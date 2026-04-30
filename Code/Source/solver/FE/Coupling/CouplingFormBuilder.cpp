@@ -10,6 +10,7 @@
 #include "Core/FEException.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
 #include <functional>
 #include <iterator>
 #include <unordered_set>
@@ -195,6 +196,15 @@ forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
     FE_THROW(InvalidArgumentException,
              "coupling interface view requires an explicit interface side");
     return forms::FormExpr{};
+}
+
+forms::FormExpr restrictToRegionSideIfNeeded(const forms::FormExpr& expr,
+                                             const CouplingRegionRef& region)
+{
+    if (region.kind != CouplingRegionKind::InterfaceFace) {
+        return expr;
+    }
+    return restrictToInterfaceSide(expr, region.side);
 }
 
 } // namespace
@@ -498,6 +508,12 @@ CouplingSharedInterfaceView CouplingFormBuilder::sharedInterface(
     return CouplingSharedInterfaceView(*this, std::string(name));
 }
 
+CouplingRegionRelationView CouplingFormBuilder::regionRelation(
+    CouplingRegionRelationRequirement requirement) const
+{
+    return CouplingRegionRelationView(*this, std::move(requirement));
+}
+
 CouplingFieldRef CouplingFormBuilder::field(std::string_view participant_name,
                                             std::string_view field_name) const
 {
@@ -633,6 +649,149 @@ forms::FormExpr CouplingSharedInterfaceView::integral(
     return builder_->integrateShared(integrand,
                                      shared_region_name_,
                                      integration_participant);
+}
+
+CouplingRegionEndpointView::CouplingRegionEndpointView(
+    const CouplingFormBuilder& builder,
+    std::string relation_name,
+    CouplingRegionEndpointDeclaration endpoint,
+    CouplingRegionRef region)
+    : builder_(&builder)
+    , relation_name_(std::move(relation_name))
+    , endpoint_(std::move(endpoint))
+    , region_(std::move(region))
+{
+}
+
+std::string_view CouplingRegionEndpointView::relationName() const noexcept
+{
+    return relation_name_;
+}
+
+const CouplingRegionEndpointDeclaration&
+CouplingRegionEndpointView::endpoint() const noexcept
+{
+    return endpoint_;
+}
+
+const CouplingRegionRef& CouplingRegionEndpointView::region() const noexcept
+{
+    return region_;
+}
+
+forms::FormExpr CouplingRegionEndpointView::state(std::string_view field_name,
+                                                  std::string symbol) const
+{
+    return restrictToRegionSideIfNeeded(
+        builder_->state(region_.participant_name, field_name, std::move(symbol)),
+        region_);
+}
+
+forms::FormExpr CouplingRegionEndpointView::test(std::string_view field_name,
+                                                 std::string symbol) const
+{
+    return restrictToRegionSideIfNeeded(
+        builder_->test(region_.participant_name, field_name, std::move(symbol)),
+        region_);
+}
+
+forms::FormExpr CouplingRegionEndpointView::dt(std::string_view field_name,
+                                               std::string symbol,
+                                               int order) const
+{
+    return restrictToRegionSideIfNeeded(
+        builder_->timeDerivative(region_.participant_name,
+                                 field_name,
+                                 std::move(symbol),
+                                 order),
+        region_);
+}
+
+forms::FormExpr CouplingRegionEndpointView::geometryTerminal(
+    CouplingGeometryTerminalQuantity quantity) const
+{
+    const CouplingGeometryTerminalScope scope{
+        .participant_name = region_.participant_name,
+        .region = endpoint_,
+        .location = CouplingGeometryTerminalLocationDeclaration{
+            .region_kind = region_.kind,
+            .shared_region_name = endpoint_.shared_region_name,
+            .side = region_.side,
+        },
+    };
+    return restrictToRegionSideIfNeeded(builder_->geometryTerminal(quantity, scope),
+                                        region_);
+}
+
+forms::FormExpr CouplingRegionEndpointView::normal() const
+{
+    return geometryTerminal(CouplingGeometryTerminalQuantity::Normal);
+}
+
+forms::FormExpr CouplingRegionEndpointView::integral(
+    const forms::FormExpr& integrand) const
+{
+    return builder_->integrate(integrand, region_);
+}
+
+CouplingRegionRelationView::CouplingRegionRelationView(
+    const CouplingFormBuilder& builder,
+    CouplingRegionRelationRequirement requirement)
+    : builder_(&builder)
+    , requirement_(std::move(requirement))
+{
+}
+
+std::string_view CouplingRegionRelationView::name() const noexcept
+{
+    return requirement_.relation_name;
+}
+
+const CouplingRegionRelationRequirement&
+CouplingRegionRelationView::requirement() const noexcept
+{
+    return requirement_;
+}
+
+CouplingRegionEndpointView CouplingRegionRelationView::endpoint(
+    std::string_view participant_name,
+    std::string_view region_name) const
+{
+    const auto it = std::find_if(
+        requirement_.endpoints.begin(),
+        requirement_.endpoints.end(),
+        [&](const CouplingRegionEndpointDeclaration& endpoint) {
+            return endpoint.participant_name == participant_name &&
+                   (region_name.empty() || endpoint.region_name == region_name);
+        });
+    FE_THROW_IF(it == requirement_.endpoints.end(), InvalidArgumentException,
+                "coupling relation endpoint is not declared");
+
+    return CouplingRegionEndpointView(
+        *builder_,
+        requirement_.relation_name,
+        *it,
+        builder_->region(it->participant_name, it->region_name));
+}
+
+forms::FormExpr CouplingRegionRelationView::integral(
+    const forms::FormExpr& integrand,
+    std::string_view participant_name,
+    std::string_view region_name) const
+{
+    return endpoint(participant_name, region_name).integral(integrand);
+}
+
+forms::FormExpr CouplingRegionRelationView::sum(
+    std::span<const forms::FormExpr> endpoint_terms) const
+{
+    FE_THROW_IF(endpoint_terms.empty(), InvalidArgumentException,
+                "coupling relation sum requires at least one endpoint term");
+    auto total = endpoint_terms.front();
+    for (std::size_t i = 1u; i < endpoint_terms.size(); ++i) {
+        total = total + endpoint_terms[i];
+    }
+    return total;
 }
 
 forms::FormExpr CouplingFormBuilder::recordTerminal(

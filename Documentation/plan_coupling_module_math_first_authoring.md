@@ -1198,9 +1198,9 @@ integrals. That mapping is generic FE/Coupling work.
       `CouplingSharedInterfaceView` and `CouplingInterfaceSideView`.
 - [ ] Add `CouplingInterfaceIntegralView` if a dedicated integral object is
       needed beyond `CouplingSharedInterfaceView::integral(...)`.
-- [ ] Add lightweight region-relation helper types for N-way and
+- [x] Add lightweight region-relation helper types for N-way and
       mixed-dimensional relations that do not have `minus()` / `plus()` sides.
-- [ ] Implement the helpers inside or next to `CouplingFormBuilder`.
+- [x] Implement the helpers inside or next to `CouplingFormBuilder`.
 - [ ] Add:
 
 ```cpp
@@ -1235,7 +1235,7 @@ forms::FormExpr CouplingRegionRelationView::sum(
       `FormExpr::plus()`.
 - [x] Implement `normal()` through existing `geometryTerminal(...)`.
 - [x] Implement `integral(...)` through existing `integrateShared(...)`.
-- [ ] Implement relation integrals through existing Forms measures and
+- [x] Implement relation integrals through existing Forms measures and
       `CouplingFormBuilder::integrate(...)` / `integrateShared(...)`, choosing
       the measure from resolved region metadata.
 - [ ] Expose projection helpers that lower to Forms expressions for normal and
@@ -1248,9 +1248,9 @@ forms::FormExpr CouplingRegionRelationView::sum(
 - [ ] FSI monolithic forms no longer manually construct
       `CouplingGeometryTerminalScope`.
 - [ ] Thermal monolithic forms can use the same interface-view API.
-- [ ] N-way conservation residuals can be written without manually iterating
+- [x] N-way conservation residuals can be written without manually iterating
       over low-level context records.
-- [ ] Mixed-dimensional residuals can select the correct resolved integration
+- [x] Mixed-dimensional residuals can select the correct resolved integration
       domain through the builder.
 - [x] Existing `CouplingFormBuilder` tests still pass.
 - [x] New tests cover missing side mappings and missing shared-region mappings.

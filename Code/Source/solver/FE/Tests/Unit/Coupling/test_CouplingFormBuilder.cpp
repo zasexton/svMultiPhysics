@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -568,6 +569,72 @@ TEST(CouplingFormBuilder, RejectsMissingSharedInterfaceViewMappings)
                  InvalidArgumentException);
     EXPECT_THROW(static_cast<void>(
                      builder.sharedInterface("shared_interface").side("missing")),
+                 InvalidArgumentException);
+}
+
+TEST(CouplingFormBuilder, BuildsRegionRelationViewsThroughFormsVocabulary)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    CouplingRegionRelationRequirement requirement{
+        .relation_name = "volume_surface_balance",
+        .relation_kind = CouplingRegionRelationKind::VolumeBoundaryRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "participant",
+                .region_name = "volume",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "participant",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+    };
+
+    const auto relation = builder.regionRelation(std::move(requirement));
+    EXPECT_EQ(std::string(relation.name()), "volume_surface_balance");
+
+    const auto volume = relation.endpoint("participant", "volume");
+    const auto surface = relation.endpoint("participant", "surface");
+    EXPECT_EQ(volume.region().kind, CouplingRegionKind::Domain);
+    EXPECT_EQ(surface.region().kind, CouplingRegionKind::Boundary);
+
+    const auto volume_term =
+        volume.state("primary", "u") * volume.test("primary", "w");
+    const auto surface_normal = surface.normal();
+    const auto surface_term =
+        surface.state("primary", "u_b") * surface.test("primary", "w_b");
+    EXPECT_TRUE(containsFormExprType(*surface_normal.node(),
+                                     forms::FormExprType::Normal));
+
+    const auto volume_integral = volume.integral(volume_term);
+    const auto surface_integral =
+        relation.integral(surface_term + forms::dot(surface_normal, surface_normal),
+                          "participant",
+                          "surface");
+    ASSERT_TRUE(volume_integral.isValid());
+    ASSERT_TRUE(surface_integral.isValid());
+    EXPECT_EQ(volume_integral.node()->type(),
+              forms::FormExprType::CellIntegral);
+    EXPECT_EQ(surface_integral.node()->type(),
+              forms::FormExprType::BoundaryIntegral);
+    ASSERT_TRUE(surface_integral.node()->boundaryMarker().has_value());
+    EXPECT_EQ(*surface_integral.node()->boundaryMarker(), 12);
+
+    const std::array<forms::FormExpr, 2> terms{
+        volume_integral,
+        surface_integral,
+    };
+    const auto summed = relation.sum(terms);
+    EXPECT_TRUE(summed.isValid());
+
+    EXPECT_THROW(static_cast<void>(
+                     relation.endpoint("participant", "missing")),
                  InvalidArgumentException);
 }
 

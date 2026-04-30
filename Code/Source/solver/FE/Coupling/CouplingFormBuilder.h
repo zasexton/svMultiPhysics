@@ -20,6 +20,7 @@
 #include "Forms/Vocabulary.h"
 
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,6 +30,8 @@ namespace FE {
 namespace coupling {
 
 class CouplingInterfaceSideView;
+class CouplingRegionEndpointView;
+class CouplingRegionRelationView;
 class CouplingSharedInterfaceView;
 
 class CouplingFormBuilder {
@@ -89,6 +92,8 @@ public:
 
     [[nodiscard]] CouplingSharedInterfaceView sharedInterface(
         std::string_view name) const;
+    [[nodiscard]] CouplingRegionRelationView regionRelation(
+        CouplingRegionRelationRequirement requirement) const;
 
     [[nodiscard]] CouplingFieldRef field(std::string_view participant,
                                          std::string_view field) const;
@@ -155,6 +160,60 @@ public:
 private:
     const CouplingFormBuilder* builder_{nullptr};
     std::string shared_region_name_;
+};
+
+class CouplingRegionEndpointView {
+public:
+    CouplingRegionEndpointView(const CouplingFormBuilder& builder,
+                               std::string relation_name,
+                               CouplingRegionEndpointDeclaration endpoint,
+                               CouplingRegionRef region);
+
+    [[nodiscard]] std::string_view relationName() const noexcept;
+    [[nodiscard]] const CouplingRegionEndpointDeclaration& endpoint() const noexcept;
+    [[nodiscard]] const CouplingRegionRef& region() const noexcept;
+
+    [[nodiscard]] forms::FormExpr state(std::string_view field,
+                                        std::string symbol) const;
+    [[nodiscard]] forms::FormExpr test(std::string_view field,
+                                       std::string symbol) const;
+    [[nodiscard]] forms::FormExpr dt(std::string_view field,
+                                     std::string symbol,
+                                     int order = 1) const;
+    [[nodiscard]] forms::FormExpr geometryTerminal(
+        CouplingGeometryTerminalQuantity quantity) const;
+    [[nodiscard]] forms::FormExpr normal() const;
+    [[nodiscard]] forms::FormExpr integral(
+        const forms::FormExpr& integrand) const;
+
+private:
+    const CouplingFormBuilder* builder_{nullptr};
+    std::string relation_name_;
+    CouplingRegionEndpointDeclaration endpoint_;
+    CouplingRegionRef region_;
+};
+
+class CouplingRegionRelationView {
+public:
+    CouplingRegionRelationView(const CouplingFormBuilder& builder,
+                               CouplingRegionRelationRequirement requirement);
+
+    [[nodiscard]] std::string_view name() const noexcept;
+    [[nodiscard]] const CouplingRegionRelationRequirement& requirement()
+        const noexcept;
+    [[nodiscard]] CouplingRegionEndpointView endpoint(
+        std::string_view participant,
+        std::string_view region = {}) const;
+    [[nodiscard]] forms::FormExpr integral(
+        const forms::FormExpr& integrand,
+        std::string_view participant,
+        std::string_view region = {}) const;
+    [[nodiscard]] forms::FormExpr sum(
+        std::span<const forms::FormExpr> endpoint_terms) const;
+
+private:
+    const CouplingFormBuilder* builder_{nullptr};
+    CouplingRegionRelationRequirement requirement_;
 };
 
 } // namespace coupling
