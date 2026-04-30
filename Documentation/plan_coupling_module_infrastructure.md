@@ -5359,7 +5359,7 @@ Implementation checklist:
 - [x] Validate monolithic FSI fields are registered in one compatible
   `FESystem` and that the FSI interface marker has registered interface
   topology before authoring `.dI(marker)` residuals.
-- [ ] Author or install monolithic dynamic/traction balance terms through Forms
+- [x] Author or install monolithic dynamic/traction balance terms through Forms
   when expressible, or through the expert hook with explicit dependency
   metadata when not yet expressible.
 - [x] Declare temporal requirements when FSI uses `dt(solid_displacement)`

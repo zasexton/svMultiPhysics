@@ -72,6 +72,19 @@ bool containsFormExprType(const forms::FormExprNode& node,
                        });
 }
 
+const fec::CouplingFormContribution* findContribution(
+    const std::vector<fec::CouplingFormContribution>& contributions,
+    const std::string& name)
+{
+    const auto it = std::find_if(
+        contributions.begin(),
+        contributions.end(),
+        [&](const fec::CouplingFormContribution& contribution) {
+            return contribution.contribution_name == name;
+        });
+    return it == contributions.end() ? nullptr : &*it;
+}
+
 struct FSIFieldComponents {
     int fluid_velocity{3};
     int fluid_pressure{1};
@@ -405,24 +418,64 @@ TEST(FSICouplingModule, BuildsFormsAuthoredVelocityContinuity)
     EXPECT_TRUE(module.supportsMonolithicLowering());
     const auto contributions = module.buildMonolithicForms(fixture.context,
                                                            form_builder);
-    ASSERT_EQ(contributions.size(), 1u);
-    const auto& contribution = contributions.front();
-    EXPECT_EQ(contribution.contribution_name, "fsi_velocity_continuity");
-    EXPECT_EQ(contribution.origin, "FSICouplingModule");
-    EXPECT_EQ(contribution.operator_name, "equations");
-    EXPECT_TRUE(hasFieldUse(contribution.field_uses, "fluid", "velocity"));
+    ASSERT_EQ(contributions.size(), 2u);
+    const auto* contribution =
+        findContribution(contributions, "fsi_velocity_continuity");
+    ASSERT_NE(contribution, nullptr);
+    EXPECT_EQ(contribution->contribution_name, "fsi_velocity_continuity");
+    EXPECT_EQ(contribution->origin, "FSICouplingModule");
+    EXPECT_EQ(contribution->operator_name, "equations");
+    EXPECT_TRUE(hasFieldUse(contribution->field_uses, "fluid", "velocity"));
     EXPECT_TRUE(
-        hasFieldUse(contribution.extra_trial_field_uses, "solid", "velocity"));
-    EXPECT_TRUE(contribution.terminal_provenance.empty());
+        hasFieldUse(contribution->extra_trial_field_uses, "solid", "velocity"));
+    EXPECT_TRUE(contribution->terminal_provenance.empty());
 
-    ASSERT_TRUE(contribution.residual.isValid());
-    ASSERT_EQ(contribution.residual.node()->type(),
+    ASSERT_TRUE(contribution->residual.isValid());
+    ASSERT_EQ(contribution->residual.node()->type(),
               forms::FormExprType::InterfaceIntegral);
-    ASSERT_TRUE(contribution.residual.node()->interfaceMarker().has_value());
-    EXPECT_EQ(*contribution.residual.node()->interfaceMarker(), 10);
-    EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
+    ASSERT_TRUE(contribution->residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*contribution->residual.node()->interfaceMarker(), 10);
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::RestrictMinus));
-    EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::RestrictPlus));
+}
+
+TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
+{
+    FSIContextFixture fixture;
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    const FSICouplingModule module;
+
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    ASSERT_EQ(contributions.size(), 2u);
+    const auto* contribution =
+        findContribution(contributions, "fsi_pressure_traction_balance");
+    ASSERT_NE(contribution, nullptr);
+    EXPECT_EQ(contribution->origin, "FSICouplingModule");
+    EXPECT_EQ(contribution->operator_name, "equations");
+    EXPECT_TRUE(hasFieldUse(contribution->field_uses,
+                            "solid",
+                            "displacement"));
+    EXPECT_TRUE(
+        hasFieldUse(contribution->extra_trial_field_uses, "fluid", "pressure"));
+    ASSERT_EQ(contribution->terminal_provenance.size(), 1u);
+    EXPECT_EQ(contribution->terminal_provenance[0].kind,
+              fec::CouplingFormTerminalProvenanceKind::GeometryTerminal);
+    EXPECT_EQ(contribution->terminal_provenance[0].geometry_quantity,
+              fec::CouplingGeometryTerminalQuantity::Normal);
+
+    ASSERT_TRUE(contribution->residual.isValid());
+    ASSERT_EQ(contribution->residual.node()->type(),
+              forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(contribution->residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*contribution->residual.node()->interfaceMarker(), 10);
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::Normal));
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::RestrictPlus));
 }
 
@@ -437,13 +490,15 @@ TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
 
     const auto contributions = module.buildMonolithicForms(fixture.context,
                                                            form_builder);
-    ASSERT_EQ(contributions.size(), 1u);
-    const auto& contribution = contributions.front();
-    EXPECT_TRUE(hasFieldUse(contribution.field_uses, "fluid", "velocity"));
-    EXPECT_TRUE(hasFieldUse(contribution.extra_trial_field_uses,
+    ASSERT_EQ(contributions.size(), 2u);
+    const auto* contribution =
+        findContribution(contributions, "fsi_velocity_continuity");
+    ASSERT_NE(contribution, nullptr);
+    EXPECT_TRUE(hasFieldUse(contribution->field_uses, "fluid", "velocity"));
+    EXPECT_TRUE(hasFieldUse(contribution->extra_trial_field_uses,
                             "solid",
                             "displacement"));
-    EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::TimeDerivative));
 }
 

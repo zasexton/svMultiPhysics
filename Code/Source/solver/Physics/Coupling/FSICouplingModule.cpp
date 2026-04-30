@@ -75,6 +75,25 @@ forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
     return forms::FormExpr{};
 }
 
+fec::CouplingGeometryTerminalScope interfaceGeometryScope(
+    const FSICouplingOptions& options,
+    const fec::CouplingRegionRef& region)
+{
+    return fec::CouplingGeometryTerminalScope{
+        .participant_name = region.participant_name,
+        .region = fec::CouplingRegionEndpointDeclaration{
+            .participant_name = region.participant_name,
+            .shared_region_name = options.interface_name,
+        },
+        .location = fec::CouplingGeometryTerminalLocationDeclaration{
+            .region_kind = fec::CouplingRegionKind::InterfaceFace,
+            .shared_region_name = options.interface_name,
+            .side = region.side,
+            .coordinate_configuration = forms::GeometryConfiguration::Reference,
+        },
+    };
+}
+
 fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& options)
 {
     return fec::CouplingValueDescriptor{
@@ -627,20 +646,62 @@ FSICouplingModule::buildMonolithicForms(
             solid_region.side);
     }
 
-    fec::CouplingFormContribution contribution;
-    contribution.contribution_name =
+    std::vector<fec::CouplingFormContribution> contributions;
+
+    fec::CouplingFormContribution kinematic;
+    kinematic.contribution_name =
         options_.contract_name + "_velocity_continuity";
-    contribution.origin = "FSICouplingModule";
-    contribution.operator_name = "equations";
-    contribution.field_uses = {fieldUse(options_.fluid_name,
-                                        options_.fluid_velocity_field)};
-    contribution.extra_trial_field_uses = {std::move(solid_dependency)};
-    contribution.residual =
+    kinematic.origin = "FSICouplingModule";
+    kinematic.operator_name = "equations";
+    kinematic.field_uses = {fieldUse(options_.fluid_name,
+                                     options_.fluid_velocity_field)};
+    kinematic.extra_trial_field_uses = {std::move(solid_dependency)};
+    kinematic.residual =
         form_builder.integrateShared(forms::inner(fluid_velocity - solid_velocity,
                                                   fluid_velocity_test),
                                      options_.interface_name,
                                      options_.fluid_name);
-    return {form_builder.attachTerminalProvenance(std::move(contribution))};
+    contributions.push_back(
+        form_builder.attachTerminalProvenance(std::move(kinematic)));
+
+    const auto fluid_pressure =
+        restrictToInterfaceSide(
+            form_builder.state(options_.fluid_name,
+                               options_.fluid_pressure_field,
+                               "p_f"),
+            fluid_region.side);
+    const auto solid_displacement_test =
+        restrictToInterfaceSide(
+            form_builder.test(options_.solid_name,
+                              options_.solid_displacement_field,
+                              "w_s"),
+            solid_region.side);
+    const auto interface_normal =
+        restrictToInterfaceSide(
+            form_builder.geometryTerminal(
+                fec::CouplingGeometryTerminalQuantity::Normal,
+                interfaceGeometryScope(options_, fluid_region)),
+            fluid_region.side);
+
+    fec::CouplingFormContribution traction;
+    traction.contribution_name =
+        options_.contract_name + "_pressure_traction_balance";
+    traction.origin = "FSICouplingModule";
+    traction.operator_name = "equations";
+    traction.field_uses = {fieldUse(options_.solid_name,
+                                    options_.solid_displacement_field)};
+    traction.extra_trial_field_uses = {fieldUse(options_.fluid_name,
+                                                options_.fluid_pressure_field)};
+    traction.residual =
+        form_builder.integrateShared(
+            -forms::inner(fluid_pressure * interface_normal,
+                          solid_displacement_test),
+            options_.interface_name,
+            options_.fluid_name);
+    contributions.push_back(
+        form_builder.attachTerminalProvenance(std::move(traction)));
+
+    return contributions;
 }
 
 std::vector<fec::CouplingExchangeDeclaration>
