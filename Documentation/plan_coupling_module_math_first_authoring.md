@@ -1164,7 +1164,7 @@ struct CouplingRegionRelationRequirement {
       requiring physics modules to hand-code participant branches.
 - [ ] Teach `CouplingGraph` to validate monolithic same-system compatibility
       from resolved field requirements and installed form metadata.
-- [ ] Teach `CouplingGraph` to validate registered interface topology for
+- [x] Teach `CouplingGraph` to validate registered interface topology for
       monolithic interface-face forms.
 
 ### Completion Checklist

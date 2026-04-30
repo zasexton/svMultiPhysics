@@ -2861,6 +2861,12 @@ void validateContextReferences(const CouplingContext& context,
                     .message = "region-relation endpoint kind does not satisfy the declaration",
                 });
             }
+            if (requirement.require_registered_topology) {
+                validateInterfaceRegionTopology(
+                    declaration,
+                    resolved_region,
+                    result);
+            }
 
             if (!endpoint.shared_region_name.has_value()) {
                 continue;

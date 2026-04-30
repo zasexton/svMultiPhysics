@@ -11,6 +11,7 @@
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Core/FEException.h"
 #include "Forms/BoundaryFunctional.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -2598,6 +2599,83 @@ TEST(CouplingGraph, RejectsInterfaceContractWithoutRegisteredTopology)
     EXPECT_NE(formatDiagnostics(validation).find(
                   "interface-face coupling region is missing registered interface topology"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, ValidatesRelationEndpointRegisteredTopology)
+{
+    NonFieldGraphFixture fixture(/*register_variables=*/false);
+    const CouplingRegionRef left_interface{
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    const CouplingRegionRef right_interface{
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+    });
+    builder.addRegion(left_interface);
+    builder.addRegion(right_interface);
+    const auto context = builder.build();
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "interface";
+    declaration.contract_name = "interface_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "interface_pair",
+        .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "interface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "interface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .require_opposite_sides_for_side_pair = true,
+        .require_registered_topology = true,
+    });
+
+    const auto missing = buildGraph(context, declaration);
+    EXPECT_FALSE(missing.ok());
+    EXPECT_NE(formatDiagnostics(missing).find(
+                  "interface-face coupling region is missing registered interface topology"),
+              std::string::npos);
+
+    fixture.system.setInterfaceMesh(17,
+                                    std::make_shared<const svmp::InterfaceMesh>());
+    const auto accepted = buildGraph(context, declaration);
+    EXPECT_TRUE(accepted.ok()) << formatDiagnostics(accepted);
 }
 
 TEST(CouplingGraph, RejectsRawFieldIdMatchesAcrossDifferentSystems)
