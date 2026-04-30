@@ -21,14 +21,28 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+struct CouplingGraphSnapshot;
+struct PartitionedCouplingPlan;
+
 enum class CouplingDiagnosticSeverity : std::uint8_t {
     Info,
     Warning,
     Error,
 };
 
+enum class CouplingDiagnosticCategory : std::uint8_t {
+    General,
+    MissingContextValue,
+    DependencyMismatch,
+    TemporalPolicyFailure,
+    TransferFailure,
+    CycleVisibility,
+    BlockCoverageMismatch,
+};
+
 struct CouplingDiagnostic {
     CouplingDiagnosticSeverity severity{CouplingDiagnosticSeverity::Error};
+    CouplingDiagnosticCategory category{CouplingDiagnosticCategory::General};
     std::string contract_name;
     std::string participant_name;
     std::string field_name;
@@ -48,8 +62,24 @@ struct CouplingValidationResult {
 };
 
 [[nodiscard]] const char* toString(CouplingDiagnosticSeverity severity) noexcept;
+[[nodiscard]] const char* toString(CouplingDiagnosticCategory category) noexcept;
+[[nodiscard]] CouplingDiagnosticCategory classifyDiagnostic(
+    const CouplingDiagnostic& diagnostic);
 [[nodiscard]] std::string formatDiagnostic(const CouplingDiagnostic& diagnostic);
 [[nodiscard]] std::string formatDiagnostics(const CouplingValidationResult& result);
+[[nodiscard]] std::string formatGraphSummary(
+    const CouplingGraphSnapshot& snapshot);
+[[nodiscard]] std::string formatPartitionedPlanSummary(
+    const PartitionedCouplingPlan& plan);
+[[nodiscard]] std::string formatDiagnosticsReport(
+    const CouplingValidationResult& result);
+[[nodiscard]] std::string formatDiagnosticsReport(
+    const CouplingGraphSnapshot& snapshot,
+    const CouplingValidationResult& result);
+[[nodiscard]] std::string formatDiagnosticsReport(
+    const CouplingGraphSnapshot& snapshot,
+    const CouplingValidationResult& result,
+    const PartitionedCouplingPlan& plan);
 
 void throwIfInvalid(const CouplingValidationResult& result);
 

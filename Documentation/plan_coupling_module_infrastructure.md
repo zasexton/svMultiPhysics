@@ -4785,7 +4785,7 @@ Implementation checklist:
   choosing a driver algorithm.
 - [x] Validate group hints reference known participants and do not contain
   duplicates.
-- [ ] Implement `CouplingDiagnostics` reports for graph summary, missing
+- [x] Implement `CouplingDiagnostics` reports for graph summary, missing
   context values, dependency mismatches, temporal-policy failures, transfer
   failures, cycle visibility, and block-coverage mismatches.
 - [x] Make diagnostics deterministic so unit tests and users see stable
@@ -4899,7 +4899,7 @@ Unit-test verification checklist:
   and trial/accepted interface-map state mismatches.
 - [x] `test_CouplingGraph.cpp` detects partitioned exchange cycles and reports
   them deterministically.
-- [ ] `test_CouplingDiagnostics.cpp` verifies stable, actionable diagnostic
+- [x] `test_CouplingDiagnostics.cpp` verifies stable, actionable diagnostic
   text for each validation failure category.
 
 ### Phase 5: Monolithic Coupling Builder And FESystem Lifecycle
