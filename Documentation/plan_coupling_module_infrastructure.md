@@ -4999,18 +4999,18 @@ Unit-test verification checklist:
   fail before setup.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies Forms contributions are
   installed through the standard `installFormulation()` path.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies
   `systems::FormInstallOptions`, including top-level `ad_mode` and
   `compiler_options.geometry_sensitivity`, `compiler_options.geometry_tangent_path`,
   and `compiler_options.use_symbolic_tangent`, are resolved from
   declaration-time options and forwarded unchanged to `installFormulation()`.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies
   `compiler_options.ad_mode` cannot override top-level
   `systems::FormInstallOptions::ad_mode` during resolution or forwarding.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies Forms contributions are
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies Forms contributions are
   resolved to concrete ordered `FieldId` lists before calling
   `installFormulation()`.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies
   `extra_trial_field_uses` resolve to
   `systems::FormInstallOptions::extra_trial_fields` and are forwarded to
   `installFormulation()` for dependency-only trial fields.
@@ -5023,15 +5023,15 @@ Unit-test verification checklist:
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies duplicate `field_uses` and
   `extra_trial_field_uses` entries are deduplicated deterministically or rejected
   with stable diagnostics.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies geometry-sensitivity install
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies geometry-sensitivity install
   options require a resolved mesh-motion field in `field_uses` or
   `extra_trial_field_uses` and a matching `FESystem::bindMeshMotionField()`
   binding.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies coupling builder mesh and
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies coupling builder mesh and
   geometry terminal helpers require explicit owner scope in N-participant
   contracts and preserve participant/region/location provenance in the metadata
   bridge output.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies captured builder terminal
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies captured builder terminal
   provenance is attached to resolved form contributions and included in
   installed diagnostics.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies contribution name, origin, and
@@ -5040,7 +5040,7 @@ Unit-test verification checklist:
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies expert custom install hooks
   are dispatched after Forms contributions and must return one install metadata
   record per custom contribution.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies Forms dependency/block
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies Forms dependency/block
   metadata, including non-field dependency provenance and structured
   geometry-sensitivity provenance, is recorded from the public Forms/Systems
   coupling-analysis metadata bridge.
