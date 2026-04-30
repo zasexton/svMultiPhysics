@@ -181,6 +181,8 @@ struct ResolvedGeometryRequirement {
     CouplingGeometryTerminalQuantity quantity{
         CouplingGeometryTerminalQuantity::MeshDisplacement};
     std::optional<analysis::DomainKind> domain;
+    CouplingGeometryTerminalLocationProvenance location;
+    std::optional<CouplingGeometryTerminalOwnerProvenance> owner;
 };
 
 std::vector<ResolvedDeclaredDependency> resolveDeclaredDependencies(
@@ -251,30 +253,106 @@ std::vector<ResolvedTemporalRequirement> resolveDeclaredTemporalRequirements(
     return resolved;
 }
 
-std::optional<analysis::DomainKind> resolveGeometryRequirementDomain(
+forms::GeometryConfiguration graphGeometryConfiguration(
+    CouplingCoordinateConfiguration configuration) noexcept
+{
+    switch (configuration) {
+    case CouplingCoordinateConfiguration::Reference:
+        return forms::GeometryConfiguration::Reference;
+    case CouplingCoordinateConfiguration::Current:
+        return forms::GeometryConfiguration::Current;
+    }
+    return forms::GeometryConfiguration::Reference;
+}
+
+void reportMissingGeometryRegion(const CouplingContractDeclaration& declaration,
+                                 const CouplingGeometryTerminalRequirement& requirement,
+                                 const CouplingRegionEndpointDeclaration& region,
+                                 CouplingValidationResult& result)
+{
+    if (!isRequired(requirement.requirement)) {
+        return;
+    }
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .contract_name = declaration.contract_name,
+        .participant_name = region.participant_name,
+        .region_name = region.region_name,
+        .message = "geometry terminal region is missing from the context",
+    });
+}
+
+void applyResolvedGeometryRegion(ResolvedGeometryRequirement& requirement,
+                                 const CouplingRegionRef& region,
+                                 std::optional<std::string> shared_region_name)
+{
+    requirement.location.region_kind = region.kind;
+    requirement.location.marker = region.marker;
+    if (shared_region_name.has_value()) {
+        requirement.location.shared_region_name = std::move(shared_region_name);
+    }
+    if (region.side != CouplingInterfaceSide::None) {
+        requirement.location.side = region.side;
+    }
+    requirement.location.geometry_revision = region.geometry_revision;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    requirement.location.logical_region = region.logical_region;
+    if (requirement.location.geometry_revision == 0u &&
+        region.revision_snapshot.has_value()) {
+        requirement.location.geometry_revision =
+            region.revision_snapshot->geometry_revision;
+    }
+#endif
+
+    requirement.owner = CouplingGeometryTerminalOwnerProvenance{
+        .participant_name = region.participant_name,
+        .system_name = region.system_name,
+        .region_name = region.region_name.empty()
+                           ? std::optional<std::string>{}
+                           : std::optional<std::string>{region.region_name},
+        .shared_region_name = requirement.location.shared_region_name,
+    };
+}
+
+ResolvedGeometryRequirement resolveGeometryRequirement(
     const CouplingContext& context,
     const CouplingContractDeclaration& declaration,
-    const CouplingGeometryTerminalRequirement& requirement,
+    const CouplingGeometryTerminalRequirement& geometry,
     CouplingValidationResult& result)
 {
-    if (requirement.scope.location.has_value()) {
-        const auto domain =
-            toAnalysisDomainKind(requirement.scope.location->region_kind);
-        if (!domain.has_value() && isRequired(requirement.requirement)) {
-            result.add(CouplingDiagnostic{
-                .severity = CouplingDiagnosticSeverity::Error,
-                .contract_name = declaration.contract_name,
-                .message = "geometry terminal requirement uses an unsupported region kind",
-            });
-        }
-        return domain;
+    ResolvedGeometryRequirement requirement{
+        .contract_name = declaration.contract_name,
+        .quantity = geometry.quantity,
+    };
+
+    if (geometry.scope.location.has_value()) {
+        const auto& location = *geometry.scope.location;
+        requirement.location.region_kind = location.region_kind;
+        requirement.location.shared_region_name = location.shared_region_name;
+        requirement.location.side = location.side;
+        requirement.location.coordinate_configuration =
+            location.coordinate_configuration;
+        requirement.location.transform_from_configuration =
+            location.transform_from_configuration;
+        requirement.location.transform_to_configuration =
+            location.transform_to_configuration;
     }
 
-    if (requirement.scope.region.has_value()) {
-        const auto& region = *requirement.scope.region;
+    if (geometry.scope.participant_name.has_value() &&
+        context.hasParticipant(*geometry.scope.participant_name)) {
+        const auto participant =
+            context.participant(*geometry.scope.participant_name);
+        requirement.owner = CouplingGeometryTerminalOwnerProvenance{
+            .participant_name = participant.participant_name,
+            .system_name = participant.system_name,
+        };
+    }
+
+    if (geometry.scope.region.has_value()) {
+        const auto& region = *geometry.scope.region;
         if (region.shared_region_name.has_value()) {
             if (region.participant_name.empty()) {
-                if (isRequired(requirement.requirement)) {
+                if (isRequired(geometry.requirement)) {
                     result.add(CouplingDiagnostic{
                         .severity = CouplingDiagnosticSeverity::Error,
                         .contract_name = declaration.contract_name,
@@ -282,10 +360,8 @@ std::optional<analysis::DomainKind> resolveGeometryRequirementDomain(
                         .message = "shared-region geometry terminal requirement needs a participant owner",
                     });
                 }
-                return std::nullopt;
-            }
-            if (!context.hasSharedRegion(*region.shared_region_name)) {
-                if (isRequired(requirement.requirement)) {
+            } else if (!context.hasSharedRegion(*region.shared_region_name)) {
+                if (isRequired(geometry.requirement)) {
                     result.add(CouplingDiagnostic{
                         .severity = CouplingDiagnosticSeverity::Error,
                         .contract_name = declaration.contract_name,
@@ -294,31 +370,52 @@ std::optional<analysis::DomainKind> resolveGeometryRequirementDomain(
                         .message = "geometry terminal shared region is missing from the context",
                     });
                 }
-                return std::nullopt;
+            } else {
+                applyResolvedGeometryRegion(
+                    requirement,
+                    context.sharedRegion(*region.shared_region_name,
+                                         region.participant_name),
+                    region.shared_region_name);
             }
-            const auto resolved =
-                context.sharedRegion(*region.shared_region_name,
-                                     region.participant_name);
-            return toAnalysisDomainKind(resolved.kind);
+        } else if (!context.hasRegion(region.participant_name,
+                                      region.region_name)) {
+            reportMissingGeometryRegion(declaration,
+                                        geometry,
+                                        region,
+                                        result);
+        } else {
+            applyResolvedGeometryRegion(
+                requirement,
+                context.region(region.participant_name, region.region_name),
+                std::nullopt);
         }
-
-        if (!context.hasRegion(region.participant_name, region.region_name)) {
-            if (isRequired(requirement.requirement)) {
-                result.add(CouplingDiagnostic{
-                    .severity = CouplingDiagnosticSeverity::Error,
-                    .contract_name = declaration.contract_name,
-                    .participant_name = region.participant_name,
-                    .region_name = region.region_name,
-                    .message = "geometry terminal region is missing from the context",
-                });
-            }
-            return std::nullopt;
-        }
-        return toAnalysisDomainKind(
-            context.region(region.participant_name, region.region_name).kind);
     }
 
-    return analysis::DomainKind::Cell;
+    if (!geometry.scope.location.has_value()) {
+        if (requirement.owner.has_value() &&
+            requirement.owner->region_name.has_value() &&
+            context.hasRegion(requirement.owner->participant_name,
+                              *requirement.owner->region_name)) {
+            requirement.location.coordinate_configuration =
+                graphGeometryConfiguration(
+                    context.region(requirement.owner->participant_name,
+                                   *requirement.owner->region_name)
+                        .coordinate_configuration);
+        } else {
+            requirement.location.coordinate_configuration =
+                forms::GeometryConfiguration::Reference;
+        }
+    }
+
+    requirement.domain = toAnalysisDomainKind(requirement.location.region_kind);
+    if (!requirement.domain.has_value() && isRequired(geometry.requirement)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .message = "geometry terminal requirement uses an unsupported region kind",
+        });
+    }
+    return requirement;
 }
 
 std::vector<ResolvedGeometryRequirement> resolveDeclaredGeometryRequirements(
@@ -329,16 +426,10 @@ std::vector<ResolvedGeometryRequirement> resolveDeclaredGeometryRequirements(
     std::vector<ResolvedGeometryRequirement> resolved;
     for (const auto& declaration : declarations) {
         for (const auto& geometry : declaration.geometry_requirements) {
-            const auto domain =
-                resolveGeometryRequirementDomain(context,
-                                                 declaration,
-                                                 geometry,
-                                                 result);
-            resolved.push_back(ResolvedGeometryRequirement{
-                .contract_name = declaration.contract_name,
-                .quantity = geometry.quantity,
-                .domain = domain,
-            });
+            resolved.push_back(resolveGeometryRequirement(context,
+                                                         declaration,
+                                                         geometry,
+                                                         result));
         }
     }
     return resolved;
@@ -558,10 +649,36 @@ std::string geometryTerminalLabel(
     std::ostringstream os;
     os << toString(geometry.quantity)
        << " domain=" << analysis::toString(geometry.analysis_domain);
+    os << " region=" << toString(geometry.location.region_kind);
     if (geometry.location.marker >= 0) {
         os << " marker=" << geometry.location.marker;
     }
+    if (geometry.location.shared_region_name.has_value()) {
+        os << " shared=" << *geometry.location.shared_region_name;
+    }
     return os.str();
+}
+
+bool geometryOwnerMatchesRequirement(
+    const CouplingFormGeometryTerminalProvenance& terminal,
+    const ResolvedGeometryRequirement& requirement)
+{
+    if (!requirement.owner.has_value()) {
+        return true;
+    }
+    if (!terminal.owner.has_value()) {
+        return false;
+    }
+    const auto& declared = *requirement.owner;
+    const auto& used = *terminal.owner;
+    return (declared.participant_name.empty() ||
+            declared.participant_name == used.participant_name) &&
+           (declared.system_name.empty() ||
+            declared.system_name == used.system_name) &&
+           (!declared.region_name.has_value() ||
+            declared.region_name == used.region_name) &&
+           (!declared.shared_region_name.has_value() ||
+            declared.shared_region_name == used.shared_region_name);
 }
 
 bool geometryTerminalMatchesRequirement(
@@ -573,6 +690,49 @@ bool geometryTerminalMatchesRequirement(
     }
     if (requirement.domain.has_value() &&
         terminal.analysis_domain != *requirement.domain) {
+        return false;
+    }
+    if (terminal.location.region_kind != requirement.location.region_kind ||
+        terminal.location.coordinate_configuration !=
+            requirement.location.coordinate_configuration ||
+        terminal.location.transform_from_configuration !=
+            requirement.location.transform_from_configuration ||
+        terminal.location.transform_to_configuration !=
+            requirement.location.transform_to_configuration) {
+        return false;
+    }
+    if (requirement.location.marker >= 0 &&
+        terminal.location.marker != requirement.location.marker) {
+        return false;
+    }
+    if (requirement.location.shared_region_name.has_value() &&
+        terminal.location.shared_region_name !=
+            requirement.location.shared_region_name) {
+        return false;
+    }
+    if (requirement.location.side != CouplingInterfaceSide::None &&
+        terminal.location.side != requirement.location.side) {
+        return false;
+    }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (requirement.location.logical_region.has_value() &&
+        (!terminal.location.logical_region.has_value() ||
+         !requirement.location.logical_region->compatible_with(
+             *terminal.location.logical_region))) {
+        return false;
+    }
+#endif
+    if (requirement.location.geometry_revision != 0u &&
+        terminal.location.geometry_revision !=
+            requirement.location.geometry_revision) {
+        return false;
+    }
+    if (requirement.location.quadrature_policy_key != 0u &&
+        terminal.location.quadrature_policy_key !=
+            requirement.location.quadrature_policy_key) {
+        return false;
+    }
+    if (!geometryOwnerMatchesRequirement(terminal, requirement)) {
         return false;
     }
     return true;

@@ -203,6 +203,7 @@ CouplingFormGeometryTerminalProvenance resolveGeometryTerminalProvenance(
         }
         location.geometry_revision = region.geometry_revision;
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        location.logical_region = region.logical_region;
         if (location.geometry_revision == 0u &&
             region.revision_snapshot.has_value()) {
             location.geometry_revision =

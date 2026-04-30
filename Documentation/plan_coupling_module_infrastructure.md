@@ -4439,7 +4439,7 @@ Implementation checklist:
 - [x] Validate that geometry terminals used by Forms residuals are declared by
   the contract and supported by the selected geometry transaction,
   mesh-motion binding, or Assembly metadata provider.
-- [ ] Validate geometry-terminal location/provenance for boundary and interface
+- [x] Validate geometry-terminal location/provenance for boundary and interface
   terminals, including declaration-side region kind, resolved
   `analysis::DomainKind`, owner-scope, marker or shared-region name, minus/plus
   side, typed logical interface region, typed `forms::GeometryConfiguration`

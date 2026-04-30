@@ -71,6 +71,9 @@ struct CouplingGeometryTerminalLocationProvenance {
         forms::GeometryConfiguration::Reference};
     std::optional<forms::GeometryConfiguration> transform_from_configuration;
     std::optional<forms::GeometryConfiguration> transform_to_configuration;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::optional<svmp::search::LogicalInterfaceRegionId> logical_region;
+#endif
     std::uint64_t geometry_revision{0};
     std::uint64_t quadrature_policy_key{0};
 };

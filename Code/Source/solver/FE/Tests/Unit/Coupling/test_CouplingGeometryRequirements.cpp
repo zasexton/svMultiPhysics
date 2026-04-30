@@ -24,7 +24,7 @@ CouplingContext geometryContext()
 {
     const auto* system = geometrySystemToken();
     const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
-    const CouplingRegionRef surface{
+    CouplingRegionRef surface{
         .participant_name = "left",
         .system_name = "system",
         .system = system,
@@ -32,6 +32,12 @@ CouplingContext geometryContext()
         .kind = CouplingRegionKind::Boundary,
         .marker = 4,
     };
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    surface.logical_region = svmp::search::LogicalInterfaceRegionId{
+        .persistent_id = "left_surface",
+        .name = "surface",
+    };
+#endif
 
     CouplingContextBuilder builder;
     builder.addParticipant({
@@ -280,4 +286,72 @@ TEST(CouplingGeometryRequirements, CouplingGraphRequiresInstalledGeometryTermina
             .region_kind = CouplingRegionKind::Boundary,
         };
     EXPECT_TRUE(run_validation().ok());
+}
+
+TEST(CouplingGeometryRequirements, CouplingGraphValidatesGeometryTerminalLocationProvenance)
+{
+    CouplingContractDeclaration declaration = geometryDeclaration();
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "boundary_normal_form";
+    metadata.geometry_terminals.push_back(
+        CouplingFormGeometryTerminalProvenance{
+            .quantity = CouplingGeometryTerminalQuantity::CurrentNormal,
+            .location = CouplingGeometryTerminalLocationProvenance{
+                .region_kind = CouplingRegionKind::Boundary,
+                .marker = 4,
+                .coordinate_configuration =
+                    forms::GeometryConfiguration::Current,
+            },
+            .analysis_domain = analysis::DomainKind::Boundary,
+            .owner = CouplingGeometryTerminalOwnerProvenance{
+                .participant_name = "left",
+                .system_name = "system",
+                .region_name = "surface",
+            },
+            .provider = "forms",
+            .normal_available = true,
+        });
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    metadata.geometry_terminals[0].location.logical_region =
+        svmp::search::LogicalInterfaceRegionId{
+            .persistent_id = "left_surface",
+            .name = "surface",
+        };
+#endif
+
+    const auto validate_metadata = [&](const CouplingFormAnalysisMetadata& form) {
+        CouplingGraph graph;
+        const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+        const std::array<CouplingFormAnalysisMetadata, 1> installed{form};
+        return graph.buildFinalizedGraph(
+            geometryContext(),
+            std::span<const CouplingContractDeclaration>(declarations),
+            std::span<const CouplingFormAnalysisMetadata>(installed));
+    };
+
+    EXPECT_TRUE(validate_metadata(metadata).ok());
+
+    auto wrong_marker = metadata;
+    wrong_marker.geometry_terminals[0].location.marker = 5;
+    EXPECT_FALSE(validate_metadata(wrong_marker).ok());
+
+    auto wrong_configuration = metadata;
+    wrong_configuration.geometry_terminals[0].location.coordinate_configuration =
+        forms::GeometryConfiguration::Reference;
+    EXPECT_FALSE(validate_metadata(wrong_configuration).ok());
+
+    auto wrong_owner = metadata;
+    wrong_owner.geometry_terminals[0].owner->participant_name = "right";
+    EXPECT_FALSE(validate_metadata(wrong_owner).ok());
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto wrong_logical_region = metadata;
+    wrong_logical_region.geometry_terminals[0].location.logical_region =
+        svmp::search::LogicalInterfaceRegionId{
+            .persistent_id = "other_surface",
+            .name = "surface",
+        };
+    EXPECT_FALSE(validate_metadata(wrong_logical_region).ok());
+#endif
 }
