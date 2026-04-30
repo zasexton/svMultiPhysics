@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 using namespace svmp::FE;
@@ -137,6 +138,46 @@ TEST(CouplingFormBuilder, BuildsTemporalTermsThroughFormsVocabulary)
     EXPECT_EQ(builder.time().node()->type(), forms::FormExprType::Time);
     EXPECT_EQ(builder.timeStep().node()->type(), forms::FormExprType::TimeStep);
     EXPECT_EQ(builder.effectiveTimeStep().node()->type(), forms::FormExprType::EffectiveTimeStep);
+}
+
+TEST(CouplingFormBuilder, PreviousSolutionIsTrialScopedWithoutSourceSymbol)
+{
+    using PreviousSolutionMember = forms::FormExpr (
+        CouplingFormBuilder::*)(std::string_view, std::string_view, int) const;
+    static_assert(std::is_invocable_v<PreviousSolutionMember,
+                                      const CouplingFormBuilder&,
+                                      std::string_view,
+                                      std::string_view,
+                                      int>);
+    static_assert(!std::is_invocable_v<PreviousSolutionMember,
+                                       const CouplingFormBuilder&,
+                                       std::string_view,
+                                       std::string_view,
+                                       std::string_view,
+                                       int>);
+
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    const auto previous = builder.previousSolution("participant", "primary", 2);
+    ASSERT_TRUE(previous.isValid());
+    EXPECT_EQ(previous.node()->type(), forms::FormExprType::PreviousSolutionRef);
+    EXPECT_FALSE(previous.node()->symbolName().has_value());
+    ASSERT_TRUE(previous.node()->historyIndex().has_value());
+    EXPECT_EQ(*previous.node()->historyIndex(), 2);
+
+    const auto residual =
+        (previous * builder.test("participant", "primary", "w")).dx();
+    const auto provenance = builder.terminalProvenanceFor(residual);
+    ASSERT_EQ(provenance.size(), 1u);
+    EXPECT_EQ(provenance[0].kind,
+              CouplingFormTerminalProvenanceKind::PreviousSolution);
+    ASSERT_TRUE(provenance[0].field.has_value());
+    EXPECT_EQ(provenance[0].field->participant_name, "participant");
+    EXPECT_EQ(provenance[0].field->field_name, "primary");
+    EXPECT_EQ(provenance[0].temporal_quantity,
+              CouplingTemporalQuantity::FieldHistoryValue);
+    EXPECT_EQ(provenance[0].history_index, 2);
 }
 
 TEST(CouplingFormBuilder, BuildsMeshAndGeometryTerminalsThroughFormsVocabulary)

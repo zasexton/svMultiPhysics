@@ -4494,7 +4494,7 @@ Unit-test verification checklist:
   through `FormExpr::previousSolution(k)` to the existing
   `PreviousSolutionRef(k)` terminal while preserving participant/field
   provenance for diagnostics.
-- [ ] `test_CouplingFormBuilder.cpp` verifies `previousSolution(k)` does not accept
+- [x] `test_CouplingFormBuilder.cpp` verifies `previousSolution(k)` does not accept
   or record a source-symbol name because Forms history terminals are trial scoped.
 - [ ] `test_CouplingFormBuilder.cpp` verifies `previousSolution(k)` is rejected
   or reported as ambiguous when the named field is not the active trial field in
