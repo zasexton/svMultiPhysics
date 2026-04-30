@@ -1324,6 +1324,46 @@ TEST(CouplingGraph, AcceptsResolvableRequiredContextReferences)
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
+TEST(CouplingGraph, ValidatesFieldRequirementShapeAgainstContext)
+{
+    auto declaration = graphDeclaration();
+    declaration.field_requirements.push_back({
+        .field = {.participant_name = "left", .field_name = "primary"},
+        .value = {.rank = CouplingValueRank::Scalar, .components = 1},
+        .required_scope = systems::FieldScope::VolumeCell,
+    });
+
+    EXPECT_TRUE(buildGraph(graphContext(), declaration).ok());
+
+    declaration.field_requirements.front().value =
+        CouplingValueDescriptor{.rank = CouplingValueRank::Vector, .components = 3};
+    declaration.field_requirements.front().required_scope =
+        systems::FieldScope::InterfaceFace;
+
+    const auto validation = buildGraph(graphContext(), declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("coupling field component count does not satisfy"),
+              std::string::npos);
+    EXPECT_NE(text.find("coupling field scope does not satisfy"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, ValidatesRequiredFieldRequirementPresence)
+{
+    auto declaration = graphDeclaration();
+    declaration.field_requirements.push_back({
+        .field = {.participant_name = "left", .field_name = "missing"},
+        .value = {.rank = CouplingValueRank::Scalar, .components = 1},
+    });
+
+    const auto validation = buildGraph(graphContext(), declaration);
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "required coupling field-shape field is missing from the context"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, BuildsGraphForMultipleContractsSharingContext)
 {
     auto first = graphDeclaration();

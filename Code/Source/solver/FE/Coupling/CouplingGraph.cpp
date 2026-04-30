@@ -86,6 +86,12 @@ bool isRequired(CouplingRequirement requirement) noexcept
     return requirement == CouplingRequirement::Required;
 }
 
+bool isRequiredFieldRequirement(const CouplingFieldRequirement& requirement) noexcept
+{
+    return isRequired(requirement.requirement) &&
+           isRequired(requirement.field.requirement);
+}
+
 bool additionalFieldSelected(
     const CouplingAdditionalFieldDeclaration& field) noexcept
 {
@@ -2656,6 +2662,45 @@ void validateContextReferences(const CouplingContext& context,
                 .participant_name = field.participant_name,
                 .field_name = field.field_name,
                 .message = "required coupling field is missing from the context",
+            });
+        }
+    }
+
+    for (const auto& requirement : declaration.field_requirements) {
+        const auto& field = requirement.field;
+        if (!context.hasField(field.participant_name, field.field_name)) {
+            if (isRequiredFieldRequirement(requirement)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .participant_name = field.participant_name,
+                    .field_name = field.field_name,
+                    .message = "required coupling field-shape field is missing from the context",
+                });
+            }
+            continue;
+        }
+
+        const auto resolved_field =
+            context.field(field.participant_name, field.field_name);
+        if (requirement.value.components > 0 &&
+            resolved_field.components != requirement.value.components) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = field.participant_name,
+                .field_name = field.field_name,
+                .message = "coupling field component count does not satisfy the value-shape declaration",
+            });
+        }
+        if (requirement.required_scope.has_value() &&
+            resolved_field.scope != *requirement.required_scope) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = field.participant_name,
+                .field_name = field.field_name,
+                .message = "coupling field scope does not satisfy the value-shape declaration",
             });
         }
     }

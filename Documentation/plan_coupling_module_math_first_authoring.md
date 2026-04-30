@@ -1152,7 +1152,7 @@ struct CouplingRegionRelationRequirement {
       diagnostics for missing, duplicate, or unsupported lowering declarations.
 - [ ] Prefer `CouplingRegionRelationRequirement` for new code when a relation is
       not exactly a simple two-side shared interface.
-- [ ] Teach `CouplingGraph` to validate field rank, component count, and field
+- [x] Teach `CouplingGraph` to validate field rank, component count, and field
       scope against `CouplingContext`.
 - [ ] Teach `CouplingGraph` to validate shared-interface participant mappings
       against `SharedRegionRegistry`.
