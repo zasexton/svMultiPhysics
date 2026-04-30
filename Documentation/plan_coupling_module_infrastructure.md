@@ -4542,7 +4542,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingFormBuilder.cpp` verifies scanner-normalization adapts any
   historical or overloaded scanner container into explicit terminal-kind records
   before coupling graph validation consumes it.
-- [ ] `test_CouplingFormBuilder.cpp` verifies declaration-time form install
+- [x] `test_CouplingFormBuilder.cpp` verifies declaration-time form install
   options are resolved into `systems::FormInstallOptions`, including
   name-to-`FieldId` geometry-sensitivity resolution and geometry tangent path
   forwarding.
