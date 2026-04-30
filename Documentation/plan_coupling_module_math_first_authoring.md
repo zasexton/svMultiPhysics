@@ -1176,7 +1176,7 @@ struct CouplingRegionRelationRequirement {
 - [x] FSI no longer needs local opposite-side checks.
 - [x] FSI no longer needs local monolithic same-system checks.
 - [x] Thermal no longer needs local scalar/vector field shape checks.
-- [ ] New N-participant and mixed-dimensional relation fixtures validate through
+- [x] New N-participant and mixed-dimensional relation fixtures validate through
       `CouplingGraph`.
 - [x] Relation capability records reject unsupported mode/lowering combinations
       before Forms installation or partitioned plan execution.
@@ -1597,7 +1597,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test missing shared-interface participant diagnostics.
 - [x] Test same-side interface diagnostics.
 - [x] Test N-way interface diagnostics.
-- [ ] Test mixed-dimensional region relation diagnostics.
+- [x] Test mixed-dimensional region relation diagnostics.
 - [x] Test optional endpoint validation.
 - [x] Test monolithic mixed-system diagnostics.
 - [x] Test missing interface topology diagnostics.

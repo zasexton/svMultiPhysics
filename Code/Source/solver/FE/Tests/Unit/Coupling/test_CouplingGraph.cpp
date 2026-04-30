@@ -207,6 +207,36 @@ CouplingContext twoBoundaryRegionGraphContext()
     return builder.build();
 }
 
+CouplingContext volumeBoundaryGraphContext()
+{
+    const auto* system = graphSystemToken();
+    const CouplingRegionRef volume{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "volume",
+        .kind = CouplingRegionKind::Domain,
+    };
+    const CouplingRegionRef outlet{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "outlet",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 9,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+    });
+    builder.addRegion(volume);
+    builder.addRegion(outlet);
+    return builder.build();
+}
+
 struct NonFieldGraphFixture {
     std::shared_ptr<spaces::H1Space> space;
     std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
@@ -1518,6 +1548,59 @@ TEST(CouplingGraph, ValidatesRegionRelationRequirementsAgainstContext)
     EXPECT_NE(formatDiagnostics(shared_region_validation).find(
                   "region-relation endpoint shared region is missing from the context"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, ValidatesMixedDimensionalRegionRelationDiagnostics)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "volume_outlet_balance",
+        .relation_kind = CouplingRegionRelationKind::VolumeBoundaryRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "volume",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "outlet",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+        .require_common_monolithic_system = true,
+    });
+
+    const auto context = volumeBoundaryGraphContext();
+    EXPECT_TRUE(buildGraph(context, declaration).ok());
+
+    auto missing_endpoint = declaration;
+    missing_endpoint.region_relation_requirements.front()
+        .endpoints[1]
+        .region_name = "missing_outlet";
+    const auto missing_validation = buildGraph(context, missing_endpoint);
+    EXPECT_FALSE(missing_validation.ok());
+    const auto missing_text = formatDiagnostics(missing_validation);
+    EXPECT_NE(missing_text.find("region-relation endpoint is missing"),
+              std::string::npos);
+    EXPECT_NE(missing_text.find("missing_outlet"), std::string::npos);
+
+    auto incompatible_kind = declaration;
+    incompatible_kind.region_relation_requirements.front()
+        .required_region_kind = CouplingRegionKind::Boundary;
+    const auto kind_validation = buildGraph(context, incompatible_kind);
+    EXPECT_FALSE(kind_validation.ok());
+    const auto kind_text = formatDiagnostics(kind_validation);
+    EXPECT_NE(kind_text.find(
+                  "region-relation endpoint kind does not satisfy the declaration"),
+              std::string::npos);
+    EXPECT_NE(kind_text.find("volume"), std::string::npos);
 }
 
 TEST(CouplingGraph, RejectsSameSideInterfaceMappings)
