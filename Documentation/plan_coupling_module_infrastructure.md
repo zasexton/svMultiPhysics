@@ -5512,38 +5512,38 @@ Unit-test verification checklist:
   marker/shared-region, owner-scope, side, typed `forms::GeometryConfiguration`
   value and frame-transform configurations, typed logical interface region,
   geometry-revision, and quadrature-policy provenance.
-- [ ] The Forms dependency fixture verifies undeclared `StateField`
+- [x] The Forms dependency fixture verifies undeclared `StateField`
   dependencies, undeclared non-field data/provenance requirements, undeclared
   graph-variable dependencies, undeclared geometry-sensitivity dependencies, and
   declared-but-unused implicit dependencies are diagnosed.
-- [ ] The Forms dependency fixture verifies diagnostics are based on public
+- [x] The Forms dependency fixture verifies diagnostics are based on public
   Forms/Systems coupling-analysis metadata.
-- [ ] The Forms dependency fixture verifies geometry-sensitivity
+- [x] The Forms dependency fixture verifies geometry-sensitivity
   `FormInstallOptions` are resolved from declaration-time options, require a
   bound mesh-motion field, and produce structured geometry-sensitivity provenance.
-- [ ] The Forms dependency fixture verifies cut/embedded geometry sensitivity
+- [x] The Forms dependency fixture verifies cut/embedded geometry sensitivity
   provenance remains structured and includes target kind, parent entity, parent
   geometry DOFs, visible assembly paths, revision/capability metadata, AD
   compatibility, and sample count.
-- [ ] The Forms dependency fixture verifies contribution name, origin, and
+- [x] The Forms dependency fixture verifies contribution name, origin, and
   owning-system provenance are preserved when multiple contracts install into the
   same operator tag.
-- [ ] The Forms dependency fixture verifies boundary-integral provenance is
+- [x] The Forms dependency fixture verifies boundary-integral provenance is
   distinct from boundary-functional provenance and maps to BoundaryFunctional
   graph identity until Analysis exposes a dedicated kind.
-- [ ] The Forms dependency fixture verifies location-sensitive non-field
+- [x] The Forms dependency fixture verifies location-sensitive non-field
   provenance for boundary functionals, boundary integrals, and material-state
   refs, including `analysis::DomainKind`, region/shared-region, marker, side,
   logical region, provider, slot/output-id, value type, and byte-offset evidence,
   and verifies same-name dependencies on different regions remain distinct.
-- [ ] The Forms dependency fixture verifies declaration-time AD mode comes only
+- [x] The Forms dependency fixture verifies declaration-time AD mode comes only
   from `CouplingFormInstallOptionsDeclaration::ad_mode`, not from
   `compiler_options.ad_mode`.
-- [ ] The Forms dependency fixture verifies declaration-time geometry tangent
+- [x] The Forms dependency fixture verifies declaration-time geometry tangent
   path and symbolic-tangent policy come only from
   `CouplingGeometrySensitivityDeclaration`, not from raw
   `forms::SymbolicOptions`.
-- [ ] The Forms dependency fixture verifies geometry tangent mode combinations:
+- [x] The Forms dependency fixture verifies geometry tangent mode combinations:
   `GeometryConstant` rejects mesh-motion fields, `SymbolicRequired`, and
   `SymbolicWithADCheck`; `GeometryConstant` accepts ordinary
   `use_symbolic_tangent`; `MeshMotionUnknowns` requires a bound mesh-motion field

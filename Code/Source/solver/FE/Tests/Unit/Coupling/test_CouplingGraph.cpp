@@ -624,6 +624,58 @@ svmp::search::LogicalInterfaceRegionId graphLogicalInterfaceRegion(
     };
 }
 
+CouplingContext logicalInterfaceProviderGraphContext(int left_marker = 17,
+                                                     int right_marker = 17)
+{
+    const auto* system = graphSystemToken();
+    const CouplingRegionRef left_region{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = left_marker,
+        .side = CouplingInterfaceSide::Minus,
+        .logical_region = graphLogicalInterfaceRegion(
+            "left-interface-region",
+            "left_interface",
+            left_marker),
+    };
+    const CouplingRegionRef right_region{
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = right_marker,
+        .side = CouplingInterfaceSide::Plus,
+        .logical_region = graphLogicalInterfaceRegion(
+            "right-interface-region",
+            "right_interface",
+            right_marker),
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "system",
+        .system = system,
+    });
+    builder.addRegion(left_region);
+    builder.addRegion(right_region);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_region, right_region},
+    });
+    return builder.build();
+}
+
 svmp::search::InterfaceRevisionSnapshot graphInterfaceRevisionSnapshot(
     svmp::Configuration configuration,
     std::uint64_t offset)
@@ -1988,6 +2040,37 @@ TEST(CouplingGraph, ValidatesInterfaceProviderMetadataSideProvenance)
     EXPECT_NE(formatDiagnostics(wrong_side).find(
                   "BoundaryIntegral(left/interface_flux)"),
               std::string::npos);
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto logical_metadata = metadata;
+    logical_metadata.non_field_dependencies[0].side =
+        CouplingInterfaceSide::Minus;
+    logical_metadata.non_field_dependencies[0].logical_region =
+        graphLogicalInterfaceRegion("left-interface-region",
+                                    "left_interface",
+                                    17);
+    const std::vector<CouplingFormAnalysisMetadata> logical_forms{
+        logical_metadata};
+    const auto logical_ok = buildFinalizedGraph(
+        logicalInterfaceProviderGraphContext(17, 17),
+        declaration,
+        logical_forms);
+    EXPECT_TRUE(logical_ok.ok()) << formatDiagnostics(logical_ok);
+
+    auto wrong_logical_region = logical_metadata;
+    wrong_logical_region.non_field_dependencies[0]
+        .logical_region->persistent_id = "other-interface-region";
+    const std::vector<CouplingFormAnalysisMetadata> wrong_logical_forms{
+        wrong_logical_region};
+    const auto wrong_logical = buildFinalizedGraph(
+        logicalInterfaceProviderGraphContext(17, 17),
+        declaration,
+        wrong_logical_forms);
+    EXPECT_FALSE(wrong_logical.ok());
+    EXPECT_NE(formatDiagnostics(wrong_logical).find(
+                  "BoundaryIntegral(left/interface_flux)"),
+              std::string::npos);
+#endif
 }
 
 TEST(CouplingGraph, AcceptsBoundaryIntegralProvenanceAsBoundaryFunctionalGraphIdentity)

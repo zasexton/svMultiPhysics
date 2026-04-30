@@ -2381,6 +2381,13 @@ TEST(MonolithicCouplingBuilder, InstallsMultipleContractsIntoSharedSystem)
         fixture.context,
         std::span<const CouplingFormContribution>(contributions));
     ASSERT_EQ(installed.size(), 2u);
+    EXPECT_EQ(installed[0].contribution_name, "generic_cell_coupling");
+    EXPECT_EQ(installed[0].origin, "GenericTwoParticipantContract");
+    EXPECT_EQ(installed[0].system_name, "shared_system");
+    EXPECT_EQ(installed[1].contribution_name,
+              "generic_reverse_cell_coupling");
+    EXPECT_EQ(installed[1].origin, "ReverseContract");
+    EXPECT_EQ(installed[1].system_name, "shared_system");
 
     CouplingGraph graph;
     const auto finalized_validation = builder.refreshFinalizedGraph(
