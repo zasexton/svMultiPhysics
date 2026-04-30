@@ -690,7 +690,8 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                 .message = "coupling field requires participant, system ownership, field id, space, and positive component count",
             });
         }
-        if (!field.participant_name.empty() &&
+        if (!field.coupling_owned &&
+            !field.participant_name.empty() &&
             !context_.hasParticipant(field.participant_name)) {
             result.add(CouplingDiagnostic{
                 .severity = CouplingDiagnosticSeverity::Error,

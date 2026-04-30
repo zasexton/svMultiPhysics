@@ -55,6 +55,7 @@ struct CouplingFieldRef {
     int components{1};
     systems::FieldScope scope{systems::FieldScope::VolumeCell};
     int interface_marker{-1};
+    bool coupling_owned{false};
 
     [[nodiscard]] bool valid() const noexcept;
 };

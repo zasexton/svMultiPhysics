@@ -1137,19 +1137,11 @@ CouplingParticipantRef participantBySystemName(const CouplingContext& context,
     return *it;
 }
 
-bool containsName(const std::vector<std::string>& names,
-                  std::string_view name) noexcept
-{
-    return std::find(names.begin(), names.end(), name) != names.end();
-}
-
 void copyContextRegistrations(const CouplingContext& context,
-                              CouplingContextBuilder& builder,
-                              std::vector<std::string>& participant_names)
+                              CouplingContextBuilder& builder)
 {
     for (const auto& participant : context.participants()) {
         builder.addParticipant(participant);
-        participant_names.push_back(participant.participant_name);
     }
     for (const auto& field : context.fields()) {
         builder.addField(field);
@@ -1193,6 +1185,7 @@ CouplingFieldRef fieldRefForRegisteredAdditionalField(
         .components = field.field_spec.components,
         .scope = field.field_spec.scope,
         .interface_marker = field.field_spec.interface_marker,
+        .coupling_owned = true,
     };
 }
 
@@ -1251,20 +1244,9 @@ CouplingContext MonolithicCouplingBuilder::refreshContextWithAdditionalFields(
     std::span<const ResolvedCouplingAdditionalFieldDeclaration> additional_fields) const
 {
     CouplingContextBuilder builder;
-    std::vector<std::string> participant_names;
-    copyContextRegistrations(context, builder, participant_names);
+    copyContextRegistrations(context, builder);
 
     for (const auto& field : additional_fields) {
-        const auto target = participantBySystemName(context, field.system_name);
-        const auto& lookup_namespace = field.declaration.namespace_name;
-        if (!containsName(participant_names, lookup_namespace)) {
-            builder.addParticipant(CouplingParticipantRef{
-                .participant_name = lookup_namespace,
-                .system_name = target.system_name,
-                .system = target.system,
-            });
-            participant_names.push_back(lookup_namespace);
-        }
         builder.addField(fieldRefForRegisteredAdditionalField(context, field));
     }
 

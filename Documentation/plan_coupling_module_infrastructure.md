@@ -4924,7 +4924,7 @@ Implementation checklist:
   from participant names.
 - [x] Refresh and finalize `CouplingContext` after additional fields are
   registered.
-- [ ] Rebuild and validate the finalized `CouplingGraph` after additional
+- [x] Rebuild and validate the finalized `CouplingGraph` after additional
   fields are present.
 - [ ] Validate temporal requirements against the selected temporal policy if
   the policy is available before setup.

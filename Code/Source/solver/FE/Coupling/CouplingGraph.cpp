@@ -597,6 +597,9 @@ bool additionalFieldCollidesWithBaseField(
         context.fields().begin(),
         context.fields().end(),
         [&](const CouplingFieldRef& base_field) {
+            if (base_field.coupling_owned) {
+                return false;
+            }
             if (base_field.field_name != field.field_name) {
                 return false;
             }

@@ -1519,15 +1519,112 @@ TEST(MonolithicCouplingBuilder, RefreshesContextWithRegisteredAdditionalFields)
     const auto participant_field = refreshed.field("left", "lambda");
     EXPECT_EQ(participant_field.field_id, registered[0].field_id);
     EXPECT_EQ(participant_field.system_name, "shared_system");
-    EXPECT_TRUE(refreshed.hasParticipant("generic_instance"));
+    EXPECT_TRUE(participant_field.coupling_owned);
+    EXPECT_FALSE(refreshed.hasParticipant("generic_instance"));
     const auto contract_field = refreshed.field("generic_instance", "lambda");
     EXPECT_EQ(contract_field.field_id, registered[1].field_id);
     EXPECT_EQ(contract_field.system_name, "shared_system");
+    EXPECT_TRUE(contract_field.coupling_owned);
     EXPECT_NE(participant_field.field_id, contract_field.field_id);
     EXPECT_EQ(fixture.system.findFieldByName("left.lambda"),
               participant_field.field_id);
     EXPECT_EQ(fixture.system.findFieldByName("generic_instance.lambda"),
               contract_field.field_id);
+}
+
+TEST(MonolithicCouplingBuilder, FinalizesGraphAfterAdditionalFieldContextRefresh)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .system_participant_name = "right",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+    const CouplingVariableUse row{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "right",
+        .name = "primary",
+    };
+    const CouplingVariableUse dependency{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "generic_instance",
+        .name = "lambda",
+    };
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = row,
+        .dependency = dependency,
+    });
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = row,
+        .dependency = dependency,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto registered = builder.registerAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(registered.size(), 1u);
+
+    CouplingGraph stale_graph;
+    const std::array<CouplingFormAnalysisMetadata, 0> no_metadata{};
+    const auto stale_validation = stale_graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(no_metadata));
+    EXPECT_FALSE(stale_validation.ok());
+
+    const auto refreshed =
+        builder.refreshContextWithAdditionalFields(fixture.context, registered);
+    const auto lambda_field = refreshed.field("generic_instance", "lambda").field_id;
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "additional_field_block";
+    metadata.origin = "MonolithicCouplingBuilderTest";
+    metadata.system_name = "shared_system";
+    metadata.operator_name = "equations";
+    metadata.installed_fields = {fixture.right_field, lambda_field};
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Test metadata reports installed dependencies."});
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledBlocks,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Test metadata reports installed blocks."});
+    metadata.installed_dependencies.push_back(CouplingInstalledDependency{
+        .residual_row = analysis::VariableKey::field(fixture.right_field),
+        .dependency = analysis::VariableKey::field(lambda_field),
+        .domain = analysis::DomainKind::Cell,
+        .contributes_matrix_block = true,
+        .contributes_vector = true,
+        .provider = "test",
+    });
+    metadata.installed_blocks.push_back(CouplingInstalledBlockProvenance{
+        .residual_row = analysis::VariableKey::field(fixture.right_field),
+        .dependency = analysis::VariableKey::field(lambda_field),
+        .domains = {analysis::DomainKind::Cell},
+        .has_matrix = true,
+        .has_vector = true,
+    });
+
+    const std::array<CouplingFormAnalysisMetadata, 1> installed{metadata};
+    CouplingGraph finalized_graph;
+    const auto finalized_validation = finalized_graph.buildFinalizedGraph(
+        refreshed,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(finalized_validation.ok())
+        << formatDiagnostics(finalized_validation);
 }
 
 TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
