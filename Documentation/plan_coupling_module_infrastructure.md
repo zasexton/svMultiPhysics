@@ -5548,16 +5548,16 @@ Unit-test verification checklist:
   `SymbolicWithADCheck`; `GeometryConstant` accepts ordinary
   `use_symbolic_tangent`; `MeshMotionUnknowns` requires a bound mesh-motion field
   and forwards or forces the resolved geometry tangent path as declared.
-- [ ] The monolithic topology fixture verifies Forms-authored coupling is
+- [x] The monolithic topology fixture verifies Forms-authored coupling is
   accepted only for one compatible `FESystem` with registered interface topology
   when `.dI(marker)` is used.
-- [ ] Expert-hook fixtures verify missing `CouplingInstallMetadata` records for
+- [x] Expert-hook fixtures verify missing `CouplingInstallMetadata` records for
   installed custom contributions prevent expected-block validation from passing.
-- [ ] Expert-hook fixtures verify declaration-shaped metadata is rejected and
+- [x] Expert-hook fixtures verify declaration-shaped metadata is rejected and
   expert installs must report contribution identity, scoped
   `analysis::VariableKey` dependencies, installed block/`analysis::DomainKind`
   provenance, and matrix/vector contribution flags.
-- [ ] Expert-hook fixtures verify custom installs use approved Systems
+- [x] Expert-hook fixtures verify custom installs use approved Systems
   extension points.
 - [x] Partitioned fixtures verify declared exchanges and generated plans remain
   consistent.
