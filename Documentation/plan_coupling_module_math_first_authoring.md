@@ -1675,27 +1675,27 @@ enum class ThermalInterfaceFormulation {
 
 ## Phase 11: Documentation
 
-- [ ] Add a short "Writing A Coupling Module" guide.
-- [ ] Document the preferred `define(builder)` path.
-- [ ] Document when direct `CouplingContract` overrides are appropriate.
-- [ ] Document how interface views map to `minus()` and `plus()`.
-- [ ] Document how monolithic Forms metadata drives dependencies and expected
+- [x] Add a short "Writing A Coupling Module" guide.
+- [x] Document the preferred `define(builder)` path.
+- [x] Document when direct `CouplingContract` overrides are appropriate.
+- [x] Document how interface views map to `minus()` and `plus()`.
+- [x] Document how monolithic Forms metadata drives dependencies and expected
       blocks.
-- [ ] Document how partitioned channels map to exchange declarations and plans.
-- [ ] Document when coupling math should be authored as Forms and when it
+- [x] Document how partitioned channels map to exchange declarations and plans.
+- [x] Document when coupling math should be authored as Forms and when it
       should be authored as exchanges, variables, or expert hooks.
-- [ ] Document relation families: equality, conservation, penalty, Nitsche,
+- [x] Document relation families: equality, conservation, penalty, Nitsche,
       multiplier, mortar, contact, friction, multi-PDE auxiliary, and
       global-scalar coupling.
-- [ ] Document relation lowering capabilities and unsupported-strategy
+- [x] Document relation lowering capabilities and unsupported-strategy
       diagnostics.
-- [ ] Document stable generated naming rules.
-- [ ] Document exact, approximate, lagged, and unavailable lowerings.
-- [ ] Document the layered configuration surface: default, advanced, expert.
-- [ ] Document N-participant, mixed-dimensional, and optional-participant
+- [x] Document stable generated naming rules.
+- [x] Document exact, approximate, lagged, and unavailable lowerings.
+- [x] Document the layered configuration surface: default, advanced, expert.
+- [x] Document N-participant, mixed-dimensional, and optional-participant
       patterns.
-- [ ] Document transform, orientation, frame, and geometry lifecycle policies.
-- [ ] Include compact FSI and thermal examples.
+- [x] Document transform, orientation, frame, and geometry lifecycle policies.
+- [x] Include compact FSI and thermal examples.
 - [ ] Update `Documentation/plan_coupling_module_infrastructure.md` to point to
       this follow-on authoring migration plan.
 
