@@ -4895,7 +4895,7 @@ Unit-test verification checklist:
   distinct interface-entry and interface-map plus interface-search-registry
   provenance, logical interface region ids, coordinate configurations, revision
   snapshots, search map state, and sliding-map kind.
-- [ ] `test_CouplingGraph.cpp` rejects stale interface maps, wrong-system maps,
+- [x] `test_CouplingGraph.cpp` rejects stale interface maps, wrong-system maps,
   and trial/accepted interface-map state mismatches.
 - [x] `test_CouplingGraph.cpp` detects partitioned exchange cycles and reports
   them deterministically.

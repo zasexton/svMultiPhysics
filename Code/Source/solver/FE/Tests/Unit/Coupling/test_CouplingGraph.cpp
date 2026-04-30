@@ -475,7 +475,43 @@ svmp::search::InterfaceRevisionSnapshot graphInterfaceRevisionSnapshot(
     };
 }
 
-CouplingContext interfacePartitionedGraphContext()
+svmp::search::InterfaceMap graphInterfaceMap(std::string name)
+{
+    svmp::search::InterfaceMap map;
+    map.name = std::move(name);
+    map.source.boundary_label = 21;
+    map.source.configuration = svmp::Configuration::Reference;
+    map.source.logical_region =
+        graphLogicalInterfaceRegion("left-interface-region", "left_interface", 21);
+    map.target.boundary_label = 22;
+    map.target.configuration = svmp::Configuration::Current;
+    map.target.logical_region =
+        graphLogicalInterfaceRegion("right-interface-region", "right_interface", 22);
+    map.source_revision =
+        graphInterfaceRevisionSnapshot(svmp::Configuration::Reference, 1);
+    map.target_revision =
+        graphInterfaceRevisionSnapshot(svmp::Configuration::Current, 2);
+    map.state = svmp::search::InterfaceMapState::Trial;
+    return map;
+}
+
+systems::SlidingInterfaceMap graphSlidingInterfaceMap()
+{
+    systems::SlidingInterfaceMap sliding_map;
+    sliding_map.name = "interface_map";
+    sliding_map.map_kind = systems::SlidingInterfaceMapKind::RotatingSliding;
+    sliding_map.interface_map = graphInterfaceMap("interface_map");
+    sliding_map.state = systems::InterfaceOperatorState::Trial;
+    sliding_map.accepted_revision_key = 47;
+    sliding_map.trial_revision_key = 53;
+    sliding_map.time = 0.125;
+    sliding_map.time_level_epoch = 59;
+    return sliding_map;
+}
+
+CouplingContext interfacePartitionedGraphContext(
+    const svmp::search::InterfaceSearchRegistry& registry,
+    const systems::SlidingInterfaceMap& sliding_map)
 {
     const auto* left_system = graphSystemToken();
     const auto* right_system = otherGraphSystemToken();
@@ -551,11 +587,20 @@ CouplingContext interfacePartitionedGraphContext()
         .required_region_kind = CouplingRegionKind::InterfaceFace,
         .participant_regions = {left_region, right_region},
     });
+    builder.addInterfaceSearchRegistry(CouplingInterfaceSearchRegistryRegistration{
+        .registry_name = "interface_search",
+        .registry = &registry,
+    });
+    builder.addSlidingInterfaceMap(CouplingSlidingInterfaceMapRegistration{
+        .interface_map_name = "interface_map",
+        .sliding_map = &sliding_map,
+    });
     return builder.build();
 }
 
 CouplingInterfaceMapProvenance graphInterfaceMapProvenance()
 {
+    const auto map = graphInterfaceMap("interface_map");
     return CouplingInterfaceMapProvenance{
         .interface_map_name = "interface_map",
         .interface_entry_name = "interface_entry",
@@ -581,9 +626,9 @@ CouplingInterfaceMapProvenance graphInterfaceMapProvenance()
         .target_revision_snapshot = graphInterfaceRevisionSnapshot(
             svmp::Configuration::Current,
             2),
-        .source_search_revision_key = 37,
-        .target_search_revision_key = 41,
-        .map_revision_key = 43,
+        .source_search_revision_key = map.source_revision.revision_key(),
+        .target_search_revision_key = map.target_revision.revision_key(),
+        .map_revision_key = map.revision_key(),
         .map_state = svmp::search::InterfaceMapState::Trial,
         .operator_state = systems::InterfaceOperatorState::Trial,
         .accepted_revision_key = 47,
@@ -2885,7 +2930,9 @@ TEST(CouplingGraph, RecordsResolvedPartitionedExchangeNodes)
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 TEST(CouplingGraph, RecordsInterfaceTransferProvenanceInResolvedPartitionedExchanges)
 {
-    const auto context = interfacePartitionedGraphContext();
+    svmp::search::InterfaceSearchRegistry registry;
+    const auto sliding_map = graphSlidingInterfaceMap();
+    const auto context = interfacePartitionedGraphContext(registry, sliding_map);
     const auto declaration = interfacePartitionedGraphDeclaration();
     const std::array<CouplingContractDeclaration, 1> declarations{declaration};
 
@@ -2943,9 +2990,12 @@ TEST(CouplingGraph, RecordsInterfaceTransferProvenanceInResolvedPartitionedExcha
     EXPECT_EQ(provenance.target_revision_snapshot.revision_key(),
               graphInterfaceRevisionSnapshot(svmp::Configuration::Current, 2)
                   .revision_key());
-    EXPECT_EQ(provenance.source_search_revision_key, 37u);
-    EXPECT_EQ(provenance.target_search_revision_key, 41u);
-    EXPECT_EQ(provenance.map_revision_key, 43u);
+    const auto interface_map = graphInterfaceMap("interface_map");
+    EXPECT_EQ(provenance.source_search_revision_key,
+              interface_map.source_revision.revision_key());
+    EXPECT_EQ(provenance.target_search_revision_key,
+              interface_map.target_revision.revision_key());
+    EXPECT_EQ(provenance.map_revision_key, interface_map.revision_key());
     EXPECT_EQ(provenance.map_state, svmp::search::InterfaceMapState::Trial);
     EXPECT_EQ(provenance.operator_state, systems::InterfaceOperatorState::Trial);
     EXPECT_EQ(provenance.accepted_revision_key, 47u);
@@ -2964,6 +3014,53 @@ TEST(CouplingGraph, RecordsInterfaceTransferProvenanceInResolvedPartitionedExcha
               "left-interface-region");
     EXPECT_EQ(exchange.consumer_region->logical_region->persistent_id,
               "right-interface-region");
+}
+
+TEST(CouplingGraph, RejectsMismatchedInterfaceMapRuntimeHandles)
+{
+    svmp::search::InterfaceSearchRegistry registry;
+    const auto sliding_map = graphSlidingInterfaceMap();
+    const auto context = interfacePartitionedGraphContext(registry, sliding_map);
+    const auto declaration = interfacePartitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    const auto expect_rejected =
+        [&](auto mutate_provenance, std::string_view expected_text) {
+            auto mutated_plan = plan;
+            ASSERT_FALSE(mutated_plan.exchanges.empty());
+            ASSERT_TRUE(mutated_plan.exchanges[0].transfer.interface_map.has_value());
+            mutate_provenance(*mutated_plan.exchanges[0].transfer.interface_map);
+
+            const auto validation =
+                buildFinalizedGraph(context, declaration, mutated_plan);
+            EXPECT_FALSE(validation.ok());
+            EXPECT_NE(formatDiagnostics(validation).find(expected_text),
+                      std::string::npos)
+                << "expected text: " << expected_text << "\n"
+                << formatDiagnostics(validation);
+        };
+
+    expect_rejected(
+        [](CouplingInterfaceMapProvenance& provenance) {
+            provenance.map_revision_key += 1;
+        },
+        "runtime revision");
+    expect_rejected(
+        [](CouplingInterfaceMapProvenance& provenance) {
+            provenance.source_system_name = "right_system";
+        },
+        "source system does not match");
+    expect_rejected(
+        [](CouplingInterfaceMapProvenance& provenance) {
+            provenance.operator_state =
+                systems::InterfaceOperatorState::AcceptedTimeStep;
+        },
+        "operator state does not match");
 }
 #endif
 

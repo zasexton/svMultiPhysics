@@ -2464,6 +2464,51 @@ void validatePartitionedPlanCoverage(
     }
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+void validatePartitionedInterfaceRuntimeHandles(
+    const CouplingContext& context,
+    const PartitionedCouplingPlan& partitioned_plan,
+    CouplingValidationResult& result)
+{
+    for (const auto& exchange : partitioned_plan.exchanges) {
+        if (!exchange.transfer.interface_map.has_value()) {
+            continue;
+        }
+        const auto& provenance = *exchange.transfer.interface_map;
+        if (!exchange.producer.system_name.empty() &&
+            exchange.producer.system_name != provenance.source_system_name) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = exchange.producer_port.contract_instance_name,
+                .endpoint_name = exchange.producer_port.port_name,
+                .message = "resolved partitioned interface transfer source system does not match the producer endpoint",
+            });
+        }
+        if (!exchange.consumer.system_name.empty() &&
+            exchange.consumer.system_name != provenance.target_system_name) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = exchange.consumer_port.contract_instance_name,
+                .endpoint_name = exchange.consumer_port.port_name,
+                .message = "resolved partitioned interface transfer target system does not match the consumer endpoint",
+            });
+        }
+
+        try {
+            static_cast<void>(context.interfaceMapHandles(provenance));
+        } catch (const std::exception& e) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = exchange.producer_port.contract_instance_name,
+                .endpoint_name = exchange.producer_port.port_name,
+                .message = "resolved partitioned interface transfer has invalid runtime map handles: " +
+                           std::string(e.what()),
+            });
+        }
+    }
+}
+#endif
+
 void validateFinalizedDependencyEvidence(
     const std::vector<ResolvedDeclaredDependency>& declared_dependencies,
     const std::vector<ResolvedExpectedBlock>& expected_blocks,
@@ -2768,6 +2813,9 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         std::span<const CouplingExchangeDeclaration>{},
         partitioned_plan,
         result);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    validatePartitionedInterfaceRuntimeHandles(context, partitioned_plan, result);
+#endif
     appendResolvedPartitionedExchangeNodes(snapshot_, partitioned_plan);
     return result;
 }
@@ -2787,6 +2835,9 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         exchange_templates,
         partitioned_plan,
         result);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    validatePartitionedInterfaceRuntimeHandles(context, partitioned_plan, result);
+#endif
     appendResolvedPartitionedExchangeNodes(snapshot_, partitioned_plan);
     return result;
 }
