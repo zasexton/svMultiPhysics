@@ -5447,7 +5447,7 @@ Implementation checklist:
   fields, regions, shared regions, contracts, transfer declarations, resolved
   transfer options, endpoint temporal slots, and driver-owned transfer
   registries.
-- [ ] Make test helpers construct participant-to-`FESystem` bindings,
+- [x] Make test helpers construct participant-to-`FESystem` bindings,
   reusable contract type keys, unique contract instance namespaces,
   participant-scoped and contract-owned additional-field declarations with
   explicit registration target policies,
