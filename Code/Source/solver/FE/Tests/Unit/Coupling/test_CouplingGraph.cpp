@@ -2116,6 +2116,24 @@ TEST(CouplingGraph, RejectsInvalidPartitionedExchangeDeclarations)
     {
         auto declaration = partitionedGraphDeclaration();
         declaration.partitioned_exchange_declarations[0]
+            .producer->endpoint_name.clear();
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("registry key"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0]
+            .producer->endpoint_name = "missing";
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("field endpoint is missing"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0]
             .producer->temporal = CouplingTemporalSlotDescriptor{
                 .slot = CouplingTemporalSlot::History,
             };

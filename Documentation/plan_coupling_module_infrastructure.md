@@ -4753,7 +4753,7 @@ Implementation checklist:
 - [x] Validate partitioned exchange declarations reference known participants,
   endpoints when declared, endpoint temporal slots, regions, value descriptors,
   and transfer declarations.
-- [ ] Validate partitioned endpoint names as registry/provider-resolved keys for
+- [x] Validate partitioned endpoint names as registry/provider-resolved keys for
   their endpoint kind while keeping their physical meaning opaque to
   `FE/Coupling`.
 - [ ] Reject partitioned exchange declarations with `Unspecified` transfers and
