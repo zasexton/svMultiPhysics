@@ -230,3 +230,54 @@ TEST(CouplingGeometryRequirements, CouplingGraphValidatesAggregatedDeclarations)
                   "current-configuration geometry terminal is unavailable"),
               std::string::npos);
 }
+
+TEST(CouplingGeometryRequirements, CouplingGraphRequiresInstalledGeometryTerminalsDeclared)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "geometry_form";
+    metadata.geometry_terminals.push_back(
+        CouplingFormGeometryTerminalProvenance{
+            .quantity = CouplingGeometryTerminalQuantity::CurrentNormal,
+            .location = CouplingGeometryTerminalLocationProvenance{
+                .region_kind = CouplingRegionKind::Boundary,
+                .marker = 4,
+            },
+            .analysis_domain = analysis::DomainKind::Boundary,
+            .provider = "forms",
+            .normal_available = true,
+        });
+
+    const auto run_validation = [&]() {
+        CouplingGraph graph;
+        const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+        const std::array<CouplingFormAnalysisMetadata, 1> installed{metadata};
+        return graph.buildFinalizedGraph(
+            geometryContext(),
+            std::span<const CouplingContractDeclaration>(declarations),
+            std::span<const CouplingFormAnalysisMetadata>(installed));
+    };
+
+    const auto missing = run_validation();
+    EXPECT_FALSE(missing.ok());
+    EXPECT_NE(formatDiagnostics(missing).find("current_normal"),
+              std::string::npos);
+
+    declaration.geometry_requirements.push_back(
+        CouplingGeometryTerminalRequirement{
+            .quantity = CouplingGeometryTerminalQuantity::CurrentNormal,
+        });
+    const auto wrong_domain = run_validation();
+    EXPECT_FALSE(wrong_domain.ok());
+    EXPECT_NE(formatDiagnostics(wrong_domain).find("Boundary"),
+              std::string::npos);
+
+    declaration.geometry_requirements[0].scope.location =
+        CouplingGeometryTerminalLocationDeclaration{
+            .region_kind = CouplingRegionKind::Boundary,
+        };
+    EXPECT_TRUE(run_validation().ok());
+}

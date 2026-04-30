@@ -176,6 +176,13 @@ struct ResolvedTemporalRequirement {
     int history_index{0};
 };
 
+struct ResolvedGeometryRequirement {
+    std::string contract_name;
+    CouplingGeometryTerminalQuantity quantity{
+        CouplingGeometryTerminalQuantity::MeshDisplacement};
+    std::optional<analysis::DomainKind> domain;
+};
+
 std::vector<ResolvedDeclaredDependency> resolveDeclaredDependencies(
     const CouplingContext& context,
     std::span<const CouplingContractDeclaration> declarations,
@@ -239,6 +246,99 @@ std::vector<ResolvedTemporalRequirement> resolveDeclaredTemporalRequirements(
             }
 
             resolved.push_back(std::move(requirement));
+        }
+    }
+    return resolved;
+}
+
+std::optional<analysis::DomainKind> resolveGeometryRequirementDomain(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingGeometryTerminalRequirement& requirement,
+    CouplingValidationResult& result)
+{
+    if (requirement.scope.location.has_value()) {
+        const auto domain =
+            toAnalysisDomainKind(requirement.scope.location->region_kind);
+        if (!domain.has_value() && isRequired(requirement.requirement)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .message = "geometry terminal requirement uses an unsupported region kind",
+            });
+        }
+        return domain;
+    }
+
+    if (requirement.scope.region.has_value()) {
+        const auto& region = *requirement.scope.region;
+        if (region.shared_region_name.has_value()) {
+            if (region.participant_name.empty()) {
+                if (isRequired(requirement.requirement)) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .region_name = *region.shared_region_name,
+                        .message = "shared-region geometry terminal requirement needs a participant owner",
+                    });
+                }
+                return std::nullopt;
+            }
+            if (!context.hasSharedRegion(*region.shared_region_name)) {
+                if (isRequired(requirement.requirement)) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .participant_name = region.participant_name,
+                        .region_name = *region.shared_region_name,
+                        .message = "geometry terminal shared region is missing from the context",
+                    });
+                }
+                return std::nullopt;
+            }
+            const auto resolved =
+                context.sharedRegion(*region.shared_region_name,
+                                     region.participant_name);
+            return toAnalysisDomainKind(resolved.kind);
+        }
+
+        if (!context.hasRegion(region.participant_name, region.region_name)) {
+            if (isRequired(requirement.requirement)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .participant_name = region.participant_name,
+                    .region_name = region.region_name,
+                    .message = "geometry terminal region is missing from the context",
+                });
+            }
+            return std::nullopt;
+        }
+        return toAnalysisDomainKind(
+            context.region(region.participant_name, region.region_name).kind);
+    }
+
+    return analysis::DomainKind::Cell;
+}
+
+std::vector<ResolvedGeometryRequirement> resolveDeclaredGeometryRequirements(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    CouplingValidationResult& result)
+{
+    std::vector<ResolvedGeometryRequirement> resolved;
+    for (const auto& declaration : declarations) {
+        for (const auto& geometry : declaration.geometry_requirements) {
+            const auto domain =
+                resolveGeometryRequirementDomain(context,
+                                                 declaration,
+                                                 geometry,
+                                                 result);
+            resolved.push_back(ResolvedGeometryRequirement{
+                .contract_name = declaration.contract_name,
+                .quantity = geometry.quantity,
+                .domain = domain,
+            });
         }
     }
     return resolved;
@@ -448,6 +548,80 @@ void validateTemporalSymbolEvidence(
                            form.contribution_name + " " +
                            temporalSymbolLabel(symbol),
             });
+        }
+    }
+}
+
+std::string geometryTerminalLabel(
+    const CouplingFormGeometryTerminalProvenance& geometry)
+{
+    std::ostringstream os;
+    os << toString(geometry.quantity)
+       << " domain=" << analysis::toString(geometry.analysis_domain);
+    if (geometry.location.marker >= 0) {
+        os << " marker=" << geometry.location.marker;
+    }
+    return os.str();
+}
+
+bool geometryTerminalMatchesRequirement(
+    const CouplingFormGeometryTerminalProvenance& terminal,
+    const ResolvedGeometryRequirement& requirement)
+{
+    if (terminal.quantity != requirement.quantity) {
+        return false;
+    }
+    if (requirement.domain.has_value() &&
+        terminal.analysis_domain != *requirement.domain) {
+        return false;
+    }
+    return true;
+}
+
+bool hasDeclaredGeometryTerminal(
+    const std::vector<ResolvedGeometryRequirement>& geometry_requirements,
+    const CouplingFormGeometryTerminalProvenance& terminal)
+{
+    return std::any_of(
+        geometry_requirements.begin(),
+        geometry_requirements.end(),
+        [&](const ResolvedGeometryRequirement& requirement) {
+            return geometryTerminalMatchesRequirement(terminal, requirement);
+        });
+}
+
+bool geometryTerminalHasAvailableData(
+    const CouplingFormGeometryTerminalProvenance& terminal) noexcept
+{
+    return terminal.value_available ||
+           terminal.gradient_or_jacobian_available ||
+           terminal.normal_available ||
+           terminal.measure_available;
+}
+
+void validateGeometryTerminalEvidence(
+    const std::vector<ResolvedGeometryRequirement>& geometry_requirements,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    CouplingValidationResult& result)
+{
+    for (const auto& form : installed_forms) {
+        for (const auto& terminal : form.geometry_terminals) {
+            if (!hasDeclaredGeometryTerminal(geometry_requirements, terminal)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .message = "installed form geometry terminal has no declared geometry requirement: " +
+                               form.contribution_name + " " +
+                               geometryTerminalLabel(terminal),
+                });
+            }
+            if (!geometryTerminalHasAvailableData(terminal)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .message = "installed form geometry terminal has no available geometry data: " +
+                               form.contribution_name + " " +
+                               geometryTerminalLabel(terminal),
+                });
+            }
         }
     }
 }
@@ -888,9 +1062,15 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         resolveDeclaredDependencies(context, declarations_, result);
     const auto declared_temporal_requirements =
         resolveDeclaredTemporalRequirements(context, declarations_, result);
+    const auto declared_geometry_requirements =
+        resolveDeclaredGeometryRequirements(context, declarations_, result);
     const auto expected_blocks = resolveExpectedBlocks(context, declarations_, result);
     validateTemporalSymbolEvidence(
         declared_temporal_requirements,
+        installed_forms,
+        result);
+    validateGeometryTerminalEvidence(
+        declared_geometry_requirements,
         installed_forms,
         result);
     validateFinalizedDependencyEvidence(

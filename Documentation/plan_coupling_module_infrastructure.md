@@ -4436,7 +4436,7 @@ Implementation checklist:
   problem-level temporal policy before assembly.
 - [x] Validate that symbolic temporal terms used by Forms residuals are
   declared by the contract.
-- [ ] Validate that geometry terminals used by Forms residuals are declared by
+- [x] Validate that geometry terminals used by Forms residuals are declared by
   the contract and supported by the selected geometry transaction,
   mesh-motion binding, or Assembly metadata provider.
 - [ ] Validate geometry-terminal location/provenance for boundary and interface
