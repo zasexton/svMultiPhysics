@@ -4496,7 +4496,7 @@ Unit-test verification checklist:
   provenance for diagnostics.
 - [x] `test_CouplingFormBuilder.cpp` verifies `previousSolution(k)` does not accept
   or record a source-symbol name because Forms history terminals are trial scoped.
-- [ ] `test_CouplingFormBuilder.cpp` verifies `previousSolution(k)` is rejected
+- [x] `test_CouplingFormBuilder.cpp` verifies `previousSolution(k)` is rejected
   or reported as ambiguous when the named field is not the active trial field in
   a mixed contribution and no owning-trial-block provenance is available.
 - [x] `test_CouplingFormBuilder.cpp` verifies `time()` and `timeStep()` terms

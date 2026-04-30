@@ -893,19 +893,14 @@ TEST(MonolithicCouplingBuilder, RejectsPreviousSolutionProvenanceOutsideTrialFie
     contribution.contribution_name = "bad_history_owner";
     contribution.origin = "MonolithicCouplingBuilderTest";
     contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
-    contribution.terminal_provenance.push_back(CouplingFormTerminalProvenanceDeclaration{
-        .kind = CouplingFormTerminalProvenanceKind::PreviousSolution,
-        .terminal_sequence = 1,
-        .field = CouplingFieldUse{
-            .participant_name = "left",
-            .field_name = "primary",
-        },
-        .temporal_quantity = CouplingTemporalQuantity::FieldHistoryValue,
-        .history_index = 1,
-    });
     contribution.residual =
         (forms.previousSolution("left", "primary", 1) *
          forms.test("right", "primary", "w")).dx();
+    contribution = forms.attachTerminalProvenance(std::move(contribution));
+    ASSERT_EQ(contribution.terminal_provenance.size(), 1u);
+    ASSERT_TRUE(contribution.terminal_provenance[0].field.has_value());
+    EXPECT_EQ(contribution.terminal_provenance[0].field->participant_name,
+              "left");
 
     EXPECT_THROW(static_cast<void>(builder.resolveFormContribution(fixture.context, contribution)),
                  InvalidArgumentException);
