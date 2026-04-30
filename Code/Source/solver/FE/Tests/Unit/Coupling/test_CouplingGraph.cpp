@@ -9,6 +9,7 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
+#include "Core/FEException.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
@@ -681,6 +682,32 @@ CouplingFormAnalysisMetadata installedDependencyMetadata()
         .contributes_matrix_block = true,
         .contributes_vector = true,
         .provider = "FormsInstaller",
+    });
+    metadata.installed_blocks.push_back(CouplingInstalledBlockProvenance{
+        .residual_row = analysis::VariableKey::field(2),
+        .dependency = analysis::VariableKey::field(1),
+        .domains = {analysis::DomainKind::Cell},
+        .has_matrix = true,
+        .has_vector = true,
+    });
+    return metadata;
+}
+
+CouplingInstallMetadata expertInstallMetadata()
+{
+    CouplingInstallMetadata metadata;
+    metadata.contribution_name = "expert_balance";
+    metadata.origin = "expert_fixture";
+    metadata.system_name = "system";
+    metadata.operator_name = "equations";
+    metadata.installed_dependencies.push_back(CouplingInstalledDependency{
+        .residual_row = analysis::VariableKey::field(2),
+        .dependency = analysis::VariableKey::field(1),
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+        .domain = analysis::DomainKind::Cell,
+        .contributes_matrix_block = true,
+        .contributes_vector = true,
+        .provider = "expert_fixture",
     });
     metadata.installed_blocks.push_back(CouplingInstalledBlockProvenance{
         .residual_row = analysis::VariableKey::field(2),
@@ -1642,6 +1669,53 @@ TEST(CouplingGraph, AcceptsDeclaredImplicitDependencyFromVariableMetadata)
         installed_forms);
 
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, RejectsIncompleteExpertInstallMetadataRecords)
+{
+    const auto expect_rejected = [](CouplingInstallMetadata metadata) {
+        EXPECT_THROW(static_cast<void>(
+                         MonolithicCouplingBuilder::adaptInstallMetadata(metadata)),
+                     InvalidArgumentException);
+    };
+
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.contribution_name.clear();
+        expect_rejected(std::move(metadata));
+    }
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.system_name.clear();
+        expect_rejected(std::move(metadata));
+    }
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.installed_dependencies[0].residual_row = analysis::VariableKey{};
+        expect_rejected(std::move(metadata));
+    }
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.installed_dependencies[0].provider.clear();
+        expect_rejected(std::move(metadata));
+    }
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.installed_dependencies[0].contributes_matrix_block = false;
+        metadata.installed_dependencies[0].contributes_vector = false;
+        expect_rejected(std::move(metadata));
+    }
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.installed_blocks[0].domains.clear();
+        expect_rejected(std::move(metadata));
+    }
+    {
+        auto metadata = expertInstallMetadata();
+        metadata.installed_blocks[0].has_matrix = false;
+        metadata.installed_blocks[0].has_vector = false;
+        expect_rejected(std::move(metadata));
+    }
 }
 
 TEST(CouplingGraph, FallbackGraphAnalyzerConsumesFormulationNonFieldDependencies)

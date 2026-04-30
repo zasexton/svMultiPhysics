@@ -58,6 +58,12 @@ public:
 
     [[nodiscard]] static CouplingFormAnalysisMetadata adaptFormAnalysisMetadata(
         const analysis::FormContributionAnalysisMetadata& metadata);
+
+    [[nodiscard]] static CouplingFormAnalysisMetadata adaptInstallMetadata(
+        const CouplingInstallMetadata& metadata);
+
+    [[nodiscard]] static std::vector<CouplingFormAnalysisMetadata>
+    adaptInstallMetadataRecords(std::span<const CouplingInstallMetadata> metadata);
 };
 
 } // namespace coupling

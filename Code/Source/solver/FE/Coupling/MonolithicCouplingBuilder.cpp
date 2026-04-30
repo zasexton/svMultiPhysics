@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -38,6 +39,107 @@ struct ResolvedGeometryTerminalScope {
     std::optional<CouplingGeometryTerminalOwnerProvenance> owner;
     const systems::FESystem* owner_system{nullptr};
 };
+
+bool isResolvedVariableKey(const analysis::VariableKey& key) noexcept
+{
+    if (key.kind == analysis::VariableKind::FieldComponent) {
+        return key.field_id != INVALID_FIELD_ID;
+    }
+    return !key.name.empty();
+}
+
+void addExpertMetadataDiagnostic(CouplingValidationResult& result,
+                                 const CouplingInstallMetadata& metadata,
+                                 std::string message)
+{
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .contract_name = metadata.contribution_name,
+        .message = std::move(message),
+    });
+}
+
+CouplingValidationResult validateInstallMetadata(
+    const CouplingInstallMetadata& metadata)
+{
+    CouplingValidationResult result;
+
+    if (metadata.contribution_name.empty()) {
+        addExpertMetadataDiagnostic(
+            result, metadata,
+            "expert install metadata is missing contribution name");
+    }
+    if (metadata.origin.empty()) {
+        addExpertMetadataDiagnostic(
+            result, metadata,
+            "expert install metadata is missing diagnostic origin");
+    }
+    if (metadata.system_name.empty()) {
+        addExpertMetadataDiagnostic(
+            result, metadata,
+            "expert install metadata is missing owning system name");
+    }
+    if (metadata.operator_name.empty()) {
+        addExpertMetadataDiagnostic(
+            result, metadata,
+            "expert install metadata is missing operator name");
+    }
+    if (metadata.installed_dependencies.empty() &&
+        metadata.installed_blocks.empty()) {
+        addExpertMetadataDiagnostic(
+            result, metadata,
+            "expert install metadata has no installed dependency or block evidence");
+    }
+
+    for (const auto& dependency : metadata.installed_dependencies) {
+        if (!isResolvedVariableKey(dependency.residual_row)) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install dependency has unresolved residual row");
+        }
+        if (!isResolvedVariableKey(dependency.dependency)) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install dependency has unresolved dependency key");
+        }
+        if (dependency.provider.empty()) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install dependency is missing provider provenance");
+        }
+        if (!dependency.contributes_matrix_block &&
+            !dependency.contributes_vector) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install dependency is missing matrix/vector contribution flags");
+        }
+    }
+
+    for (const auto& block : metadata.installed_blocks) {
+        if (!isResolvedVariableKey(block.residual_row)) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install block has unresolved residual row");
+        }
+        if (!isResolvedVariableKey(block.dependency)) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install block has unresolved dependency key");
+        }
+        if (block.domains.empty()) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install block is missing domain provenance");
+        }
+        if (!block.has_matrix && !block.has_vector) {
+            addExpertMetadataDiagnostic(
+                result, metadata,
+                "expert install block is missing matrix/vector contribution flags");
+        }
+    }
+
+    return result;
+}
 
 std::string additionalFieldSystemName(const CouplingAdditionalFieldDeclaration& field)
 {
@@ -1244,6 +1346,41 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptFormAnalysisMetadat
         });
     }
 
+    return adapted;
+}
+
+CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptInstallMetadata(
+    const CouplingInstallMetadata& metadata)
+{
+    throwIfInvalid(validateInstallMetadata(metadata));
+
+    CouplingFormAnalysisMetadata adapted;
+    adapted.contribution_name = metadata.contribution_name;
+    adapted.origin = metadata.origin;
+    adapted.system_name = metadata.system_name;
+    adapted.operator_name = metadata.operator_name;
+    adapted.installed_dependencies = metadata.installed_dependencies;
+    adapted.installed_blocks = metadata.installed_blocks;
+    adapted.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Expert install metadata reports resolved installed dependencies."});
+    adapted.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledBlocks,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Expert install metadata reports resolved installed blocks."});
+    return adapted;
+}
+
+std::vector<CouplingFormAnalysisMetadata>
+MonolithicCouplingBuilder::adaptInstallMetadataRecords(
+    std::span<const CouplingInstallMetadata> metadata)
+{
+    std::vector<CouplingFormAnalysisMetadata> adapted;
+    adapted.reserve(metadata.size());
+    for (const auto& record : metadata) {
+        adapted.push_back(adaptInstallMetadata(record));
+    }
     return adapted;
 }
 

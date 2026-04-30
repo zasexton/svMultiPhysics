@@ -4731,7 +4731,7 @@ Implementation checklist:
   `FE/Analysis/CouplingGraphAnalyzer` output where possible for installed
   contribution analysis rather than creating an independent installed-form graph
   model.
-- [ ] Record expert-hook dependencies only from returned
+- [x] Record expert-hook dependencies only from returned
   `CouplingInstallMetadata` records, and require each record to include stable
   contribution name/origin/owning-system/operator provenance and resolved
   `analysis::VariableKey` rows/dependencies plus explicit `analysis::DomainKind`
@@ -4857,7 +4857,7 @@ Unit-test verification checklist:
 - [ ] `test_CouplingGraph.cpp` verifies installed block provenance stores
   contributing domains as `analysis::DomainKind` values, including `Global`,
   `CoupledBoundary`, and `AuxiliaryCoupling` when Systems reports them.
-- [ ] `test_CouplingGraph.cpp` verifies expert-hook
+- [x] `test_CouplingGraph.cpp` verifies expert-hook
   `CouplingInstallMetadata` records are rejected when they lack resolved
   contribution identity, `analysis::VariableKey` identity,
   `analysis::DomainKind` provenance, or matrix/vector contribution flags.

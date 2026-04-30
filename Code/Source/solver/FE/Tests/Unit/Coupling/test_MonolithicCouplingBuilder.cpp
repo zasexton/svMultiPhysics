@@ -185,6 +185,35 @@ const CouplingInstalledDependency* findDependency(
     return it == metadata.installed_dependencies.end() ? nullptr : &*it;
 }
 
+CouplingInstallMetadata validExpertInstallMetadata()
+{
+    CouplingInstallMetadata metadata;
+    metadata.contribution_name = "expert_balance";
+    metadata.origin = "expert_fixture";
+    metadata.system_name = "shared_system";
+    metadata.operator_name = "equations";
+    metadata.installed_dependencies.push_back(CouplingInstalledDependency{
+        .residual_row = analysis::VariableKey::field(2),
+        .dependency = analysis::VariableKey::named(
+            analysis::VariableKind::GlobalScalar,
+            "lambda"),
+        .domain = analysis::DomainKind::Global,
+        .contributes_matrix_block = true,
+        .contributes_vector = true,
+        .provider = "expert_fixture",
+    });
+    metadata.installed_blocks.push_back(CouplingInstalledBlockProvenance{
+        .residual_row = analysis::VariableKey::field(2),
+        .dependency = analysis::VariableKey::named(
+            analysis::VariableKind::GlobalScalar,
+            "lambda"),
+        .domains = {analysis::DomainKind::Global},
+        .has_matrix = true,
+        .has_vector = true,
+    });
+    return metadata;
+}
+
 template <typename T, typename = void>
 struct HasSymbolicAdMode : std::false_type {};
 template <typename T>
@@ -955,6 +984,42 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
     EXPECT_TRUE(adapted.installed_blocks[0].has_matrix);
     EXPECT_EQ(adapted.installed_blocks[0].domains[0],
               analysis::DomainKind::Global);
+}
+
+TEST(MonolithicCouplingBuilder, AdaptsExpertInstallMetadata)
+{
+    const auto metadata = validExpertInstallMetadata();
+    const auto adapted =
+        MonolithicCouplingBuilder::adaptInstallMetadata(metadata);
+
+    EXPECT_EQ(adapted.contribution_name, metadata.contribution_name);
+    EXPECT_EQ(adapted.origin, metadata.origin);
+    EXPECT_EQ(adapted.system_name, metadata.system_name);
+    EXPECT_EQ(adapted.operator_name, metadata.operator_name);
+    EXPECT_TRUE(adapted.variable_dependencies.empty());
+    ASSERT_EQ(adapted.installed_dependencies.size(), 1u);
+    EXPECT_EQ(adapted.installed_dependencies[0].provider, "expert_fixture");
+    EXPECT_TRUE(adapted.installed_dependencies[0].contributes_matrix_block);
+    ASSERT_EQ(adapted.installed_blocks.size(), 1u);
+    EXPECT_EQ(adapted.installed_blocks[0].domains,
+              (std::vector<analysis::DomainKind>{analysis::DomainKind::Global}));
+
+    const auto has_dependency_gate = std::any_of(
+        adapted.feature_gates.begin(),
+        adapted.feature_gates.end(),
+        [](const auto& gate) {
+            return gate.feature == analysis::FormBridgeFeature::InstalledDependencies &&
+                   gate.status == analysis::FormBridgeFeatureStatus::Available;
+        });
+    const auto has_block_gate = std::any_of(
+        adapted.feature_gates.begin(),
+        adapted.feature_gates.end(),
+        [](const auto& gate) {
+            return gate.feature == analysis::FormBridgeFeature::InstalledBlocks &&
+                   gate.status == analysis::FormBridgeFeatureStatus::Available;
+        });
+    EXPECT_TRUE(has_dependency_gate);
+    EXPECT_TRUE(has_block_gate);
 }
 
 TEST(MonolithicCouplingBuilder, AdaptsCutGeometrySensitivityProvenance)
