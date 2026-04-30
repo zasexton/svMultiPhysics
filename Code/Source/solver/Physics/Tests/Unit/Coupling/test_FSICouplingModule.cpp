@@ -1,13 +1,19 @@
 #include "Physics/Coupling/FSICouplingModule.h"
 
-#include "Core/FEException.h"
-#include "Spaces/SpaceFactory.h"
-
 #include <gtest/gtest.h>
+
+#include "Coupling/CouplingContext.h"
+#include "Core/FEException.h"
+#include "Mesh/Core/InterfaceMesh.h"
+#include "Physics/Tests/Unit/PhysicsTestHelpers.h"
+#include "Spaces/SpaceFactory.h"
+#include "Systems/FESystem.h"
 
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace svmp;
 using namespace svmp::Physics::coupling;
@@ -34,6 +40,164 @@ bool hasField(const fec::CouplingContractDeclaration& declaration,
                            return use.participant_name == participant &&
                                   use.field_name == field;
                        });
+}
+
+struct FSIFieldComponents {
+    int fluid_velocity{3};
+    int fluid_pressure{1};
+    int solid_displacement{3};
+    int solid_velocity{3};
+    int mesh_displacement{3};
+};
+
+std::shared_ptr<const FE::spaces::FunctionSpace> space(int components)
+{
+    return FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Triangle3,
+        1,
+        components);
+}
+
+fec::CouplingFieldRef field(std::string participant_name,
+                            std::string system_name,
+                            const FE::systems::FESystem* system,
+                            std::string field_name,
+                            FE::FieldId field_id,
+                            int components)
+{
+    return fec::CouplingFieldRef{
+        .participant_name = std::move(participant_name),
+        .system_name = std::move(system_name),
+        .system = system,
+        .field_name = std::move(field_name),
+        .field_id = field_id,
+        .space = space(components),
+        .components = components,
+    };
+}
+
+fec::CouplingRegionRef interfaceRegion(std::string participant_name,
+                                       std::string system_name,
+                                       const FE::systems::FESystem* system,
+                                       std::string region_name,
+                                       int marker,
+                                       fec::CouplingInterfaceSide side)
+{
+    return fec::CouplingRegionRef{
+        .participant_name = std::move(participant_name),
+        .system_name = std::move(system_name),
+        .system = system,
+        .region_name = std::move(region_name),
+        .kind = fec::CouplingRegionKind::InterfaceFace,
+        .marker = marker,
+        .side = side,
+    };
+}
+
+struct FSIContextFixture {
+    std::shared_ptr<svmp::Physics::test::SingleTetraMeshAccess> mesh{
+        std::make_shared<svmp::Physics::test::SingleTetraMeshAccess>()};
+    FE::systems::FESystem fluid_system{mesh};
+    FE::systems::FESystem solid_system{mesh};
+    FE::systems::FESystem mesh_system{mesh};
+    fec::CouplingContext context;
+
+    explicit FSIContextFixture(const FSIFieldComponents& components = {},
+                               bool include_mesh = false)
+    {
+        fluid_system.setInterfaceMesh(10, std::make_shared<const svmp::InterfaceMesh>());
+        solid_system.setInterfaceMesh(20, std::make_shared<const svmp::InterfaceMesh>());
+
+        auto fluid_region = interfaceRegion("fluid",
+                                            "fluid_system",
+                                            &fluid_system,
+                                            "fluid_interface",
+                                            10,
+                                            fec::CouplingInterfaceSide::Minus);
+        auto solid_region = interfaceRegion("solid",
+                                            "solid_system",
+                                            &solid_system,
+                                            "solid_interface",
+                                            20,
+                                            fec::CouplingInterfaceSide::Plus);
+        std::vector<fec::CouplingRegionRef> shared_regions{
+            fluid_region,
+            solid_region,
+        };
+
+        fec::CouplingContextBuilder builder;
+        builder.addParticipant(fec::CouplingParticipantRef{
+                   .participant_name = "fluid",
+                   .system_name = "fluid_system",
+                   .system = &fluid_system,
+               })
+            .addParticipant(fec::CouplingParticipantRef{
+                .participant_name = "solid",
+                .system_name = "solid_system",
+                .system = &solid_system,
+            })
+            .addField(field("fluid",
+                            "fluid_system",
+                            &fluid_system,
+                            "velocity",
+                            static_cast<FE::FieldId>(1),
+                            components.fluid_velocity))
+            .addField(field("fluid",
+                            "fluid_system",
+                            &fluid_system,
+                            "pressure",
+                            static_cast<FE::FieldId>(2),
+                            components.fluid_pressure))
+            .addField(field("solid",
+                            "solid_system",
+                            &solid_system,
+                            "displacement",
+                            static_cast<FE::FieldId>(3),
+                            components.solid_displacement))
+            .addField(field("solid",
+                            "solid_system",
+                            &solid_system,
+                            "velocity",
+                            static_cast<FE::FieldId>(4),
+                            components.solid_velocity))
+            .addRegion(fluid_region)
+            .addRegion(solid_region);
+
+        if (include_mesh) {
+            builder.addParticipant(fec::CouplingParticipantRef{
+                       .participant_name = "mesh",
+                       .system_name = "mesh_system",
+                       .system = &mesh_system,
+                   })
+                .addField(field("mesh",
+                                "mesh_system",
+                                &mesh_system,
+                                "displacement",
+                                static_cast<FE::FieldId>(5),
+                                components.mesh_displacement));
+        }
+
+        builder.addSharedRegion(fec::SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+            .participant_regions = std::move(shared_regions),
+        });
+        context = builder.build();
+    }
+};
+
+void expectValidationFailureContaining(const FSICouplingModule& module,
+                                       const fec::CouplingContext& context,
+                                       const std::string& message)
+{
+    try {
+        module.validate(context);
+        FAIL() << "expected validation to fail";
+    } catch (const FE::InvalidArgumentException& exception) {
+        EXPECT_NE(std::string(exception.what()).find(message), std::string::npos)
+            << exception.what();
+    }
 }
 
 } // namespace
@@ -162,6 +326,56 @@ TEST(FSICouplingModule, RejectsInvalidOptionsDuringValidation)
 
     const FSICouplingModule module(options);
     EXPECT_THROW(module.validate(fec::CouplingContext{}), FE::InvalidArgumentException);
+}
+
+TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
+{
+    FSICouplingOptions options;
+    options.mesh_name = "mesh";
+    const FSICouplingModule module(options);
+
+    FSIContextFixture valid_fixture(FSIFieldComponents{}, true);
+    EXPECT_NO_THROW(module.validate(valid_fixture.context));
+
+    auto components = FSIFieldComponents{};
+    components.fluid_velocity = 2;
+    FSIContextFixture fluid_velocity_fixture(components, true);
+    expectValidationFailureContaining(
+        module,
+        fluid_velocity_fixture.context,
+        "FSI fluid velocity field component count must match the interface component count");
+
+    components = FSIFieldComponents{};
+    components.fluid_pressure = 2;
+    FSIContextFixture fluid_pressure_fixture(components, true);
+    expectValidationFailureContaining(
+        module,
+        fluid_pressure_fixture.context,
+        "FSI fluid pressure field component count must be scalar");
+
+    components = FSIFieldComponents{};
+    components.solid_displacement = 2;
+    FSIContextFixture solid_displacement_fixture(components, true);
+    expectValidationFailureContaining(
+        module,
+        solid_displacement_fixture.context,
+        "FSI solid displacement field component count must match the interface component count");
+
+    components = FSIFieldComponents{};
+    components.solid_velocity = 2;
+    FSIContextFixture solid_velocity_fixture(components, true);
+    expectValidationFailureContaining(
+        module,
+        solid_velocity_fixture.context,
+        "FSI solid velocity field component count must match the interface component count");
+
+    components = FSIFieldComponents{};
+    components.mesh_displacement = 2;
+    FSIContextFixture mesh_displacement_fixture(components, true);
+    expectValidationFailureContaining(
+        module,
+        mesh_displacement_fixture.context,
+        "FSI mesh displacement field component count must match the interface component count");
 }
 
 TEST(FSICouplingModule, RejectsUnconfiguredPartitionedTransfers)

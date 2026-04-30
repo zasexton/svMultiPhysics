@@ -11,6 +11,8 @@
 
 #include <array>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace svmp {
@@ -135,6 +137,91 @@ fec::CouplingValidationResult validateOptionShape(const FSICouplingOptions& opti
     return result;
 }
 
+void validateVectorFieldComponents(fec::CouplingValidationResult& result,
+                                   const fec::CouplingContext& ctx,
+                                   const FSICouplingOptions& options,
+                                   const std::string& participant,
+                                   const std::string& field,
+                                   std::string_view label)
+{
+    if (!ctx.hasField(participant, field)) {
+        return;
+    }
+    const auto ref = ctx.field(participant, field);
+    if (ref.components == options.interface_components) {
+        return;
+    }
+    result.add(fec::CouplingDiagnostic{
+        .severity = fec::CouplingDiagnosticSeverity::Error,
+        .contract_name = options.contract_name,
+        .participant_name = participant,
+        .field_name = field,
+        .message = "FSI " + std::string(label) +
+                   " field component count must match the interface component count",
+    });
+}
+
+void validateScalarPressureComponents(fec::CouplingValidationResult& result,
+                                      const fec::CouplingContext& ctx,
+                                      const FSICouplingOptions& options)
+{
+    if (!ctx.hasField(options.fluid_name, options.fluid_pressure_field)) {
+        return;
+    }
+    const auto ref = ctx.field(options.fluid_name, options.fluid_pressure_field);
+    if (ref.components == 1) {
+        return;
+    }
+    result.add(fec::CouplingDiagnostic{
+        .severity = fec::CouplingDiagnosticSeverity::Error,
+        .contract_name = options.contract_name,
+        .participant_name = options.fluid_name,
+        .field_name = options.fluid_pressure_field,
+        .message = "FSI fluid pressure field component count must be scalar",
+    });
+}
+
+void validateFieldComponentCounts(fec::CouplingValidationResult& result,
+                                  const fec::CouplingContext& ctx,
+                                  const FSICouplingOptions& options)
+{
+    if (options.interface_components <= 0) {
+        return;
+    }
+
+    validateVectorFieldComponents(result,
+                                  ctx,
+                                  options,
+                                  options.fluid_name,
+                                  options.fluid_velocity_field,
+                                  "fluid velocity");
+    validateScalarPressureComponents(result, ctx, options);
+    validateVectorFieldComponents(result,
+                                  ctx,
+                                  options,
+                                  options.solid_name,
+                                  options.solid_displacement_field,
+                                  "solid displacement");
+    if (!options.use_solid_displacement_derivative &&
+        options.solid_velocity_field.has_value()) {
+        validateVectorFieldComponents(result,
+                                      ctx,
+                                      options,
+                                      options.solid_name,
+                                      *options.solid_velocity_field,
+                                      "solid velocity");
+    }
+    if (options.mesh_name.has_value() &&
+        options.mesh_displacement_field.has_value()) {
+        validateVectorFieldComponents(result,
+                                      ctx,
+                                      options,
+                                      *options.mesh_name,
+                                      *options.mesh_displacement_field,
+                                      "mesh displacement");
+    }
+}
+
 } // namespace
 
 FSICouplingModule::FSICouplingModule(FSICouplingOptions options)
@@ -216,6 +303,7 @@ fec::CouplingContractDeclaration FSICouplingModule::declare() const
 void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
 {
     auto result = validateOptionShape(options_);
+    validateFieldComponentCounts(result, ctx, options_);
     const auto declaration = declare();
     FE::coupling::CouplingGraph graph;
     const std::array<fec::CouplingContractDeclaration, 1> declarations{declaration};

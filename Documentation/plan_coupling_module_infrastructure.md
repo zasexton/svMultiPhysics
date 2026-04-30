@@ -5349,7 +5349,7 @@ Implementation checklist:
   participant, field name, function space, component count, shared-region policy,
   and trace/mortar compatibility must be explicit when the multiplier formulation
   is enabled.
-- [ ] Validate FSI field component counts against spatial/interface dimension.
+- [x] Validate FSI field component counts against spatial/interface dimension.
 - [ ] Validate FSI interface region existence and participant-region mappings.
 - [ ] Validate ALE FSI fails when the mesh participant or mesh displacement
   field is required but absent.
