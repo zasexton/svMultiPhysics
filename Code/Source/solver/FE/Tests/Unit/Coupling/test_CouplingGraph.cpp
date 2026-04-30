@@ -1253,6 +1253,56 @@ TEST(CouplingGraph, ValidatesInterfaceAdditionalFieldMarkerResolution)
               std::string::npos);
 }
 
+TEST(CouplingGraph, RejectsInvalidAdditionalFieldAttachmentCombinations)
+{
+    auto volume_with_region = graphDeclaration();
+    volume_with_region.contract_name = "volume_with_region_instance";
+    auto invalid_volume = graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "lambda");
+    invalid_volume.scope = CouplingAdditionalFieldScope::VolumeCell;
+    invalid_volume.region_name = "surface";
+    volume_with_region.additional_fields.push_back(invalid_volume);
+
+    auto interface_without_region = graphDeclaration();
+    interface_without_region.contract_name = "interface_without_region_instance";
+    auto missing_attachment = graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "trace");
+    missing_attachment.scope = CouplingAdditionalFieldScope::InterfaceFace;
+    interface_without_region.additional_fields.push_back(missing_attachment);
+
+    auto interface_with_both = graphDeclaration();
+    interface_with_both.contract_name = "interface_with_both_instance";
+    auto duplicate_attachment = graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "trace");
+    duplicate_attachment.scope = CouplingAdditionalFieldScope::InterfaceFace;
+    duplicate_attachment.region_name = "surface";
+    duplicate_attachment.shared_region_name = "interface";
+    interface_with_both.additional_fields.push_back(duplicate_attachment);
+
+    const std::array<CouplingContractDeclaration, 3> declarations{
+        volume_with_region,
+        interface_without_region,
+        interface_with_both,
+    };
+    CouplingGraph graph;
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("volume additional fields must not declare region attachments"),
+              std::string::npos);
+    EXPECT_NE(text.find("interface additional fields require exactly one region attachment"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsRegionKindMismatches)
 {
     auto declaration = graphDeclaration();

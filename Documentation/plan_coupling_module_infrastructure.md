@@ -4685,7 +4685,7 @@ Implementation checklist:
   interface marker from participant-region or shared-region context and never
   treat declaration-time raw markers as portable identity; the resolved marker
   is stored only in `systems::FieldSpec::interface_marker`.
-- [ ] Validate additional-field attachment combinations during graph
+- [x] Validate additional-field attachment combinations during graph
   validation: `VolumeCell` fields reject region attachments and `InterfaceFace`
   fields require exactly one participant-region or shared-region attachment.
 - [x] Validate monolithic Forms contracts only reference fields and regions from
@@ -4819,7 +4819,7 @@ Unit-test verification checklist:
   carry only declaration-side region names before resolution and compare against
   resolved `systems::FieldSpec::interface_marker` provenance only after
   `CouplingContext` lookup.
-- [ ] `test_CouplingGraph.cpp` verifies invalid additional-field attachment
+- [x] `test_CouplingGraph.cpp` verifies invalid additional-field attachment
   combinations fail before any `FESystem` field registration mutates state.
 - [ ] `test_CouplingGraph.cpp` distinguishes declaration-stage validation from
   finalized graph validation for coupling-owned fields.
