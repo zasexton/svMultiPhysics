@@ -2830,6 +2830,81 @@ void validateContextReferences(const CouplingContext& context,
             });
         }
     }
+
+    for (const auto& requirement : declaration.region_relation_requirements) {
+        std::vector<CouplingRegionRef> resolved_endpoints;
+        for (const auto& endpoint : requirement.endpoints) {
+            if (!context.hasRegion(endpoint.participant_name,
+                                   endpoint.region_name)) {
+                if (requirement.require_all_endpoints) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .participant_name = endpoint.participant_name,
+                        .region_name = endpoint.region_name,
+                        .message = "region-relation endpoint is missing from the context",
+                    });
+                }
+                continue;
+            }
+
+            const auto resolved_region =
+                context.region(endpoint.participant_name, endpoint.region_name);
+            resolved_endpoints.push_back(resolved_region);
+            if (requirement.required_region_kind.has_value() &&
+                resolved_region.kind != *requirement.required_region_kind) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .participant_name = endpoint.participant_name,
+                    .region_name = endpoint.region_name,
+                    .message = "region-relation endpoint kind does not satisfy the declaration",
+                });
+            }
+
+            if (!endpoint.shared_region_name.has_value()) {
+                continue;
+            }
+            if (!context.hasSharedRegion(*endpoint.shared_region_name)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .participant_name = endpoint.participant_name,
+                    .region_name = *endpoint.shared_region_name,
+                    .message = "region-relation endpoint shared region is missing from the context",
+                });
+                continue;
+            }
+
+            const auto group = context.sharedRegionGroup(*endpoint.shared_region_name);
+            const auto* participant_region =
+                sharedRegionParticipant(group, endpoint.participant_name);
+            if (participant_region == nullptr ||
+                participant_region->region_name != endpoint.region_name) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .participant_name = endpoint.participant_name,
+                    .region_name = *endpoint.shared_region_name,
+                    .message = "region-relation endpoint shared-region mapping is missing from the context",
+                });
+            }
+        }
+
+        if (requirement.relation_kind ==
+                CouplingRegionRelationKind::SidePairedInterface &&
+            requirement.require_opposite_sides_for_side_pair &&
+            resolved_endpoints.size() == 2u &&
+            (resolved_endpoints[0].side == CouplingInterfaceSide::None ||
+             resolved_endpoints[1].side == CouplingInterfaceSide::None ||
+             resolved_endpoints[0].side == resolved_endpoints[1].side)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .message = "side-paired region relation needs opposite nonempty sides",
+            });
+        }
+    }
 }
 
 } // namespace

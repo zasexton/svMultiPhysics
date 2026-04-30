@@ -1408,6 +1408,82 @@ TEST(CouplingGraph, ValidatesSharedInterfaceRequirementsAgainstContext)
               std::string::npos);
 }
 
+TEST(CouplingGraph, ValidatesRegionRelationRequirementsAgainstContext)
+{
+    const auto fixture = nParticipantGraphFixture();
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "middle"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "chain_balance",
+        .relation_kind = CouplingRegionRelationKind::NWayInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "boundary",
+                .shared_region_name = "chain_boundary",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "middle",
+                .region_name = "boundary",
+                .shared_region_name = "chain_boundary",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "boundary",
+                .shared_region_name = "chain_boundary",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+            },
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+
+    EXPECT_TRUE(buildGraph(fixture.context, declaration).ok());
+
+    auto missing_endpoint = declaration;
+    missing_endpoint.region_relation_requirements.front()
+        .endpoints[1]
+        .region_name = "missing";
+    const auto missing_validation = buildGraph(fixture.context, missing_endpoint);
+    EXPECT_FALSE(missing_validation.ok());
+    EXPECT_NE(formatDiagnostics(missing_validation).find(
+                  "region-relation endpoint is missing from the context"),
+              std::string::npos);
+
+    auto optional_endpoint = missing_endpoint;
+    optional_endpoint.region_relation_requirements.front().require_all_endpoints =
+        false;
+    EXPECT_TRUE(buildGraph(fixture.context, optional_endpoint).ok());
+
+    auto bad_kind = declaration;
+    bad_kind.region_relation_requirements.front().required_region_kind =
+        CouplingRegionKind::InterfaceFace;
+    const auto kind_validation = buildGraph(fixture.context, bad_kind);
+    EXPECT_FALSE(kind_validation.ok());
+    EXPECT_NE(formatDiagnostics(kind_validation).find(
+                  "region-relation endpoint kind does not satisfy the declaration"),
+              std::string::npos);
+
+    auto bad_shared_region = declaration;
+    bad_shared_region.region_relation_requirements.front()
+        .endpoints[0]
+        .shared_region_name = "missing_shared_region";
+    const auto shared_region_validation =
+        buildGraph(fixture.context, bad_shared_region);
+    EXPECT_FALSE(shared_region_validation.ok());
+    EXPECT_NE(formatDiagnostics(shared_region_validation).find(
+                  "region-relation endpoint shared region is missing from the context"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, BuildsGraphForMultipleContractsSharingContext)
 {
     auto first = graphDeclaration();

@@ -1158,9 +1158,9 @@ struct CouplingRegionRelationRequirement {
       against `SharedRegionRegistry`.
 - [x] Teach `CouplingGraph` to validate opposite-side mappings for
       two-participant interfaces.
-- [ ] Teach `CouplingGraph` to validate N-way and mixed-dimensional region
+- [x] Teach `CouplingGraph` to validate N-way and mixed-dimensional region
       relation endpoints.
-- [ ] Teach `CouplingGraph` to validate optional endpoint policies without
+- [x] Teach `CouplingGraph` to validate optional endpoint policies without
       requiring physics modules to hand-code participant branches.
 - [ ] Teach `CouplingGraph` to validate monolithic same-system compatibility
       from resolved field requirements and installed form metadata.
