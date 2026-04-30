@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -494,6 +495,50 @@ void validateMonolithicFormContext(fec::CouplingValidationResult& result,
     validateMonolithicInterfaceTopology(result, ctx, options, expected_system);
 }
 
+std::optional<fec::CouplingRegionEndpointDeclaration> partitionedRegionEndpoint(
+    const fec::CouplingContext& ctx,
+    const FSICouplingOptions& options,
+    const std::string& participant_name)
+{
+    if (!ctx.hasSharedRegion(options.interface_name)) {
+        return std::nullopt;
+    }
+    const auto group = ctx.sharedRegionGroup(options.interface_name);
+    const auto* region = findSharedRegionParticipant(group, participant_name);
+    if (region == nullptr) {
+        return std::nullopt;
+    }
+    return fec::CouplingRegionEndpointDeclaration{
+        .participant_name = region->participant_name,
+        .region_name = region->region_name,
+        .shared_region_name = options.interface_name,
+    };
+}
+
+void attachPartitionedRegionEndpoints(
+    const fec::CouplingContext& ctx,
+    const FSICouplingOptions& options,
+    std::vector<fec::CouplingExchangeDeclaration>& exchanges)
+{
+    if (options.mode != fec::CouplingMode::Partitioned) {
+        return;
+    }
+    for (auto& exchange : exchanges) {
+        if (exchange.producer.has_value() &&
+            exchange.producer->participant_name.has_value()) {
+            exchange.producer_region =
+                partitionedRegionEndpoint(
+                    ctx, options, *exchange.producer->participant_name);
+        }
+        if (exchange.consumer.has_value() &&
+            exchange.consumer->participant_name.has_value()) {
+            exchange.consumer_region =
+                partitionedRegionEndpoint(
+                    ctx, options, *exchange.consumer->participant_name);
+        }
+    }
+}
+
 } // namespace
 
 FSICouplingModule::FSICouplingModule(FSICouplingOptions options)
@@ -579,7 +624,11 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
     validateFieldComponentCounts(result, ctx, options_);
     validateInterfaceRegionMappings(result, ctx, options_);
     validateMonolithicFormContext(result, ctx, options_);
-    const auto declaration = declare();
+    auto declaration = declare();
+    if (options_.mode == fec::CouplingMode::Partitioned) {
+        declaration.partitioned_exchange_declarations =
+            buildPartitionedExchangeDeclarations(ctx);
+    }
     FE::coupling::CouplingGraph graph;
     const std::array<fec::CouplingContractDeclaration, 1> declarations{declaration};
     result.append(graph.buildDeclarationGraph(
@@ -705,9 +754,16 @@ FSICouplingModule::buildMonolithicForms(
 }
 
 std::vector<fec::CouplingExchangeDeclaration>
-FSICouplingModule::buildPartitionedExchangeDeclarations(const fec::CouplingContext&) const
+FSICouplingModule::buildPartitionedExchangeDeclarations(
+    const fec::CouplingContext& ctx) const
 {
-    return {};
+    if (options_.mode != fec::CouplingMode::Partitioned) {
+        return {};
+    }
+    auto declaration = declare();
+    auto exchanges = std::move(declaration.partitioned_exchange_declarations);
+    attachPartitionedRegionEndpoints(ctx, options_, exchanges);
+    return exchanges;
 }
 
 } // namespace coupling

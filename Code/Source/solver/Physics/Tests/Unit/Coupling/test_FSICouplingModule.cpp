@@ -2,8 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#include "Coupling/CouplingDiagnostics.h"
 #include "Coupling/CouplingFormBuilder.h"
 #include "Coupling/CouplingContext.h"
+#include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "Core/FEException.h"
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
@@ -13,6 +15,7 @@
 #include <algorithm>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -102,6 +105,36 @@ std::shared_ptr<const FE::spaces::FunctionSpace> space(int components)
         components);
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+svmp::search::LogicalInterfaceRegionId fsiLogicalInterfaceRegion(
+    const std::string& participant_name)
+{
+    const bool fluid = participant_name == "fluid";
+    return svmp::search::LogicalInterfaceRegionId{
+        .persistent_id = fluid ? "fluid_interface" : "solid_interface",
+        .name = fluid ? "fluid_surface" : "solid_surface",
+    };
+}
+
+svmp::search::InterfaceRevisionSnapshot fsiInterfaceRevisionSnapshot(
+    const std::string& participant_name)
+{
+    const bool fluid = participant_name == "fluid";
+    svmp::search::InterfaceRevisionSnapshot snapshot;
+    snapshot.configuration = svmp::Configuration::Reference;
+    snapshot.geometry_revision = fluid ? 101 : 201;
+    snapshot.reference_geometry_revision = fluid ? 102 : 202;
+    snapshot.current_geometry_revision = fluid ? 103 : 203;
+    snapshot.topology_revision = fluid ? 104 : 204;
+    snapshot.ownership_revision = fluid ? 105 : 205;
+    snapshot.numbering_revision = fluid ? 106 : 206;
+    snapshot.field_layout_revision = fluid ? 107 : 207;
+    snapshot.label_revision = fluid ? 108 : 208;
+    snapshot.active_configuration_epoch = fluid ? 109 : 209;
+    return snapshot;
+}
+#endif
+
 fec::CouplingFieldRef field(std::string participant_name,
                             std::string system_name,
                             const FE::systems::FESystem* system,
@@ -127,7 +160,7 @@ fec::CouplingRegionRef interfaceRegion(std::string participant_name,
                                        int marker,
                                        fec::CouplingInterfaceSide side)
 {
-    return fec::CouplingRegionRef{
+    fec::CouplingRegionRef region{
         .participant_name = std::move(participant_name),
         .system_name = std::move(system_name),
         .system = system,
@@ -136,6 +169,13 @@ fec::CouplingRegionRef interfaceRegion(std::string participant_name,
         .marker = marker,
         .side = side,
     };
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    region.logical_region =
+        fsiLogicalInterfaceRegion(region.participant_name);
+    region.revision_snapshot =
+        fsiInterfaceRevisionSnapshot(region.participant_name);
+#endif
+    return region;
 }
 
 struct FSIContextFixture {
@@ -263,6 +303,76 @@ struct FSIContextFixture {
     }
 };
 
+FSICouplingOptions partitionedIdentityOptions()
+{
+    FSICouplingOptions options;
+    options.mode = fec::CouplingMode::Partitioned;
+    options.solid_to_fluid_transfer.kind = fec::CouplingTransferKind::Identity;
+    options.fluid_to_solid_transfer.kind = fec::CouplingTransferKind::Identity;
+    return options;
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+fec::CouplingInterfaceMapProvenance interfaceMapProvenance(
+    const std::string& source_participant,
+    const std::string& target_participant)
+{
+    const auto system_name = [](const std::string& participant) {
+        return participant + "_system";
+    };
+    const auto marker = [](const std::string& participant) {
+        return participant == "fluid" ? 10 : 20;
+    };
+
+    return fec::CouplingInterfaceMapProvenance{
+        .interface_map_name = "fsi_interface_map",
+        .interface_entry_name = "interface",
+        .interface_search_registry_name = "default_search",
+        .source_system_name = system_name(source_participant),
+        .target_system_name = system_name(target_participant),
+        .source_interface_marker = marker(source_participant),
+        .target_interface_marker = marker(target_participant),
+        .source_logical_region =
+            fsiLogicalInterfaceRegion(source_participant),
+        .target_logical_region =
+            fsiLogicalInterfaceRegion(target_participant),
+        .source_revision_snapshot =
+            fsiInterfaceRevisionSnapshot(source_participant),
+        .target_revision_snapshot =
+            fsiInterfaceRevisionSnapshot(target_participant),
+        .source_search_revision_key = 3,
+        .target_search_revision_key = 5,
+        .map_revision_key = 7,
+        .map_state = svmp::search::InterfaceMapState::Committed,
+        .operator_state = FE::systems::InterfaceOperatorState::AcceptedTimeStep,
+        .accepted_revision_key = 11,
+        .trial_revision_key = 13,
+        .time = 0.25,
+        .time_level_epoch = 17,
+    };
+}
+#endif
+
+fec::CouplingTransferDeclaration interfaceTransfer(
+    fec::CouplingTransferKind kind,
+    const std::string& source_participant,
+    const std::string& target_participant)
+{
+    fec::CouplingTransferDeclaration transfer;
+    transfer.kind = kind;
+    transfer.interface_declaration = fec::CouplingInterfaceTransferDeclaration{
+        .frame_policy = fec::CouplingInterfaceFramePolicy::SourceToTargetVector,
+    };
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    transfer.interface_map =
+        interfaceMapProvenance(source_participant, target_participant);
+#else
+    static_cast<void>(source_participant);
+    static_cast<void>(target_participant);
+#endif
+    return transfer;
+}
+
 void expectValidationFailureContaining(const FSICouplingModule& module,
                                        const fec::CouplingContext& context,
                                        const std::string& message)
@@ -369,10 +479,7 @@ TEST(FSICouplingModule, DeclaresTemporalDerivativeWhenSolidVelocityDerived)
 
 TEST(FSICouplingModule, DeclaresPartitionedExchanges)
 {
-    FSICouplingOptions options;
-    options.mode = fec::CouplingMode::Partitioned;
-    options.solid_to_fluid_transfer.kind = fec::CouplingTransferKind::Identity;
-    options.fluid_to_solid_transfer.kind = fec::CouplingTransferKind::Identity;
+    const auto options = partitionedIdentityOptions();
 
     const FSICouplingModule module(options);
     const auto declaration = module.declare();
@@ -406,7 +513,134 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     EXPECT_EQ(declaration.group_hints[0].participant_names,
               (std::vector<std::string>{"fluid", "solid"}));
 
-    EXPECT_TRUE(module.buildPartitionedExchangeDeclarations(fec::CouplingContext{}).empty());
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              false);
+    const auto resolved_exchanges =
+        module.buildPartitionedExchangeDeclarations(fixture.context);
+    ASSERT_EQ(resolved_exchanges.size(), 2u);
+    ASSERT_TRUE(resolved_exchanges[0].producer_region.has_value());
+    EXPECT_EQ(resolved_exchanges[0].producer_region->participant_name, "solid");
+    EXPECT_EQ(resolved_exchanges[0].producer_region->region_name,
+              "solid_interface");
+    ASSERT_TRUE(resolved_exchanges[0].consumer_region.has_value());
+    EXPECT_EQ(resolved_exchanges[0].consumer_region->participant_name, "fluid");
+    EXPECT_EQ(resolved_exchanges[0].consumer_region->region_name,
+              "fluid_interface");
+    ASSERT_TRUE(resolved_exchanges[1].producer_region.has_value());
+    EXPECT_EQ(resolved_exchanges[1].producer_region->participant_name, "fluid");
+    ASSERT_TRUE(resolved_exchanges[1].consumer_region.has_value());
+    EXPECT_EQ(resolved_exchanges[1].consumer_region->participant_name, "solid");
+}
+
+TEST(FSICouplingModule, ValidatesPartitionedIdentityTransfersWithResolvedRegions)
+{
+    const auto options = partitionedIdentityOptions();
+    const FSICouplingModule module(options);
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              false);
+
+    EXPECT_NO_THROW(module.validate(fixture.context));
+
+    const auto exchanges =
+        module.buildPartitionedExchangeDeclarations(fixture.context);
+    const auto declaration = module.declare();
+    const fec::PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const fec::CouplingExchangeDeclaration>(exchanges),
+        std::span<const fec::CouplingGroupHint>(declaration.group_hints));
+    ASSERT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const fec::CouplingExchangeDeclaration>(exchanges),
+        std::span<const fec::CouplingGroupHint>(declaration.group_hints));
+
+    ASSERT_EQ(plan.exchanges.size(), 2u);
+    EXPECT_EQ(plan.exchanges[0].producer.field_id, static_cast<FE::FieldId>(3));
+    EXPECT_EQ(plan.exchanges[0].consumer.field_id, static_cast<FE::FieldId>(1));
+    ASSERT_TRUE(plan.exchanges[0].producer_region.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer_region->region_name,
+              "solid_interface");
+    ASSERT_TRUE(plan.exchanges[0].consumer_region.has_value());
+    EXPECT_EQ(plan.exchanges[0].consumer_region->region_name,
+              "fluid_interface");
+    ASSERT_EQ(plan.group_hints.size(), 1u);
+    EXPECT_EQ(plan.group_hints[0].participant_names,
+              (std::vector<std::string>{"fluid", "solid"}));
+}
+
+TEST(FSICouplingModule, ValidatesPartitionedInterfaceTransferKinds)
+{
+    const std::vector<fec::CouplingTransferKind> transfer_kinds{
+        fec::CouplingTransferKind::InterfacePointwiseInterpolation,
+        fec::CouplingTransferKind::InterfaceConservativeProjection,
+        fec::CouplingTransferKind::InterfaceMortar,
+    };
+
+    for (const auto kind : transfer_kinds) {
+        SCOPED_TRACE(fec::toString(kind));
+        FSICouplingOptions options;
+        options.mode = fec::CouplingMode::Partitioned;
+        options.solid_to_fluid_transfer =
+            interfaceTransfer(kind, "solid", "fluid");
+        options.fluid_to_solid_transfer =
+            interfaceTransfer(kind, "fluid", "solid");
+        const FSICouplingModule module(options);
+        FSIContextFixture fixture(FSIFieldComponents{},
+                                  false,
+                                  true,
+                                  true,
+                                  true,
+                                  true,
+                                  false);
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        EXPECT_NO_THROW(module.validate(fixture.context));
+
+        const auto exchanges =
+            module.buildPartitionedExchangeDeclarations(fixture.context);
+        const auto declaration = module.declare();
+        const fec::PartitionedCouplingPlanGenerator generator;
+        const auto plan = generator.generate(
+            fixture.context,
+            std::span<const fec::CouplingExchangeDeclaration>(exchanges),
+            std::span<const fec::CouplingGroupHint>(declaration.group_hints));
+
+        ASSERT_EQ(plan.exchanges.size(), 2u);
+        EXPECT_EQ(plan.exchanges[0].transfer.kind, kind);
+        ASSERT_TRUE(plan.exchanges[0].transfer.interface_options.has_value());
+        EXPECT_EQ(plan.exchanges[0].transfer.interface_options->component_count,
+                  3u);
+        ASSERT_TRUE(plan.exchanges[0].transfer.interface_map.has_value());
+        EXPECT_EQ(plan.exchanges[0].transfer.interface_map->source_system_name,
+                  "solid_system");
+        EXPECT_EQ(plan.exchanges[0].transfer.interface_map->target_system_name,
+                  "fluid_system");
+        EXPECT_EQ(plan.exchanges[1].transfer.kind, kind);
+        ASSERT_TRUE(plan.exchanges[1].transfer.interface_options.has_value());
+        ASSERT_TRUE(plan.exchanges[1].transfer.interface_map.has_value());
+        EXPECT_EQ(plan.exchanges[1].transfer.interface_map->source_system_name,
+                  "fluid_system");
+        EXPECT_EQ(plan.exchanges[1].transfer.interface_map->target_system_name,
+                  "solid_system");
+#else
+        expectValidationFailureContaining(
+            module,
+            fixture.context,
+            "interface partitioned transfers require mesh interface support");
+#endif
+    }
 }
 
 TEST(FSICouplingModule, BuildsFormsAuthoredVelocityContinuity)

@@ -5367,7 +5367,7 @@ Implementation checklist:
 - [x] Build a partitioned FSI exchange plan with opaque ports for
   solid-displacement, solid-velocity, fluid-traction/load, and
   mesh-displacement exchanges as applicable.
-- [ ] Validate FSI partitioned transfer declarations for each requested direction,
+- [x] Validate FSI partitioned transfer declarations for each requested direction,
   using resolved FE interface operators for interface interpolation,
   conservative projection, and mortar transfers.
 - [x] Reject FSI partitioned plans with `Unspecified` transfers; require each
