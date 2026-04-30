@@ -4191,7 +4191,7 @@ Implementation checklist:
   declarations, invalid derivative orders, inconsistent non-field dependency
   requirements, inconsistent expected-block records, and inconsistent
   partitioned exchange declarations.
-- [ ] Validate `CouplingNonFieldDependencyRequirement` records as declaration
+- [x] Validate `CouplingNonFieldDependencyRequirement` records as declaration
   metadata: participant/system-scoped names, expected value/type constraints,
   optional declaration-side region scope, optional required region kind, and
   material-state byte offsets are allowed, while resolved markers, logical

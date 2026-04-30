@@ -78,6 +78,7 @@ struct CouplingNonFieldDependencyRequirement {
     std::string name;
     std::optional<CouplingRegionEndpointDeclaration> region;
     std::optional<CouplingRegionKind> required_region_kind;
+    std::optional<params::ValueType> expected_parameter_value_type;
     std::string expected_value_type;
     std::optional<std::uint64_t> material_state_byte_offset;
     CouplingRequirement requirement{CouplingRequirement::Required};

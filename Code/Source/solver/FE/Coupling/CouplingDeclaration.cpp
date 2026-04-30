@@ -55,6 +55,48 @@ std::string additionalFieldKey(const CouplingAdditionalFieldDeclaration& field)
            field.shared_region_name.value_or("");
 }
 
+std::string nonFieldDependencyKey(const CouplingNonFieldDependencyRequirement& dependency)
+{
+    std::string key =
+        std::to_string(static_cast<int>(dependency.kind)) + "/" +
+        dependency.participant_name + "/" + dependency.name + "/" +
+        std::to_string(static_cast<int>(dependency.requirement)) + "/" +
+        std::to_string(dependency.require_analysis_variable_key);
+    if (dependency.region.has_value()) {
+        key += "/" + dependency.region->participant_name + "/" +
+               dependency.region->region_name + "/" +
+               dependency.region->shared_region_name.value_or("");
+    }
+    key += "/" + std::to_string(
+        dependency.required_region_kind.has_value()
+            ? static_cast<int>(*dependency.required_region_kind)
+            : -1);
+    key += "/" + std::to_string(
+        dependency.expected_parameter_value_type.has_value()
+            ? static_cast<int>(*dependency.expected_parameter_value_type)
+            : -1);
+    key += "/" + dependency.expected_value_type;
+    key += dependency.material_state_byte_offset.has_value()
+               ? "/1:" + std::to_string(*dependency.material_state_byte_offset)
+               : "/0:";
+    return key;
+}
+
+bool isMaterialStateRequirement(CouplingNonFieldDependencyRequirementKind kind)
+{
+    return kind == CouplingNonFieldDependencyRequirementKind::MaterialStateOld ||
+           kind == CouplingNonFieldDependencyRequirementKind::MaterialStateWork;
+}
+
+bool supportsAnalysisVariableKey(CouplingNonFieldDependencyRequirementKind kind)
+{
+    return kind == CouplingNonFieldDependencyRequirementKind::BoundaryFunctional ||
+           kind == CouplingNonFieldDependencyRequirementKind::BoundaryIntegral ||
+           kind == CouplingNonFieldDependencyRequirementKind::AuxiliaryState ||
+           kind == CouplingNonFieldDependencyRequirementKind::AuxiliaryInput ||
+           kind == CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput;
+}
+
 } // namespace
 
 CouplingValidationResult validateContractDeclarationShape(
@@ -154,6 +196,49 @@ CouplingValidationResult validateContractDeclarationShape(
                                    additionalFieldKey(field),
                                    additionalFieldKey(declaration.additional_fields[j]),
                                    "duplicate additional field declaration");
+        }
+    }
+
+    for (std::size_t i = 0; i < declaration.non_field_dependencies.size(); ++i) {
+        const auto& dependency = declaration.non_field_dependencies[i];
+        if (dependency.participant_name.empty()) {
+            result.addError("non-field dependency requirement requires a participant name");
+        }
+        if (dependency.name.empty()) {
+            result.addError("non-field dependency requirement requires a name");
+        }
+        if (dependency.region.has_value()) {
+            const auto& region = *dependency.region;
+            if (region.region_name.empty()) {
+                result.addError("non-field dependency region scope requires a region name");
+            }
+            if (region.shared_region_name.has_value() &&
+                region.shared_region_name->empty()) {
+                result.addError("non-field dependency shared-region scope requires a name");
+            }
+            if (!region.participant_name.empty() &&
+                !dependency.participant_name.empty() &&
+                region.participant_name != dependency.participant_name) {
+                result.addError("non-field dependency region scope must match the participant");
+            }
+        }
+        if (dependency.expected_parameter_value_type.has_value() &&
+            dependency.kind != CouplingNonFieldDependencyRequirementKind::Parameter) {
+            result.addError("expected parameter value type is only valid for parameter dependencies");
+        }
+        if (dependency.material_state_byte_offset.has_value() &&
+            !isMaterialStateRequirement(dependency.kind)) {
+            result.addError("material-state byte offset is only valid for material-state dependencies");
+        }
+        if (dependency.require_analysis_variable_key &&
+            !supportsAnalysisVariableKey(dependency.kind)) {
+            result.addError("non-field dependency kind cannot require analysis variable identity");
+        }
+        for (std::size_t j = i + 1u; j < declaration.non_field_dependencies.size(); ++j) {
+            addDuplicateIfRepeated(result,
+                                   nonFieldDependencyKey(dependency),
+                                   nonFieldDependencyKey(declaration.non_field_dependencies[j]),
+                                   "duplicate non-field dependency requirement");
         }
     }
 

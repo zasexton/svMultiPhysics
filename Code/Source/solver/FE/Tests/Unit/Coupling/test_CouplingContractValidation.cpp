@@ -277,6 +277,108 @@ TEST(CouplingContractValidation, FormAnalysisMetadataStoresDiagnosticProvenance)
     EXPECT_EQ(metadata.geometry_sensitivity_provenance[0].sensitivity_sample_count, 4u);
 }
 
+TEST(CouplingContractValidation, ValidatesNonFieldDependencyRequirements)
+{
+    auto declaration = minimalDeclaration();
+    declaration.non_field_dependencies = {
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+            .participant_name = "left",
+            .name = "penalty",
+            .expected_parameter_value_type = svmp::FE::params::ValueType::Real,
+            .expected_value_type = "scalar",
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Coefficient,
+            .participant_name = "left",
+            .name = "wall_weight",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+            .required_region_kind = CouplingRegionKind::Boundary,
+            .expected_value_type = "scalar",
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::MaterialStateOld,
+            .participant_name = "left",
+            .name = "history",
+            .material_state_byte_offset = 16,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::BoundaryIntegral,
+            .participant_name = "left",
+            .name = "traction_integral",
+            .require_analysis_variable_key = true,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryState,
+            .participant_name = "left",
+            .name = "state",
+            .require_analysis_variable_key = true,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+            .participant_name = "left",
+            .name = "input",
+            .require_analysis_variable_key = true,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput,
+            .participant_name = "left",
+            .name = "output",
+            .require_analysis_variable_key = true,
+        },
+    };
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+
+    declaration.non_field_dependencies = {
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Coefficient,
+            .participant_name = "left",
+            .name = "coefficient",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "surface",
+            },
+            .expected_parameter_value_type = svmp::FE::params::ValueType::Real,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+            .participant_name = "left",
+            .name = "bad_offset",
+            .material_state_byte_offset = 8,
+            .require_analysis_variable_key = true,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+            .participant_name = "left",
+            .name = "duplicate",
+            .require_analysis_variable_key = true,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+            .participant_name = "left",
+            .name = "duplicate",
+            .require_analysis_variable_key = true,
+        },
+    };
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("participant name"), std::string::npos);
+    EXPECT_NE(text.find("requires a name"), std::string::npos);
+    EXPECT_NE(text.find("region scope must match"), std::string::npos);
+    EXPECT_NE(text.find("expected parameter value type"), std::string::npos);
+    EXPECT_NE(text.find("material-state byte offset"), std::string::npos);
+    EXPECT_NE(text.find("analysis variable identity"), std::string::npos);
+    EXPECT_NE(text.find("duplicate non-field dependency requirement"), std::string::npos);
+}
+
 TEST(CouplingContractValidation, ValidatesTemporalRequirementsAndExchangeShape)
 {
     auto declaration = minimalDeclaration();
