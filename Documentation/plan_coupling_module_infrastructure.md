@@ -4546,7 +4546,7 @@ Unit-test verification checklist:
   options are resolved into `systems::FormInstallOptions`, including
   name-to-`FieldId` geometry-sensitivity resolution and geometry tangent path
   forwarding.
-- [ ] `test_CouplingFormBuilder.cpp` rejects declaration-time install options
+- [x] `test_CouplingFormBuilder.cpp` rejects declaration-time install options
   that bypass `CouplingSymbolicOptionsDeclaration` and set raw
   `forms::SymbolicOptions::ad_mode` or
   `forms::SymbolicOptions::geometry_tangent_path`,
