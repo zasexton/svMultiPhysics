@@ -35,6 +35,10 @@ public:
 
     virtual void validate(const CouplingContext& ctx) const;
 
+    [[nodiscard]] virtual bool supportsMonolithicLowering() const;
+    [[nodiscard]] virtual bool supportsPartitionedLowering() const;
+    [[nodiscard]] bool supportsCouplingMode(CouplingMode mode) const;
+
     [[nodiscard]] virtual std::vector<CouplingFormContribution> buildMonolithicForms(
         const CouplingContext& ctx,
         const CouplingFormBuilder& forms) const;

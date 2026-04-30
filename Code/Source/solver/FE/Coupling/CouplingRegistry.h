@@ -32,8 +32,10 @@ public:
     void registerContract(std::string name, Factory factory);
 
     [[nodiscard]] bool contains(std::string_view name) const noexcept;
+    [[nodiscard]] bool supportsMode(std::string_view name, CouplingMode mode) const;
     [[nodiscard]] std::unique_ptr<CouplingContract> create(std::string_view name) const;
     [[nodiscard]] std::vector<std::string> names() const;
+    [[nodiscard]] std::vector<std::string> namesSupporting(CouplingMode mode) const;
 
 private:
     struct Entry {

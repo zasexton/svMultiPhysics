@@ -33,6 +33,27 @@ void CouplingContract::validate(const CouplingContext& ctx) const
     throwIfInvalid(validation);
 }
 
+bool CouplingContract::supportsMonolithicLowering() const
+{
+    return false;
+}
+
+bool CouplingContract::supportsPartitionedLowering() const
+{
+    return false;
+}
+
+bool CouplingContract::supportsCouplingMode(CouplingMode mode) const
+{
+    switch (mode) {
+    case CouplingMode::Monolithic:
+        return supportsMonolithicLowering();
+    case CouplingMode::Partitioned:
+        return supportsPartitionedLowering();
+    }
+    return false;
+}
+
 std::vector<CouplingFormContribution> CouplingContract::buildMonolithicForms(
     const CouplingContext&,
     const CouplingFormBuilder&) const

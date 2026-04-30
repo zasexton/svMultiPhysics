@@ -4228,7 +4228,7 @@ Implementation checklist:
   instantiating coupling contracts.
 - [x] Make contract-type registration deterministic when duplicate type names are
   attempted: reject duplicates or require explicit replacement.
-- [ ] Add mode-specific dispatch helpers so setup code can ask whether a
+- [x] Add mode-specific dispatch helpers so setup code can ask whether a
   contract supports monolithic lowering, partitioned lowering, or both.
 - [x] Ensure a two-participant contract uses the same API as an N-participant
   contract rather than a special pairwise-only path.
@@ -4307,7 +4307,7 @@ Unit-test verification checklist:
   normals, measures, and surface Jacobians.
 - [x] `test_CouplingRegistry.cpp` covers registration, lookup, duplicate
   handling, and deterministic iteration order.
-- [ ] `test_CouplingRegistry.cpp` covers mode-specific contract dispatch
+- [x] `test_CouplingRegistry.cpp` covers mode-specific contract dispatch
   without invoking unsupported lowering hooks.
 - [ ] `test_CouplingContractValidation.cpp` verifies additional-field
   declarations reject collisions and accept unique coupling fields.
