@@ -13,10 +13,9 @@
  * @brief Physics-side thermal interface coupling contract declaration.
  */
 
-#include "FE/Coupling/CouplingContract.h"
+#include "FE/Coupling/DefinitionBackedCouplingContract.h"
 
 #include <string>
-#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -40,18 +39,19 @@ struct ThermalInterfaceCouplingOptions {
     FE::coupling::CouplingTransferDeclaration heat_flux_transfer{};
 };
 
-class ThermalInterfaceCouplingModule final : public FE::coupling::CouplingContract {
+class ThermalInterfaceCouplingModule final
+    : public FE::coupling::DefinitionBackedCouplingContract {
 public:
     explicit ThermalInterfaceCouplingModule(
         ThermalInterfaceCouplingOptions options = {});
 
     [[nodiscard]] std::string name() const override;
-    [[nodiscard]] FE::coupling::CouplingContractDeclaration declare() const override;
 
     void validate(const FE::coupling::CouplingContext& ctx) const override;
 
-    [[nodiscard]] std::vector<FE::coupling::CouplingExchangeDeclaration>
-    buildPartitionedExchangeDeclarations(const FE::coupling::CouplingContext& ctx) const override;
+protected:
+    [[nodiscard]] std::string contractInstanceName() const override;
+    void define(FE::coupling::CouplingDefinitionBuilder& builder) const override;
 
 private:
     ThermalInterfaceCouplingOptions options_{};

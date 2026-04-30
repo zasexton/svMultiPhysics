@@ -7,6 +7,7 @@
 
 #include "Physics/Coupling/ThermalInterfaceCouplingModule.h"
 
+#include "FE/Coupling/CouplingDefinitionBuilder.h"
 #include "FE/Coupling/CouplingGraph.h"
 
 #include <array>
@@ -30,28 +31,6 @@ fec::CouplingFieldUse fieldUse(const std::string& participant,
     };
 }
 
-fec::CouplingEndpointRef fieldEndpoint(const std::string& participant,
-                                       const std::string& field)
-{
-    return fec::CouplingEndpointRef{
-        .kind = fec::CouplingEndpointKind::Field,
-        .participant_name = participant,
-        .endpoint_name = field,
-        .temporal = fec::CouplingTemporalSlotDescriptor{
-            .slot = fec::CouplingTemporalSlot::Current,
-        },
-    };
-}
-
-fec::CouplingPortId port(const ThermalInterfaceCouplingOptions& options,
-                         std::string port_name)
-{
-    return fec::CouplingPortId{
-        .contract_instance_name = options.contract_name,
-        .port_name = std::move(port_name),
-    };
-}
-
 fec::CouplingValueDescriptor scalarValue(int components)
 {
     return fec::CouplingValueDescriptor{
@@ -61,44 +40,51 @@ fec::CouplingValueDescriptor scalarValue(int components)
     };
 }
 
+void declareFieldRequirement(fec::CouplingDefinitionBuilder& builder,
+                             fec::CouplingFieldUse field,
+                             fec::CouplingValueDescriptor value)
+{
+    builder.field(field);
+    builder.fieldRequirement(fec::CouplingFieldRequirement{
+        .field = std::move(field),
+        .value = std::move(value),
+    });
+}
+
 void appendPartitionedExchangeDeclarations(
     const ThermalInterfaceCouplingOptions& options,
-    fec::CouplingContractDeclaration& declaration)
+    fec::CouplingDefinitionBuilder& builder)
 {
     if (options.mode != fec::CouplingMode::Partitioned) {
         return;
     }
 
-    declaration.partitioned_exchange_declarations.push_back(
-        fec::CouplingExchangeDeclaration{
-            .producer_port = port(options, "side_a_temperature"),
-            .consumer_port = port(options, "side_b_temperature"),
-            .value = scalarValue(options.temperature_components),
-            .producer = fieldEndpoint(options.side_a_name,
-                                      options.side_a_temperature_field),
-            .consumer = fieldEndpoint(options.side_b_name,
-                                      options.side_b_temperature_field),
-            .shared_region_name = options.interface_name,
-            .transfer = options.temperature_transfer,
-        });
+    builder
+        .exchange("temperature",
+                  fieldUse(options.side_a_name,
+                           options.side_a_temperature_field),
+                  fieldUse(options.side_b_name,
+                           options.side_b_temperature_field))
+        .producerPort("side_a_temperature")
+        .consumerPort("side_b_temperature")
+        .sharedInterface(options.interface_name)
+        .value(scalarValue(options.temperature_components))
+        .transfer(options.temperature_transfer);
 
-    declaration.partitioned_exchange_declarations.push_back(
-        fec::CouplingExchangeDeclaration{
-            .producer_port = port(options, "side_b_heat_flux"),
-            .consumer_port = port(options, "side_a_heat_flux"),
-            .value = scalarValue(options.heat_flux_components),
-            .producer = fieldEndpoint(options.side_b_name,
-                                      options.side_b_heat_flux_field),
-            .consumer = fieldEndpoint(options.side_a_name,
-                                      options.side_a_heat_flux_field),
-            .shared_region_name = options.interface_name,
-            .transfer = options.heat_flux_transfer,
-        });
+    builder
+        .exchange("heat_flux",
+                  fieldUse(options.side_b_name,
+                           options.side_b_heat_flux_field),
+                  fieldUse(options.side_a_name,
+                           options.side_a_heat_flux_field))
+        .producerPort("side_b_heat_flux")
+        .consumerPort("side_a_heat_flux")
+        .sharedInterface(options.interface_name)
+        .value(scalarValue(options.heat_flux_components))
+        .transfer(options.heat_flux_transfer);
 
-    declaration.group_hints.push_back(fec::CouplingGroupHint{
-        .name = options.contract_name + "_participants",
-        .participant_names = {options.side_a_name, options.side_b_name},
-    });
+    builder.group(options.contract_name + "_participants",
+                  {options.side_a_name, options.side_b_name});
 }
 
 fec::CouplingValidationResult validateOptionShape(
@@ -151,32 +137,52 @@ std::string ThermalInterfaceCouplingModule::name() const
     return "thermal_interface";
 }
 
-fec::CouplingContractDeclaration ThermalInterfaceCouplingModule::declare() const
+std::string ThermalInterfaceCouplingModule::contractInstanceName() const
 {
-    fec::CouplingContractDeclaration declaration;
-    declaration.contract_type = name();
-    declaration.contract_name = options_.contract_name;
-    declaration.participants.push_back({.participant_name = options_.side_a_name});
-    declaration.participants.push_back({.participant_name = options_.side_b_name});
+    return options_.contract_name;
+}
 
-    declaration.fields.push_back(fieldUse(options_.side_a_name,
-                                          options_.side_a_temperature_field));
-    declaration.fields.push_back(fieldUse(options_.side_b_name,
-                                          options_.side_b_temperature_field));
+void ThermalInterfaceCouplingModule::define(
+    fec::CouplingDefinitionBuilder& builder) const
+{
+    builder.participant(options_.side_a_name);
+    builder.participant(options_.side_b_name);
+
+    declareFieldRequirement(builder,
+                            fieldUse(options_.side_a_name,
+                                     options_.side_a_temperature_field),
+                            scalarValue(options_.temperature_components));
+    declareFieldRequirement(builder,
+                            fieldUse(options_.side_b_name,
+                                     options_.side_b_temperature_field),
+                            scalarValue(options_.temperature_components));
+
     if (options_.mode == fec::CouplingMode::Partitioned) {
-        declaration.fields.push_back(fieldUse(options_.side_a_name,
-                                              options_.side_a_heat_flux_field));
-        declaration.fields.push_back(fieldUse(options_.side_b_name,
-                                              options_.side_b_heat_flux_field));
+        declareFieldRequirement(builder,
+                                fieldUse(options_.side_a_name,
+                                         options_.side_a_heat_flux_field),
+                                scalarValue(options_.heat_flux_components));
+        declareFieldRequirement(builder,
+                                fieldUse(options_.side_b_name,
+                                         options_.side_b_heat_flux_field),
+                                scalarValue(options_.heat_flux_components));
     }
 
-    declaration.shared_regions.push_back(fec::CouplingSharedRegionUse{
+    builder.sharedRegion(fec::CouplingSharedRegionUse{
         .shared_region_name = options_.interface_name,
         .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
     });
+    builder.sharedInterface(fec::CouplingSharedInterfaceRequirement{
+        .shared_region_name = options_.interface_name,
+        .participant_names = {options_.side_a_name, options_.side_b_name},
+        .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+        .require_all_participants = true,
+        .require_opposite_sides_for_two_participants = true,
+        .require_monolithic_topology =
+            options_.mode == fec::CouplingMode::Monolithic,
+    });
 
-    appendPartitionedExchangeDeclarations(options_, declaration);
-    return declaration;
+    appendPartitionedExchangeDeclarations(options_, builder);
 }
 
 void ThermalInterfaceCouplingModule::validate(const fec::CouplingContext& ctx) const
@@ -189,13 +195,6 @@ void ThermalInterfaceCouplingModule::validate(const fec::CouplingContext& ctx) c
         ctx,
         std::span<const fec::CouplingContractDeclaration>(declarations)));
     throwIfInvalid(result);
-}
-
-std::vector<fec::CouplingExchangeDeclaration>
-ThermalInterfaceCouplingModule::buildPartitionedExchangeDeclarations(
-    const fec::CouplingContext&) const
-{
-    return {};
 }
 
 } // namespace coupling

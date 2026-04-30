@@ -105,7 +105,11 @@ TEST(ThermalInterfaceCouplingModule, DeclaresPartitionedTemperatureAndHeatFluxEx
     EXPECT_EQ(declaration.group_hints[0].participant_names,
               (std::vector<std::string>{"side_a", "side_b"}));
 
-    EXPECT_TRUE(module.buildPartitionedExchangeDeclarations(fec::CouplingContext{}).empty());
+    const auto built_exchanges =
+        module.buildPartitionedExchangeDeclarations(fec::CouplingContext{});
+    ASSERT_EQ(built_exchanges.size(), 2u);
+    EXPECT_EQ(built_exchanges[0].producer_port.port_name, "side_a_temperature");
+    EXPECT_EQ(built_exchanges[1].producer_port.port_name, "side_b_heat_flux");
 }
 
 TEST(ThermalInterfaceCouplingModule, RejectsInvalidOptionsDuringValidation)

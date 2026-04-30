@@ -1175,7 +1175,7 @@ struct CouplingRegionRelationRequirement {
 - [x] FSI no longer needs local interface participant mapping checks.
 - [x] FSI no longer needs local opposite-side checks.
 - [x] FSI no longer needs local monolithic same-system checks.
-- [ ] Thermal no longer needs local scalar/vector field shape checks.
+- [x] Thermal no longer needs local scalar/vector field shape checks.
 - [ ] New N-participant and mixed-dimensional relation fixtures validate through
       `CouplingGraph`.
 - [x] Relation capability records reject unsupported mode/lowering combinations
@@ -1542,13 +1542,15 @@ authoring path.
 
 ### Concrete Changes
 
-- [ ] Derive `ThermalInterfaceCouplingModule` from
+- [x] Derive `ThermalInterfaceCouplingModule` from
       `DefinitionBackedCouplingContract`.
-- [ ] Replace direct declaration and validation code with `define(...)`.
-- [ ] Declare participant roles:
+- [x] Replace direct declaration code with `define(...)`.
+- [ ] Move remaining option-specific `validate()` checks into a
+      definition-backed validation hook once that hook exists.
+- [x] Declare participant roles:
       - side A
       - side B
-- [ ] Declare field roles:
+- [x] Declare field roles:
       - side A temperature as scalar by default
       - side B temperature as scalar by default
       - side A heat flux as scalar or vector depending on selected strategy
@@ -1567,7 +1569,7 @@ enum class ThermalInterfaceFormulation {
       formulation.
 - [ ] Reuse `FE/Forms/InterfaceConditions.h` and `BoundaryConditions.h` helpers
       for Nitsche-style scalar diffusion when applicable.
-- [ ] Define partitioned temperature and heat-flux channels through
+- [x] Define partitioned temperature and heat-flux channels through
       `PartitionedCouplingBuilder`.
 - [ ] Remove local validation that backend field and partitioned checks now
       cover.
@@ -1575,9 +1577,9 @@ enum class ThermalInterfaceFormulation {
 ### Completion Checklist
 
 - [ ] Thermal default monolithic mode has valid monolithic lowering.
-- [ ] Thermal partitioned mode behavior is preserved.
+- [x] Thermal partitioned mode behavior is preserved.
 - [ ] Thermal tests cover scalar temperature continuity.
-- [ ] Thermal tests cover partitioned temperature and heat-flux exchanges.
+- [x] Thermal tests cover partitioned temperature and heat-flux exchanges.
 - [ ] Thermal examples are short enough to serve as authoring documentation.
 
 ## Phase 10: Tests
