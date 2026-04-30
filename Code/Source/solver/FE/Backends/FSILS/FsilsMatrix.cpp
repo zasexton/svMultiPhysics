@@ -191,13 +191,6 @@ enum class LocalRowOwnership : std::uint8_t {
     return backend_col >= 0 && backend_col < global_cols;
 }
 
-[[nodiscard]] bool track_resolved_insert_drops() noexcept
-{
-    static const bool enabled =
-        std::getenv("SVMP_FSILS_TRACK_DROPPED_RESOLVED_INSERTS") != nullptr;
-    return enabled;
-}
-
 [[nodiscard]] bool ghost_rows_look_nodal_interleaved(std::span<const GlobalIndex> ghost_rows, int dof)
 {
     if (dof <= 0) {
@@ -1972,30 +1965,28 @@ void FsilsMatrix::addResolvedMatrixEntries(std::span<const GlobalIndex> row_dofs
     }
 
     std::uint64_t dropped_entries = 0;
-    if (track_resolved_insert_drops()) {
-        thread_local std::vector<unsigned char> valid_col;
-        valid_col.assign(col_dofs.size(), 0);
-        for (GlobalIndex j = 0; j < n_cols; ++j) {
-            if (is_valid_fe_matrix_col(
-                    *shared_, col_dofs[static_cast<std::size_t>(j)], numCols())) {
-                valid_col[static_cast<std::size_t>(j)] = 1;
-            }
+    thread_local std::vector<unsigned char> valid_col;
+    valid_col.assign(col_dofs.size(), 0);
+    for (GlobalIndex j = 0; j < n_cols; ++j) {
+        if (is_valid_fe_matrix_col(
+                *shared_, col_dofs[static_cast<std::size_t>(j)], numCols())) {
+            valid_col[static_cast<std::size_t>(j)] = 1;
         }
-        for (GlobalIndex i = 0; i < n_rows; ++i) {
-            const auto row_idx = static_cast<std::size_t>(i);
-            if (owned_row[row_idx] == 0) {
+    }
+    for (GlobalIndex i = 0; i < n_rows; ++i) {
+        const auto row_idx = static_cast<std::size_t>(i);
+        if (owned_row[row_idx] == 0) {
+            continue;
+        }
+        for (GlobalIndex j = 0; j < n_cols; ++j) {
+            const auto col_idx = static_cast<std::size_t>(j);
+            if (valid_col[col_idx] == 0) {
                 continue;
             }
-            for (GlobalIndex j = 0; j < n_cols; ++j) {
-                const auto col_idx = static_cast<std::size_t>(j);
-                if (valid_col[col_idx] == 0) {
-                    continue;
-                }
-                const auto idx = static_cast<std::size_t>(i * n_cols + j);
-                const auto slot = resolved[idx];
-                if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
-                    ++dropped_entries;
-                }
+            const auto idx = static_cast<std::size_t>(i * n_cols + j);
+            const auto slot = resolved[idx];
+            if (slot < 0 || static_cast<std::size_t>(slot) >= values_size) {
+                ++dropped_entries;
             }
         }
     }

@@ -8,6 +8,7 @@
 #include "Analysis/ProblemAnalyzer.h"
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalysisTypes.h"
+#include "Analysis/FormContributionLowerer.h"
 #include "Analysis/FormulationRecord.h"
 #include "Analysis/FormStructureAnalyzer.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
@@ -88,9 +89,10 @@ FormulationRecord makeStokesRecord() {
     auto q = FormExpr::testFunction(*scalar_space, "q");
     auto u = FormExpr::stateField(1, *vector_space, "u");
     auto v = FormExpr::testFunction(*vector_space, "v");
-    auto residual = inner(grad(u), grad(v)).dx()
-                  - (p * div(v)).dx()
-                  + (div(u) * q).dx();
+    auto momentum = inner(grad(u), grad(v)).dx()
+                  - (p * div(v)).dx();
+    auto continuity = (div(u) * q).dx();
+    auto residual = momentum + continuity;
 
     FormulationRecord rec;
     rec.operator_tag = "equations";
@@ -101,6 +103,63 @@ FormulationRecord makeStokesRecord() {
     rec.active_variables.push_back(VariableKey::field(0));
     rec.active_variables.push_back(VariableKey::field(1));
     rec.block_couplings = {{0,0}, {0,1}, {1,0}, {1,1}};
+    rec.block_residual_exprs.push_back({{1, 1}, momentum.nodeShared()});
+    rec.block_residual_exprs.push_back({{0, 0}, continuity.nodeShared()});
+    return rec;
+}
+
+// Helper: Stokes record with nonzero pressure reaction p*q.
+FormulationRecord makePressureReactionStokesRecord() {
+    auto scalar_space = scalarH1();
+    auto vector_space = vectorH1();
+    auto p = FormExpr::stateField(0, *scalar_space, "p");
+    auto q = FormExpr::testFunction(*scalar_space, "q");
+    auto u = FormExpr::stateField(1, *vector_space, "u");
+    auto v = FormExpr::testFunction(*vector_space, "v");
+    auto momentum = inner(grad(u), grad(v)).dx()
+                  - (p * div(v)).dx();
+    auto continuity = (div(u) * q).dx()
+                    + (FormExpr::constant(2.0) * p * q).dx();
+    auto residual = momentum + continuity;
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0, 1};
+    rec.residual_expr = residual.nodeShared();
+    rec.is_mixed = true;
+    rec.has_stabilization_terms = false;
+    rec.active_variables.push_back(VariableKey::field(0));
+    rec.active_variables.push_back(VariableKey::field(1));
+    rec.block_couplings = {{0,0}, {0,1}, {1,0}, {1,1}};
+    rec.block_residual_exprs.push_back({{1, 1}, momentum.nodeShared()});
+    rec.block_residual_exprs.push_back({{0, 0}, continuity.nodeShared()});
+    return rec;
+}
+
+// Helper: mixed multiplier enforcing a pointwise component relation, not div(u).
+FormulationRecord makeGenericMultiplierRecord() {
+    auto scalar_space = scalarH1();
+    auto vector_space = vectorH1();
+    auto lambda = FormExpr::stateField(0, *scalar_space, "lambda");
+    auto mu = FormExpr::testFunction(*scalar_space, "mu");
+    auto u = FormExpr::stateField(1, *vector_space, "u");
+    auto v = FormExpr::testFunction(*vector_space, "v");
+    auto momentum = inner(grad(u), grad(v)).dx()
+                  + (lambda * v.component(0)).dx();
+    auto constraint = (mu * u.component(0)).dx();
+    auto residual = momentum + constraint;
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0, 1};
+    rec.residual_expr = residual.nodeShared();
+    rec.is_mixed = true;
+    rec.has_stabilization_terms = false;
+    rec.active_variables.push_back(VariableKey::field(0));
+    rec.active_variables.push_back(VariableKey::field(1));
+    rec.block_couplings = {{0,0}, {0,1}, {1,0}, {1,1}};
+    rec.block_residual_exprs.push_back({{1, 1}, momentum.nodeShared()});
+    rec.block_residual_exprs.push_back({{0, 0}, constraint.nodeShared()});
     return rec;
 }
 
@@ -138,6 +197,31 @@ FormulationRecord makeElasticityRecord() {
     rec.active_variables.push_back(VariableKey::field(0));
     rec.block_couplings = {{0, 0}};
     return rec;
+}
+
+void addScalarVectorDescriptors(ProblemAnalysisContext& ctx) {
+    FieldDescriptor scalar;
+    scalar.field_id = 0;
+    scalar.name = "scalar_constraint";
+    scalar.field_type = FieldType::Scalar;
+    scalar.value_dimension = 1;
+    scalar.topological_dimension = 3;
+    ctx.addFieldDescriptor(scalar);
+
+    FieldDescriptor vector;
+    vector.field_id = 1;
+    vector.name = "vector_momentum";
+    vector.field_type = FieldType::Vector;
+    vector.value_dimension = 3;
+    vector.topological_dimension = 3;
+    ctx.addFieldDescriptor(vector);
+}
+
+void addLoweredContributions(ProblemAnalysisContext& ctx,
+                             const FormulationRecord& rec) {
+    for (auto contribution : lowerFormulation(rec)) {
+        ctx.addContribution(std::move(contribution));
+    }
 }
 
 } // namespace
@@ -256,15 +340,56 @@ TEST(MixedOperatorAnalyzer, StokesFallbackEmitsStructuredPressureNullspace) {
     EXPECT_EQ(nullspace[0]->claim_origin, "MixedOperatorAnalyzer");
 }
 
-TEST(MixedOperatorAnalyzer, StokesFallbackDoesNotInferUndeclaredPressureNullspace) {
+TEST(MixedOperatorAnalyzer, StokesContributionsInferPressureNullspaceWithoutMetadata) {
     MixedOperatorAnalyzer pass;
     ProblemAnalysisContext ctx;
-    ctx.addFormulationRecord(makeStokesRecord());
+    addScalarVectorDescriptors(ctx);
+    const auto rec = makeStokesRecord();
+    addLoweredContributions(ctx, rec);
+    ctx.addFormulationRecord(rec);
 
     ProblemAnalysisReport report;
     pass.run(ctx, report);
 
-    EXPECT_EQ(report.countByKind(PropertyKind::MixedSaddlePoint), 1u);
+    EXPECT_GE(report.countByKind(PropertyKind::MixedSaddlePoint), 1u);
+    auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
+    ASSERT_EQ(nullspace.size(), 1u);
+    EXPECT_EQ(nullspace[0]->field, FieldId{0});
+    ASSERT_TRUE(nullspace[0]->nullspace_family.has_value());
+    EXPECT_EQ(*nullspace[0]->nullspace_family, NullspaceFamily::ScalarConstant);
+    EXPECT_EQ(nullspace[0]->claim_origin, "MixedOperatorAnalyzer");
+    ASSERT_FALSE(nullspace[0]->evidence.empty());
+    EXPECT_NE(nullspace[0]->evidence.front().description.find("div(momentum)"),
+              std::string::npos);
+}
+
+TEST(MixedOperatorAnalyzer, PressureReactionBlocksInferredPressureNullspace) {
+    MixedOperatorAnalyzer pass;
+    ProblemAnalysisContext ctx;
+    addScalarVectorDescriptors(ctx);
+    const auto rec = makePressureReactionStokesRecord();
+    addLoweredContributions(ctx, rec);
+    ctx.addFormulationRecord(rec);
+
+    ProblemAnalysisReport report;
+    pass.run(ctx, report);
+
+    EXPECT_GE(report.countByKind(PropertyKind::MixedSaddlePoint), 1u);
+    EXPECT_EQ(report.countByKind(PropertyKind::Nullspace), 0u);
+}
+
+TEST(MixedOperatorAnalyzer, GenericComponentMultiplierDoesNotInferGauge) {
+    MixedOperatorAnalyzer pass;
+    ProblemAnalysisContext ctx;
+    addScalarVectorDescriptors(ctx);
+    const auto rec = makeGenericMultiplierRecord();
+    addLoweredContributions(ctx, rec);
+    ctx.addFormulationRecord(rec);
+
+    ProblemAnalysisReport report;
+    pass.run(ctx, report);
+
+    EXPECT_GE(report.countByKind(PropertyKind::MixedSaddlePoint), 1u);
     EXPECT_EQ(report.countByKind(PropertyKind::Nullspace), 0u);
 }
 

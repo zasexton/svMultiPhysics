@@ -10,6 +10,7 @@
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
+#include "Forms/FormExpr.h"
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +49,776 @@ struct DeclaredNullspaceMetadata {
     AnalysisConfidence confidence{AnalysisConfidence::Medium};
     std::string evidence;
 };
+
+bool variableIsField(const VariableKey& variable, FieldId field) noexcept
+{
+    return variable.kind == VariableKind::FieldComponent &&
+           variable.field_id == field;
+}
+
+bool variablesContainField(const std::vector<VariableKey>& variables,
+                           FieldId field)
+{
+    return std::any_of(variables.begin(), variables.end(),
+                       [field](const VariableKey& variable) {
+                           return variableIsField(variable, field);
+                       });
+}
+
+bool contributionHasTestField(const ContributionDescriptor& contribution,
+                              FieldId field)
+{
+    return variablesContainField(contribution.test_variables, field);
+}
+
+bool contributionHasTrialField(const ContributionDescriptor& contribution,
+                               FieldId field)
+{
+    return variablesContainField(contribution.trial_variables, field);
+}
+
+bool isScalarFieldDescriptor(const ProblemAnalysisContext& context,
+                             FieldId field)
+{
+    const auto* descriptor = context.fieldDescriptor(field);
+    return descriptor &&
+           descriptor->field_type == FieldType::Scalar &&
+           descriptor->value_dimension <= 1;
+}
+
+bool isVectorFieldDescriptor(const ProblemAnalysisContext& context,
+                             FieldId field)
+{
+    const auto* descriptor = context.fieldDescriptor(field);
+    return descriptor &&
+           (descriptor->field_type == FieldType::Vector ||
+            descriptor->value_dimension > 1);
+}
+
+bool isZeroLikeExpression(const forms::FormExprNode& node)
+{
+    using forms::FormExprType;
+
+    if (node.type() == FormExprType::TypedZero) {
+        return true;
+    }
+    if (node.type() == FormExprType::Constant) {
+        const auto value = node.constantValue();
+        return value.has_value() && *value == Real(0.0);
+    }
+
+    const auto children = node.children();
+    if (children.empty()) {
+        return false;
+    }
+
+    switch (node.type()) {
+        case FormExprType::Negate:
+        case FormExprType::Gradient:
+        case FormExprType::Divergence:
+        case FormExprType::Curl:
+        case FormExprType::Hessian:
+        case FormExprType::TimeDerivative:
+        case FormExprType::RestrictMinus:
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+        case FormExprType::Transpose:
+        case FormExprType::Trace:
+        case FormExprType::Deviator:
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart:
+        case FormExprType::Norm:
+        case FormExprType::Normalize:
+        case FormExprType::AbsoluteValue:
+        case FormExprType::Sign:
+        case FormExprType::Sqrt:
+        case FormExprType::CellIntegral:
+        case FormExprType::BoundaryIntegral:
+        case FormExprType::InteriorFaceIntegral:
+        case FormExprType::InterfaceIntegral:
+            return children.front() && isZeroLikeExpression(*children.front());
+
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+            return std::all_of(children.begin(), children.end(),
+                               [](const forms::FormExprNode* child) {
+                                   return child && isZeroLikeExpression(*child);
+                               });
+
+        case FormExprType::Multiply:
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
+        case FormExprType::OuterProduct:
+        case FormExprType::CrossProduct:
+            return std::any_of(children.begin(), children.end(),
+                               [](const forms::FormExprNode* child) {
+                                   return child && isZeroLikeExpression(*child);
+                               });
+
+        case FormExprType::Divide:
+            return children.front() && isZeroLikeExpression(*children.front());
+
+        case FormExprType::AsVector:
+        case FormExprType::AsTensor:
+            return std::all_of(children.begin(), children.end(),
+                               [](const forms::FormExprNode* child) {
+                                   return child && isZeroLikeExpression(*child);
+                               });
+
+        default:
+            return false;
+    }
+}
+
+bool staticallyZeroContribution(const ContributionDescriptor& contribution)
+{
+    return contribution.source_expression &&
+           isZeroLikeExpression(*contribution.source_expression);
+}
+
+bool fieldHasNonzeroTrialOccurrence(const forms::FormExprNode& node,
+                                    FieldId field)
+{
+    using forms::FormExprType;
+
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+
+    switch (node.type()) {
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField:
+        case FormExprType::TrialFunction: {
+            const auto fid = node.fieldId();
+            return fid.has_value() && *fid == field;
+        }
+        default:
+            break;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [field](const forms::FormExprNode* child) {
+                           return child &&
+                                  fieldHasNonzeroTrialOccurrence(*child, field);
+                       });
+}
+
+bool nodeIsTrialField(const forms::FormExprNode& node, FieldId field)
+{
+    using forms::FormExprType;
+    switch (node.type()) {
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField:
+        case FormExprType::TrialFunction: {
+            const auto fid = node.fieldId();
+            return fid.has_value() && *fid == field;
+        }
+        default:
+            return false;
+    }
+}
+
+bool nodeIsTestField(const forms::FormExprNode& node, FieldId field)
+{
+    if (node.type() != forms::FormExprType::TestFunction) {
+        return false;
+    }
+    const auto fid = node.fieldId();
+    return fid.has_value() && *fid == field;
+}
+
+bool subtreeContainsTestField(const forms::FormExprNode& node, FieldId field)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (nodeIsTestField(node, field)) {
+        return true;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [field](const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsTestField(*child, field);
+                       });
+}
+
+bool subtreeContainsTrialField(const forms::FormExprNode& node, FieldId field)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (nodeIsTrialField(node, field)) {
+        return true;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [field](const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsTrialField(*child, field);
+                       });
+}
+
+bool subtreeContainsNonPressureTrialField(const forms::FormExprNode& node,
+                                         FieldId pressure_field)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+
+    using forms::FormExprType;
+    switch (node.type()) {
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField:
+        case FormExprType::TrialFunction: {
+            const auto fid = node.fieldId();
+            return fid.has_value() && *fid != pressure_field;
+        }
+        default:
+            break;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [pressure_field](const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsNonPressureTrialField(
+                                      *child, pressure_field);
+                       });
+}
+
+struct TrialUseState {
+    bool under_annihilating_operator{false};
+    bool under_time_derivative{false};
+};
+
+bool subtreeContainsUndifferentiatedTrialField(
+    const forms::FormExprNode& node,
+    FieldId field,
+    TrialUseState state = {})
+{
+    using forms::FormExprType;
+
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (nodeIsTrialField(node, field)) {
+        return !state.under_annihilating_operator &&
+               !state.under_time_derivative;
+    }
+
+    TrialUseState child_state = state;
+    switch (node.type()) {
+        case FormExprType::Gradient:
+        case FormExprType::Divergence:
+        case FormExprType::Curl:
+        case FormExprType::Hessian:
+            child_state.under_annihilating_operator = true;
+            break;
+        case FormExprType::TimeDerivative:
+            child_state.under_time_derivative = true;
+            break;
+        default:
+            break;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [field, child_state](const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsUndifferentiatedTrialField(
+                                      *child, field, child_state);
+                       });
+}
+
+bool subtreeContainsDivergenceOfTestField(const forms::FormExprNode& node,
+                                          FieldId field)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (node.type() == forms::FormExprType::Divergence) {
+        const auto children = node.children();
+        return !children.empty() &&
+               children.front() &&
+               subtreeContainsTestField(*children.front(), field);
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [field](const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsDivergenceOfTestField(
+                                      *child, field);
+                       });
+}
+
+bool subtreeContainsDivergenceOfTrialField(const forms::FormExprNode& node,
+                                           FieldId field)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (node.type() == forms::FormExprType::Divergence) {
+        const auto children = node.children();
+        return !children.empty() &&
+               children.front() &&
+               subtreeContainsTrialField(*children.front(), field);
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [field](const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsDivergenceOfTrialField(
+                                      *child, field);
+                       });
+}
+
+bool subtreeContainsAnyMomentumTestDivergence(
+    const forms::FormExprNode& node,
+    const std::unordered_set<FieldId>& momentum_fields)
+{
+    return std::any_of(momentum_fields.begin(), momentum_fields.end(),
+                       [&node](FieldId momentum_field) {
+                           return subtreeContainsDivergenceOfTestField(
+                               node, momentum_field);
+                       });
+}
+
+bool subtreeContainsAnyMomentumTrialDivergence(
+    const forms::FormExprNode& node,
+    const std::unordered_set<FieldId>& momentum_fields)
+{
+    return std::any_of(momentum_fields.begin(), momentum_fields.end(),
+                       [&node](FieldId momentum_field) {
+                           return subtreeContainsDivergenceOfTrialField(
+                               node, momentum_field);
+                       });
+}
+
+bool subtreeIsCertifiedPressureMultiplierBlock(
+    const forms::FormExprNode& node,
+    FieldId pressure_field,
+    const std::unordered_set<FieldId>& momentum_fields)
+{
+    using forms::FormExprType;
+    if (node.type() != FormExprType::Multiply &&
+        node.type() != FormExprType::InnerProduct &&
+        node.type() != FormExprType::DoubleContraction) {
+        return false;
+    }
+
+    return subtreeContainsUndifferentiatedTrialField(node, pressure_field) &&
+           subtreeContainsAnyMomentumTestDivergence(node, momentum_fields) &&
+           !subtreeContainsNonPressureTrialField(node, pressure_field);
+}
+
+bool pressureTrialUseOutsideCertifiedGaugePattern(
+    const forms::FormExprNode& node,
+    FieldId pressure_field,
+    const std::unordered_set<FieldId>& momentum_fields,
+    TrialUseState state = {})
+{
+    using forms::FormExprType;
+
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (!state.under_annihilating_operator &&
+        !state.under_time_derivative &&
+        subtreeIsCertifiedPressureMultiplierBlock(
+            node, pressure_field, momentum_fields)) {
+        return false;
+    }
+    if (nodeIsTrialField(node, pressure_field)) {
+        if (state.under_time_derivative) {
+            return true;
+        }
+        return !state.under_annihilating_operator;
+    }
+
+    TrialUseState child_state = state;
+    switch (node.type()) {
+        case FormExprType::Gradient:
+        case FormExprType::Divergence:
+        case FormExprType::Curl:
+        case FormExprType::Hessian:
+            child_state.under_annihilating_operator = true;
+            break;
+        case FormExprType::TimeDerivative:
+            child_state.under_time_derivative = true;
+            break;
+        default:
+            break;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [pressure_field, &momentum_fields, child_state](
+                           const forms::FormExprNode* child) {
+                           return child &&
+                                  pressureTrialUseOutsideCertifiedGaugePattern(
+                                      *child,
+                                      pressure_field,
+                                      momentum_fields,
+                                      child_state);
+                       });
+}
+
+bool subtreeContainsCertifiedPressureMultiplierBlock(
+    const forms::FormExprNode& node,
+    FieldId pressure_field,
+    const std::unordered_set<FieldId>& momentum_fields)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (subtreeIsCertifiedPressureMultiplierBlock(
+            node, pressure_field, momentum_fields)) {
+        return true;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [pressure_field, &momentum_fields](
+                           const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsCertifiedPressureMultiplierBlock(
+                                      *child,
+                                      pressure_field,
+                                      momentum_fields);
+                       });
+}
+
+bool subtreeIsPressureContinuityBlock(
+    const forms::FormExprNode& node,
+    FieldId pressure_field,
+    const std::unordered_set<FieldId>& momentum_fields)
+{
+    using forms::FormExprType;
+    if (node.type() != FormExprType::Multiply &&
+        node.type() != FormExprType::InnerProduct &&
+        node.type() != FormExprType::DoubleContraction) {
+        return false;
+    }
+
+    return subtreeContainsTestField(node, pressure_field) &&
+           subtreeContainsAnyMomentumTrialDivergence(node, momentum_fields);
+}
+
+bool subtreeContainsPressureContinuityBlock(
+    const forms::FormExprNode& node,
+    FieldId pressure_field,
+    const std::unordered_set<FieldId>& momentum_fields)
+{
+    if (isZeroLikeExpression(node)) {
+        return false;
+    }
+    if (subtreeIsPressureContinuityBlock(
+            node, pressure_field, momentum_fields)) {
+        return true;
+    }
+
+    const auto children = node.children();
+    return std::any_of(children.begin(), children.end(),
+                       [pressure_field, &momentum_fields](
+                           const forms::FormExprNode* child) {
+                           return child &&
+                                  subtreeContainsPressureContinuityBlock(
+                                      *child,
+                                      pressure_field,
+                                      momentum_fields);
+                       });
+}
+
+bool fieldSummaryHasOnlyConstantAnnihilatingTrialUse(
+    const ContributionDescriptor& contribution,
+    FieldId field,
+    FormStructureAnalyzer& fsa)
+{
+    if (!contribution.source_expression) {
+        return false;
+    }
+    if (!fieldHasNonzeroTrialOccurrence(*contribution.source_expression, field)) {
+        return false;
+    }
+
+    const auto fs = fsa.analyzeField(*contribution.source_expression, field);
+    return fs.occurrence_count > 0 &&
+           fs.only_through_annihilating_ops &&
+           !fs.has_absolute_value &&
+           !fs.has_time_derivative;
+}
+
+bool fieldSummaryHasUndifferentiatedTrialUse(
+    const ContributionDescriptor& contribution,
+    FieldId field,
+    FormStructureAnalyzer& fsa)
+{
+    if (!contribution.source_expression) {
+        return false;
+    }
+    if (!fieldHasNonzeroTrialOccurrence(*contribution.source_expression, field)) {
+        return false;
+    }
+
+    const auto fs = fsa.analyzeField(*contribution.source_expression, field);
+    return fs.occurrence_count > 0 &&
+           fs.has_absolute_value &&
+           !fs.has_time_derivative;
+}
+
+bool fieldSummaryHasDivergenceTrialUse(const ContributionDescriptor& contribution,
+                                       FieldId field,
+                                       FormStructureAnalyzer& fsa)
+{
+    if (!contribution.source_expression) {
+        return false;
+    }
+    if (!fieldHasNonzeroTrialOccurrence(*contribution.source_expression, field)) {
+        return false;
+    }
+
+    const auto fs = fsa.analyzeField(*contribution.source_expression, field);
+    return fs.occurrence_count > 0 &&
+           fs.has_divergence &&
+           !fs.has_absolute_value &&
+           !fs.has_time_derivative;
+}
+
+bool hasPairing(const ContributionDescriptor& contribution,
+                FieldId row_field,
+                FieldId col_field,
+                PairingKind kind)
+{
+    return std::any_of(contribution.pairings.begin(),
+                       contribution.pairings.end(),
+                       [row_field, col_field, kind](const PairingDescriptor& pairing) {
+                           return pairing.kind == kind &&
+                                  variableIsField(pairing.row_var, row_field) &&
+                                  variableIsField(pairing.col_var, col_field);
+                       });
+}
+
+bool hasUndifferentiatedConstraintPair(const ContributionDescriptor& contribution,
+                                       FieldId row_field,
+                                       FieldId col_field)
+{
+    return std::any_of(contribution.pairings.begin(),
+                       contribution.pairings.end(),
+                       [row_field, col_field](const PairingDescriptor& pairing) {
+                           return pairing.kind == PairingKind::ConstraintPair &&
+                                  pairing.trial_has_undifferentiated &&
+                                  variableIsField(pairing.row_var, row_field) &&
+                                  variableIsField(pairing.col_var, col_field);
+                       });
+}
+
+bool pressureTrialContributionIsAllowedForGaugeInference(
+    const ContributionDescriptor& contribution,
+    FieldId pressure_field,
+    const std::unordered_set<FieldId>& certified_momentum_fields,
+    FormStructureAnalyzer& fsa)
+{
+    if (!contributionHasTrialField(contribution, pressure_field)) {
+        return true;
+    }
+    if (staticallyZeroContribution(contribution)) {
+        return true;
+    }
+    if (contribution.source_expression &&
+        !fieldHasNonzeroTrialOccurrence(*contribution.source_expression,
+                                        pressure_field)) {
+        return true;
+    }
+
+    if (contributionHasTestField(contribution, pressure_field)) {
+        if (!contribution.source_expression) {
+            return !hasFlag(contribution.traits, OperatorTraitFlags::HasMass) &&
+                   !hasFlag(contribution.traits, OperatorTraitFlags::HasFirstOrder) &&
+                   !hasFlag(contribution.traits, OperatorTraitFlags::NullspaceLifting);
+        }
+
+        const auto fs =
+            fsa.analyzeField(*contribution.source_expression, pressure_field);
+        return fs.occurrence_count > 0 &&
+               fs.only_through_annihilating_ops &&
+               !fs.has_absolute_value &&
+               !fs.has_time_derivative &&
+               !hasFlag(contribution.traits, OperatorTraitFlags::HasMass) &&
+               !hasFlag(contribution.traits, OperatorTraitFlags::HasFirstOrder) &&
+               !hasFlag(contribution.traits, OperatorTraitFlags::NullspaceLifting);
+    }
+
+    const bool tests_certified_momentum =
+        std::any_of(certified_momentum_fields.begin(),
+                    certified_momentum_fields.end(),
+                    [&contribution](FieldId momentum_field) {
+                        return contributionHasTestField(contribution, momentum_field);
+                    });
+    if (tests_certified_momentum &&
+        fieldSummaryHasUndifferentiatedTrialUse(
+            contribution, pressure_field, fsa)) {
+        return true;
+    }
+
+    return fieldSummaryHasOnlyConstantAnnihilatingTrialUse(
+        contribution, pressure_field, fsa);
+}
+
+struct InferredPressureNullspace {
+    bool certified{false};
+    std::string evidence;
+};
+
+InferredPressureNullspace inferPressureConstantNullspace(
+    const ProblemAnalysisContext& context,
+    const VariableKey& constraint_variable,
+    const std::unordered_set<VariableKey, VariableKeyHash>& partners,
+    const std::vector<const ContributionDescriptor*>& contributions)
+{
+    InferredPressureNullspace result;
+
+    if (constraint_variable.kind != VariableKind::FieldComponent ||
+        constraint_variable.field_id == INVALID_FIELD_ID ||
+        !isScalarFieldDescriptor(context, constraint_variable.field_id)) {
+        return result;
+    }
+
+    FormStructureAnalyzer fsa;
+    std::unordered_set<FieldId> certified_momentum_fields;
+
+    for (const auto& momentum_variable : partners) {
+        if (momentum_variable.kind != VariableKind::FieldComponent ||
+            momentum_variable.field_id == INVALID_FIELD_ID ||
+            !isVectorFieldDescriptor(context, momentum_variable.field_id)) {
+            continue;
+        }
+
+        bool has_pressure_in_momentum_equation = false;
+        bool has_divergence_in_constraint_equation = false;
+
+        for (const auto* contribution : contributions) {
+            if (!contribution) {
+                continue;
+            }
+            if (staticallyZeroContribution(*contribution)) {
+                continue;
+            }
+
+            if (contributionHasTestField(*contribution,
+                                         momentum_variable.field_id) &&
+                contributionHasTrialField(*contribution,
+                                          constraint_variable.field_id) &&
+                hasUndifferentiatedConstraintPair(
+                    *contribution,
+                    momentum_variable.field_id,
+                    constraint_variable.field_id) &&
+                fieldSummaryHasUndifferentiatedTrialUse(
+                    *contribution,
+                    constraint_variable.field_id,
+                    fsa)) {
+                has_pressure_in_momentum_equation = true;
+            }
+
+            if (contributionHasTestField(*contribution,
+                                         constraint_variable.field_id) &&
+                contributionHasTrialField(*contribution,
+                                          momentum_variable.field_id) &&
+                hasPairing(*contribution,
+                           constraint_variable.field_id,
+                           momentum_variable.field_id,
+                           PairingKind::FormalAdjointPair) &&
+                fieldSummaryHasDivergenceTrialUse(
+                    *contribution,
+                    momentum_variable.field_id,
+                    fsa)) {
+                has_divergence_in_constraint_equation = true;
+            }
+        }
+
+        if (has_pressure_in_momentum_equation &&
+            has_divergence_in_constraint_equation) {
+            certified_momentum_fields.insert(momentum_variable.field_id);
+        }
+    }
+
+    if (certified_momentum_fields.empty()) {
+        return result;
+    }
+
+    for (const auto* contribution : contributions) {
+        if (!contribution) {
+            continue;
+        }
+        if (!pressureTrialContributionIsAllowedForGaugeInference(
+                *contribution,
+                constraint_variable.field_id,
+                certified_momentum_fields,
+                fsa)) {
+            return result;
+        }
+    }
+
+    result.certified = true;
+    result.evidence =
+        "Certified scalar-constant pressure gauge: scalar constraint field has "
+        "an undifferentiated multiplier block against a vector momentum "
+        "divergence test operator, the adjoint constraint equation contains "
+        "div(momentum), and all nonzero trial appearances of the scalar field "
+        "are either that multiplier block or constant-annihilating terms; no "
+        "nonzero scalar mass/reaction/time/lifting block was found";
+    return result;
+}
+
+InferredPressureNullspace inferPressureConstantNullspaceFromResidual(
+    const ProblemAnalysisContext& context,
+    const forms::FormExprNode& residual,
+    FieldId pressure_field,
+    const std::vector<FieldId>& candidate_momentum_fields)
+{
+    InferredPressureNullspace result;
+    if (!isScalarFieldDescriptor(context, pressure_field)) {
+        return result;
+    }
+
+    std::unordered_set<FieldId> momentum_fields;
+    for (FieldId field : candidate_momentum_fields) {
+        if (isVectorFieldDescriptor(context, field)) {
+            momentum_fields.insert(field);
+        }
+    }
+    if (momentum_fields.empty()) {
+        return result;
+    }
+
+    if (!subtreeContainsCertifiedPressureMultiplierBlock(
+            residual, pressure_field, momentum_fields)) {
+        return result;
+    }
+    if (!subtreeContainsPressureContinuityBlock(
+            residual, pressure_field, momentum_fields)) {
+        return result;
+    }
+    if (pressureTrialUseOutsideCertifiedGaugePattern(
+            residual, pressure_field, momentum_fields)) {
+        return result;
+    }
+
+    result.certified = true;
+    result.evidence =
+        "Certified scalar-constant pressure gauge from residual structure: "
+        "the residual contains p*div(v)-type momentum coupling and q*div(u) "
+        "continuity coupling for a scalar constraint and vector momentum field; "
+        "all nonzero pressure trial occurrences are either in that multiplier "
+        "coupling or under constant-annihilating differential operators";
+    return result;
+}
 
 DeclaredNullspaceMetadata declaredNullspaceForField(
     const ProblemAnalysisContext& context,
@@ -495,23 +1266,31 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     report.claims.push_back(std::move(claim));
                 }
 
-                // Nullspace claim: one per constraint field only when the
-                // multiplier kernel is explicitly declared.  A generic
-                // constraint variable without a diagonal block is not enough
-                // to prove a pressure-gauge style constant nullspace.
+                // Nullspace claim: one per constraint field.  Explicit
+                // metadata remains authoritative, and otherwise the analyzer
+                // can certify the canonical pressure-gauge case from the
+                // block operator structure itself.
                 if (cv.kind == VariableKind::FieldComponent &&
                     constraint_fid != INVALID_FIELD_ID &&
                     !emitted_nullspace_fields.count(constraint_fid)) {
                     const auto metadata = declaredNullspaceForField(
                         context, constraint_fid, cv.component, &comp_group);
-                    if (metadata.present) {
+                    const auto inferred = metadata.present
+                        ? InferredPressureNullspace{}
+                        : inferPressureConstantNullspace(
+                              context, cv, partners, comp_group);
+                    if (metadata.present || inferred.certified) {
                         PropertyClaim ns_claim;
                         ns_claim.kind = PropertyKind::Nullspace;
                         ns_claim.status =
-                            metadata.confidence == AnalysisConfidence::High
-                                ? PropertyStatus::Exact
-                                : PropertyStatus::Likely;
-                        ns_claim.confidence = metadata.confidence;
+                            metadata.present
+                                ? (metadata.confidence == AnalysisConfidence::High
+                                      ? PropertyStatus::Exact
+                                      : PropertyStatus::Likely)
+                                : PropertyStatus::Exact;
+                        ns_claim.confidence = metadata.present
+                            ? metadata.confidence
+                            : AnalysisConfidence::High;
                         ns_claim.field = constraint_fid;
                         ns_claim.component = cv.component;
                         ns_claim.domain = DomainKind::Cell;
@@ -520,14 +1299,23 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                                 ? VariableKey::field(constraint_fid, cv.component)
                                 : VariableKey::field(constraint_fid));
                         ns_claim.description =
-                            "Constraint field " +
-                            std::to_string(constraint_fid) +
-                            " in saddle-point system has declared multiplier"
-                            " nullspace metadata";
-                        ns_claim.nullspace_family = metadata.family;
+                            metadata.present
+                                ? ("Constraint field " +
+                                   std::to_string(constraint_fid) +
+                                   " in saddle-point system has declared multiplier"
+                                   " nullspace metadata")
+                                : ("Scalar constraint field " +
+                                   std::to_string(constraint_fid) +
+                                   " in saddle-point system has certified"
+                                   " pressure-gauge constant nullspace");
+                        ns_claim.nullspace_family = metadata.present
+                            ? metadata.family
+                            : NullspaceFamily::ScalarConstant;
                         ns_claim.claim_origin = "MixedOperatorAnalyzer";
                         ns_claim.addEvidence("MixedOperatorAnalyzer",
-                            metadata.evidence, metadata.confidence);
+                            metadata.present ? metadata.evidence
+                                             : inferred.evidence,
+                            ns_claim.confidence);
                         report.claims.push_back(std::move(ns_claim));
                         emitted_nullspace_fields.insert(constraint_fid);
                     }
@@ -607,35 +1395,53 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     " available to verify specific momentum partner)");
                 report.claims.push_back(std::move(claim));
 
-                // Nullspace: one per constraint field only when explicitly
-                // declared through field metadata.  Form-level saddle-point
-                // structure alone does not identify the multiplier kernel.
+                // Nullspace: one per constraint field.  Explicit metadata is
+                // accepted, and residual-only records can still certify the
+                // pressure gauge when the full residual exposes the p*div(v)
+                // and q*div(u) pattern with no nonzero pressure reaction.
                 if (!emitted_nullspace_fields.count(cfid)) {
                     const auto metadata = declaredNullspaceForField(
                         context, cfid, -1, nullptr);
-                    if (!metadata.present) {
+                    const auto inferred = metadata.present
+                        ? InferredPressureNullspace{}
+                        : inferPressureConstantNullspaceFromResidual(
+                              context, *rec.residual_expr, cfid, momentum_fids);
+                    if (!metadata.present && !inferred.certified) {
                         continue;
                     }
                     PropertyClaim ns_claim;
                     ns_claim.kind = PropertyKind::Nullspace;
                     ns_claim.status =
-                        metadata.confidence == AnalysisConfidence::High
-                            ? PropertyStatus::Exact
-                            : PropertyStatus::Likely;
-                    ns_claim.confidence = metadata.confidence;
+                        metadata.present
+                            ? (metadata.confidence == AnalysisConfidence::High
+                                  ? PropertyStatus::Exact
+                                  : PropertyStatus::Likely)
+                            : PropertyStatus::Exact;
+                    ns_claim.confidence = metadata.present
+                        ? metadata.confidence
+                        : AnalysisConfidence::High;
                     ns_claim.field = cfid;
                     ns_claim.component = -1;
                     ns_claim.domain = DomainKind::Cell;
                     ns_claim.variables.push_back(
                         VariableKey::field(cfid));
                     ns_claim.description =
-                        "Constraint field " + std::to_string(cfid) +
-                        " in saddle-point system has declared multiplier"
-                        " nullspace metadata";
-                    ns_claim.nullspace_family = metadata.family;
+                        metadata.present
+                            ? ("Constraint field " + std::to_string(cfid) +
+                               " in saddle-point system has declared multiplier"
+                               " nullspace metadata")
+                            : ("Scalar constraint field " +
+                               std::to_string(cfid) +
+                               " in residual-defined saddle-point system has"
+                               " certified pressure-gauge constant nullspace");
+                    ns_claim.nullspace_family = metadata.present
+                        ? metadata.family
+                        : NullspaceFamily::ScalarConstant;
                     ns_claim.claim_origin = "MixedOperatorAnalyzer";
                     ns_claim.addEvidence("MixedOperatorAnalyzer",
-                        metadata.evidence, metadata.confidence);
+                        metadata.present ? metadata.evidence
+                                         : inferred.evidence,
+                        ns_claim.confidence);
                     report.claims.push_back(std::move(ns_claim));
                     emitted_nullspace_fields.insert(cfid);
                 }

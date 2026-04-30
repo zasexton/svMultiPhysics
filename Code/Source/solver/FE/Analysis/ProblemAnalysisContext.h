@@ -76,8 +76,9 @@ struct FieldDescriptor {
     bool has_exact_sequence_structure{false};   ///< HDiv/HCurl in a de Rham sequence
     bool supports_local_balance_closure{false}; ///< Spaces with conservative trace (HDiv)
 
-    // Optional kernel metadata.  This is intentionally explicit so generic
-    // multiplier fields are not treated as pressure-gauge nullspaces.
+    // Optional kernel metadata.  Analyzer passes may also certify structured
+    // nullspaces from operator IR, but generic multipliers should not be
+    // treated as gauges without explicit metadata or such certification.
     bool declared_nullspace_metadata_present{false};
     NullspaceFamily declared_nullspace_family{NullspaceFamily::UserDefined};
     std::string declared_nullspace_scope;
