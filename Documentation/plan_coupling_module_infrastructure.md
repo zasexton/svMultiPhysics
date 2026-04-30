@@ -4974,7 +4974,7 @@ Implementation checklist:
 - [x] Refresh the finalized graph after Forms and expert install metadata are
   available.
 - [x] Validate expected block coverage before `FESystem::setup()`.
-- [ ] Ensure builder failures leave `FESystem` in a clear pre-setup failed
+- [x] Ensure builder failures leave `FESystem` in a clear pre-setup failed
   state and do not partially run setup.
 - [x] Keep monolithic coupling independent of partitioned driver policy.
 
@@ -4995,7 +4995,7 @@ Unit-test verification checklist:
   shared-region participants resolve to one monolithic `FESystem`.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies contracts cannot directly
   register additional fields on `FESystem`.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies duplicate coupling fields
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies duplicate coupling fields
   fail before setup.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies Forms contributions are
   installed through the standard `installFormulation()` path.

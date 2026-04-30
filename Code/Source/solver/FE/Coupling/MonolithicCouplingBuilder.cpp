@@ -1295,6 +1295,17 @@ MonolithicCouplingBuilder::registerAdditionalFields(
         const auto& system = mutableSystemByName(context, field.system_name);
         FE_THROW_IF(system.isSetup(), systems::InvalidStateException,
                     "coupling additional fields must be registered before FESystem::setup()");
+        FE_THROW_IF(system.hasField(field.field_spec.name), InvalidArgumentException,
+                    "coupling additional field collides with an existing FESystem field");
+    }
+    for (std::size_t i = 0; i < resolved.size(); ++i) {
+        for (std::size_t j = i + 1u; j < resolved.size(); ++j) {
+            FE_THROW_IF(resolved[i].system_name == resolved[j].system_name &&
+                            resolved[i].field_spec.name ==
+                                resolved[j].field_spec.name,
+                        InvalidArgumentException,
+                        "duplicate coupling additional field registration");
+        }
     }
     for (auto& field : resolved) {
         auto& system = mutableSystemByName(context, field.system_name);

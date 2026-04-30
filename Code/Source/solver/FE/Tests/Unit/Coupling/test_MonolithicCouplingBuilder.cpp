@@ -1839,6 +1839,46 @@ TEST(MonolithicCouplingBuilder, SkipsDisabledOptionalAdditionalFields)
     EXPECT_FALSE(fixture.system.hasField("generic_instance.lambda"));
 }
 
+TEST(MonolithicCouplingBuilder, RejectsDuplicateCouplingFieldsBeforeSetup)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_FALSE(validation.ok());
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.registerAdditionalFields(
+                         fixture.context,
+                         std::span<const CouplingContractDeclaration>(
+                             declarations))),
+                 InvalidArgumentException);
+    EXPECT_FALSE(fixture.system.hasField("left.lambda"));
+    EXPECT_FALSE(fixture.system.isSetup());
+}
+
 TEST(MonolithicCouplingBuilder, EnforcesAdditionalFieldRegistrationBeforeSetup)
 {
     BuilderFixture fixture;
