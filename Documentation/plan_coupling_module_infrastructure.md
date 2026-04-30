@@ -4290,7 +4290,7 @@ Unit-test verification checklist:
   material-state, boundary-functional, boundary-integral, auxiliary-state,
   `AuxiliaryInput`, and `AuxiliaryOutput` requirements without forcing
   provenance-only dependencies into `CouplingResidualDependency`.
-- [ ] `test_CouplingContractValidation.cpp` verifies non-field requirements use
+- [x] `test_CouplingContractValidation.cpp` verifies non-field requirements use
   declaration-side names, optional region scope, optional region-kind
   constraints, material-state byte offsets, and expected value/type constraints,
   while resolved parameter slots, auxiliary ids, provider-local indices, markers,

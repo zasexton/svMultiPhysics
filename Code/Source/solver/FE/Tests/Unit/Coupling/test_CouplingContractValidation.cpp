@@ -955,6 +955,111 @@ TEST(CouplingContractValidation, ValidatesNonFieldDependencyRequirements)
     EXPECT_NE(text.find("duplicate non-field dependency requirement"), std::string::npos);
 }
 
+TEST(CouplingContractValidation, SeparatesNonFieldRequirementsFromProvenance)
+{
+    auto declaration = minimalDeclaration();
+    declaration.non_field_dependencies = {
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+            .participant_name = "left",
+            .name = "penalty",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+                .shared_region_name = "interface",
+            },
+            .required_region_kind = CouplingRegionKind::Boundary,
+            .expected_parameter_value_type = svmp::FE::params::ValueType::Real,
+            .expected_value_type = "scalar",
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::MaterialStateWork,
+            .participant_name = "left",
+            .name = "history",
+            .expected_value_type = "tensor",
+            .material_state_byte_offset = 32,
+        },
+    };
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+    ASSERT_EQ(declaration.non_field_dependencies.size(), 2u);
+    EXPECT_EQ(declaration.non_field_dependencies[0].participant_name, "left");
+    EXPECT_EQ(declaration.non_field_dependencies[0].name, "penalty");
+    ASSERT_TRUE(declaration.non_field_dependencies[0].region.has_value());
+    EXPECT_EQ(declaration.non_field_dependencies[0].region->region_name, "surface");
+    ASSERT_TRUE(
+        declaration.non_field_dependencies[0].region->shared_region_name.has_value());
+    EXPECT_EQ(*declaration.non_field_dependencies[0].region->shared_region_name,
+              "interface");
+    ASSERT_TRUE(
+        declaration.non_field_dependencies[0].expected_parameter_value_type.has_value());
+    EXPECT_EQ(*declaration.non_field_dependencies[0].expected_parameter_value_type,
+              svmp::FE::params::ValueType::Real);
+    ASSERT_TRUE(
+        declaration.non_field_dependencies[1].material_state_byte_offset.has_value());
+    EXPECT_EQ(*declaration.non_field_dependencies[1].material_state_byte_offset, 32u);
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.non_field_dependencies.push_back(
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::Parameter,
+            .participant_name = "left",
+            .system_name = "left_system",
+            .name = "penalty",
+            .domain = svmp::FE::analysis::DomainKind::Boundary,
+            .region_name = "surface",
+            .shared_region_name = "interface",
+            .marker = 17,
+            .side = CouplingInterfaceSide::Minus,
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+            .logical_region = svmp::search::LogicalInterfaceRegionId{
+                .persistent_id = "left/surface",
+                .physical_label = 17,
+            },
+#endif
+            .slot = 5,
+            .provider = "forms",
+            .value_type = "scalar",
+            .parameter_value_type = svmp::FE::params::ValueType::Real,
+        });
+    metadata.non_field_dependencies.push_back(
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::MaterialStateWork,
+            .participant_name = "left",
+            .system_name = "left_system",
+            .name = "history",
+            .byte_offset = 32,
+            .provider = "forms",
+            .value_type = "tensor",
+        });
+    metadata.non_field_dependencies.push_back(
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::AuxiliaryOutput,
+            .participant_name = "left",
+            .system_name = "left_system",
+            .name = "traction_out",
+            .output_id = 9,
+            .provider = "forms",
+            .value_type = "scalar",
+        });
+
+    ASSERT_EQ(metadata.non_field_dependencies.size(), 3u);
+    EXPECT_EQ(metadata.non_field_dependencies[0].system_name, "left_system");
+    EXPECT_EQ(metadata.non_field_dependencies[0].marker, 17);
+    EXPECT_EQ(metadata.non_field_dependencies[0].side, CouplingInterfaceSide::Minus);
+    ASSERT_TRUE(metadata.non_field_dependencies[0].slot.has_value());
+    EXPECT_EQ(*metadata.non_field_dependencies[0].slot, 5u);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    ASSERT_TRUE(metadata.non_field_dependencies[0].logical_region.has_value());
+    EXPECT_EQ(metadata.non_field_dependencies[0].logical_region->physical_label, 17);
+#endif
+    ASSERT_TRUE(metadata.non_field_dependencies[1].byte_offset.has_value());
+    EXPECT_EQ(*metadata.non_field_dependencies[1].byte_offset, 32u);
+    ASSERT_TRUE(metadata.non_field_dependencies[2].output_id.has_value());
+    EXPECT_EQ(*metadata.non_field_dependencies[2].output_id, 9u);
+}
+
 TEST(CouplingContractValidation, ValidatesTemporalRequirementsAndExchangeShape)
 {
     auto declaration = minimalDeclaration();
