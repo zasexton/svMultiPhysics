@@ -1588,19 +1588,19 @@ enum class ThermalInterfaceFormulation {
 
 ### FE/Coupling Unit Tests
 
-- [ ] Test field requirement validation for scalar fields.
-- [ ] Test field requirement validation for vector fields.
-- [ ] Test component-count mismatch diagnostics.
-- [ ] Test required participant lookup diagnostics.
-- [ ] Test required field lookup diagnostics.
-- [ ] Test required shared-region lookup diagnostics.
-- [ ] Test missing shared-interface participant diagnostics.
+- [x] Test field requirement validation for scalar fields.
+- [x] Test field requirement validation for vector fields.
+- [x] Test component-count mismatch diagnostics.
+- [x] Test required participant lookup diagnostics.
+- [x] Test required field lookup diagnostics.
+- [x] Test required shared-region lookup diagnostics.
+- [x] Test missing shared-interface participant diagnostics.
 - [x] Test same-side interface diagnostics.
-- [ ] Test N-way interface diagnostics.
+- [x] Test N-way interface diagnostics.
 - [ ] Test mixed-dimensional region relation diagnostics.
-- [ ] Test optional endpoint validation.
-- [ ] Test monolithic mixed-system diagnostics.
-- [ ] Test missing interface topology diagnostics.
+- [x] Test optional endpoint validation.
+- [x] Test monolithic mixed-system diagnostics.
+- [x] Test missing interface topology diagnostics.
 - [ ] Test transform, orientation, component-layout, and frame-policy
       diagnostics.
 - [x] Test relation lowering capability validation.

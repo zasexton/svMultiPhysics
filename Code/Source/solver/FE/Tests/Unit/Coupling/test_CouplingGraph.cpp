@@ -139,7 +139,7 @@ public:
     }
 };
 
-CouplingContext graphContext()
+CouplingContext graphContext(int primary_components = 1)
 {
     const auto* system = graphSystemToken();
     const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
@@ -165,7 +165,7 @@ CouplingContext graphContext()
         .field_name = "primary",
         .field_id = 1,
         .space = space,
-        .components = 1,
+        .components = primary_components,
     });
     builder.addRegion(surface);
     builder.addSharedRegion(SharedRegionRef{
@@ -1341,6 +1341,14 @@ TEST(CouplingGraph, ValidatesFieldRequirementShapeAgainstContext)
     });
 
     EXPECT_TRUE(buildGraph(graphContext(), declaration).ok());
+
+    auto vector_declaration = graphDeclaration();
+    vector_declaration.field_requirements.push_back({
+        .field = {.participant_name = "left", .field_name = "primary"},
+        .value = {.rank = CouplingValueRank::Vector, .components = 3},
+        .required_scope = systems::FieldScope::VolumeCell,
+    });
+    EXPECT_TRUE(buildGraph(graphContext(3), vector_declaration).ok());
 
     declaration.field_requirements.front().value =
         CouplingValueDescriptor{.rank = CouplingValueRank::Vector, .components = 3};
