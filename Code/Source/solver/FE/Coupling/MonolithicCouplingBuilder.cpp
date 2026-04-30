@@ -271,6 +271,24 @@ ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribut
         resolved.install_options.extra_trial_fields.push_back(field);
     }
 
+    auto is_active_trial_field = [&](const CouplingFieldUse& use) {
+        const auto field = context.field(use.participant_name, use.field_name).field_id;
+        return std::find(resolved.fields.begin(), resolved.fields.end(), field) !=
+                   resolved.fields.end() ||
+               std::find(resolved.extra_trial_fields.begin(),
+                         resolved.extra_trial_fields.end(),
+                         field) != resolved.extra_trial_fields.end();
+    };
+    for (const auto& terminal : contribution.terminal_provenance) {
+        if (terminal.kind != CouplingFormTerminalProvenanceKind::PreviousSolution) {
+            continue;
+        }
+        FE_THROW_IF(!terminal.field.has_value(), InvalidArgumentException,
+                    "previous solution terminal provenance requires a field");
+        FE_THROW_IF(!is_active_trial_field(*terminal.field), InvalidArgumentException,
+                    "previous solution terminal provenance requires an active trial field");
+    }
+
     resolved.residual = contribution.residual;
     return resolved;
 }

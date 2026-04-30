@@ -319,6 +319,34 @@ TEST(MonolithicCouplingBuilder, RejectsOverlappingPrimaryAndExtraTrialFields)
                  InvalidArgumentException);
 }
 
+TEST(MonolithicCouplingBuilder, RejectsPreviousSolutionProvenanceOutsideTrialFields)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "bad_history_owner";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.terminal_provenance.push_back(CouplingFormTerminalProvenanceDeclaration{
+        .kind = CouplingFormTerminalProvenanceKind::PreviousSolution,
+        .terminal_sequence = 1,
+        .field = CouplingFieldUse{
+            .participant_name = "left",
+            .field_name = "primary",
+        },
+        .temporal_quantity = CouplingTemporalQuantity::FieldHistoryValue,
+        .history_index = 1,
+    });
+    contribution.residual =
+        (forms.previousSolution("left", "primary", 1) *
+         forms.test("right", "primary", "w")).dx();
+
+    EXPECT_THROW(static_cast<void>(builder.resolveFormContribution(fixture.context, contribution)),
+                 InvalidArgumentException);
+}
+
 TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
 {
     BuilderFixture fixture;

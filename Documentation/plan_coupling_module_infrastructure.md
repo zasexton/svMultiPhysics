@@ -4334,7 +4334,7 @@ Implementation checklist:
   provenance, expose no symbolic-name parameter, and lower through the public
   `FormExpr::previousSolution(k)` path to the existing field/trial-scoped
   `PreviousSolutionRef(k)` Forms terminal.
-- [ ] Validate `CouplingFormBuilder::previousSolution()` use in mixed forms by
+- [x] Validate `CouplingFormBuilder::previousSolution()` use in mixed forms by
   requiring the named participant/field to match the active trial field for the
   installed contribution, or by recording explicit owning-trial-block provenance
   from the metadata bridge.
