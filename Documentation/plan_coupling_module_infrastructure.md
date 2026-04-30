@@ -4823,7 +4823,7 @@ Unit-test verification checklist:
   combinations fail before any `FESystem` field registration mutates state.
 - [x] `test_CouplingGraph.cpp` distinguishes declaration-stage validation from
   finalized graph validation for coupling-owned fields.
-- [ ] `test_CouplingGraph.cpp` rejects monolithic Forms coupling across
+- [x] `test_CouplingGraph.cpp` rejects monolithic Forms coupling across
   incompatible `FESystem` instances or unregistered interface topology.
 - [ ] `test_CouplingGraph.cpp` verifies identical raw `FieldId`s or interface
   markers from two different `FESystem` instances are not treated as the same

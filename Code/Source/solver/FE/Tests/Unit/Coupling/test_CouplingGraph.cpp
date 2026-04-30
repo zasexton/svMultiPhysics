@@ -1607,6 +1607,69 @@ TEST(CouplingGraph, DistinguishesDeclarationAndFinalizedValidationForCouplingOwn
     EXPECT_NE(text.find("field='lambda'"), std::string::npos);
 }
 
+TEST(CouplingGraph, RejectsInterfaceContractWithoutRegisteredTopology)
+{
+    NonFieldGraphFixture fixture(/*register_variables=*/false);
+    const CouplingRegionRef left_interface{
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    const CouplingRegionRef right_interface{
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "shared_system",
+        .system = &fixture.system,
+    });
+    builder.addRegion(left_interface);
+    builder.addRegion(right_interface);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_interface, right_interface},
+    });
+    const auto context = builder.build();
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "interface";
+    declaration.contract_name = "interface_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.shared_regions.push_back({
+        .shared_region_name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+    });
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = graph.buildDeclarationGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "interface-face coupling region is missing registered interface topology"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsSkippedOptionalAdditionalFieldReferences)
 {
     auto skipped_owner = graphDeclaration();
