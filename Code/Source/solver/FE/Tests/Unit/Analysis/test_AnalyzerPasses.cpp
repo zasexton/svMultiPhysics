@@ -42,6 +42,26 @@ std::shared_ptr<spaces::FunctionSpace> vectorH1(int dim = 3) {
     return std::make_shared<spaces::ProductSpace>(base, dim);
 }
 
+bool hasCouplingClaim(const ProblemAnalysisReport& report,
+                      const VariableKey& a,
+                      const VariableKey& b,
+                      DomainKind domain)
+{
+    for (const auto& claim : report.claims) {
+        if (claim.kind != PropertyKind::CoupledSystemStructure ||
+            claim.domain != domain ||
+            claim.variables.size() != 2u) {
+            continue;
+        }
+        const bool same_order = claim.variables[0] == a && claim.variables[1] == b;
+        const bool reverse_order = claim.variables[0] == b && claim.variables[1] == a;
+        if (same_order || reverse_order) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Helper: build a FormulationRecord for scalar Poisson (pure Neumann)
 FormulationRecord makePoissonRecord() {
     auto space = scalarH1();
@@ -425,9 +445,20 @@ TEST(CouplingGraphAnalyzer, CoupledRecord_EmitsCoupledStructure) {
     FormulationRecord rec;
     rec.operator_tag = "equations";
     rec.active_fields = {0};
+    const auto field = VariableKey::field(0);
     auto bf = VariableKey::named(VariableKind::BoundaryFunctional, "Q");
-    rec.variable_couplings.emplace_back(VariableKey::field(0), bf);
+    const auto aux_state = VariableKey::named(VariableKind::AuxiliaryState, "P_d");
+    const auto aux_input =
+        VariableKey::named(VariableKind::AuxiliaryInput, "windkessel/inflow");
+    const auto aux_output =
+        VariableKey::named(VariableKind::AuxiliaryOutput, "windkessel/pressure");
+    const auto global = VariableKey::named(VariableKind::GlobalScalar, "lambda");
+    rec.variable_couplings.emplace_back(field, bf);
+    rec.variable_couplings.emplace_back(field, global);
     rec.boundary_functional_dependencies.push_back(bf);
+    rec.auxiliary_state_dependencies.push_back(aux_state);
+    rec.auxiliary_input_dependencies.push_back(aux_input);
+    rec.auxiliary_output_dependencies.push_back(aux_output);
     ctx.addFormulationRecord(rec);
 
     ProblemAnalysisReport report;
@@ -435,6 +466,11 @@ TEST(CouplingGraphAnalyzer, CoupledRecord_EmitsCoupledStructure) {
 
     auto coupled = report.claimsOfKind(PropertyKind::CoupledSystemStructure);
     EXPECT_GE(coupled.size(), 1u);
+    EXPECT_TRUE(hasCouplingClaim(report, field, bf, DomainKind::CoupledBoundary));
+    EXPECT_TRUE(hasCouplingClaim(report, field, aux_state, DomainKind::AuxiliaryCoupling));
+    EXPECT_TRUE(hasCouplingClaim(report, field, aux_input, DomainKind::AuxiliaryCoupling));
+    EXPECT_TRUE(hasCouplingClaim(report, field, aux_output, DomainKind::AuxiliaryCoupling));
+    EXPECT_TRUE(hasCouplingClaim(report, field, global, DomainKind::Global));
 }
 
 TEST(CouplingGraphAnalyzer, NoCouplings_NoClaims) {

@@ -4718,7 +4718,7 @@ Implementation checklist:
   resolved `analysis::DomainKind`, and frame-transform configuration provenance,
   with installed dependency evidence carrying `analysis::DomainKind`, provider,
   and matrix/vector contribution flags.
-- [ ] Extend or adapt `FE/Analysis/CouplingGraphAnalyzer` so fallback Analysis
+- [x] Extend or adapt `FE/Analysis/CouplingGraphAnalyzer` so fallback Analysis
   consumption includes `FormulationRecord::auxiliary_input_dependencies`,
   `FormulationRecord::auxiliary_output_dependencies`, and global-scalar
   dependencies from `ContributionDescriptor`, `FormStructureSummary`, or an
@@ -4861,7 +4861,7 @@ Unit-test verification checklist:
   `CouplingInstallMetadata` records are rejected when they lack resolved
   contribution identity, `analysis::VariableKey` identity,
   `analysis::DomainKind` provenance, or matrix/vector contribution flags.
-- [ ] `test_CouplingGraph.cpp` verifies fallback
+- [x] `test_CouplingGraph.cpp` verifies fallback
   `FE/Analysis/CouplingGraphAnalyzer` consumption includes
   `FormulationRecord::auxiliary_input_dependencies`,
   `FormulationRecord::auxiliary_output_dependencies`, and global-scalar

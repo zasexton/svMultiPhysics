@@ -65,6 +65,75 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
         report.claims.push_back(std::move(claim));
     };
 
+    const auto dependency_domain = [](const VariableKey& dependency) {
+        switch (dependency.kind) {
+            case VariableKind::BoundaryFunctional:
+                return DomainKind::CoupledBoundary;
+            case VariableKind::AuxiliaryState:
+            case VariableKind::AuxiliaryInput:
+            case VariableKind::AuxiliaryOutput:
+                return DomainKind::AuxiliaryCoupling;
+            case VariableKind::GlobalScalar:
+                return DomainKind::Global;
+            case VariableKind::FieldComponent:
+                return DomainKind::Cell;
+        }
+        return DomainKind::Cell;
+    };
+
+    const auto coupling_domain = [&](const VariableKey& a, const VariableKey& b) {
+        if (b.kind != VariableKind::FieldComponent) {
+            return dependency_domain(b);
+        }
+        if (a.kind != VariableKind::FieldComponent) {
+            return dependency_domain(a);
+        }
+        return DomainKind::Cell;
+    };
+
+    const auto emit_record_dependency =
+        [&](const FormulationRecord& rec,
+            const VariableKey& dependency,
+            const std::string& source_tag)
+    {
+        for (FieldId fid : rec.active_fields) {
+            emit_coupling(VariableKey::field(fid),
+                          dependency,
+                          dependency_domain(dependency),
+                          source_tag + " in '" + rec.operator_tag + "'");
+        }
+    };
+
+    const auto emit_formulation_record = [&](const FormulationRecord& rec) {
+        for (const auto& [test_fid, trial_fid] : rec.block_couplings) {
+            auto a = VariableKey::field(test_fid);
+            auto b = VariableKey::field(trial_fid);
+            emit_coupling(a, b, DomainKind::Cell,
+                          "formulation '" + rec.operator_tag + "'");
+        }
+
+        for (const auto& [va, vb] : rec.variable_couplings) {
+            emit_coupling(va, vb, coupling_domain(va, vb),
+                          "formulation '" + rec.operator_tag + "'");
+        }
+
+        for (const auto& bf : rec.boundary_functional_dependencies) {
+            emit_record_dependency(rec, bf, "boundary functional");
+        }
+
+        for (const auto& aux : rec.auxiliary_state_dependencies) {
+            emit_record_dependency(rec, aux, "auxiliary state");
+        }
+
+        for (const auto& input : rec.auxiliary_input_dependencies) {
+            emit_record_dependency(rec, input, "auxiliary input");
+        }
+
+        for (const auto& output : rec.auxiliary_output_dependencies) {
+            emit_record_dependency(rec, output, "auxiliary output");
+        }
+    };
+
     // =====================================================================
     // PRIMARY PATH: Consume ContributionDescriptors
     // =====================================================================
@@ -96,18 +165,6 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
                 }
             }
 
-            // Detect CoupledSystemStructure when non-FE variables are involved
-            bool has_non_fe = false;
-            for (const auto& tv : contrib.test_variables) {
-                if (tv.kind != VariableKind::FieldComponent) has_non_fe = true;
-            }
-            for (const auto& tv : contrib.trial_variables) {
-                if (tv.kind != VariableKind::FieldComponent) has_non_fe = true;
-            }
-            for (const auto& rv : contrib.related_variables) {
-                if (rv.kind != VariableKind::FieldComponent) has_non_fe = true;
-            }
-
             // Non-FE variable couplings are already emitted above through
             // the test x trial cross-product and related variables.
         }
@@ -115,36 +172,10 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
         // Also include fallback paths that may carry additional information
 
         // --- Formulation records for block_couplings/variable_couplings/
-        //     boundary_functional_dependencies/auxiliary_state_dependencies
+        //     non-field dependency lists
         //     that might not have been lowered to contributions yet ---
         for (const auto& rec : context.formulationRecords()) {
-            for (const auto& [test_fid, trial_fid] : rec.block_couplings) {
-                auto a = VariableKey::field(test_fid);
-                auto b = VariableKey::field(trial_fid);
-                emit_coupling(a, b, DomainKind::Cell,
-                              "formulation '" + rec.operator_tag + "'");
-            }
-
-            for (const auto& [va, vb] : rec.variable_couplings) {
-                emit_coupling(va, vb, DomainKind::Cell,
-                              "formulation '" + rec.operator_tag + "'");
-            }
-
-            for (const auto& bf : rec.boundary_functional_dependencies) {
-                for (FieldId fid : rec.active_fields) {
-                    auto fk = VariableKey::field(fid);
-                    emit_coupling(fk, bf, DomainKind::CoupledBoundary,
-                                  "boundary functional in '" + rec.operator_tag + "'");
-                }
-            }
-
-            for (const auto& aux : rec.auxiliary_state_dependencies) {
-                for (FieldId fid : rec.active_fields) {
-                    auto fk = VariableKey::field(fid);
-                    emit_coupling(fk, aux, DomainKind::Cell,
-                                  "auxiliary state in '" + rec.operator_tag + "'");
-                }
-            }
+            emit_formulation_record(rec);
         }
 
         // --- BC descriptors ---
@@ -167,37 +198,7 @@ void CouplingGraphAnalyzer::run(const ProblemAnalysisContext& context,
 
     // --- Formulation records ---
     for (const auto& rec : context.formulationRecords()) {
-        // Block couplings (FE field pairs)
-        for (const auto& [test_fid, trial_fid] : rec.block_couplings) {
-            auto a = VariableKey::field(test_fid);
-            auto b = VariableKey::field(trial_fid);
-            emit_coupling(a, b, DomainKind::Cell,
-                          "formulation '" + rec.operator_tag + "'");
-        }
-
-        // Generic variable couplings
-        for (const auto& [va, vb] : rec.variable_couplings) {
-            emit_coupling(va, vb, DomainKind::Cell,
-                          "formulation '" + rec.operator_tag + "'");
-        }
-
-        // Boundary functional dependencies couple to active fields
-        for (const auto& bf : rec.boundary_functional_dependencies) {
-            for (FieldId fid : rec.active_fields) {
-                auto fk = VariableKey::field(fid);
-                emit_coupling(fk, bf, DomainKind::CoupledBoundary,
-                              "boundary functional in '" + rec.operator_tag + "'");
-            }
-        }
-
-        // Auxiliary state dependencies couple to active fields
-        for (const auto& aux : rec.auxiliary_state_dependencies) {
-            for (FieldId fid : rec.active_fields) {
-                auto fk = VariableKey::field(fid);
-                emit_coupling(fk, aux, DomainKind::Cell,
-                              "auxiliary state in '" + rec.operator_tag + "'");
-            }
-        }
+        emit_formulation_record(rec);
     }
 
     // --- BC descriptors ---

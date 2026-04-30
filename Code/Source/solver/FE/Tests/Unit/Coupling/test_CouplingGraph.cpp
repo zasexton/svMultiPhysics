@@ -2,6 +2,9 @@
 #include "Coupling/MonolithicCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 
+#include "Analysis/CouplingGraphAnalyzer.h"
+#include "Analysis/FormulationRecord.h"
+#include "Analysis/ProblemAnalysisContext.h"
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Auxiliary/AuxiliaryBindings.h"
@@ -31,6 +34,26 @@ namespace {
 const systems::FESystem* graphSystemToken()
 {
     return reinterpret_cast<const systems::FESystem*>(1);
+}
+
+bool hasAnalysisCouplingClaim(const analysis::ProblemAnalysisReport& report,
+                              const analysis::VariableKey& a,
+                              const analysis::VariableKey& b,
+                              analysis::DomainKind domain)
+{
+    for (const auto& claim : report.claims) {
+        if (claim.kind != analysis::PropertyKind::CoupledSystemStructure ||
+            claim.domain != domain ||
+            claim.variables.size() != 2u) {
+            continue;
+        }
+        const bool same_order = claim.variables[0] == a && claim.variables[1] == b;
+        const bool reverse_order = claim.variables[0] == b && claim.variables[1] == a;
+        if (same_order || reverse_order) {
+            return true;
+        }
+    }
+    return false;
 }
 
 class GraphParameterKernel final : public assembly::BilinearFormKernel {
@@ -1619,6 +1642,47 @@ TEST(CouplingGraph, AcceptsDeclaredImplicitDependencyFromVariableMetadata)
         installed_forms);
 
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, FallbackGraphAnalyzerConsumesFormulationNonFieldDependencies)
+{
+    analysis::ProblemAnalysisContext context;
+    analysis::FormulationRecord record;
+    record.operator_tag = "coupled_form";
+    record.active_fields = {2};
+
+    const auto row = analysis::VariableKey::field(2);
+    const auto boundary = analysis::VariableKey::named(
+        analysis::VariableKind::BoundaryFunctional,
+        "flow");
+    const auto aux_input = analysis::VariableKey::named(
+        analysis::VariableKind::AuxiliaryInput,
+        "driver/inlet");
+    const auto aux_output = analysis::VariableKey::named(
+        analysis::VariableKind::AuxiliaryOutput,
+        "model/pressure");
+    const auto global = analysis::VariableKey::named(
+        analysis::VariableKind::GlobalScalar,
+        "lambda");
+
+    record.boundary_functional_dependencies.push_back(boundary);
+    record.auxiliary_input_dependencies.push_back(aux_input);
+    record.auxiliary_output_dependencies.push_back(aux_output);
+    record.variable_couplings.emplace_back(row, global);
+    context.addFormulationRecord(record);
+
+    analysis::ProblemAnalysisReport report;
+    analysis::CouplingGraphAnalyzer analyzer;
+    analyzer.run(context, report);
+
+    EXPECT_TRUE(hasAnalysisCouplingClaim(
+        report, row, boundary, analysis::DomainKind::CoupledBoundary));
+    EXPECT_TRUE(hasAnalysisCouplingClaim(
+        report, row, aux_input, analysis::DomainKind::AuxiliaryCoupling));
+    EXPECT_TRUE(hasAnalysisCouplingClaim(
+        report, row, aux_output, analysis::DomainKind::AuxiliaryCoupling));
+    EXPECT_TRUE(hasAnalysisCouplingClaim(
+        report, row, global, analysis::DomainKind::Global));
 }
 
 TEST(CouplingGraph, ValidatesNonFieldDependencyExpectationsThroughVariableKeys)
