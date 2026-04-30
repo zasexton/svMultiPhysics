@@ -4764,7 +4764,7 @@ Implementation checklist:
   existing FE registries/providers, and validate external-buffer and driver-owned
   transfer endpoints against explicit driver-owned registries, rather than
   adding a parallel endpoint registry.
-- [ ] Validate partitioned endpoint temporal slots against endpoint kind and
+- [x] Validate partitioned endpoint temporal slots against endpoint kind and
   registry support, including `history_index` only for History,
   `stage_index` only for Stage, logical 1-based history numbering, and the
   special restrictions for Field accepted/predicted/stage/external slots,

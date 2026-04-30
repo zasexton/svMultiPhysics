@@ -2144,6 +2144,18 @@ TEST(CouplingGraph, RejectsInvalidPartitionedExchangeDeclarations)
     }
     {
         auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0]
+            .producer->temporal = CouplingTemporalSlotDescriptor{
+                .slot = CouplingTemporalSlot::Current,
+                .stage_index = 0,
+            };
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("stage index is valid only"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
         declaration.partitioned_exchange_declarations[0].value.components = 0;
         const auto validation = buildGraph(context, declaration);
         EXPECT_FALSE(validation.ok());
