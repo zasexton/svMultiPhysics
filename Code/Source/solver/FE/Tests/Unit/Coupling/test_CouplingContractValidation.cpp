@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <type_traits>
 
 using namespace svmp::FE::coupling;
 using svmp::FE::InvalidArgumentException;
@@ -75,6 +76,50 @@ public:
     }
 };
 
+class ExpertInstallContract final : public CouplingContract {
+public:
+    [[nodiscard]] std::string name() const override { return "expert_install"; }
+
+    [[nodiscard]] CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = name();
+        declaration.contract_name = "expert_install_instance";
+        return declaration;
+    }
+
+    [[nodiscard]] bool supportsMonolithicLowering() const override { return true; }
+
+    [[nodiscard]] std::vector<CouplingInstallMetadata> installMonolithicTerms(
+        MonolithicCouplingInstallContext& install,
+        const CouplingContext& ctx) override
+    {
+        called_ = true;
+        install_context_ = &install;
+        coupling_context_ = &ctx;
+        return {CouplingInstallMetadata{
+            .contribution_name = "expert_term",
+            .origin = "ExpertInstallContract",
+            .system_name = "left_system",
+        }};
+    }
+
+    [[nodiscard]] bool called() const noexcept { return called_; }
+    [[nodiscard]] const MonolithicCouplingInstallContext* installContext() const noexcept
+    {
+        return install_context_;
+    }
+    [[nodiscard]] const CouplingContext* couplingContext() const noexcept
+    {
+        return coupling_context_;
+    }
+
+private:
+    bool called_{false};
+    const MonolithicCouplingInstallContext* install_context_{nullptr};
+    const CouplingContext* coupling_context_{nullptr};
+};
+
 } // namespace
 
 TEST(CouplingContractValidation, AcceptsMinimalTwoParticipantDeclaration)
@@ -119,6 +164,28 @@ TEST(CouplingContractValidation, AcceptsValidNParticipantDeclaration)
     });
 
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+}
+
+TEST(CouplingContractValidation, InvokesExpertInstallHooksThroughInstallContext)
+{
+    using InstallHook = std::vector<CouplingInstallMetadata> (CouplingContract::*)(
+        MonolithicCouplingInstallContext&,
+        const CouplingContext&);
+    static_assert(std::is_same_v<decltype(&CouplingContract::installMonolithicTerms),
+                                 InstallHook>);
+
+    ExpertInstallContract contract;
+    MonolithicCouplingInstallContext install_context;
+    const CouplingContext coupling_context;
+    const auto metadata =
+        contract.installMonolithicTerms(install_context, coupling_context);
+
+    EXPECT_TRUE(contract.called());
+    EXPECT_EQ(contract.installContext(), &install_context);
+    EXPECT_EQ(contract.couplingContext(), &coupling_context);
+    ASSERT_EQ(metadata.size(), 1u);
+    EXPECT_EQ(metadata[0].contribution_name, "expert_term");
+    EXPECT_EQ(metadata[0].origin, "ExpertInstallContract");
 }
 
 TEST(CouplingContractValidation, RejectsEmptyContractNames)

@@ -4311,7 +4311,7 @@ Unit-test verification checklist:
   without invoking unsupported lowering hooks.
 - [x] `test_CouplingContractValidation.cpp` verifies additional-field
   declarations reject collisions and accept unique coupling fields.
-- [ ] `test_CouplingContractValidation.cpp` verifies expert install hooks are
+- [x] `test_CouplingContractValidation.cpp` verifies expert install hooks are
   invoked only through `MonolithicCouplingInstallContext`.
 - [ ] `test_CouplingContractValidation.cpp` verifies Forms contributions reject
   duplicate or empty contribution names within one contract and preserve
