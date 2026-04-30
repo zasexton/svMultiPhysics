@@ -141,41 +141,6 @@ void appendMonolithicGeometryRequirements(
     });
 }
 
-forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
-                                        fec::CouplingInterfaceSide side)
-{
-    switch (side) {
-    case fec::CouplingInterfaceSide::Minus:
-        return expr.minus();
-    case fec::CouplingInterfaceSide::Plus:
-        return expr.plus();
-    case fec::CouplingInterfaceSide::None:
-        break;
-    }
-    FE_THROW(FE::InvalidArgumentException,
-             "FSI monolithic form requires explicit interface sides");
-    return forms::FormExpr{};
-}
-
-fec::CouplingGeometryTerminalScope interfaceGeometryScope(
-    const FSICouplingOptions& options,
-    const fec::CouplingRegionRef& region)
-{
-    return fec::CouplingGeometryTerminalScope{
-        .participant_name = region.participant_name,
-        .region = fec::CouplingRegionEndpointDeclaration{
-            .participant_name = region.participant_name,
-            .shared_region_name = options.interface_name,
-        },
-        .location = fec::CouplingGeometryTerminalLocationDeclaration{
-            .region_kind = fec::CouplingRegionKind::InterfaceFace,
-            .shared_region_name = options.interface_name,
-            .side = region.side,
-            .coordinate_configuration = forms::GeometryConfiguration::Reference,
-        },
-    };
-}
-
 fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& options)
 {
     return fec::CouplingValueDescriptor{
@@ -760,34 +725,22 @@ FSICouplingModule::buildMonolithicForms(
     validateMonolithicFormContext(validation, ctx, options_);
     throwIfInvalid(validation);
 
-    const auto fluid_region = form_builder.sharedRegion(options_.interface_name,
-                                                        options_.fluid_name);
-    const auto solid_region = form_builder.sharedRegion(options_.interface_name,
-                                                        options_.solid_name);
+    const auto interface = form_builder.sharedInterface(options_.interface_name);
+    const auto fluid_side = interface.side(options_.fluid_name);
+    const auto solid_side = interface.side(options_.solid_name);
 
     const auto fluid_velocity =
-        restrictToInterfaceSide(
-            form_builder.state(options_.fluid_name,
-                               options_.fluid_velocity_field,
-                               "u_f"),
-            fluid_region.side);
+        fluid_side.state(options_.fluid_velocity_field, "u_f");
     const auto fluid_velocity_test =
-        restrictToInterfaceSide(
-            form_builder.test(options_.fluid_name,
-                              options_.fluid_velocity_field,
-                              "w_f"),
-            fluid_region.side);
+        fluid_side.test(options_.fluid_velocity_field, "w_f");
 
     fec::CouplingFieldUse solid_dependency;
     forms::FormExpr solid_velocity;
     if (options_.use_solid_displacement_derivative) {
         solid_dependency = fieldUse(options_.solid_name,
                                     options_.solid_displacement_field);
-        solid_velocity = restrictToInterfaceSide(
-            form_builder.timeDerivative(options_.solid_name,
-                                        options_.solid_displacement_field,
-                                        "dt_d_s"),
-            solid_region.side);
+        solid_velocity = solid_side.dt(options_.solid_displacement_field,
+                                       "dt_d_s");
     } else {
         FE_THROW_IF(!options_.solid_velocity_field.has_value() ||
                         options_.solid_velocity_field->empty(),
@@ -795,9 +748,7 @@ FSICouplingModule::buildMonolithicForms(
                     "FSI monolithic form requires a solid velocity field or displacement derivative");
         const auto& solid_velocity_field = *options_.solid_velocity_field;
         solid_dependency = fieldUse(options_.solid_name, solid_velocity_field);
-        solid_velocity = restrictToInterfaceSide(
-            form_builder.state(options_.solid_name, solid_velocity_field, "v_s"),
-            solid_region.side);
+        solid_velocity = solid_side.state(solid_velocity_field, "v_s");
     }
 
     std::vector<fec::CouplingFormContribution> contributions;
@@ -821,10 +772,9 @@ FSICouplingModule::buildMonolithicForms(
                                      options_.fluid_velocity_field)};
     kinematic.extra_trial_field_uses = {std::move(solid_dependency)};
     kinematic.residual =
-        form_builder.integrateShared(forms::inner(fluid_velocity - solid_velocity,
-                                                  fluid_velocity_test),
-                                     options_.interface_name,
-                                     options_.fluid_name);
+        interface.integral(forms::inner(fluid_velocity - solid_velocity,
+                                        fluid_velocity_test),
+                           options_.fluid_name);
     if (mesh_geometry_sensitivity.has_value()) {
         kinematic.install_options_declaration.geometry_sensitivity =
             *mesh_geometry_sensitivity;
@@ -835,23 +785,10 @@ FSICouplingModule::buildMonolithicForms(
         form_builder.attachTerminalProvenance(std::move(kinematic)));
 
     const auto fluid_pressure =
-        restrictToInterfaceSide(
-            form_builder.state(options_.fluid_name,
-                               options_.fluid_pressure_field,
-                               "p_f"),
-            fluid_region.side);
+        fluid_side.state(options_.fluid_pressure_field, "p_f");
     const auto solid_displacement_test =
-        restrictToInterfaceSide(
-            form_builder.test(options_.solid_name,
-                              options_.solid_displacement_field,
-                              "w_s"),
-            solid_region.side);
-    const auto interface_normal =
-        restrictToInterfaceSide(
-            form_builder.geometryTerminal(
-                fec::CouplingGeometryTerminalQuantity::Normal,
-                interfaceGeometryScope(options_, fluid_region)),
-            fluid_region.side);
+        solid_side.test(options_.solid_displacement_field, "w_s");
+    const auto interface_normal = fluid_side.normal();
 
     fec::CouplingFormContribution traction;
     traction.contribution_name =
@@ -863,10 +800,9 @@ FSICouplingModule::buildMonolithicForms(
     traction.extra_trial_field_uses = {fieldUse(options_.fluid_name,
                                                 options_.fluid_pressure_field)};
     traction.residual =
-        form_builder.integrateShared(
+        interface.integral(
             -forms::inner(fluid_pressure * interface_normal,
                           solid_displacement_test),
-            options_.interface_name,
             options_.fluid_name);
     if (mesh_geometry_sensitivity.has_value()) {
         traction.install_options_declaration.geometry_sensitivity =

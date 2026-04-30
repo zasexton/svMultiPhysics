@@ -1244,8 +1244,8 @@ forms::FormExpr CouplingRegionRelationView::sum(
 
 ### Completion Checklist
 
-- [ ] FSI monolithic forms no longer manually call `restrictToInterfaceSide`.
-- [ ] FSI monolithic forms no longer manually construct
+- [x] FSI monolithic forms no longer manually call `restrictToInterfaceSide`.
+- [x] FSI monolithic forms no longer manually construct
       `CouplingGeometryTerminalScope`.
 - [ ] Thermal monolithic forms can use the same interface-view API.
 - [x] N-way conservation residuals can be written without manually iterating
@@ -1471,13 +1471,13 @@ equation definitions, and partitioned strategy choices.
       - solid displacement as interface vector
       - optional solid velocity as interface vector
       - optional mesh displacement as interface vector
-- [ ] Define the monolithic velocity-continuity residual with interface-view
+- [x] Define the monolithic velocity-continuity residual with interface-view
       Forms.
-- [ ] Define the monolithic pressure-traction residual with interface-view
+- [x] Define the monolithic pressure-traction residual with interface-view
       Forms.
-- [ ] Preserve optional solid velocity versus time derivative of solid
+- [x] Preserve optional solid velocity versus time derivative of solid
       displacement.
-- [ ] Preserve optional mesh-displacement geometry sensitivity.
+- [x] Preserve optional mesh-displacement geometry sensitivity.
 - [x] Define partitioned channels through `PartitionedCouplingBuilder`.
 - [ ] Remove local helpers that duplicate backend responsibilities:
       - `validateVectorFieldComponents`
