@@ -1482,6 +1482,54 @@ TEST(MonolithicCouplingBuilder, EnforcesAdditionalFieldRegistrationBeforeSetup)
     EXPECT_TRUE(fixture.system.isSetup());
 }
 
+TEST(MonolithicCouplingBuilder, RefreshesContextWithRegisteredAdditionalFields)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .system_participant_name = "right",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto registered = builder.registerAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(registered.size(), 2u);
+
+    const auto refreshed =
+        builder.refreshContextWithAdditionalFields(fixture.context, registered);
+    const auto participant_field = refreshed.field("left", "lambda");
+    EXPECT_EQ(participant_field.field_id, registered[0].field_id);
+    EXPECT_EQ(participant_field.system_name, "shared_system");
+    EXPECT_TRUE(refreshed.hasParticipant("generic_instance"));
+    const auto contract_field = refreshed.field("generic_instance", "lambda");
+    EXPECT_EQ(contract_field.field_id, registered[1].field_id);
+    EXPECT_EQ(contract_field.system_name, "shared_system");
+    EXPECT_NE(participant_field.field_id, contract_field.field_id);
+    EXPECT_EQ(fixture.system.findFieldByName("left.lambda"),
+              participant_field.field_id);
+    EXPECT_EQ(fixture.system.findFieldByName("generic_instance.lambda"),
+              contract_field.field_id);
+}
+
 TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
 {
     BuilderFixture fixture;

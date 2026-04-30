@@ -43,6 +43,11 @@ public:
         const CouplingContext& context,
         std::span<const CouplingContractDeclaration> declarations) const;
 
+    [[nodiscard]] CouplingContext refreshContextWithAdditionalFields(
+        const CouplingContext& context,
+        std::span<const ResolvedCouplingAdditionalFieldDeclaration>
+            additional_fields) const;
+
     [[nodiscard]] ResolvedCouplingFormContribution resolveFormContribution(
         const CouplingContext& context,
         const CouplingFormContribution& contribution) const;

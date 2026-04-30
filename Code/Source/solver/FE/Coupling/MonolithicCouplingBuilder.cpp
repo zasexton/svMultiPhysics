@@ -1122,6 +1122,80 @@ systems::FESystem& mutableSystemByName(const CouplingContext& context,
     return const_cast<systems::FESystem&>(*it->system);
 }
 
+CouplingParticipantRef participantBySystemName(const CouplingContext& context,
+                                               std::string_view system_name)
+{
+    const auto it = std::find_if(
+        context.participants().begin(),
+        context.participants().end(),
+        [&](const CouplingParticipantRef& participant) {
+            return participant.system_name == system_name;
+        });
+    FE_THROW_IF(it == context.participants().end(), InvalidArgumentException,
+                "additional field target system is missing from context");
+    FE_CHECK_NOT_NULL(it->system, "additional field target system");
+    return *it;
+}
+
+bool containsName(const std::vector<std::string>& names,
+                  std::string_view name) noexcept
+{
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+void copyContextRegistrations(const CouplingContext& context,
+                              CouplingContextBuilder& builder,
+                              std::vector<std::string>& participant_names)
+{
+    for (const auto& participant : context.participants()) {
+        builder.addParticipant(participant);
+        participant_names.push_back(participant.participant_name);
+    }
+    for (const auto& field : context.fields()) {
+        builder.addField(field);
+    }
+    for (const auto& region : context.regions()) {
+        builder.addRegion(region);
+    }
+    for (const auto& shared_region : context.sharedRegions()) {
+        builder.addSharedRegion(shared_region);
+    }
+    for (const auto& buffer : context.externalBuffers()) {
+        builder.addExternalBuffer(buffer);
+    }
+    for (const auto& transfer : context.driverOwnedTransfers()) {
+        builder.addDriverOwnedTransfer(transfer);
+    }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    for (const auto& registry : context.interfaceSearchRegistries()) {
+        builder.addInterfaceSearchRegistry(registry);
+    }
+    for (const auto& map : context.slidingInterfaceMaps()) {
+        builder.addSlidingInterfaceMap(map);
+    }
+#endif
+}
+
+CouplingFieldRef fieldRefForRegisteredAdditionalField(
+    const CouplingContext& context,
+    const ResolvedCouplingAdditionalFieldDeclaration& field)
+{
+    FE_THROW_IF(field.field_id == INVALID_FIELD_ID, InvalidArgumentException,
+                "registered additional field is missing a resolved field id");
+    const auto target = participantBySystemName(context, field.system_name);
+    return CouplingFieldRef{
+        .participant_name = field.declaration.namespace_name,
+        .system_name = target.system_name,
+        .system = target.system,
+        .field_name = field.declaration.field_name,
+        .field_id = field.field_id,
+        .space = field.field_spec.space,
+        .components = field.field_spec.components,
+        .scope = field.field_spec.scope,
+        .interface_marker = field.field_spec.interface_marker,
+    };
+}
+
 } // namespace
 
 CouplingValidationResult MonolithicCouplingBuilder::validateDeclarations(
@@ -1170,6 +1244,31 @@ MonolithicCouplingBuilder::registerAdditionalFields(
         field.field_id = system.addField(field.field_spec);
     }
     return resolved;
+}
+
+CouplingContext MonolithicCouplingBuilder::refreshContextWithAdditionalFields(
+    const CouplingContext& context,
+    std::span<const ResolvedCouplingAdditionalFieldDeclaration> additional_fields) const
+{
+    CouplingContextBuilder builder;
+    std::vector<std::string> participant_names;
+    copyContextRegistrations(context, builder, participant_names);
+
+    for (const auto& field : additional_fields) {
+        const auto target = participantBySystemName(context, field.system_name);
+        const auto& lookup_namespace = field.declaration.namespace_name;
+        if (!containsName(participant_names, lookup_namespace)) {
+            builder.addParticipant(CouplingParticipantRef{
+                .participant_name = lookup_namespace,
+                .system_name = target.system_name,
+                .system = target.system,
+            });
+            participant_names.push_back(lookup_namespace);
+        }
+        builder.addField(fieldRefForRegisteredAdditionalField(context, field));
+    }
+
+    return builder.build();
 }
 
 ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribution(

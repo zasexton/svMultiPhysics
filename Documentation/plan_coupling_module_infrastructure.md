@@ -4922,7 +4922,7 @@ Implementation checklist:
   resolved target `FESystem`; contracts must not mutate `FESystem` directly
   during this step, and contract-owned field namespaces must remain distinct
   from participant names.
-- [ ] Refresh and finalize `CouplingContext` after additional fields are
+- [x] Refresh and finalize `CouplingContext` after additional fields are
   registered.
 - [ ] Rebuild and validate the finalized `CouplingGraph` after additional
   fields are present.
@@ -4984,7 +4984,7 @@ Unit-test verification checklist:
   context creation through pre-setup validation.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies additional fields are
   registered before `FESystem::setup()`.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies participant-scoped and
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies participant-scoped and
   contract-owned additional fields register into the resolved target `FESystem`
   and are exposed under the correct lookup namespace after context refresh.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies interface additional fields
