@@ -3750,9 +3750,9 @@ Unit-test verification checklist:
   `FE/Coupling` header independently.
 - [x] Add a build-only unit test or compile target that includes every public
   `Physics/Coupling` header independently.
-- [ ] Add a dependency-boundary test or build assertion that `FE/Coupling`
+- [x] Add a dependency-boundary test or build assertion that `FE/Coupling`
   compiles without including any `Physics/Coupling` header.
-- [ ] Add a dependency-boundary test or build assertion that `FE/Coupling`
+- [x] Add a dependency-boundary test or build assertion that `FE/Coupling`
   uses only public Forms/Systems headers for Forms residual installation and
   analysis.
 - [x] Add a dependency-boundary test or build assertion that expert hook test
