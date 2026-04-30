@@ -460,6 +460,133 @@ TEST(CouplingContractValidation, ValidatesRegionRelationRequirements)
               std::string::npos);
 }
 
+TEST(CouplingContractValidation, ValidatesRelationLoweringRequests)
+{
+    auto declaration = minimalDeclaration();
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "bad_mode",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Partitioned,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+        },
+    });
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "expert_without_opt_in",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+        },
+    });
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "monolithic_with_partitioned_strategy",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .partitioned_solve_strategy =
+                CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+        },
+    });
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "bad_capability_strategy_filters",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {"penalty", "penalty", ""},
+                .partitioned_solve_strategies = {
+                    CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+            },
+        },
+    });
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "duplicate_partitioned_strategy",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+                .partitioned_solve_strategies = {
+                    CouplingPartitionedSolveStrategy::ExplicitLagged,
+                    CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+            },
+        },
+    });
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find(
+                  "relation lowering request mode does not match lowering kind"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "expert relation lowering requires explicit expert fallback opt-in"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "monolithic relation lowering request cannot select a partitioned strategy"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "relation lowering capability enforcement strategy cannot be empty"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate relation lowering enforcement strategy"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "partitioned solve strategies can only be attached to partitioned relation lowerings"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "duplicate relation lowering partitioned solve strategy"),
+              std::string::npos);
+}
+
 TEST(CouplingContractValidation, ValidatesAdditionalFieldAttachmentRules)
 {
     auto declaration = minimalDeclaration();

@@ -86,6 +86,121 @@ bool isRequired(CouplingRequirement requirement) noexcept
     return requirement == CouplingRequirement::Required;
 }
 
+const char* toString(CouplingPartitionedSolveStrategy strategy) noexcept
+{
+    switch (strategy) {
+    case CouplingPartitionedSolveStrategy::ExplicitLagged:
+        return "explicit_lagged";
+    case CouplingPartitionedSolveStrategy::StaggeredFixedPoint:
+        return "staggered_fixed_point";
+    }
+    return "unknown";
+}
+
+const CouplingRelationLoweringCapability* findLoweringCapability(
+    const CouplingRegionRelationRequirement& requirement,
+    CouplingRelationLoweringKind kind)
+{
+    const auto it = std::find_if(
+        requirement.lowering_capabilities.begin(),
+        requirement.lowering_capabilities.end(),
+        [kind](const CouplingRelationLoweringCapability& capability) {
+            return capability.lowering_kind == kind;
+        });
+    if (it == requirement.lowering_capabilities.end()) {
+        return nullptr;
+    }
+    return &(*it);
+}
+
+bool supportsEnforcementStrategy(
+    const CouplingRelationLoweringCapability& capability,
+    std::string_view enforcement_strategy)
+{
+    return enforcement_strategy.empty() ||
+           capability.enforcement_strategies.empty() ||
+           std::find(capability.enforcement_strategies.begin(),
+                     capability.enforcement_strategies.end(),
+                     enforcement_strategy) != capability.enforcement_strategies.end();
+}
+
+bool supportsPartitionedSolveStrategy(
+    const CouplingRelationLoweringCapability& capability,
+    const std::optional<CouplingPartitionedSolveStrategy>& strategy)
+{
+    return !strategy.has_value() ||
+           capability.partitioned_solve_strategies.empty() ||
+           std::find(capability.partitioned_solve_strategies.begin(),
+                     capability.partitioned_solve_strategies.end(),
+                     *strategy) != capability.partitioned_solve_strategies.end();
+}
+
+std::string selectedLoweringDescription(
+    const CouplingRelationLoweringRequest& request)
+{
+    std::ostringstream stream;
+    stream << "mode=" << toString(request.mode)
+           << ", lowering=" << toString(request.lowering_kind);
+    if (!request.enforcement_strategy.empty()) {
+        stream << ", enforcement=" << request.enforcement_strategy;
+    }
+    if (request.partitioned_solve_strategy.has_value()) {
+        stream << ", partitioned_strategy="
+               << toString(*request.partitioned_solve_strategy);
+    }
+    if (request.expert_fallback_enabled) {
+        stream << ", expert_fallback=enabled";
+    }
+    return stream.str();
+}
+
+std::string availableLoweringDescription(
+    const CouplingRegionRelationRequirement& requirement)
+{
+    std::ostringstream stream;
+    for (std::size_t i = 0; i < requirement.lowering_capabilities.size(); ++i) {
+        const auto& capability = requirement.lowering_capabilities[i];
+        if (i != 0u) {
+            stream << ", ";
+        }
+        stream << toString(capability.lowering_kind);
+        if (capability.supported) {
+            stream << "(supported)";
+        } else {
+            stream << "(unsupported";
+            if (!capability.unsupported_reason.empty()) {
+                stream << ": " << capability.unsupported_reason;
+            }
+            stream << ")";
+        }
+        if (!capability.enforcement_strategies.empty()) {
+            stream << "{enforcement=";
+            for (std::size_t j = 0;
+                 j < capability.enforcement_strategies.size();
+                 ++j) {
+                if (j != 0u) {
+                    stream << "|";
+                }
+                stream << capability.enforcement_strategies[j];
+            }
+            stream << "}";
+        }
+        if (!capability.partitioned_solve_strategies.empty()) {
+            stream << "{partitioned_strategy=";
+            for (std::size_t j = 0;
+                 j < capability.partitioned_solve_strategies.size();
+                 ++j) {
+                if (j != 0u) {
+                    stream << "|";
+                }
+                stream << toString(capability.partitioned_solve_strategies[j]);
+            }
+            stream << "}";
+        }
+    }
+    return stream.str();
+}
+
 bool isRequiredFieldRequirement(const CouplingFieldRequirement& requirement) noexcept
 {
     return isRequired(requirement.requirement) &&
@@ -2958,6 +3073,54 @@ void validateContextReferences(const CouplingContext& context,
     }
 
     for (const auto& requirement : declaration.region_relation_requirements) {
+        if (requirement.selected_lowering.has_value()) {
+            const auto& request = *requirement.selected_lowering;
+            const auto* capability =
+                findLoweringCapability(requirement, request.lowering_kind);
+            if (capability == nullptr) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message =
+                        "selected relation lowering is not declared: relation=" +
+                        requirement.relation_name + ", kind=" +
+                        toString(requirement.relation_kind) + ", selected=(" +
+                        selectedLoweringDescription(request) +
+                        "), available=[" +
+                        availableLoweringDescription(requirement) + "]",
+                });
+            } else if (!capability->supported) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message =
+                        "selected relation lowering is declared unsupported: relation=" +
+                        requirement.relation_name + ", kind=" +
+                        toString(requirement.relation_kind) + ", selected=(" +
+                        selectedLoweringDescription(request) + "), reason=" +
+                        capability->unsupported_reason + ", available=[" +
+                        availableLoweringDescription(requirement) + "]",
+                });
+            } else if (!supportsEnforcementStrategy(
+                           *capability,
+                           request.enforcement_strategy) ||
+                       !supportsPartitionedSolveStrategy(
+                           *capability,
+                           request.partitioned_solve_strategy)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .message =
+                        "selected relation lowering strategy is unsupported: relation=" +
+                        requirement.relation_name + ", kind=" +
+                        toString(requirement.relation_kind) + ", selected=(" +
+                        selectedLoweringDescription(request) +
+                        "), available=[" +
+                        availableLoweringDescription(requirement) + "]",
+                });
+            }
+        }
+
         std::vector<CouplingRegionRef> resolved_endpoints;
         for (const auto& endpoint : requirement.endpoints) {
             if (!context.hasRegion(endpoint.participant_name,

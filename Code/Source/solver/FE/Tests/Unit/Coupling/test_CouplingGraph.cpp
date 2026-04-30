@@ -1485,6 +1485,148 @@ TEST(CouplingGraph, ValidatesRegionRelationRequirementsAgainstContext)
               std::string::npos);
 }
 
+TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "surface_balance",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .enforcement_strategy = "penalty",
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+
+    const auto validation = buildGraph(graphContext(), declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("selected relation lowering is not declared"),
+              std::string::npos);
+    EXPECT_NE(text.find("relation=surface_balance"), std::string::npos);
+    EXPECT_NE(text.find("kind=embedded_relation"), std::string::npos);
+    EXPECT_NE(text.find("mode=monolithic"), std::string::npos);
+    EXPECT_NE(text.find("lowering=monolithic_forms"), std::string::npos);
+    EXPECT_NE(text.find("available=[partitioned_exchange(supported)]"),
+              std::string::npos);
+
+    auto unsupported = declaration;
+    unsupported.region_relation_requirements.front().lowering_capabilities = {
+        CouplingRelationLoweringCapability{
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .supported = false,
+            .unsupported_reason = "requires shared residual assembly",
+        },
+    };
+    const auto unsupported_validation = buildGraph(graphContext(), unsupported);
+    EXPECT_FALSE(unsupported_validation.ok());
+    const auto unsupported_text = formatDiagnostics(unsupported_validation);
+    EXPECT_NE(unsupported_text.find(
+                  "selected relation lowering is declared unsupported"),
+              std::string::npos);
+    EXPECT_NE(unsupported_text.find("requires shared residual assembly"),
+              std::string::npos);
+
+    auto unsupported_enforcement = declaration;
+    unsupported_enforcement.region_relation_requirements.front()
+        .lowering_capabilities = {
+        CouplingRelationLoweringCapability{
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .enforcement_strategies = {"nitsche"},
+        },
+    };
+    const auto enforcement_validation =
+        buildGraph(graphContext(), unsupported_enforcement);
+    EXPECT_FALSE(enforcement_validation.ok());
+    const auto enforcement_text = formatDiagnostics(enforcement_validation);
+    EXPECT_NE(enforcement_text.find(
+                  "selected relation lowering strategy is unsupported"),
+              std::string::npos);
+    EXPECT_NE(enforcement_text.find("enforcement=penalty"), std::string::npos);
+    EXPECT_NE(enforcement_text.find("monolithic_forms(supported){enforcement=nitsche}"),
+              std::string::npos);
+
+    auto unsupported_partitioned = declaration;
+    auto& partitioned_requirement =
+        unsupported_partitioned.region_relation_requirements.front();
+    partitioned_requirement.lowering_capabilities = {
+        CouplingRelationLoweringCapability{
+            .lowering_kind =
+                CouplingRelationLoweringKind::PartitionedExchange,
+            .partitioned_solve_strategies = {
+                CouplingPartitionedSolveStrategy::ExplicitLagged,
+            },
+        },
+    };
+    partitioned_requirement.selected_lowering = CouplingRelationLoweringRequest{
+        .mode = CouplingMode::Partitioned,
+        .lowering_kind = CouplingRelationLoweringKind::PartitionedExchange,
+        .partitioned_solve_strategy =
+            CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+    };
+    const auto partitioned_validation =
+        buildGraph(graphContext(), unsupported_partitioned);
+    EXPECT_FALSE(partitioned_validation.ok());
+    const auto partitioned_text = formatDiagnostics(partitioned_validation);
+    EXPECT_NE(partitioned_text.find(
+                  "selected relation lowering strategy is unsupported"),
+              std::string::npos);
+    EXPECT_NE(partitioned_text.find(
+                  "partitioned_strategy=staggered_fixed_point"),
+              std::string::npos);
+    EXPECT_NE(partitioned_text.find(
+                  "partitioned_exchange(supported){partitioned_strategy=explicit_lagged}"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, AcceptsExplicitExpertRelationLowering)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "surface_balance",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+            .expert_fallback_enabled = true,
+            .enforcement_strategy = "custom",
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+
+    EXPECT_TRUE(buildGraph(graphContext(), declaration).ok());
+}
+
 TEST(CouplingGraph, BuildsGraphForMultipleContractsSharingContext)
 {
     auto first = graphDeclaration();

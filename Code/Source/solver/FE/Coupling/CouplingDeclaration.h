@@ -104,6 +104,17 @@ struct CouplingRelationLoweringCapability {
         CouplingRelationLoweringKind::MonolithicForms};
     bool supported{true};
     std::string unsupported_reason;
+    std::vector<std::string> enforcement_strategies;
+    std::vector<CouplingPartitionedSolveStrategy> partitioned_solve_strategies;
+};
+
+struct CouplingRelationLoweringRequest {
+    CouplingMode mode{CouplingMode::Monolithic};
+    CouplingRelationLoweringKind lowering_kind{
+        CouplingRelationLoweringKind::MonolithicForms};
+    bool expert_fallback_enabled{false};
+    std::string enforcement_strategy;
+    std::optional<CouplingPartitionedSolveStrategy> partitioned_solve_strategy;
 };
 
 struct CouplingRegionRelationRequirement {
@@ -112,6 +123,7 @@ struct CouplingRegionRelationRequirement {
         CouplingRegionRelationKind::SidePairedInterface};
     std::vector<CouplingRegionEndpointDeclaration> endpoints;
     std::vector<CouplingRelationLoweringCapability> lowering_capabilities;
+    std::optional<CouplingRelationLoweringRequest> selected_lowering;
     std::optional<CouplingRegionKind> required_region_kind;
     bool require_all_endpoints{true};
     bool require_distinct_participants{false};
@@ -417,6 +429,17 @@ analysisVariableKindForNonFieldRequirement(
 [[nodiscard]] std::optional<analysis::VariableKind>
 analysisVariableKindForFormNonFieldDependency(
     CouplingFormNonFieldDependencyKind kind) noexcept;
+
+[[nodiscard]] const char* toString(CouplingRegionRelationKind kind) noexcept;
+
+[[nodiscard]] const char* toString(CouplingRelationLoweringKind kind) noexcept;
+
+[[nodiscard]] bool isExpertRelationLoweringKind(
+    CouplingRelationLoweringKind kind) noexcept;
+
+[[nodiscard]] bool relationLoweringKindMatchesMode(
+    CouplingRelationLoweringKind kind,
+    CouplingMode mode) noexcept;
 
 struct CouplingContractDeclaration {
     std::string contract_type;

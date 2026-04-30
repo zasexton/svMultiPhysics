@@ -17,6 +17,60 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+const char* toString(CouplingRegionRelationKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingRegionRelationKind::SidePairedInterface:
+        return "side_paired_interface";
+    case CouplingRegionRelationKind::NWayInterface:
+        return "n_way_interface";
+    case CouplingRegionRelationKind::SameParticipantRegions:
+        return "same_participant_regions";
+    case CouplingRegionRelationKind::EmbeddedRelation:
+        return "embedded_relation";
+    case CouplingRegionRelationKind::VolumeBoundaryRelation:
+        return "volume_boundary_relation";
+    case CouplingRegionRelationKind::AuxiliaryPDECoupling:
+        return "auxiliary_pde_coupling";
+    }
+    return "unknown";
+}
+
+const char* toString(CouplingRelationLoweringKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingRelationLoweringKind::MonolithicForms:
+        return "monolithic_forms";
+    case CouplingRelationLoweringKind::MonolithicExpert:
+        return "monolithic_expert";
+    case CouplingRelationLoweringKind::PartitionedExchange:
+        return "partitioned_exchange";
+    case CouplingRelationLoweringKind::PartitionedExpert:
+        return "partitioned_expert";
+    }
+    return "unknown";
+}
+
+bool isExpertRelationLoweringKind(CouplingRelationLoweringKind kind) noexcept
+{
+    return kind == CouplingRelationLoweringKind::MonolithicExpert ||
+           kind == CouplingRelationLoweringKind::PartitionedExpert;
+}
+
+bool relationLoweringKindMatchesMode(CouplingRelationLoweringKind kind,
+                                     CouplingMode mode) noexcept
+{
+    switch (mode) {
+    case CouplingMode::Monolithic:
+        return kind == CouplingRelationLoweringKind::MonolithicForms ||
+               kind == CouplingRelationLoweringKind::MonolithicExpert;
+    case CouplingMode::Partitioned:
+        return kind == CouplingRelationLoweringKind::PartitionedExchange ||
+               kind == CouplingRelationLoweringKind::PartitionedExpert;
+    }
+    return false;
+}
+
 std::optional<analysis::VariableKind> analysisVariableKindForNonFieldRequirement(
     CouplingNonFieldDependencyRequirementKind kind) noexcept
 {
@@ -97,7 +151,7 @@ std::string regionEndpointKey(const CouplingRegionEndpointDeclaration& endpoint)
 std::string relationLoweringCapabilityKey(
     const CouplingRelationLoweringCapability& capability)
 {
-    return std::to_string(static_cast<int>(capability.lowering_kind));
+    return toString(capability.lowering_kind);
 }
 
 std::string variableKey(const CouplingVariableUse& variable)
@@ -382,6 +436,43 @@ CouplingValidationResult validateContractDeclarationShape(
                 result.addError(
                     "unsupported relation lowering capability requires a reason");
             }
+            for (std::size_t k = 0;
+                 k < capability.enforcement_strategies.size();
+                 ++k) {
+                if (capability.enforcement_strategies[k].empty()) {
+                    result.addError(
+                        "relation lowering capability enforcement strategy cannot be empty");
+                }
+                for (std::size_t l = k + 1u;
+                     l < capability.enforcement_strategies.size();
+                     ++l) {
+                    addDuplicateIfRepeated(
+                        result,
+                        capability.enforcement_strategies[k],
+                        capability.enforcement_strategies[l],
+                        "duplicate relation lowering enforcement strategy");
+                }
+            }
+            if (!relationLoweringKindMatchesMode(
+                    capability.lowering_kind,
+                    CouplingMode::Partitioned) &&
+                !capability.partitioned_solve_strategies.empty()) {
+                result.addError(
+                    "partitioned solve strategies can only be attached to partitioned relation lowerings");
+            }
+            for (std::size_t k = 0;
+                 k < capability.partitioned_solve_strategies.size();
+                 ++k) {
+                for (std::size_t l = k + 1u;
+                     l < capability.partitioned_solve_strategies.size();
+                     ++l) {
+                    if (capability.partitioned_solve_strategies[k] ==
+                        capability.partitioned_solve_strategies[l]) {
+                        result.addError(
+                            "duplicate relation lowering partitioned solve strategy");
+                    }
+                }
+            }
             for (std::size_t k = j + 1u;
                  k < requirement.lowering_capabilities.size();
                  ++k) {
@@ -397,6 +488,24 @@ CouplingValidationResult validateContractDeclarationShape(
             !has_supported_lowering) {
             result.addError(
                 "region-relation requirement requires at least one supported lowering capability");
+        }
+        if (requirement.selected_lowering.has_value()) {
+            const auto& request = *requirement.selected_lowering;
+            if (!relationLoweringKindMatchesMode(request.lowering_kind,
+                                                 request.mode)) {
+                result.addError(
+                    "relation lowering request mode does not match lowering kind");
+            }
+            if (isExpertRelationLoweringKind(request.lowering_kind) &&
+                !request.expert_fallback_enabled) {
+                result.addError(
+                    "expert relation lowering requires explicit expert fallback opt-in");
+            }
+            if (request.mode == CouplingMode::Monolithic &&
+                request.partitioned_solve_strategy.has_value()) {
+                result.addError(
+                    "monolithic relation lowering request cannot select a partitioned strategy");
+            }
         }
         if (requirement.require_opposite_sides_for_side_pair &&
             requirement.required_region_kind.has_value() &&

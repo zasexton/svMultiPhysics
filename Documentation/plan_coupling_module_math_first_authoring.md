@@ -234,10 +234,10 @@ strategies should fail with clear diagnostics.
 
 Checklist:
 
-- [ ] Relation lowerings are declared in one place.
-- [ ] Unsupported monolithic lowering fails before Forms installation.
-- [ ] Unsupported partitioned lowering fails before plan generation.
-- [ ] Expert fallback requires explicit opt-in.
+- [x] Relation lowerings are declared in one place.
+- [x] Unsupported monolithic lowering fails before Forms installation.
+- [x] Unsupported partitioned lowering fails before plan generation.
+- [x] Expert fallback requires explicit opt-in.
 - [ ] Physics modules do not hand-code backend capability branching.
 
 ### AuxiliaryState Strategy Inheritance
@@ -1178,7 +1178,7 @@ struct CouplingRegionRelationRequirement {
 - [ ] Thermal no longer needs local scalar/vector field shape checks.
 - [ ] New N-participant and mixed-dimensional relation fixtures validate through
       `CouplingGraph`.
-- [ ] Relation capability records reject unsupported mode/lowering combinations
+- [x] Relation capability records reject unsupported mode/lowering combinations
       before Forms installation or partitioned plan execution.
 - [ ] Orientation policy diagnostics cover side-paired, N-way, flux-balance,
       and traction-balance relations.
@@ -1428,22 +1428,22 @@ strategy, while FE/Coupling decides whether that combination is supported.
 
 ### Concrete Changes
 
-- [ ] Add the relation lowering capability declarations described in "Resolved
+- [x] Add the relation lowering capability declarations described in "Resolved
       Authoring Decisions".
 - [ ] Add capability records for the initial FSI and thermal relations.
 - [ ] Add capability records for fixture relations: N-way conservation,
       multiplier, multi-PDE auxiliary, electro-thermal, and contact/friction.
-- [ ] Add validation that checks selected `CouplingMode`, enforcement strategy,
+- [x] Add validation that checks selected `CouplingMode`, enforcement strategy,
       partitioned strategy, and expert fallback options against the relation
       lowering capabilities.
-- [ ] Add diagnostics that identify relation name, relation kind, selected
+- [x] Add diagnostics that identify relation name, relation kind, selected
       strategy, missing capability, and available capabilities.
 
 ### Completion Checklist
 
-- [ ] Unsupported monolithic lowering fails before Forms installation.
-- [ ] Unsupported partitioned lowering fails before plan generation.
-- [ ] Expert fallback is rejected unless explicitly selected.
+- [x] Unsupported monolithic lowering fails before Forms installation.
+- [x] Unsupported partitioned lowering fails before plan generation.
+- [x] Expert fallback is rejected unless explicitly selected.
 - [ ] Physics modules do not hand-code relation capability branching.
 
 ## Phase 7: Migrate FSI Coupling
@@ -1597,10 +1597,10 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test missing interface topology diagnostics.
 - [ ] Test transform, orientation, component-layout, and frame-policy
       diagnostics.
-- [ ] Test relation lowering capability validation.
-- [ ] Test unsupported monolithic capability diagnostics.
-- [ ] Test unsupported partitioned capability diagnostics.
-- [ ] Test explicit expert fallback opt-in diagnostics.
+- [x] Test relation lowering capability validation.
+- [x] Test unsupported monolithic capability diagnostics.
+- [x] Test unsupported partitioned capability diagnostics.
+- [x] Test explicit expert fallback opt-in diagnostics.
 - [ ] Test stable generated names for residuals, exchanges, and relation nodes.
 
 ### CouplingFormBuilder Tests
