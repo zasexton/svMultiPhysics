@@ -4756,7 +4756,7 @@ Implementation checklist:
 - [x] Validate partitioned endpoint names as registry/provider-resolved keys for
   their endpoint kind while keeping their physical meaning opaque to
   `FE/Coupling`.
-- [ ] Reject partitioned exchange declarations with `Unspecified` transfers and
+- [x] Reject partitioned exchange declarations with `Unspecified` transfers and
   validate explicit `Identity` transfers against endpoint ownership, layout,
   value shape, and temporal-slot semantics.
 - [ ] Validate field, typed `ParameterRegistry`, raw auxiliary-state,

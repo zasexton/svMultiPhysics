@@ -2152,6 +2152,17 @@ TEST(CouplingGraph, RejectsInvalidPartitionedExchangeDeclarations)
     }
     {
         auto declaration = partitionedGraphDeclaration();
+        declaration.partitioned_exchange_declarations[0].value = CouplingValueDescriptor{
+            .rank = CouplingValueRank::Vector,
+            .components = 2,
+        };
+        const auto validation = buildGraph(context, declaration);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("component count does not match"),
+                  std::string::npos);
+    }
+    {
+        auto declaration = partitionedGraphDeclaration();
         declaration.partitioned_exchange_declarations[0].transfer.kind =
             CouplingTransferKind::Unspecified;
         const auto validation = buildGraph(context, declaration);
