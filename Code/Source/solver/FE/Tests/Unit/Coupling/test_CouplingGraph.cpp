@@ -1560,6 +1560,53 @@ TEST(CouplingGraph, ValidatesContractOwnedAdditionalFieldNamespaceAndTarget)
               std::string::npos);
 }
 
+TEST(CouplingGraph, DistinguishesDeclarationAndFinalizedValidationForCouplingOwnedFields)
+{
+    auto declaration = graphDeclaration();
+    declaration.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Contract,
+        "generic_instance",
+        "lambda",
+        "left"));
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "generic_instance",
+            .name = "lambda",
+        },
+    });
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = declaration.dependencies.back().residual_row,
+        .dependency = declaration.dependencies.back().dependency,
+    });
+
+    CouplingGraph declaration_graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto declaration_validation =
+        declaration_graph.buildDeclarationGraph(
+            graphContext(),
+            std::span<const CouplingContractDeclaration>(declarations));
+    EXPECT_TRUE(declaration_validation.ok())
+        << formatDiagnostics(declaration_validation);
+
+    CouplingGraph finalized_graph;
+    const std::array<CouplingFormAnalysisMetadata, 0> installed_forms{};
+    const auto finalized_validation = finalized_graph.buildFinalizedGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms));
+    EXPECT_FALSE(finalized_validation.ok());
+    const auto text = formatDiagnostics(finalized_validation);
+    EXPECT_NE(text.find("coupling graph variable field is missing from the context"),
+              std::string::npos);
+    EXPECT_NE(text.find("field='lambda'"), std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsSkippedOptionalAdditionalFieldReferences)
 {
     auto skipped_owner = graphDeclaration();

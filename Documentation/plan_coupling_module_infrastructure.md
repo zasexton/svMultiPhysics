@@ -4821,7 +4821,7 @@ Unit-test verification checklist:
   `CouplingContext` lookup.
 - [x] `test_CouplingGraph.cpp` verifies invalid additional-field attachment
   combinations fail before any `FESystem` field registration mutates state.
-- [ ] `test_CouplingGraph.cpp` distinguishes declaration-stage validation from
+- [x] `test_CouplingGraph.cpp` distinguishes declaration-stage validation from
   finalized graph validation for coupling-owned fields.
 - [ ] `test_CouplingGraph.cpp` rejects monolithic Forms coupling across
   incompatible `FESystem` instances or unregistered interface topology.
