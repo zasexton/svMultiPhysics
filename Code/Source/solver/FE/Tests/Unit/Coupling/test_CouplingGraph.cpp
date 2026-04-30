@@ -2337,6 +2337,29 @@ TEST(CouplingGraph, RejectsExpectedBlockWithoutInstalledMatrixEvidence)
               std::string::npos);
 }
 
+TEST(CouplingGraph, DistinguishesExternalLaggedDependenciesFromImplicitEdges)
+{
+    auto implicit = twoParticipantDependencyDeclaration();
+    implicit.expected_blocks.clear();
+    const std::vector<CouplingFormAnalysisMetadata> no_installed_forms;
+    const auto implicit_validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        implicit,
+        no_installed_forms);
+    EXPECT_FALSE(implicit_validation.ok());
+    EXPECT_NE(formatDiagnostics(implicit_validation).find(
+                  "declared implicit coupling dependency is not reported"),
+              std::string::npos);
+
+    auto external = implicit;
+    external.dependencies[0].mode = CouplingDependencyMode::ExternalLagged;
+    const auto external_validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        external,
+        no_installed_forms);
+    EXPECT_TRUE(external_validation.ok()) << formatDiagnostics(external_validation);
+}
+
 TEST(CouplingGraph, RejectsExpectedMatrixBlockForExternalDependency)
 {
     auto declaration = twoParticipantDependencyDeclaration();

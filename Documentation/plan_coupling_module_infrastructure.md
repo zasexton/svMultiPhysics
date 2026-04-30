@@ -4828,7 +4828,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` verifies identical raw `FieldId`s or interface
   markers from two different `FESystem` instances are not treated as the same
   field or topology.
-- [ ] `test_CouplingGraph.cpp` distinguishes implicit-monolithic dependency
+- [x] `test_CouplingGraph.cpp` distinguishes implicit-monolithic dependency
   edges from external/lagged dependency edges.
 - [x] `test_CouplingGraph.cpp` rejects expected monolithic blocks attached to
   external/lagged dependencies.
