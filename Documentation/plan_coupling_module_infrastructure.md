@@ -4773,7 +4773,7 @@ Implementation checklist:
   AuxiliaryInput/AuxiliaryOutput provider support, and DriverOwned GeneralTensor
   payload semantics on
   external-buffer endpoints.
-- [ ] Validate interface transfer provenance against source/target owning
+- [x] Validate interface transfer provenance against source/target owning
   systems, interface search registry names, logical interface region ids,
   coordinate configurations, `InterfaceRevisionSnapshot` records, search
   revision keys, interface map revision/state, sliding-map kind, accepted/trial
