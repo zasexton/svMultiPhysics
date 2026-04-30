@@ -1154,9 +1154,9 @@ struct CouplingRegionRelationRequirement {
       not exactly a simple two-side shared interface.
 - [x] Teach `CouplingGraph` to validate field rank, component count, and field
       scope against `CouplingContext`.
-- [ ] Teach `CouplingGraph` to validate shared-interface participant mappings
+- [x] Teach `CouplingGraph` to validate shared-interface participant mappings
       against `SharedRegionRegistry`.
-- [ ] Teach `CouplingGraph` to validate opposite-side mappings for
+- [x] Teach `CouplingGraph` to validate opposite-side mappings for
       two-participant interfaces.
 - [ ] Teach `CouplingGraph` to validate N-way and mixed-dimensional region
       relation endpoints.

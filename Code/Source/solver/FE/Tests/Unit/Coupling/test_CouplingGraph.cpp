@@ -565,8 +565,11 @@ NParticipantGraphFixture nParticipantGraphFixture()
     };
 }
 
-CouplingContext interfaceGraphContext(int left_marker = 17,
-                                      int right_marker = 17)
+CouplingContext interfaceGraphContext(
+    int left_marker = 17,
+    int right_marker = 17,
+    CouplingInterfaceSide left_side = CouplingInterfaceSide::Minus,
+    CouplingInterfaceSide right_side = CouplingInterfaceSide::Plus)
 {
     const auto* system = graphSystemToken();
     const CouplingRegionRef left_region{
@@ -576,7 +579,7 @@ CouplingContext interfaceGraphContext(int left_marker = 17,
         .region_name = "interface",
         .kind = CouplingRegionKind::InterfaceFace,
         .marker = left_marker,
-        .side = CouplingInterfaceSide::Minus,
+        .side = left_side,
     };
     const CouplingRegionRef right_region{
         .participant_name = "right",
@@ -585,7 +588,7 @@ CouplingContext interfaceGraphContext(int left_marker = 17,
         .region_name = "interface",
         .kind = CouplingRegionKind::InterfaceFace,
         .marker = right_marker,
-        .side = CouplingInterfaceSide::Plus,
+        .side = right_side,
     };
 
     CouplingContextBuilder builder;
@@ -1361,6 +1364,47 @@ TEST(CouplingGraph, ValidatesRequiredFieldRequirementPresence)
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find(
                   "required coupling field-shape field is missing from the context"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, ValidatesSharedInterfaceRequirementsAgainstContext)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.shared_interface_requirements.push_back({
+        .shared_region_name = "interface",
+        .participant_names = {"left", "right"},
+    });
+
+    EXPECT_TRUE(buildGraph(interfaceGraphContext(), declaration).ok());
+
+    auto missing_mapping = declaration;
+    missing_mapping.shared_interface_requirements.front().participant_names = {
+        "left",
+        "middle",
+    };
+    const auto missing_validation =
+        buildGraph(interfaceGraphContext(), missing_mapping);
+    EXPECT_FALSE(missing_validation.ok());
+    EXPECT_NE(formatDiagnostics(missing_validation).find(
+                  "shared-interface participant mapping is missing from the context"),
+              std::string::npos);
+
+    CouplingContractDeclaration boundary_declaration;
+    boundary_declaration.contract_type = "generic";
+    boundary_declaration.contract_name = "generic_instance";
+    boundary_declaration.participants.push_back({.participant_name = "left"});
+    boundary_declaration.shared_interface_requirements.push_back({
+        .shared_region_name = "interface",
+        .participant_names = {"left"},
+    });
+    const auto boundary_validation = buildGraph(graphContext(), boundary_declaration);
+    EXPECT_FALSE(boundary_validation.ok());
+    EXPECT_NE(formatDiagnostics(boundary_validation).find(
+                  "shared-interface participant mapping does not satisfy the declaration"),
               std::string::npos);
 }
 

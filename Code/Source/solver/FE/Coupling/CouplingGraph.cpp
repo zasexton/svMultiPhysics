@@ -1445,6 +1445,19 @@ bool sharedRegionHasParticipant(const SharedRegionRef& group,
         });
 }
 
+const CouplingRegionRef* sharedRegionParticipant(
+    const SharedRegionRef& group,
+    const std::string& participant_name)
+{
+    const auto it = std::find_if(
+        group.participant_regions.begin(),
+        group.participant_regions.end(),
+        [&](const CouplingRegionRef& region) {
+            return region.participant_name == participant_name;
+        });
+    return it == group.participant_regions.end() ? nullptr : &*it;
+}
+
 void validateMeshTemporalScope(const CouplingContext& context,
                                const CouplingContractDeclaration& declaration,
                                const CouplingTemporalRequirement& temporal,
@@ -2758,6 +2771,63 @@ void validateContextReferences(const CouplingContext& context,
                 }
             }
             validateInterfaceRegionTopology(declaration, participant_region, result);
+        }
+    }
+
+    for (const auto& requirement : declaration.shared_interface_requirements) {
+        if (!context.hasSharedRegion(requirement.shared_region_name)) {
+            if (requirement.require_all_participants) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .region_name = requirement.shared_region_name,
+                    .message = "required shared-interface region is missing from the context",
+                });
+            }
+            continue;
+        }
+
+        const auto group = context.sharedRegionGroup(requirement.shared_region_name);
+        std::vector<const CouplingRegionRef*> resolved_participants;
+        for (const auto& participant_name : requirement.participant_names) {
+            const auto* participant_region =
+                sharedRegionParticipant(group, participant_name);
+            if (participant_region == nullptr) {
+                if (requirement.require_all_participants) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .participant_name = participant_name,
+                        .region_name = requirement.shared_region_name,
+                        .message = "shared-interface participant mapping is missing from the context",
+                    });
+                }
+                continue;
+            }
+
+            resolved_participants.push_back(participant_region);
+            if (participant_region->kind != requirement.required_region_kind) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .participant_name = participant_name,
+                    .region_name = requirement.shared_region_name,
+                    .message = "shared-interface participant mapping does not satisfy the declaration",
+                });
+            }
+        }
+
+        if (requirement.require_opposite_sides_for_two_participants &&
+            resolved_participants.size() == 2u &&
+            (resolved_participants[0]->side == CouplingInterfaceSide::None ||
+             resolved_participants[1]->side == CouplingInterfaceSide::None ||
+             resolved_participants[0]->side == resolved_participants[1]->side)) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .region_name = requirement.shared_region_name,
+                .message = "two-participant shared-interface requirement needs opposite nonempty sides",
+            });
         }
     }
 }
