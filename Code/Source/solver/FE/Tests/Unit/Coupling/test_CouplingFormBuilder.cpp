@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -293,6 +294,44 @@ TEST(CouplingFormBuilder, AttachesTerminalProvenanceInResidualEncounterOrder)
               CouplingTemporalQuantity::MeshVelocity);
     EXPECT_EQ(attached.terminal_provenance[2].geometry_quantity,
               CouplingGeometryTerminalQuantity::CurrentNormal);
+}
+
+TEST(CouplingFormBuilder, RejectsTerminalTransformsThatLoseProvenanceIdentity)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    const auto previous = builder.previousSolution("participant", "primary", 1);
+    const auto preserved = previous.transformNodes(
+        [](const forms::FormExprNode&) -> std::optional<forms::FormExpr> {
+            return std::nullopt;
+        });
+    EXPECT_EQ(preserved.nodeShared(), previous.nodeShared());
+
+    const auto test = builder.test("participant", "primary", "w");
+    CouplingFormContribution preserved_contribution;
+    preserved_contribution.residual = (preserved * test).dx();
+    const auto attached =
+        builder.attachTerminalProvenance(std::move(preserved_contribution));
+    ASSERT_EQ(attached.terminal_provenance.size(), 1u);
+    EXPECT_EQ(attached.terminal_provenance[0].terminal_sequence, 0u);
+    EXPECT_EQ(attached.terminal_provenance[0].history_index, 1);
+
+    const auto replaced = previous.transformNodes(
+        [](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+            if (node.type() == forms::FormExprType::PreviousSolutionRef) {
+                return forms::FormExpr::previousSolution(
+                    node.historyIndex().value_or(1));
+            }
+            return std::nullopt;
+        });
+    EXPECT_NE(replaced.nodeShared(), previous.nodeShared());
+
+    CouplingFormContribution replaced_contribution;
+    replaced_contribution.residual = (replaced * test).dx();
+    EXPECT_THROW(static_cast<void>(builder.attachTerminalProvenance(
+                     std::move(replaced_contribution))),
+                 InvalidArgumentException);
 }
 
 TEST(CouplingFormBuilder, RejectsInvalidTemporalRequestsAndUnknownFields)

@@ -4349,7 +4349,7 @@ Implementation checklist:
   side table for `previousSolution(...)`, mesh temporal, and geometry-terminal
   helper calls, and attach the matching provenance records to each
   `CouplingFormContribution` before resolution.
-- [ ] Key terminal-provenance matching by public Forms identity, either the
+- [x] Key terminal-provenance matching by public Forms identity, either the
   node ownership identity or raw node address obtained from
   `FormExpr::nodeShared()` for the terminal expression, or an explicit public
   Forms metadata hook, assign `terminal_sequence` after matching in deterministic
@@ -4511,7 +4511,7 @@ Unit-test verification checklist:
 - [ ] `test_CouplingFormBuilder.cpp` verifies builder terminal provenance is
   attached to each `CouplingFormContribution`, survives resolution, and is used
   instead of private Forms AST traversal to recover coupling owner scope.
-- [ ] `test_CouplingFormBuilder.cpp` verifies terminal-provenance matching uses
+- [x] `test_CouplingFormBuilder.cpp` verifies terminal-provenance matching uses
   public node ownership identity or raw node address from
   `FormExpr::nodeShared()`, or an explicit public Forms metadata hook, assigns
   deterministic `terminal_sequence` values after matching, and rejects or

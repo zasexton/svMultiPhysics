@@ -19,6 +19,170 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+namespace {
+
+bool declarationMatchesNodeTerminal(
+    const CouplingFormTerminalProvenanceDeclaration& declaration,
+    const forms::FormExprNode& node)
+{
+    using forms::FormExprType;
+
+    switch (node.type()) {
+    case FormExprType::PreviousSolutionRef:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::PreviousSolution &&
+               declaration.temporal_quantity ==
+                   CouplingTemporalQuantity::FieldHistoryValue &&
+               node.historyIndex().value_or(0) == declaration.history_index;
+    case FormExprType::MeshVelocity:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::MeshTemporal &&
+               declaration.temporal_quantity ==
+                   CouplingTemporalQuantity::MeshVelocity;
+    case FormExprType::MeshAcceleration:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::MeshTemporal &&
+               declaration.temporal_quantity ==
+                   CouplingTemporalQuantity::MeshAcceleration;
+    case FormExprType::PreviousMeshVelocity:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::MeshTemporal &&
+               declaration.temporal_quantity ==
+                   CouplingTemporalQuantity::PreviousMeshVelocity;
+    case FormExprType::PredictedMeshVelocity:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::MeshTemporal &&
+               declaration.temporal_quantity ==
+                   CouplingTemporalQuantity::PredictedMeshVelocity;
+    case FormExprType::MeshDisplacement:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::MeshDisplacement;
+    case FormExprType::Coordinate:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::Coordinate;
+    case FormExprType::ReferenceCoordinate:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::ReferenceCoordinate;
+    case FormExprType::CurrentCoordinate:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CurrentCoordinate;
+    case FormExprType::PreviousCoordinate:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::PreviousCoordinate;
+    case FormExprType::ReferencePhysicalCoordinate:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::ReferencePhysicalCoordinate;
+    case FormExprType::Jacobian:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::Jacobian;
+    case FormExprType::JacobianInverse:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::JacobianInverse;
+    case FormExprType::JacobianDeterminant:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::JacobianDeterminant;
+    case FormExprType::CurrentJacobian:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CurrentJacobian;
+    case FormExprType::ReferenceJacobian:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::ReferenceJacobian;
+    case FormExprType::CurrentJacobianDeterminant:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant;
+    case FormExprType::ReferenceJacobianDeterminant:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::ReferenceJacobianDeterminant;
+    case FormExprType::Determinant:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               (declaration.geometry_quantity ==
+                    CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant ||
+                declaration.geometry_quantity ==
+                    CouplingGeometryTerminalQuantity::ReferenceJacobianDeterminant);
+    case FormExprType::Normal:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::Normal;
+    case FormExprType::CurrentNormal:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CurrentNormal;
+    case FormExprType::ReferenceNormal:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::ReferenceNormal;
+    case FormExprType::CurrentMeasure:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CurrentMeasure;
+    case FormExprType::ReferenceMeasure:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::ReferenceMeasure;
+    case FormExprType::SurfaceJacobian:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::SurfaceJacobian;
+    case FormExprType::CellDiameter:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CellDiameter;
+    case FormExprType::CellVolume:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CellVolume;
+    case FormExprType::FacetArea:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::FacetArea;
+    case FormExprType::CellDomainId:
+        return declaration.kind ==
+                   CouplingFormTerminalProvenanceKind::GeometryTerminal &&
+               declaration.geometry_quantity ==
+                   CouplingGeometryTerminalQuantity::CellDomainId;
+    default:
+        return false;
+    }
+}
+
+} // namespace
+
 CouplingFormBuilder::CouplingFormBuilder(const CouplingContext& context)
     : context_(&context)
 {
@@ -235,8 +399,18 @@ CouplingFormBuilder::terminalProvenanceFor(
             auto declaration = recorded.declaration;
             declaration.terminal_sequence = matched.size();
             matched.push_back(std::move(declaration));
-            break;
+            return true;
         }
+        return false;
+    };
+
+    const auto has_lost_provenance = [&](const forms::FormExprNode& node) {
+        for (const auto& recorded : recorded_terminals_) {
+            if (declarationMatchesNodeTerminal(recorded.declaration, node)) {
+                return true;
+            }
+        }
+        return false;
     };
 
     const std::function<void(const forms::FormExprNode*)> visit =
@@ -244,7 +418,10 @@ CouplingFormBuilder::terminalProvenanceFor(
             if (node == nullptr || !visited.insert(node).second) {
                 return;
             }
-            append_match(node);
+            if (!append_match(node) && has_lost_provenance(*node)) {
+                FE_THROW(InvalidArgumentException,
+                         "coupling terminal provenance identity was lost before attachment");
+            }
             for (const auto* child : node->children()) {
                 visit(child);
             }
