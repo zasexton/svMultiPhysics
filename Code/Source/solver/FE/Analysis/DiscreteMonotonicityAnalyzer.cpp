@@ -190,7 +190,7 @@ bool hasScopedPositiveCoefficientEvidence(const AnalysisSummarySet* summaries,
 {
     if (!summaries) return false;
     for (const auto& coefficient : summaries->coefficient_properties) {
-        if (!coefficientSummaryMatches(coefficient, matrix)) {
+        if (!coefficientSummaryCovers(coefficient, matrix)) {
             continue;
         }
         const bool positive =

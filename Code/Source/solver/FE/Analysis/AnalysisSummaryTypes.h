@@ -509,6 +509,7 @@ struct BoundarySymbolSummary {
     bool complementing_margin_present{false};
     bool component_coverage_complete{false};
     bool dof_coverage_complete{false};
+    bool mixed_boundary_or_corner_scope_present{false};
     bool mixed_corner_edge_coverage_present{false};
 };
 
@@ -601,10 +602,18 @@ struct InvariantDomainSummary {
     std::vector<VariableKey> variables;
     Real lower_bound{};
     Real upper_bound{};
+    Real cfl_estimate{};
+    Real accepted_cfl_bound{};
+    Real wave_speed_bound{};
+    std::string time_step_scope;
+    std::string mesh_size_scope;
     bool lower_bound_active{false};
     bool upper_bound_active{false};
     bool limiter_evidence_present{false};
     bool cfl_condition_satisfied{false};
+    bool cfl_estimate_present{false};
+    bool accepted_cfl_bound_present{false};
+    bool wave_speed_bound_present{false};
     bool ssp_time_discretization_evidence_present{false};
     bool source_admissibility_evidence_present{false};
     bool low_order_invariant_domain_evidence_present{false};
@@ -631,13 +640,20 @@ struct EquilibriumPreservationSummary {
 
 struct MovingDomainSummary {
     MeshRevisionId mesh_revision{};
+    std::string gcl_theorem_id;
+    std::string constant_state_scope;
+    std::string mesh_update_time_scheme;
     bool mesh_velocity_metadata_present{false};
     bool time_integration_metadata_present{false};
     bool remap_metadata_present{false};
+    bool geometric_conservation_tolerance_declared{false};
+    bool metric_identity_evidence_present{false};
+    bool free_stream_preservation_residual_present{false};
     Real min_geometric_jacobian{};
     Real max_geometric_jacobian{};
     Real geometric_conservation_residual{};
     Real geometric_conservation_tolerance{};
+    Real free_stream_preservation_residual{};
 };
 
 struct TransferOperatorSummary {
@@ -872,8 +888,14 @@ struct MinimumResidualStabilitySummary {
     Real discrete_inf_sup_lower_bound{};
     bool local_trial_to_test_conditioning_present{false};
     Real local_trial_to_test_condition_estimate{};
+    bool accepted_local_trial_to_test_condition_bound_present{false};
+    Real accepted_local_trial_to_test_condition_bound{};
     bool normal_equation_conditioning_present{false};
     Real normal_equation_condition_estimate{};
+    bool accepted_normal_equation_condition_bound_present{false};
+    Real accepted_normal_equation_condition_bound{};
+    bool condition_bound_scope_metadata_present{false};
+    std::string condition_bound_scope;
     std::uint64_t missing_required_metadata_count{0};
     std::uint64_t violation_count{0};
 };

@@ -71,12 +71,16 @@ bool boundaryComplementingCertificateComplete(
         margin_ok &&
         !boundary.complementing_theorem_id.empty() &&
         boundary.root_subspace_mismatch_count == 0u;
+    const bool mixed_corner_scope_ok =
+        !boundary.mixed_boundary_or_corner_scope_present ||
+        boundary.mixed_corner_edge_coverage_present;
     return boundary.principal_symbol_rank_evidence_present &&
            boundary.boundary_symbol_rank_evidence_present &&
            lopatinskii_symbol_evidence &&
            boundary.component_coverage_complete &&
            boundary.dof_coverage_complete &&
            boundary.missing_symbol_count == 0u &&
+           mixed_corner_scope_ok &&
            count_ok;
 }
 
@@ -116,8 +120,8 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
                 : (symbol_mismatch
                     ? "Boundary-symbol summary reports inconsistent decaying-root and stable-subspace evidence"
                 : (certificate_complete
-                    ? "Boundary-symbol summary satisfies the complementing condition with rank, count, tangential-frequency, root/subspace, margin, component, and DOF coverage evidence"
-                    : "Boundary-symbol summary reports the complementing condition but lacks complete rank, count, tangential-frequency, root/subspace, margin, component, or DOF coverage evidence"));
+                    ? "Boundary-symbol summary satisfies the complementing condition with rank, count, tangential-frequency, root/subspace, margin, component, DOF, and mixed-corner coverage evidence"
+                    : "Boundary-symbol summary reports the complementing condition but lacks complete rank, count, tangential-frequency, root/subspace, margin, component, DOF, or mixed-corner coverage evidence"));
             claim.claim_origin = "InterfaceValidationAnalyzer";
             claim.addEvidence("InterfaceValidationAnalyzer",
                 "BoundarySymbolSummary principal_order=" +
@@ -133,6 +137,10 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
                 std::string(boundary.component_coverage_complete ? "true" : "false") +
                 ", dof_coverage=" +
                 std::string(boundary.dof_coverage_complete ? "true" : "false") +
+                ", mixed_boundary_or_corner_scope=" +
+                std::string(boundary.mixed_boundary_or_corner_scope_present ? "true" : "false") +
+                ", mixed_corner_edge_coverage=" +
+                std::string(boundary.mixed_corner_edge_coverage_present ? "true" : "false") +
                 ", tangential_frequency=" +
                 std::string(boundary.tangential_frequency_coverage_present ? "true" : "false") +
                 ", decaying_roots=" +
@@ -160,7 +168,7 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
             bool has_scale_theorem = false;
             bool invalid_penalty_numeric_evidence = false;
             for (const auto& scale : summaries->parameter_scales) {
-                if (!parameterScaleMatches(
+                if (!parameterScaleCovers(
                         scale, boundary.block,
                         ParameterScaleRole::WeakBoundaryPenalty)) {
                     continue;

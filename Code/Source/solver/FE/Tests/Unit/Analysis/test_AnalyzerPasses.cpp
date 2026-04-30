@@ -234,6 +234,15 @@ TEST(MixedOperatorAnalyzer, SingleField_NoSaddlePoint) {
 TEST(MixedOperatorAnalyzer, StokesFallbackEmitsStructuredPressureNullspace) {
     MixedOperatorAnalyzer pass;
     ProblemAnalysisContext ctx;
+    FieldDescriptor pressure;
+    pressure.field_id = 0;
+    pressure.name = "pressure";
+    pressure.field_type = FieldType::Scalar;
+    pressure.declared_nullspace_metadata_present = true;
+    pressure.declared_nullspace_family = NullspaceFamily::ScalarConstant;
+    pressure.declared_nullspace_scope =
+        "closed Stokes pressure space modulo constants";
+    ctx.addFieldDescriptor(pressure);
     ctx.addFormulationRecord(makeStokesRecord());
 
     ProblemAnalysisReport report;
@@ -245,6 +254,18 @@ TEST(MixedOperatorAnalyzer, StokesFallbackEmitsStructuredPressureNullspace) {
     ASSERT_TRUE(nullspace[0]->nullspace_family.has_value());
     EXPECT_EQ(*nullspace[0]->nullspace_family, NullspaceFamily::ScalarConstant);
     EXPECT_EQ(nullspace[0]->claim_origin, "MixedOperatorAnalyzer");
+}
+
+TEST(MixedOperatorAnalyzer, StokesFallbackDoesNotInferUndeclaredPressureNullspace) {
+    MixedOperatorAnalyzer pass;
+    ProblemAnalysisContext ctx;
+    ctx.addFormulationRecord(makeStokesRecord());
+
+    ProblemAnalysisReport report;
+    pass.run(ctx, report);
+
+    EXPECT_EQ(report.countByKind(PropertyKind::MixedSaddlePoint), 1u);
+    EXPECT_EQ(report.countByKind(PropertyKind::Nullspace), 0u);
 }
 
 // ============================================================================

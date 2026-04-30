@@ -42,6 +42,63 @@ std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
     return variables;
 }
 
+struct DeclaredNullspaceMetadata {
+    bool present{false};
+    NullspaceFamily family{NullspaceFamily::UserDefined};
+    AnalysisConfidence confidence{AnalysisConfidence::Medium};
+    std::string evidence;
+};
+
+DeclaredNullspaceMetadata declaredNullspaceForField(
+    const ProblemAnalysisContext& context,
+    FieldId field,
+    int component,
+    const std::vector<const ContributionDescriptor*>* contributions)
+{
+    if (contributions) {
+        for (const auto* contribution : *contributions) {
+            for (const auto& hint : contribution->nullspace_hints) {
+                if (hint.field != field) {
+                    continue;
+                }
+                if (component >= 0 && hint.component >= 0 &&
+                    hint.component != component) {
+                    continue;
+                }
+                DeclaredNullspaceMetadata metadata;
+                metadata.present = true;
+                metadata.family = hint.family;
+                metadata.confidence = hint.confidence;
+                metadata.evidence =
+                    "ContributionDescriptor declared multiplier nullspace family=" +
+                    std::string(toString(hint.family));
+                if (!hint.reason.empty()) {
+                    metadata.evidence += ": " + hint.reason;
+                }
+                return metadata;
+            }
+        }
+    }
+
+    const auto* descriptor = context.fieldDescriptor(field);
+    if (descriptor && descriptor->declared_nullspace_metadata_present) {
+        DeclaredNullspaceMetadata metadata;
+        metadata.present = true;
+        metadata.family = descriptor->declared_nullspace_family;
+        metadata.confidence = AnalysisConfidence::High;
+        metadata.evidence =
+            "FieldDescriptor declared multiplier nullspace family=" +
+            std::string(toString(descriptor->declared_nullspace_family));
+        if (!descriptor->declared_nullspace_scope.empty()) {
+            metadata.evidence += ", scope='" +
+                                 descriptor->declared_nullspace_scope + "'";
+        }
+        return metadata;
+    }
+
+    return {};
+}
+
 void emitSchurSummaryClaim(ProblemAnalysisReport& report,
                            const ReducedMatrixSummary& summary)
 {
@@ -438,32 +495,42 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     report.claims.push_back(std::move(claim));
                 }
 
-                // Nullspace claim: one per constraint field (field-intrinsic)
+                // Nullspace claim: one per constraint field only when the
+                // multiplier kernel is explicitly declared.  A generic
+                // constraint variable without a diagonal block is not enough
+                // to prove a pressure-gauge style constant nullspace.
                 if (cv.kind == VariableKind::FieldComponent &&
                     constraint_fid != INVALID_FIELD_ID &&
                     !emitted_nullspace_fields.count(constraint_fid)) {
-                    PropertyClaim ns_claim;
-                    ns_claim.kind = PropertyKind::Nullspace;
-                    ns_claim.status = PropertyStatus::Exact;
-                    ns_claim.confidence = AnalysisConfidence::High;
-                    ns_claim.field = constraint_fid;
-                    ns_claim.component = -1;
-                    ns_claim.domain = DomainKind::Cell;
-                    ns_claim.variables.push_back(
-                        VariableKey::field(constraint_fid));
-                    ns_claim.description =
-                        "Constraint field " +
-                        std::to_string(constraint_fid) +
-                        " in saddle-point system has constant nullspace"
-                        " (pressure gauge)";
-                    ns_claim.nullspace_family =
-                        NullspaceFamily::ScalarConstant;
-                    ns_claim.claim_origin = "MixedOperatorAnalyzer";
-                    ns_claim.addEvidence("MixedOperatorAnalyzer",
-                        "Field has no diagonal elliptic block — constant"
-                        " shift is in the operator nullspace");
-                    report.claims.push_back(std::move(ns_claim));
-                    emitted_nullspace_fields.insert(constraint_fid);
+                    const auto metadata = declaredNullspaceForField(
+                        context, constraint_fid, cv.component, &comp_group);
+                    if (metadata.present) {
+                        PropertyClaim ns_claim;
+                        ns_claim.kind = PropertyKind::Nullspace;
+                        ns_claim.status =
+                            metadata.confidence == AnalysisConfidence::High
+                                ? PropertyStatus::Exact
+                                : PropertyStatus::Likely;
+                        ns_claim.confidence = metadata.confidence;
+                        ns_claim.field = constraint_fid;
+                        ns_claim.component = cv.component;
+                        ns_claim.domain = DomainKind::Cell;
+                        ns_claim.variables.push_back(
+                            cv.component >= 0
+                                ? VariableKey::field(constraint_fid, cv.component)
+                                : VariableKey::field(constraint_fid));
+                        ns_claim.description =
+                            "Constraint field " +
+                            std::to_string(constraint_fid) +
+                            " in saddle-point system has declared multiplier"
+                            " nullspace metadata";
+                        ns_claim.nullspace_family = metadata.family;
+                        ns_claim.claim_origin = "MixedOperatorAnalyzer";
+                        ns_claim.addEvidence("MixedOperatorAnalyzer",
+                            metadata.evidence, metadata.confidence);
+                        report.claims.push_back(std::move(ns_claim));
+                        emitted_nullspace_fields.insert(constraint_fid);
+                    }
                 }
             }
         }
@@ -540,12 +607,22 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     " available to verify specific momentum partner)");
                 report.claims.push_back(std::move(claim));
 
-                // Nullspace: one per constraint field (field-intrinsic)
+                // Nullspace: one per constraint field only when explicitly
+                // declared through field metadata.  Form-level saddle-point
+                // structure alone does not identify the multiplier kernel.
                 if (!emitted_nullspace_fields.count(cfid)) {
+                    const auto metadata = declaredNullspaceForField(
+                        context, cfid, -1, nullptr);
+                    if (!metadata.present) {
+                        continue;
+                    }
                     PropertyClaim ns_claim;
                     ns_claim.kind = PropertyKind::Nullspace;
-                    ns_claim.status = PropertyStatus::Exact;
-                    ns_claim.confidence = AnalysisConfidence::High;
+                    ns_claim.status =
+                        metadata.confidence == AnalysisConfidence::High
+                            ? PropertyStatus::Exact
+                            : PropertyStatus::Likely;
+                    ns_claim.confidence = metadata.confidence;
                     ns_claim.field = cfid;
                     ns_claim.component = -1;
                     ns_claim.domain = DomainKind::Cell;
@@ -553,14 +630,12 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                         VariableKey::field(cfid));
                     ns_claim.description =
                         "Constraint field " + std::to_string(cfid) +
-                        " in saddle-point system has constant nullspace"
-                        " (pressure gauge)";
-                    ns_claim.nullspace_family =
-                        NullspaceFamily::ScalarConstant;
+                        " in saddle-point system has declared multiplier"
+                        " nullspace metadata";
+                    ns_claim.nullspace_family = metadata.family;
                     ns_claim.claim_origin = "MixedOperatorAnalyzer";
                     ns_claim.addEvidence("MixedOperatorAnalyzer",
-                        "Field has no diagonal elliptic block — constant"
-                        " shift is in the operator nullspace");
+                        metadata.evidence, metadata.confidence);
                     report.claims.push_back(std::move(ns_claim));
                     emitted_nullspace_fields.insert(cfid);
                 }

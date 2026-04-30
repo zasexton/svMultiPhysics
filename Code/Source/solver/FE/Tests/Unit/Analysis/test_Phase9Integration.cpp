@@ -347,6 +347,15 @@ TEST(Phase9, PinnedElasticity) {
 TEST(Phase9, StokesPressure) {
     auto analyzer = ProblemAnalyzer::createDefault();
     ProblemAnalysisContext ctx;
+    FieldDescriptor pressure;
+    pressure.field_id = 0;
+    pressure.name = "pressure";
+    pressure.field_type = FieldType::Scalar;
+    pressure.declared_nullspace_metadata_present = true;
+    pressure.declared_nullspace_family = NullspaceFamily::ScalarConstant;
+    pressure.declared_nullspace_scope =
+        "closed Stokes pressure space modulo constants";
+    ctx.addFieldDescriptor(pressure);
     ctx.addFormulationRecord(makeStokesRecord());
     ctx.addBCDescriptor(dirichletBC(1, 1)); // Dirichlet on velocity
 
@@ -355,11 +364,11 @@ TEST(Phase9, StokesPressure) {
     // MixedSaddlePoint
     EXPECT_GE(report.countByKind(PropertyKind::MixedSaddlePoint), 1u);
 
-    // Nullspace claims: velocity (per-component) + pressure (from saddle-point)
+    // Nullspace claims: velocity (per-component) + explicitly declared pressure gauge
     auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
     EXPECT_GE(nullspace.size(), 1u);
 
-    // Pressure nullspace detected by MixedOperatorAnalyzer (pressure gauge)
+    // Pressure nullspace detected by MixedOperatorAnalyzer from field metadata
     bool has_pressure_nullspace = false;
     for (const auto* c : nullspace) {
         if (c->field == 0) has_pressure_nullspace = true;
@@ -729,4 +738,3 @@ TEST(Phase9, CoupledBoundaryPDEODE) {
     // CoupledSystemStructure detected
     EXPECT_GE(report.countByKind(PropertyKind::CoupledSystemStructure), 1u);
 }
-

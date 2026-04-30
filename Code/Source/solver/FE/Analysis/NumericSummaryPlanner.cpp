@@ -518,13 +518,13 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::MinimumResidualStability) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::MinimumResidualStability,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted minimum-residual/Petrov-Galerkin evidence; request trial/test space, Riesz map, Fortin/optimal-test, enrichment, residual-control, and conditioning metadata");
+                       source + " emitted minimum-residual/Petrov-Galerkin evidence; request trial/test space, Riesz map, Fortin/optimal-test, enrichment, residual-control, conditioning estimates, accepted conditioning bounds, and condition-scope metadata");
         }
 
         if (claim.kind == PropertyKind::InvariantDomainPreservation) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::InvariantDomain,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted invariant-domain evidence; request bound, limiter, and post-step violation summaries");
+                       source + " emitted invariant-domain evidence; request bound, limiter, quantitative CFL/wave-speed, theorem, and post-step violation summaries");
         }
 
         if (claim.kind == PropertyKind::EquilibriumPreservation) {
@@ -536,7 +536,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::GeometricConservation) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::MovingDomain,
                        claim.domain, claim.variables, i, claim,
-                       source + " emitted moving-domain geometric conservation evidence; request finite mapping Jacobian interval, finite GCL residual/tolerance, mesh-velocity, time-integration, and remap summaries");
+                       source + " emitted moving-domain geometric conservation evidence; request finite mapping Jacobian interval, declared GCL tolerance, theorem, metric-identity, free-stream residual, mesh-update, mesh-velocity, time-integration, and remap summaries");
         }
 
         if (claim.kind == PropertyKind::TransferOperatorCompatibility) {

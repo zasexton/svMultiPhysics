@@ -83,6 +83,24 @@ variablesForBlock(const OperatorBlockId& block)
     return false;
 }
 
+[[nodiscard]] inline bool variableSetCoversAll(
+    const std::vector<VariableKey>& evidence,
+    const std::vector<VariableKey>& target)
+{
+    if (target.empty()) {
+        return true;
+    }
+    if (evidence.empty()) {
+        return false;
+    }
+    return std::all_of(target.begin(), target.end(),
+                       [&](const VariableKey& variable) {
+                           return std::find(evidence.begin(),
+                                            evidence.end(),
+                                            variable) != evidence.end();
+                       });
+}
+
 [[nodiscard]] inline bool hasBlockScope(const OperatorBlockId& block)
 {
     return !block.contribution_id.empty() ||
@@ -137,6 +155,48 @@ variablesForBlock(const OperatorBlockId& block)
     return true;
 }
 
+[[nodiscard]] inline bool blockEvidenceCovers(
+    const OperatorBlockId& evidence_block,
+    const OperatorBlockId& target_block)
+{
+    if (!hasBlockScope(evidence_block)) {
+        return false;
+    }
+
+    if (!evidence_block.contribution_id.empty()) {
+        return !target_block.contribution_id.empty() &&
+               evidence_block.contribution_id == target_block.contribution_id;
+    }
+
+    if (!target_block.contribution_id.empty()) {
+        return false;
+    }
+
+    if (!evidence_block.operator_tag.empty()) {
+        if (target_block.operator_tag.empty() ||
+            evidence_block.operator_tag != target_block.operator_tag) {
+            return false;
+        }
+    } else if (!target_block.operator_tag.empty()) {
+        return false;
+    }
+
+    if (evidence_block.marker >= 0) {
+        if (target_block.marker != evidence_block.marker) {
+            return false;
+        }
+    } else if (target_block.marker >= 0) {
+        return false;
+    }
+
+    if (evidence_block.domain != target_block.domain) {
+        return false;
+    }
+
+    return variableSetCoversAll(variablesForBlock(evidence_block),
+                                variablesForBlock(target_block));
+}
+
 [[nodiscard]] inline bool variableEvidenceMatches(
     const std::vector<VariableKey>& evidence_variables,
     DomainKind evidence_domain,
@@ -184,6 +244,35 @@ variablesForBlock(const OperatorBlockId& block)
            variableEvidenceMatches(evidence_variables,
                                    evidence_block.domain,
                                    target_block);
+}
+
+[[nodiscard]] inline bool strictScopedEvidenceMatches(
+    const OperatorBlockId& evidence_block,
+    const std::vector<VariableKey>& evidence_variables,
+    const std::string& evidence_contribution_id,
+    const OperatorBlockId& target_block,
+    const std::vector<std::string>& target_contribution_ids)
+{
+    const std::string& explicit_contribution_id =
+        !evidence_contribution_id.empty()
+            ? evidence_contribution_id
+            : evidence_block.contribution_id;
+    if (!explicit_contribution_id.empty()) {
+        if (!target_block.contribution_id.empty()) {
+            return explicit_contribution_id == target_block.contribution_id;
+        }
+        return containsContributionId(target_contribution_ids,
+                                      explicit_contribution_id);
+    }
+    if (blockEvidenceCovers(evidence_block, target_block)) {
+        return true;
+    }
+    if (evidence_block.domain != target_block.domain) {
+        return false;
+    }
+    const auto target_variables = variablesForBlock(target_block);
+    return !target_variables.empty() &&
+           variableSetCoversAll(evidence_variables, target_variables);
 }
 
 [[nodiscard]] inline bool scopedEvidenceMatches(
@@ -239,6 +328,32 @@ variablesForBlock(const OperatorBlockId& block)
                                  empty_contribution_ids);
 }
 
+[[nodiscard]] inline bool parameterScaleCovers(
+    const ParameterScaleSummary& summary,
+    const OperatorBlockId& target_block,
+    ParameterScaleRole expected,
+    const std::vector<std::string>& target_contribution_ids)
+{
+    return matchesParameterRole(summary, expected) &&
+           strictScopedEvidenceMatches(summary.block,
+                                       summary.variables,
+                                       summary.contribution_id,
+                                       target_block,
+                                       target_contribution_ids);
+}
+
+[[nodiscard]] inline bool parameterScaleCovers(
+    const ParameterScaleSummary& summary,
+    const OperatorBlockId& target_block,
+    ParameterScaleRole expected)
+{
+    static const std::vector<std::string> empty_contribution_ids;
+    return parameterScaleCovers(summary,
+                                target_block,
+                                expected,
+                                empty_contribution_ids);
+}
+
 [[nodiscard]] inline bool temporalSummaryMatches(
     const TemporalStabilitySummary& summary,
     const OperatorBlockId& target_block,
@@ -281,6 +396,27 @@ variablesForBlock(const OperatorBlockId& block)
     return coefficientSummaryMatches(summary,
                                      target_block,
                                      empty_contribution_ids);
+}
+
+[[nodiscard]] inline bool coefficientSummaryCovers(
+    const CoefficientPropertySummary& summary,
+    const OperatorBlockId& target_block,
+    const std::vector<std::string>& target_contribution_ids)
+{
+    return strictScopedEvidenceMatches(summary.block,
+                                       summary.variables,
+                                       summary.contribution_id,
+                                       target_block,
+                                       target_contribution_ids);
+}
+
+[[nodiscard]] inline bool coefficientSummaryCovers(
+    const CoefficientPropertySummary& summary,
+    const DiscreteMatrixSummary& target_matrix)
+{
+    return coefficientSummaryCovers(summary,
+                                    target_matrix.block,
+                                    target_matrix.contribution_ids);
 }
 
 [[nodiscard]] inline bool coefficientSummaryMatches(

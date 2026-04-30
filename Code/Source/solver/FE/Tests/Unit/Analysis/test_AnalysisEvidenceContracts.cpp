@@ -232,6 +232,40 @@ void addEquilibriumScopeEvidence(EquilibriumPreservationSummary& summary)
     summary.reconstruction_scope_metadata_present = true;
 }
 
+void addInvariantDomainCflEvidence(InvariantDomainSummary& summary)
+{
+    summary.cfl_estimate_present = true;
+    summary.cfl_estimate = 0.4;
+    summary.accepted_cfl_bound_present = true;
+    summary.accepted_cfl_bound = 0.5;
+    summary.wave_speed_bound_present = true;
+    summary.wave_speed_bound = 2.0;
+    summary.time_step_scope = "forward Euler step";
+    summary.mesh_size_scope = "active cell family";
+}
+
+void addMovingDomainGclEvidence(MovingDomainSummary& summary)
+{
+    summary.geometric_conservation_tolerance_declared = true;
+    summary.metric_identity_evidence_present = true;
+    summary.free_stream_preservation_residual_present = true;
+    summary.free_stream_preservation_residual = 0.0;
+    summary.gcl_theorem_id = "ALE discrete geometric conservation law";
+    summary.constant_state_scope = "free-stream constant state";
+    summary.mesh_update_time_scheme = "matching ALE mesh update";
+}
+
+void addMinimumResidualConditioningBounds(
+    MinimumResidualStabilitySummary& summary)
+{
+    summary.accepted_local_trial_to_test_condition_bound_present = true;
+    summary.accepted_local_trial_to_test_condition_bound = 20.0;
+    summary.accepted_normal_equation_condition_bound_present = true;
+    summary.accepted_normal_equation_condition_bound = 200.0;
+    summary.condition_bound_scope_metadata_present = true;
+    summary.condition_bound_scope = "active enriched test-search space";
+}
+
 DiscreteMatrixSummary certifiedSignPatternMatrix(std::string tag)
 {
     DiscreteMatrixSummary matrix;
@@ -1269,6 +1303,89 @@ TEST(AnalysisEvidenceContracts, DiscreteMatrixCertificationRequiresCompleteSignA
                                   PropertyKind::DiscreteMaximumPrinciple));
 }
 
+TEST(AnalysisEvidenceContracts, DmpRequiresCoefficientCoverageForAllMatrixVariables)
+{
+    const auto u = VariableKey::field(0);
+    const auto w = VariableKey::field(1);
+    OperatorBlockId coupled_block;
+    coupled_block.test_variables = {u, w};
+    coupled_block.trial_variables = {u, w};
+    coupled_block.operator_tag = "coupled-diffusion";
+    coupled_block.domain = DomainKind::Cell;
+
+    ProblemAnalysisContext ctx;
+    ctx.addFieldDescriptor(h1Field(0, 1, FieldType::Scalar, 1, "u"));
+    ctx.addFieldDescriptor(h1Field(1, 1, FieldType::Scalar, 1, "w"));
+    ctx.addContribution(ContributionDescriptor::diagonalSymmetric(
+        u, "coupled-diffusion", "evidence-contract"));
+
+    CoefficientPropertySummary partial_coefficient;
+    partial_coefficient.block = scalarBlock("coupled-diffusion");
+    partial_coefficient.positivity = PositivityClass::Positive;
+    partial_coefficient.min_eigenvalue = 0.5;
+    partial_coefficient.max_eigenvalue = 2.0;
+    partial_coefficient.coefficient_region_coverage_complete = true;
+    partial_coefficient.quadrature_point_coverage_complete = true;
+    partial_coefficient.lower_bound_valid_for_all_samples = true;
+    partial_coefficient.tolerance_metadata_present = true;
+
+    DiscreteMatrixSummary matrix;
+    matrix.block = coupled_block;
+    matrix.rows = 4;
+    matrix.cols = 4;
+    matrix.square = true;
+    matrix.sign_evidence_complete = true;
+    matrix.row_sum_evidence_complete = true;
+    matrix.sign_tolerance = 1.0e-12;
+    matrix.row_sum_tolerance = 1.0e-12;
+    matrix.diagonal_count = 4;
+    matrix.offdiag_count = 12;
+    matrix.negative_offdiag_count = 12;
+    matrix.min_row_sum = 0.0;
+    matrix.max_row_sum = 1.0;
+    matrix.max_abs_row_sum = 1.0;
+    matrix.scanned_row_count = 4;
+    matrix.expected_row_count = 4;
+    matrix.scanned_entry_count = 16;
+    matrix.structurally_symmetric = true;
+    matrix.numerically_symmetric = true;
+    matrix.symmetry_evidence_complete = true;
+    matrix.cholesky_factorization_succeeded = true;
+    matrix.m_matrix_certification_evidence = true;
+    matrix.stieltjes_matrix_evidence = true;
+    matrix.m_matrix_theorem_id = "stieltjes-spd-z";
+    matrix.dmp_applicability_evidence = true;
+    matrix.dmp_rhs_sign_evidence = true;
+
+    AnalysisSummarySet summaries;
+    summaries.coefficient_properties.push_back(partial_coefficient);
+    summaries.discrete_matrices.push_back(matrix);
+    ctx.setAnalysisSummaries(std::move(summaries));
+
+    const auto report = analyze(std::move(ctx));
+    const auto* m_matrix = firstForBlock(
+        report, PropertyKind::MMatrixStructure,
+        "DiscreteMonotonicityAnalyzer", "coupled-diffusion");
+    ASSERT_NE(m_matrix, nullptr);
+    EXPECT_EQ(m_matrix->status, PropertyStatus::Exact);
+    ASSERT_TRUE(m_matrix->certification_class.has_value());
+    EXPECT_EQ(*m_matrix->certification_class,
+              CertificationClass::Certified);
+
+    const auto* dmp = firstForBlock(
+        report, PropertyKind::DiscreteMaximumPrinciple,
+        "DiscreteMonotonicityAnalyzer", "coupled-diffusion");
+    ASSERT_NE(dmp, nullptr);
+    EXPECT_EQ(dmp->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(dmp->certification_class.has_value());
+    EXPECT_EQ(*dmp->certification_class,
+              CertificationClass::Unknown);
+    ASSERT_FALSE(dmp->evidence.empty());
+    EXPECT_NE(dmp->evidence.front().description.find(
+                  "scoped positive coefficient evidence"),
+              std::string::npos);
+}
+
 TEST(AnalysisEvidenceContracts, DiscreteMatrixNonfiniteEvidenceCannotCertifyDmp)
 {
     const auto scalar = VariableKey::field(0);
@@ -1881,6 +1998,7 @@ TEST(AnalysisEvidenceContracts, InvariantDomainCertificationRequiresTypedTheorem
     certified.convex_limiting_evidence_present = true;
     certified.spatial_monotonicity_evidence_present = true;
     certified.mass_positivity_evidence_present = true;
+    addInvariantDomainCflEvidence(certified);
     certified.invariant_domain_theorem_id =
         "Guermond-Popov convex limiting invariant domain theorem";
     summaries.invariant_domains.push_back(certified);
@@ -1892,13 +2010,19 @@ TEST(AnalysisEvidenceContracts, InvariantDomainCertificationRequiresTypedTheorem
     invalid_bounds.upper_bound = 0.0;
     summaries.invariant_domains.push_back(invalid_bounds);
 
+    InvariantDomainSummary cfl_exceeds_bound = certified;
+    cfl_exceeds_bound.invariant_set_id = "cfl-exceeds-bound";
+    cfl_exceeds_bound.cfl_estimate = 0.75;
+    cfl_exceeds_bound.accepted_cfl_bound = 0.5;
+    summaries.invariant_domains.push_back(cfl_exceeds_bound);
+
     ProblemAnalysisContext ctx;
     ctx.setAnalysisSummaries(std::move(summaries));
     const auto report = analyze(std::move(ctx));
     const auto invariant = claimsFrom(
         report, PropertyKind::InvariantDomainPreservation,
         "PreservationStructureAnalyzer");
-    ASSERT_EQ(invariant.size(), 3u);
+    ASSERT_EQ(invariant.size(), 4u);
     EXPECT_EQ(invariant[0]->status, PropertyStatus::Unknown);
     EXPECT_EQ(invariant[1]->status, PropertyStatus::Preserved);
     ASSERT_TRUE(invariant[1]->certification_class.has_value());
@@ -1907,6 +2031,57 @@ TEST(AnalysisEvidenceContracts, InvariantDomainCertificationRequiresTypedTheorem
     EXPECT_EQ(invariant[2]->status, PropertyStatus::Violated);
     ASSERT_TRUE(invariant[2]->certification_class.has_value());
     EXPECT_EQ(*invariant[2]->certification_class,
+              CertificationClass::Violated);
+    EXPECT_EQ(invariant[3]->status, PropertyStatus::Violated);
+    ASSERT_TRUE(invariant[3]->certification_class.has_value());
+    EXPECT_EQ(*invariant[3]->certification_class,
+              CertificationClass::Violated);
+}
+
+TEST(AnalysisEvidenceContracts, MovingDomainCertificationRequiresDgclScope)
+{
+    AnalysisSummarySet summaries;
+
+    MovingDomainSummary residual_only;
+    residual_only.mesh_revision = 1;
+    residual_only.min_geometric_jacobian = 0.75;
+    residual_only.max_geometric_jacobian = 1.25;
+    residual_only.geometric_conservation_tolerance_declared = true;
+    residual_only.geometric_conservation_residual = 0.0;
+    residual_only.geometric_conservation_tolerance = 1.0e-8;
+    residual_only.mesh_velocity_metadata_present = true;
+    residual_only.time_integration_metadata_present = true;
+    residual_only.remap_metadata_present = true;
+    summaries.moving_domain.push_back(residual_only);
+
+    MovingDomainSummary certified = residual_only;
+    certified.mesh_revision = 2;
+    addMovingDomainGclEvidence(certified);
+    summaries.moving_domain.push_back(certified);
+
+    MovingDomainSummary free_stream_violation = certified;
+    free_stream_violation.mesh_revision = 3;
+    free_stream_violation.free_stream_preservation_residual = 1.0e-4;
+    summaries.moving_domain.push_back(free_stream_violation);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    const auto report = analyze(std::move(ctx));
+    const auto claims = claimsFrom(
+        report, PropertyKind::GeometricConservation,
+        "PreservationStructureAnalyzer");
+    ASSERT_EQ(claims.size(), 3u);
+    EXPECT_EQ(claims[0]->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(claims[0]->certification_class.has_value());
+    EXPECT_EQ(*claims[0]->certification_class,
+              CertificationClass::NotCertified);
+    EXPECT_EQ(claims[1]->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(claims[1]->certification_class.has_value());
+    EXPECT_EQ(*claims[1]->certification_class,
+              CertificationClass::Certified);
+    EXPECT_EQ(claims[2]->status, PropertyStatus::Violated);
+    ASSERT_TRUE(claims[2]->certification_class.has_value());
+    EXPECT_EQ(*claims[2]->certification_class,
               CertificationClass::Violated);
 }
 
@@ -2425,6 +2600,19 @@ TEST(AnalysisEvidenceContracts, BoundaryComplementingRequiresRankCountAndCoverag
         "Agmon-Douglis-Nirenberg complementing condition";
     summaries.boundary_symbols.push_back(certified);
 
+    BoundarySymbolSummary mixed_corner_missing = certified;
+    mixed_corner_missing.block =
+        scalarBlock("mixed-corner-missing", DomainKind::Boundary);
+    mixed_corner_missing.mixed_boundary_or_corner_scope_present = true;
+    mixed_corner_missing.mixed_corner_edge_coverage_present = false;
+    summaries.boundary_symbols.push_back(mixed_corner_missing);
+
+    BoundarySymbolSummary mixed_corner_certified = mixed_corner_missing;
+    mixed_corner_certified.block =
+        scalarBlock("mixed-corner-certified", DomainKind::Boundary);
+    mixed_corner_certified.mixed_corner_edge_coverage_present = true;
+    summaries.boundary_symbols.push_back(mixed_corner_certified);
+
     BoundarySymbolSummary invalid_margin = certified;
     invalid_margin.block = scalarBlock("invalid-boundary", DomainKind::Boundary);
     invalid_margin.complementing_margin =
@@ -2451,6 +2639,24 @@ TEST(AnalysisEvidenceContracts, BoundaryComplementingRequiresRankCountAndCoverag
     EXPECT_EQ(certified_claim->status, PropertyStatus::Preserved);
     ASSERT_TRUE(certified_claim->certification_class.has_value());
     EXPECT_EQ(*certified_claim->certification_class,
+              CertificationClass::Certified);
+
+    const auto* mixed_missing_claim = firstForBlock(
+        report, PropertyKind::BoundaryComplementingCondition,
+        "InterfaceValidationAnalyzer", "mixed-corner-missing");
+    ASSERT_NE(mixed_missing_claim, nullptr);
+    EXPECT_EQ(mixed_missing_claim->status, PropertyStatus::Likely);
+    ASSERT_TRUE(mixed_missing_claim->certification_class.has_value());
+    EXPECT_EQ(*mixed_missing_claim->certification_class,
+              CertificationClass::NotCertified);
+
+    const auto* mixed_certified_claim = firstForBlock(
+        report, PropertyKind::BoundaryComplementingCondition,
+        "InterfaceValidationAnalyzer", "mixed-corner-certified");
+    ASSERT_NE(mixed_certified_claim, nullptr);
+    EXPECT_EQ(mixed_certified_claim->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(mixed_certified_claim->certification_class.has_value());
+    EXPECT_EQ(*mixed_certified_claim->certification_class,
               CertificationClass::Certified);
 
     const auto* invalid_claim = firstForBlock(
@@ -2652,6 +2858,7 @@ TEST(AnalysisEvidenceContracts, MinimumResidualStabilityRequiresFortinRieszAndCo
     certified.local_trial_to_test_condition_estimate = 10.0;
     certified.normal_equation_conditioning_present = true;
     certified.normal_equation_condition_estimate = 100.0;
+    addMinimumResidualConditioningBounds(certified);
     summaries.minimum_residual_stability.push_back(certified);
 
     MinimumResidualStabilitySummary violated = certified;
@@ -2660,13 +2867,20 @@ TEST(AnalysisEvidenceContracts, MinimumResidualStabilityRequiresFortinRieszAndCo
     violated.violation_count = 1;
     summaries.minimum_residual_stability.push_back(violated);
 
+    MinimumResidualStabilitySummary conditioning_exceeds_bound = certified;
+    conditioning_exceeds_bound.method_id = "conditioning-exceeds-bound";
+    conditioning_exceeds_bound.block =
+        scalarBlock("conditioning-exceeds-bound");
+    conditioning_exceeds_bound.local_trial_to_test_condition_estimate = 30.0;
+    summaries.minimum_residual_stability.push_back(conditioning_exceeds_bound);
+
     ProblemAnalysisContext ctx;
     ctx.setAnalysisSummaries(std::move(summaries));
     const auto report = analyze(std::move(ctx));
     const auto claims = claimsFrom(
         report, PropertyKind::MinimumResidualStability,
         "MinimumResidualStabilityAnalyzer");
-    ASSERT_EQ(claims.size(), 3u);
+    ASSERT_EQ(claims.size(), 4u);
     EXPECT_EQ(claims[0]->status, PropertyStatus::Likely);
     ASSERT_TRUE(claims[0]->certification_class.has_value());
     EXPECT_EQ(*claims[0]->certification_class,
@@ -2678,6 +2892,10 @@ TEST(AnalysisEvidenceContracts, MinimumResidualStabilityRequiresFortinRieszAndCo
     EXPECT_EQ(claims[2]->status, PropertyStatus::Violated);
     ASSERT_TRUE(claims[2]->certification_class.has_value());
     EXPECT_EQ(*claims[2]->certification_class,
+              CertificationClass::Violated);
+    EXPECT_EQ(claims[3]->status, PropertyStatus::Violated);
+    ASSERT_TRUE(claims[3]->certification_class.has_value());
+    EXPECT_EQ(*claims[3]->certification_class,
               CertificationClass::Violated);
 }
 
@@ -2707,6 +2925,7 @@ TEST(AnalysisEvidenceContracts, MinimumResidualFortinRouteRequiresQuantifiedNorm
     missing_norm.local_trial_to_test_condition_estimate = 10.0;
     missing_norm.normal_equation_conditioning_present = true;
     missing_norm.normal_equation_condition_estimate = 100.0;
+    addMinimumResidualConditioningBounds(missing_norm);
     summaries.minimum_residual_stability.push_back(missing_norm);
 
     MinimumResidualStabilitySummary quantified = missing_norm;

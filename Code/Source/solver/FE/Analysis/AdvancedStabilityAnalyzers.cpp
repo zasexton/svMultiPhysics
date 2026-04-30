@@ -1519,6 +1519,18 @@ void MinimumResidualStabilityAnalyzer::run(
         const bool normal_conditioning_valid =
             summary.normal_equation_conditioning_present &&
             finitePositive(summary.normal_equation_condition_estimate);
+        const bool accepted_local_condition_bound_valid =
+            summary.accepted_local_trial_to_test_condition_bound_present &&
+            finitePositive(summary.accepted_local_trial_to_test_condition_bound) &&
+            local_conditioning_valid &&
+            summary.local_trial_to_test_condition_estimate <=
+                summary.accepted_local_trial_to_test_condition_bound + Real{1.0e-14};
+        const bool accepted_normal_condition_bound_valid =
+            summary.accepted_normal_equation_condition_bound_present &&
+            finitePositive(summary.accepted_normal_equation_condition_bound) &&
+            normal_conditioning_valid &&
+            summary.normal_equation_condition_estimate <=
+                summary.accepted_normal_equation_condition_bound + Real{1.0e-14};
         const bool fortin_norm_valid =
             summary.fortin_operator_norm_bound_present &&
             finitePositive(summary.fortin_operator_norm_bound);
@@ -1553,7 +1565,11 @@ void MinimumResidualStabilityAnalyzer::run(
             residual_control_valid;
         const bool conditioning_metadata_present =
             local_conditioning_valid &&
-            normal_conditioning_valid;
+            normal_conditioning_valid &&
+            accepted_local_condition_bound_valid &&
+            accepted_normal_condition_bound_valid &&
+            summary.condition_bound_scope_metadata_present &&
+            !summary.condition_bound_scope.empty();
         const bool certified =
             core_metadata_present &&
             dpg_or_pg_stability_metadata_present &&
@@ -1567,6 +1583,18 @@ void MinimumResidualStabilityAnalyzer::run(
              !finitePositive(summary.local_trial_to_test_condition_estimate)) ||
             (summary.normal_equation_conditioning_present &&
              !finitePositive(summary.normal_equation_condition_estimate)) ||
+            (summary.accepted_local_trial_to_test_condition_bound_present &&
+             !finitePositive(summary.accepted_local_trial_to_test_condition_bound)) ||
+            (summary.accepted_normal_equation_condition_bound_present &&
+             !finitePositive(summary.accepted_normal_equation_condition_bound)) ||
+            (summary.accepted_local_trial_to_test_condition_bound_present &&
+             local_conditioning_valid &&
+             summary.local_trial_to_test_condition_estimate >
+                 summary.accepted_local_trial_to_test_condition_bound + Real{1.0e-14}) ||
+            (summary.accepted_normal_equation_condition_bound_present &&
+             normal_conditioning_valid &&
+             summary.normal_equation_condition_estimate >
+                 summary.accepted_normal_equation_condition_bound + Real{1.0e-14}) ||
             (summary.fortin_operator_norm_bound_present &&
              !finitePositive(summary.fortin_operator_norm_bound)) ||
             (summary.accepted_fortin_operator_norm_bound_present &&
@@ -1604,13 +1632,13 @@ void MinimumResidualStabilityAnalyzer::run(
 
         if (violated) {
             claim.description =
-                "Minimum-residual/Petrov-Galerkin summary reports violated residual, Fortin, Riesz, enrichment, distinct-space, or conditioning checks";
+                "Minimum-residual/Petrov-Galerkin summary reports violated residual, Fortin, Riesz, enrichment, distinct-space, or accepted conditioning checks";
         } else if (certified) {
             claim.description =
-                "Minimum-residual/Petrov-Galerkin stability is certified by scoped trial/test, residual norm, test norm, Riesz map, quantified Fortin or optimal-test evidence, enrichment, residual-control, theorem, and conditioning evidence";
+                "Minimum-residual/Petrov-Galerkin stability is certified by scoped trial/test, residual norm, test norm, Riesz map, quantified Fortin or optimal-test evidence, enrichment, residual-control, theorem, and accepted conditioning-bound evidence";
         } else if (core_metadata_present) {
             claim.description =
-                "Minimum-residual/Petrov-Galerkin method is structurally eligible but lacks complete Fortin/optimal-test, enrichment, residual-control, or conditioning evidence";
+                "Minimum-residual/Petrov-Galerkin method is structurally eligible but lacks complete Fortin/optimal-test, enrichment, residual-control, or accepted conditioning-bound evidence";
         } else {
             claim.description =
                 "Minimum-residual/Petrov-Galerkin stability is unknown because trial/test space or residual/test norm metadata is incomplete";
@@ -1663,8 +1691,17 @@ void MinimumResidualStabilityAnalyzer::run(
             std::string(conditioning_metadata_present ? "true" : "false") +
             ", local_condition=" +
             std::to_string(summary.local_trial_to_test_condition_estimate) +
+            ", accepted_local_condition_present=" +
+            std::string(summary.accepted_local_trial_to_test_condition_bound_present ? "true" : "false") +
+            ", accepted_local_condition=" +
+            std::to_string(summary.accepted_local_trial_to_test_condition_bound) +
             ", normal_condition=" +
             std::to_string(summary.normal_equation_condition_estimate) +
+            ", accepted_normal_condition_present=" +
+            std::string(summary.accepted_normal_equation_condition_bound_present ? "true" : "false") +
+            ", accepted_normal_condition=" +
+            std::to_string(summary.accepted_normal_equation_condition_bound) +
+            ", condition_scope='" + summary.condition_bound_scope + "'" +
             ", violations=" +
             std::to_string(summary.violation_count),
             claim.confidence);
@@ -1695,15 +1732,40 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             lower_bound_valid &&
             upper_bound_valid &&
             bounds_order_valid;
+        const bool cfl_bound_valid =
+            summary.cfl_estimate_present &&
+            summary.accepted_cfl_bound_present &&
+            finiteNonnegative(summary.cfl_estimate) &&
+            finitePositive(summary.accepted_cfl_bound) &&
+            summary.cfl_estimate <= summary.accepted_cfl_bound + Real{1.0e-14};
+        const bool cfl_scope_complete =
+            !summary.time_step_scope.empty() &&
+            !summary.mesh_size_scope.empty() &&
+            summary.wave_speed_bound_present &&
+            finiteNonnegative(summary.wave_speed_bound);
         const bool active_bounds_invalid =
             bounds_declared &&
             (!lower_bound_valid ||
              !upper_bound_valid ||
              !bounds_order_valid);
+        const bool cfl_numeric_invalid =
+            (summary.cfl_estimate_present &&
+             !finiteNonnegative(summary.cfl_estimate)) ||
+            (summary.accepted_cfl_bound_present &&
+             !finitePositive(summary.accepted_cfl_bound)) ||
+            (summary.wave_speed_bound_present &&
+             !finiteNonnegative(summary.wave_speed_bound)) ||
+            (summary.cfl_estimate_present &&
+             summary.accepted_cfl_bound_present &&
+             finiteNonnegative(summary.cfl_estimate) &&
+             finitePositive(summary.accepted_cfl_bound) &&
+             summary.cfl_estimate > summary.accepted_cfl_bound + Real{1.0e-14});
         const bool metadata_complete =
             bounds_valid &&
             summary.limiter_evidence_present &&
             summary.cfl_condition_satisfied &&
+            cfl_bound_valid &&
+            cfl_scope_complete &&
             summary.ssp_time_discretization_evidence_present &&
             summary.source_admissibility_evidence_present &&
             summary.low_order_invariant_domain_evidence_present &&
@@ -1723,6 +1785,12 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             claim.certification_class = CertificationClass::Violated;
             claim.description =
                 "Invariant-domain summary has non-finite or unordered active bounds";
+        } else if (cfl_numeric_invalid) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.description =
+                "Invariant-domain CFL, accepted bound, or wave-speed metadata is invalid or exceeds the accepted bound";
         } else if (summary.post_step_violation_count > 0u) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
@@ -1740,7 +1808,7 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Invariant-domain preservation lacks limiter, bound, CFL/SSP, source-admissibility, monotone low-order, mass-positivity, or theorem metadata";
+                "Invariant-domain preservation lacks limiter, bound, quantitative CFL/SSP, wave-speed, source-admissibility, monotone low-order, mass-positivity, or theorem metadata";
         }
         claim.addEvidence("PreservationStructureAnalyzer",
             "InvariantDomainSummary id='" + summary.invariant_set_id +
@@ -1758,6 +1826,20 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.limiter_evidence_present ? "true" : "false") +
             ", cfl_condition=" +
             std::string(summary.cfl_condition_satisfied ? "true" : "false") +
+            ", cfl_estimate_present=" +
+            std::string(summary.cfl_estimate_present ? "true" : "false") +
+            ", cfl_estimate=" +
+            std::to_string(summary.cfl_estimate) +
+            ", accepted_cfl_bound_present=" +
+            std::string(summary.accepted_cfl_bound_present ? "true" : "false") +
+            ", accepted_cfl_bound=" +
+            std::to_string(summary.accepted_cfl_bound) +
+            ", wave_speed_bound_present=" +
+            std::string(summary.wave_speed_bound_present ? "true" : "false") +
+            ", wave_speed_bound=" +
+            std::to_string(summary.wave_speed_bound) +
+            ", time_step_scope='" + summary.time_step_scope + "'" +
+            ", mesh_size_scope='" + summary.mesh_size_scope + "'" +
             ", ssp_time_discretization=" +
             std::string(summary.ssp_time_discretization_evidence_present ? "true" : "false") +
             ", source_admissibility=" +
@@ -1877,17 +1959,30 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
 
     for (const auto& summary : summaries->moving_domain) {
         const Real tol = effectiveTolerance(summary.geometric_conservation_tolerance);
+        const bool tolerance_declared =
+            summary.geometric_conservation_tolerance_declared &&
+            numeric::finiteDeclaredTolerance(
+                summary.geometric_conservation_tolerance);
         const bool jacobian_positive =
             numeric::finitePositiveOrdered(summary.min_geometric_jacobian,
                                            summary.max_geometric_jacobian);
         const bool residual_ok =
-            finiteNonnegative(summary.geometric_conservation_tolerance) &&
+            tolerance_declared &&
             numeric::finite(summary.geometric_conservation_residual) &&
             std::abs(summary.geometric_conservation_residual) <= tol;
+        const bool free_stream_residual_ok =
+            summary.free_stream_preservation_residual_present &&
+            numeric::finite(summary.free_stream_preservation_residual) &&
+            std::abs(summary.free_stream_preservation_residual) <= tol;
         const bool metadata_present =
             summary.mesh_velocity_metadata_present &&
             summary.time_integration_metadata_present &&
-            summary.remap_metadata_present;
+            summary.remap_metadata_present &&
+            summary.metric_identity_evidence_present &&
+            free_stream_residual_ok &&
+            theoremScoped(summary.gcl_theorem_id) &&
+            !summary.constant_state_scope.empty() &&
+            !summary.mesh_update_time_scheme.empty();
 
         PropertyClaim claim;
         claim.kind = PropertyKind::GeometricConservation;
@@ -1895,7 +1990,9 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
         claim.claim_origin = "PreservationStructureAnalyzer";
         claim.estimate_scope =
             "mesh_revision=" + std::to_string(summary.mesh_revision);
-        if (!jacobian_positive || !residual_ok) {
+        if (!jacobian_positive || !residual_ok ||
+            (summary.free_stream_preservation_residual_present &&
+             !free_stream_residual_ok)) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
@@ -1906,13 +2003,13 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
             claim.description =
-                "Moving-domain summary preserves positive mapping and geometric conservation";
+                "Moving-domain summary preserves positive mapping, discrete geometric conservation, and free-stream constant states";
         } else {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Moving-domain geometric conservation lacks mesh-velocity, time-integration, or remap metadata";
+                "Moving-domain geometric conservation lacks declared tolerance, metric identity, theorem, free-stream, mesh-update, or remap metadata";
         }
         claim.addEvidence("PreservationStructureAnalyzer",
             "MovingDomainSummary min_jacobian=" +
@@ -1922,6 +2019,17 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             ", gcl_residual=" +
             std::to_string(summary.geometric_conservation_residual) +
             ", tolerance=" + std::to_string(tol) +
+            ", tolerance_declared=" +
+            std::string(tolerance_declared ? "true" : "false") +
+            ", theorem='" + summary.gcl_theorem_id + "'" +
+            ", metric_identity=" +
+            std::string(summary.metric_identity_evidence_present ? "true" : "false") +
+            ", free_stream_residual_present=" +
+            std::string(summary.free_stream_preservation_residual_present ? "true" : "false") +
+            ", free_stream_residual=" +
+            std::to_string(summary.free_stream_preservation_residual) +
+            ", constant_state_scope='" + summary.constant_state_scope + "'" +
+            ", mesh_update_time_scheme='" + summary.mesh_update_time_scheme + "'" +
             ", mesh_velocity_metadata=" +
             std::string(summary.mesh_velocity_metadata_present ? "true" : "false") +
             ", time_integration_metadata=" +
