@@ -238,7 +238,7 @@ Checklist:
 - [x] Unsupported monolithic lowering fails before Forms installation.
 - [x] Unsupported partitioned lowering fails before plan generation.
 - [x] Expert fallback requires explicit opt-in.
-- [ ] Physics modules do not hand-code backend capability branching.
+- [x] Physics modules do not hand-code backend capability branching.
 
 ### AuxiliaryState Strategy Inheritance
 
@@ -1365,7 +1365,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 
 - [x] FSI partitioned exchange definitions are reduced to logical channels and
       transfer choices.
-- [ ] Thermal partitioned exchange definitions are reduced to logical channels
+- [x] Thermal partitioned exchange definitions are reduced to logical channels
       and transfer choices.
 - [x] Physics modules do not manually attach producer/consumer region endpoints.
 - [ ] Multi-PDE auxiliary and global-scalar exchanges are expressible through
@@ -1432,7 +1432,7 @@ strategy, while FE/Coupling decides whether that combination is supported.
 
 - [x] Add the relation lowering capability declarations described in "Resolved
       Authoring Decisions".
-- [ ] Add capability records for the initial FSI and thermal relations.
+- [x] Add capability records for the initial FSI and thermal relations.
 - [ ] Add capability records for fixture relations: N-way conservation,
       multiplier, multi-PDE auxiliary, electro-thermal, and contact/friction.
 - [x] Add validation that checks selected `CouplingMode`, enforcement strategy,
@@ -1446,7 +1446,7 @@ strategy, while FE/Coupling decides whether that combination is supported.
 - [x] Unsupported monolithic lowering fails before Forms installation.
 - [x] Unsupported partitioned lowering fails before plan generation.
 - [x] Expert fallback is rejected unless explicitly selected.
-- [ ] Physics modules do not hand-code relation capability branching.
+- [x] Physics modules do not hand-code relation capability branching.
 
 ## Phase 7: Migrate FSI Coupling
 
@@ -1660,8 +1660,8 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test migrated FSI monolithic forms install the same contribution names and
       dependencies.
 - [ ] Test migrated FSI partitioned exchanges match current logical channels.
-- [ ] Test migrated thermal monolithic lowering.
-- [ ] Test migrated thermal partitioned exchanges.
+- [x] Test migrated thermal monolithic lowering.
+- [x] Test migrated thermal partitioned exchanges.
 - [x] Test at least one N-way conservation coupling.
 - [x] Test at least one multiplier coupling.
 - [x] Test at least one multi-PDE auxiliary/global-scalar coupling.

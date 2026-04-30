@@ -53,6 +53,76 @@ void declareFieldRequirement(fec::CouplingDefinitionBuilder& builder,
     });
 }
 
+std::string thermalEnforcementStrategy(
+    ThermalInterfaceFormulation formulation)
+{
+    switch (formulation) {
+    case ThermalInterfaceFormulation::TemperatureContinuityPenalty:
+        return "temperature_continuity_penalty";
+    case ThermalInterfaceFormulation::SymmetricNitscheDiffusion:
+        return "symmetric_nitsche_diffusion";
+    case ThermalInterfaceFormulation::ExplicitFluxBalance:
+        return "explicit_flux_balance";
+    }
+    return "unknown";
+}
+
+fec::CouplingRelationLoweringRequest selectedLowering(
+    fec::CouplingMode mode,
+    std::string enforcement_strategy)
+{
+    return fec::CouplingRelationLoweringRequest{
+        .mode = mode,
+        .lowering_kind = mode == fec::CouplingMode::Monolithic
+                             ? fec::CouplingRelationLoweringKind::MonolithicForms
+                             : fec::CouplingRelationLoweringKind::PartitionedExchange,
+        .enforcement_strategy = std::move(enforcement_strategy),
+    };
+}
+
+fec::CouplingRegionRelationRequirement thermalInterfaceRelation(
+    const ThermalInterfaceCouplingOptions& options)
+{
+    return fec::CouplingRegionRelationRequirement{
+        .relation_name = "thermal_interface",
+        .relation_kind = fec::CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            fec::CouplingRegionEndpointDeclaration{
+                .participant_name = options.side_a_name,
+                .shared_region_name = options.interface_name,
+            },
+            fec::CouplingRegionEndpointDeclaration{
+                .participant_name = options.side_b_name,
+                .shared_region_name = options.interface_name,
+            },
+        },
+        .lowering_capabilities = {
+            fec::CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    fec::CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {
+                    "temperature_continuity_penalty",
+                },
+            },
+            fec::CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    fec::CouplingRelationLoweringKind::PartitionedExchange,
+            },
+        },
+        .selected_lowering = selectedLowering(
+            options.mode,
+            thermalEnforcementStrategy(options.formulation)),
+        .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+        .require_all_endpoints = true,
+        .require_distinct_participants = true,
+        .require_opposite_sides_for_side_pair = true,
+        .require_common_monolithic_system =
+            options.mode == fec::CouplingMode::Monolithic,
+        .require_registered_topology =
+            options.mode == fec::CouplingMode::Monolithic,
+    };
+}
+
 void appendPartitionedExchangeDeclarations(
     const ThermalInterfaceCouplingOptions& options,
     fec::CouplingDefinitionBuilder& builder)
@@ -241,6 +311,7 @@ void ThermalInterfaceCouplingModule::define(
         .require_monolithic_topology =
             options_.mode == fec::CouplingMode::Monolithic,
     });
+    builder.regionRelation(thermalInterfaceRelation(options_));
 
     appendPartitionedExchangeDeclarations(options_, builder);
 

@@ -75,6 +75,19 @@ const fec::CouplingFormContribution* findContribution(
     return it == contributions.end() ? nullptr : &*it;
 }
 
+const fec::CouplingRelationLoweringCapability* findCapability(
+    const fec::CouplingRegionRelationRequirement& relation,
+    fec::CouplingRelationLoweringKind kind)
+{
+    const auto it = std::find_if(
+        relation.lowering_capabilities.begin(),
+        relation.lowering_capabilities.end(),
+        [kind](const fec::CouplingRelationLoweringCapability& capability) {
+            return capability.lowering_kind == kind;
+        });
+    return it == relation.lowering_capabilities.end() ? nullptr : &*it;
+}
+
 std::shared_ptr<const FE::spaces::FunctionSpace> scalarSpace()
 {
     return FE::spaces::Space(FE::spaces::SpaceType::H1,
@@ -188,6 +201,46 @@ TEST(ThermalInterfaceCouplingModule, DeclaresMonolithicTemperatureInterface)
     EXPECT_EQ(*declaration.shared_regions[0].required_region_kind,
               fec::CouplingRegionKind::InterfaceFace);
     EXPECT_TRUE(declaration.partitioned_exchange_declarations.empty());
+}
+
+TEST(ThermalInterfaceCouplingModule, DeclaresRelationLoweringCapabilities)
+{
+    const ThermalInterfaceCouplingModule monolithic_module;
+    const auto monolithic = monolithic_module.declare();
+
+    ASSERT_EQ(monolithic.region_relation_requirements.size(), 1u);
+    const auto& relation = monolithic.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_name, "thermal_interface");
+    ASSERT_EQ(relation.endpoints.size(), 2u);
+    EXPECT_TRUE(relation.endpoints[0].region_name.empty());
+    ASSERT_TRUE(relation.endpoints[0].shared_region_name.has_value());
+    EXPECT_EQ(*relation.endpoints[0].shared_region_name, "interface");
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
+              fec::CouplingRelationLoweringKind::MonolithicForms);
+    EXPECT_EQ(relation.selected_lowering->enforcement_strategy,
+              "temperature_continuity_penalty");
+    EXPECT_NE(findCapability(
+                  relation,
+                  fec::CouplingRelationLoweringKind::MonolithicForms),
+              nullptr);
+    EXPECT_NE(findCapability(
+                  relation,
+                  fec::CouplingRelationLoweringKind::PartitionedExchange),
+              nullptr);
+
+    ThermalInterfaceCouplingOptions options;
+    options.mode = fec::CouplingMode::Partitioned;
+    options.temperature_transfer.kind = fec::CouplingTransferKind::Identity;
+    options.heat_flux_transfer.kind = fec::CouplingTransferKind::Identity;
+    const ThermalInterfaceCouplingModule partitioned_module(options);
+    const auto partitioned = partitioned_module.declare();
+    ASSERT_EQ(partitioned.region_relation_requirements.size(), 1u);
+    ASSERT_TRUE(partitioned.region_relation_requirements.front()
+                    .selected_lowering.has_value());
+    EXPECT_EQ(partitioned.region_relation_requirements.front()
+                  .selected_lowering->lowering_kind,
+              fec::CouplingRelationLoweringKind::PartitionedExchange);
 }
 
 TEST(ThermalInterfaceCouplingModule, DeclaresPartitionedTemperatureAndHeatFluxExchanges)

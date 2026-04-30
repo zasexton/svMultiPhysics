@@ -64,6 +64,65 @@ fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& opti
     };
 }
 
+fec::CouplingRelationLoweringRequest selectedLowering(
+    fec::CouplingMode mode,
+    std::string enforcement_strategy)
+{
+    return fec::CouplingRelationLoweringRequest{
+        .mode = mode,
+        .lowering_kind = mode == fec::CouplingMode::Monolithic
+                             ? fec::CouplingRelationLoweringKind::MonolithicForms
+                             : fec::CouplingRelationLoweringKind::PartitionedExchange,
+        .enforcement_strategy = std::move(enforcement_strategy),
+    };
+}
+
+fec::CouplingRegionRelationRequirement fsiInterfaceRelation(
+    const FSICouplingOptions& options)
+{
+    return fec::CouplingRegionRelationRequirement{
+        .relation_name = "fsi_interface",
+        .relation_kind = fec::CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            fec::CouplingRegionEndpointDeclaration{
+                .participant_name = options.fluid_name,
+                .shared_region_name = options.interface_name,
+            },
+            fec::CouplingRegionEndpointDeclaration{
+                .participant_name = options.solid_name,
+                .shared_region_name = options.interface_name,
+            },
+        },
+        .lowering_capabilities = {
+            fec::CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    fec::CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {"velocity_traction_balance"},
+            },
+            fec::CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    fec::CouplingRelationLoweringKind::PartitionedExchange,
+                .enforcement_strategies = {"velocity_traction_balance"},
+                .partitioned_solve_strategies = {
+                    fec::CouplingPartitionedSolveStrategy::ExplicitLagged,
+                    fec::CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                },
+            },
+        },
+        .selected_lowering = selectedLowering(
+            options.mode,
+            "velocity_traction_balance"),
+        .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+        .require_all_endpoints = true,
+        .require_distinct_participants = true,
+        .require_opposite_sides_for_side_pair = true,
+        .require_common_monolithic_system =
+            options.mode == fec::CouplingMode::Monolithic,
+        .require_registered_topology =
+            options.mode == fec::CouplingMode::Monolithic,
+    };
+}
+
 void appendPartitionedExchangeDeclarations(
     const FSICouplingOptions& options,
     fec::CouplingDefinitionBuilder& builder)
@@ -344,6 +403,7 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
         .require_monolithic_topology =
             options_.mode == fec::CouplingMode::Monolithic,
     });
+    builder.regionRelation(fsiInterfaceRelation(options_));
 
     if (options_.multiplier.enabled) {
         const auto multiplier_namespace =
