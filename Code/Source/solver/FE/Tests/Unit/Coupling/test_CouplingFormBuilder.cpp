@@ -194,6 +194,9 @@ TEST(CouplingFormBuilder, LowersRegionKindsToFormsMeasures)
     EXPECT_EQ(shared_interface.node()->type(), forms::FormExprType::InterfaceIntegral);
     ASSERT_TRUE(shared_interface.node()->interfaceMarker().has_value());
     EXPECT_EQ(*shared_interface.node()->interfaceMarker(), 17);
+    const auto shared_region = builder.sharedRegion("shared_interface", "participant");
+    EXPECT_EQ(shared_region.marker, 17);
+    EXPECT_EQ(shared_region.side, CouplingInterfaceSide::Minus);
 }
 
 TEST(CouplingFormBuilder, RejectsUserDefinedRegionFormsLowering)

@@ -61,7 +61,8 @@ CouplingRegionRef region(std::string participant_name,
                          const systems::FESystem* system,
                          std::string region_name,
                          CouplingRegionKind kind,
-                         int marker)
+                         int marker,
+                         CouplingInterfaceSide side = CouplingInterfaceSide::None)
 {
     return CouplingRegionRef{
         .participant_name = std::move(participant_name),
@@ -70,6 +71,7 @@ CouplingRegionRef region(std::string participant_name,
         .region_name = std::move(region_name),
         .kind = kind,
         .marker = marker,
+        .side = side,
     };
 }
 
@@ -340,21 +342,27 @@ TEST(CouplingContext, SharedRegionLookupReturnsParticipantMapping)
 {
     const auto* system = systemToken(1);
     const auto surface = region("left", "shared_system", system, "surface",
-                                CouplingRegionKind::Boundary, 12);
+                                CouplingRegionKind::InterfaceFace, 12,
+                                CouplingInterfaceSide::Plus);
 
     CouplingContextBuilder builder;
     builder.addParticipant(participant("left", "shared_system", system))
         .addRegion(surface)
         .addSharedRegion(SharedRegionRef{
             .name = "interface",
-            .required_region_kind = CouplingRegionKind::Boundary,
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
             .participant_regions = {surface},
         });
 
     const auto context = builder.build();
     EXPECT_TRUE(context.hasSharedRegion("interface"));
     EXPECT_EQ(context.sharedRegion("interface", "left").marker, 12);
-    EXPECT_EQ(context.sharedRegionGroup("interface").participant_regions.size(), 1u);
+    EXPECT_EQ(context.sharedRegion("interface", "left").side,
+              CouplingInterfaceSide::Plus);
+    const auto group = context.sharedRegionGroup("interface");
+    ASSERT_EQ(group.participant_regions.size(), 1u);
+    EXPECT_EQ(group.participant_regions[0].marker, 12);
+    EXPECT_EQ(group.participant_regions[0].side, CouplingInterfaceSide::Plus);
 }
 
 TEST(CouplingContext, RejectsSharedRegionMappingThatDiffersFromContextRegion)

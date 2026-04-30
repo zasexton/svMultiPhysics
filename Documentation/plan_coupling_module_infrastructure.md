@@ -3946,7 +3946,7 @@ Implementation checklist:
 - [x] Map region kinds to the existing Forms measures `.dx()`, `.ds(marker)`,
   `.dS()`, and `.dI(interface_marker)` without introducing a parallel
   coupling-specific measure vocabulary.
-- [ ] Preserve marker and side/orientation metadata needed by interface-face
+- [x] Preserve marker and side/orientation metadata needed by interface-face
   Forms expressions and trace/mortar workflows.
 - [x] Validate that Forms-authored monolithic fields belong to one compatible
   `FESystem` before constructing field-bound Forms symbols.
