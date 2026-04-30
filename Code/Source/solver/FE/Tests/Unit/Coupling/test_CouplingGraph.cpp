@@ -812,6 +812,52 @@ TEST(CouplingGraph, BuildsGraphForMultipleContractsSharingContext)
     EXPECT_EQ(snapshot.contract_instances[1].contract_name, "thermal_interface");
 }
 
+TEST(CouplingGraph, SeparatesContractTypesFromInstances)
+{
+    auto first = graphDeclaration();
+    first.contract_type = "fsi";
+    first.contract_name = "wall_interface";
+
+    auto second = graphDeclaration();
+    second.contract_type = "thermal";
+    second.contract_name = "thermal_interface";
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 2> declarations{
+        first,
+        second,
+    };
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    ASSERT_EQ(snapshot.contract_types.size(), 2u);
+    EXPECT_EQ(snapshot.contract_types[0].contract_type, "fsi");
+    EXPECT_EQ(snapshot.contract_types[1].contract_type, "thermal");
+    ASSERT_EQ(snapshot.contract_instances.size(), 2u);
+    EXPECT_EQ(snapshot.contract_instances[0].contract_type, "fsi");
+    EXPECT_EQ(snapshot.contract_instances[0].contract_name, "wall_interface");
+    EXPECT_EQ(snapshot.contract_instances[1].contract_type, "thermal");
+    EXPECT_EQ(snapshot.contract_instances[1].contract_name, "thermal_interface");
+
+    auto duplicate = second;
+    duplicate.contract_name = first.contract_name;
+    const std::array<CouplingContractDeclaration, 2> duplicate_declarations{
+        first,
+        duplicate,
+    };
+    CouplingGraph duplicate_graph;
+    const auto duplicate_validation = duplicate_graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(duplicate_declarations));
+    EXPECT_FALSE(duplicate_validation.ok());
+    EXPECT_NE(formatDiagnostics(duplicate_validation)
+                  .find("duplicate coupling contract instance name"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)
 {
     auto declaration = graphDeclaration();
