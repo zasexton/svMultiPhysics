@@ -212,6 +212,46 @@ TEST(CouplingGeometryRequirements, RejectsMissingOwnerScope)
               std::string::npos);
 }
 
+TEST(CouplingGeometryRequirements, RejectsLocationOnlySharedRegionOwnerScope)
+{
+    const std::array<CouplingGeometryTerminalRequirement, 1> requirements{
+        CouplingGeometryTerminalRequirement{
+            .quantity = CouplingGeometryTerminalQuantity::CurrentNormal,
+            .scope = CouplingGeometryTerminalScope{
+                .location = CouplingGeometryTerminalLocationDeclaration{
+                    .region_kind = CouplingRegionKind::Boundary,
+                    .shared_region_name = "surface_pair",
+                },
+            },
+        },
+    };
+
+    const auto validation = validateGeometryTerminalRequirements(
+        geometryContext(),
+        std::span<const CouplingGeometryTerminalRequirement>(requirements),
+        boundaryGeometryAvailability());
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("requires owner scope"),
+              std::string::npos);
+}
+
+TEST(CouplingGeometryRequirements, RejectsConflictingOwnerAndRegionParticipants)
+{
+    auto requirement = boundaryNormalRequirement();
+    requirement.scope.participant_name = "right";
+
+    const std::array<CouplingGeometryTerminalRequirement, 1> requirements{requirement};
+    const auto validation = validateGeometryTerminalRequirements(
+        geometryContext(),
+        std::span<const CouplingGeometryTerminalRequirement>(requirements),
+        boundaryGeometryAvailability());
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("conflicts with region participant"),
+              std::string::npos);
+}
+
 TEST(CouplingGeometryRequirements, CouplingGraphValidatesAggregatedDeclarations)
 {
     CouplingGraph graph;

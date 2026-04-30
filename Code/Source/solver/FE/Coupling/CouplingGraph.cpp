@@ -339,6 +339,20 @@ ResolvedGeometryRequirement resolveGeometryRequirement(
     }
 
     if (geometry.scope.participant_name.has_value() &&
+        geometry.scope.region.has_value() &&
+        !geometry.scope.region->participant_name.empty() &&
+        *geometry.scope.participant_name !=
+            geometry.scope.region->participant_name) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = *geometry.scope.participant_name,
+            .region_name = geometry.scope.region->region_name,
+            .message = "geometry terminal owner participant conflicts with region participant",
+        });
+    }
+
+    if (geometry.scope.participant_name.has_value() &&
         context.hasParticipant(*geometry.scope.participant_name)) {
         const auto participant =
             context.participant(*geometry.scope.participant_name);

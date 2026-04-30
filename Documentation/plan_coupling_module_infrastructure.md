@@ -4445,7 +4445,7 @@ Implementation checklist:
   side, typed logical interface region, typed `forms::GeometryConfiguration`
   value configuration, optional frame-transform from/to configurations,
   geometry revision, and quadrature-policy key.
-- [ ] Validate geometry-terminal requirement owner scope by requiring either an
+- [x] Validate geometry-terminal requirement owner scope by requiring either an
   owning participant or a declaration-side participant/region attachment, so
   normals, measures, and interface-side geometry terminals are not ambiguous in
   N-participant contracts; if both `scope.participant_name` and `scope.region`

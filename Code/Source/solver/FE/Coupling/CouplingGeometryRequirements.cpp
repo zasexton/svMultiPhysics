@@ -96,6 +96,26 @@ void updateConfigurationSummary(CouplingGeometryTerminalRequirementSummary& summ
     }
 }
 
+void validateOwnerScope(const CouplingGeometryTerminalRequirement& requirement,
+                        CouplingValidationResult& result)
+{
+    const bool required = requirement.requirement == CouplingRequirement::Required;
+    const bool has_owner =
+        requirement.scope.participant_name.has_value() ||
+        requirement.scope.region.has_value();
+    if (required && !has_owner) {
+        result.addError("geometry terminal requirement requires owner scope");
+    }
+
+    if (requirement.scope.participant_name.has_value() &&
+        requirement.scope.region.has_value() &&
+        !requirement.scope.region->participant_name.empty() &&
+        *requirement.scope.participant_name !=
+            requirement.scope.region->participant_name) {
+        result.addError("geometry terminal owner participant conflicts with region participant");
+    }
+}
+
 } // namespace
 
 const char* toString(CouplingGeometryTerminalQuantity quantity) noexcept
@@ -191,14 +211,7 @@ CouplingValidationResult validateGeometryTerminalRequirements(
     CouplingValidationResult result;
     for (const auto& requirement : requirements) {
         const bool required = requirement.requirement == CouplingRequirement::Required;
-        const bool has_owner =
-            requirement.scope.participant_name.has_value() ||
-            requirement.scope.region.has_value() ||
-            (requirement.scope.location.has_value() &&
-             requirement.scope.location->shared_region_name.has_value());
-        if (required && !has_owner) {
-            result.addError("geometry terminal requirement requires owner scope");
-        }
+        validateOwnerScope(requirement, result);
 
         const auto domain = resolveRequirementDomain(context, requirement, &result);
         if (!domain.has_value()) {
