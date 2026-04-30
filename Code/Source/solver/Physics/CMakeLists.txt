@@ -269,6 +269,42 @@ endif()
 if(PHYSICS_BUILD_TESTS)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableGTest.cmake)
 
+    set(PHYSICS_COUPLING_HEADER_TEST_SOURCES)
+    foreach(_physics_coupling_header IN LISTS PHYSICS_COUPLING_HEADERS)
+        file(RELATIVE_PATH
+            _physics_coupling_header_include
+            "${CMAKE_CURRENT_SOURCE_DIR}/.."
+            "${_physics_coupling_header}"
+        )
+        string(MAKE_C_IDENTIFIER
+            "${_physics_coupling_header_include}"
+            _physics_coupling_header_id
+        )
+        set(_physics_coupling_header_source
+            "${CMAKE_CURRENT_BINARY_DIR}/header_checks/${_physics_coupling_header_id}.cpp"
+        )
+        file(WRITE
+            "${_physics_coupling_header_source}"
+            "#include \"${_physics_coupling_header_include}\"\n"
+            "int ${_physics_coupling_header_id}_compile_check() { return 0; }\n"
+        )
+        list(APPEND
+            PHYSICS_COUPLING_HEADER_TEST_SOURCES
+            "${_physics_coupling_header_source}"
+        )
+    endforeach()
+
+    add_library(test_physics_coupling_headers OBJECT
+        ${PHYSICS_COUPLING_HEADER_TEST_SOURCES}
+    )
+    target_link_libraries(test_physics_coupling_headers PRIVATE svphysics)
+    if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
+        target_compile_options(test_physics_coupling_headers
+            PRIVATE
+                ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS}
+        )
+    endif()
+
     set(PHYSICS_TEST_SOURCES
         Tests/Unit/test_main.cpp
         Tests/Unit/test_PoissonModule.cpp
@@ -287,6 +323,7 @@ if(PHYSICS_BUILD_TESTS)
     )
 
     add_executable(test_physics ${PHYSICS_TEST_SOURCES})
+    add_dependencies(test_physics test_physics_coupling_headers)
     target_link_libraries(test_physics PRIVATE svphysics ${GTEST_LIBRARIES})
     if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
         target_compile_options(test_physics PRIVATE ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS})

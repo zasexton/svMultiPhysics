@@ -3748,7 +3748,7 @@ Unit-test verification checklist:
 
 - [x] Add a build-only unit test or compile target that includes every public
   `FE/Coupling` header independently.
-- [ ] Add a build-only unit test or compile target that includes every public
+- [x] Add a build-only unit test or compile target that includes every public
   `Physics/Coupling` header independently.
 - [ ] Add a dependency-boundary test or build assertion that `FE/Coupling`
   compiles without including any `Physics/Coupling` header.
