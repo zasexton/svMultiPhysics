@@ -128,6 +128,25 @@ TEST(CouplingContractValidation, AcceptsMinimalTwoParticipantDeclaration)
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 }
 
+TEST(CouplingContractValidation, PreservesDependencyDeclarationMode)
+{
+    static_assert(std::is_same_v<decltype(CouplingContractDeclaration::
+                                              dependency_declaration_mode),
+                                 CouplingDependencyDeclarationMode>);
+
+    auto declaration = minimalDeclaration();
+    EXPECT_EQ(declaration.dependency_declaration_mode,
+              CouplingDependencyDeclarationMode::DeclareAndVerify);
+
+    declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::InferFromInstalledForms;
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+
+    declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::ExpertProvided;
+    EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
+}
+
 TEST(CouplingContractValidation, AcceptsValidNParticipantDeclaration)
 {
     CouplingContractDeclaration declaration;

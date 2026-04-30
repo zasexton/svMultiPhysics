@@ -61,6 +61,12 @@ struct CouplingResidualDependency {
     CouplingDependencyMode mode{CouplingDependencyMode::ImplicitMonolithic};
 };
 
+enum class CouplingDependencyDeclarationMode : std::uint8_t {
+    InferFromInstalledForms,
+    DeclareAndVerify,
+    ExpertProvided,
+};
+
 struct CouplingFieldRequirement {
     CouplingFieldUse field;
     CouplingValueDescriptor value;
@@ -415,6 +421,8 @@ analysisVariableKindForFormNonFieldDependency(
 struct CouplingContractDeclaration {
     std::string contract_type;
     std::string contract_name;
+    CouplingDependencyDeclarationMode dependency_declaration_mode{
+        CouplingDependencyDeclarationMode::DeclareAndVerify};
     std::vector<CouplingParticipantUse> participants;
     std::vector<CouplingFieldUse> fields;
     std::vector<CouplingFieldRequirement> field_requirements;

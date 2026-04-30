@@ -1281,7 +1281,7 @@ evidence.
         terminals
       - geometry requirements from geometry terminals
       - geometry-sensitivity field uses from install options and bridge metadata
-- [ ] Add a policy enum for dependency declaration mode:
+- [x] Add a policy enum for dependency declaration mode:
 
 ```cpp
 enum class CouplingDependencyDeclarationMode {
@@ -1292,7 +1292,7 @@ enum class CouplingDependencyDeclarationMode {
 ```
 
 - [ ] Default new physics modules to `InferFromInstalledForms`.
-- [ ] Keep current explicit `dependencies` and `expected_blocks` as
+- [x] Keep current explicit `dependencies` and `expected_blocks` as
       compatibility and expert-check paths.
 - [ ] Add diagnostics when explicit declarations disagree with installed Forms
       metadata.
