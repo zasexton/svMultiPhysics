@@ -35,8 +35,9 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
             return CouplingResolvedTemporalBackingKind::SystemStateCurrent;
         case CouplingTemporalSlot::History:
             return CouplingResolvedTemporalBackingKind::SystemStateHistory;
-        case CouplingTemporalSlot::Accepted:
         case CouplingTemporalSlot::Predicted:
+            return CouplingResolvedTemporalBackingKind::SystemStatePredicted;
+        case CouplingTemporalSlot::Accepted:
         case CouplingTemporalSlot::Stage:
         case CouplingTemporalSlot::External:
             return CouplingResolvedTemporalBackingKind::None;
@@ -54,6 +55,7 @@ CouplingResolvedTemporalBackingKind backingForEndpoint(const CouplingEndpointRef
         case CouplingTemporalSlot::History:
             return CouplingResolvedTemporalBackingKind::AuxiliaryHistory;
         case CouplingTemporalSlot::Predicted:
+            return CouplingResolvedTemporalBackingKind::AuxiliaryPredicted;
         case CouplingTemporalSlot::Stage:
         case CouplingTemporalSlot::External:
             return CouplingResolvedTemporalBackingKind::None;
@@ -258,9 +260,9 @@ CouplingValidationResult validateEndpointResolutionSupport(
         switch (endpoint.temporal.slot) {
         case CouplingTemporalSlot::Current:
         case CouplingTemporalSlot::History:
+        case CouplingTemporalSlot::Predicted:
             break;
         case CouplingTemporalSlot::Accepted:
-        case CouplingTemporalSlot::Predicted:
         case CouplingTemporalSlot::Stage:
         case CouplingTemporalSlot::External:
             result.add(CouplingDiagnostic{
@@ -452,8 +454,8 @@ CouplingValidationResult validateEndpointResolutionSupport(
         case CouplingTemporalSlot::Current:
         case CouplingTemporalSlot::Accepted:
         case CouplingTemporalSlot::History:
-            break;
         case CouplingTemporalSlot::Predicted:
+            break;
         case CouplingTemporalSlot::Stage:
         case CouplingTemporalSlot::External:
             result.add(CouplingDiagnostic{

@@ -80,6 +80,11 @@ CouplingTemporalSlotDescriptor currentSlot()
     return CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Current};
 }
 
+CouplingTemporalSlotDescriptor predictedSlot()
+{
+    return CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted};
+}
+
 CouplingExternalBufferDescriptor externalBuffer(std::string name,
                                                 std::uint64_t data_revision)
 {
@@ -664,6 +669,43 @@ TEST(CouplingContext, RejectsDuplicateExternalBufferTemporalSlots)
     EXPECT_NE(formatDiagnostics(validation).find(
                   "external buffer descriptor has duplicate temporal slots"),
               std::string::npos);
+}
+
+TEST(CouplingContext, PreservesPredictedTemporalSlotDescriptors)
+{
+    auto buffer = externalBuffer("driver_value", 1);
+    buffer.supported_temporal_slots = {predictedSlot()};
+
+    auto transfer = driverOwnedTransfer("copy");
+    transfer.supported_source_temporal_slots = {predictedSlot()};
+    transfer.supported_target_temporal_slots = {predictedSlot()};
+
+    CouplingContextBuilder builder;
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = buffer,
+    });
+    builder.addDriverOwnedTransfer(transfer);
+
+    const auto context = builder.build();
+    const auto* resolved_buffer =
+        context.externalBufferDescriptor(std::nullopt, "driver_value");
+    ASSERT_NE(resolved_buffer, nullptr);
+    ASSERT_EQ(resolved_buffer->supported_temporal_slots.size(), 1u);
+    EXPECT_EQ(resolved_buffer->supported_temporal_slots[0].slot,
+              CouplingTemporalSlot::Predicted);
+    EXPECT_NE(resolved_buffer->supported_temporal_slots[0].slot,
+              CouplingTemporalSlot::Current);
+    EXPECT_NE(resolved_buffer->supported_temporal_slots[0].slot,
+              CouplingTemporalSlot::Accepted);
+
+    const auto* resolved_transfer = context.driverOwnedTransfer("copy");
+    ASSERT_NE(resolved_transfer, nullptr);
+    ASSERT_EQ(resolved_transfer->supported_source_temporal_slots.size(), 1u);
+    ASSERT_EQ(resolved_transfer->supported_target_temporal_slots.size(), 1u);
+    EXPECT_EQ(resolved_transfer->supported_source_temporal_slots[0].slot,
+              CouplingTemporalSlot::Predicted);
+    EXPECT_EQ(resolved_transfer->supported_target_temporal_slots[0].slot,
+              CouplingTemporalSlot::Predicted);
 }
 
 TEST(CouplingContext, RejectsExternalBufferWithoutRevisionKeys)

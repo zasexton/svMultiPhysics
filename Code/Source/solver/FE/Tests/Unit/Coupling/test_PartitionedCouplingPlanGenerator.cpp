@@ -1268,7 +1268,6 @@ TEST(PartitionedCouplingPlanGenerator, RejectsUnsupportedFieldTemporalSlots)
 {
     const std::vector<CouplingTemporalSlotDescriptor> unsupported_temporal_slots{
         CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Accepted},
-        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted},
         CouplingTemporalSlotDescriptor{
             .slot = CouplingTemporalSlot::Stage,
             .stage_index = 0,
@@ -1291,6 +1290,32 @@ TEST(PartitionedCouplingPlanGenerator, RejectsUnsupportedFieldTemporalSlots)
         EXPECT_NE(formatDiagnostics(validation).find("field endpoint temporal slot"),
                   std::string::npos);
     }
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesFieldPredictedTemporalSlot)
+{
+    auto exchange = identityExchange();
+    exchange.producer = fieldEndpoint(
+        "left",
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted});
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::SystemStatePredicted);
+    EXPECT_NE(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::SystemStateCurrent);
+    EXPECT_NE(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::SystemStateAccepted);
 }
 
 TEST(PartitionedCouplingPlanGenerator, GeneratesAuxiliaryStateEndpointFromBlock)
@@ -1347,6 +1372,34 @@ TEST(PartitionedCouplingPlanGenerator, ResolvesAcceptedAuxiliaryStateEndpoint)
         std::span<const CouplingExchangeDeclaration>(exchanges));
 
     EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryCommitted);
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesPredictedAuxiliaryStateEndpoint)
+{
+    AuxiliaryOutputEndpointFixture fixture;
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryStateEndpoint(
+        "left",
+        "output_block",
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted});
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryPredicted);
+    EXPECT_NE(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::AuxiliaryCurrent);
+    EXPECT_NE(plan.exchanges[0].producer.temporal.backing,
               CouplingResolvedTemporalBackingKind::AuxiliaryCommitted);
 }
 
@@ -1818,6 +1871,42 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesExternalBufferEndpointWithDescri
               CouplingResolvedTemporalBackingKind::ExternalBuffer);
     EXPECT_EQ(plan.exchanges[0].producer.layout_revision_key, 3u);
     EXPECT_EQ(plan.exchanges[0].producer.registry_revision_key, 5u);
+}
+
+TEST(PartitionedCouplingPlanGenerator, ResolvesPredictedExternalBufferEndpoint)
+{
+    auto exchange = identityExchange();
+    exchange.producer = externalBufferEndpoint("driver_value");
+    exchange.producer->temporal =
+        CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted};
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBufferDescriptor(
+            "driver_value",
+            exchange.value,
+            CouplingExternalBufferAccess::ReadOnly,
+            {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::Predicted}}),
+    });
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::ExternalBuffer);
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.request.slot,
+              CouplingTemporalSlot::Predicted);
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.provided.slot,
+              CouplingTemporalSlot::Predicted);
 }
 
 TEST(PartitionedCouplingPlanGenerator, ResolvesParticipantScopedExternalBufferEndpoint)

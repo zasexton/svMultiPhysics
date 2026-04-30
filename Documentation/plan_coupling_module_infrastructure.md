@@ -4015,7 +4015,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingContext.cpp` verifies FE-backed and parameter endpoints reject
   missing `participant_name`, while external-buffer endpoints accept missing
   `participant_name` only for registered global driver-owned buffers.
-- [ ] `test_CouplingContext.cpp` verifies predicted temporal slots resolve to
+- [x] `test_CouplingContext.cpp` verifies predicted temporal slots resolve to
   explicit system, auxiliary, interface-map, external-buffer, or provider-defined
   predicted backings and are never silently treated as Current or Accepted.
 - [x] `test_CouplingContext.cpp` verifies typed minus/plus interface sides are
