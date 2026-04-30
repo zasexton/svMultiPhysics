@@ -4296,7 +4296,7 @@ Unit-test verification checklist:
   while resolved parameter slots, auxiliary ids, provider-local indices, markers,
   logical regions, and system provenance appear only in
   `CouplingFormNonFieldDependencyProvenance`.
-- [ ] `test_CouplingContractValidation.cpp` verifies BoundaryIntegral
+- [x] `test_CouplingContractValidation.cpp` verifies BoundaryIntegral
   declaration/provenance maps to BoundaryFunctional graph identity until
   Analysis exposes a distinct boundary-integral variable kind.
 - [x] `test_CouplingContractValidation.cpp` verifies temporal requirement

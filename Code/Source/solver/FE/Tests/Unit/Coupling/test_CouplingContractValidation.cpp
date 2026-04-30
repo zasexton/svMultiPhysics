@@ -1060,6 +1060,60 @@ TEST(CouplingContractValidation, SeparatesNonFieldRequirementsFromProvenance)
     EXPECT_EQ(*metadata.non_field_dependencies[2].output_id, 9u);
 }
 
+TEST(CouplingContractValidation, MapsBoundaryIntegralToBoundaryFunctionalIdentity)
+{
+    const auto declaration_kind = analysisVariableKindForNonFieldRequirement(
+        CouplingNonFieldDependencyRequirementKind::BoundaryIntegral);
+    ASSERT_TRUE(declaration_kind.has_value());
+    EXPECT_EQ(*declaration_kind,
+              svmp::FE::analysis::VariableKind::BoundaryFunctional);
+
+    const auto boundary_functional_kind = analysisVariableKindForNonFieldRequirement(
+        CouplingNonFieldDependencyRequirementKind::BoundaryFunctional);
+    ASSERT_TRUE(boundary_functional_kind.has_value());
+    EXPECT_EQ(*boundary_functional_kind,
+              svmp::FE::analysis::VariableKind::BoundaryFunctional);
+
+    EXPECT_FALSE(analysisVariableKindForNonFieldRequirement(
+                     CouplingNonFieldDependencyRequirementKind::Parameter)
+                     .has_value());
+
+    const auto provenance_kind = analysisVariableKindForFormNonFieldDependency(
+        CouplingFormNonFieldDependencyKind::BoundaryIntegral);
+    ASSERT_TRUE(provenance_kind.has_value());
+    EXPECT_EQ(*provenance_kind,
+              svmp::FE::analysis::VariableKind::BoundaryFunctional);
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.non_field_dependencies.push_back(
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::BoundaryIntegral,
+            .participant_name = "left",
+            .system_name = "left_system",
+            .name = "traction_integral",
+            .domain = svmp::FE::analysis::DomainKind::Boundary,
+            .provider = "forms",
+            .value_type = "scalar",
+        });
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = svmp::FE::analysis::VariableKey::field(1),
+        .dependency = svmp::FE::analysis::VariableKey::named(
+            *provenance_kind,
+            "left_system/traction_integral"),
+        .domain = svmp::FE::analysis::DomainKind::Boundary,
+        .provider = "forms",
+    });
+
+    ASSERT_EQ(metadata.non_field_dependencies.size(), 1u);
+    EXPECT_EQ(metadata.non_field_dependencies[0].kind,
+              CouplingFormNonFieldDependencyKind::BoundaryIntegral);
+    ASSERT_EQ(metadata.variable_dependencies.size(), 1u);
+    EXPECT_EQ(metadata.variable_dependencies[0].dependency.kind,
+              svmp::FE::analysis::VariableKind::BoundaryFunctional);
+    EXPECT_EQ(metadata.variable_dependencies[0].dependency.name,
+              "left_system/traction_integral");
+}
+
 TEST(CouplingContractValidation, ValidatesTemporalRequirementsAndExchangeShape)
 {
     auto declaration = minimalDeclaration();

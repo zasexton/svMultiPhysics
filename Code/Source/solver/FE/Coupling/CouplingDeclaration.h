@@ -333,6 +333,14 @@ struct CouplingFormAnalysisMetadata {
     std::vector<analysis::FormBridgeFeatureGate> feature_gates;
 };
 
+[[nodiscard]] std::optional<analysis::VariableKind>
+analysisVariableKindForNonFieldRequirement(
+    CouplingNonFieldDependencyRequirementKind kind) noexcept;
+
+[[nodiscard]] std::optional<analysis::VariableKind>
+analysisVariableKindForFormNonFieldDependency(
+    CouplingFormNonFieldDependencyKind kind) noexcept;
+
 struct CouplingContractDeclaration {
     std::string contract_type;
     std::string contract_name;

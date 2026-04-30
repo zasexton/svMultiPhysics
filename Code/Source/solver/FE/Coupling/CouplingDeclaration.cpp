@@ -17,6 +17,50 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+std::optional<analysis::VariableKind> analysisVariableKindForNonFieldRequirement(
+    CouplingNonFieldDependencyRequirementKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingNonFieldDependencyRequirementKind::BoundaryFunctional:
+    case CouplingNonFieldDependencyRequirementKind::BoundaryIntegral:
+        return analysis::VariableKind::BoundaryFunctional;
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryState:
+        return analysis::VariableKind::AuxiliaryState;
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryInput:
+        return analysis::VariableKind::AuxiliaryInput;
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput:
+        return analysis::VariableKind::AuxiliaryOutput;
+    case CouplingNonFieldDependencyRequirementKind::Parameter:
+    case CouplingNonFieldDependencyRequirementKind::Coefficient:
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateOld:
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateWork:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<analysis::VariableKind> analysisVariableKindForFormNonFieldDependency(
+    CouplingFormNonFieldDependencyKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingFormNonFieldDependencyKind::BoundaryFunctional:
+    case CouplingFormNonFieldDependencyKind::BoundaryIntegral:
+        return analysis::VariableKind::BoundaryFunctional;
+    case CouplingFormNonFieldDependencyKind::AuxiliaryState:
+        return analysis::VariableKind::AuxiliaryState;
+    case CouplingFormNonFieldDependencyKind::AuxiliaryInput:
+        return analysis::VariableKind::AuxiliaryInput;
+    case CouplingFormNonFieldDependencyKind::AuxiliaryOutput:
+        return analysis::VariableKind::AuxiliaryOutput;
+    case CouplingFormNonFieldDependencyKind::Parameter:
+    case CouplingFormNonFieldDependencyKind::Coefficient:
+    case CouplingFormNonFieldDependencyKind::MaterialStateOld:
+    case CouplingFormNonFieldDependencyKind::MaterialStateWork:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 namespace {
 
 void addDuplicateIfRepeated(CouplingValidationResult& result,
@@ -122,11 +166,7 @@ bool isMaterialStateRequirement(CouplingNonFieldDependencyRequirementKind kind)
 
 bool supportsAnalysisVariableKey(CouplingNonFieldDependencyRequirementKind kind)
 {
-    return kind == CouplingNonFieldDependencyRequirementKind::BoundaryFunctional ||
-           kind == CouplingNonFieldDependencyRequirementKind::BoundaryIntegral ||
-           kind == CouplingNonFieldDependencyRequirementKind::AuxiliaryState ||
-           kind == CouplingNonFieldDependencyRequirementKind::AuxiliaryInput ||
-           kind == CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput;
+    return analysisVariableKindForNonFieldRequirement(kind).has_value();
 }
 
 } // namespace
