@@ -4591,7 +4591,7 @@ Unit-test verification checklist:
   as an ordinary symbolic-tangent request, requires `mesh_motion_field` for
   `MeshMotionUnknowns`, and forwards/forces the resolved geometry tangent path
   correctly for mesh-motion geometry sensitivity.
-- [ ] `test_CouplingFormBuilder.cpp` verifies cut/embedded geometry sensitivity
+- [x] `test_CouplingFormBuilder.cpp` verifies cut/embedded geometry sensitivity
   metadata is adapted into `CouplingGeometrySensitivityProvenance` without
   collapsing it to a boolean field-use flag, including target kind, parent
   entity, parent geometry DOFs, visible assembly paths, revision keys,
