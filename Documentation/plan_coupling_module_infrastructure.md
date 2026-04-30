@@ -4961,14 +4961,14 @@ Implementation checklist:
   provenance returned by the public Forms/Systems coupling-analysis metadata
   bridge, preserving contribution name, origin, owning-system provenance, and
   builder terminal-provenance declarations for diagnostics.
-- [ ] Dispatch `installMonolithicTerms()` after Forms-based installation for
+- [x] Dispatch `installMonolithicTerms()` after Forms-based installation for
   contracts that require expert custom terms.
-- [ ] Require expert custom install hooks to return one `CouplingInstallMetadata`
+- [x] Require expert custom install hooks to return one `CouplingInstallMetadata`
   record per installed custom contribution, with contribution identity, resolved
   `analysis::VariableKey` residual rows/dependencies, domain provenance, and
   matrix/vector contribution flags, and record those installed dependencies for
   graph diagnostics.
-- [ ] Ensure expert custom install hooks use `MonolithicCouplingInstallContext`
+- [x] Ensure expert custom install hooks use `MonolithicCouplingInstallContext`
   and approved Systems extension points rather than internal raw kernel
   registration methods.
 - [ ] Refresh the finalized graph after Forms and expert install metadata are
@@ -5037,14 +5037,14 @@ Unit-test verification checklist:
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies contribution name, origin, and
   owning-system provenance are retained when installed metadata is adapted for
   graph diagnostics.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies expert custom install hooks
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies expert custom install hooks
   are dispatched after Forms contributions and must return one install metadata
   record per custom contribution.
 - [ ] `test_MonolithicCouplingBuilder.cpp` verifies Forms dependency/block
   metadata, including non-field dependency provenance and structured
   geometry-sensitivity provenance, is recorded from the public Forms/Systems
   coupling-analysis metadata bridge.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies expert hooks cannot bypass
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies expert hooks cannot bypass
   `MonolithicCouplingInstallContext`.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies missing expected blocks
   fail before setup.

@@ -411,6 +411,62 @@ public:
     }
 };
 
+class ExpertMetadataContract final : public CouplingContract {
+public:
+    ExpertMetadataContract(std::vector<std::string>* events,
+                           bool return_metadata)
+        : events_(events)
+        , return_metadata_(return_metadata)
+    {
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "expert";
+    }
+
+    [[nodiscard]] CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = name();
+        declaration.contract_name = "expert_instance";
+        declaration.participants.push_back({.participant_name = "left"});
+        declaration.participants.push_back({.participant_name = "right"});
+        return declaration;
+    }
+
+    [[nodiscard]] std::vector<CouplingInstallMetadata> installMonolithicTerms(
+        MonolithicCouplingInstallContext& install,
+        const CouplingContext& context) override
+    {
+        if (events_ != nullptr) {
+            events_->push_back("expert");
+        }
+        install.recordInstalledContribution();
+        if (!return_metadata_) {
+            return {};
+        }
+
+        auto metadata = validExpertInstallMetadata();
+        metadata.installed_dependencies[0].residual_row =
+            analysis::VariableKey::field(
+                context.field("right", "primary").field_id);
+        metadata.installed_dependencies[0].dependency =
+            analysis::VariableKey::field(
+                context.field("left", "primary").field_id);
+        metadata.installed_blocks[0].residual_row =
+            metadata.installed_dependencies[0].residual_row;
+        metadata.installed_blocks[0].dependency =
+            metadata.installed_dependencies[0].dependency;
+        metadata.installed_blocks[0].domains = {analysis::DomainKind::Cell};
+        return {metadata};
+    }
+
+private:
+    std::vector<std::string>* events_{nullptr};
+    bool return_metadata_{true};
+};
+
 } // namespace
 
 TEST(MonolithicCouplingBuilder, BuildsInitialContextFromRegisteredReferences)
@@ -2023,6 +2079,57 @@ TEST(MonolithicCouplingBuilder, InstallsCouplingFormsAfterExistingBaseForms)
     ASSERT_EQ(fixture.system.formulationRecords().size(), 2u);
     EXPECT_EQ(fixture.system.formulationRecords()[0].active_fields,
               (std::vector<FieldId>{fixture.left_field}));
+}
+
+TEST(MonolithicCouplingBuilder, DispatchesExpertTermsAfterFormsAndAdaptsMetadata)
+{
+    BuilderFixture fixture;
+    const GenericTwoParticipantContract form_contract;
+    MonolithicCouplingBuilder builder;
+    const CouplingFormBuilder forms(fixture.context);
+    std::vector<std::string> events;
+
+    const auto contributions =
+        form_contract.buildMonolithicForms(fixture.context, forms);
+    const auto forms_metadata = builder.installFormContributions(
+        fixture.system,
+        fixture.context,
+        std::span<const CouplingFormContribution>(contributions));
+    ASSERT_EQ(forms_metadata.size(), 1u);
+    events.push_back("forms");
+
+    ExpertMetadataContract expert_contract(&events, true);
+    std::array<CouplingContract*, 1> contracts{&expert_contract};
+    MonolithicCouplingInstallContext install_context;
+    const auto expert_metadata = builder.installExpertTerms(
+        install_context,
+        fixture.context,
+        std::span<CouplingContract*>(contracts));
+
+    EXPECT_EQ(events, (std::vector<std::string>{"forms", "expert"}));
+    ASSERT_EQ(expert_metadata.size(), 1u);
+    EXPECT_EQ(expert_metadata[0].contribution_name, "expert_balance");
+    EXPECT_NE(findDependency(expert_metadata[0],
+                             analysis::VariableKey::field(fixture.right_field),
+                             analysis::VariableKey::field(fixture.left_field)),
+              nullptr);
+    EXPECT_EQ(install_context.installedContributionCount(), 1u);
+}
+
+TEST(MonolithicCouplingBuilder, RejectsExpertTermsWithoutReturnedMetadata)
+{
+    BuilderFixture fixture;
+    MonolithicCouplingBuilder builder;
+    ExpertMetadataContract missing_metadata(nullptr, false);
+    std::array<CouplingContract*, 1> contracts{&missing_metadata};
+    MonolithicCouplingInstallContext install_context;
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.installExpertTerms(
+                         install_context,
+                         fixture.context,
+                         std::span<CouplingContract*>(contracts))),
+                 InvalidArgumentException);
 }
 
 TEST(MonolithicCouplingBuilder, GenericInterfaceContractInstallsAndFinalizesGraph)

@@ -1191,6 +1191,17 @@ CouplingFieldRef fieldRefForRegisteredAdditionalField(
 
 } // namespace
 
+void MonolithicCouplingInstallContext::recordInstalledContribution() noexcept
+{
+    ++installed_contribution_count_;
+}
+
+std::size_t MonolithicCouplingInstallContext::installedContributionCount()
+    const noexcept
+{
+    return installed_contribution_count_;
+}
+
 CouplingContext MonolithicCouplingBuilder::buildInitialContext(
     std::span<const CouplingParticipantRef> participants,
     std::span<const CouplingFieldRef> fields,
@@ -1428,6 +1439,31 @@ std::vector<CouplingFormAnalysisMetadata> MonolithicCouplingBuilder::installForm
     for (const auto& contribution : contributions) {
         const auto resolved = resolveFormContribution(context, contribution);
         installed.push_back(installResolvedFormContribution(system, resolved));
+    }
+    return installed;
+}
+
+std::vector<CouplingFormAnalysisMetadata> MonolithicCouplingBuilder::installExpertTerms(
+    MonolithicCouplingInstallContext& install,
+    const CouplingContext& context,
+    std::span<CouplingContract*> contracts) const
+{
+    std::vector<CouplingFormAnalysisMetadata> installed;
+    for (auto* contract : contracts) {
+        FE_CHECK_NOT_NULL(contract, "coupling contract");
+        const auto contribution_count_before =
+            install.installedContributionCount();
+        auto metadata = contract->installMonolithicTerms(install, context);
+        const auto contribution_count =
+            install.installedContributionCount() - contribution_count_before;
+        FE_THROW_IF(metadata.size() != contribution_count,
+                    InvalidArgumentException,
+                    "expert install hook must return one metadata record per installed custom contribution");
+        auto adapted = adaptInstallMetadataRecords(
+            std::span<const CouplingInstallMetadata>(metadata));
+        installed.insert(installed.end(),
+                         std::make_move_iterator(adapted.begin()),
+                         std::make_move_iterator(adapted.end()));
     }
     return installed;
 }

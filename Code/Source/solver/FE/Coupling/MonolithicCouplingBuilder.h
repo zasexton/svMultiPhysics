@@ -15,6 +15,7 @@
 
 #include "Coupling/CouplingContract.h"
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <vector>
@@ -26,6 +27,12 @@ namespace coupling {
 class MonolithicCouplingInstallContext {
 public:
     MonolithicCouplingInstallContext() = default;
+
+    void recordInstalledContribution() noexcept;
+    [[nodiscard]] std::size_t installedContributionCount() const noexcept;
+
+private:
+    std::size_t installed_contribution_count_{0};
 };
 
 class CouplingGraph;
@@ -76,6 +83,11 @@ public:
         systems::FESystem& system,
         const CouplingContext& context,
         std::span<const CouplingFormContribution> contributions) const;
+
+    [[nodiscard]] std::vector<CouplingFormAnalysisMetadata> installExpertTerms(
+        MonolithicCouplingInstallContext& install,
+        const CouplingContext& context,
+        std::span<CouplingContract*> contracts) const;
 
     [[nodiscard]] static CouplingFormAnalysisMetadata adaptFormAnalysisMetadata(
         const analysis::FormContributionAnalysisMetadata& metadata);
