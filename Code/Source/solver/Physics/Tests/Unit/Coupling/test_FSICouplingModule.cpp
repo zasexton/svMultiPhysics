@@ -138,22 +138,44 @@ struct FSIContextFixture {
                                bool include_shared_region = true,
                                bool include_fluid_mapping = true,
                                bool include_solid_mapping = true,
-                               bool include_mesh_displacement = true)
+                               bool include_mesh_displacement = true,
+                               bool use_shared_system = true,
+                               bool include_interface_topology = true)
     {
-        fluid_system.setInterfaceMesh(10, std::make_shared<const svmp::InterfaceMesh>());
-        solid_system.setInterfaceMesh(20, std::make_shared<const svmp::InterfaceMesh>());
+        auto* fluid_system_ref = &fluid_system;
+        auto* solid_system_ref = use_shared_system ? &fluid_system : &solid_system;
+        auto* mesh_system_ref = use_shared_system ? &fluid_system : &mesh_system;
+        const std::string fluid_system_name =
+            use_shared_system ? "fsi_system" : "fluid_system";
+        const std::string solid_system_name =
+            use_shared_system ? "fsi_system" : "solid_system";
+        const std::string mesh_system_name =
+            use_shared_system ? "fsi_system" : "mesh_system";
+        const int fluid_marker = 10;
+        const int solid_marker = use_shared_system ? 10 : 20;
+
+        if (include_interface_topology) {
+            fluid_system_ref->setInterfaceMesh(
+                fluid_marker,
+                std::make_shared<const svmp::InterfaceMesh>());
+            if (!use_shared_system) {
+                solid_system_ref->setInterfaceMesh(
+                    solid_marker,
+                    std::make_shared<const svmp::InterfaceMesh>());
+            }
+        }
 
         auto fluid_region = interfaceRegion("fluid",
-                                            "fluid_system",
-                                            &fluid_system,
+                                            fluid_system_name,
+                                            fluid_system_ref,
                                             "fluid_interface",
-                                            10,
+                                            fluid_marker,
                                             fec::CouplingInterfaceSide::Minus);
         auto solid_region = interfaceRegion("solid",
-                                            "solid_system",
-                                            &solid_system,
+                                            solid_system_name,
+                                            solid_system_ref,
                                             "solid_interface",
-                                            20,
+                                            solid_marker,
                                             fec::CouplingInterfaceSide::Plus);
         std::vector<fec::CouplingRegionRef> shared_regions;
         if (include_fluid_mapping) {
@@ -166,35 +188,35 @@ struct FSIContextFixture {
         fec::CouplingContextBuilder builder;
         builder.addParticipant(fec::CouplingParticipantRef{
                    .participant_name = "fluid",
-                   .system_name = "fluid_system",
-                   .system = &fluid_system,
+                   .system_name = fluid_system_name,
+                   .system = fluid_system_ref,
                })
             .addParticipant(fec::CouplingParticipantRef{
                 .participant_name = "solid",
-                .system_name = "solid_system",
-                .system = &solid_system,
+                .system_name = solid_system_name,
+                .system = solid_system_ref,
             })
             .addField(field("fluid",
-                            "fluid_system",
-                            &fluid_system,
+                            fluid_system_name,
+                            fluid_system_ref,
                             "velocity",
                             static_cast<FE::FieldId>(1),
                             components.fluid_velocity))
             .addField(field("fluid",
-                            "fluid_system",
-                            &fluid_system,
+                            fluid_system_name,
+                            fluid_system_ref,
                             "pressure",
                             static_cast<FE::FieldId>(2),
                             components.fluid_pressure))
             .addField(field("solid",
-                            "solid_system",
-                            &solid_system,
+                            solid_system_name,
+                            solid_system_ref,
                             "displacement",
                             static_cast<FE::FieldId>(3),
                             components.solid_displacement))
             .addField(field("solid",
-                            "solid_system",
-                            &solid_system,
+                            solid_system_name,
+                            solid_system_ref,
                             "velocity",
                             static_cast<FE::FieldId>(4),
                             components.solid_velocity))
@@ -204,13 +226,13 @@ struct FSIContextFixture {
         if (include_mesh) {
             builder.addParticipant(fec::CouplingParticipantRef{
                        .participant_name = "mesh",
-                       .system_name = "mesh_system",
-                       .system = &mesh_system,
+                       .system_name = mesh_system_name,
+                       .system = mesh_system_ref,
                    });
             if (include_mesh_displacement) {
                 builder.addField(field("mesh",
-                                       "mesh_system",
-                                       &mesh_system,
+                                       mesh_system_name,
+                                       mesh_system_ref,
                                        "displacement",
                                        static_cast<FE::FieldId>(5),
                                        components.mesh_displacement));
@@ -235,6 +257,20 @@ void expectValidationFailureContaining(const FSICouplingModule& module,
     try {
         module.validate(context);
         FAIL() << "expected validation to fail";
+    } catch (const FE::InvalidArgumentException& exception) {
+        EXPECT_NE(std::string(exception.what()).find(message), std::string::npos)
+            << exception.what();
+    }
+}
+
+void expectFormBuildFailureContaining(const FSICouplingModule& module,
+                                      const fec::CouplingContext& context,
+                                      const fec::CouplingFormBuilder& form_builder,
+                                      const std::string& message)
+{
+    try {
+        static_cast<void>(module.buildMonolithicForms(context, form_builder));
+        FAIL() << "expected form build to fail";
     } catch (const FE::InvalidArgumentException& exception) {
         EXPECT_NE(std::string(exception.what()).find(message), std::string::npos)
             << exception.what();
@@ -409,6 +445,53 @@ TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
                             "displacement"));
     EXPECT_TRUE(containsFormExprType(*contribution.residual.node(),
                                      forms::FormExprType::TimeDerivative));
+}
+
+TEST(FSICouplingModule, RejectsMonolithicFormsWithIncompatibleSystems)
+{
+    const FSICouplingModule module;
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              false);
+    expectValidationFailureContaining(
+        module,
+        fixture.context,
+        "FSI monolithic fields must be registered in one compatible FESystem");
+
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    expectFormBuildFailureContaining(
+        module,
+        fixture.context,
+        form_builder,
+        "FSI monolithic fields must be registered in one compatible FESystem");
+}
+
+TEST(FSICouplingModule, RejectsMonolithicFormsWithoutInterfaceTopology)
+{
+    const FSICouplingModule module;
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              false);
+    expectValidationFailureContaining(
+        module,
+        fixture.context,
+        "FSI monolithic interface marker is missing registered interface topology");
+
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    expectFormBuildFailureContaining(
+        module,
+        fixture.context,
+        form_builder,
+        "FSI monolithic interface marker is missing registered interface topology");
 }
 
 TEST(FSICouplingModule, RejectsInvalidOptionsDuringValidation)

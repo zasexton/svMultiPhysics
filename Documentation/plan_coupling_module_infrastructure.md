@@ -5356,7 +5356,7 @@ Implementation checklist:
 - [x] Author at least one Forms-based FSI-like monolithic kinematic constraint
   through `CouplingFormBuilder` using explicit Forms interface measures and
   trace/side restrictions.
-- [ ] Validate monolithic FSI fields are registered in one compatible
+- [x] Validate monolithic FSI fields are registered in one compatible
   `FESystem` and that the FSI interface marker has registered interface
   topology before authoring `.dI(marker)` residuals.
 - [ ] Author or install monolithic dynamic/traction balance terms through Forms
@@ -5409,7 +5409,7 @@ Unit-test verification checklist:
   expected implicit dependencies, including structured geometry-sensitivity
   provenance when ALE mesh motion is handled through the Systems
   geometry-sensitivity path.
-- [ ] `test_FSICouplingModule.cpp` rejects Forms-authored monolithic FSI when
+- [x] `test_FSICouplingModule.cpp` rejects Forms-authored monolithic FSI when
   participants are not in one compatible `FESystem` or the interface topology
   is not registered.
 - [ ] `test_FSICouplingModule.cpp` verifies expected FSI monolithic block
