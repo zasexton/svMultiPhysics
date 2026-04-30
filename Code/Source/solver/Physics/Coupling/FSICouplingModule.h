@@ -19,7 +19,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -73,13 +72,6 @@ public:
     [[nodiscard]] std::string name() const override;
 
     void validate(const FE::coupling::CouplingContext& ctx) const override;
-
-    [[nodiscard]] bool supportsMonolithicLowering() const override;
-
-    [[nodiscard]] std::vector<FE::coupling::CouplingFormContribution>
-    buildMonolithicForms(
-        const FE::coupling::CouplingContext& ctx,
-        const FE::coupling::CouplingFormBuilder& form_builder) const override;
 
 protected:
     [[nodiscard]] std::string contractInstanceName() const override;

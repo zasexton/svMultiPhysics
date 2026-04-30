@@ -107,6 +107,104 @@ void appendPartitionedExchangeDeclarations(
                   {options.fluid_name, options.solid_name});
 }
 
+std::vector<fec::CouplingFormContribution> buildFSIMonolithicForms(
+    const FSICouplingOptions& options,
+    const fec::CouplingContext& ctx,
+    const fec::CouplingFormBuilder& form_builder)
+{
+    static_cast<void>(ctx);
+
+    const auto interface = form_builder.sharedInterface(options.interface_name);
+    const auto fluid_side = interface.side(options.fluid_name);
+    const auto solid_side = interface.side(options.solid_name);
+
+    const auto fluid_velocity =
+        fluid_side.state(options.fluid_velocity_field, "u_f");
+    const auto fluid_velocity_test =
+        fluid_side.test(options.fluid_velocity_field, "w_f");
+
+    fec::CouplingFieldUse solid_dependency;
+    forms::FormExpr solid_velocity;
+    if (options.use_solid_displacement_derivative) {
+        solid_dependency = fieldUse(options.solid_name,
+                                    options.solid_displacement_field);
+        solid_velocity = solid_side.dt(options.solid_displacement_field,
+                                       "dt_d_s");
+    } else {
+        FE_THROW_IF(!options.solid_velocity_field.has_value() ||
+                        options.solid_velocity_field->empty(),
+                    FE::InvalidArgumentException,
+                    "FSI monolithic form requires a solid velocity field or displacement derivative");
+        const auto& solid_velocity_field = *options.solid_velocity_field;
+        solid_dependency = fieldUse(options.solid_name, solid_velocity_field);
+        solid_velocity = solid_side.state(solid_velocity_field, "v_s");
+    }
+
+    std::vector<fec::CouplingFormContribution> contributions;
+    std::optional<fec::CouplingGeometrySensitivityDeclaration>
+        mesh_geometry_sensitivity;
+    if (options.mesh_name.has_value() &&
+        options.mesh_displacement_field.has_value()) {
+        mesh_geometry_sensitivity = fec::CouplingGeometrySensitivityDeclaration{
+            .mode = forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = fieldUse(*options.mesh_name,
+                                          *options.mesh_displacement_field),
+        };
+    }
+
+    fec::CouplingFormContribution kinematic;
+    kinematic.contribution_name =
+        options.contract_name + "_velocity_continuity";
+    kinematic.origin = "FSICouplingModule";
+    kinematic.operator_name = "equations";
+    kinematic.field_uses = {fieldUse(options.fluid_name,
+                                     options.fluid_velocity_field)};
+    kinematic.extra_trial_field_uses = {std::move(solid_dependency)};
+    kinematic.residual =
+        interface.integral(forms::inner(fluid_velocity - solid_velocity,
+                                        fluid_velocity_test),
+                           options.fluid_name);
+    if (mesh_geometry_sensitivity.has_value()) {
+        kinematic.install_options_declaration.geometry_sensitivity =
+            *mesh_geometry_sensitivity;
+        kinematic.extra_trial_field_uses.push_back(
+            fieldUse(*options.mesh_name, *options.mesh_displacement_field));
+    }
+    contributions.push_back(
+        form_builder.attachTerminalProvenance(std::move(kinematic)));
+
+    const auto fluid_pressure =
+        fluid_side.state(options.fluid_pressure_field, "p_f");
+    const auto solid_displacement_test =
+        solid_side.test(options.solid_displacement_field, "w_s");
+    const auto interface_normal = fluid_side.normal();
+
+    fec::CouplingFormContribution traction;
+    traction.contribution_name =
+        options.contract_name + "_pressure_traction_balance";
+    traction.origin = "FSICouplingModule";
+    traction.operator_name = "equations";
+    traction.field_uses = {fieldUse(options.solid_name,
+                                    options.solid_displacement_field)};
+    traction.extra_trial_field_uses = {fieldUse(options.fluid_name,
+                                                options.fluid_pressure_field)};
+    traction.residual =
+        interface.integral(
+            -forms::inner(fluid_pressure * interface_normal,
+                          solid_displacement_test),
+            options.fluid_name);
+    if (mesh_geometry_sensitivity.has_value()) {
+        traction.install_options_declaration.geometry_sensitivity =
+            *mesh_geometry_sensitivity;
+        traction.extra_trial_field_uses.push_back(
+            fieldUse(*options.mesh_name, *options.mesh_displacement_field));
+    }
+    contributions.push_back(
+        form_builder.attachTerminalProvenance(std::move(traction)));
+
+    return contributions;
+}
+
 fec::CouplingValidationResult validateOptionShape(const FSICouplingOptions& options)
 {
     fec::CouplingValidationResult result;
@@ -267,6 +365,14 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
     }
 
     appendPartitionedExchangeDeclarations(options_, builder);
+
+    if (options_.mode == fec::CouplingMode::Monolithic) {
+        const auto options = options_;
+        builder.monolithic([options](const fec::CouplingContext& ctx,
+                                     const fec::CouplingFormBuilder& forms) {
+            return buildFSIMonolithicForms(options, ctx, forms);
+        });
+    }
 }
 
 void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
@@ -280,112 +386,6 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
         ctx,
         std::span<const fec::CouplingContractDeclaration>(declarations)));
     throwIfInvalid(result);
-}
-
-bool FSICouplingModule::supportsMonolithicLowering() const
-{
-    return options_.mode == fec::CouplingMode::Monolithic;
-}
-
-std::vector<fec::CouplingFormContribution>
-FSICouplingModule::buildMonolithicForms(
-    const fec::CouplingContext& ctx,
-    const fec::CouplingFormBuilder& form_builder) const
-{
-    static_cast<void>(ctx);
-    if (options_.mode != fec::CouplingMode::Monolithic) {
-        return {};
-    }
-
-    const auto interface = form_builder.sharedInterface(options_.interface_name);
-    const auto fluid_side = interface.side(options_.fluid_name);
-    const auto solid_side = interface.side(options_.solid_name);
-
-    const auto fluid_velocity =
-        fluid_side.state(options_.fluid_velocity_field, "u_f");
-    const auto fluid_velocity_test =
-        fluid_side.test(options_.fluid_velocity_field, "w_f");
-
-    fec::CouplingFieldUse solid_dependency;
-    forms::FormExpr solid_velocity;
-    if (options_.use_solid_displacement_derivative) {
-        solid_dependency = fieldUse(options_.solid_name,
-                                    options_.solid_displacement_field);
-        solid_velocity = solid_side.dt(options_.solid_displacement_field,
-                                       "dt_d_s");
-    } else {
-        FE_THROW_IF(!options_.solid_velocity_field.has_value() ||
-                        options_.solid_velocity_field->empty(),
-                    FE::InvalidArgumentException,
-                    "FSI monolithic form requires a solid velocity field or displacement derivative");
-        const auto& solid_velocity_field = *options_.solid_velocity_field;
-        solid_dependency = fieldUse(options_.solid_name, solid_velocity_field);
-        solid_velocity = solid_side.state(solid_velocity_field, "v_s");
-    }
-
-    std::vector<fec::CouplingFormContribution> contributions;
-    std::optional<fec::CouplingGeometrySensitivityDeclaration>
-        mesh_geometry_sensitivity;
-    if (options_.mesh_name.has_value() &&
-        options_.mesh_displacement_field.has_value()) {
-        mesh_geometry_sensitivity = fec::CouplingGeometrySensitivityDeclaration{
-            .mode = forms::GeometrySensitivityMode::MeshMotionUnknowns,
-            .mesh_motion_field = fieldUse(*options_.mesh_name,
-                                          *options_.mesh_displacement_field),
-        };
-    }
-
-    fec::CouplingFormContribution kinematic;
-    kinematic.contribution_name =
-        options_.contract_name + "_velocity_continuity";
-    kinematic.origin = "FSICouplingModule";
-    kinematic.operator_name = "equations";
-    kinematic.field_uses = {fieldUse(options_.fluid_name,
-                                     options_.fluid_velocity_field)};
-    kinematic.extra_trial_field_uses = {std::move(solid_dependency)};
-    kinematic.residual =
-        interface.integral(forms::inner(fluid_velocity - solid_velocity,
-                                        fluid_velocity_test),
-                           options_.fluid_name);
-    if (mesh_geometry_sensitivity.has_value()) {
-        kinematic.install_options_declaration.geometry_sensitivity =
-            *mesh_geometry_sensitivity;
-        kinematic.extra_trial_field_uses.push_back(
-            fieldUse(*options_.mesh_name, *options_.mesh_displacement_field));
-    }
-    contributions.push_back(
-        form_builder.attachTerminalProvenance(std::move(kinematic)));
-
-    const auto fluid_pressure =
-        fluid_side.state(options_.fluid_pressure_field, "p_f");
-    const auto solid_displacement_test =
-        solid_side.test(options_.solid_displacement_field, "w_s");
-    const auto interface_normal = fluid_side.normal();
-
-    fec::CouplingFormContribution traction;
-    traction.contribution_name =
-        options_.contract_name + "_pressure_traction_balance";
-    traction.origin = "FSICouplingModule";
-    traction.operator_name = "equations";
-    traction.field_uses = {fieldUse(options_.solid_name,
-                                    options_.solid_displacement_field)};
-    traction.extra_trial_field_uses = {fieldUse(options_.fluid_name,
-                                                options_.fluid_pressure_field)};
-    traction.residual =
-        interface.integral(
-            -forms::inner(fluid_pressure * interface_normal,
-                          solid_displacement_test),
-            options_.fluid_name);
-    if (mesh_geometry_sensitivity.has_value()) {
-        traction.install_options_declaration.geometry_sensitivity =
-            *mesh_geometry_sensitivity;
-        traction.extra_trial_field_uses.push_back(
-            fieldUse(*options_.mesh_name, *options_.mesh_displacement_field));
-    }
-    contributions.push_back(
-        form_builder.attachTerminalProvenance(std::move(traction)));
-
-    return contributions;
 }
 
 } // namespace coupling

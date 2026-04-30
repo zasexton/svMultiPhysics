@@ -1458,9 +1458,11 @@ equation definitions, and partitioned strategy choices.
 ### Concrete Changes
 
 - [x] Derive `FSICouplingModule` from `DefinitionBackedCouplingContract`.
-- [ ] Replace `declare()`, `validate()`, `supportsMonolithicLowering()`,
+- [x] Replace `declare()`, `supportsMonolithicLowering()`,
       `buildMonolithicForms()`, and `buildPartitionedExchangeDeclarations()`
       with `define(...)`.
+- [ ] Move remaining option-specific `validate()` checks into a
+      definition-backed validation hook once that hook exists.
 - [x] Declare participant roles:
       - fluid
       - solid
@@ -1479,7 +1481,7 @@ equation definitions, and partitioned strategy choices.
       displacement.
 - [x] Preserve optional mesh-displacement geometry sensitivity.
 - [x] Define partitioned channels through `PartitionedCouplingBuilder`.
-- [ ] Remove local helpers that duplicate backend responsibilities:
+- [x] Remove local helpers that duplicate backend responsibilities:
       - [x] `validateVectorFieldComponents`
       - [x] `validateScalarPressureComponents`
       - [x] `validateInterfaceRegionMappings`
@@ -1492,8 +1494,8 @@ equation definitions, and partitioned strategy choices.
 ### Completion Checklist
 
 - [x] FSI behavior is unchanged in existing tests.
-- [ ] FSI file length is substantially reduced.
-- [ ] FSI equations remain easy to review in one location.
+- [x] FSI file length is substantially reduced.
+- [x] FSI equations remain easy to review in one location.
 - [ ] FSI validation errors still identify contract, participant, field, and
       region context.
 
