@@ -4701,7 +4701,7 @@ Implementation checklist:
 - [x] Validate non-field dependency expectations against installed
   `analysis::VariableKey` edges and only require matrix-block evidence when the
   relevant Systems metadata reports a true linearized matrix contribution.
-- [ ] Validate `CouplingNonFieldDependencyRequirement` records against installed
+- [x] Validate `CouplingNonFieldDependencyRequirement` records against installed
   participant/system-scoped non-field provenance, including expected parameter
   value type, coefficient value type, material-state byte offset, resolved
   `analysis::DomainKind`, region/shared-region name, marker, side, and logical
@@ -4843,7 +4843,7 @@ Unit-test verification checklist:
   against provider metadata without requiring installed `analysis::VariableKey`
   edges for parameters, coefficients, material-state old/work data, and
   boundary-integral provenance unless explicitly marked as graph variables.
-- [ ] `test_CouplingGraph.cpp` verifies location-sensitive non-field
+- [x] `test_CouplingGraph.cpp` verifies location-sensitive non-field
   requirements use `analysis::DomainKind`, region/shared-region name, marker,
   side, logical region, provider, value-type, slot/output-id, and byte-offset
   provenance only as installed evidence, and that two dependencies with the same

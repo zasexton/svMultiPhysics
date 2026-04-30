@@ -146,6 +146,37 @@ CouplingContext graphContext()
     return builder.build();
 }
 
+CouplingContext twoBoundaryRegionGraphContext()
+{
+    const auto* system = graphSystemToken();
+    const CouplingRegionRef inlet{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "inlet",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 4,
+    };
+    const CouplingRegionRef outlet{
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+        .region_name = "outlet",
+        .kind = CouplingRegionKind::Boundary,
+        .marker = 5,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "system",
+        .system = system,
+    });
+    builder.addRegion(inlet);
+    builder.addRegion(outlet);
+    return builder.build();
+}
+
 struct NonFieldGraphFixture {
     std::shared_ptr<spaces::H1Space> space;
     std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
@@ -898,6 +929,166 @@ TEST(CouplingGraph, RejectsMissingProviderOnlyNonFieldMetadata)
     EXPECT_NE(text.find("required provider metadata is missing"),
               std::string::npos);
     EXPECT_NE(text.find("BoundaryIntegral(left/traction_integral)"),
+              std::string::npos);
+}
+
+TEST(CouplingGraph, RejectsIncompleteProviderMetadataProvenance)
+{
+    const auto declaration = providerMetadataDeclaration();
+    auto missing_region = providerMetadataFixture();
+    missing_region.non_field_dependencies[0].region_name.reset();
+    auto wrong_marker = providerMetadataFixture();
+    wrong_marker.non_field_dependencies[0].marker = 99;
+    auto missing_provider = providerMetadataFixture();
+    missing_provider.non_field_dependencies[0].provider.clear();
+
+    auto expect_rejected = [&](const CouplingFormAnalysisMetadata& metadata) {
+        const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+        const auto validation = buildFinalizedGraph(
+            graphContext(),
+            declaration,
+            installed_forms);
+        EXPECT_FALSE(validation.ok());
+        EXPECT_NE(formatDiagnostics(validation).find("Parameter(left/penalty)"),
+                  std::string::npos);
+    };
+
+    expect_rejected(missing_region);
+    expect_rejected(wrong_marker);
+    expect_rejected(missing_provider);
+}
+
+TEST(CouplingGraph, DistinguishesProviderMetadataWithSameNameByRegion)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.regions.push_back({
+        .participant_name = "left",
+        .region_name = "inlet",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.regions.push_back({
+        .participant_name = "left",
+        .region_name = "outlet",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+        .participant_name = "left",
+        .name = "penalty",
+        .region = CouplingRegionEndpointDeclaration{
+            .participant_name = "left",
+            .region_name = "inlet",
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .expected_parameter_value_type = params::ValueType::Real,
+        .expected_value_type = "scalar",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+        .participant_name = "left",
+        .name = "penalty",
+        .region = CouplingRegionEndpointDeclaration{
+            .participant_name = "left",
+            .region_name = "outlet",
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .expected_parameter_value_type = params::ValueType::Real,
+        .expected_value_type = "scalar",
+    });
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "regional_provider_metadata";
+    metadata.system_name = "system";
+    metadata.non_field_dependencies = {
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::Parameter,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "penalty",
+            .domain = analysis::DomainKind::Boundary,
+            .region_name = "inlet",
+            .marker = 4,
+            .provider = "forms",
+            .value_type = "scalar",
+            .parameter_value_type = params::ValueType::Real,
+        },
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::Parameter,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "penalty",
+            .domain = analysis::DomainKind::Boundary,
+            .region_name = "outlet",
+            .marker = 5,
+            .provider = "forms",
+            .value_type = "scalar",
+            .parameter_value_type = params::ValueType::Real,
+        },
+    };
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        twoBoundaryRegionGraphContext(),
+        declaration,
+        installed_forms);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, ValidatesInterfaceProviderMetadataSideProvenance)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::BoundaryIntegral,
+        .participant_name = "left",
+        .name = "interface_flux",
+        .region = CouplingRegionEndpointDeclaration{
+            .participant_name = "left",
+            .region_name = "interface",
+            .shared_region_name = "interface",
+        },
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .expected_value_type = "scalar",
+    });
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "interface_provider_metadata";
+    metadata.system_name = "system";
+    metadata.non_field_dependencies.push_back({
+        .kind = CouplingFormNonFieldDependencyKind::BoundaryIntegral,
+        .participant_name = "left",
+        .system_name = "system",
+        .name = "interface_flux",
+        .domain = analysis::DomainKind::InterfaceFace,
+        .region_name = "interface",
+        .shared_region_name = "interface",
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+        .provider = "forms",
+        .value_type = "scalar",
+    });
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto accepted = buildFinalizedGraph(
+        interfaceGraphContext(17, 17),
+        declaration,
+        installed_forms);
+    EXPECT_TRUE(accepted.ok()) << formatDiagnostics(accepted);
+
+    metadata.non_field_dependencies[0].side = CouplingInterfaceSide::Plus;
+    const std::vector<CouplingFormAnalysisMetadata> wrong_side_forms{metadata};
+    const auto wrong_side = buildFinalizedGraph(
+        interfaceGraphContext(17, 17),
+        declaration,
+        wrong_side_forms);
+    EXPECT_FALSE(wrong_side.ok());
+    EXPECT_NE(formatDiagnostics(wrong_side).find(
+                  "BoundaryIntegral(left/interface_flux)"),
               std::string::npos);
 }
 

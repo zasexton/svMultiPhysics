@@ -1079,7 +1079,7 @@ bool providerParticipantMatches(
         return true;
     }
     const auto participant = context.participant(requirement.participant_name);
-    return participant.system_name.empty() || provenance.system_name.empty() ||
+    return !participant.system_name.empty() &&
            provenance.system_name == participant.system_name;
 }
 
@@ -1129,29 +1129,39 @@ bool providerRegionMatches(
     }
 
     const auto& region = *requirement.region;
-    if (!region.region_name.empty() && provenance.region_name.has_value() &&
-        *provenance.region_name != region.region_name) {
-        return false;
+    if (!region.region_name.empty()) {
+        if (!provenance.region_name.has_value() ||
+            *provenance.region_name != region.region_name) {
+            return false;
+        }
     }
-    if (region.shared_region_name.has_value() &&
-        provenance.shared_region_name.has_value() &&
-        *provenance.shared_region_name != *region.shared_region_name) {
-        return false;
+    if (region.shared_region_name.has_value()) {
+        if (!provenance.shared_region_name.has_value() ||
+            *provenance.shared_region_name != *region.shared_region_name) {
+            return false;
+        }
     }
 
     const auto resolved_region = providerRequirementRegion(context, requirement);
     if (!resolved_region.has_value()) {
         return true;
     }
-    if (provenance.marker >= 0 &&
+    if (resolved_region->marker >= 0 &&
         provenance.marker != resolved_region->marker) {
         return false;
     }
-    if (provenance.side != CouplingInterfaceSide::None &&
-        resolved_region->side != CouplingInterfaceSide::None &&
+    if (resolved_region->side != CouplingInterfaceSide::None &&
         provenance.side != resolved_region->side) {
         return false;
     }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (resolved_region->logical_region.has_value() &&
+        (!provenance.logical_region.has_value() ||
+         !resolved_region->logical_region->compatible_with(
+             *provenance.logical_region))) {
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -1185,6 +1195,9 @@ bool providerMetadataMatchesRequirement(
 {
     const auto expected_kind = providerMetadataKindForRequirement(requirement.kind);
     if (!expected_kind.has_value() || provenance.kind != *expected_kind) {
+        return false;
+    }
+    if (provenance.provider.empty()) {
         return false;
     }
     return provenance.name == requirement.name &&
