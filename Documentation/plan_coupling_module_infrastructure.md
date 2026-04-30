@@ -4928,7 +4928,7 @@ Implementation checklist:
   fields are present.
 - [x] Validate temporal requirements against the selected temporal policy if
   the policy is available before setup.
-- [ ] Allow base physics modules to install their residual forms before
+- [x] Allow base physics modules to install their residual forms before
   coupling Forms are installed.
 - [x] Collect `CouplingFormContribution` objects from all contracts that
   support Forms-based monolithic lowering.

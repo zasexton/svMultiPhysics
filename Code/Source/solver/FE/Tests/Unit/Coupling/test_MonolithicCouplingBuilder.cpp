@@ -9,6 +9,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
+#include "Systems/FormsInstaller.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
@@ -1938,6 +1939,45 @@ TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
                              analysis::VariableKey::field(fixture.right_field),
                              analysis::VariableKey::field(fixture.left_field)),
               nullptr);
+}
+
+TEST(MonolithicCouplingBuilder, InstallsCouplingFormsAfterExistingBaseForms)
+{
+    BuilderFixture fixture;
+    const GenericTwoParticipantContract contract;
+    const MonolithicCouplingBuilder builder;
+    const CouplingFormBuilder forms(fixture.context);
+
+    analysis::FormAnalysisBridgeOptions base_options;
+    base_options.contribution_name = "base_left";
+    base_options.origin = "base_fixture";
+    base_options.system_name = "shared_system";
+    const auto base_residual =
+        (forms.state("left", "primary", "u") *
+         forms.test("left", "primary", "w")).dx();
+    const auto base_install = systems::installFormulationWithMetadata(
+        fixture.system,
+        "equations",
+        {fixture.left_field},
+        base_residual,
+        systems::FormInstallOptions{},
+        base_options);
+    ASSERT_EQ(base_install.analysis.contribution_name, "base_left");
+    ASSERT_EQ(fixture.system.formulationRecords().size(), 1u);
+    EXPECT_EQ(fixture.system.formulationRecords()[0].active_fields,
+              (std::vector<FieldId>{fixture.left_field}));
+
+    const auto contributions = contract.buildMonolithicForms(fixture.context, forms);
+    const auto installed = builder.installFormContributions(
+        fixture.system,
+        fixture.context,
+        std::span<const CouplingFormContribution>(contributions));
+
+    ASSERT_EQ(installed.size(), 1u);
+    EXPECT_EQ(installed[0].contribution_name, "generic_cell_coupling");
+    ASSERT_EQ(fixture.system.formulationRecords().size(), 2u);
+    EXPECT_EQ(fixture.system.formulationRecords()[0].active_fields,
+              (std::vector<FieldId>{fixture.left_field}));
 }
 
 TEST(MonolithicCouplingBuilder, GenericInterfaceContractInstallsAndFinalizesGraph)
