@@ -150,6 +150,35 @@ TEST(PartitionedCouplingBuilder, BuildsGenericEndpointExchangeDeclarations)
               "branch_pressure.producer");
 }
 
+TEST(PartitionedCouplingBuilder, AllowsExplicitPortNameOverrides)
+{
+    PartitionedCouplingBuilder builder("fsi_wall");
+
+    builder
+        .exchange("solid_motion",
+                  CouplingFieldUse{
+                      .participant_name = "solid",
+                      .field_name = "displacement",
+                  },
+                  CouplingFieldUse{
+                      .participant_name = "fluid",
+                      .field_name = "mesh_displacement",
+                  })
+        .producerPort("solid_displacement")
+        .consumerPort("fluid_displacement");
+
+    const auto& declarations = builder.declarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().producer_port.contract_instance_name,
+              "fsi_wall");
+    EXPECT_EQ(declarations.front().producer_port.port_name,
+              "solid_displacement");
+    EXPECT_EQ(declarations.front().consumer_port.contract_instance_name,
+              "fsi_wall");
+    EXPECT_EQ(declarations.front().consumer_port.port_name,
+              "fluid_displacement");
+}
+
 TEST(PartitionedCouplingBuilder, InfersFieldExchangeValueDescriptors)
 {
     PartitionedCouplingBuilder builder("thermal");

@@ -68,6 +68,24 @@ PartitionedExchangeBuilder& PartitionedExchangeBuilder::consumerRegion(
     return *this;
 }
 
+PartitionedExchangeBuilder& PartitionedExchangeBuilder::producerPort(
+    std::string_view port_name)
+{
+    FE_THROW_IF(port_name.empty(), InvalidArgumentException,
+                "partitioned exchange producer port override is empty");
+    exchange().producer_port.port_name = std::string(port_name);
+    return *this;
+}
+
+PartitionedExchangeBuilder& PartitionedExchangeBuilder::consumerPort(
+    std::string_view port_name)
+{
+    FE_THROW_IF(port_name.empty(), InvalidArgumentException,
+                "partitioned exchange consumer port override is empty");
+    exchange().consumer_port.port_name = std::string(port_name);
+    return *this;
+}
+
 PartitionedExchangeBuilder& PartitionedExchangeBuilder::value(
     CouplingValueDescriptor descriptor)
 {

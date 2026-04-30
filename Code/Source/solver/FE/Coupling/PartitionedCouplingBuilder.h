@@ -38,6 +38,8 @@ public:
         CouplingRegionEndpointDeclaration region);
     PartitionedExchangeBuilder& consumerRegion(
         CouplingRegionEndpointDeclaration region);
+    PartitionedExchangeBuilder& producerPort(std::string_view port_name);
+    PartitionedExchangeBuilder& consumerPort(std::string_view port_name);
     PartitionedExchangeBuilder& value(CouplingValueDescriptor descriptor);
     PartitionedExchangeBuilder& transfer(CouplingTransferDeclaration declaration);
     PartitionedExchangeBuilder& strategy(

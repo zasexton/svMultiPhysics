@@ -221,7 +221,7 @@ Checklist:
       `<contract_name>.<relation_name>.<contribution_or_exchange_name>` when no
       explicit override is supplied.
 - [ ] Residual contribution names are stable.
-- [ ] Exchange names are stable.
+- [x] Exchange names are stable.
 - [ ] Coupling-owned field and variable names are stable.
 - [x] Explicit name overrides are available for advanced cases.
 - [ ] Generated names appear in diagnostics and installed metadata.
