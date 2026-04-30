@@ -73,6 +73,26 @@ TEST(CouplingTypes, ValueDescriptorRejectsAmbiguousComponentLayout)
     EXPECT_TRUE(validateCouplingValueDescriptor(value).ok());
 }
 
+TEST(CouplingTypes, ValueDescriptorValidatesRankComponentMinimums)
+{
+    CouplingValueDescriptor value;
+    value.rank = CouplingValueRank::Vector;
+    value.components = 1;
+    EXPECT_FALSE(validateCouplingValueDescriptor(value).ok());
+
+    value.rank = CouplingValueRank::Rank2Tensor;
+    value.components = 3;
+    EXPECT_FALSE(validateCouplingValueDescriptor(value).ok());
+
+    value.rank = CouplingValueRank::SymmetricTensor;
+    value.components = 2;
+    EXPECT_FALSE(validateCouplingValueDescriptor(value).ok());
+
+    value.rank = CouplingValueRank::Rank2Tensor;
+    value.components = 4;
+    EXPECT_TRUE(validateCouplingValueDescriptor(value).ok());
+}
+
 TEST(CouplingTypes, TemporalSlotValidationUsesLogicalHistoryAndStageRules)
 {
     CouplingTemporalSlotDescriptor history;

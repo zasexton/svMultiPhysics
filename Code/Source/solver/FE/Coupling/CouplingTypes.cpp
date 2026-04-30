@@ -257,6 +257,15 @@ CouplingValidationResult validateCouplingValueDescriptor(const CouplingValueDesc
     if (value.rank == CouplingValueRank::Scalar && value.components != 1) {
         result.addError("scalar coupling values require exactly one component");
     }
+    if (value.rank == CouplingValueRank::Vector && value.components < 2) {
+        result.addError("vector coupling values require at least two components");
+    }
+    if (value.rank == CouplingValueRank::Rank2Tensor && value.components < 4) {
+        result.addError("rank-2 tensor coupling values require at least four components");
+    }
+    if (value.rank == CouplingValueRank::SymmetricTensor && value.components < 3) {
+        result.addError("symmetric tensor coupling values require at least three components");
+    }
 
     if (value.rank == CouplingValueRank::MixedBlock && value.component_layout.empty()) {
         result.addError("mixed block values require component layout metadata");
