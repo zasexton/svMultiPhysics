@@ -56,6 +56,12 @@ public:
         const CouplingGraph& graph,
         const std::optional<CouplingTemporalAvailability>& availability) const;
 
+    [[nodiscard]] CouplingValidationResult refreshFinalizedGraph(
+        CouplingGraph& graph,
+        const CouplingContext& context,
+        std::span<const CouplingContractDeclaration> declarations,
+        std::span<const CouplingFormAnalysisMetadata> installed_metadata) const;
+
     [[nodiscard]] std::vector<ResolvedCouplingAdditionalFieldDeclaration>
     resolveAdditionalFields(
         const CouplingContext& context,

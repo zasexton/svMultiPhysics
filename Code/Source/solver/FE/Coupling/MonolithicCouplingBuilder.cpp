@@ -1254,6 +1254,15 @@ CouplingValidationResult MonolithicCouplingBuilder::validateTemporalPolicy(
     return graph.validateTemporalRequirements(*availability);
 }
 
+CouplingValidationResult MonolithicCouplingBuilder::refreshFinalizedGraph(
+    CouplingGraph& graph,
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_metadata) const
+{
+    return graph.buildFinalizedGraph(context, declarations, installed_metadata);
+}
+
 std::vector<ResolvedCouplingAdditionalFieldDeclaration>
 MonolithicCouplingBuilder::resolveAdditionalFields(
     const CouplingContext& context,

@@ -432,6 +432,26 @@ public:
         declaration.contract_name = "expert_instance";
         declaration.participants.push_back({.participant_name = "left"});
         declaration.participants.push_back({.participant_name = "right"});
+        declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+        declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+        const CouplingVariableUse row{
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "right",
+            .name = "primary",
+        };
+        const CouplingVariableUse dependency{
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        };
+        declaration.dependencies.push_back(CouplingResidualDependency{
+            .residual_row = row,
+            .dependency = dependency,
+        });
+        declaration.expected_blocks.push_back(CouplingBlockExpectation{
+            .residual_row = row,
+            .dependency = dependency,
+        });
         return declaration;
     }
 
@@ -2130,6 +2150,64 @@ TEST(MonolithicCouplingBuilder, RejectsExpertTermsWithoutReturnedMetadata)
                          fixture.context,
                          std::span<CouplingContract*>(contracts))),
                  InvalidArgumentException);
+}
+
+TEST(MonolithicCouplingBuilder, RefreshesFinalizedGraphAfterFormsAndExpertMetadata)
+{
+    BuilderFixture fixture;
+    const GenericTwoParticipantContract form_contract;
+    ExpertMetadataContract expert_contract(nullptr, true);
+    MonolithicCouplingBuilder builder;
+    const CouplingFormBuilder forms(fixture.context);
+
+    std::array<const CouplingContract*, 2> selected_contracts{
+        &form_contract,
+        &expert_contract,
+    };
+    const auto declarations = builder.collectDeclarations(selected_contracts);
+    const auto declaration_validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(declaration_validation.ok())
+        << formatDiagnostics(declaration_validation);
+
+    CouplingGraph missing_graph;
+    const std::array<CouplingFormAnalysisMetadata, 0> no_metadata{};
+    const auto missing_validation = builder.refreshFinalizedGraph(
+        missing_graph,
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(no_metadata));
+    EXPECT_FALSE(missing_validation.ok());
+    EXPECT_FALSE(fixture.system.isSetup());
+
+    const auto contributions =
+        form_contract.buildMonolithicForms(fixture.context, forms);
+    auto installed_metadata = builder.installFormContributions(
+        fixture.system,
+        fixture.context,
+        std::span<const CouplingFormContribution>(contributions));
+
+    std::array<CouplingContract*, 1> expert_contracts{&expert_contract};
+    MonolithicCouplingInstallContext install_context;
+    const auto expert_metadata = builder.installExpertTerms(
+        install_context,
+        fixture.context,
+        std::span<CouplingContract*>(expert_contracts));
+    installed_metadata.insert(installed_metadata.end(),
+                              expert_metadata.begin(),
+                              expert_metadata.end());
+
+    CouplingGraph finalized_graph;
+    const auto finalized_validation = builder.refreshFinalizedGraph(
+        finalized_graph,
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_metadata));
+    EXPECT_TRUE(finalized_validation.ok())
+        << formatDiagnostics(finalized_validation);
+    EXPECT_EQ(finalized_graph.installedFormMetadata().size(), 2u);
+    EXPECT_FALSE(fixture.system.isSetup());
 }
 
 TEST(MonolithicCouplingBuilder, GenericInterfaceContractInstallsAndFinalizesGraph)

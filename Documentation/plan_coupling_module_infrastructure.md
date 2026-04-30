@@ -4971,9 +4971,9 @@ Implementation checklist:
 - [x] Ensure expert custom install hooks use `MonolithicCouplingInstallContext`
   and approved Systems extension points rather than internal raw kernel
   registration methods.
-- [ ] Refresh the finalized graph after Forms and expert install metadata are
+- [x] Refresh the finalized graph after Forms and expert install metadata are
   available.
-- [ ] Validate expected block coverage before `FESystem::setup()`.
+- [x] Validate expected block coverage before `FESystem::setup()`.
 - [ ] Ensure builder failures leave `FESystem` in a clear pre-setup failed
   state and do not partially run setup.
 - [x] Keep monolithic coupling independent of partitioned driver policy.
