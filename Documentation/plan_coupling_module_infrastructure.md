@@ -4914,7 +4914,7 @@ Implementation checklist:
   regions, and shared regions.
 - [x] Require every FE-backed participant in the context to carry its owning
   `FESystem` before field, region, interface, or Forms resolution begins.
-- [ ] Collect declarations from all selected coupling contracts before adding
+- [x] Collect declarations from all selected coupling contracts before adding
   any coupling-owned fields.
 - [x] Build and validate a declaration-stage `CouplingGraph` without requiring
   coupling-owned `FieldId`s to exist yet.

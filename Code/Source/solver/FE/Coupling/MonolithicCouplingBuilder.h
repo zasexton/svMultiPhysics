@@ -35,6 +35,9 @@ public:
         std::span<const CouplingRegionRef> regions = {},
         std::span<const SharedRegionRef> shared_regions = {}) const;
 
+    [[nodiscard]] std::vector<CouplingContractDeclaration> collectDeclarations(
+        std::span<const CouplingContract*> contracts) const;
+
     [[nodiscard]] CouplingValidationResult validateDeclarations(
         const CouplingContext& context,
         std::span<const CouplingContractDeclaration> declarations) const;

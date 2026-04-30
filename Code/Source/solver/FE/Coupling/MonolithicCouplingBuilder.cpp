@@ -1213,6 +1213,18 @@ CouplingContext MonolithicCouplingBuilder::buildInitialContext(
     return builder.build();
 }
 
+std::vector<CouplingContractDeclaration> MonolithicCouplingBuilder::collectDeclarations(
+    std::span<const CouplingContract*> contracts) const
+{
+    std::vector<CouplingContractDeclaration> declarations;
+    declarations.reserve(contracts.size());
+    for (const auto* contract : contracts) {
+        FE_CHECK_NOT_NULL(contract, "coupling contract");
+        declarations.push_back(contract->declare());
+    }
+    return declarations;
+}
+
 CouplingValidationResult MonolithicCouplingBuilder::validateDeclarations(
     const CouplingContext& context,
     std::span<const CouplingContractDeclaration> declarations) const

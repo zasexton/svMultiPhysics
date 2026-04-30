@@ -253,6 +253,47 @@ static_assert(
 static_assert(
     !HasSymbolicUseSymbolicTangent<CouplingSymbolicOptionsDeclaration>::value);
 
+class AdditionalFieldContract final : public CouplingContract {
+public:
+    AdditionalFieldContract(std::string instance_name,
+                            std::string participant_name,
+                            std::string field_name,
+                            std::shared_ptr<const spaces::FunctionSpace> space)
+        : instance_name_(std::move(instance_name))
+        , participant_name_(std::move(participant_name))
+        , field_name_(std::move(field_name))
+        , space_(std::move(space))
+    {
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "additional_field";
+    }
+
+    [[nodiscard]] CouplingContractDeclaration declare() const override
+    {
+        CouplingContractDeclaration declaration;
+        declaration.contract_type = name();
+        declaration.contract_name = instance_name_;
+        declaration.participants.push_back({.participant_name = participant_name_});
+        declaration.additional_fields.push_back({
+            .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+            .namespace_name = participant_name_,
+            .field_name = field_name_,
+            .space = space_,
+            .components = 1,
+        });
+        return declaration;
+    }
+
+private:
+    std::string instance_name_;
+    std::string participant_name_;
+    std::string field_name_;
+    std::shared_ptr<const spaces::FunctionSpace> space_;
+};
+
 class GenericTwoParticipantContract final : public CouplingContract {
 public:
     [[nodiscard]] std::string name() const override
@@ -449,6 +490,45 @@ TEST(MonolithicCouplingBuilder, BuildsInitialContextFromRegisteredReferences)
               kInterfaceMarker);
     EXPECT_EQ(context.sharedRegion("interface", "right").side,
               CouplingInterfaceSide::Plus);
+}
+
+TEST(MonolithicCouplingBuilder, CollectsAllDeclarationsBeforeAdditionalFields)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+    AdditionalFieldContract left_contract(
+        "left_aux",
+        "left",
+        "lambda",
+        fixture.space);
+    AdditionalFieldContract right_contract(
+        "right_aux",
+        "right",
+        "mu",
+        fixture.space);
+    std::array<const CouplingContract*, 2> contracts{
+        &left_contract,
+        &right_contract,
+    };
+
+    const auto declarations = builder.collectDeclarations(contracts);
+    ASSERT_EQ(declarations.size(), 2u);
+    EXPECT_EQ(declarations[0].contract_name, "left_aux");
+    EXPECT_EQ(declarations[1].contract_name, "right_aux");
+    EXPECT_FALSE(fixture.system.hasField("left.lambda"));
+    EXPECT_FALSE(fixture.system.hasField("right.mu"));
+
+    const auto validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto registered = builder.registerAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(registered.size(), 2u);
+    EXPECT_TRUE(fixture.system.hasField("left.lambda"));
+    EXPECT_TRUE(fixture.system.hasField("right.mu"));
 }
 
 TEST(MonolithicCouplingBuilder, ResolvesFormContributionThroughContext)
