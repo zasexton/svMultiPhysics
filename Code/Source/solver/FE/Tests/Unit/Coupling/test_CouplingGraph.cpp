@@ -1030,6 +1030,89 @@ TEST(CouplingGraph, ValidatesContractOwnedAdditionalFieldNamespaceAndTarget)
               std::string::npos);
 }
 
+TEST(CouplingGraph, RejectsSkippedOptionalAdditionalFieldReferences)
+{
+    auto skipped_owner = graphDeclaration();
+    skipped_owner.contract_name = "optional_instance";
+    auto skipped_field = graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Contract,
+        "optional_instance",
+        "lambda",
+        "left");
+    skipped_field.requirement = CouplingRequirement::Optional;
+    skipped_field.enabled = false;
+    skipped_owner.additional_fields.push_back(skipped_field);
+
+    auto dependent = graphDeclaration();
+    dependent.contract_name = "dependent_instance";
+    const CouplingVariableUse row{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "left",
+        .name = "primary",
+    };
+    const CouplingVariableUse skipped_dependency{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "optional_instance",
+        .name = "lambda",
+    };
+    dependent.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = row,
+        .dependency = skipped_dependency,
+    });
+    dependent.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = row,
+        .dependency = skipped_dependency,
+    });
+
+    const std::array<CouplingContractDeclaration, 2> skipped_declarations{
+        skipped_owner,
+        dependent,
+    };
+    CouplingGraph graph;
+    const auto graph_validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(skipped_declarations));
+
+    EXPECT_FALSE(graph_validation.ok());
+    EXPECT_NE(formatDiagnostics(graph_validation).find(
+                  "disabled optional additional field is referenced by another contract"),
+              std::string::npos);
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "skipped_optional_use";
+    contribution.origin = "SkippedOptionalFieldTest";
+    contribution.field_uses = {{
+        .participant_name = "optional_instance",
+        .field_name = "lambda",
+    }};
+    const std::array<CouplingFormContribution, 1> contributions{contribution};
+    const auto contribution_validation = validateFormContributionDeclarations(
+        std::span<const CouplingContractDeclaration>(skipped_declarations),
+        std::span<const CouplingFormContribution>(contributions));
+
+    EXPECT_FALSE(contribution_validation.ok());
+    EXPECT_NE(formatDiagnostics(contribution_validation).find(
+                  "disabled optional additional field is referenced by a form contribution"),
+              std::string::npos);
+
+    skipped_owner.additional_fields[0].enabled = true;
+    const std::array<CouplingContractDeclaration, 2> selected_declarations{
+        skipped_owner,
+        dependent,
+    };
+    CouplingGraph selected_graph;
+    const auto selected_graph_validation = selected_graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(selected_declarations));
+    EXPECT_TRUE(selected_graph_validation.ok())
+        << formatDiagnostics(selected_graph_validation);
+    EXPECT_TRUE(validateFormContributionDeclarations(
+                    std::span<const CouplingContractDeclaration>(
+                        selected_declarations),
+                    std::span<const CouplingFormContribution>(contributions))
+                    .ok());
+}
+
 TEST(CouplingGraph, RejectsRegionKindMismatches)
 {
     auto declaration = graphDeclaration();

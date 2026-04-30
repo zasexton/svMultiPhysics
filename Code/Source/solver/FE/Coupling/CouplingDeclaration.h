@@ -381,6 +381,10 @@ struct CouplingContractDeclaration {
 [[nodiscard]] CouplingValidationResult validateFormContributionDeclarations(
     std::span<const CouplingFormContribution> contributions);
 
+[[nodiscard]] CouplingValidationResult validateFormContributionDeclarations(
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormContribution> contributions);
+
 } // namespace coupling
 } // namespace FE
 } // namespace svmp

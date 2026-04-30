@@ -112,6 +112,14 @@ bool variableReferencesAdditionalField(const CouplingAdditionalFieldDeclaration&
            variable.name == field.field_name;
 }
 
+bool fieldUseReferencesAdditionalField(
+    const CouplingAdditionalFieldDeclaration& field,
+    const CouplingFieldUse& use)
+{
+    return use.participant_name == field.namespace_name &&
+           use.field_name == field.field_name;
+}
+
 bool declarationReferencesAdditionalField(
     const CouplingContractDeclaration& declaration,
     const CouplingAdditionalFieldDeclaration& field)
@@ -127,6 +135,36 @@ bool declarationReferencesAdditionalField(
             variableReferencesAdditionalField(field, block.dependency)) {
             return true;
         }
+    }
+    return false;
+}
+
+bool contributionReferencesAdditionalField(
+    const CouplingFormContribution& contribution,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    for (const auto& use : contribution.field_uses) {
+        if (fieldUseReferencesAdditionalField(field, use)) {
+            return true;
+        }
+    }
+    for (const auto& use : contribution.extra_trial_field_uses) {
+        if (fieldUseReferencesAdditionalField(field, use)) {
+            return true;
+        }
+    }
+    for (const auto& terminal : contribution.terminal_provenance) {
+        if (terminal.field.has_value() &&
+            fieldUseReferencesAdditionalField(field, *terminal.field)) {
+            return true;
+        }
+    }
+    if (contribution.install_options_declaration.geometry_sensitivity.has_value()) {
+        const auto& geometry =
+            *contribution.install_options_declaration.geometry_sensitivity;
+        return geometry.mesh_motion_field.has_value() &&
+               fieldUseReferencesAdditionalField(field,
+                                                 *geometry.mesh_motion_field);
     }
     return false;
 }
@@ -408,6 +446,34 @@ CouplingValidationResult validateFormContributionDeclarations(
             if (!contribution.contribution_name.empty() &&
                 contribution.contribution_name == contributions[j].contribution_name) {
                 result.addError("duplicate coupling form contribution name");
+            }
+        }
+    }
+    return result;
+}
+
+CouplingValidationResult validateFormContributionDeclarations(
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormContribution> contributions)
+{
+    CouplingValidationResult result =
+        validateFormContributionDeclarations(contributions);
+    for (const auto& declaration : declarations) {
+        for (const auto& field : declaration.additional_fields) {
+            if (additionalFieldSelected(field)) {
+                continue;
+            }
+            for (const auto& contribution : contributions) {
+                if (!contributionReferencesAdditionalField(contribution, field)) {
+                    continue;
+                }
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .field_name = field.field_name,
+                    .endpoint_name = contribution.contribution_name,
+                    .message = "disabled optional additional field is referenced by a form contribution",
+                });
             }
         }
     }

@@ -91,6 +91,15 @@ bool additionalFieldSelected(
     return field.requirement == CouplingRequirement::Required || field.enabled;
 }
 
+bool variableReferencesAdditionalField(
+    const CouplingAdditionalFieldDeclaration& field,
+    const CouplingVariableUse& variable)
+{
+    return variable.kind == CouplingVariableKind::Field &&
+           variable.participant_name == field.namespace_name &&
+           variable.name == field.field_name;
+}
+
 struct AdditionalFieldTargetResolution {
     std::string participant_name;
     std::string system_name;
@@ -467,11 +476,21 @@ void validateAdditionalFieldGraphDeclarations(
     struct SeenAdditionalField {
         std::string key;
     };
+    struct SkippedAdditionalField {
+        std::size_t declaration_index{0};
+        CouplingAdditionalFieldDeclaration field;
+    };
     std::vector<SeenAdditionalField> seen;
+    std::vector<SkippedAdditionalField> skipped;
 
-    for (const auto& declaration : declarations) {
+    for (std::size_t i = 0; i < declarations.size(); ++i) {
+        const auto& declaration = declarations[i];
         for (const auto& field : declaration.additional_fields) {
             if (!additionalFieldSelected(field)) {
+                skipped.push_back(SkippedAdditionalField{
+                    .declaration_index = i,
+                    .field = field,
+                });
                 continue;
             }
             validateContractOwnedAdditionalField(context,
@@ -505,6 +524,46 @@ void validateAdditionalFieldGraphDeclarations(
             }
             seen.push_back(SeenAdditionalField{
                 .key = key,
+            });
+        }
+    }
+
+    for (std::size_t i = 0; i < declarations.size(); ++i) {
+        const auto& declaration = declarations[i];
+        for (const auto& skipped_field : skipped) {
+            if (skipped_field.declaration_index == i) {
+                continue;
+            }
+            const auto references_skipped_dependency =
+                std::any_of(declaration.dependencies.begin(),
+                            declaration.dependencies.end(),
+                            [&](const CouplingResidualDependency& dependency) {
+                                return variableReferencesAdditionalField(
+                                           skipped_field.field,
+                                           dependency.residual_row) ||
+                                       variableReferencesAdditionalField(
+                                           skipped_field.field,
+                                           dependency.dependency);
+                            });
+            const auto references_skipped_block =
+                std::any_of(declaration.expected_blocks.begin(),
+                            declaration.expected_blocks.end(),
+                            [&](const CouplingBlockExpectation& block) {
+                                return variableReferencesAdditionalField(
+                                           skipped_field.field,
+                                           block.residual_row) ||
+                                       variableReferencesAdditionalField(
+                                           skipped_field.field,
+                                           block.dependency);
+                            });
+            if (!references_skipped_dependency && !references_skipped_block) {
+                continue;
+            }
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .field_name = skipped_field.field.field_name,
+                .message = "disabled optional additional field is referenced by another contract",
             });
         }
     }

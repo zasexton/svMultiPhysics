@@ -4675,7 +4675,7 @@ Implementation checklist:
 - [x] Validate that contract-owned additional fields use a contract instance
   namespace, are not treated as participants, and resolve to a concrete target
   `FESystem` before registration.
-- [ ] Validate optional additional fields are either selected and fully
+- [x] Validate optional additional fields are either selected and fully
   compatible or skipped without leaving dependency edges, expected blocks, or
   Forms contributions that reference them.
 - [ ] Validate that additional field declarations can be lowered to existing FE
@@ -4811,7 +4811,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` verifies participant-scoped and contract-owned
   additional field namespaces do not collide accidentally and that
   contract-owned fields resolve a concrete target `FESystem`.
-- [ ] `test_CouplingGraph.cpp` verifies skipped optional additional fields leave
+- [x] `test_CouplingGraph.cpp` verifies skipped optional additional fields leave
   no dependency edge, expected block, or Forms contribution reference.
 - [ ] `test_CouplingGraph.cpp` rejects additional field declarations that
   cannot lower to existing FE field registration APIs.
