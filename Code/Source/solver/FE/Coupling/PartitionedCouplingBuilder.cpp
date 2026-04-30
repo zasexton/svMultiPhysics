@@ -198,6 +198,32 @@ PartitionedCouplingBuilder::takeDeclarations()
     return std::move(declarations_);
 }
 
+PartitionedCouplingBuilder& PartitionedCouplingBuilder::group(
+    std::string name,
+    std::vector<std::string> participant_names)
+{
+    FE_THROW_IF(name.empty(), InvalidArgumentException,
+                "partitioned coupling group hint requires a name");
+    FE_THROW_IF(participant_names.empty(), InvalidArgumentException,
+                "partitioned coupling group hint requires participants");
+    group_hints_.push_back(CouplingGroupHint{
+        .name = std::move(name),
+        .participant_names = std::move(participant_names),
+    });
+    return *this;
+}
+
+const std::vector<CouplingGroupHint>&
+PartitionedCouplingBuilder::groupHints() const noexcept
+{
+    return group_hints_;
+}
+
+std::vector<CouplingGroupHint> PartitionedCouplingBuilder::takeGroupHints()
+{
+    return std::move(group_hints_);
+}
+
 std::optional<CouplingValueDescriptor>
 PartitionedCouplingBuilder::valueDescriptorForField(
     const CouplingFieldUse& field) const

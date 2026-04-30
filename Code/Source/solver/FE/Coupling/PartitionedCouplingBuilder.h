@@ -79,6 +79,10 @@ public:
     [[nodiscard]] const std::vector<CouplingExchangeDeclaration>&
     declarations() const noexcept;
     [[nodiscard]] std::vector<CouplingExchangeDeclaration> takeDeclarations();
+    PartitionedCouplingBuilder& group(std::string name,
+                                      std::vector<std::string> participant_names);
+    [[nodiscard]] const std::vector<CouplingGroupHint>& groupHints() const noexcept;
+    [[nodiscard]] std::vector<CouplingGroupHint> takeGroupHints();
 
 private:
     friend class PartitionedExchangeBuilder;
@@ -96,6 +100,7 @@ private:
     std::string contract_name_;
     std::vector<CouplingFieldRequirement> field_requirements_;
     std::vector<CouplingExchangeDeclaration> declarations_;
+    std::vector<CouplingGroupHint> group_hints_;
 };
 
 } // namespace coupling

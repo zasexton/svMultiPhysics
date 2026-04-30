@@ -1349,7 +1349,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 - [ ] Support exchanges involving field endpoints, region data, auxiliary
       state/input/output, parameters, boundary functionals, external buffers,
       global scalars, and driver-owned buffers.
-- [ ] Support N-way exchange groups for junctions and hub-and-spoke couplings.
+- [x] Support N-way exchange groups for junctions and hub-and-spoke couplings.
 - [ ] Add partitioned strategy metadata for explicit lagging, staggered
       fixed-point, relaxation, convergence norms, subcycling, and time-window
       exchange without encoding those algorithms in Forms.

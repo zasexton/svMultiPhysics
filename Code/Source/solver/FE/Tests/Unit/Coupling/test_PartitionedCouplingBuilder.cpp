@@ -219,6 +219,25 @@ TEST(PartitionedCouplingBuilder, RejectsIncompatibleInferredValueDescriptors)
                  InvalidArgumentException);
 }
 
+TEST(PartitionedCouplingBuilder, BuildsGroupHints)
+{
+    PartitionedCouplingBuilder builder("junction");
+    builder.group("outlet_branches", {"branch_a", "branch_b", "branch_c"});
+
+    const auto& hints = builder.groupHints();
+    ASSERT_EQ(hints.size(), 1u);
+    EXPECT_EQ(hints.front().name, "outlet_branches");
+    ASSERT_EQ(hints.front().participant_names.size(), 3u);
+    EXPECT_EQ(hints.front().participant_names[0], "branch_a");
+    EXPECT_EQ(hints.front().participant_names[1], "branch_b");
+    EXPECT_EQ(hints.front().participant_names[2], "branch_c");
+
+    auto moved = builder.takeGroupHints();
+    ASSERT_EQ(moved.size(), 1u);
+    EXPECT_TRUE(builder.groupHints().empty());
+    EXPECT_EQ(moved.front().name, "outlet_branches");
+}
+
 TEST(PartitionedCouplingBuilder, RejectsMissingContractOrExchangeNames)
 {
     EXPECT_THROW(static_cast<void>(PartitionedCouplingBuilder("")),
@@ -236,5 +255,9 @@ TEST(PartitionedCouplingBuilder, RejectsMissingContractOrExchangeNames)
                              .participant_name = "right",
                              .field_name = "primary",
                          })),
+                 InvalidArgumentException);
+    EXPECT_THROW(static_cast<void>(builder.group("", {"left", "right"})),
+                 InvalidArgumentException);
+    EXPECT_THROW(static_cast<void>(builder.group("empty", {})),
                  InvalidArgumentException);
 }
