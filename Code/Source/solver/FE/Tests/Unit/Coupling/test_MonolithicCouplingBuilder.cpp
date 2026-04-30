@@ -17,6 +17,8 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace svmp::FE;
@@ -157,6 +159,44 @@ const CouplingInstalledDependency* findDependency(
         });
     return it == metadata.installed_dependencies.end() ? nullptr : &*it;
 }
+
+template <typename T, typename = void>
+struct HasSymbolicAdMode : std::false_type {};
+template <typename T>
+struct HasSymbolicAdMode<T, std::void_t<decltype(std::declval<T&>().ad_mode)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSymbolicGeometrySensitivity : std::false_type {};
+template <typename T>
+struct HasSymbolicGeometrySensitivity<
+    T,
+    std::void_t<decltype(std::declval<T&>().geometry_sensitivity)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSymbolicGeometryTangentPath : std::false_type {};
+template <typename T>
+struct HasSymbolicGeometryTangentPath<
+    T,
+    std::void_t<decltype(std::declval<T&>().geometry_tangent_path)>>
+    : std::true_type {};
+
+template <typename T, typename = void>
+struct HasSymbolicUseSymbolicTangent : std::false_type {};
+template <typename T>
+struct HasSymbolicUseSymbolicTangent<
+    T,
+    std::void_t<decltype(std::declval<T&>().use_symbolic_tangent)>>
+    : std::true_type {};
+
+static_assert(!HasSymbolicAdMode<CouplingSymbolicOptionsDeclaration>::value);
+static_assert(
+    !HasSymbolicGeometrySensitivity<CouplingSymbolicOptionsDeclaration>::value);
+static_assert(
+    !HasSymbolicGeometryTangentPath<CouplingSymbolicOptionsDeclaration>::value);
+static_assert(
+    !HasSymbolicUseSymbolicTangent<CouplingSymbolicOptionsDeclaration>::value);
 
 class GenericTwoParticipantContract final : public CouplingContract {
 public:
@@ -338,6 +378,8 @@ TEST(MonolithicCouplingBuilder, ResolvesDeclaredFormInstallOptions)
     const auto resolved = builder.resolveFormContribution(fixture.context, contribution);
     EXPECT_EQ(resolved.install_options.ad_mode,
               svmp::FE::forms::ADMode::Reverse);
+    EXPECT_EQ(resolved.install_options.compiler_options.ad_mode,
+              svmp::FE::forms::ADMode::None);
     EXPECT_FALSE(resolved.install_options.compiler_options.jit.enable);
     EXPECT_EQ(resolved.install_options.compiler_options.jit.optimization_level, 1);
     EXPECT_FALSE(resolved.install_options.compiler_options.simplify_expressions);

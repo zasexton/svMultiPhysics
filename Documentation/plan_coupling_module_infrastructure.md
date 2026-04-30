@@ -4367,7 +4367,7 @@ Implementation checklist:
 - [x] Resolve `CouplingFormInstallOptionsDeclaration` into
   `ResolvedCouplingFormContribution::install_options` so the monolithic builder
   can forward concrete `systems::FormInstallOptions` to `installFormulation()`.
-- [ ] Make `CouplingSymbolicOptionsDeclaration` mirror only non-geometry
+- [x] Make `CouplingSymbolicOptionsDeclaration` mirror only non-geometry
   `forms::SymbolicOptions` fields, excluding both
   `forms::SymbolicOptions::ad_mode`, `use_symbolic_tangent`,
   `geometry_tangent_path`, and geometry sensitivity, with AD mode resolved into
