@@ -548,6 +548,22 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
     EXPECT_EQ(metadata.declaration_terminal_provenance[0].kind,
               CouplingFormTerminalProvenanceKind::PreviousSolution);
     EXPECT_EQ(metadata.declaration_terminal_provenance[0].history_index, 1);
+    const auto right_field_use = std::find_if(
+        metadata.field_uses.begin(),
+        metadata.field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return field.field == fixture.right_field;
+        });
+    ASSERT_NE(right_field_use, metadata.field_uses.end());
+    EXPECT_TRUE(right_field_use->appears_as_test_field);
+    const auto left_field_use = std::find_if(
+        metadata.field_uses.begin(),
+        metadata.field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return field.field == fixture.left_field;
+        });
+    ASSERT_NE(left_field_use, metadata.field_uses.end());
+    EXPECT_TRUE(left_field_use->appears_as_state_field);
 
     const auto* dependency = findDependency(
         metadata,
@@ -641,13 +657,36 @@ TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
         metadata.geometry_terminals.end(),
         [](const CouplingFormGeometryTerminalProvenance& provenance) {
             return provenance.quantity ==
-                   CouplingGeometryTerminalQuantity::CurrentNormal;
+                       CouplingGeometryTerminalQuantity::CurrentNormal &&
+                   provenance.owner.has_value() &&
+                   provenance.owner->participant_name == "left";
         });
     ASSERT_NE(metadata_terminal, metadata.geometry_terminals.end());
     EXPECT_EQ(metadata_terminal->analysis_domain,
               analysis::DomainKind::InterfaceFace);
     ASSERT_TRUE(metadata_terminal->owner.has_value());
     EXPECT_EQ(metadata_terminal->owner->participant_name, "left");
+}
+
+TEST(MonolithicCouplingBuilder, RejectsBridgeMetadataForUndeclaredStateField)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "undeclared_state";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.residual =
+        (forms.state("left", "primary", "a") *
+         forms.test("right", "primary", "w")).dx();
+
+    const auto resolved = builder.resolveFormContribution(fixture.context, contribution);
+    EXPECT_THROW(static_cast<void>(
+                     builder.installResolvedFormContribution(fixture.system,
+                                                             resolved)),
+                 InvalidArgumentException);
 }
 
 TEST(MonolithicCouplingBuilder, RegistersContractOwnedInterfaceAdditionalFields)

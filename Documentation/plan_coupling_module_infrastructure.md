@@ -4384,7 +4384,7 @@ Implementation checklist:
   `.dS()`, `.dI(marker)`, side restrictions, normals, jumps, averages, traces,
   and penalties rather than hiding them behind broad coupling-specific weak-form
   helpers.
-- [ ] Consume the public Forms/Systems coupling-analysis metadata bridge to
+- [x] Consume the public Forms/Systems coupling-analysis metadata bridge to
   compare referenced state fields, non-field Forms dependencies against
   `CouplingNonFieldDependencyRequirement` records,
   `analysis::VariableKey` coupling-variable dependencies,

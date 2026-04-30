@@ -14,6 +14,7 @@
 #include "Systems/FormsInstaller.h"
 
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -325,6 +326,351 @@ systems::FormInstallOptions resolveFormInstallOptions(
     return options;
 }
 
+const char* fieldTypeName(FieldType type) noexcept
+{
+    switch (type) {
+    case FieldType::Scalar:
+        return "scalar";
+    case FieldType::Vector:
+        return "vector";
+    case FieldType::Tensor:
+        return "tensor";
+    case FieldType::SymmetricTensor:
+        return "symmetric_tensor";
+    case FieldType::Mixed:
+        return "mixed";
+    }
+    return "unknown";
+}
+
+CouplingRegionKind regionKindForAnalysisDomain(
+    analysis::DomainKind domain) noexcept
+{
+    switch (domain) {
+    case analysis::DomainKind::Cell:
+        return CouplingRegionKind::Domain;
+    case analysis::DomainKind::Boundary:
+        return CouplingRegionKind::Boundary;
+    case analysis::DomainKind::InteriorFace:
+        return CouplingRegionKind::InteriorFace;
+    case analysis::DomainKind::InterfaceFace:
+        return CouplingRegionKind::InterfaceFace;
+    case analysis::DomainKind::Global:
+    case analysis::DomainKind::CoupledBoundary:
+    case analysis::DomainKind::AuxiliaryCoupling:
+        return CouplingRegionKind::UserDefined;
+    }
+    return CouplingRegionKind::UserDefined;
+}
+
+std::optional<CouplingFormNonFieldDependencyKind> nonFieldKindForTerminal(
+    analysis::FormTerminalKind kind) noexcept
+{
+    using Kind = analysis::FormTerminalKind;
+    switch (kind) {
+    case Kind::ParameterSymbol:
+    case Kind::ParameterRef:
+        return CouplingFormNonFieldDependencyKind::Parameter;
+    case Kind::Coefficient:
+        return CouplingFormNonFieldDependencyKind::Coefficient;
+    case Kind::MaterialStateOldRef:
+        return CouplingFormNonFieldDependencyKind::MaterialStateOld;
+    case Kind::MaterialStateWorkRef:
+        return CouplingFormNonFieldDependencyKind::MaterialStateWork;
+    case Kind::BoundaryFunctionalSymbol:
+        return CouplingFormNonFieldDependencyKind::BoundaryFunctional;
+    case Kind::BoundaryIntegralSymbol:
+    case Kind::BoundaryIntegralRef:
+        return CouplingFormNonFieldDependencyKind::BoundaryIntegral;
+    case Kind::AuxiliaryStateSymbol:
+    case Kind::AuxiliaryStateRef:
+        return CouplingFormNonFieldDependencyKind::AuxiliaryState;
+    case Kind::AuxiliaryInputSymbol:
+    case Kind::AuxiliaryInputRef:
+        return CouplingFormNonFieldDependencyKind::AuxiliaryInput;
+    case Kind::AuxiliaryOutputSymbol:
+    case Kind::AuxiliaryOutputRef:
+        return CouplingFormNonFieldDependencyKind::AuxiliaryOutput;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<CouplingTemporalQuantity> temporalQuantityForTerminal(
+    analysis::FormTerminalKind kind) noexcept
+{
+    using Kind = analysis::FormTerminalKind;
+    switch (kind) {
+    case Kind::Time:
+        return CouplingTemporalQuantity::Time;
+    case Kind::TimeStep:
+        return CouplingTemporalQuantity::TimeStep;
+    case Kind::EffectiveTimeStep:
+        return CouplingTemporalQuantity::EffectiveTimeStep;
+    case Kind::TimeDerivative:
+        return CouplingTemporalQuantity::FieldDerivative;
+    case Kind::PreviousSolutionRef:
+        return CouplingTemporalQuantity::FieldHistoryValue;
+    case Kind::MeshVelocity:
+        return CouplingTemporalQuantity::MeshVelocity;
+    case Kind::MeshAcceleration:
+        return CouplingTemporalQuantity::MeshAcceleration;
+    case Kind::PreviousMeshVelocity:
+        return CouplingTemporalQuantity::PreviousMeshVelocity;
+    case Kind::PredictedMeshVelocity:
+        return CouplingTemporalQuantity::PredictedMeshVelocity;
+    default:
+        return std::nullopt;
+    }
+}
+
+std::optional<CouplingGeometryTerminalQuantity> geometryQuantityForTerminal(
+    analysis::FormTerminalKind kind) noexcept
+{
+    using Kind = analysis::FormTerminalKind;
+    switch (kind) {
+    case Kind::MeshDisplacement:
+        return CouplingGeometryTerminalQuantity::MeshDisplacement;
+    case Kind::Coordinate:
+        return CouplingGeometryTerminalQuantity::Coordinate;
+    case Kind::ReferenceCoordinate:
+        return CouplingGeometryTerminalQuantity::ReferenceCoordinate;
+    case Kind::CurrentCoordinate:
+        return CouplingGeometryTerminalQuantity::CurrentCoordinate;
+    case Kind::PreviousCoordinate:
+        return CouplingGeometryTerminalQuantity::PreviousCoordinate;
+    case Kind::ReferencePhysicalCoordinate:
+        return CouplingGeometryTerminalQuantity::ReferencePhysicalCoordinate;
+    case Kind::CurrentJacobian:
+        return CouplingGeometryTerminalQuantity::CurrentJacobian;
+    case Kind::ReferenceJacobian:
+        return CouplingGeometryTerminalQuantity::ReferenceJacobian;
+    case Kind::CurrentJacobianDeterminant:
+        return CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant;
+    case Kind::ReferenceJacobianDeterminant:
+        return CouplingGeometryTerminalQuantity::ReferenceJacobianDeterminant;
+    case Kind::CurrentNormal:
+        return CouplingGeometryTerminalQuantity::CurrentNormal;
+    case Kind::ReferenceNormal:
+        return CouplingGeometryTerminalQuantity::ReferenceNormal;
+    case Kind::CurrentMeasure:
+        return CouplingGeometryTerminalQuantity::CurrentMeasure;
+    case Kind::ReferenceMeasure:
+        return CouplingGeometryTerminalQuantity::ReferenceMeasure;
+    case Kind::SurfaceJacobian:
+        return CouplingGeometryTerminalQuantity::SurfaceJacobian;
+    case Kind::CellDiameter:
+        return CouplingGeometryTerminalQuantity::CellDiameter;
+    case Kind::CellVolume:
+        return CouplingGeometryTerminalQuantity::CellVolume;
+    case Kind::FacetArea:
+        return CouplingGeometryTerminalQuantity::FacetArea;
+    case Kind::CellDomainId:
+        return CouplingGeometryTerminalQuantity::CellDomainId;
+    default:
+        return std::nullopt;
+    }
+}
+
+void appendFieldTerminalMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const analysis::FormTerminalMetadata& terminal)
+{
+    if (terminal.field_id == INVALID_FIELD_ID) {
+        return;
+    }
+    auto it = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return field.field == terminal.field_id;
+        });
+    if (it == adapted.field_uses.end()) {
+        adapted.field_uses.push_back(
+            CouplingFormFieldProvenance{.field = terminal.field_id});
+        it = std::prev(adapted.field_uses.end());
+    }
+
+    switch (terminal.kind) {
+    case analysis::FormTerminalKind::TestField:
+        it->appears_as_test_field = true;
+        break;
+    case analysis::FormTerminalKind::StateField:
+        it->appears_as_state_field = true;
+        break;
+    case analysis::FormTerminalKind::DiscreteField:
+        it->appears_as_discrete_field = true;
+        break;
+    default:
+        break;
+    }
+    if (adapted.geometry_sensitivity.mesh_motion_field == terminal.field_id) {
+        it->appears_as_geometry_sensitivity = true;
+    }
+}
+
+void appendNonFieldTerminalMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const analysis::FormTerminalMetadata& terminal)
+{
+    const auto kind = nonFieldKindForTerminal(terminal.kind);
+    if (!kind.has_value()) {
+        return;
+    }
+
+    CouplingFormNonFieldDependencyProvenance provenance;
+    provenance.kind = *kind;
+    provenance.participant_name = terminal.owner_participant_name;
+    provenance.system_name = terminal.owner_system_name;
+    provenance.name = terminal.symbol_name;
+    provenance.domain = terminal.domain;
+    provenance.marker = terminal.boundary_marker >= 0
+                            ? terminal.boundary_marker
+                            : terminal.interface_marker;
+    provenance.provider = terminal.provider;
+    provenance.value_type = fieldTypeName(terminal.value_type);
+    provenance.slot = terminal.slot;
+    provenance.byte_offset = terminal.state_offset_bytes;
+    adapted.non_field_dependencies.push_back(std::move(provenance));
+}
+
+void appendTemporalTerminalMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const analysis::FormTerminalMetadata& terminal)
+{
+    const auto quantity = temporalQuantityForTerminal(terminal.kind);
+    if (!quantity.has_value()) {
+        return;
+    }
+    adapted.temporal_symbols.push_back(CouplingFormTemporalProvenance{
+        .field = terminal.field_id == INVALID_FIELD_ID
+                     ? std::optional<FieldId>{}
+                     : std::optional<FieldId>{terminal.field_id},
+        .quantity = *quantity,
+        .derivative_order = terminal.derivative_order,
+        .history_index = terminal.history_index.value_or(0),
+    });
+}
+
+void appendGeometryTerminalMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const analysis::FormTerminalMetadata& terminal)
+{
+    const auto quantity = geometryQuantityForTerminal(terminal.kind);
+    if (!quantity.has_value()) {
+        return;
+    }
+
+    CouplingFormGeometryTerminalProvenance provenance;
+    provenance.quantity = *quantity;
+    provenance.location.region_kind =
+        regionKindForAnalysisDomain(terminal.domain);
+    provenance.location.marker = terminal.boundary_marker >= 0
+                                     ? terminal.boundary_marker
+                                     : terminal.interface_marker;
+    provenance.analysis_domain = terminal.domain;
+    if (!terminal.owner_participant_name.empty() ||
+        !terminal.owner_system_name.empty()) {
+        provenance.owner = CouplingGeometryTerminalOwnerProvenance{
+            .participant_name = terminal.owner_participant_name,
+            .system_name = terminal.owner_system_name,
+        };
+    }
+    provenance.provider = terminal.provider;
+    markGeometryTerminalAvailability(provenance);
+    adapted.geometry_terminals.push_back(std::move(provenance));
+}
+
+void appendBridgeTerminalMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const analysis::FormTerminalMetadata& terminal)
+{
+    appendFieldTerminalMetadata(adapted, terminal);
+    appendNonFieldTerminalMetadata(adapted, terminal);
+    appendTemporalTerminalMetadata(adapted, terminal);
+    appendGeometryTerminalMetadata(adapted, terminal);
+}
+
+bool resolvedContributionDeclaresField(
+    const ResolvedCouplingFormContribution& contribution,
+    FieldId field)
+{
+    return std::find(contribution.fields.begin(), contribution.fields.end(), field) !=
+               contribution.fields.end() ||
+           std::find(contribution.extra_trial_fields.begin(),
+                     contribution.extra_trial_fields.end(),
+                     field) != contribution.extra_trial_fields.end();
+}
+
+bool resolvedContributionDeclaresTemporal(
+    const ResolvedCouplingFormContribution& contribution,
+    const CouplingFormTemporalProvenance& temporal)
+{
+    if (temporal.quantity == CouplingTemporalQuantity::FieldHistoryValue) {
+        return std::find_if(
+                   contribution.terminal_provenance.begin(),
+                   contribution.terminal_provenance.end(),
+                   [&](const CouplingFormTerminalProvenanceDeclaration& declared) {
+                       return declared.kind ==
+                                  CouplingFormTerminalProvenanceKind::
+                                      PreviousSolution &&
+                              declared.history_index == temporal.history_index;
+                   }) != contribution.terminal_provenance.end();
+    }
+    if (temporal.quantity == CouplingTemporalQuantity::MeshVelocity ||
+        temporal.quantity == CouplingTemporalQuantity::MeshAcceleration ||
+        temporal.quantity == CouplingTemporalQuantity::PreviousMeshVelocity ||
+        temporal.quantity == CouplingTemporalQuantity::PredictedMeshVelocity) {
+        return std::find_if(
+                   contribution.terminal_provenance.begin(),
+                   contribution.terminal_provenance.end(),
+                   [&](const CouplingFormTerminalProvenanceDeclaration& declared) {
+                       return declared.kind ==
+                                  CouplingFormTerminalProvenanceKind::
+                                      MeshTemporal &&
+                              declared.temporal_quantity == temporal.quantity;
+                   }) != contribution.terminal_provenance.end();
+    }
+    return true;
+}
+
+bool resolvedContributionDeclaresGeometry(
+    const ResolvedCouplingFormContribution& contribution,
+    const CouplingFormGeometryTerminalProvenance& geometry)
+{
+    return std::find_if(
+               contribution.geometry_terminals.begin(),
+               contribution.geometry_terminals.end(),
+               [&](const CouplingFormGeometryTerminalProvenance& declared) {
+                   return declared.quantity == geometry.quantity;
+               }) != contribution.geometry_terminals.end();
+}
+
+void validateBridgeMetadataAgainstContribution(
+    const ResolvedCouplingFormContribution& contribution,
+    const CouplingFormAnalysisMetadata& metadata)
+{
+    for (const auto& field : metadata.field_uses) {
+        FE_THROW_IF(field.field != INVALID_FIELD_ID &&
+                        !resolvedContributionDeclaresField(contribution,
+                                                           field.field),
+                    InvalidArgumentException,
+                    "Forms metadata references an undeclared coupling form field");
+    }
+    for (const auto& temporal : metadata.temporal_symbols) {
+        FE_THROW_IF(!resolvedContributionDeclaresTemporal(contribution,
+                                                          temporal),
+                    InvalidArgumentException,
+                    "Forms metadata references an undeclared coupling temporal terminal");
+    }
+    for (const auto& geometry : metadata.geometry_terminals) {
+        FE_THROW_IF(!resolvedContributionDeclaresGeometry(contribution,
+                                                          geometry),
+                    InvalidArgumentException,
+                    "Forms metadata references an undeclared coupling geometry terminal");
+    }
+}
+
 AdditionalFieldTarget explicitAdditionalFieldTarget(
     const CouplingContext& context,
     const CouplingAdditionalFieldDeclaration& field)
@@ -603,6 +949,7 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::installResolvedFormContr
         bridge_options);
 
     auto adapted = adaptFormAnalysisMetadata(installed.analysis);
+    validateBridgeMetadataAgainstContribution(contribution, adapted);
     adapted.declaration_terminal_provenance = contribution.terminal_provenance;
     adapted.geometry_terminals.insert(adapted.geometry_terminals.end(),
                                       contribution.geometry_terminals.begin(),
@@ -637,6 +984,10 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptFormAnalysisMetadat
     adapted.installed_fields = metadata.installed_fields;
     adapted.geometry_sensitivity = metadata.geometry_sensitivity;
     adapted.feature_gates = metadata.feature_gates;
+
+    for (const auto& terminal : metadata.terminals) {
+        appendBridgeTerminalMetadata(adapted, terminal);
+    }
 
     adapted.installed_dependencies.reserve(metadata.installed_dependencies.size());
     for (const auto& dependency : metadata.installed_dependencies) {
