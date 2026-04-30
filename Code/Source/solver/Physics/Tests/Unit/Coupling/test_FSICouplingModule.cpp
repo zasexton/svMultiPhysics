@@ -480,20 +480,6 @@ void expectValidationFailureContaining(const FSICouplingModule& module,
     }
 }
 
-void expectFormBuildFailureContaining(const FSICouplingModule& module,
-                                      const fec::CouplingContext& context,
-                                      const fec::CouplingFormBuilder& form_builder,
-                                      const std::string& message)
-{
-    try {
-        static_cast<void>(module.buildMonolithicForms(context, form_builder));
-        FAIL() << "expected form build to fail";
-    } catch (const FE::InvalidArgumentException& exception) {
-        EXPECT_NE(std::string(exception.what()).find(message), std::string::npos)
-            << exception.what();
-    }
-}
-
 } // namespace
 
 TEST(FSICouplingModule, DeclaresMonolithicRequirements)
@@ -1132,7 +1118,7 @@ TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
                                      forms::FormExprType::TimeDerivative));
 }
 
-TEST(FSICouplingModule, RejectsMonolithicFormsWithIncompatibleSystems)
+TEST(FSICouplingModule, ReportsMonolithicIncompatibleSystemsThroughGraph)
 {
     const FSICouplingModule module;
     FSIContextFixture fixture(FSIFieldComponents{},
@@ -1145,17 +1131,10 @@ TEST(FSICouplingModule, RejectsMonolithicFormsWithIncompatibleSystems)
     expectValidationFailureContaining(
         module,
         fixture.context,
-        "FSI monolithic fields must be registered in one compatible FESystem");
-
-    const fec::CouplingFormBuilder form_builder(fixture.context);
-    expectFormBuildFailureContaining(
-        module,
-        fixture.context,
-        form_builder,
-        "FSI monolithic fields must be registered in one compatible FESystem");
+        "shared-interface monolithic participant mappings must resolve to one owning system");
 }
 
-TEST(FSICouplingModule, RejectsMonolithicFormsWithoutInterfaceTopology)
+TEST(FSICouplingModule, ReportsMissingInterfaceTopologyThroughGraph)
 {
     const FSICouplingModule module;
     FSIContextFixture fixture(FSIFieldComponents{},
@@ -1169,14 +1148,7 @@ TEST(FSICouplingModule, RejectsMonolithicFormsWithoutInterfaceTopology)
     expectValidationFailureContaining(
         module,
         fixture.context,
-        "FSI monolithic interface marker is missing registered interface topology");
-
-    const fec::CouplingFormBuilder form_builder(fixture.context);
-    expectFormBuildFailureContaining(
-        module,
-        fixture.context,
-        form_builder,
-        "FSI monolithic interface marker is missing registered interface topology");
+        "interface-face coupling region is missing registered interface topology");
 }
 
 TEST(FSICouplingModule, RejectsInvalidOptionsDuringValidation)

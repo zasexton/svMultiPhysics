@@ -3070,6 +3070,63 @@ void validateContextReferences(const CouplingContext& context,
                 .message = "two-participant shared-interface requirement needs opposite nonempty sides",
             });
         }
+
+        if (requirement.require_monolithic_topology &&
+            !resolved_participants.empty()) {
+            const auto* owning_system = resolved_participants.front()->system;
+            bool reported_system_mismatch = false;
+            bool reported_missing_system = false;
+            std::optional<int> interface_marker;
+            for (const auto* participant_region : resolved_participants) {
+                if (participant_region->system == nullptr) {
+                    if (!reported_missing_system) {
+                        result.add(CouplingDiagnostic{
+                            .severity = CouplingDiagnosticSeverity::Error,
+                            .contract_name = declaration.contract_name,
+                            .participant_name =
+                                participant_region->participant_name,
+                            .region_name = requirement.shared_region_name,
+                            .message =
+                                "shared-interface monolithic participant mapping requires an owning system",
+                        });
+                        reported_missing_system = true;
+                    }
+                    continue;
+                }
+                if (owning_system == nullptr) {
+                    owning_system = participant_region->system;
+                } else if (participant_region->system != owning_system &&
+                           !reported_system_mismatch) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .participant_name =
+                            participant_region->participant_name,
+                        .region_name = requirement.shared_region_name,
+                        .message =
+                            "shared-interface monolithic participant mappings must resolve to one owning system",
+                    });
+                    reported_system_mismatch = true;
+                }
+
+                if (participant_region->kind != CouplingRegionKind::InterfaceFace ||
+                    participant_region->marker < 0) {
+                    continue;
+                }
+                if (interface_marker.has_value() &&
+                    *interface_marker != participant_region->marker) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .region_name = requirement.shared_region_name,
+                        .message =
+                            "shared-interface monolithic participant mappings must use one interface marker",
+                    });
+                    break;
+                }
+                interface_marker = participant_region->marker;
+            }
+        }
     }
 
     for (const auto& requirement : declaration.region_relation_requirements) {

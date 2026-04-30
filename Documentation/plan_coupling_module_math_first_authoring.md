@@ -1174,7 +1174,7 @@ struct CouplingRegionRelationRequirement {
 - [x] FSI no longer needs local scalar pressure checks.
 - [x] FSI no longer needs local interface participant mapping checks.
 - [x] FSI no longer needs local opposite-side checks.
-- [ ] FSI no longer needs local monolithic same-system checks.
+- [x] FSI no longer needs local monolithic same-system checks.
 - [ ] Thermal no longer needs local scalar/vector field shape checks.
 - [ ] New N-participant and mixed-dimensional relation fixtures validate through
       `CouplingGraph`.
@@ -1483,8 +1483,8 @@ equation definitions, and partitioned strategy choices.
       - [x] `validateVectorFieldComponents`
       - [x] `validateScalarPressureComponents`
       - [x] `validateInterfaceRegionMappings`
-      - [ ] `validateMonolithicFieldSystems`
-      - [ ] `validateMonolithicInterfaceTopology`
+      - [x] `validateMonolithicFieldSystems`
+      - [x] `validateMonolithicInterfaceTopology`
       - [ ] manual partitioned endpoint attachment
       - [ ] manual monolithic dependency appending
       - [ ] manual expected-block appending

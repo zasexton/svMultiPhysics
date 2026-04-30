@@ -570,13 +570,16 @@ CouplingContext interfaceGraphContext(
     int left_marker = 17,
     int right_marker = 17,
     CouplingInterfaceSide left_side = CouplingInterfaceSide::Minus,
-    CouplingInterfaceSide right_side = CouplingInterfaceSide::Plus)
+    CouplingInterfaceSide right_side = CouplingInterfaceSide::Plus,
+    bool use_shared_system = true)
 {
-    const auto* system = graphSystemToken();
+    const auto* left_system = graphSystemToken();
+    const auto* right_system =
+        use_shared_system ? graphSystemToken() : otherGraphSystemToken();
     const CouplingRegionRef left_region{
         .participant_name = "left",
         .system_name = "system",
-        .system = system,
+        .system = left_system,
         .region_name = "interface",
         .kind = CouplingRegionKind::InterfaceFace,
         .marker = left_marker,
@@ -584,8 +587,8 @@ CouplingContext interfaceGraphContext(
     };
     const CouplingRegionRef right_region{
         .participant_name = "right",
-        .system_name = "system",
-        .system = system,
+        .system_name = use_shared_system ? "system" : "other_system",
+        .system = right_system,
         .region_name = "interface",
         .kind = CouplingRegionKind::InterfaceFace,
         .marker = right_marker,
@@ -596,12 +599,12 @@ CouplingContext interfaceGraphContext(
     builder.addParticipant({
         .participant_name = "left",
         .system_name = "system",
-        .system = system,
+        .system = left_system,
     });
     builder.addParticipant({
         .participant_name = "right",
-        .system_name = "system",
-        .system = system,
+        .system_name = use_shared_system ? "system" : "other_system",
+        .system = right_system,
     });
     builder.addRegion(left_region);
     builder.addRegion(right_region);
@@ -1406,6 +1409,30 @@ TEST(CouplingGraph, ValidatesSharedInterfaceRequirementsAgainstContext)
     EXPECT_FALSE(boundary_validation.ok());
     EXPECT_NE(formatDiagnostics(boundary_validation).find(
                   "shared-interface participant mapping does not satisfy the declaration"),
+              std::string::npos);
+
+    auto monolithic_declaration = declaration;
+    monolithic_declaration.shared_interface_requirements.front()
+        .require_monolithic_topology = true;
+    EXPECT_TRUE(buildGraph(interfaceGraphContext(), monolithic_declaration).ok());
+
+    const auto split_system_validation =
+        buildGraph(interfaceGraphContext(17,
+                                         17,
+                                         CouplingInterfaceSide::Minus,
+                                         CouplingInterfaceSide::Plus,
+                                         false),
+                   monolithic_declaration);
+    EXPECT_FALSE(split_system_validation.ok());
+    EXPECT_NE(formatDiagnostics(split_system_validation)
+                  .find("shared-interface monolithic participant mappings must resolve to one owning system"),
+              std::string::npos);
+
+    const auto marker_validation =
+        buildGraph(interfaceGraphContext(17, 18), monolithic_declaration);
+    EXPECT_FALSE(marker_validation.ok());
+    EXPECT_NE(formatDiagnostics(marker_validation)
+                  .find("shared-interface monolithic participant mappings must use one interface marker"),
               std::string::npos);
 }
 

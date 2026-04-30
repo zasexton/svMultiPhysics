@@ -11,7 +11,6 @@
 #include "FE/Coupling/CouplingDefinitionBuilder.h"
 #include "FE/Coupling/CouplingFormBuilder.h"
 #include "FE/Coupling/CouplingGraph.h"
-#include "FE/Systems/FESystem.h"
 
 #include <algorithm>
 #include <array>
@@ -279,134 +278,6 @@ const fec::CouplingRegionRef* findSharedRegionParticipant(
     return it == group.participant_regions.end() ? nullptr : &*it;
 }
 
-std::vector<fec::CouplingFieldUse> monolithicFieldUses(
-    const FSICouplingOptions& options)
-{
-    std::vector<fec::CouplingFieldUse> uses{
-        fieldUse(options.fluid_name, options.fluid_velocity_field),
-        fieldUse(options.fluid_name, options.fluid_pressure_field),
-        fieldUse(options.solid_name, options.solid_displacement_field),
-    };
-    if (!options.use_solid_displacement_derivative &&
-        options.solid_velocity_field.has_value()) {
-        uses.push_back(fieldUse(options.solid_name,
-                                *options.solid_velocity_field));
-    }
-    if (options.mesh_name.has_value() &&
-        options.mesh_displacement_field.has_value()) {
-        uses.push_back(fieldUse(*options.mesh_name,
-                                *options.mesh_displacement_field));
-    }
-    return uses;
-}
-
-const FE::systems::FESystem* validateMonolithicFieldSystems(
-    fec::CouplingValidationResult& result,
-    const fec::CouplingContext& ctx,
-    const FSICouplingOptions& options)
-{
-    const FE::systems::FESystem* expected_system = nullptr;
-    for (const auto& use : monolithicFieldUses(options)) {
-        if (!ctx.hasField(use.participant_name, use.field_name)) {
-            continue;
-        }
-        const auto ref = ctx.field(use.participant_name, use.field_name);
-        if (ref.system == nullptr) {
-            result.add(fec::CouplingDiagnostic{
-                .severity = fec::CouplingDiagnosticSeverity::Error,
-                .contract_name = options.contract_name,
-                .participant_name = use.participant_name,
-                .field_name = use.field_name,
-                .message = "FSI monolithic fields require FESystem bindings",
-            });
-            continue;
-        }
-        if (expected_system == nullptr) {
-            expected_system = ref.system;
-        } else if (ref.system != expected_system) {
-            result.add(fec::CouplingDiagnostic{
-                .severity = fec::CouplingDiagnosticSeverity::Error,
-                .contract_name = options.contract_name,
-                .participant_name = use.participant_name,
-                .field_name = use.field_name,
-                .message = "FSI monolithic fields must be registered in one compatible FESystem",
-            });
-        }
-    }
-    return expected_system;
-}
-
-void validateMonolithicInterfaceTopology(
-    fec::CouplingValidationResult& result,
-    const fec::CouplingContext& ctx,
-    const FSICouplingOptions& options,
-    const FE::systems::FESystem* expected_system)
-{
-    if (expected_system == nullptr ||
-        !ctx.hasSharedRegion(options.interface_name)) {
-        return;
-    }
-
-    const auto group = ctx.sharedRegionGroup(options.interface_name);
-    std::optional<int> marker;
-    const std::array<std::string_view, 2> participants{
-        options.fluid_name,
-        options.solid_name,
-    };
-    for (std::string_view participant : participants) {
-        const auto* region =
-            findSharedRegionParticipant(group, std::string(participant));
-        if (region == nullptr) {
-            continue;
-        }
-        if (region->system != expected_system) {
-            result.add(fec::CouplingDiagnostic{
-                .severity = fec::CouplingDiagnosticSeverity::Error,
-                .contract_name = options.contract_name,
-                .participant_name = region->participant_name,
-                .region_name = options.interface_name,
-                .message = "FSI monolithic interface mappings must use the same FESystem as the fields",
-            });
-            continue;
-        }
-        if (region->kind != fec::CouplingRegionKind::InterfaceFace ||
-            region->marker < 0) {
-            continue;
-        }
-        if (marker.has_value() && *marker != region->marker) {
-            result.add(fec::CouplingDiagnostic{
-                .severity = fec::CouplingDiagnosticSeverity::Error,
-                .contract_name = options.contract_name,
-                .region_name = options.interface_name,
-                .message = "FSI monolithic shared-region interface markers must agree in one FESystem",
-            });
-        } else {
-            marker = region->marker;
-        }
-        if (!expected_system->hasInterfaceMesh(region->marker)) {
-            result.add(fec::CouplingDiagnostic{
-                .severity = fec::CouplingDiagnosticSeverity::Error,
-                .contract_name = options.contract_name,
-                .participant_name = region->participant_name,
-                .region_name = options.interface_name,
-                .message = "FSI monolithic interface marker is missing registered interface topology",
-            });
-        }
-    }
-}
-
-void validateMonolithicFormContext(fec::CouplingValidationResult& result,
-                                   const fec::CouplingContext& ctx,
-                                   const FSICouplingOptions& options)
-{
-    if (options.mode != fec::CouplingMode::Monolithic) {
-        return;
-    }
-    const auto* expected_system =
-        validateMonolithicFieldSystems(result, ctx, options);
-    validateMonolithicInterfaceTopology(result, ctx, options, expected_system);
-}
-
 std::optional<fec::CouplingRegionEndpointDeclaration> partitionedRegionEndpoint(
     const fec::CouplingContext& ctx,
     const FSICouplingOptions& options,
@@ -554,7 +425,6 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
 {
     auto result = validateOptionShape(options_);
     validateALEMeshRequirements(result, ctx, options_);
-    validateMonolithicFormContext(result, ctx, options_);
     auto declaration = declare();
     if (options_.mode == fec::CouplingMode::Partitioned) {
         declaration.partitioned_exchange_declarations =
@@ -578,13 +448,10 @@ FSICouplingModule::buildMonolithicForms(
     const fec::CouplingContext& ctx,
     const fec::CouplingFormBuilder& form_builder) const
 {
+    static_cast<void>(ctx);
     if (options_.mode != fec::CouplingMode::Monolithic) {
         return {};
     }
-
-    fec::CouplingValidationResult validation;
-    validateMonolithicFormContext(validation, ctx, options_);
-    throwIfInvalid(validation);
 
     const auto interface = form_builder.sharedInterface(options_.interface_name);
     const auto fluid_side = interface.side(options_.fluid_name);
