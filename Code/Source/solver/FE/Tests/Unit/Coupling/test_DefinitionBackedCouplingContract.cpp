@@ -277,6 +277,39 @@ protected:
     }
 };
 
+class OptionValidatingDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    explicit OptionValidatingDefinitionContract(bool options_valid)
+        : options_valid_(options_valid)
+    {
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "option_validating_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        builder.participant("left")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"));
+    }
+
+    void validateDefinitionOptions(
+        const CouplingContext&,
+        CouplingValidationResult& result) const override
+    {
+        if (!options_valid_) {
+            result.addError("definition option validation rejected configuration");
+        }
+    }
+
+private:
+    bool options_valid_{true};
+};
+
 class InterfacePenaltyGeometryDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
@@ -879,6 +912,21 @@ TEST(DefinitionBackedCouplingContract, ValidatesThroughCouplingGraph)
     const FixtureDefinitionContract contract;
 
     EXPECT_NO_THROW(contract.validate(context));
+}
+
+TEST(DefinitionBackedCouplingContract, RunsDefinitionOptionValidationHook)
+{
+    const auto context = makeDefinitionContext();
+    EXPECT_NO_THROW(OptionValidatingDefinitionContract(true).validate(context));
+
+    try {
+        OptionValidatingDefinitionContract(false).validate(context);
+        FAIL() << "expected definition option validation failure";
+    } catch (const InvalidArgumentException& e) {
+        EXPECT_NE(std::string(e.what()).find(
+                      "definition option validation rejected configuration"),
+                  std::string::npos);
+    }
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsNWayFormsFixture)

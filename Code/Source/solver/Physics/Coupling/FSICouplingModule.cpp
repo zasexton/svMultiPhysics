@@ -10,11 +10,8 @@
 #include "Core/FEException.h"
 #include "FE/Coupling/CouplingDefinitionBuilder.h"
 #include "FE/Coupling/CouplingFormBuilder.h"
-#include "FE/Coupling/CouplingGraph.h"
 
-#include <array>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -448,17 +445,12 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
     }
 }
 
-void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
+void FSICouplingModule::validateDefinitionOptions(
+    const fec::CouplingContext& ctx,
+    fec::CouplingValidationResult& result) const
 {
-    auto result = validateOptionShape(options_);
+    result.append(validateOptionShape(options_));
     validateALEMeshRequirements(result, ctx, options_);
-    auto declaration = declare();
-    FE::coupling::CouplingGraph graph;
-    const std::array<fec::CouplingContractDeclaration, 1> declarations{declaration};
-    result.append(graph.buildDeclarationGraph(
-        ctx,
-        std::span<const fec::CouplingContractDeclaration>(declarations)));
-    throwIfInvalid(result);
 }
 
 } // namespace coupling

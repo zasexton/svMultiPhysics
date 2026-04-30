@@ -38,6 +38,9 @@ public:
 protected:
     [[nodiscard]] virtual std::string contractInstanceName() const;
     virtual void define(CouplingDefinitionBuilder& builder) const = 0;
+    virtual void validateDefinitionOptions(
+        const CouplingContext& ctx,
+        CouplingValidationResult& result) const;
 
 private:
     [[nodiscard]] CouplingDefinitionBuilder buildDefinition() const;

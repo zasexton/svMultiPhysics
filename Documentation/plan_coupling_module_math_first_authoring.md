@@ -1463,7 +1463,7 @@ equation definitions, and partitioned strategy choices.
 - [x] Replace `declare()`, `supportsMonolithicLowering()`,
       `buildMonolithicForms()`, and `buildPartitionedExchangeDeclarations()`
       with `define(...)`.
-- [ ] Move remaining option-specific `validate()` checks into a
+- [x] Move remaining option-specific `validate()` checks into a
       definition-backed validation hook once that hook exists.
 - [x] Declare participant roles:
       - fluid
@@ -1547,7 +1547,7 @@ authoring path.
 - [x] Derive `ThermalInterfaceCouplingModule` from
       `DefinitionBackedCouplingContract`.
 - [x] Replace direct declaration code with `define(...)`.
-- [ ] Move remaining option-specific `validate()` checks into a
+- [x] Move remaining option-specific `validate()` checks into a
       definition-backed validation hook once that hook exists.
 - [x] Declare participant roles:
       - side A

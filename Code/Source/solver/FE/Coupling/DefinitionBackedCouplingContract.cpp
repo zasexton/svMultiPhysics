@@ -7,6 +7,11 @@
 
 #include "Coupling/DefinitionBackedCouplingContract.h"
 
+#include "Coupling/CouplingGraph.h"
+
+#include <array>
+#include <span>
+
 namespace svmp {
 namespace FE {
 namespace coupling {
@@ -18,7 +23,21 @@ CouplingContractDeclaration DefinitionBackedCouplingContract::declare() const
 
 void DefinitionBackedCouplingContract::validate(const CouplingContext& ctx) const
 {
-    CouplingContract::validate(ctx);
+    CouplingValidationResult validation;
+    validateDefinitionOptions(ctx, validation);
+
+    const auto declaration = declare();
+    if (declaration.contract_type != name()) {
+        validation.addError(
+            "coupling contract declaration type does not match the contract registry key");
+    }
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    validation.append(graph.buildDeclarationGraph(
+        ctx,
+        std::span<const CouplingContractDeclaration>(declarations)));
+    throwIfInvalid(validation);
 }
 
 bool DefinitionBackedCouplingContract::supportsMonolithicLowering() const
@@ -50,6 +69,12 @@ DefinitionBackedCouplingContract::buildPartitionedExchangeDeclarations(
 std::string DefinitionBackedCouplingContract::contractInstanceName() const
 {
     return name();
+}
+
+void DefinitionBackedCouplingContract::validateDefinitionOptions(
+    const CouplingContext&,
+    CouplingValidationResult&) const
+{
 }
 
 CouplingDefinitionBuilder

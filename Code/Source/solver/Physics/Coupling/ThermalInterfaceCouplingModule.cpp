@@ -8,10 +8,7 @@
 #include "Physics/Coupling/ThermalInterfaceCouplingModule.h"
 
 #include "FE/Coupling/CouplingDefinitionBuilder.h"
-#include "FE/Coupling/CouplingGraph.h"
 
-#include <array>
-#include <span>
 #include <utility>
 #include <vector>
 
@@ -340,16 +337,11 @@ void ThermalInterfaceCouplingModule::define(
     }
 }
 
-void ThermalInterfaceCouplingModule::validate(const fec::CouplingContext& ctx) const
+void ThermalInterfaceCouplingModule::validateDefinitionOptions(
+    const fec::CouplingContext&,
+    fec::CouplingValidationResult& result) const
 {
-    auto result = validateOptionShape(options_);
-    const auto declaration = declare();
-    FE::coupling::CouplingGraph graph;
-    const std::array<fec::CouplingContractDeclaration, 1> declarations{declaration};
-    result.append(graph.buildDeclarationGraph(
-        ctx,
-        std::span<const fec::CouplingContractDeclaration>(declarations)));
-    throwIfInvalid(result);
+    result.append(validateOptionShape(options_));
 }
 
 } // namespace coupling

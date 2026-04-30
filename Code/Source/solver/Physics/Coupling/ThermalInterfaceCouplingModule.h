@@ -56,11 +56,12 @@ public:
 
     [[nodiscard]] std::string name() const override;
 
-    void validate(const FE::coupling::CouplingContext& ctx) const override;
-
 protected:
     [[nodiscard]] std::string contractInstanceName() const override;
     void define(FE::coupling::CouplingDefinitionBuilder& builder) const override;
+    void validateDefinitionOptions(
+        const FE::coupling::CouplingContext& ctx,
+        FE::coupling::CouplingValidationResult& result) const override;
 
 private:
     ThermalInterfaceCouplingOptions options_{};
