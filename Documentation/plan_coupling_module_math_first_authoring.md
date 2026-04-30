@@ -222,7 +222,7 @@ Checklist:
       explicit override is supplied.
 - [x] Residual contribution names are stable.
 - [x] Exchange names are stable.
-- [ ] Coupling-owned field and variable names are stable.
+- [x] Coupling-owned field and variable names are stable.
 - [x] Explicit name overrides are available for advanced cases.
 - [x] Generated names appear in diagnostics and installed metadata.
 

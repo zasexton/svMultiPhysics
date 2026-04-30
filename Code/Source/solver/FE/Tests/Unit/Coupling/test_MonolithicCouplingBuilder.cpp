@@ -1998,11 +1998,15 @@ TEST(MonolithicCouplingBuilder, RefreshesContextWithRegisteredAdditionalFields)
     const auto refreshed =
         builder.refreshContextWithAdditionalFields(fixture.context, registered);
     const auto participant_field = refreshed.field("left", "lambda");
+    EXPECT_EQ(participant_field.participant_name, "left");
+    EXPECT_EQ(participant_field.field_name, "lambda");
     EXPECT_EQ(participant_field.field_id, registered[0].field_id);
     EXPECT_EQ(participant_field.system_name, "shared_system");
     EXPECT_TRUE(participant_field.coupling_owned);
     EXPECT_FALSE(refreshed.hasParticipant("generic_instance"));
     const auto contract_field = refreshed.field("generic_instance", "lambda");
+    EXPECT_EQ(contract_field.participant_name, "generic_instance");
+    EXPECT_EQ(contract_field.field_name, "lambda");
     EXPECT_EQ(contract_field.field_id, registered[1].field_id);
     EXPECT_EQ(contract_field.system_name, "shared_system");
     EXPECT_TRUE(contract_field.coupling_owned);
