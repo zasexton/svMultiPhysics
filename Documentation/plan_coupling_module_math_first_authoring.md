@@ -1118,7 +1118,7 @@ struct CouplingSharedInterfaceRequirement {
 };
 ```
 
-- [ ] Add a more general region-relation declaration for non-two-sided and
+- [x] Add a more general region-relation declaration for non-two-sided and
       mixed-dimensional coupling. Suggested shape:
 
 ```cpp

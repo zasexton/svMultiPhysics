@@ -77,6 +77,28 @@ struct CouplingSharedInterfaceRequirement {
     bool require_monolithic_topology{false};
 };
 
+enum class CouplingRegionRelationKind : std::uint8_t {
+    SidePairedInterface,
+    NWayInterface,
+    SameParticipantRegions,
+    EmbeddedRelation,
+    VolumeBoundaryRelation,
+    AuxiliaryPDECoupling,
+};
+
+struct CouplingRegionRelationRequirement {
+    std::string relation_name;
+    CouplingRegionRelationKind relation_kind{
+        CouplingRegionRelationKind::SidePairedInterface};
+    std::vector<CouplingRegionEndpointDeclaration> endpoints;
+    std::optional<CouplingRegionKind> required_region_kind;
+    bool require_all_endpoints{true};
+    bool require_distinct_participants{false};
+    bool require_opposite_sides_for_side_pair{false};
+    bool require_common_monolithic_system{false};
+    bool require_registered_topology{false};
+};
+
 enum class CouplingNonFieldDependencyRequirementKind : std::uint8_t {
     Parameter,
     Coefficient,
@@ -384,6 +406,7 @@ struct CouplingContractDeclaration {
     std::vector<CouplingRegionUse> regions;
     std::vector<CouplingSharedRegionUse> shared_regions;
     std::vector<CouplingSharedInterfaceRequirement> shared_interface_requirements;
+    std::vector<CouplingRegionRelationRequirement> region_relation_requirements;
     std::vector<CouplingAdditionalFieldDeclaration> additional_fields;
     std::vector<CouplingNonFieldDependencyRequirement> non_field_dependencies;
     std::vector<CouplingResidualDependency> dependencies;

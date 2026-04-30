@@ -88,6 +88,12 @@ std::string regionKey(const CouplingRegionUse& region)
     return region.participant_name + "/" + region.region_name;
 }
 
+std::string regionEndpointKey(const CouplingRegionEndpointDeclaration& endpoint)
+{
+    return endpoint.participant_name + "/" + endpoint.region_name + "/" +
+           endpoint.shared_region_name.value_or("");
+}
+
 std::string variableKey(const CouplingVariableUse& variable)
 {
     return std::to_string(static_cast<int>(variable.kind)) + "/" +
@@ -331,6 +337,71 @@ CouplingValidationResult validateContractDeclarationShape(
                     requirement.participant_names[j],
                     requirement.participant_names[k],
                     "duplicate participant in shared-interface requirement");
+            }
+        }
+    }
+
+    for (std::size_t i = 0;
+         i < declaration.region_relation_requirements.size();
+         ++i) {
+        const auto& requirement = declaration.region_relation_requirements[i];
+        if (requirement.relation_name.empty()) {
+            result.addError("region-relation requirement requires a name");
+        }
+        if (requirement.require_all_endpoints && requirement.endpoints.empty()) {
+            result.addError("region-relation requirement requires endpoints");
+        }
+        if (requirement.relation_kind ==
+                CouplingRegionRelationKind::SidePairedInterface &&
+            requirement.endpoints.size() != 2u) {
+            result.addError(
+                "side-paired interface relation requires exactly two endpoints");
+        }
+        if (requirement.relation_kind == CouplingRegionRelationKind::NWayInterface &&
+            requirement.endpoints.size() < 2u) {
+            result.addError("N-way interface relation requires at least two endpoints");
+        }
+        if (requirement.require_opposite_sides_for_side_pair &&
+            requirement.required_region_kind.has_value() &&
+            *requirement.required_region_kind != CouplingRegionKind::InterfaceFace) {
+            result.addError(
+                "opposite-side relation requires interface-face region kind");
+        }
+        for (std::size_t j = i + 1u;
+             j < declaration.region_relation_requirements.size();
+             ++j) {
+            addDuplicateIfRepeated(
+                result,
+                requirement.relation_name,
+                declaration.region_relation_requirements[j].relation_name,
+                "duplicate region-relation requirement");
+        }
+        for (std::size_t j = 0; j < requirement.endpoints.size(); ++j) {
+            const auto& endpoint = requirement.endpoints[j];
+            if (endpoint.participant_name.empty() || endpoint.region_name.empty()) {
+                result.addError(
+                    "region-relation endpoint requires participant and region names");
+            }
+            if (endpoint.shared_region_name.has_value() &&
+                endpoint.shared_region_name->empty()) {
+                result.addError("region-relation endpoint shared-region name cannot be empty");
+            }
+            for (std::size_t k = j + 1u;
+                 k < requirement.endpoints.size();
+                 ++k) {
+                const auto& other = requirement.endpoints[k];
+                addDuplicateIfRepeated(
+                    result,
+                    regionEndpointKey(endpoint),
+                    regionEndpointKey(other),
+                    "duplicate endpoint in region-relation requirement");
+                if (requirement.require_distinct_participants) {
+                    addDuplicateIfRepeated(
+                        result,
+                        endpoint.participant_name,
+                        other.participant_name,
+                        "region-relation requirement requires distinct participants");
+                }
             }
         }
     }

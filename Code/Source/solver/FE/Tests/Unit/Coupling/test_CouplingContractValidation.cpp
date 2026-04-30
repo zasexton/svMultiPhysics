@@ -318,6 +318,81 @@ TEST(CouplingContractValidation, ValidatesSharedInterfaceRequirements)
     EXPECT_NE(text.find("duplicate shared-interface requirement"), std::string::npos);
 }
 
+TEST(CouplingContractValidation, AcceptsRegionRelationRequirements)
+{
+    auto declaration = minimalDeclaration();
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "embedded_surface",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "surface",
+                .shared_region_name = "interface",
+            },
+        },
+        .require_distinct_participants = true,
+        .require_registered_topology = true,
+    });
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingContractValidation, ValidatesRegionRelationRequirements)
+{
+    auto declaration = minimalDeclaration();
+    CouplingRegionRelationRequirement invalid_pair{
+        .relation_name = "bad_pair",
+        .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .require_distinct_participants = true,
+        .require_opposite_sides_for_side_pair = true,
+    };
+    declaration.region_relation_requirements.push_back(invalid_pair);
+    declaration.region_relation_requirements.push_back(invalid_pair);
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "short_n_way",
+        .relation_kind = CouplingRegionRelationKind::NWayInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "surface",
+                .shared_region_name = "",
+            },
+        },
+    });
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("opposite-side relation requires interface-face region kind"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate region-relation requirement"), std::string::npos);
+    EXPECT_NE(text.find("duplicate endpoint in region-relation requirement"),
+              std::string::npos);
+    EXPECT_NE(text.find("region-relation requirement requires distinct participants"),
+              std::string::npos);
+    EXPECT_NE(text.find("N-way interface relation requires at least two endpoints"),
+              std::string::npos);
+    EXPECT_NE(text.find("region-relation endpoint shared-region name cannot be empty"),
+              std::string::npos);
+}
+
 TEST(CouplingContractValidation, ValidatesAdditionalFieldAttachmentRules)
 {
     auto declaration = minimalDeclaration();
