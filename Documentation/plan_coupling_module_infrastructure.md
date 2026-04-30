@@ -4523,7 +4523,7 @@ Unit-test verification checklist:
   typed `forms::GeometryConfiguration`, optional frame-transform from/to
   configurations, typed logical interface region, geometry-revision, and
   quadrature-policy provenance without changing the Forms measure semantics.
-- [ ] `test_CouplingFormBuilder.cpp` verifies geometry-terminal declarations for
+- [x] `test_CouplingFormBuilder.cpp` verifies geometry-terminal declarations for
   boundary/interface terminals include participant or participant-region owner
   scope, reject ambiguous shared-region-only requirements, and reject conflicting
   participant names when both `scope.participant_name` and `scope.region` are
