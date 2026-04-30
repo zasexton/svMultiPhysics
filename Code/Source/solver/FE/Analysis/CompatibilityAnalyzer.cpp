@@ -57,6 +57,11 @@ void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
         const auto boundary_residual = boundary_residual_finite
             ? std::abs(summary.initial_boundary_residual)
             : summary.initial_boundary_residual;
+        const bool invariant_residual_finite =
+            numeric::finite(summary.invariant_domain_admissibility_residual);
+        const auto invariant_residual = invariant_residual_finite
+            ? std::abs(summary.invariant_domain_admissibility_residual)
+            : summary.invariant_domain_admissibility_residual;
         const bool tolerance_declared =
             summary.residual_tolerance_declared &&
             numeric::finiteDeclaredTolerance(summary.residual_tolerance);
@@ -70,7 +75,11 @@ void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
             summary.boundary_constraint_metadata_present &&
             summary.checked_boundary_condition_count > 0u;
         const bool invariant_scope_checked =
-            summary.invariant_domain_metadata_present;
+            summary.invariant_domain_metadata_present &&
+            summary.checked_invariant_state_count > 0u &&
+            !summary.invariant_set_id.empty() &&
+            !summary.invariant_domain_variables.empty() &&
+            summary.invariant_domain_admissibility_residual_present;
         const bool compatibility_scope_declared =
             !summary.compatibility_scope.empty() &&
             (algebraic_scope_checked ||
@@ -78,12 +87,14 @@ void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
              invariant_scope_checked);
         const bool residuals_finite_for_checked_scopes =
             (!algebraic_scope_checked || constraint_residual_finite) &&
-            (!boundary_scope_checked || boundary_residual_finite);
+            (!boundary_scope_checked || boundary_residual_finite) &&
+            (!invariant_scope_checked || invariant_residual_finite);
         const bool violated =
             tolerance_declared &&
             residuals_finite_for_checked_scopes &&
             ((algebraic_scope_checked && constraint_residual > tolerance) ||
              (boundary_scope_checked && boundary_residual > tolerance) ||
+             (invariant_scope_checked && invariant_residual > tolerance) ||
              (invariant_scope_checked &&
               summary.invariant_domain_initial_violation_count > 0u));
 
@@ -134,7 +145,16 @@ void emitInitialCompatibilityClaims(const ProblemAnalysisContext& context,
             ", invariant_scope_checked=" +
             std::string(invariant_scope_checked ? "true" : "false") +
             ", invariant_violations=" +
-            std::to_string(summary.invariant_domain_initial_violation_count));
+            std::to_string(summary.invariant_domain_initial_violation_count) +
+            ", invariant_set='" + summary.invariant_set_id + "'" +
+            ", checked_invariant_states=" +
+            std::to_string(summary.checked_invariant_state_count) +
+            ", invariant_residual_present=" +
+            std::string(summary.invariant_domain_admissibility_residual_present ? "true" : "false") +
+            ", invariant_residual=" +
+            std::to_string(summary.invariant_domain_admissibility_residual) +
+            ", invariant_residual_finite=" +
+            std::string(invariant_residual_finite ? "true" : "false"));
         report.claims.push_back(std::move(claim));
     }
 }

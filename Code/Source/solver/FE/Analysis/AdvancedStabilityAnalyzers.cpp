@@ -343,10 +343,14 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
         const bool cfl_numeric_valid =
             !summary.cfl_estimate_present ||
             finiteNonnegative(summary.cfl_estimate);
+        const bool accepted_cfl_bound_valid =
+            summary.accepted_cfl_bound_present &&
+            finitePositive(summary.accepted_cfl_bound);
         const bool cfl_bounded =
             summary.cfl_estimate_present &&
             cfl_numeric_valid &&
-            summary.cfl_estimate <= Real{1} + tol;
+            accepted_cfl_bound_valid &&
+            summary.cfl_estimate <= summary.accepted_cfl_bound + tol;
         const bool conditional =
             summary.stability_class == TemporalStabilityClass::ConditionallyStable;
         const bool ssp =
@@ -377,6 +381,8 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
         const bool cfl_certificate =
             !conditional ||
             (summary.cfl_derivation_metadata_present &&
+             accepted_cfl_bound_valid &&
+             !summary.cfl_bound_scope.empty() &&
              cfl_margin_valid &&
              (summary.operator_spectrum_coverage_present ||
               summary.numerical_range_coverage_present ||
@@ -469,12 +475,26 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.certification_class = CertificationClass::Violated;
             claim.description =
                 "Time-integration CFL estimate is non-finite or negative";
+        } else if (conditional &&
+                   summary.accepted_cfl_bound_present &&
+                   !accepted_cfl_bound_valid) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Violated;
+            claim.description =
+                "Conditional time-integration accepted CFL bound is non-finite or non-positive";
         } else if (conditional && !summary.cfl_estimate_present) {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
                 "Conditional time-integration stability lacks CFL evidence";
+        } else if (conditional && !summary.accepted_cfl_bound_present) {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Conditional time-integration stability lacks a method-specific accepted CFL bound";
         } else if (ssp && !summary.ssp_or_tvd_evidence_present) {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
@@ -514,6 +534,11 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             "', cfl=" + std::to_string(summary.cfl_estimate) +
             ", cfl_present=" +
             std::string(summary.cfl_estimate_present ? "true" : "false") +
+            ", accepted_cfl_bound=" +
+            std::to_string(summary.accepted_cfl_bound) +
+            ", accepted_cfl_bound_present=" +
+            std::string(summary.accepted_cfl_bound_present ? "true" : "false") +
+            ", cfl_bound_scope='" + summary.cfl_bound_scope + "'" +
             ", eigenvalue_scale=" +
             std::to_string(summary.eigenvalue_scale_estimate) +
             ", amplification_radius=" +
@@ -2060,15 +2085,68 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             numeric_evidence_valid &&
             (std::abs(summary.conservation_residual) > tol ||
              std::abs(summary.constant_preservation_residual) > tol);
+        const bool rank_defect_valid =
+            summary.rank_defect_present &&
+            numeric::finiteNonnegative(summary.rank_defect) &&
+            summary.rank_defect <= tol;
+        const bool projection_norm_valid =
+            summary.projection_operator_norm_present &&
+            finitePositive(summary.projection_operator_norm);
+        const bool accepted_projection_norm_valid =
+            summary.accepted_projection_operator_norm_present &&
+            finitePositive(summary.accepted_projection_operator_norm) &&
+            projection_norm_valid &&
+            summary.projection_operator_norm <=
+                summary.accepted_projection_operator_norm + Real{1.0e-14};
+        const bool mortar_inf_sup_bound_valid =
+            summary.mortar_inf_sup_lower_bound_present &&
+            finitePositive(summary.mortar_inf_sup_lower_bound);
+        const bool mass_condition_bound_valid =
+            summary.interface_mass_condition_number_present &&
+            summary.accepted_interface_mass_condition_bound_present &&
+            finitePositive(summary.interface_mass_condition_number) &&
+            finitePositive(summary.accepted_interface_mass_condition_bound) &&
+            summary.interface_mass_condition_number <=
+                summary.accepted_interface_mass_condition_bound + Real{1.0e-14};
+        const bool invalid_quantitative_transfer_evidence =
+            (summary.rank_defect_present &&
+             (!numeric::finiteNonnegative(summary.rank_defect) ||
+              summary.rank_defect > tol)) ||
+            (summary.projection_operator_norm_present &&
+             !finitePositive(summary.projection_operator_norm)) ||
+            (summary.accepted_projection_operator_norm_present &&
+             !finitePositive(summary.accepted_projection_operator_norm)) ||
+            (summary.accepted_projection_operator_norm_present &&
+             projection_norm_valid &&
+             summary.projection_operator_norm >
+                 summary.accepted_projection_operator_norm + Real{1.0e-14}) ||
+            (summary.mortar_inf_sup_lower_bound_present &&
+             !finitePositive(summary.mortar_inf_sup_lower_bound)) ||
+            (summary.interface_mass_condition_number_present &&
+             !finitePositive(summary.interface_mass_condition_number)) ||
+            (summary.accepted_interface_mass_condition_bound_present &&
+             !finitePositive(summary.accepted_interface_mass_condition_bound)) ||
+            (summary.interface_mass_condition_number_present &&
+             summary.accepted_interface_mass_condition_bound_present &&
+             finitePositive(summary.interface_mass_condition_number) &&
+             finitePositive(summary.accepted_interface_mass_condition_bound) &&
+             summary.interface_mass_condition_number >
+                 summary.accepted_interface_mass_condition_bound + Real{1.0e-14});
         const bool metadata_complete =
             summary.rank_metadata_present &&
+            rank_defect_valid &&
             summary.interface_scope_metadata_present &&
             summary.projection_consistency_metadata_present &&
+            accepted_projection_norm_valid &&
             summary.mortar_inf_sup_or_dual_consistency_metadata_present &&
+            mortar_inf_sup_bound_valid &&
             summary.interface_mass_conditioning_metadata_present &&
+            mass_condition_bound_valid &&
             summary.action_reaction_flux_metadata_present &&
             !summary.interface_pair_id.empty() &&
-            !summary.projection_space_id.empty();
+            !summary.projection_space_id.empty() &&
+            !summary.transfer_theorem_id.empty() &&
+            !summary.interface_quadrature_scope.empty();
 
         PropertyClaim claim;
         claim.kind = PropertyKind::TransferOperatorCompatibility;
@@ -2079,12 +2157,14 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
         claim.estimate_scope = summary.interface_pair_id;
         claim.tested_block_id = summary.projection_space_id;
         claim.claim_origin = "PreservationStructureAnalyzer";
-        if (residual_violation) {
+        if (residual_violation || invalid_quantitative_transfer_evidence) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
             claim.description =
-                "Transfer summary violates conservation or constant preservation residual tolerance";
+                residual_violation
+                    ? "Transfer summary violates conservation or constant preservation residual tolerance"
+                    : "Transfer summary has invalid rank, mortar inf-sup, projection norm, or interface mass conditioning evidence";
         } else if (residual_ok && metadata_complete) {
             claim.status = PropertyStatus::Preserved;
             claim.confidence = AnalysisConfidence::High;
@@ -2115,6 +2195,31 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(conservation_residual_finite ? "true" : "false") +
             ", constant_residual_finite=" +
             std::string(constant_residual_finite ? "true" : "false") +
+            ", theorem='" + summary.transfer_theorem_id + "'" +
+            ", quadrature_scope='" + summary.interface_quadrature_scope + "'" +
+            ", rank_defect_present=" +
+            std::string(summary.rank_defect_present ? "true" : "false") +
+            ", rank_defect=" + std::to_string(summary.rank_defect) +
+            ", projection_norm_present=" +
+            std::string(summary.projection_operator_norm_present ? "true" : "false") +
+            ", projection_norm=" +
+            std::to_string(summary.projection_operator_norm) +
+            ", accepted_projection_norm_present=" +
+            std::string(summary.accepted_projection_operator_norm_present ? "true" : "false") +
+            ", accepted_projection_norm=" +
+            std::to_string(summary.accepted_projection_operator_norm) +
+            ", mortar_inf_sup_present=" +
+            std::string(summary.mortar_inf_sup_lower_bound_present ? "true" : "false") +
+            ", mortar_inf_sup=" +
+            std::to_string(summary.mortar_inf_sup_lower_bound) +
+            ", mass_condition_present=" +
+            std::string(summary.interface_mass_condition_number_present ? "true" : "false") +
+            ", mass_condition=" +
+            std::to_string(summary.interface_mass_condition_number) +
+            ", accepted_mass_condition_present=" +
+            std::string(summary.accepted_interface_mass_condition_bound_present ? "true" : "false") +
+            ", accepted_mass_condition=" +
+            std::to_string(summary.accepted_interface_mass_condition_bound) +
             ", rank_metadata=" +
             std::string(summary.rank_metadata_present ? "true" : "false") +
             ", interface_scope_metadata=" +
@@ -2273,12 +2378,71 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             const bool quantitative_nonnormal_coupling_evidence =
                 summary.nonnormal_coupling_bound_present &&
                 nonnormal_coupling_bound_valid;
+            const bool theorem_scope_complete =
+                !summary.coupled_stability_theorem_id.empty();
+            const bool norm_scope_complete =
+                summary.coupling_norm_metadata_present &&
+                !summary.coupling_norm_id.empty();
+            const bool operator_scope_complete =
+                summary.coupling_operator_scope_metadata_present &&
+                !summary.coupling_operator_scope_id.empty();
+            const bool time_horizon_complete =
+                summary.coupling_time_horizon_present &&
+                numeric::finiteNonnegative(summary.coupling_time_horizon) &&
+                !summary.coupling_time_horizon_scope.empty();
+            const bool common_stability_scope_complete =
+                theorem_scope_complete &&
+                norm_scope_complete &&
+                operator_scope_complete &&
+                time_horizon_complete;
+            const bool contraction_factor_bound_valid =
+                summary.contraction_factor_bound_present &&
+                summary.accepted_contraction_factor_bound_present &&
+                numeric::finiteNonnegative(summary.contraction_factor_bound) &&
+                numeric::finiteNonnegative(
+                    summary.accepted_contraction_factor_bound) &&
+                summary.accepted_contraction_factor_bound < Real{1} &&
+                summary.contraction_factor_bound <=
+                    summary.accepted_contraction_factor_bound + tol;
+            const bool energy_norm_bounds_valid =
+                summary.coupled_energy_norm_equivalence_bounds_present &&
+                numeric::finitePositiveOrdered(
+                    summary.coupled_energy_norm_equivalence_lower_bound,
+                    summary.coupled_energy_norm_equivalence_upper_bound);
+            const bool energy_coercivity_bound_valid =
+                summary.coupled_energy_coercivity_lower_bound_present &&
+                numeric::finitePositive(
+                    summary.coupled_energy_coercivity_lower_bound);
+            const bool invalid_quantitative_coupling_evidence =
+                (summary.coupling_time_horizon_present &&
+                 !numeric::finiteNonnegative(summary.coupling_time_horizon)) ||
+                (summary.contraction_factor_bound_present &&
+                 !numeric::finiteNonnegative(summary.contraction_factor_bound)) ||
+                (summary.accepted_contraction_factor_bound_present &&
+                 (!numeric::finiteNonnegative(
+                      summary.accepted_contraction_factor_bound) ||
+                  summary.accepted_contraction_factor_bound >= Real{1})) ||
+                (summary.contraction_factor_bound_present &&
+                 summary.accepted_contraction_factor_bound_present &&
+                 numeric::finiteNonnegative(summary.contraction_factor_bound) &&
+                 numeric::finiteNonnegative(
+                     summary.accepted_contraction_factor_bound) &&
+                 summary.contraction_factor_bound >
+                     summary.accepted_contraction_factor_bound + tol) ||
+                (summary.coupled_energy_coercivity_lower_bound_present &&
+                 !numeric::finitePositive(
+                     summary.coupled_energy_coercivity_lower_bound)) ||
+                (summary.coupled_energy_norm_equivalence_bounds_present &&
+                 !numeric::finitePositiveOrdered(
+                     summary.coupled_energy_norm_equivalence_lower_bound,
+                     summary.coupled_energy_norm_equivalence_upper_bound));
             const bool numeric_evidence_present =
                 residual_evidence_present &&
                 residual_numeric_evidence_present &&
                 spectral_evidence_present &&
                 partition_spectral_finite &&
-                nonnormal_coupling_bound_valid;
+                nonnormal_coupling_bound_valid &&
+                !invalid_quantitative_coupling_evidence;
             const bool spectral_ok =
                 !summary.partitioned_coupling ||
                 (summary.partition_iteration_spectral_radius_present &&
@@ -2302,10 +2466,14 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
                 !nonnormal_coupling_bound_valid;
             const bool contractive_or_bounded_operator_evidence =
                 summary.coupled_operator_stability_evidence_present &&
-                (summary.contraction_norm_evidence_present ||
+                common_stability_scope_complete &&
+                ((summary.contraction_norm_evidence_present &&
+                  contraction_factor_bound_valid) ||
                  quantitative_nonnormal_coupling_evidence ||
                  (summary.interface_energy_balance_evidence_present &&
-                  summary.coupled_norm_coercivity_evidence_present));
+                  summary.coupled_norm_coercivity_evidence_present &&
+                  energy_coercivity_bound_valid &&
+                  energy_norm_bounds_valid));
             const bool partition_metadata_complete =
                 !summary.partitioned_coupling ||
                 (summary.linear_stationary_iteration_evidence_present &&
@@ -2319,6 +2487,7 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.claim_origin = "CoupledSystemStabilityAnalyzer";
             claim.estimate_scope = summary.coupling_group;
             if (residual_violation || spectral_violation ||
+                invalid_quantitative_coupling_evidence ||
                 nonnormal_coupling_bound_violation) {
                 claim.status = PropertyStatus::Violated;
                 claim.confidence = AnalysisConfidence::High;
@@ -2382,6 +2551,26 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
                 std::to_string(summary.unstable_exchange_count) +
                 ", contraction_norm=" +
                 std::string(summary.contraction_norm_evidence_present ? "true" : "false") +
+                ", theorem='" + summary.coupled_stability_theorem_id + "'" +
+                ", norm='" + summary.coupling_norm_id + "'" +
+                ", norm_metadata=" +
+                std::string(summary.coupling_norm_metadata_present ? "true" : "false") +
+                ", operator_scope='" + summary.coupling_operator_scope_id + "'" +
+                ", operator_scope_metadata=" +
+                std::string(summary.coupling_operator_scope_metadata_present ? "true" : "false") +
+                ", time_horizon_scope='" + summary.coupling_time_horizon_scope + "'" +
+                ", time_horizon_present=" +
+                std::string(summary.coupling_time_horizon_present ? "true" : "false") +
+                ", time_horizon=" +
+                std::to_string(summary.coupling_time_horizon) +
+                ", contraction_factor_present=" +
+                std::string(summary.contraction_factor_bound_present ? "true" : "false") +
+                ", contraction_factor=" +
+                std::to_string(summary.contraction_factor_bound) +
+                ", accepted_contraction_factor_present=" +
+                std::string(summary.accepted_contraction_factor_bound_present ? "true" : "false") +
+                ", accepted_contraction_factor=" +
+                std::to_string(summary.accepted_contraction_factor_bound) +
                 ", nonnormal_coupling_bound_present=" +
                 std::string(summary.nonnormal_coupling_bound_present ? "true" : "false") +
                 ", nonnormal_coupling_growth_bound=" +
@@ -2396,6 +2585,16 @@ void CoupledSystemStabilityAnalyzer::run(const ProblemAnalysisContext& context,
                 std::string(summary.interface_energy_balance_evidence_present ? "true" : "false") +
                 ", coupled_norm_coercivity=" +
                 std::string(summary.coupled_norm_coercivity_evidence_present ? "true" : "false") +
+                ", energy_coercivity_lower_present=" +
+                std::string(summary.coupled_energy_coercivity_lower_bound_present ? "true" : "false") +
+                ", energy_coercivity_lower=" +
+                std::to_string(summary.coupled_energy_coercivity_lower_bound) +
+                ", energy_norm_equivalence_present=" +
+                std::string(summary.coupled_energy_norm_equivalence_bounds_present ? "true" : "false") +
+                ", energy_norm_equivalence_lower=" +
+                std::to_string(summary.coupled_energy_norm_equivalence_lower_bound) +
+                ", energy_norm_equivalence_upper=" +
+                std::to_string(summary.coupled_energy_norm_equivalence_upper_bound) +
                 ", coupled_operator_stability=" +
                 std::string(summary.coupled_operator_stability_evidence_present ? "true" : "false") +
                 ", partition_metadata=" +

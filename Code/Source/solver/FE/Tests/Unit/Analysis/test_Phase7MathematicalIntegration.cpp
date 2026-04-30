@@ -533,10 +533,12 @@ TEST(Phase7Integration, DG_SIPG_PenaltyTooSmall_CoercivityWarning)
     penalty.nondimensional_parameter_id = "weak-boundary-penalty";
     penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
     penalty.block = symbol.block;
+    penalty.min_scale_value = 0.25;
     penalty.max_scale_value = 0.25;
     penalty.required_lower_bound_present = true;
     penalty.required_lower_bound = 1.0;
     penalty.trace_inverse_metadata_present = true;
+    penalty.trace_inverse_constant = 4.0;
     summaries.parameter_scales.push_back(penalty);
     FluxBalanceSummary flux;
     flux.block = symbol.block;
@@ -799,11 +801,26 @@ TEST(Phase7Integration, Transfer_NonmatchingProjection_NotConstantPreserving)
     good.constant_preservation_residual = 0.0;
     good.residual_tolerance = 1.0e-10;
     good.rank_metadata_present = true;
+    good.rank_defect_present = true;
+    good.rank_defect = 0.0;
     good.interface_scope_metadata_present = true;
     good.projection_consistency_metadata_present = true;
+    good.projection_operator_norm_present = true;
+    good.projection_operator_norm = 1.25;
+    good.accepted_projection_operator_norm_present = true;
+    good.accepted_projection_operator_norm = 2.0;
     good.mortar_inf_sup_or_dual_consistency_metadata_present = true;
+    good.mortar_inf_sup_lower_bound_present = true;
+    good.mortar_inf_sup_lower_bound = 0.2;
     good.interface_mass_conditioning_metadata_present = true;
+    good.interface_mass_condition_number_present = true;
+    good.interface_mass_condition_number = 8.0;
+    good.accepted_interface_mass_condition_bound_present = true;
+    good.accepted_interface_mass_condition_bound = 20.0;
     good.action_reaction_flux_metadata_present = true;
+    good.transfer_theorem_id =
+        "mortar projection stability and conservation theorem";
+    good.interface_quadrature_scope = "nonmatching interface quadrature";
     summaries.transfer_operators.push_back(good);
     TransferOperatorSummary bad;
     bad.interface_pair_id = "pair-bad";
@@ -1171,19 +1188,23 @@ TEST(Phase7Integration, InterfacePenaltyScopingPreventsCrossBoundaryCertificatio
     ParameterScaleSummary weak_penalty;
     weak_penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
     weak_penalty.block = weak_boundary.block;
+    weak_penalty.min_scale_value = 0.25;
     weak_penalty.max_scale_value = 0.25;
     weak_penalty.required_lower_bound_present = true;
     weak_penalty.required_lower_bound = 1.0;
     weak_penalty.trace_inverse_metadata_present = true;
+    weak_penalty.trace_inverse_constant = 4.0;
     summaries.parameter_scales.push_back(weak_penalty);
 
     ParameterScaleSummary unrelated_high_penalty;
     unrelated_high_penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
     unrelated_high_penalty.block = strong_boundary.block;
+    unrelated_high_penalty.min_scale_value = 10.0;
     unrelated_high_penalty.max_scale_value = 10.0;
     unrelated_high_penalty.required_lower_bound_present = true;
     unrelated_high_penalty.required_lower_bound = 1.0;
     unrelated_high_penalty.trace_inverse_metadata_present = true;
+    unrelated_high_penalty.trace_inverse_constant = 4.0;
     unrelated_high_penalty.scale_theorem_id =
         "Nitsche trace-inverse coercivity bound";
     summaries.parameter_scales.push_back(unrelated_high_penalty);
@@ -1794,6 +1815,20 @@ TEST(Phase7Integration, CoupledSystemSummariesDoNotSuppressUncoveredFallback)
     summary.interface_energy_balance_evidence_present = true;
     summary.coupled_norm_coercivity_evidence_present = true;
     summary.coupled_operator_stability_evidence_present = true;
+    summary.coupled_stability_theorem_id =
+        "monolithic coupled energy estimate";
+    summary.coupling_norm_id = "coupled energy norm";
+    summary.coupling_norm_metadata_present = true;
+    summary.coupling_operator_scope_id = "monolithic coupled operator";
+    summary.coupling_operator_scope_metadata_present = true;
+    summary.coupling_time_horizon_scope = "one coupled step";
+    summary.coupling_time_horizon_present = true;
+    summary.coupling_time_horizon = 1.0;
+    summary.coupled_energy_coercivity_lower_bound_present = true;
+    summary.coupled_energy_coercivity_lower_bound = 0.25;
+    summary.coupled_energy_norm_equivalence_bounds_present = true;
+    summary.coupled_energy_norm_equivalence_lower_bound = 0.25;
+    summary.coupled_energy_norm_equivalence_upper_bound = 4.0;
     summaries.coupled_system_stability.push_back(summary);
     ctx.setAnalysisSummaries(std::move(summaries));
 

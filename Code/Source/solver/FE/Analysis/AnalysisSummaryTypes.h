@@ -452,9 +452,11 @@ struct TemporalStabilitySummary {
     std::string stability_theorem_id;
     std::string stability_norm_id;
     std::string operator_scope_id;
+    std::string cfl_bound_scope;
     TemporalStabilityClass stability_class{TemporalStabilityClass::Unknown};
     Real cfl_estimate{};
     Real cfl_margin{};
+    Real accepted_cfl_bound{};
     Real eigenvalue_scale_estimate{};
     Real amplification_radius{};
     Real high_frequency_dissipation{};
@@ -464,6 +466,7 @@ struct TemporalStabilitySummary {
     bool cfl_estimate_present{false};
     bool cfl_derivation_metadata_present{false};
     bool cfl_margin_present{false};
+    bool accepted_cfl_bound_present{false};
     bool amplification_radius_present{false};
     bool stability_metadata_present{false};
     bool stability_region_evidence_present{false};
@@ -659,14 +662,28 @@ struct MovingDomainSummary {
 struct TransferOperatorSummary {
     std::string interface_pair_id;
     std::string projection_space_id;
+    std::string transfer_theorem_id;
+    std::string interface_quadrature_scope;
     Real residual_tolerance{};
     Real conservation_residual{};
     Real constant_preservation_residual{};
+    Real rank_defect{};
+    Real projection_operator_norm{};
+    Real accepted_projection_operator_norm{};
+    Real mortar_inf_sup_lower_bound{};
+    Real interface_mass_condition_number{};
+    Real accepted_interface_mass_condition_bound{};
     bool rank_metadata_present{false};
+    bool rank_defect_present{false};
     bool interface_scope_metadata_present{false};
     bool projection_consistency_metadata_present{false};
+    bool projection_operator_norm_present{false};
+    bool accepted_projection_operator_norm_present{false};
     bool mortar_inf_sup_or_dual_consistency_metadata_present{false};
+    bool mortar_inf_sup_lower_bound_present{false};
     bool interface_mass_conditioning_metadata_present{false};
+    bool interface_mass_condition_number_present{false};
+    bool accepted_interface_mass_condition_bound_present{false};
     bool action_reaction_flux_metadata_present{false};
 };
 
@@ -742,13 +759,18 @@ struct StabilizationAdequacySummary {
 struct InitialCompatibilitySummary {
     Real initial_constraint_residual{};
     Real initial_boundary_residual{};
+    Real invariant_domain_admissibility_residual{};
     std::uint64_t invariant_domain_initial_violation_count{0};
+    std::uint64_t checked_invariant_state_count{0};
     Real residual_tolerance{};
     std::string compatibility_scope;
+    std::string invariant_set_id;
+    std::vector<VariableKey> invariant_domain_variables;
     bool residual_tolerance_declared{false};
     bool algebraic_constraint_metadata_present{false};
     bool boundary_constraint_metadata_present{false};
     bool invariant_domain_metadata_present{false};
+    bool invariant_domain_admissibility_residual_present{false};
     std::uint64_t checked_constraint_family_count{0};
     std::uint64_t checked_boundary_condition_count{0};
 };
@@ -937,6 +959,10 @@ struct QuadratureAdequacySummary {
 
 struct CoupledSystemStabilitySummary {
     std::string coupling_group;
+    std::string coupled_stability_theorem_id;
+    std::string coupling_norm_id;
+    std::string coupling_operator_scope_id;
+    std::string coupling_time_horizon_scope;
     std::vector<VariableKey> variables;
     bool monolithic_coupling{false};
     bool partitioned_coupling{false};
@@ -948,17 +974,30 @@ struct CoupledSystemStabilitySummary {
     bool partition_iteration_spectral_radius_present{false};
     Real constraint_drift_norm{};
     bool constraint_drift_present{false};
+    Real contraction_factor_bound{};
+    Real accepted_contraction_factor_bound{};
     Real nonnormal_coupling_growth_bound{};
     Real accepted_nonnormal_coupling_growth_bound{};
+    Real coupling_time_horizon{};
+    Real coupled_energy_coercivity_lower_bound{};
+    Real coupled_energy_norm_equivalence_lower_bound{};
+    Real coupled_energy_norm_equivalence_upper_bound{};
     std::uint64_t unstable_exchange_count{0};
     bool linear_stationary_iteration_evidence_present{false};
     bool contraction_norm_evidence_present{false};
     bool interface_energy_balance_evidence_present{false};
     bool relaxation_metadata_present{false};
     bool added_mass_risk_assessed{false};
+    bool coupling_norm_metadata_present{false};
+    bool coupling_operator_scope_metadata_present{false};
+    bool coupling_time_horizon_present{false};
+    bool contraction_factor_bound_present{false};
+    bool accepted_contraction_factor_bound_present{false};
     bool nonnormal_coupling_bound_present{false};
     bool accepted_nonnormal_coupling_growth_bound_present{false};
     bool coupled_norm_coercivity_evidence_present{false};
+    bool coupled_energy_coercivity_lower_bound_present{false};
+    bool coupled_energy_norm_equivalence_bounds_present{false};
     bool coupled_operator_stability_evidence_present{false};
 };
 

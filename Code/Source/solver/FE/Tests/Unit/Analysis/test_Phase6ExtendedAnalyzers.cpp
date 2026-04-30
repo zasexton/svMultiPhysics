@@ -256,10 +256,12 @@ TEST(Phase6ExtendedAnalyzers, InterfaceValidationConsumesBoundaryPenaltyAndFluxE
     ParameterScaleSummary penalty;
     penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
     penalty.block = boundary.block;
+    penalty.min_scale_value = 2.0;
     penalty.max_scale_value = 2.0;
     penalty.required_lower_bound_present = true;
     penalty.required_lower_bound = 1.0;
     penalty.trace_inverse_metadata_present = true;
+    penalty.trace_inverse_constant = 4.0;
     penalty.scale_theorem_id = "Nitsche trace-inverse coercivity bound";
     summaries.parameter_scales.push_back(penalty);
     FluxBalanceSummary flux;
@@ -304,10 +306,12 @@ TEST(Phase6ExtendedAnalyzers, InterfaceValidationConsumesBoundaryPenaltyAndFluxE
     ParameterScaleSummary bad_penalty;
     bad_penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
     bad_penalty.block = bad_boundary.block;
+    bad_penalty.min_scale_value = 0.25;
     bad_penalty.max_scale_value = 0.25;
     bad_penalty.required_lower_bound_present = true;
     bad_penalty.required_lower_bound = 1.0;
     bad_penalty.trace_inverse_metadata_present = true;
+    bad_penalty.trace_inverse_constant = 4.0;
     bad_summaries.parameter_scales.push_back(bad_penalty);
 
     auto bad_report = analyzeWithSummaries(std::move(bad_summaries));
@@ -354,6 +358,10 @@ TEST(Phase6ExtendedAnalyzers, TemporalStabilityCertifiedViolatedAndMissing)
     bad.cfl_estimate = 1.5;
     bad.amplification_radius = 1.0;
     bad.cfl_estimate_present = true;
+    bad.accepted_cfl_bound_present = true;
+    bad.accepted_cfl_bound = 1.0;
+    bad.cfl_derivation_metadata_present = true;
+    bad.cfl_bound_scope = "conditional method CFL";
     bad.amplification_radius_present = true;
     bad.stability_metadata_present = true;
     bad_summaries.temporal_stability.push_back(bad);
@@ -654,6 +662,20 @@ TEST(Phase6ExtendedAnalyzers, SpectralErrorEstimatorQuadratureAndCoupledSummarie
     coupled_ok.interface_energy_balance_evidence_present = true;
     coupled_ok.coupled_norm_coercivity_evidence_present = true;
     coupled_ok.coupled_operator_stability_evidence_present = true;
+    coupled_ok.coupled_stability_theorem_id =
+        "monolithic coupled energy estimate";
+    coupled_ok.coupling_norm_id = "coupled energy norm";
+    coupled_ok.coupling_norm_metadata_present = true;
+    coupled_ok.coupling_operator_scope_id = "monolithic coupled operator";
+    coupled_ok.coupling_operator_scope_metadata_present = true;
+    coupled_ok.coupling_time_horizon_scope = "one coupled step";
+    coupled_ok.coupling_time_horizon_present = true;
+    coupled_ok.coupling_time_horizon = 1.0;
+    coupled_ok.coupled_energy_coercivity_lower_bound_present = true;
+    coupled_ok.coupled_energy_coercivity_lower_bound = 0.25;
+    coupled_ok.coupled_energy_norm_equivalence_bounds_present = true;
+    coupled_ok.coupled_energy_norm_equivalence_lower_bound = 0.25;
+    coupled_ok.coupled_energy_norm_equivalence_upper_bound = 4.0;
     summaries.coupled_system_stability.push_back(coupled_ok);
     CoupledSystemStabilitySummary coupled_bad;
     coupled_bad.coupling_group = "coupled-bad";

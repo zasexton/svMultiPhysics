@@ -268,6 +268,71 @@ void addMovingDomainGclEvidence(MovingDomainSummary& summary)
     summary.mesh_update_time_scheme = "matching ALE mesh update";
 }
 
+void addTemporalCflCertificate(TemporalStabilitySummary& summary,
+                               Real cfl,
+                               Real accepted_bound)
+{
+    summary.cfl_estimate_present = true;
+    summary.cfl_estimate = cfl;
+    summary.accepted_cfl_bound_present = true;
+    summary.accepted_cfl_bound = accepted_bound;
+    summary.cfl_derivation_metadata_present = true;
+    summary.cfl_bound_scope = "scheme-specific spatial operator CFL bound";
+    summary.cfl_margin_present = true;
+    summary.cfl_margin = accepted_bound >= cfl ? accepted_bound - cfl : 0.0;
+}
+
+void addTransferQuantitativeCertificate(TransferOperatorSummary& summary)
+{
+    summary.transfer_theorem_id =
+        "mortar projection stability and conservation theorem";
+    summary.interface_quadrature_scope = "nonmatching interface quadrature";
+    summary.rank_defect_present = true;
+    summary.rank_defect = 0.0;
+    summary.projection_operator_norm_present = true;
+    summary.projection_operator_norm = 1.25;
+    summary.accepted_projection_operator_norm_present = true;
+    summary.accepted_projection_operator_norm = 2.0;
+    summary.mortar_inf_sup_lower_bound_present = true;
+    summary.mortar_inf_sup_lower_bound = 0.2;
+    summary.interface_mass_condition_number_present = true;
+    summary.interface_mass_condition_number = 8.0;
+    summary.accepted_interface_mass_condition_bound_present = true;
+    summary.accepted_interface_mass_condition_bound = 20.0;
+}
+
+void addCoupledCommonScope(CoupledSystemStabilitySummary& summary)
+{
+    summary.coupled_stability_theorem_id =
+        "coupled fixed-point stability theorem";
+    summary.coupling_norm_id = "interface energy norm";
+    summary.coupling_norm_metadata_present = true;
+    summary.coupling_operator_scope_id = "coupled interface iteration";
+    summary.coupling_operator_scope_metadata_present = true;
+    summary.coupling_time_horizon_scope = "one coupled time step";
+    summary.coupling_time_horizon_present = true;
+    summary.coupling_time_horizon = 1.0;
+}
+
+void addCoupledContractionCertificate(CoupledSystemStabilitySummary& summary)
+{
+    addCoupledCommonScope(summary);
+    summary.contraction_factor_bound_present = true;
+    summary.contraction_factor_bound = 0.5;
+    summary.accepted_contraction_factor_bound_present = true;
+    summary.accepted_contraction_factor_bound = 0.9;
+}
+
+void addCoupledEnergyCertificate(CoupledSystemStabilitySummary& summary)
+{
+    addCoupledCommonScope(summary);
+    summary.coupled_energy_coercivity_lower_bound_present = true;
+    summary.coupled_energy_coercivity_lower_bound = 0.25;
+    summary.coupled_energy_norm_equivalence_bounds_present = true;
+    summary.coupled_energy_norm_equivalence_lower_bound = 0.25;
+    summary.coupled_energy_norm_equivalence_upper_bound = 4.0;
+}
+
 void addMinimumResidualConditioningBounds(
     MinimumResidualStabilitySummary& summary)
 {
@@ -420,6 +485,7 @@ TEST(AnalysisEvidenceContracts, WeakBoundaryCoercivityRequiresLowerBound)
     ParameterScaleSummary penalty;
     penalty.role = ParameterScaleRole::WeakBoundaryPenalty;
     penalty.block = boundary.block;
+    penalty.min_scale_value = 10.0;
     penalty.max_scale_value = 10.0;
     missing_bound_summaries.parameter_scales.push_back(penalty);
 
@@ -455,6 +521,7 @@ TEST(AnalysisEvidenceContracts, WeakBoundaryCoercivityRequiresLowerBound)
     AnalysisSummarySet certified_summaries;
     certified_summaries.boundary_symbols.push_back(boundary);
     penalty.trace_inverse_metadata_present = true;
+    penalty.trace_inverse_constant = 4.0;
     penalty.scale_theorem_id = "Nitsche trace-inverse coercivity bound";
     certified_summaries.parameter_scales.push_back(penalty);
 
@@ -483,6 +550,46 @@ TEST(AnalysisEvidenceContracts, WeakBoundaryCoercivityRequiresLowerBound)
         "InterfaceValidationAnalyzer");
     ASSERT_NE(invalid, nullptr);
     EXPECT_EQ(invalid->status, PropertyStatus::Violated);
+}
+
+TEST(AnalysisEvidenceContracts, WeakBoundaryCoercivityDoesNotAggregateSplitCertificates)
+{
+    AnalysisSummarySet summaries;
+    BoundarySymbolSummary boundary;
+    boundary.block = scalarBlock("split-nitsche-face", DomainKind::Boundary);
+    boundary.complementing_condition_satisfied = true;
+    summaries.boundary_symbols.push_back(boundary);
+
+    ParameterScaleSummary scale_only;
+    scale_only.role = ParameterScaleRole::WeakBoundaryPenalty;
+    scale_only.block = boundary.block;
+    scale_only.min_scale_value = 10.0;
+    scale_only.max_scale_value = 10.0;
+    summaries.parameter_scales.push_back(scale_only);
+
+    ParameterScaleSummary lower_bound_only = scale_only;
+    lower_bound_only.required_lower_bound_present = true;
+    lower_bound_only.required_lower_bound = 4.0;
+    summaries.parameter_scales.push_back(lower_bound_only);
+
+    ParameterScaleSummary theorem_only = scale_only;
+    theorem_only.trace_inverse_metadata_present = true;
+    theorem_only.trace_inverse_constant = 4.0;
+    theorem_only.scale_theorem_id =
+        "Nitsche trace-inverse coercivity bound";
+    summaries.parameter_scales.push_back(theorem_only);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    const auto report = analyze(std::move(ctx));
+    const auto* claim = firstFrom(
+        report, PropertyKind::WeakBoundaryCoercivity,
+        "InterfaceValidationAnalyzer");
+    ASSERT_NE(claim, nullptr);
+    EXPECT_EQ(claim->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(claim->certification_class.has_value());
+    EXPECT_EQ(*claim->certification_class,
+              CertificationClass::NotCertified);
 }
 
 TEST(AnalysisEvidenceContracts, TransportCflRequiresExplicitEstimatePresence)
@@ -790,6 +897,57 @@ TEST(AnalysisEvidenceContracts, TemporalStabilityRejectsInvalidScalarBounds)
         EXPECT_EQ(*claim->certification_class,
                   CertificationClass::Violated);
     }
+}
+
+TEST(AnalysisEvidenceContracts, ConditionalTemporalStabilityUsesAcceptedCflBound)
+{
+    TemporalStabilitySummary missing_bound;
+    missing_bound.time_scheme = "missing-accepted-cfl";
+    missing_bound.stability_class = TemporalStabilityClass::ConditionallyStable;
+    missing_bound.stability_metadata_present = true;
+    missing_bound.amplification_radius_present = true;
+    missing_bound.amplification_radius = 0.9;
+    missing_bound.stability_theorem_id =
+        "scheme-specific absolute stability region";
+    missing_bound.stability_region_evidence_present = true;
+    missing_bound.operator_spectrum_coverage_present = true;
+    missing_bound.operator_normality_evidence_present = true;
+    missing_bound.cfl_estimate_present = true;
+    missing_bound.cfl_estimate = 0.5;
+    missing_bound.cfl_derivation_metadata_present = true;
+    missing_bound.cfl_bound_scope = "cell spectral-radius CFL";
+
+    TemporalStabilitySummary certified = missing_bound;
+    certified.time_scheme = "accepted-cfl-greater-than-one";
+    addTemporalCflCertificate(certified, 1.5, 2.0);
+
+    TemporalStabilitySummary violated = missing_bound;
+    violated.time_scheme = "accepted-cfl-exceeded";
+    addTemporalCflCertificate(violated, 0.75, 0.5);
+
+    AnalysisSummarySet summaries;
+    summaries.temporal_stability.push_back(missing_bound);
+    summaries.temporal_stability.push_back(certified);
+    summaries.temporal_stability.push_back(violated);
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    const auto report = analyze(std::move(ctx));
+    const auto claims = claimsFrom(
+        report, PropertyKind::TemporalStability,
+        "TemporalStabilityAnalyzer");
+    ASSERT_EQ(claims.size(), 3u);
+    EXPECT_EQ(claims[0]->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(claims[0]->certification_class.has_value());
+    EXPECT_EQ(*claims[0]->certification_class,
+              CertificationClass::NotCertified);
+    EXPECT_EQ(claims[1]->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(claims[1]->certification_class.has_value());
+    EXPECT_EQ(*claims[1]->certification_class,
+              CertificationClass::Certified);
+    EXPECT_EQ(claims[2]->status, PropertyStatus::Violated);
+    ASSERT_TRUE(claims[2]->certification_class.has_value());
+    EXPECT_EQ(*claims[2]->certification_class,
+              CertificationClass::Violated);
 }
 
 TEST(AnalysisEvidenceContracts, EntropyStabilityRequiresEntropyVariableMetadata)
@@ -1166,6 +1324,7 @@ TEST(AnalysisEvidenceContracts, CoupledStabilityNeedsContractionEvidence)
     certified.coupled_operator_stability_evidence_present = true;
     certified.relaxation_metadata_present = true;
     certified.added_mass_risk_assessed = true;
+    addCoupledContractionCertificate(certified);
     summaries.coupled_system_stability.push_back(certified);
 
     ProblemAnalysisContext ctx;
@@ -1211,6 +1370,7 @@ TEST(AnalysisEvidenceContracts, CoupledNonnormalRouteNeedsQuantitativeBound)
     certified.nonnormal_coupling_growth_bound = 1.5;
     certified.accepted_nonnormal_coupling_growth_bound = 2.0;
     certified.accepted_nonnormal_coupling_growth_bound_present = true;
+    addCoupledCommonScope(certified);
     summaries.coupled_system_stability.push_back(certified);
 
     ProblemAnalysisContext ctx;
@@ -1251,6 +1411,7 @@ TEST(AnalysisEvidenceContracts, CoupledEnergyBalanceNeedsCoerciveOperatorEvidenc
     certified.coupling_group = "energy-coercive";
     certified.coupled_norm_coercivity_evidence_present = true;
     certified.coupled_operator_stability_evidence_present = true;
+    addCoupledEnergyCertificate(certified);
     summaries.coupled_system_stability.push_back(certified);
 
     ProblemAnalysisContext ctx;
@@ -2054,6 +2215,52 @@ TEST(AnalysisEvidenceContracts, InitialCompatibilityRequiresDeclaredToleranceAnd
               CertificationClass::Certified);
 }
 
+TEST(AnalysisEvidenceContracts, InitialInvariantCompatibilityRequiresCoverageEvidence)
+{
+    const auto u = VariableKey::field(0);
+    AnalysisSummarySet summaries;
+
+    InitialCompatibilitySummary metadata_only;
+    metadata_only.residual_tolerance = 1.0e-8;
+    metadata_only.residual_tolerance_declared = true;
+    metadata_only.compatibility_scope = "invariant-domain-initial-state";
+    metadata_only.invariant_domain_metadata_present = true;
+    summaries.initial_compatibility.push_back(metadata_only);
+
+    InitialCompatibilitySummary certified = metadata_only;
+    certified.invariant_set_id = "positive-density-pressure";
+    certified.invariant_domain_variables = {u};
+    certified.checked_invariant_state_count = 16;
+    certified.invariant_domain_admissibility_residual_present = true;
+    certified.invariant_domain_admissibility_residual = 0.0;
+    summaries.initial_compatibility.push_back(certified);
+
+    InitialCompatibilitySummary violated = certified;
+    violated.invariant_set_id = "violated-positive-density-pressure";
+    violated.invariant_domain_initial_violation_count = 1;
+    summaries.initial_compatibility.push_back(violated);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    const auto report = analyze(std::move(ctx));
+    const auto claims = claimsFrom(
+        report, PropertyKind::InitialDataCompatibility,
+        "CompatibilityAnalyzer");
+    ASSERT_EQ(claims.size(), 3u);
+    EXPECT_EQ(claims[0]->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(claims[0]->certification_class.has_value());
+    EXPECT_EQ(*claims[0]->certification_class,
+              CertificationClass::NotCertified);
+    EXPECT_EQ(claims[1]->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(claims[1]->certification_class.has_value());
+    EXPECT_EQ(*claims[1]->certification_class,
+              CertificationClass::Certified);
+    EXPECT_EQ(claims[2]->status, PropertyStatus::Violated);
+    ASSERT_TRUE(claims[2]->certification_class.has_value());
+    EXPECT_EQ(*claims[2]->certification_class,
+              CertificationClass::Violated);
+}
+
 TEST(AnalysisEvidenceContracts, MixedTemporalStateContributesDynamicAndAlgebraicParts)
 {
     const auto u = VariableKey::field(0);
@@ -2149,6 +2356,56 @@ TEST(AnalysisEvidenceContracts, InvariantDomainCertificationRequiresTypedTheorem
     EXPECT_EQ(invariant[3]->status, PropertyStatus::Violated);
     ASSERT_TRUE(invariant[3]->certification_class.has_value());
     EXPECT_EQ(*invariant[3]->certification_class,
+              CertificationClass::Violated);
+}
+
+TEST(AnalysisEvidenceContracts, TransferCompatibilityRequiresQuantitativeMortarEvidence)
+{
+    TransferOperatorSummary base;
+    base.interface_pair_id = "nonmatching-interface";
+    base.projection_space_id = "mortar-projection";
+    base.residual_tolerance = 1.0e-10;
+    base.conservation_residual = 0.0;
+    base.constant_preservation_residual = 0.0;
+    base.rank_metadata_present = true;
+    base.interface_scope_metadata_present = true;
+    base.projection_consistency_metadata_present = true;
+    base.mortar_inf_sup_or_dual_consistency_metadata_present = true;
+    base.interface_mass_conditioning_metadata_present = true;
+    base.action_reaction_flux_metadata_present = true;
+
+    AnalysisSummarySet summaries;
+    summaries.transfer_operators.push_back(base);
+
+    auto certified = base;
+    certified.interface_pair_id = "certified-nonmatching-interface";
+    addTransferQuantitativeCertificate(certified);
+    summaries.transfer_operators.push_back(certified);
+
+    auto bad_mass_condition = certified;
+    bad_mass_condition.interface_pair_id = "bad-interface-mass";
+    bad_mass_condition.interface_mass_condition_number = 50.0;
+    bad_mass_condition.accepted_interface_mass_condition_bound = 20.0;
+    summaries.transfer_operators.push_back(bad_mass_condition);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    const auto report = analyze(std::move(ctx));
+    const auto claims = claimsFrom(
+        report, PropertyKind::TransferOperatorCompatibility,
+        "PreservationStructureAnalyzer");
+    ASSERT_EQ(claims.size(), 3u);
+    EXPECT_EQ(claims[0]->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(claims[0]->certification_class.has_value());
+    EXPECT_EQ(*claims[0]->certification_class,
+              CertificationClass::NotCertified);
+    EXPECT_EQ(claims[1]->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(claims[1]->certification_class.has_value());
+    EXPECT_EQ(*claims[1]->certification_class,
+              CertificationClass::Certified);
+    EXPECT_EQ(claims[2]->status, PropertyStatus::Violated);
+    ASSERT_TRUE(claims[2]->certification_class.has_value());
+    EXPECT_EQ(*claims[2]->certification_class,
               CertificationClass::Violated);
 }
 

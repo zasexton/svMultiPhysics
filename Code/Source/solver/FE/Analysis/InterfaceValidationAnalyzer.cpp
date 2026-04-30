@@ -160,12 +160,13 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
         }
 
         if (isFaceOrBoundary(boundary.block.domain)) {
-            Real max_penalty_scale = Real{};
-            Real required_lower_bound = Real{};
+            Real reported_penalty_scale = Real{};
+            Real reported_required_lower_bound = Real{};
             bool has_penalty_scale = false;
             bool has_required_lower_bound = false;
-            bool has_trace_metadata = false;
-            bool has_scale_theorem = false;
+            bool has_complete_certificate = false;
+            bool has_lower_bound_violation = false;
+            bool has_adequate_incomplete_certificate = false;
             bool invalid_penalty_numeric_evidence = false;
             for (const auto& scale : summaries->parameter_scales) {
                 if (!parameterScaleCovers(
@@ -173,29 +174,42 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
                         ParameterScaleRole::WeakBoundaryPenalty)) {
                     continue;
                 }
-                if (!numeric::finitePositive(scale.max_scale_value)) {
+                has_penalty_scale = true;
+                if (scale.required_lower_bound_present) {
+                    has_required_lower_bound = true;
+                    const bool scale_values_valid =
+                        numeric::finitePositive(scale.min_scale_value) &&
+                        numeric::finitePositive(scale.max_scale_value) &&
+                        scale.min_scale_value <= scale.max_scale_value;
+                    const bool lower_bound_valid =
+                        numeric::finitePositive(scale.required_lower_bound);
+                    const bool trace_constant_valid =
+                        !scale.trace_inverse_metadata_present ||
+                        numeric::finitePositive(scale.trace_inverse_constant);
+                    if (!scale_values_valid ||
+                        !lower_bound_valid ||
+                        !trace_constant_valid) {
+                        invalid_penalty_numeric_evidence = true;
+                        continue;
+                    }
+                    reported_penalty_scale = scale.min_scale_value;
+                    reported_required_lower_bound = scale.required_lower_bound;
+                    const bool adequate =
+                        scale.min_scale_value + Real{1.0e-14} >=
+                        scale.required_lower_bound;
+                    if (!adequate) {
+                        has_lower_bound_violation = true;
+                    } else if (scale.trace_inverse_metadata_present &&
+                               !scale.scale_theorem_id.empty()) {
+                        has_complete_certificate = true;
+                    } else {
+                        has_adequate_incomplete_certificate = true;
+                    }
+                } else if (numeric::finitePositive(scale.max_scale_value)) {
+                    reported_penalty_scale = scale.max_scale_value;
+                } else {
                     invalid_penalty_numeric_evidence = true;
                 }
-                if (!has_penalty_scale ||
-                    scale.max_scale_value > max_penalty_scale) {
-                    max_penalty_scale = scale.max_scale_value;
-                    has_penalty_scale = true;
-                }
-                if (scale.required_lower_bound_present) {
-                    if (!numeric::finitePositive(
-                            scale.required_lower_bound)) {
-                        invalid_penalty_numeric_evidence = true;
-                    } else if (!has_required_lower_bound ||
-                               scale.required_lower_bound >
-                                   required_lower_bound) {
-                        required_lower_bound = scale.required_lower_bound;
-                        has_required_lower_bound = true;
-                    }
-                }
-                has_trace_metadata =
-                    has_trace_metadata || scale.trace_inverse_metadata_present;
-                has_scale_theorem =
-                    has_scale_theorem || !scale.scale_theorem_id.empty();
             }
 
             PropertyClaim claim;
@@ -205,52 +219,65 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
             claim.tested_block_id = boundary.block.operator_tag;
             claim.claim_origin = "InterfaceValidationAnalyzer";
             if (has_penalty_scale) {
-                claim.penalty_scale = max_penalty_scale;
+                claim.penalty_scale = reported_penalty_scale;
                 if (invalid_penalty_numeric_evidence) {
                     claim.status = PropertyStatus::Violated;
                     claim.confidence = AnalysisConfidence::High;
                     claim.certification_class = CertificationClass::Violated;
                     claim.description =
-                        "Weak-boundary penalty scale or required lower bound is non-finite or non-positive";
+                        "Weak-boundary penalty scale, trace inverse constant, or required lower bound is non-finite, non-positive, or unordered";
                     claim.addEvidence("InterfaceValidationAnalyzer",
-                        "ParameterScaleSummary max_scale=" +
-                        std::to_string(max_penalty_scale) +
+                        "ParameterScaleSummary penalty_scale=" +
+                        std::to_string(reported_penalty_scale) +
                         ", required_lower_bound=" +
-                        std::to_string(required_lower_bound) +
+                        std::to_string(reported_required_lower_bound) +
                         ", invalid_numeric_evidence=true",
                         claim.confidence);
-                } else if (has_required_lower_bound) {
-                    const bool adequate =
-                        max_penalty_scale + Real{1.0e-14} >= required_lower_bound;
-                    if (adequate && has_trace_metadata && has_scale_theorem) {
-                        claim.status = PropertyStatus::Preserved;
-                        claim.confidence = AnalysisConfidence::High;
-                        claim.certification_class = CertificationClass::Certified;
-                    } else if (adequate) {
-                        claim.status = PropertyStatus::Unknown;
-                        claim.confidence = AnalysisConfidence::Medium;
-                        claim.certification_class = CertificationClass::NotCertified;
-                    } else {
-                        claim.status = PropertyStatus::Violated;
-                        claim.confidence = AnalysisConfidence::High;
-                        claim.certification_class = CertificationClass::Violated;
-                    }
+                } else if (has_lower_bound_violation) {
+                    claim.status = PropertyStatus::Violated;
+                    claim.confidence = AnalysisConfidence::High;
+                    claim.certification_class = CertificationClass::Violated;
                     claim.weak_coercivity_lower_bound =
-                        max_penalty_scale - required_lower_bound;
-                    claim.description = adequate
-                        ? (has_trace_metadata && has_scale_theorem
-                              ? "Scoped weak-boundary penalty scale satisfies the theorem-scoped trace-backed coercivity lower bound"
-                              : "Scoped weak-boundary penalty scale satisfies the reported lower bound but lacks trace/inverse or theorem metadata")
-                        : "Scoped weak-boundary penalty scale is below the reported coercivity lower bound";
+                        reported_penalty_scale - reported_required_lower_bound;
+                    claim.description =
+                        "Scoped weak-boundary minimum penalty scale is below the reported coercivity lower bound";
                     claim.addEvidence("InterfaceValidationAnalyzer",
-                        "ParameterScaleSummary max_scale=" +
-                        std::to_string(max_penalty_scale) +
+                        "ParameterScaleSummary min_scale=" +
+                        std::to_string(reported_penalty_scale) +
                         ", required_lower_bound=" +
-                        std::to_string(required_lower_bound) +
-                        ", trace_inverse_metadata=" +
-                        std::string(has_trace_metadata ? "true" : "false") +
-                        ", scale_theorem=" +
-                        std::string(has_scale_theorem ? "true" : "false"),
+                        std::to_string(reported_required_lower_bound) +
+                        ", trace_inverse_and_theorem_on_same_summary=false",
+                        claim.confidence);
+                } else if (has_complete_certificate) {
+                    claim.status = PropertyStatus::Preserved;
+                    claim.confidence = AnalysisConfidence::High;
+                    claim.certification_class = CertificationClass::Certified;
+                    claim.weak_coercivity_lower_bound =
+                        reported_penalty_scale - reported_required_lower_bound;
+                    claim.description =
+                        "Scoped weak-boundary minimum penalty scale satisfies the trace-backed theorem-specific coercivity lower bound";
+                    claim.addEvidence("InterfaceValidationAnalyzer",
+                        "ParameterScaleSummary min_scale=" +
+                        std::to_string(reported_penalty_scale) +
+                        ", required_lower_bound=" +
+                        std::to_string(reported_required_lower_bound) +
+                        ", trace_inverse_metadata=true, scale_theorem=true",
+                        claim.confidence);
+                } else if (has_required_lower_bound) {
+                    (void)has_adequate_incomplete_certificate;
+                    claim.status = PropertyStatus::Unknown;
+                    claim.confidence = AnalysisConfidence::Medium;
+                    claim.certification_class = CertificationClass::NotCertified;
+                    claim.weak_coercivity_lower_bound =
+                        reported_penalty_scale - reported_required_lower_bound;
+                    claim.description =
+                        "Scoped weak-boundary minimum penalty scale satisfies the reported lower bound but lacks trace/inverse or theorem metadata on the same parameter-scale summary";
+                    claim.addEvidence("InterfaceValidationAnalyzer",
+                        "ParameterScaleSummary min_scale=" +
+                        std::to_string(reported_penalty_scale) +
+                        ", required_lower_bound=" +
+                        std::to_string(reported_required_lower_bound) +
+                        ", complete_same_summary=false",
                         claim.confidence);
                 } else {
                     claim.status = PropertyStatus::Unknown;
@@ -260,7 +287,7 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
                         "Weak-boundary penalty scale is present but lacks a theorem-specific coercivity lower bound";
                     claim.addEvidence("InterfaceValidationAnalyzer",
                         "ParameterScaleSummary max_scale=" +
-                        std::to_string(max_penalty_scale) +
+                        std::to_string(reported_penalty_scale) +
                         " without required_lower_bound metadata",
                         AnalysisConfidence::Medium);
                 }
