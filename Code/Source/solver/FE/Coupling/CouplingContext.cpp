@@ -815,6 +815,20 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                     .message = "duplicate coupling region mapping",
                 });
             }
+            if (region.participant_name == context_.regions_[j].participant_name &&
+                region.system == context_.regions_[j].system &&
+                region.kind == context_.regions_[j].kind &&
+                region.marker >= 0 &&
+                region.marker == context_.regions_[j].marker &&
+                region.side == context_.regions_[j].side &&
+                region.region_name != context_.regions_[j].region_name) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region.participant_name,
+                    .region_name = region.region_name,
+                    .message = "duplicate coupling region marker mapping",
+                });
+            }
         }
     }
 

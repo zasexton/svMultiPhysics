@@ -232,6 +232,23 @@ TEST(CouplingContext, RejectsFieldAndRegionOwnershipMismatch)
               std::string::npos);
 }
 
+TEST(CouplingContext, RejectsDuplicateRegionMarkerAliasesForParticipant)
+{
+    const auto* system = systemToken(1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", system))
+        .addRegion(region("left", "shared_system", system, "inlet",
+                          CouplingRegionKind::Boundary, 12))
+        .addRegion(region("left", "shared_system", system, "outlet",
+                          CouplingRegionKind::Boundary, 12));
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("duplicate coupling region marker mapping"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsInvalidFieldMetadata)
 {
     const auto* system = systemToken(1);
