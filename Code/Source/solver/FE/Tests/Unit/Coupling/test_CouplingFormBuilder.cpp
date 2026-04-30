@@ -523,11 +523,17 @@ TEST(CouplingFormBuilder, BuildsSharedInterfaceViewsThroughFormsVocabulary)
     const auto test = side.test("primary", "w");
     const auto derivative = side.dt("primary", "udot");
     const auto normal = side.normal();
+    const auto normal_component = side.normalComponent(normal);
+    const auto normal_projection = side.normalProjection(normal);
+    const auto tangential_projection = side.tangentialProjection(normal);
 
     ASSERT_TRUE(state.isValid());
     ASSERT_TRUE(test.isValid());
     ASSERT_TRUE(derivative.isValid());
     ASSERT_TRUE(normal.isValid());
+    ASSERT_TRUE(normal_component.isValid());
+    ASSERT_TRUE(normal_projection.isValid());
+    ASSERT_TRUE(tangential_projection.isValid());
     EXPECT_TRUE(containsFormExprType(*state.node(),
                                      forms::FormExprType::RestrictMinus));
     EXPECT_TRUE(containsFormExprType(*test.node(),
@@ -538,6 +544,18 @@ TEST(CouplingFormBuilder, BuildsSharedInterfaceViewsThroughFormsVocabulary)
                                      forms::FormExprType::Normal));
     EXPECT_TRUE(containsFormExprType(*normal.node(),
                                      forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*normal_component.node(),
+                                     forms::FormExprType::InnerProduct));
+    EXPECT_TRUE(containsFormExprType(*normal_component.node(),
+                                     forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(containsFormExprType(*normal_projection.node(),
+                                     forms::FormExprType::InnerProduct));
+    EXPECT_TRUE(containsFormExprType(*normal_projection.node(),
+                                     forms::FormExprType::Multiply));
+    EXPECT_TRUE(containsFormExprType(*tangential_projection.node(),
+                                     forms::FormExprType::Subtract));
+    EXPECT_TRUE(containsFormExprType(*tangential_projection.node(),
+                                     forms::FormExprType::InnerProduct));
 
     const auto residual =
         shared.integral((state + forms::dot(normal, normal)) * test,
@@ -607,10 +625,29 @@ TEST(CouplingFormBuilder, BuildsRegionRelationViewsThroughFormsVocabulary)
     const auto volume_term =
         volume.state("primary", "u") * volume.test("primary", "w");
     const auto surface_normal = surface.normal();
+    const auto surface_normal_component =
+        surface.normalComponent(surface_normal);
+    const auto surface_normal_projection =
+        surface.normalProjection(surface_normal);
+    const auto surface_tangential_projection =
+        surface.tangentialProjection(surface_normal);
     const auto surface_term =
         surface.state("primary", "u_b") * surface.test("primary", "w_b");
     EXPECT_TRUE(containsFormExprType(*surface_normal.node(),
                                      forms::FormExprType::Normal));
+    ASSERT_TRUE(surface_normal_component.isValid());
+    ASSERT_TRUE(surface_normal_projection.isValid());
+    ASSERT_TRUE(surface_tangential_projection.isValid());
+    EXPECT_TRUE(containsFormExprType(*surface_normal_component.node(),
+                                     forms::FormExprType::InnerProduct));
+    EXPECT_TRUE(containsFormExprType(*surface_normal_projection.node(),
+                                     forms::FormExprType::Multiply));
+    EXPECT_TRUE(containsFormExprType(*surface_normal_projection.node(),
+                                     forms::FormExprType::InnerProduct));
+    EXPECT_TRUE(containsFormExprType(*surface_tangential_projection.node(),
+                                     forms::FormExprType::Subtract));
+    EXPECT_TRUE(containsFormExprType(*surface_tangential_projection.node(),
+                                     forms::FormExprType::InnerProduct));
 
     const auto volume_integral = volume.integral(volume_term);
     const auto surface_integral =

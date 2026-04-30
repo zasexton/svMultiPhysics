@@ -615,6 +615,25 @@ forms::FormExpr CouplingInterfaceSideView::normal() const
     return geometryTerminal(CouplingGeometryTerminalQuantity::Normal);
 }
 
+forms::FormExpr CouplingInterfaceSideView::normalComponent(
+    const forms::FormExpr& value) const
+{
+    return forms::inner(value, normal());
+}
+
+forms::FormExpr CouplingInterfaceSideView::normalProjection(
+    const forms::FormExpr& value) const
+{
+    const auto n = normal();
+    return forms::inner(value, n) * n;
+}
+
+forms::FormExpr CouplingInterfaceSideView::tangentialProjection(
+    const forms::FormExpr& value) const
+{
+    return value - normalProjection(value);
+}
+
 CouplingSharedInterfaceView::CouplingSharedInterfaceView(
     const CouplingFormBuilder& builder,
     std::string shared_region_name)
@@ -726,6 +745,25 @@ forms::FormExpr CouplingRegionEndpointView::geometryTerminal(
 forms::FormExpr CouplingRegionEndpointView::normal() const
 {
     return geometryTerminal(CouplingGeometryTerminalQuantity::Normal);
+}
+
+forms::FormExpr CouplingRegionEndpointView::normalComponent(
+    const forms::FormExpr& value) const
+{
+    return forms::inner(value, normal());
+}
+
+forms::FormExpr CouplingRegionEndpointView::normalProjection(
+    const forms::FormExpr& value) const
+{
+    const auto n = normal();
+    return forms::inner(value, n) * n;
+}
+
+forms::FormExpr CouplingRegionEndpointView::tangentialProjection(
+    const forms::FormExpr& value) const
+{
+    return value - normalProjection(value);
 }
 
 forms::FormExpr CouplingRegionEndpointView::integral(

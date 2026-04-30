@@ -137,6 +137,12 @@ public:
     [[nodiscard]] forms::FormExpr geometryTerminal(
         CouplingGeometryTerminalQuantity quantity) const;
     [[nodiscard]] forms::FormExpr normal() const;
+    [[nodiscard]] forms::FormExpr normalComponent(
+        const forms::FormExpr& value) const;
+    [[nodiscard]] forms::FormExpr normalProjection(
+        const forms::FormExpr& value) const;
+    [[nodiscard]] forms::FormExpr tangentialProjection(
+        const forms::FormExpr& value) const;
 
 private:
     const CouplingFormBuilder* builder_{nullptr};
@@ -183,6 +189,12 @@ public:
     [[nodiscard]] forms::FormExpr geometryTerminal(
         CouplingGeometryTerminalQuantity quantity) const;
     [[nodiscard]] forms::FormExpr normal() const;
+    [[nodiscard]] forms::FormExpr normalComponent(
+        const forms::FormExpr& value) const;
+    [[nodiscard]] forms::FormExpr normalProjection(
+        const forms::FormExpr& value) const;
+    [[nodiscard]] forms::FormExpr tangentialProjection(
+        const forms::FormExpr& value) const;
     [[nodiscard]] forms::FormExpr integral(
         const forms::FormExpr& integrand) const;
 

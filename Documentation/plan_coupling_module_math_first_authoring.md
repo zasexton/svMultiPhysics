@@ -1238,9 +1238,9 @@ forms::FormExpr CouplingRegionRelationView::sum(
 - [x] Implement relation integrals through existing Forms measures and
       `CouplingFormBuilder::integrate(...)` / `integrateShared(...)`, choosing
       the measure from resolved region metadata.
-- [ ] Expose projection helpers that lower to Forms expressions for normal and
+- [x] Expose projection helpers that lower to Forms expressions for normal and
       tangential components.
-- [ ] Preserve existing lower-level methods for expert use.
+- [x] Preserve existing lower-level methods for expert use.
 
 ### Completion Checklist
 
@@ -1613,7 +1613,7 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test missing side mappings produce clear diagnostics.
 - [ ] Test generic relation endpoints for N-way residual authoring.
 - [ ] Test mixed-dimensional relation integrals select the expected domain.
-- [ ] Test normal and tangential projection helpers lower to Forms expressions.
+- [x] Test normal and tangential projection helpers lower to Forms expressions.
 
 ### Metadata Inference Tests
 
