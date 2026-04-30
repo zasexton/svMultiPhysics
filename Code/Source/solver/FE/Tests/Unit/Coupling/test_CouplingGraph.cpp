@@ -2172,6 +2172,61 @@ TEST(CouplingGraph, RejectsInvalidPartitionedExchangeDeclarations)
     }
 }
 
+TEST(CouplingGraph, RejectsPartitionedEndpointsMissingProviderRegistryEntries)
+{
+    NonFieldGraphFixture fixture(/*register_variables=*/false);
+
+    auto declaration = graphDeclaration();
+    declaration.partitioned_exchange_declarations.push_back(CouplingExchangeDeclaration{
+        .producer_port = {
+            .contract_instance_name = "generic_instance",
+            .port_name = "parameter_out",
+        },
+        .consumer_port = {
+            .contract_instance_name = "generic_instance",
+            .port_name = "field_in",
+        },
+        .value = CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        .producer = CouplingEndpointRef{
+            .kind = CouplingEndpointKind::Parameter,
+            .participant_name = "left",
+            .endpoint_name = "missing_parameter",
+            .temporal = CouplingTemporalSlotDescriptor{
+                .slot = CouplingTemporalSlot::Current,
+            },
+        },
+        .consumer = graphFieldEndpoint("left"),
+        .transfer = CouplingTransferDeclaration{
+            .kind = CouplingTransferKind::Identity,
+        },
+    });
+
+    auto parameter_validation = buildGraph(fixture.context, declaration);
+    EXPECT_FALSE(parameter_validation.ok());
+    EXPECT_NE(formatDiagnostics(parameter_validation).find(
+                  "ParameterRegistry entry"),
+              std::string::npos);
+
+    declaration.partitioned_exchange_declarations[0].producer =
+        CouplingEndpointRef{
+            .kind = CouplingEndpointKind::AuxiliaryInput,
+            .participant_name = "left",
+            .endpoint_name = "missing_input",
+            .temporal = CouplingTemporalSlotDescriptor{
+                .slot = CouplingTemporalSlot::Current,
+            },
+        };
+
+    const auto auxiliary_validation = buildGraph(fixture.context, declaration);
+    EXPECT_FALSE(auxiliary_validation.ok());
+    EXPECT_NE(formatDiagnostics(auxiliary_validation).find(
+                  "AuxiliaryInputRegistry entry"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsGeneratedPartitionedPlanMissingDeclaredExchange)
 {
     const auto context = twoParticipantGraphContext();

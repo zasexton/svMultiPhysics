@@ -4759,7 +4759,7 @@ Implementation checklist:
 - [x] Reject partitioned exchange declarations with `Unspecified` transfers and
   validate explicit `Identity` transfers against endpoint ownership, layout,
   value shape, and temporal-slot semantics.
-- [ ] Validate field, typed `ParameterRegistry`, raw auxiliary-state,
+- [x] Validate field, typed `ParameterRegistry`, raw auxiliary-state,
   AuxiliaryInput, AuxiliaryOutput, and region-data partitioned endpoints against
   existing FE registries/providers, and validate external-buffer and driver-owned
   transfer endpoints against explicit driver-owned registries, rather than
