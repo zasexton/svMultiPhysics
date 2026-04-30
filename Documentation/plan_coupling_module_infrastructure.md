@@ -4848,7 +4848,7 @@ Unit-test verification checklist:
   side, logical region, provider, value-type, slot/output-id, and byte-offset
   provenance only as installed evidence, and that two dependencies with the same
   declaration name on different regions do not collide.
-- [ ] `test_CouplingGraph.cpp` verifies boundary-integral provenance maps to
+- [x] `test_CouplingGraph.cpp` verifies boundary-integral provenance maps to
   BoundaryFunctional graph identity for expected-block diagnostics until
   Analysis exposes a distinct boundary-integral kind.
 - [x] `test_CouplingGraph.cpp` validates installed matrix-block provenance uses

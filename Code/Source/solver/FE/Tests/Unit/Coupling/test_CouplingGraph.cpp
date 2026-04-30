@@ -1429,6 +1429,89 @@ TEST(CouplingGraph, ValidatesInterfaceProviderMetadataSideProvenance)
               std::string::npos);
 }
 
+TEST(CouplingGraph, AcceptsBoundaryIntegralProvenanceAsBoundaryFunctionalGraphIdentity)
+{
+    NonFieldGraphFixture fixture(/*register_variables=*/true);
+    auto declaration = graphDeclaration();
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::BoundaryIntegral,
+        .participant_name = "left",
+        .name = "surface_measure",
+        .region = CouplingRegionEndpointDeclaration{
+            .participant_name = "left",
+            .region_name = "surface",
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+        .expected_value_type = "scalar",
+    });
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::BoundaryFunctional,
+            .participant_name = "left",
+            .name = "surface_measure",
+        },
+    });
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = declaration.dependencies.back().residual_row,
+        .dependency = declaration.dependencies.back().dependency,
+    });
+
+    const auto boundary_functional =
+        analysis::VariableKey::named(analysis::VariableKind::BoundaryFunctional,
+                                     "left_system/surface_measure");
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "boundary_integral_block";
+    metadata.origin = "CouplingGraphTest";
+    metadata.system_name = "left_system";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic installed dependency fixture"});
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledBlocks,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic installed block fixture"});
+    metadata.non_field_dependencies.push_back({
+        .kind = CouplingFormNonFieldDependencyKind::BoundaryIntegral,
+        .participant_name = "left",
+        .system_name = "left_system",
+        .name = "surface_measure",
+        .domain = analysis::DomainKind::Boundary,
+        .region_name = "surface",
+        .marker = 1,
+        .provider = "forms",
+        .value_type = "scalar",
+    });
+    metadata.installed_dependencies.push_back(CouplingInstalledDependency{
+        .residual_row = analysis::VariableKey::field(fixture.field),
+        .dependency = boundary_functional,
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+        .domain = analysis::DomainKind::Boundary,
+        .contributes_matrix_block = true,
+        .contributes_vector = true,
+        .provider = "FormsInstaller",
+    });
+    metadata.installed_blocks.push_back(CouplingInstalledBlockProvenance{
+        .residual_row = analysis::VariableKey::field(fixture.field),
+        .dependency = boundary_functional,
+        .domains = {analysis::DomainKind::Boundary},
+        .has_matrix = true,
+        .has_vector = true,
+    });
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        fixture.context,
+        declaration,
+        installed_forms);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
 TEST(CouplingGraph, RejectsMissingRequiredContextReferences)
 {
     auto declaration = graphDeclaration();
