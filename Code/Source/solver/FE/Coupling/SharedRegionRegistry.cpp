@@ -14,6 +14,46 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+namespace {
+
+void validateInterfaceSideOwnership(const SharedRegionRef& record,
+                                    CouplingValidationResult& result)
+{
+    const CouplingRegionRef* minus_owner = nullptr;
+    const CouplingRegionRef* plus_owner = nullptr;
+
+    for (const auto& region : record.participant_regions) {
+        if (region.kind != CouplingRegionKind::InterfaceFace) {
+            continue;
+        }
+
+        if (region.side == CouplingInterfaceSide::None) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region.participant_name,
+                .region_name = record.name,
+                .message = "interface shared-region participant mapping requires a minus or plus side",
+            });
+            continue;
+        }
+
+        const CouplingRegionRef*& owner =
+            region.side == CouplingInterfaceSide::Minus ? minus_owner : plus_owner;
+        if (owner != nullptr) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = region.participant_name,
+                .region_name = record.name,
+                .message = "interface shared-region side ownership is ambiguous",
+            });
+            continue;
+        }
+        owner = &region;
+    }
+}
+
+} // namespace
+
 void SharedRegionRegistry::add(SharedRegionRef region)
 {
     records_.push_back(std::move(region));
@@ -82,6 +122,7 @@ CouplingValidationResult SharedRegionRegistry::validate() const
                 result.addError("shared region participant mapping does not match the required region kind");
             }
         }
+        validateInterfaceSideOwnership(record, result);
     }
     return result;
 }

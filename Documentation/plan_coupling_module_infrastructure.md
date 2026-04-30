@@ -4057,7 +4057,7 @@ Unit-test verification checklist:
   concrete FE integration kind or explicit provider-extension path.
 - [x] `test_SharedRegionRegistry.cpp` verifies interface shared regions expose
   per-participant `.dI(marker)` marker and side/orientation metadata.
-- [ ] `test_SharedRegionRegistry.cpp` verifies minus/plus side ownership is
+- [x] `test_SharedRegionRegistry.cpp` verifies minus/plus side ownership is
   recorded per participant and rejected when ambiguous.
 - [ ] `test_SharedRegionRegistry.cpp` rejects interface shared regions whose
   marker has no registered interface topology for monolithic Forms use.

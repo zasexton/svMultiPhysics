@@ -46,8 +46,10 @@ TEST(SharedRegionRegistry, RegistersAndFindsParticipantRegions)
         .name = "interface",
         .required_region_kind = CouplingRegionKind::InterfaceFace,
         .participant_regions = {
-            registryRegion("left", "surface", CouplingRegionKind::InterfaceFace, 3),
-            registryRegion("right", "surface", CouplingRegionKind::InterfaceFace, 3),
+            registryRegion("left", "surface", CouplingRegionKind::InterfaceFace,
+                           3, CouplingInterfaceSide::Minus),
+            registryRegion("right", "surface", CouplingRegionKind::InterfaceFace,
+                           3, CouplingInterfaceSide::Plus),
         },
     });
 
@@ -55,6 +57,36 @@ TEST(SharedRegionRegistry, RegistersAndFindsParticipantRegions)
     ASSERT_NE(registry.find("interface"), nullptr);
     ASSERT_NE(registry.findParticipantRegion("interface", "left"), nullptr);
     EXPECT_EQ(registry.findParticipantRegion("interface", "right")->marker, 3);
+}
+
+TEST(SharedRegionRegistry, RejectsAmbiguousInterfaceSideOwnership)
+{
+    SharedRegionRegistry registry;
+    registry.add(SharedRegionRef{
+        .name = "missing_side",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {
+            registryRegion("left", "surface", CouplingRegionKind::InterfaceFace, 3),
+        },
+    });
+    registry.add(SharedRegionRef{
+        .name = "duplicate_side",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {
+            registryRegion("left", "surface", CouplingRegionKind::InterfaceFace,
+                           3, CouplingInterfaceSide::Minus),
+            registryRegion("right", "surface", CouplingRegionKind::InterfaceFace,
+                           3, CouplingInterfaceSide::Minus),
+        },
+    });
+
+    const auto validation = registry.validate();
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("requires a minus or plus side"),
+              std::string::npos);
+    EXPECT_NE(diagnostics.find("side ownership is ambiguous"),
+              std::string::npos);
 }
 
 TEST(SharedRegionRegistry, ExposesInterfaceMarkersAndSidesForFormsLowering)
