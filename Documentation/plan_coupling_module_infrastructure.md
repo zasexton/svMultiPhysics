@@ -4678,7 +4678,7 @@ Implementation checklist:
 - [x] Validate optional additional fields are either selected and fully
   compatible or skipped without leaving dependency edges, expected blocks, or
   Forms contributions that reference them.
-- [ ] Validate that additional field declarations can be lowered to existing FE
+- [x] Validate that additional field declarations can be lowered to existing FE
   field registration APIs before the monolithic coupling builder mutates the
   `FESystem`.
 - [ ] Validate that interface additional-field declarations resolve their
@@ -4813,7 +4813,7 @@ Unit-test verification checklist:
   contract-owned fields resolve a concrete target `FESystem`.
 - [x] `test_CouplingGraph.cpp` verifies skipped optional additional fields leave
   no dependency edge, expected block, or Forms contribution reference.
-- [ ] `test_CouplingGraph.cpp` rejects additional field declarations that
+- [x] `test_CouplingGraph.cpp` rejects additional field declarations that
   cannot lower to existing FE field registration APIs.
 - [ ] `test_CouplingGraph.cpp` verifies interface additional-field declarations
   carry only declaration-side region names before resolution and compare against

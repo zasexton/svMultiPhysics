@@ -1113,6 +1113,33 @@ TEST(CouplingGraph, RejectsSkippedOptionalAdditionalFieldReferences)
                     .ok());
 }
 
+TEST(CouplingGraph, RejectsAdditionalFieldsThatCannotLowerToFieldRegistration)
+{
+    auto compatible = graphDeclaration();
+    auto inferred_components = graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "lambda");
+    inferred_components.components = 0;
+    compatible.additional_fields.push_back(inferred_components);
+    EXPECT_TRUE(buildGraph(graphContext(), compatible).ok());
+
+    auto missing_target = graphDeclaration();
+    missing_target.contract_name = "missing_target_instance";
+    missing_target.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "unknown_participant",
+        "lambda"));
+
+    const auto validation = buildGraph(graphContext(), missing_target);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("cannot be lowered to an FE field registration target"),
+              std::string::npos);
+    EXPECT_NE(text.find("participant='unknown_participant'"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsRegionKindMismatches)
 {
     auto declaration = graphDeclaration();

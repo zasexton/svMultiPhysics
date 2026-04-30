@@ -430,6 +430,28 @@ void validateContractOwnedAdditionalField(
     }
 }
 
+void validateAdditionalFieldLowering(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingAdditionalFieldDeclaration& field,
+    CouplingValidationResult& result)
+{
+    if (!additionalFieldSelected(field)) {
+        return;
+    }
+    if (!additionalFieldTarget(context, field).has_value()) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = field.system_participant_name.empty()
+                ? field.namespace_name
+                : field.system_participant_name,
+            .field_name = field.field_name,
+            .message = "additional field declaration cannot be lowered to an FE field registration target",
+        });
+    }
+}
+
 std::string additionalFieldGraphKey(
     const CouplingContext& context,
     const CouplingAdditionalFieldDeclaration& field)
@@ -497,6 +519,10 @@ void validateAdditionalFieldGraphDeclarations(
                                                  declaration,
                                                  field,
                                                  result);
+            validateAdditionalFieldLowering(context,
+                                            declaration,
+                                            field,
+                                            result);
             if (additionalFieldCollidesWithBaseField(context, field)) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,
