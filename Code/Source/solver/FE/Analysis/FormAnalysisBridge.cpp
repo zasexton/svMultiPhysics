@@ -581,6 +581,8 @@ FormContributionAnalysisMetadata buildFormAnalysisMetadata(
     metadata.contribution_name_explicit = !options.contribution_name.empty();
     metadata.installed_fields = formulation.active_fields;
     metadata.geometry_sensitivity = options.geometry_sensitivity;
+    metadata.geometry_sensitivity_provenance =
+        options.geometry_sensitivity_provenance;
 
     FormAnalysisBridgeOptions terminal_options = options;
     terminal_options.contribution_name = metadata.contribution_name;

@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <memory>
+#include <string>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::analysis;
@@ -179,6 +181,51 @@ TEST(FormAnalysisBridge, ReportsTemporalAndGeometryTerminalCoverage)
         findGate(metadata.feature_gates, FormBridgeFeature::GeometryTerminals);
     ASSERT_NE(geometry_gate, nullptr);
     EXPECT_EQ(geometry_gate->status, FormBridgeFeatureStatus::Partial);
+}
+
+TEST(FormAnalysisBridge, PreservesGeometrySensitivityProvenanceOptions)
+{
+    FormulationRecord formulation;
+    formulation.operator_tag = "equations";
+    formulation.active_fields = {7};
+
+    FormAnalysisBridgeOptions options;
+    options.contribution_name = "cut_geometry";
+    options.origin = "unit_test";
+    options.geometry_sensitivity_provenance.push_back(
+        FormGeometrySensitivityProvenanceMetadata{
+            .kind = FormGeometrySensitivityProvenanceKind::CutGeometry,
+            .provenance_id = "cut:wall:42",
+            .construction_policy = "level_set_cut_quadrature",
+            .target_kind = "embedded_surface",
+            .source_stable_id = 991,
+            .parent_entity = 3,
+            .parent_geometry_dofs = {31, 32, 33},
+            .cut_topology_revision = 17,
+            .quadrature_policy_key = 81,
+            .visible_to_assembly_paths = {"residual", "jacobian"},
+            .location_sensitivity_available = true,
+            .jacobian_sensitivity_available = true,
+            .measure_sensitivity_available = true,
+            .normal_sensitivity_available = true,
+            .quadrature_weight_sensitivity_available = true,
+            .ad_compatible = true,
+            .sensitivity_sample_count = 6,
+            .geometry_fields = {7},
+        });
+
+    const auto metadata = buildFormAnalysisMetadata(formulation, {}, options);
+
+    ASSERT_EQ(metadata.geometry_sensitivity_provenance.size(), 1u);
+    const auto& provenance = metadata.geometry_sensitivity_provenance[0];
+    EXPECT_EQ(provenance.kind, FormGeometrySensitivityProvenanceKind::CutGeometry);
+    EXPECT_EQ(provenance.provenance_id, "cut:wall:42");
+    EXPECT_EQ(provenance.parent_geometry_dofs,
+              (std::vector<MeshIndex>{31, 32, 33}));
+    EXPECT_EQ(provenance.visible_to_assembly_paths,
+              (std::vector<std::string>{"residual", "jacobian"}));
+    EXPECT_TRUE(provenance.quadrature_weight_sensitivity_available);
+    EXPECT_EQ(provenance.geometry_fields, (std::vector<FieldId>{7}));
 }
 
 TEST(FormAnalysisBridge, AdaptsContributionDescriptorsToInstalledBlocks)

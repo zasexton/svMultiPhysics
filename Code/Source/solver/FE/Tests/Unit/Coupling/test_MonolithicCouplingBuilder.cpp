@@ -794,6 +794,76 @@ TEST(MonolithicCouplingBuilder, AdaptsNativeBridgeMetadataProvenance)
               analysis::DomainKind::Global);
 }
 
+TEST(MonolithicCouplingBuilder, AdaptsCutGeometrySensitivityProvenance)
+{
+    analysis::FormContributionAnalysisMetadata native;
+    native.contribution_name = "cut_geometry";
+    native.origin = "bridge_test";
+    native.system_name = "fluid_system";
+    native.operator_tag = "equations";
+    native.installed_fields = {7, 8};
+    native.geometry_sensitivity_provenance.push_back(
+        analysis::FormGeometrySensitivityProvenanceMetadata{
+            .kind =
+                analysis::FormGeometrySensitivityProvenanceKind::CutGeometry,
+            .provenance_id = "cut:wall:42",
+            .construction_policy = "level_set_cut_quadrature",
+            .target_kind = "embedded_surface",
+            .source_stable_id = 991,
+            .parent_entity = 3,
+            .parent_geometry_dofs = {31, 32, 33},
+            .cut_topology_revision = 17,
+            .quadrature_policy_key = 81,
+            .visible_to_assembly_paths = {"residual", "jacobian"},
+            .location_sensitivity_available = true,
+            .jacobian_sensitivity_available = true,
+            .measure_sensitivity_available = true,
+            .normal_sensitivity_available = true,
+            .quadrature_weight_sensitivity_available = true,
+            .ad_compatible = true,
+            .sensitivity_sample_count = 6,
+            .geometry_fields = {7, 8},
+        });
+
+    const auto adapted =
+        MonolithicCouplingBuilder::adaptFormAnalysisMetadata(native);
+
+    ASSERT_EQ(adapted.geometry_sensitivity_provenance.size(), 1u);
+    const auto& provenance = adapted.geometry_sensitivity_provenance[0];
+    EXPECT_EQ(provenance.kind,
+              CouplingGeometrySensitivityProvenanceKind::CutGeometry);
+    EXPECT_EQ(provenance.provenance_id, "cut:wall:42");
+    EXPECT_EQ(provenance.construction_policy, "level_set_cut_quadrature");
+    EXPECT_EQ(provenance.target_kind, "embedded_surface");
+    EXPECT_EQ(provenance.source_stable_id, 991u);
+    EXPECT_EQ(provenance.parent_entity, 3);
+    EXPECT_EQ(provenance.parent_geometry_dofs,
+              (std::vector<MeshIndex>{31, 32, 33}));
+    EXPECT_EQ(provenance.cut_topology_revision, 17u);
+    EXPECT_EQ(provenance.quadrature_policy_key, 81u);
+    EXPECT_EQ(provenance.visible_to_assembly_paths,
+              (std::vector<std::string>{"residual", "jacobian"}));
+    EXPECT_TRUE(provenance.location_sensitivity_available);
+    EXPECT_TRUE(provenance.jacobian_sensitivity_available);
+    EXPECT_TRUE(provenance.measure_sensitivity_available);
+    EXPECT_TRUE(provenance.normal_sensitivity_available);
+    EXPECT_TRUE(provenance.quadrature_weight_sensitivity_available);
+    EXPECT_TRUE(provenance.ad_compatible);
+    EXPECT_EQ(provenance.sensitivity_sample_count, 6u);
+    EXPECT_EQ(provenance.geometry_fields, (std::vector<FieldId>{7, 8}));
+
+    for (const auto field : provenance.geometry_fields) {
+        const auto field_use = std::find_if(
+            adapted.field_uses.begin(),
+            adapted.field_uses.end(),
+            [field](const CouplingFormFieldProvenance& use) {
+                return use.field == field;
+            });
+        ASSERT_NE(field_use, adapted.field_uses.end());
+        EXPECT_TRUE(field_use->appears_as_geometry_sensitivity);
+    }
+}
+
 TEST(MonolithicCouplingBuilder, RejectsOverlappingPrimaryAndExtraTrialFields)
 {
     BuilderFixture fixture;

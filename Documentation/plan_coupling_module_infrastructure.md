@@ -4473,7 +4473,7 @@ Implementation checklist:
   resolved mesh-motion field and forwards all `GeometryTangentPath` values,
   forcing the symbolic geometry tangent path for `SymbolicRequired` and
   `SymbolicWithADCheck`.
-- [ ] Adapt cut/embedded geometry sensitivity metadata, when present, into
+- [x] Adapt cut/embedded geometry sensitivity metadata, when present, into
   `CouplingGeometrySensitivityProvenance` with provenance id, construction
   policy, target kind, source stable id, parent entity, parent geometry DOFs,
   cut topology revision, quadrature policy key, visible assembly paths, available

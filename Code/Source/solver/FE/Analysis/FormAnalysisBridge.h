@@ -24,6 +24,7 @@
 #include "Core/Types.h"
 #include "Forms/FormExpr.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -156,12 +157,41 @@ struct FormInstalledBlockMetadata {
     std::string provider;
 };
 
+enum class FormGeometrySensitivityProvenanceKind : std::uint8_t {
+    CutGeometry,
+    DriverProvided,
+};
+
+struct FormGeometrySensitivityProvenanceMetadata {
+    FormGeometrySensitivityProvenanceKind kind{
+        FormGeometrySensitivityProvenanceKind::CutGeometry};
+    std::string provenance_id;
+    std::string construction_policy;
+    std::string target_kind;
+    std::uint64_t source_stable_id{0};
+    MeshIndex parent_entity{static_cast<MeshIndex>(-1)};
+    std::vector<MeshIndex> parent_geometry_dofs;
+    std::uint64_t cut_topology_revision{0};
+    std::uint64_t quadrature_policy_key{0};
+    std::vector<std::string> visible_to_assembly_paths;
+    bool location_sensitivity_available{false};
+    bool jacobian_sensitivity_available{false};
+    bool measure_sensitivity_available{false};
+    bool normal_sensitivity_available{false};
+    bool quadrature_weight_sensitivity_available{false};
+    bool ad_compatible{false};
+    std::size_t sensitivity_sample_count{0};
+    std::vector<FieldId> geometry_fields;
+};
+
 struct FormAnalysisBridgeOptions {
     std::string contribution_name;
     std::string origin;
     std::string system_name;
     std::string owner_participant_name;
     forms::GeometrySensitivityOptions geometry_sensitivity{};
+    std::vector<FormGeometrySensitivityProvenanceMetadata>
+        geometry_sensitivity_provenance;
 };
 
 struct FormContributionAnalysisMetadata {
@@ -172,6 +202,8 @@ struct FormContributionAnalysisMetadata {
     bool contribution_name_explicit{false};
     std::vector<FieldId> installed_fields;
     forms::GeometrySensitivityOptions geometry_sensitivity{};
+    std::vector<FormGeometrySensitivityProvenanceMetadata>
+        geometry_sensitivity_provenance;
     std::vector<FormTerminalMetadata> terminals;
     std::vector<FormInstalledDependencyMetadata> installed_dependencies;
     std::vector<FormInstalledBlockMetadata> installed_blocks;

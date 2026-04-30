@@ -672,6 +672,75 @@ void appendBridgeTerminalMetadata(
     appendGeometryTerminalMetadata(adapted, terminal);
 }
 
+void markGeometrySensitivityFieldUse(CouplingFormAnalysisMetadata& adapted,
+                                     FieldId field_id)
+{
+    if (field_id == INVALID_FIELD_ID) {
+        return;
+    }
+
+    auto field_it = std::find_if(
+        adapted.field_uses.begin(),
+        adapted.field_uses.end(),
+        [field_id](const CouplingFormFieldProvenance& field) {
+            return field.field == field_id;
+        });
+    if (field_it == adapted.field_uses.end()) {
+        adapted.field_uses.push_back(
+            CouplingFormFieldProvenance{.field = field_id});
+        field_it = std::prev(adapted.field_uses.end());
+    }
+    field_it->appears_as_geometry_sensitivity = true;
+}
+
+CouplingGeometrySensitivityProvenanceKind couplingGeometrySensitivityKind(
+    analysis::FormGeometrySensitivityProvenanceKind kind) noexcept
+{
+    switch (kind) {
+    case analysis::FormGeometrySensitivityProvenanceKind::CutGeometry:
+        return CouplingGeometrySensitivityProvenanceKind::CutGeometry;
+    case analysis::FormGeometrySensitivityProvenanceKind::DriverProvided:
+        return CouplingGeometrySensitivityProvenanceKind::DriverProvided;
+    }
+    return CouplingGeometrySensitivityProvenanceKind::DriverProvided;
+}
+
+void appendBridgeGeometrySensitivityMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const analysis::FormGeometrySensitivityProvenanceMetadata& metadata)
+{
+    for (const auto field : metadata.geometry_fields) {
+        markGeometrySensitivityFieldUse(adapted, field);
+    }
+
+    adapted.geometry_sensitivity_provenance.push_back(
+        CouplingGeometrySensitivityProvenance{
+            .kind = couplingGeometrySensitivityKind(metadata.kind),
+            .provenance_id = metadata.provenance_id,
+            .construction_policy = metadata.construction_policy,
+            .target_kind = metadata.target_kind,
+            .source_stable_id = metadata.source_stable_id,
+            .cut_topology_revision = metadata.cut_topology_revision,
+            .quadrature_policy_key = metadata.quadrature_policy_key,
+            .parent_entity = metadata.parent_entity,
+            .ad_compatible = metadata.ad_compatible,
+            .location_sensitivity_available =
+                metadata.location_sensitivity_available,
+            .jacobian_sensitivity_available =
+                metadata.jacobian_sensitivity_available,
+            .measure_sensitivity_available =
+                metadata.measure_sensitivity_available,
+            .normal_sensitivity_available =
+                metadata.normal_sensitivity_available,
+            .quadrature_weight_sensitivity_available =
+                metadata.quadrature_weight_sensitivity_available,
+            .geometry_fields = metadata.geometry_fields,
+            .parent_geometry_dofs = metadata.parent_geometry_dofs,
+            .visible_to_assembly_paths = metadata.visible_to_assembly_paths,
+            .sensitivity_sample_count = metadata.sensitivity_sample_count,
+        });
+}
+
 void appendGeometrySensitivityMetadata(
     CouplingFormAnalysisMetadata& adapted)
 {
@@ -683,18 +752,7 @@ void appendGeometrySensitivityMetadata(
 
     const auto mesh_motion_field =
         adapted.geometry_sensitivity.mesh_motion_field;
-    auto field_it = std::find_if(
-        adapted.field_uses.begin(),
-        adapted.field_uses.end(),
-        [&](const CouplingFormFieldProvenance& field) {
-            return field.field == mesh_motion_field;
-        });
-    if (field_it == adapted.field_uses.end()) {
-        adapted.field_uses.push_back(
-            CouplingFormFieldProvenance{.field = mesh_motion_field});
-        field_it = std::prev(adapted.field_uses.end());
-    }
-    field_it->appears_as_geometry_sensitivity = true;
+    markGeometrySensitivityFieldUse(adapted, mesh_motion_field);
 
     adapted.geometry_sensitivity_provenance.push_back(
         CouplingGeometrySensitivityProvenance{
@@ -1115,6 +1173,9 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::adaptFormAnalysisMetadat
 
     for (const auto& terminal : metadata.terminals) {
         appendBridgeTerminalMetadata(adapted, terminal);
+    }
+    for (const auto& sensitivity : metadata.geometry_sensitivity_provenance) {
+        appendBridgeGeometrySensitivityMetadata(adapted, sensitivity);
     }
     appendGeometrySensitivityMetadata(adapted);
 
