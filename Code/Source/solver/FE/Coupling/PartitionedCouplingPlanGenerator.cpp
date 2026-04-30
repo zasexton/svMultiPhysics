@@ -1025,6 +1025,36 @@ bool sharedRegionContainsParticipant(const CouplingContext& ctx,
                        });
 }
 
+std::optional<CouplingRegionEndpointDeclaration> effectiveExchangeRegionEndpoint(
+    const CouplingContext& ctx,
+    const std::optional<std::string>& exchange_shared_region_name,
+    const std::optional<CouplingRegionEndpointDeclaration>& declared_region,
+    const std::optional<CouplingEndpointRef>& endpoint)
+{
+    if (declared_region.has_value() ||
+        !exchange_shared_region_name.has_value() ||
+        !endpoint.has_value() ||
+        !endpoint->participant_name.has_value()) {
+        return declared_region;
+    }
+
+    CouplingRegionEndpointDeclaration inferred;
+    inferred.participant_name = *endpoint->participant_name;
+    inferred.shared_region_name = exchange_shared_region_name;
+    if (!ctx.hasSharedRegion(*exchange_shared_region_name) ||
+        !sharedRegionContainsParticipant(
+            ctx,
+            *exchange_shared_region_name,
+            inferred.participant_name)) {
+        return inferred;
+    }
+
+    const auto resolved =
+        ctx.sharedRegion(*exchange_shared_region_name, inferred.participant_name);
+    inferred.region_name = resolved.region_name;
+    return inferred;
+}
+
 CouplingValidationResult validateRegionEndpointScope(
     const CouplingContext& ctx,
     const std::optional<std::string>& exchange_shared_region_name,
@@ -1141,7 +1171,9 @@ std::optional<CouplingRegionRef> tryResolveRegion(
 
 CouplingValidationResult validateInterfaceTransferRegions(
     const CouplingContext& ctx,
-    const CouplingExchangeDeclaration& exchange)
+    const CouplingExchangeDeclaration& exchange,
+    const std::optional<CouplingRegionEndpointDeclaration>& producer_region,
+    const std::optional<CouplingRegionEndpointDeclaration>& consumer_region)
 {
     CouplingValidationResult result;
     if (!isInterfaceTransferKind(exchange.transfer.kind)) {
@@ -1183,8 +1215,8 @@ CouplingValidationResult validateInterfaceTransferRegions(
             }
         };
 
-    validate_region(exchange.producer_region, "producer");
-    validate_region(exchange.consumer_region, "consumer");
+    validate_region(producer_region, "producer");
+    validate_region(consumer_region, "consumer");
     return result;
 }
 
@@ -1206,7 +1238,9 @@ bool hasInterfaceRevisionEvidence(
 
 CouplingValidationResult validateInterfaceMapProvenance(
     const CouplingContext& ctx,
-    const CouplingExchangeDeclaration& exchange)
+    const CouplingExchangeDeclaration& exchange,
+    const std::optional<CouplingRegionEndpointDeclaration>& producer_endpoint_region,
+    const std::optional<CouplingRegionEndpointDeclaration>& consumer_endpoint_region)
 {
     CouplingValidationResult result;
     if (!isInterfaceTransferKind(exchange.transfer.kind)) {
@@ -1273,7 +1307,7 @@ CouplingValidationResult validateInterfaceMapProvenance(
     }
 
     const auto producer_region =
-        tryResolveRegion(ctx, exchange.shared_region_name, exchange.producer_region);
+        tryResolveRegion(ctx, exchange.shared_region_name, producer_endpoint_region);
     if (producer_region.has_value()) {
         if (producer_region->system_name != provenance.source_system_name) {
             result.add(CouplingDiagnostic{
@@ -1331,7 +1365,7 @@ CouplingValidationResult validateInterfaceMapProvenance(
     }
 
     const auto consumer_region =
-        tryResolveRegion(ctx, exchange.shared_region_name, exchange.consumer_region);
+        tryResolveRegion(ctx, exchange.shared_region_name, consumer_endpoint_region);
     if (consumer_region.has_value()) {
         if (consumer_region->system_name != provenance.target_system_name) {
             result.add(CouplingDiagnostic{
@@ -1754,13 +1788,25 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
                 .message = "partitioned coupling exchange shared region is missing from the context",
             });
         }
+        const auto producer_region = effectiveExchangeRegionEndpoint(
+            ctx,
+            exchange.shared_region_name,
+            exchange.producer_region,
+            exchange.producer);
+        const auto consumer_region = effectiveExchangeRegionEndpoint(
+            ctx,
+            exchange.shared_region_name,
+            exchange.consumer_region,
+            exchange.consumer);
         result.append(validateRegionEndpointScope(
-            ctx, exchange.shared_region_name, exchange.producer_region, "producer"));
+            ctx, exchange.shared_region_name, producer_region, "producer"));
         result.append(validateRegionEndpointScope(
-            ctx, exchange.shared_region_name, exchange.consumer_region, "consumer"));
-        result.append(validateInterfaceTransferRegions(ctx, exchange));
+            ctx, exchange.shared_region_name, consumer_region, "consumer"));
+        result.append(validateInterfaceTransferRegions(
+            ctx, exchange, producer_region, consumer_region));
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-        result.append(validateInterfaceMapProvenance(ctx, exchange));
+        result.append(validateInterfaceMapProvenance(
+            ctx, exchange, producer_region, consumer_region));
 #endif
     }
 
@@ -1860,10 +1906,20 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.producer = resolveEndpoint(ctx, *exchange.producer, exchange.value);
         resolved.consumer = resolveEndpoint(ctx, *exchange.consumer, exchange.value);
         resolved.shared_region_name = exchange.shared_region_name;
+        const auto producer_region = effectiveExchangeRegionEndpoint(
+            ctx,
+            exchange.shared_region_name,
+            exchange.producer_region,
+            exchange.producer);
+        const auto consumer_region = effectiveExchangeRegionEndpoint(
+            ctx,
+            exchange.shared_region_name,
+            exchange.consumer_region,
+            exchange.consumer);
         resolved.producer_region = resolveRegion(
-            ctx, exchange.shared_region_name, exchange.producer_region);
+            ctx, exchange.shared_region_name, producer_region);
         resolved.consumer_region = resolveRegion(
-            ctx, exchange.shared_region_name, exchange.consumer_region);
+            ctx, exchange.shared_region_name, consumer_region);
         resolved.transfer = resolveTransfer(ctx, exchange);
         plan.exchanges.push_back(std::move(resolved));
     }

@@ -1353,10 +1353,10 @@ exchange(name, producer_endpoint, consumer_endpoint)
 - [ ] Add partitioned strategy metadata for explicit lagging, staggered
       fixed-point, relaxation, convergence norms, subcycling, and time-window
       exchange without encoding those algorithms in Forms.
-- [ ] Move shared-region endpoint attachment into FE/Coupling preprocessing or
+- [x] Move shared-region endpoint attachment into FE/Coupling preprocessing or
       `PartitionedCouplingPlanGenerator`.
 - [ ] Keep transfer validation in `PartitionedCouplingPlanGenerator`.
-- [ ] Keep endpoint scope, temporal slot, frame transform, component layout, and
+- [x] Keep endpoint scope, temporal slot, frame transform, component layout, and
       runtime handle validation in `PartitionedCouplingPlanGenerator`.
 
 ### Completion Checklist
