@@ -37,16 +37,6 @@ fec::CouplingFieldUse fieldUse(const std::string& participant,
     };
 }
 
-fec::CouplingVariableUse fieldVariable(const std::string& participant,
-                                       const std::string& field)
-{
-    return fec::CouplingVariableUse{
-        .kind = fec::CouplingVariableKind::Field,
-        .participant_name = participant,
-        .name = field,
-    };
-}
-
 fec::CouplingValueDescriptor scalarValue()
 {
     return fec::CouplingValueDescriptor{
@@ -64,53 +54,6 @@ void declareFieldRequirement(fec::CouplingDefinitionBuilder& builder,
         .field = std::move(field),
         .value = std::move(value),
     });
-}
-
-void appendImplicitDependency(fec::CouplingDefinitionBuilder& builder,
-                              fec::CouplingVariableUse residual_row,
-                              fec::CouplingVariableUse dependency)
-{
-    builder.dependency(fec::CouplingResidualDependency{
-        .residual_row = residual_row,
-        .dependency = dependency,
-    });
-    builder.expectedBlock(fec::CouplingBlockExpectation{
-        .residual_row = std::move(residual_row),
-        .dependency = std::move(dependency),
-    });
-}
-
-void appendMonolithicDependencies(
-    const FSICouplingOptions& options,
-    fec::CouplingDefinitionBuilder& builder)
-{
-    if (options.mode != fec::CouplingMode::Monolithic) {
-        return;
-    }
-
-    const auto fluid_velocity =
-        fieldVariable(options.fluid_name, options.fluid_velocity_field);
-    const auto solid_displacement =
-        fieldVariable(options.solid_name, options.solid_displacement_field);
-
-    appendImplicitDependency(builder,
-                             fluid_velocity,
-                             fluid_velocity);
-    if (options.use_solid_displacement_derivative) {
-        appendImplicitDependency(builder,
-                                 fluid_velocity,
-                                 solid_displacement);
-    } else if (options.solid_velocity_field.has_value()) {
-        appendImplicitDependency(
-            builder,
-            fluid_velocity,
-            fieldVariable(options.solid_name, *options.solid_velocity_field));
-    }
-
-    appendImplicitDependency(
-        builder,
-        solid_displacement,
-        fieldVariable(options.fluid_name, options.fluid_pressure_field));
 }
 
 void appendMonolithicGeometryRequirements(
@@ -359,7 +302,6 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
     }
 
     appendPartitionedExchangeDeclarations(options_, builder);
-    appendMonolithicDependencies(options_, builder);
     appendMonolithicGeometryRequirements(options_, builder);
 }
 

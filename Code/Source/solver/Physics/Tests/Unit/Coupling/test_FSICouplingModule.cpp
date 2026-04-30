@@ -557,31 +557,15 @@ TEST(FSICouplingModule, DeclaresTemporalDerivativeWhenSolidVelocityDerived)
     EXPECT_EQ(requirement.derivative_order, 1);
 }
 
-TEST(FSICouplingModule, DeclaresMonolithicDependencyAndBlockExpectations)
+TEST(FSICouplingModule, DeclaresMonolithicGeometryWithoutManualDependencies)
 {
     const FSICouplingModule module;
     const auto declaration = module.declare();
 
-    ASSERT_EQ(declaration.dependencies.size(), 3u);
-    ASSERT_EQ(declaration.expected_blocks.size(), 3u);
-    EXPECT_EQ(declaration.dependencies[0].residual_row.participant_name,
-              "fluid");
-    EXPECT_EQ(declaration.dependencies[0].residual_row.name, "velocity");
-    EXPECT_EQ(declaration.dependencies[0].dependency.participant_name,
-              "fluid");
-    EXPECT_EQ(declaration.dependencies[0].dependency.name, "velocity");
-    EXPECT_EQ(declaration.dependencies[1].residual_row.participant_name,
-              "fluid");
-    EXPECT_EQ(declaration.dependencies[1].residual_row.name, "velocity");
-    EXPECT_EQ(declaration.dependencies[1].dependency.participant_name,
-              "solid");
-    EXPECT_EQ(declaration.dependencies[1].dependency.name, "velocity");
-    EXPECT_EQ(declaration.dependencies[2].residual_row.participant_name,
-              "solid");
-    EXPECT_EQ(declaration.dependencies[2].residual_row.name, "displacement");
-    EXPECT_EQ(declaration.dependencies[2].dependency.participant_name,
-              "fluid");
-    EXPECT_EQ(declaration.dependencies[2].dependency.name, "pressure");
+    EXPECT_EQ(declaration.dependency_declaration_mode,
+              fec::CouplingDependencyDeclarationMode::InferFromInstalledForms);
+    EXPECT_TRUE(declaration.dependencies.empty());
+    EXPECT_TRUE(declaration.expected_blocks.empty());
     ASSERT_EQ(declaration.geometry_requirements.size(), 1u);
     EXPECT_EQ(declaration.geometry_requirements[0].quantity,
               fec::CouplingGeometryTerminalQuantity::Normal);
@@ -590,8 +574,8 @@ TEST(FSICouplingModule, DeclaresMonolithicDependencyAndBlockExpectations)
     ale_options.mesh_name = "mesh";
     const FSICouplingModule ale_module(ale_options);
     const auto ale_declaration = ale_module.declare();
-    ASSERT_EQ(ale_declaration.dependencies.size(), 3u);
-    ASSERT_EQ(ale_declaration.expected_blocks.size(), 3u);
+    EXPECT_TRUE(ale_declaration.dependencies.empty());
+    EXPECT_TRUE(ale_declaration.expected_blocks.empty());
     EXPECT_TRUE(hasField(ale_declaration, "mesh", "displacement"));
 }
 

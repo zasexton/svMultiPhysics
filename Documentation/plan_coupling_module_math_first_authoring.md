@@ -1299,8 +1299,8 @@ enum class CouplingDependencyDeclarationMode {
 
 ### Completion Checklist
 
-- [ ] FSI no longer manually appends monolithic dependencies.
-- [ ] FSI no longer manually appends expected blocks.
+- [x] FSI no longer manually appends monolithic dependencies.
+- [x] FSI no longer manually appends expected blocks.
 - [ ] Temporal requirements from `dt(...)` can be inferred or verified.
 - [ ] Geometry terminal requirements from `normal()` can be inferred or
       verified.
@@ -1486,8 +1486,8 @@ equation definitions, and partitioned strategy choices.
       - [x] `validateMonolithicFieldSystems`
       - [x] `validateMonolithicInterfaceTopology`
       - [x] manual partitioned endpoint attachment
-      - [ ] manual monolithic dependency appending
-      - [ ] manual expected-block appending
+      - [x] manual monolithic dependency appending
+      - [x] manual expected-block appending
 
 ### Completion Checklist
 
