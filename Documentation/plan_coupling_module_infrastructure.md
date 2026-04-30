@@ -4285,7 +4285,7 @@ Unit-test verification checklist:
   `CouplingVariableUse` records adapt to `analysis::VariableKey` using
   canonical owning-system or participant-qualified names, while slots and output
   ids appear only in resolved lookup/provenance metadata.
-- [ ] `test_CouplingContractValidation.cpp` verifies
+- [x] `test_CouplingContractValidation.cpp` verifies
   `CouplingNonFieldDependencyRequirement` supports parameter, coefficient,
   material-state, boundary-functional, boundary-integral, auxiliary-state,
   `AuxiliaryInput`, and `AuxiliaryOutput` requirements without forcing

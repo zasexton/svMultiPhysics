@@ -864,6 +864,18 @@ TEST(CouplingContractValidation, ValidatesNonFieldDependencyRequirements)
             .material_state_byte_offset = 16,
         },
         CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::MaterialStateWork,
+            .participant_name = "left",
+            .name = "work",
+            .material_state_byte_offset = 24,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::BoundaryFunctional,
+            .participant_name = "left",
+            .name = "traction",
+            .require_analysis_variable_key = true,
+        },
+        CouplingNonFieldDependencyRequirement{
             .kind = CouplingNonFieldDependencyRequirementKind::BoundaryIntegral,
             .participant_name = "left",
             .name = "traction_integral",
@@ -888,6 +900,12 @@ TEST(CouplingContractValidation, ValidatesNonFieldDependencyRequirements)
             .require_analysis_variable_key = true,
         },
     };
+    ASSERT_EQ(declaration.non_field_dependencies.size(), 9u);
+    EXPECT_TRUE(declaration.dependencies.empty());
+    EXPECT_FALSE(declaration.non_field_dependencies[0].require_analysis_variable_key);
+    EXPECT_FALSE(declaration.non_field_dependencies[1].require_analysis_variable_key);
+    EXPECT_FALSE(declaration.non_field_dependencies[2].require_analysis_variable_key);
+    EXPECT_FALSE(declaration.non_field_dependencies[3].require_analysis_variable_key);
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 
     declaration.non_field_dependencies = {
