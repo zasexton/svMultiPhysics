@@ -82,6 +82,13 @@ PartitionedExchangeBuilder& PartitionedExchangeBuilder::transfer(
     return *this;
 }
 
+PartitionedExchangeBuilder& PartitionedExchangeBuilder::strategy(
+    CouplingPartitionedStrategyDeclaration declaration)
+{
+    exchange().strategy = declaration;
+    return *this;
+}
+
 PartitionedExchangeBuilder& PartitionedExchangeBuilder::producerTemporal(
     CouplingTemporalSlotDescriptor temporal)
 {

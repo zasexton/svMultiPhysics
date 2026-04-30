@@ -897,6 +897,39 @@ CouplingValidationResult validateGeneralTensorEndpointDescriptors(
     return result;
 }
 
+CouplingValidationResult validatePartitionedStrategyDeclaration(
+    const CouplingPartitionedStrategyDeclaration& strategy)
+{
+    CouplingValidationResult result;
+    if (strategy.max_iterations <= 0) {
+        result.addError("partitioned strategy requires positive max iterations");
+    }
+    if (strategy.subcycles <= 0) {
+        result.addError("partitioned strategy requires positive subcycles");
+    }
+    if (strategy.time_window_steps <= 0) {
+        result.addError("partitioned strategy requires positive time-window steps");
+    }
+    if (strategy.relaxation_strategy !=
+            CouplingPartitionedRelaxationStrategy::None &&
+        (strategy.relaxation_factor <= 0.0 || strategy.relaxation_factor > 1.0)) {
+        result.addError(
+            "partitioned relaxation factor must be in the interval (0, 1]");
+    }
+    if (strategy.solve_strategy ==
+            CouplingPartitionedSolveStrategy::StaggeredFixedPoint &&
+        strategy.max_iterations < 2) {
+        result.addError(
+            "staggered fixed-point partitioned strategy requires at least two iterations");
+    }
+    if (strategy.convergence_norm != CouplingPartitionedConvergenceNorm::None &&
+        strategy.max_iterations < 2) {
+        result.addError(
+            "partitioned convergence checks require at least two iterations");
+    }
+    return result;
+}
+
 CouplingValidationResult validateFieldEndpointValueDescriptor(
     const CouplingContext& ctx,
     const CouplingEndpointRef& endpoint,
@@ -1712,6 +1745,7 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         result.append(validateCouplingPortId(exchange.consumer_port));
         result.append(validateCouplingValueDescriptor(exchange.value));
         result.append(validateTransferDeclarationConsistency(exchange.transfer));
+        result.append(validatePartitionedStrategyDeclaration(exchange.strategy));
         if (exchange.transfer.kind == CouplingTransferKind::Unspecified) {
             result.addError("partitioned coupling exchange requires an explicit transfer");
         }
@@ -1921,6 +1955,7 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.consumer_region = resolveRegion(
             ctx, exchange.shared_region_name, consumer_region);
         resolved.transfer = resolveTransfer(ctx, exchange);
+        resolved.strategy = exchange.strategy;
         plan.exchanges.push_back(std::move(resolved));
     }
     plan.group_hints = uniqueGroupHints(group_hints);

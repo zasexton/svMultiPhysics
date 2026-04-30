@@ -27,6 +27,36 @@ namespace svmp {
 namespace FE {
 namespace coupling {
 
+enum class CouplingPartitionedSolveStrategy : std::uint8_t {
+    ExplicitLagged,
+    StaggeredFixedPoint,
+};
+
+enum class CouplingPartitionedRelaxationStrategy : std::uint8_t {
+    None,
+    Constant,
+    Aitken,
+};
+
+enum class CouplingPartitionedConvergenceNorm : std::uint8_t {
+    None,
+    ExchangeIncrement,
+    Residual,
+};
+
+struct CouplingPartitionedStrategyDeclaration {
+    CouplingPartitionedSolveStrategy solve_strategy{
+        CouplingPartitionedSolveStrategy::ExplicitLagged};
+    CouplingPartitionedRelaxationStrategy relaxation_strategy{
+        CouplingPartitionedRelaxationStrategy::None};
+    CouplingPartitionedConvergenceNorm convergence_norm{
+        CouplingPartitionedConvergenceNorm::None};
+    Real relaxation_factor{1.0};
+    int max_iterations{1};
+    int subcycles{1};
+    int time_window_steps{1};
+};
+
 struct CouplingExchangeDeclaration {
     CouplingPortId producer_port;
     CouplingPortId consumer_port;
@@ -37,6 +67,7 @@ struct CouplingExchangeDeclaration {
     std::optional<CouplingRegionEndpointDeclaration> producer_region;
     std::optional<CouplingRegionEndpointDeclaration> consumer_region;
     CouplingTransferDeclaration transfer{};
+    CouplingPartitionedStrategyDeclaration strategy{};
 };
 
 enum class CouplingResolvedTemporalBackingKind : std::uint8_t {
@@ -121,6 +152,7 @@ struct CouplingExchange {
     std::optional<CouplingRegionRef> producer_region;
     std::optional<CouplingRegionRef> consumer_region;
     ResolvedCouplingTransfer transfer{};
+    CouplingPartitionedStrategyDeclaration strategy{};
 };
 
 struct CouplingGroupHint {

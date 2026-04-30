@@ -1350,7 +1350,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
       state/input/output, parameters, boundary functionals, external buffers,
       global scalars, and driver-owned buffers.
 - [x] Support N-way exchange groups for junctions and hub-and-spoke couplings.
-- [ ] Add partitioned strategy metadata for explicit lagging, staggered
+- [x] Add partitioned strategy metadata for explicit lagging, staggered
       fixed-point, relaxation, convergence norms, subcycling, and time-window
       exchange without encoding those algorithms in Forms.
 - [x] Move shared-region endpoint attachment into FE/Coupling preprocessing or
@@ -1639,8 +1639,8 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test auxiliary endpoint exchange descriptors.
 - [ ] Test global-scalar exchange descriptors.
 - [ ] Test N-way exchange group validation.
-- [ ] Test partitioned relaxation and convergence metadata validation.
-- [ ] Test subcycling and time-window metadata validation.
+- [x] Test partitioned relaxation and convergence metadata validation.
+- [x] Test subcycling and time-window metadata validation.
 - [ ] Test AuxiliaryState endpoints admitted into a partitioned coupling inherit
       the coupling contract partitioned strategy and temporal policy.
 - [ ] Test transfer-kind validation remains in `PartitionedCouplingPlanGenerator`.

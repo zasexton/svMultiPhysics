@@ -54,6 +54,16 @@ TEST(PartitionedCouplingBuilder, BuildsFieldExchangeDeclarations)
         .sharedInterface("wall")
         .value(vectorDescriptor(3))
         .transfer(transfer)
+        .strategy(CouplingPartitionedStrategyDeclaration{
+            .solve_strategy =
+                CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+            .relaxation_strategy =
+                CouplingPartitionedRelaxationStrategy::Constant,
+            .convergence_norm =
+                CouplingPartitionedConvergenceNorm::ExchangeIncrement,
+            .relaxation_factor = 0.5,
+            .max_iterations = 4,
+        })
         .producerTemporal(CouplingTemporalSlotDescriptor{
             .slot = CouplingTemporalSlot::Accepted,
         })
@@ -88,6 +98,13 @@ TEST(PartitionedCouplingBuilder, BuildsFieldExchangeDeclarations)
     EXPECT_EQ(exchange.value.rank, CouplingValueRank::Vector);
     EXPECT_EQ(exchange.value.components, 3);
     EXPECT_EQ(exchange.transfer.kind, CouplingTransferKind::Identity);
+    EXPECT_EQ(exchange.strategy.solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+    EXPECT_EQ(exchange.strategy.relaxation_strategy,
+              CouplingPartitionedRelaxationStrategy::Constant);
+    EXPECT_EQ(exchange.strategy.convergence_norm,
+              CouplingPartitionedConvergenceNorm::ExchangeIncrement);
+    EXPECT_EQ(exchange.strategy.max_iterations, 4);
 }
 
 TEST(PartitionedCouplingBuilder, BuildsGenericEndpointExchangeDeclarations)

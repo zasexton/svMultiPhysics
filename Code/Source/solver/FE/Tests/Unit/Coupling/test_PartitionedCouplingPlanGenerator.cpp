@@ -776,6 +776,68 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesFieldIdentityExchange)
     EXPECT_TRUE(plan.cycles.empty());
 }
 
+TEST(PartitionedCouplingPlanGenerator, CarriesPartitionedStrategyMetadata)
+{
+    auto exchange = identityExchange();
+    exchange.strategy = CouplingPartitionedStrategyDeclaration{
+        .solve_strategy = CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+        .relaxation_strategy = CouplingPartitionedRelaxationStrategy::Aitken,
+        .convergence_norm = CouplingPartitionedConvergenceNorm::Residual,
+        .relaxation_factor = 0.8,
+        .max_iterations = 5,
+        .subcycles = 2,
+        .time_window_steps = 3,
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_EQ(plan.exchanges.size(), 1u);
+    EXPECT_EQ(plan.exchanges[0].strategy.solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+    EXPECT_EQ(plan.exchanges[0].strategy.relaxation_strategy,
+              CouplingPartitionedRelaxationStrategy::Aitken);
+    EXPECT_EQ(plan.exchanges[0].strategy.convergence_norm,
+              CouplingPartitionedConvergenceNorm::Residual);
+    EXPECT_EQ(plan.exchanges[0].strategy.relaxation_factor, 0.8);
+    EXPECT_EQ(plan.exchanges[0].strategy.max_iterations, 5);
+    EXPECT_EQ(plan.exchanges[0].strategy.subcycles, 2);
+    EXPECT_EQ(plan.exchanges[0].strategy.time_window_steps, 3);
+}
+
+TEST(PartitionedCouplingPlanGenerator, RejectsInvalidPartitionedStrategyMetadata)
+{
+    auto exchange = identityExchange();
+    exchange.strategy = CouplingPartitionedStrategyDeclaration{
+        .solve_strategy = CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+        .relaxation_strategy = CouplingPartitionedRelaxationStrategy::Constant,
+        .convergence_norm = CouplingPartitionedConvergenceNorm::ExchangeIncrement,
+        .relaxation_factor = 1.5,
+        .max_iterations = 1,
+        .subcycles = 0,
+        .time_window_steps = 0,
+    };
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    EXPECT_FALSE(validation.ok());
+    const auto diagnostics = formatDiagnostics(validation);
+    EXPECT_NE(diagnostics.find("relaxation factor"), std::string::npos);
+    EXPECT_NE(diagnostics.find("positive subcycles"), std::string::npos);
+    EXPECT_NE(diagnostics.find("time-window"), std::string::npos);
+    EXPECT_NE(diagnostics.find("at least two iterations"), std::string::npos);
+}
+
 TEST(PartitionedCouplingPlanGenerator, GeneratesVectorFieldIdentityExchange)
 {
     auto exchange = identityExchange();

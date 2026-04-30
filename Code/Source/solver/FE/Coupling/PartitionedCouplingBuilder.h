@@ -40,6 +40,8 @@ public:
         CouplingRegionEndpointDeclaration region);
     PartitionedExchangeBuilder& value(CouplingValueDescriptor descriptor);
     PartitionedExchangeBuilder& transfer(CouplingTransferDeclaration declaration);
+    PartitionedExchangeBuilder& strategy(
+        CouplingPartitionedStrategyDeclaration declaration);
     PartitionedExchangeBuilder& producerTemporal(
         CouplingTemporalSlotDescriptor temporal);
     PartitionedExchangeBuilder& consumerTemporal(
