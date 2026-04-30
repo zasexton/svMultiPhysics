@@ -4508,7 +4508,7 @@ Unit-test verification checklist:
   cell-metric, and cell-domain-id helpers lower through the existing Forms
   vocabulary, and that mesh temporal helper metadata records owner-scope plus
   `systems::MeshMotionFieldRole` provenance.
-- [ ] `test_CouplingFormBuilder.cpp` verifies builder terminal provenance is
+- [x] `test_CouplingFormBuilder.cpp` verifies builder terminal provenance is
   attached to each `CouplingFormContribution`, survives resolution, and is used
   instead of private Forms AST traversal to recover coupling owner scope.
 - [x] `test_CouplingFormBuilder.cpp` verifies terminal-provenance matching uses

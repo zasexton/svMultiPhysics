@@ -1027,8 +1027,19 @@ TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
          forms.test("right", "primary", "w"))
             .dI(kInterfaceMarker);
     contribution = forms.attachTerminalProvenance(std::move(contribution));
+    ASSERT_EQ(contribution.terminal_provenance.size(), 1u);
+    EXPECT_EQ(contribution.terminal_provenance[0].kind,
+              CouplingFormTerminalProvenanceKind::GeometryTerminal);
+    ASSERT_TRUE(contribution.terminal_provenance[0].scope.has_value());
+    ASSERT_TRUE(contribution.terminal_provenance[0]
+                    .scope->participant_name.has_value());
+    EXPECT_EQ(*contribution.terminal_provenance[0].scope->participant_name,
+              "left");
 
     const auto resolved = builder.resolveFormContribution(context, contribution);
+    ASSERT_EQ(resolved.terminal_provenance.size(), 1u);
+    EXPECT_EQ(resolved.terminal_provenance[0].geometry_quantity,
+              CouplingGeometryTerminalQuantity::CurrentNormal);
     ASSERT_EQ(resolved.geometry_terminals.size(), 1u);
     const auto& terminal = resolved.geometry_terminals[0];
     EXPECT_EQ(terminal.quantity, CouplingGeometryTerminalQuantity::CurrentNormal);
@@ -1058,6 +1069,15 @@ TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
 
     const auto metadata =
         builder.installResolvedFormContribution(fixture.system, resolved);
+    ASSERT_EQ(metadata.declaration_terminal_provenance.size(), 1u);
+    EXPECT_EQ(metadata.declaration_terminal_provenance[0].geometry_quantity,
+              CouplingGeometryTerminalQuantity::CurrentNormal);
+    ASSERT_TRUE(metadata.declaration_terminal_provenance[0].scope.has_value());
+    ASSERT_TRUE(metadata.declaration_terminal_provenance[0]
+                    .scope->participant_name.has_value());
+    EXPECT_EQ(*metadata.declaration_terminal_provenance[0]
+                   .scope->participant_name,
+              "left");
     const auto metadata_terminal = std::find_if(
         metadata.geometry_terminals.begin(),
         metadata.geometry_terminals.end(),
