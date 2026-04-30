@@ -275,6 +275,60 @@ TEST(CouplingFormBuilder, BuildsMeshAndGeometryTerminalsThroughFormsVocabulary)
                 forms::FormExprType::CellDomainId);
 }
 
+TEST(CouplingFormBuilder, RecordsMeshTemporalProvenanceRoles)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const CouplingGeometryTerminalScope scope{
+        .participant_name = "participant",
+    };
+
+    const auto mesh_velocity = builder.meshVelocity(scope);
+    const auto mesh_acceleration = builder.meshAcceleration(scope);
+    const auto previous_velocity = builder.previousMeshVelocity(scope);
+    const auto predicted_velocity = builder.predictedMeshVelocity(scope);
+    const auto test = builder.test("participant", "primary", "w");
+    const auto residual =
+        ((forms::dot(mesh_velocity, mesh_acceleration) +
+          forms::dot(previous_velocity, predicted_velocity)) * test).dx();
+
+    const auto provenance = builder.terminalProvenanceFor(residual);
+    ASSERT_EQ(provenance.size(), 4u);
+
+    auto expect_mesh_temporal =
+        [](const CouplingFormTerminalProvenanceDeclaration& declaration,
+           std::uint64_t sequence,
+           CouplingTemporalQuantity quantity,
+           systems::MeshMotionFieldRole role) {
+            EXPECT_EQ(declaration.kind,
+                      CouplingFormTerminalProvenanceKind::MeshTemporal);
+            EXPECT_EQ(declaration.terminal_sequence, sequence);
+            EXPECT_EQ(declaration.temporal_quantity, quantity);
+            ASSERT_TRUE(declaration.scope.has_value());
+            ASSERT_TRUE(declaration.scope->participant_name.has_value());
+            EXPECT_EQ(*declaration.scope->participant_name, "participant");
+            ASSERT_TRUE(declaration.mesh_motion_role.has_value());
+            EXPECT_EQ(*declaration.mesh_motion_role, role);
+        };
+
+    expect_mesh_temporal(provenance[0],
+                         0,
+                         CouplingTemporalQuantity::MeshVelocity,
+                         systems::MeshMotionFieldRole::Velocity);
+    expect_mesh_temporal(provenance[1],
+                         1,
+                         CouplingTemporalQuantity::MeshAcceleration,
+                         systems::MeshMotionFieldRole::Acceleration);
+    expect_mesh_temporal(provenance[2],
+                         2,
+                         CouplingTemporalQuantity::PreviousMeshVelocity,
+                         systems::MeshMotionFieldRole::PreviousVelocity);
+    expect_mesh_temporal(provenance[3],
+                         3,
+                         CouplingTemporalQuantity::PredictedMeshVelocity,
+                         systems::MeshMotionFieldRole::PredictedVelocity);
+}
+
 TEST(CouplingFormBuilder, AttachesTerminalProvenanceInResidualEncounterOrder)
 {
     const auto context = makeBuilderContext();

@@ -4503,7 +4503,7 @@ Unit-test verification checklist:
   lower through the existing Forms temporal path.
 - [x] `test_CouplingFormBuilder.cpp` verifies `effectiveTimeStep()` lowers
   through the existing Forms temporal path.
-- [ ] `test_CouplingFormBuilder.cpp` verifies mesh displacement, mesh temporal,
+- [x] `test_CouplingFormBuilder.cpp` verifies mesh displacement, mesh temporal,
   coordinate, Jacobian, Jacobian-inverse, normal, measure, surface-Jacobian,
   cell-metric, and cell-domain-id helpers lower through the existing Forms
   vocabulary, and that mesh temporal helper metadata records owner-scope plus
