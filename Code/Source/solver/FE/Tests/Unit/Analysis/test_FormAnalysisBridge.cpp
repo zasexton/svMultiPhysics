@@ -47,6 +47,23 @@ const FormBridgeFeatureGate* findGate(
     return it == gates.end() ? nullptr : &*it;
 }
 
+const FormInstalledDependencyMetadata* findInstalledDependency(
+    const std::vector<FormInstalledDependencyMetadata>& dependencies,
+    const VariableKey& row,
+    const VariableKey& dependency,
+    DomainKind domain,
+    bool contributes_matrix_block)
+{
+    const auto it = std::find_if(
+        dependencies.begin(), dependencies.end(), [&](const auto& installed) {
+            return installed.residual_row == row &&
+                   installed.dependency == dependency &&
+                   installed.domain == domain &&
+                   installed.contributes_matrix_block == contributes_matrix_block;
+        });
+    return it == dependencies.end() ? nullptr : &*it;
+}
+
 } // namespace
 
 TEST(FormAnalysisBridge, ToStringReportsStableNames)
@@ -350,15 +367,31 @@ TEST(FormAnalysisBridge, AdaptsContributionDescriptorsToInstalledBlocks)
     const auto space = scalarH1();
     const auto a = FormExpr::stateField(1, *space, "a");
     const auto b = FormExpr::testFunction(0, *space, "b");
-    const auto residual = (a * b).dI(11);
+    const auto residual =
+        ((a + FormExpr::boundaryIntegralRef(4)) * b).dI(11);
 
     FormulationRecord formulation;
     formulation.operator_tag = "equations";
     formulation.active_fields = {0, 1};
     formulation.residual_expr = residual.nodeShared();
+    const auto boundary =
+        VariableKey::named(VariableKind::BoundaryFunctional, "system/outflow");
+    const auto aux_state =
+        VariableKey::named(VariableKind::AuxiliaryState, "system/state");
+    const auto aux_input =
+        VariableKey::named(VariableKind::AuxiliaryInput, "system/input");
+    const auto aux_output =
+        VariableKey::named(VariableKind::AuxiliaryOutput, "system/output");
+    const auto global =
+        VariableKey::named(VariableKind::GlobalScalar, "system/global");
     formulation.variable_couplings.emplace_back(
         VariableKey::field(0),
-        VariableKey::named(VariableKind::AuxiliaryInput, "system/input"));
+        aux_input);
+    formulation.variable_couplings.emplace_back(VariableKey::field(0), global);
+    formulation.boundary_functional_dependencies.push_back(boundary);
+    formulation.auxiliary_state_dependencies.push_back(aux_state);
+    formulation.auxiliary_input_dependencies.push_back(aux_input);
+    formulation.auxiliary_output_dependencies.push_back(aux_output);
 
     ContributionDescriptor contribution;
     contribution.origin = "unit_test";
@@ -388,15 +421,66 @@ TEST(FormAnalysisBridge, AdaptsContributionDescriptorsToInstalledBlocks)
     ASSERT_EQ(metadata.installed_blocks[0].domains.size(), 1u);
     EXPECT_EQ(metadata.installed_blocks[0].domains[0], DomainKind::InterfaceFace);
 
-    const auto aux_dep = std::find_if(
-        metadata.installed_dependencies.begin(),
-        metadata.installed_dependencies.end(),
-        [](const auto& dependency) {
-            return dependency.dependency.kind == VariableKind::AuxiliaryInput;
-        });
-    ASSERT_NE(aux_dep, metadata.installed_dependencies.end());
-    EXPECT_FALSE(aux_dep->contributes_matrix_block);
-    EXPECT_TRUE(aux_dep->contributes_vector);
+    const auto row = VariableKey::field(0);
+    const auto field_dependency = VariableKey::field(1);
+    const auto slot_dependency =
+        VariableKey::named(VariableKind::BoundaryFunctional, "slot:4");
+
+    ASSERT_NE(findInstalledDependency(metadata.installed_dependencies,
+                                      row,
+                                      field_dependency,
+                                      DomainKind::InterfaceFace,
+                                      true),
+              nullptr);
+
+    const auto* boundary_dep =
+        findInstalledDependency(metadata.installed_dependencies,
+                                row,
+                                boundary,
+                                DomainKind::CoupledBoundary,
+                                false);
+    ASSERT_NE(boundary_dep, nullptr);
+    EXPECT_TRUE(boundary_dep->contributes_vector);
+
+    const auto* slot_dep =
+        findInstalledDependency(metadata.installed_dependencies,
+                                row,
+                                slot_dependency,
+                                DomainKind::InterfaceFace,
+                                false);
+    ASSERT_NE(slot_dep, nullptr);
+    EXPECT_TRUE(slot_dep->contributes_vector);
+
+    const auto* aux_state_dep =
+        findInstalledDependency(metadata.installed_dependencies,
+                                row,
+                                aux_state,
+                                DomainKind::AuxiliaryCoupling,
+                                false);
+    ASSERT_NE(aux_state_dep, nullptr);
+    EXPECT_TRUE(aux_state_dep->contributes_vector);
+
+    const auto* aux_input_dep =
+        findInstalledDependency(metadata.installed_dependencies,
+                                row,
+                                aux_input,
+                                DomainKind::AuxiliaryCoupling,
+                                false);
+    ASSERT_NE(aux_input_dep, nullptr);
+    EXPECT_TRUE(aux_input_dep->contributes_vector);
+
+    ASSERT_NE(findInstalledDependency(metadata.installed_dependencies,
+                                      row,
+                                      aux_output,
+                                      DomainKind::AuxiliaryCoupling,
+                                      false),
+              nullptr);
+    ASSERT_NE(findInstalledDependency(metadata.installed_dependencies,
+                                      row,
+                                      global,
+                                      DomainKind::Global,
+                                      false),
+              nullptr);
 
     EXPECT_TRUE(bridgeFeatureAvailable(metadata,
                                        FormBridgeFeature::InstalledBlocks));

@@ -4707,7 +4707,7 @@ Implementation checklist:
   `analysis::DomainKind`, region/shared-region name, marker, side, and logical
   region where applicable, and validate only requirements marked as graph
   variables against installed `analysis::VariableKey` dependency edges.
-- [ ] Record installed Forms dependencies from the public Forms/Systems
+- [x] Record installed Forms dependencies from the public Forms/Systems
   coupling-analysis metadata bridge so expected block diagnostics can compare
   declared versus installed structure, including geometry-sensitivity
   dependencies and non-field parameter, coefficient, boundary-functional,

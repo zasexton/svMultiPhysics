@@ -8,6 +8,7 @@
 #include "Analysis/FormAnalysisBridge.h"
 
 #include <algorithm>
+#include <span>
 #include <utility>
 
 namespace svmp {
@@ -403,6 +404,93 @@ void appendFeatureGates(FormContributionAnalysisMetadata& metadata)
     });
 }
 
+[[nodiscard]] DomainKind defaultDependencyDomain(const VariableKey& dependency) noexcept
+{
+    switch (dependency.kind) {
+        case VariableKind::BoundaryFunctional:
+            return DomainKind::CoupledBoundary;
+        case VariableKind::AuxiliaryState:
+        case VariableKind::AuxiliaryInput:
+        case VariableKind::AuxiliaryOutput:
+            return DomainKind::AuxiliaryCoupling;
+        case VariableKind::GlobalScalar:
+            return DomainKind::Global;
+        case VariableKind::FieldComponent:
+            return DomainKind::Cell;
+    }
+    return DomainKind::Cell;
+}
+
+void appendInstalledDependency(FormContributionAnalysisMetadata& metadata,
+                               const VariableKey& row,
+                               const VariableKey& dependency,
+                               DomainKind domain,
+                               bool contributes_matrix_block,
+                               bool contributes_vector,
+                               std::string provider)
+{
+    if (dependencyExists(metadata.installed_dependencies,
+                         row,
+                         dependency,
+                         domain,
+                         contributes_matrix_block)) {
+        return;
+    }
+    metadata.installed_dependencies.push_back(
+        FormInstalledDependencyMetadata{
+            row,
+            dependency,
+            domain,
+            contributes_matrix_block,
+            contributes_vector,
+            std::move(provider)});
+}
+
+[[nodiscard]] std::vector<VariableKey> dependencyRows(
+    const FormulationRecord& formulation,
+    const std::vector<ContributionDescriptor>& contributions)
+{
+    std::vector<VariableKey> rows;
+    const auto add_row = [&](const VariableKey& row) {
+        if (std::find(rows.begin(), rows.end(), row) == rows.end()) {
+            rows.push_back(row);
+        }
+    };
+
+    for (const auto& contribution : contributions) {
+        for (const auto& row : contribution.test_variables) {
+            add_row(row);
+        }
+    }
+
+    if (rows.empty()) {
+        for (const auto field : formulation.active_fields) {
+            add_row(VariableKey::field(field));
+        }
+    }
+
+    return rows;
+}
+
+void appendDependencySet(FormContributionAnalysisMetadata& metadata,
+                         std::span<const VariableKey> rows,
+                         std::span<const VariableKey> dependencies,
+                         DomainKind domain,
+                         const std::string& provider)
+{
+    for (const auto& row : rows) {
+        for (const auto& dependency : dependencies) {
+            appendInstalledDependency(metadata,
+                                      row,
+                                      dependency,
+                                      domain,
+                                      false,
+                                      true,
+                                      provider);
+        }
+    }
+}
+
 } // namespace
 
 const char* toString(FormBridgeFeature feature) noexcept
@@ -593,23 +681,18 @@ FormContributionAnalysisMetadata buildFormAnalysisMetadata(
             *formulation.residual_expr, terminal_options, formulation.operator_tag);
     }
 
+    const auto dependency_rows = dependencyRows(formulation, contributions);
+
     for (const auto& contribution : contributions) {
         for (const auto& row : contribution.test_variables) {
             for (const auto& dependency : contribution.trial_variables) {
-                if (!dependencyExists(metadata.installed_dependencies,
-                                      row,
-                                      dependency,
-                                      contribution.domain,
-                                      true)) {
-                    metadata.installed_dependencies.push_back(
-                        FormInstalledDependencyMetadata{
-                            row,
-                            dependency,
-                            contribution.domain,
-                            true,
-                            true,
-                            contribution.origin});
-                }
+                appendInstalledDependency(metadata,
+                                          row,
+                                          dependency,
+                                          contribution.domain,
+                                          true,
+                                          true,
+                                          contribution.origin);
                 if (!blockExists(metadata.installed_blocks,
                                  row,
                                  dependency,
@@ -628,19 +711,48 @@ FormContributionAnalysisMetadata buildFormAnalysisMetadata(
     }
 
     for (const auto& [row, dependency] : formulation.variable_couplings) {
-        if (!dependencyExists(metadata.installed_dependencies,
-                              row,
-                              dependency,
-                              DomainKind::CoupledBoundary,
-                              false)) {
-            metadata.installed_dependencies.push_back(
-                FormInstalledDependencyMetadata{
-                    row,
-                    dependency,
-                    DomainKind::CoupledBoundary,
-                    false,
-                    true,
-                    "FormulationRecord::variable_couplings"});
+        appendInstalledDependency(metadata,
+                                  row,
+                                  dependency,
+                                  defaultDependencyDomain(dependency),
+                                  false,
+                                  true,
+                                  "FormulationRecord::variable_couplings");
+    }
+
+    appendDependencySet(metadata,
+                        dependency_rows,
+                        formulation.boundary_functional_dependencies,
+                        DomainKind::CoupledBoundary,
+                        "FormulationRecord::boundary_functional_dependencies");
+    appendDependencySet(metadata,
+                        dependency_rows,
+                        formulation.auxiliary_state_dependencies,
+                        DomainKind::AuxiliaryCoupling,
+                        "FormulationRecord::auxiliary_state_dependencies");
+    appendDependencySet(metadata,
+                        dependency_rows,
+                        formulation.auxiliary_input_dependencies,
+                        DomainKind::AuxiliaryCoupling,
+                        "FormulationRecord::auxiliary_input_dependencies");
+    appendDependencySet(metadata,
+                        dependency_rows,
+                        formulation.auxiliary_output_dependencies,
+                        DomainKind::AuxiliaryCoupling,
+                        "FormulationRecord::auxiliary_output_dependencies");
+
+    for (const auto& terminal : metadata.terminals) {
+        if (isFieldTerminal(terminal.kind) || !terminal.graph_variable.has_value()) {
+            continue;
+        }
+        for (const auto& row : dependency_rows) {
+            appendInstalledDependency(metadata,
+                                      row,
+                                      *terminal.graph_variable,
+                                      terminal.domain,
+                                      false,
+                                      true,
+                                      "Forms terminal metadata");
         }
     }
 
