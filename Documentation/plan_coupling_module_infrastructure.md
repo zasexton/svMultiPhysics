@@ -4910,7 +4910,7 @@ Implementation checklist:
   coupling lifecycle.
 - [x] Ensure the builder runs after base physics field registration and before
   `FESystem::setup()`.
-- [ ] Build the initial `CouplingContext` from registered participants, fields,
+- [x] Build the initial `CouplingContext` from registered participants, fields,
   regions, and shared regions.
 - [x] Require every FE-backed participant in the context to carry its owning
   `FESystem` before field, region, interface, or Forms resolution begins.

@@ -29,6 +29,12 @@ public:
 
 class MonolithicCouplingBuilder {
 public:
+    [[nodiscard]] CouplingContext buildInitialContext(
+        std::span<const CouplingParticipantRef> participants,
+        std::span<const CouplingFieldRef> fields,
+        std::span<const CouplingRegionRef> regions = {},
+        std::span<const SharedRegionRef> shared_regions = {}) const;
+
     [[nodiscard]] CouplingValidationResult validateDeclarations(
         const CouplingContext& context,
         std::span<const CouplingContractDeclaration> declarations) const;

@@ -370,6 +370,87 @@ public:
 
 } // namespace
 
+TEST(MonolithicCouplingBuilder, BuildsInitialContextFromRegisteredReferences)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    const std::array<CouplingParticipantRef, 2> participants{{
+        {
+            .participant_name = "left",
+            .system_name = "shared_system",
+            .system = &fixture.system,
+        },
+        {
+            .participant_name = "right",
+            .system_name = "shared_system",
+            .system = &fixture.system,
+        },
+    }};
+    const std::array<CouplingFieldRef, 2> fields{{
+        {
+            .participant_name = "left",
+            .system_name = "shared_system",
+            .system = &fixture.system,
+            .field_name = "primary",
+            .field_id = fixture.left_field,
+            .space = fixture.space,
+            .components = 1,
+        },
+        {
+            .participant_name = "right",
+            .system_name = "shared_system",
+            .system = &fixture.system,
+            .field_name = "primary",
+            .field_id = fixture.right_field,
+            .space = fixture.space,
+            .components = 1,
+        },
+    }};
+    const std::array<CouplingRegionRef, 2> regions{{
+        {
+            .participant_name = "left",
+            .system_name = "shared_system",
+            .system = &fixture.system,
+            .region_name = "interface",
+            .kind = CouplingRegionKind::InterfaceFace,
+            .marker = kInterfaceMarker,
+            .side = CouplingInterfaceSide::Minus,
+        },
+        {
+            .participant_name = "right",
+            .system_name = "shared_system",
+            .system = &fixture.system,
+            .region_name = "interface",
+            .kind = CouplingRegionKind::InterfaceFace,
+            .marker = kInterfaceMarker,
+            .side = CouplingInterfaceSide::Plus,
+        },
+    }};
+    const std::array<SharedRegionRef, 1> shared_regions{{
+        {
+            .name = "interface",
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .participant_regions = {regions[0], regions[1]},
+        },
+    }};
+
+    const auto context = builder.buildInitialContext(
+        participants,
+        fields,
+        regions,
+        shared_regions);
+
+    EXPECT_TRUE(context.hasParticipant("left"));
+    EXPECT_TRUE(context.hasParticipant("right"));
+    EXPECT_EQ(context.field("left", "primary").field_id, fixture.left_field);
+    EXPECT_EQ(context.field("right", "primary").field_id, fixture.right_field);
+    EXPECT_EQ(context.sharedRegion("interface", "left").marker,
+              kInterfaceMarker);
+    EXPECT_EQ(context.sharedRegion("interface", "right").side,
+              CouplingInterfaceSide::Plus);
+}
+
 TEST(MonolithicCouplingBuilder, ResolvesFormContributionThroughContext)
 {
     BuilderFixture fixture;

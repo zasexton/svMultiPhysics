@@ -1191,6 +1191,28 @@ CouplingFieldRef fieldRefForRegisteredAdditionalField(
 
 } // namespace
 
+CouplingContext MonolithicCouplingBuilder::buildInitialContext(
+    std::span<const CouplingParticipantRef> participants,
+    std::span<const CouplingFieldRef> fields,
+    std::span<const CouplingRegionRef> regions,
+    std::span<const SharedRegionRef> shared_regions) const
+{
+    CouplingContextBuilder builder;
+    for (const auto& participant : participants) {
+        builder.addParticipant(participant);
+    }
+    for (const auto& field : fields) {
+        builder.addField(field);
+    }
+    for (const auto& region : regions) {
+        builder.addRegion(region);
+    }
+    for (const auto& shared_region : shared_regions) {
+        builder.addSharedRegion(shared_region);
+    }
+    return builder.build();
+}
+
 CouplingValidationResult MonolithicCouplingBuilder::validateDeclarations(
     const CouplingContext& context,
     std::span<const CouplingContractDeclaration> declarations) const
