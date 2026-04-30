@@ -4342,7 +4342,7 @@ Implementation checklist:
   symbolic time and time-step terms used by the existing FE Forms pipeline.
 - [x] Make `CouplingFormBuilder::effectiveTimeStep()` return the existing
   Forms `deltat_eff()` terminal.
-- [ ] Make `CouplingFormBuilder` expose mesh displacement, mesh temporal, and
+- [x] Make `CouplingFormBuilder` expose mesh displacement, mesh temporal, and
   geometry-terminal helpers that delegate to the existing Forms vocabulary
   rather than introducing new FE/Coupling terminals.
 - [ ] Make `CouplingFormBuilder` record a coupling-owned terminal-provenance

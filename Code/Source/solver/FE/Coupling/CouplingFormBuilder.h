@@ -52,6 +52,20 @@ public:
     [[nodiscard]] forms::FormExpr timeStep() const;
     [[nodiscard]] forms::FormExpr effectiveTimeStep() const;
 
+    [[nodiscard]] forms::FormExpr meshDisplacement(
+        const CouplingGeometryTerminalScope& scope) const;
+    [[nodiscard]] forms::FormExpr meshVelocity(
+        const CouplingGeometryTerminalScope& scope) const;
+    [[nodiscard]] forms::FormExpr meshAcceleration(
+        const CouplingGeometryTerminalScope& scope) const;
+    [[nodiscard]] forms::FormExpr previousMeshVelocity(
+        const CouplingGeometryTerminalScope& scope) const;
+    [[nodiscard]] forms::FormExpr predictedMeshVelocity(
+        const CouplingGeometryTerminalScope& scope) const;
+    [[nodiscard]] forms::FormExpr geometryTerminal(
+        CouplingGeometryTerminalQuantity quantity,
+        const CouplingGeometryTerminalScope& scope) const;
+
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
                                             const CouplingRegionRef& region) const;
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,

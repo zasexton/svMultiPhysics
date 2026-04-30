@@ -80,6 +80,97 @@ forms::FormExpr CouplingFormBuilder::effectiveTimeStep() const
     return forms::deltat_eff();
 }
 
+forms::FormExpr CouplingFormBuilder::meshDisplacement(
+    const CouplingGeometryTerminalScope& scope) const
+{
+    static_cast<void>(scope);
+    return forms::meshDisplacement();
+}
+
+forms::FormExpr CouplingFormBuilder::meshVelocity(
+    const CouplingGeometryTerminalScope& scope) const
+{
+    static_cast<void>(scope);
+    return forms::meshVelocity();
+}
+
+forms::FormExpr CouplingFormBuilder::meshAcceleration(
+    const CouplingGeometryTerminalScope& scope) const
+{
+    static_cast<void>(scope);
+    return forms::meshAcceleration();
+}
+
+forms::FormExpr CouplingFormBuilder::previousMeshVelocity(
+    const CouplingGeometryTerminalScope& scope) const
+{
+    static_cast<void>(scope);
+    return forms::previousMeshVelocity();
+}
+
+forms::FormExpr CouplingFormBuilder::predictedMeshVelocity(
+    const CouplingGeometryTerminalScope& scope) const
+{
+    static_cast<void>(scope);
+    return forms::predictedMeshVelocity();
+}
+
+forms::FormExpr CouplingFormBuilder::geometryTerminal(
+    CouplingGeometryTerminalQuantity quantity,
+    const CouplingGeometryTerminalScope& scope) const
+{
+    switch (quantity) {
+    case CouplingGeometryTerminalQuantity::MeshDisplacement:
+        return meshDisplacement(scope);
+    case CouplingGeometryTerminalQuantity::Coordinate:
+        return forms::x();
+    case CouplingGeometryTerminalQuantity::ReferenceCoordinate:
+        return forms::X();
+    case CouplingGeometryTerminalQuantity::CurrentCoordinate:
+        return forms::currentCoordinate();
+    case CouplingGeometryTerminalQuantity::PreviousCoordinate:
+        return forms::previousCoordinate();
+    case CouplingGeometryTerminalQuantity::ReferencePhysicalCoordinate:
+        return forms::referenceCoordinatePhysical();
+    case CouplingGeometryTerminalQuantity::Jacobian:
+        return forms::J();
+    case CouplingGeometryTerminalQuantity::JacobianInverse:
+        return forms::Jinv();
+    case CouplingGeometryTerminalQuantity::JacobianDeterminant:
+        return forms::detJ();
+    case CouplingGeometryTerminalQuantity::CurrentJacobian:
+        return forms::currentJacobian();
+    case CouplingGeometryTerminalQuantity::ReferenceJacobian:
+        return forms::referenceJacobian();
+    case CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant:
+        return forms::currentJacobianDeterminant();
+    case CouplingGeometryTerminalQuantity::ReferenceJacobianDeterminant:
+        return forms::referenceJacobianDeterminant();
+    case CouplingGeometryTerminalQuantity::Normal:
+        return forms::FormExpr::normal();
+    case CouplingGeometryTerminalQuantity::CurrentNormal:
+        return forms::currentNormal();
+    case CouplingGeometryTerminalQuantity::ReferenceNormal:
+        return forms::referenceNormal();
+    case CouplingGeometryTerminalQuantity::CurrentMeasure:
+        return forms::currentMeasure();
+    case CouplingGeometryTerminalQuantity::ReferenceMeasure:
+        return forms::referenceMeasure();
+    case CouplingGeometryTerminalQuantity::SurfaceJacobian:
+        return forms::surfaceJacobian();
+    case CouplingGeometryTerminalQuantity::CellDiameter:
+        return forms::h();
+    case CouplingGeometryTerminalQuantity::CellVolume:
+        return forms::vol();
+    case CouplingGeometryTerminalQuantity::FacetArea:
+        return forms::area();
+    case CouplingGeometryTerminalQuantity::CellDomainId:
+        return forms::domainId();
+    }
+    FE_THROW(InvalidArgumentException,
+             "unsupported coupling geometry terminal quantity");
+}
+
 forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
                                                const CouplingRegionRef& region) const
 {
