@@ -394,6 +394,65 @@ TEST(MonolithicCouplingBuilder, ResolvesDeclaredFormInstallOptions)
     EXPECT_TRUE(resolved.install_options.compiler_options.use_symbolic_tangent);
 }
 
+TEST(MonolithicCouplingBuilder, RejectsRawFormInstallOptionOverrides)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    auto make_contribution = [&]() {
+        CouplingFormContribution contribution;
+        contribution.contribution_name = "raw_options";
+        contribution.origin = "MonolithicCouplingBuilderTest";
+        contribution.field_uses = {{.participant_name = "right",
+                                    .field_name = "primary"}};
+        contribution.residual =
+            (forms.state("right", "primary", "u") *
+             forms.test("right", "primary", "w")).dx();
+        return contribution;
+    };
+
+    auto expect_rejected = [&](CouplingFormContribution contribution) {
+        EXPECT_THROW(static_cast<void>(
+                         builder.resolveFormContribution(fixture.context,
+                                                         contribution)),
+                     InvalidArgumentException);
+    };
+
+    auto raw_top_level_ad = make_contribution();
+    raw_top_level_ad.install_options.ad_mode =
+        svmp::FE::forms::ADMode::Reverse;
+    expect_rejected(std::move(raw_top_level_ad));
+
+    auto raw_compiler_ad = make_contribution();
+    raw_compiler_ad.install_options.compiler_options.ad_mode =
+        svmp::FE::forms::ADMode::Forward;
+    expect_rejected(std::move(raw_compiler_ad));
+
+    auto raw_symbolic_tangent = make_contribution();
+    raw_symbolic_tangent.install_options.compiler_options.use_symbolic_tangent =
+        true;
+    expect_rejected(std::move(raw_symbolic_tangent));
+
+    auto raw_geometry_tangent = make_contribution();
+    raw_geometry_tangent.install_options.compiler_options.geometry_tangent_path =
+        svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
+    expect_rejected(std::move(raw_geometry_tangent));
+
+    auto raw_geometry_sensitivity = make_contribution();
+    raw_geometry_sensitivity.install_options.compiler_options
+        .geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
+    raw_geometry_sensitivity.install_options.compiler_options
+        .geometry_sensitivity.mesh_motion_field = fixture.left_field;
+    expect_rejected(std::move(raw_geometry_sensitivity));
+
+    auto raw_extra_trial_field = make_contribution();
+    raw_extra_trial_field.install_options.extra_trial_fields.push_back(
+        fixture.left_field);
+    expect_rejected(std::move(raw_extra_trial_field));
+}
+
 TEST(MonolithicCouplingBuilder, RejectsOverlappingPrimaryAndExtraTrialFields)
 {
     BuilderFixture fixture;

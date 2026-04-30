@@ -4374,7 +4374,7 @@ Implementation checklist:
   top-level `systems::FormInstallOptions::ad_mode` and geometry sensitivity plus
   geometry tangent policy resolved into
   `systems::FormInstallOptions::compiler_options`.
-- [ ] Reject declaration-time form install options that attempt to smuggle raw
+- [x] Reject declaration-time form install options that attempt to smuggle raw
   AD-mode overrides, `use_symbolic_tangent`, `geometry_tangent_path`,
   geometry-sensitivity settings, or `FieldId`s through any raw
   `forms::SymbolicOptions` path; mesh-motion sensitivity and geometry tangent

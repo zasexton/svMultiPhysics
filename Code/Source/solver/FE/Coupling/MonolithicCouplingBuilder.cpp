@@ -273,11 +273,43 @@ void applyGeometrySensitivityDeclaration(
     options.use_symbolic_tangent = declaration.use_symbolic_tangent;
 }
 
+void rejectRawFormInstallOptionOverrides(
+    const systems::FormInstallOptions& options)
+{
+    const systems::FormInstallOptions defaults;
+    FE_THROW_IF(options.ad_mode != defaults.ad_mode, InvalidArgumentException,
+                "coupling form AD mode must be declared through coupling install options");
+    FE_THROW_IF(!options.extra_trial_fields.empty(), InvalidArgumentException,
+                "coupling form extra trial fields must be declared by name");
+
+    const auto& compiler = options.compiler_options;
+    const auto& default_compiler = defaults.compiler_options;
+    FE_THROW_IF(compiler.ad_mode != default_compiler.ad_mode,
+                InvalidArgumentException,
+                "coupling form compiler AD mode cannot be set through raw symbolic options");
+    FE_THROW_IF(compiler.use_symbolic_tangent !=
+                    default_compiler.use_symbolic_tangent,
+                InvalidArgumentException,
+                "coupling form symbolic tangent policy must be declared through coupling install options");
+    FE_THROW_IF(compiler.geometry_tangent_path !=
+                    default_compiler.geometry_tangent_path,
+                InvalidArgumentException,
+                "coupling form geometry tangent path must be declared through coupling install options");
+    FE_THROW_IF(compiler.geometry_sensitivity.mode !=
+                        default_compiler.geometry_sensitivity.mode ||
+                    compiler.geometry_sensitivity.mesh_motion_field !=
+                        default_compiler.geometry_sensitivity.mesh_motion_field,
+                InvalidArgumentException,
+                "coupling form geometry sensitivity must be declared through coupling install options");
+}
+
 systems::FormInstallOptions resolveFormInstallOptions(
     const CouplingContext& context,
     const CouplingFormContribution& contribution)
 {
-    auto options = contribution.install_options;
+    rejectRawFormInstallOptionOverrides(contribution.install_options);
+
+    systems::FormInstallOptions options;
     const auto& declaration = contribution.install_options_declaration;
     if (declaration.ad_mode.has_value()) {
         options.ad_mode = *declaration.ad_mode;
