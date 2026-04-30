@@ -210,6 +210,53 @@ TEST(CouplingContractValidation, ValidatesAdditionalFieldSpaceAndComponents)
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok());
 }
 
+TEST(CouplingContractValidation, ValidatesAdditionalFieldCollisionsAndUniqueFields)
+{
+    auto declaration = minimalDeclaration();
+    const auto space = scalarSpace();
+    const CouplingAdditionalFieldDeclaration participant_field{
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "lambda",
+        .space = space,
+        .components = 1,
+    };
+    declaration.additional_fields = {participant_field, participant_field};
+
+    const auto duplicate_validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(duplicate_validation.ok());
+    EXPECT_NE(formatDiagnostics(duplicate_validation).find(
+                  "duplicate additional field declaration"),
+              std::string::npos);
+
+    declaration.additional_fields = {
+        CouplingAdditionalFieldDeclaration{
+            .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+            .namespace_name = "left",
+            .field_name = "lambda",
+            .space = space,
+            .components = 1,
+        },
+        CouplingAdditionalFieldDeclaration{
+            .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+            .namespace_name = "right",
+            .field_name = "lambda",
+            .space = space,
+            .components = 1,
+        },
+        CouplingAdditionalFieldDeclaration{
+            .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+            .namespace_name = "generic_instance",
+            .system_participant_name = "left",
+            .field_name = "lambda",
+            .space = space,
+            .components = 1,
+        },
+    };
+    const auto unique_validation = validateContractDeclarationShape(declaration);
+    EXPECT_TRUE(unique_validation.ok()) << formatDiagnostics(unique_validation);
+}
+
 TEST(CouplingContractValidation, ValidatesOptionalAdditionalFieldSelection)
 {
     auto declaration = minimalDeclaration();

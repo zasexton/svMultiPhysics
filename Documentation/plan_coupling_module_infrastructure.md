@@ -4309,7 +4309,7 @@ Unit-test verification checklist:
   handling, and deterministic iteration order.
 - [x] `test_CouplingRegistry.cpp` covers mode-specific contract dispatch
   without invoking unsupported lowering hooks.
-- [ ] `test_CouplingContractValidation.cpp` verifies additional-field
+- [x] `test_CouplingContractValidation.cpp` verifies additional-field
   declarations reject collisions and accept unique coupling fields.
 - [ ] `test_CouplingContractValidation.cpp` verifies expert install hooks are
   invoked only through `MonolithicCouplingInstallContext`.
