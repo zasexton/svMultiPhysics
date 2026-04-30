@@ -52,6 +52,15 @@ public:
     [[nodiscard]] forms::FormExpr timeStep() const;
     [[nodiscard]] forms::FormExpr effectiveTimeStep() const;
 
+    [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
+                                            const CouplingRegionRef& region) const;
+    [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
+                                            std::string_view participant,
+                                            std::string_view region) const;
+    [[nodiscard]] forms::FormExpr integrateShared(const forms::FormExpr& integrand,
+                                                  std::string_view shared_region,
+                                                  std::string_view participant) const;
+
     [[nodiscard]] CouplingFieldRef field(std::string_view participant,
                                          std::string_view field) const;
     [[nodiscard]] CouplingRegionRef region(std::string_view participant,

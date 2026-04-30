@@ -44,9 +44,52 @@ CouplingContext makeBuilderContext()
         .participant_name = "participant",
         .system_name = "system",
         .system = system,
+        .region_name = "volume",
+        .kind = CouplingRegionKind::Domain,
+    });
+    builder.addRegion({
+        .participant_name = "participant",
+        .system_name = "system",
+        .system = system,
         .region_name = "surface",
         .kind = CouplingRegionKind::Boundary,
         .marker = 12,
+    });
+    builder.addRegion({
+        .participant_name = "participant",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interior",
+        .kind = CouplingRegionKind::InteriorFace,
+    });
+    builder.addRegion({
+        .participant_name = "participant",
+        .system_name = "system",
+        .system = system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 17,
+        .side = CouplingInterfaceSide::Minus,
+    });
+    builder.addRegion({
+        .participant_name = "participant",
+        .system_name = "system",
+        .system = system,
+        .region_name = "provider_owned",
+        .kind = CouplingRegionKind::UserDefined,
+    });
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "shared_interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {{
+            .participant_name = "participant",
+            .system_name = "system",
+            .system = system,
+            .region_name = "interface",
+            .kind = CouplingRegionKind::InterfaceFace,
+            .marker = 17,
+            .side = CouplingInterfaceSide::Minus,
+        }},
     });
     return builder.build();
 }
@@ -115,4 +158,53 @@ TEST(CouplingFormBuilder, DelegatesRegionLookupsToContext)
     const auto region = builder.region("participant", "surface");
     EXPECT_EQ(region.marker, 12);
     EXPECT_EQ(region.kind, CouplingRegionKind::Boundary);
+}
+
+TEST(CouplingFormBuilder, LowersRegionKindsToFormsMeasures)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const auto integrand =
+        builder.state("participant", "primary", "u") *
+        builder.test("participant", "primary", "w");
+
+    const auto cell = builder.integrate(integrand, "participant", "volume");
+    ASSERT_TRUE(cell.isValid());
+    EXPECT_EQ(cell.node()->type(), forms::FormExprType::CellIntegral);
+
+    const auto boundary = builder.integrate(integrand, "participant", "surface");
+    ASSERT_TRUE(boundary.isValid());
+    EXPECT_EQ(boundary.node()->type(), forms::FormExprType::BoundaryIntegral);
+    ASSERT_TRUE(boundary.node()->boundaryMarker().has_value());
+    EXPECT_EQ(*boundary.node()->boundaryMarker(), 12);
+
+    const auto interior = builder.integrate(integrand, "participant", "interior");
+    ASSERT_TRUE(interior.isValid());
+    EXPECT_EQ(interior.node()->type(), forms::FormExprType::InteriorFaceIntegral);
+
+    const auto interface = builder.integrate(integrand, "participant", "interface");
+    ASSERT_TRUE(interface.isValid());
+    EXPECT_EQ(interface.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(interface.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*interface.node()->interfaceMarker(), 17);
+
+    const auto shared_interface =
+        builder.integrateShared(integrand, "shared_interface", "participant");
+    ASSERT_TRUE(shared_interface.isValid());
+    EXPECT_EQ(shared_interface.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(shared_interface.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*shared_interface.node()->interfaceMarker(), 17);
+}
+
+TEST(CouplingFormBuilder, RejectsUserDefinedRegionFormsLowering)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const auto integrand =
+        builder.state("participant", "primary", "u") *
+        builder.test("participant", "primary", "w");
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.integrate(integrand, "participant", "provider_owned")),
+                 InvalidArgumentException);
 }

@@ -3943,7 +3943,7 @@ Implementation checklist:
   lowering, interface transfer resolution, or geometry-terminal validation, or to
   declare an explicit provider-extension evaluation path; reject unresolved
   user-defined regions.
-- [ ] Map region kinds to the existing Forms measures `.dx()`, `.ds(marker)`,
+- [x] Map region kinds to the existing Forms measures `.dx()`, `.ds(marker)`,
   `.dS()`, and `.dI(interface_marker)` without introducing a parallel
   coupling-specific measure vocabulary.
 - [ ] Preserve marker and side/orientation metadata needed by interface-face

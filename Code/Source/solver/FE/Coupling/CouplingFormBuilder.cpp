@@ -80,6 +80,40 @@ forms::FormExpr CouplingFormBuilder::effectiveTimeStep() const
     return forms::deltat_eff();
 }
 
+forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
+                                               const CouplingRegionRef& region) const
+{
+    switch (region.kind) {
+        case CouplingRegionKind::Domain:
+            return integrand.dx();
+        case CouplingRegionKind::Boundary:
+            return integrand.ds(region.marker);
+        case CouplingRegionKind::InteriorFace:
+            return integrand.dS();
+        case CouplingRegionKind::InterfaceFace:
+            return integrand.dI(region.marker);
+        case CouplingRegionKind::UserDefined:
+            break;
+    }
+    FE_THROW(InvalidArgumentException,
+             "user-defined coupling region requires a concrete Forms integration kind");
+}
+
+forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
+                                               std::string_view participant_name,
+                                               std::string_view region_name) const
+{
+    return integrate(integrand, region(participant_name, region_name));
+}
+
+forms::FormExpr CouplingFormBuilder::integrateShared(
+    const forms::FormExpr& integrand,
+    std::string_view shared_region_name,
+    std::string_view participant_name) const
+{
+    return integrate(integrand, sharedRegion(shared_region_name, participant_name));
+}
+
 CouplingFieldRef CouplingFormBuilder::field(std::string_view participant_name,
                                             std::string_view field_name) const
 {
