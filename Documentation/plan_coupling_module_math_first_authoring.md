@@ -1308,7 +1308,7 @@ enum class CouplingDependencyDeclarationMode {
       verified.
 - [ ] Non-field variable dependencies from Forms terminals can be inferred or
       verified.
-- [ ] Coupling-owned additional fields participate in dependency inference.
+- [x] Coupling-owned additional fields participate in dependency inference.
 - [ ] Existing bridge feature gates are reported through `CouplingGraph`.
 - [ ] Missing bridge metadata produces actionable diagnostics rather than
       silent acceptance.
@@ -1631,7 +1631,7 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test geometry-sensitivity field-use inference.
 - [ ] Test non-field dependency inference.
 - [ ] Test global scalar dependency inference.
-- [ ] Test coupling-owned field dependency inference.
+- [x] Test coupling-owned field dependency inference.
 - [x] Test approximate and lagged lowering disclosures appear in diagnostics.
 - [ ] Test explicit dependency declarations can still be verified.
 - [ ] Test mismatched explicit declarations produce diagnostics.

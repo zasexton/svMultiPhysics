@@ -2108,6 +2108,86 @@ TEST(MonolithicCouplingBuilder, FinalizesGraphAfterAdditionalFieldContextRefresh
         << formatDiagnostics(finalized_validation);
 }
 
+TEST(MonolithicCouplingBuilder, InfersDependenciesForCouplingOwnedFields)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::InferFromInstalledForms;
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({
+        .participant_name = "right",
+        .field_name = "primary",
+    });
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+        .namespace_name = "generic_instance",
+        .system_participant_name = "right",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto registered = builder.registerAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(registered.size(), 1u);
+
+    const auto refreshed =
+        builder.refreshContextWithAdditionalFields(fixture.context, registered);
+    const auto lambda_field =
+        refreshed.field("generic_instance", "lambda").field_id;
+
+    const CouplingFormBuilder forms(refreshed);
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "additional_field_inferred_dependency";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.operator_name = "equations";
+    contribution.field_uses = {{
+        .participant_name = "right",
+        .field_name = "primary",
+    }};
+    contribution.extra_trial_field_uses = {{
+        .participant_name = "generic_instance",
+        .field_name = "lambda",
+    }};
+    contribution.residual =
+        (forms.state("generic_instance", "lambda", "lambda") *
+         forms.test("right", "primary", "w")).dx();
+
+    const std::array<CouplingFormContribution, 1> contributions{contribution};
+    const auto installed = builder.installFormContributions(
+        fixture.system,
+        refreshed,
+        std::span<const CouplingFormContribution>(contributions));
+    ASSERT_EQ(installed.size(), 1u);
+
+    const auto lambda_use = std::find_if(
+        installed[0].field_uses.begin(),
+        installed[0].field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return field.field == lambda_field;
+        });
+    ASSERT_NE(lambda_use, installed[0].field_uses.end());
+    EXPECT_TRUE(lambda_use->appears_as_state_field);
+    EXPECT_NE(findDependency(installed[0],
+                             analysis::VariableKey::field(fixture.right_field),
+                             analysis::VariableKey::field(lambda_field)),
+              nullptr);
+
+    CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        refreshed,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
 TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)
 {
     BuilderFixture fixture;
