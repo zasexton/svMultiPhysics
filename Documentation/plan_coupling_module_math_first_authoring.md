@@ -1170,10 +1170,10 @@ struct CouplingRegionRelationRequirement {
 
 ### Completion Checklist
 
-- [ ] FSI no longer needs local vector component checks.
-- [ ] FSI no longer needs local scalar pressure checks.
-- [ ] FSI no longer needs local interface participant mapping checks.
-- [ ] FSI no longer needs local opposite-side checks.
+- [x] FSI no longer needs local vector component checks.
+- [x] FSI no longer needs local scalar pressure checks.
+- [x] FSI no longer needs local interface participant mapping checks.
+- [x] FSI no longer needs local opposite-side checks.
 - [ ] FSI no longer needs local monolithic same-system checks.
 - [ ] Thermal no longer needs local scalar/vector field shape checks.
 - [ ] New N-participant and mixed-dimensional relation fixtures validate through
@@ -1480,14 +1480,14 @@ equation definitions, and partitioned strategy choices.
 - [x] Preserve optional mesh-displacement geometry sensitivity.
 - [x] Define partitioned channels through `PartitionedCouplingBuilder`.
 - [ ] Remove local helpers that duplicate backend responsibilities:
-      - `validateVectorFieldComponents`
-      - `validateScalarPressureComponents`
-      - `validateInterfaceRegionMappings`
-      - `validateMonolithicFieldSystems`
-      - `validateMonolithicInterfaceTopology`
-      - manual partitioned endpoint attachment
-      - manual monolithic dependency appending
-      - manual expected-block appending
+      - [x] `validateVectorFieldComponents`
+      - [x] `validateScalarPressureComponents`
+      - [x] `validateInterfaceRegionMappings`
+      - [ ] `validateMonolithicFieldSystems`
+      - [ ] `validateMonolithicInterfaceTopology`
+      - [ ] manual partitioned endpoint attachment
+      - [ ] manual monolithic dependency appending
+      - [ ] manual expected-block appending
 
 ### Completion Checklist
 

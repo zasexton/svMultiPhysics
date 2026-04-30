@@ -1188,7 +1188,7 @@ TEST(FSICouplingModule, RejectsInvalidOptionsDuringValidation)
     EXPECT_THROW(module.validate(fec::CouplingContext{}), FE::InvalidArgumentException);
 }
 
-TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
+TEST(FSICouplingModule, ValidatesFieldComponentCountsThroughGraph)
 {
     FSICouplingOptions options;
     options.mesh_name = "mesh";
@@ -1203,7 +1203,7 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
     expectValidationFailureContaining(
         module,
         fluid_velocity_fixture.context,
-        "FSI fluid velocity field component count must match the interface component count");
+        "coupling field component count does not satisfy the value-shape declaration");
 
     components = FSIFieldComponents{};
     components.fluid_pressure = 2;
@@ -1211,7 +1211,7 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
     expectValidationFailureContaining(
         module,
         fluid_pressure_fixture.context,
-        "FSI fluid pressure field component count must be scalar");
+        "coupling field component count does not satisfy the value-shape declaration");
 
     components = FSIFieldComponents{};
     components.solid_displacement = 2;
@@ -1219,7 +1219,7 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
     expectValidationFailureContaining(
         module,
         solid_displacement_fixture.context,
-        "FSI solid displacement field component count must match the interface component count");
+        "coupling field component count does not satisfy the value-shape declaration");
 
     components = FSIFieldComponents{};
     components.solid_velocity = 2;
@@ -1227,7 +1227,7 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
     expectValidationFailureContaining(
         module,
         solid_velocity_fixture.context,
-        "FSI solid velocity field component count must match the interface component count");
+        "coupling field component count does not satisfy the value-shape declaration");
 
     components = FSIFieldComponents{};
     components.mesh_displacement = 2;
@@ -1235,10 +1235,10 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
     expectValidationFailureContaining(
         module,
         mesh_displacement_fixture.context,
-        "FSI mesh displacement field component count must match the interface component count");
+        "coupling field component count does not satisfy the value-shape declaration");
 }
 
-TEST(FSICouplingModule, ValidatesInterfaceSharedRegionMappings)
+TEST(FSICouplingModule, ValidatesInterfaceSharedRegionMappingsThroughGraph)
 {
     FSICouplingOptions options;
     const FSICouplingModule module(options);
@@ -1247,19 +1247,19 @@ TEST(FSICouplingModule, ValidatesInterfaceSharedRegionMappings)
     expectValidationFailureContaining(
         module,
         missing_group.context,
-        "FSI interface shared region is missing");
+        "required shared-interface region is missing from the context");
 
     FSIContextFixture missing_fluid(FSIFieldComponents{}, false, true, false, true);
     expectValidationFailureContaining(
         module,
         missing_fluid.context,
-        "FSI interface shared region must map the fluid participant");
+        "shared-interface participant mapping is missing from the context");
 
     FSIContextFixture missing_solid(FSIFieldComponents{}, false, true, true, false);
     expectValidationFailureContaining(
         module,
         missing_solid.context,
-        "FSI interface shared region must map the solid participant");
+        "shared-interface participant mapping is missing from the context");
 }
 
 TEST(FSICouplingModule, RejectsALEWithoutMeshDisplacement)

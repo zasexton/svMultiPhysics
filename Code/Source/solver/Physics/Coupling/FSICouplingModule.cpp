@@ -266,91 +266,6 @@ void validateALEMeshRequirements(fec::CouplingValidationResult& result,
     }
 }
 
-void validateVectorFieldComponents(fec::CouplingValidationResult& result,
-                                   const fec::CouplingContext& ctx,
-                                   const FSICouplingOptions& options,
-                                   const std::string& participant,
-                                   const std::string& field,
-                                   std::string_view label)
-{
-    if (!ctx.hasField(participant, field)) {
-        return;
-    }
-    const auto ref = ctx.field(participant, field);
-    if (ref.components == options.interface_components) {
-        return;
-    }
-    result.add(fec::CouplingDiagnostic{
-        .severity = fec::CouplingDiagnosticSeverity::Error,
-        .contract_name = options.contract_name,
-        .participant_name = participant,
-        .field_name = field,
-        .message = "FSI " + std::string(label) +
-                   " field component count must match the interface component count",
-    });
-}
-
-void validateScalarPressureComponents(fec::CouplingValidationResult& result,
-                                      const fec::CouplingContext& ctx,
-                                      const FSICouplingOptions& options)
-{
-    if (!ctx.hasField(options.fluid_name, options.fluid_pressure_field)) {
-        return;
-    }
-    const auto ref = ctx.field(options.fluid_name, options.fluid_pressure_field);
-    if (ref.components == 1) {
-        return;
-    }
-    result.add(fec::CouplingDiagnostic{
-        .severity = fec::CouplingDiagnosticSeverity::Error,
-        .contract_name = options.contract_name,
-        .participant_name = options.fluid_name,
-        .field_name = options.fluid_pressure_field,
-        .message = "FSI fluid pressure field component count must be scalar",
-    });
-}
-
-void validateFieldComponentCounts(fec::CouplingValidationResult& result,
-                                  const fec::CouplingContext& ctx,
-                                  const FSICouplingOptions& options)
-{
-    if (options.interface_components <= 0) {
-        return;
-    }
-
-    validateVectorFieldComponents(result,
-                                  ctx,
-                                  options,
-                                  options.fluid_name,
-                                  options.fluid_velocity_field,
-                                  "fluid velocity");
-    validateScalarPressureComponents(result, ctx, options);
-    validateVectorFieldComponents(result,
-                                  ctx,
-                                  options,
-                                  options.solid_name,
-                                  options.solid_displacement_field,
-                                  "solid displacement");
-    if (!options.use_solid_displacement_derivative &&
-        options.solid_velocity_field.has_value()) {
-        validateVectorFieldComponents(result,
-                                      ctx,
-                                      options,
-                                      options.solid_name,
-                                      *options.solid_velocity_field,
-                                      "solid velocity");
-    }
-    if (options.mesh_name.has_value() &&
-        options.mesh_displacement_field.has_value()) {
-        validateVectorFieldComponents(result,
-                                      ctx,
-                                      options,
-                                      *options.mesh_name,
-                                      *options.mesh_displacement_field,
-                                      "mesh displacement");
-    }
-}
-
 const fec::CouplingRegionRef* findSharedRegionParticipant(
     const fec::SharedRegionRef& group,
     const std::string& participant)
@@ -362,58 +277,6 @@ const fec::CouplingRegionRef* findSharedRegionParticipant(
             return region.participant_name == participant;
         });
     return it == group.participant_regions.end() ? nullptr : &*it;
-}
-
-void validateInterfaceRegionMappings(fec::CouplingValidationResult& result,
-                                      const fec::CouplingContext& ctx,
-                                      const FSICouplingOptions& options)
-{
-    if (!ctx.hasSharedRegion(options.interface_name)) {
-        result.add(fec::CouplingDiagnostic{
-            .severity = fec::CouplingDiagnosticSeverity::Error,
-            .contract_name = options.contract_name,
-            .region_name = options.interface_name,
-            .message = "FSI interface shared region is missing",
-        });
-        return;
-    }
-
-    const auto group = ctx.sharedRegionGroup(options.interface_name);
-    const auto* fluid_region =
-        findSharedRegionParticipant(group, options.fluid_name);
-    if (fluid_region == nullptr) {
-        result.add(fec::CouplingDiagnostic{
-            .severity = fec::CouplingDiagnosticSeverity::Error,
-            .contract_name = options.contract_name,
-            .participant_name = options.fluid_name,
-            .region_name = options.interface_name,
-            .message = "FSI interface shared region must map the fluid participant",
-        });
-    }
-
-    const auto* solid_region =
-        findSharedRegionParticipant(group, options.solid_name);
-    if (solid_region == nullptr) {
-        result.add(fec::CouplingDiagnostic{
-            .severity = fec::CouplingDiagnosticSeverity::Error,
-            .contract_name = options.contract_name,
-            .participant_name = options.solid_name,
-            .region_name = options.interface_name,
-            .message = "FSI interface shared region must map the solid participant",
-        });
-    }
-
-    if (fluid_region != nullptr && solid_region != nullptr &&
-        fluid_region->side != fec::CouplingInterfaceSide::None &&
-        solid_region->side != fec::CouplingInterfaceSide::None &&
-        fluid_region->side == solid_region->side) {
-        result.add(fec::CouplingDiagnostic{
-            .severity = fec::CouplingDiagnosticSeverity::Error,
-            .contract_name = options.contract_name,
-            .region_name = options.interface_name,
-            .message = "FSI interface shared-region fluid and solid mappings must occupy opposite sides",
-        });
-    }
 }
 
 std::vector<fec::CouplingFieldUse> monolithicFieldUses(
@@ -691,8 +554,6 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
 {
     auto result = validateOptionShape(options_);
     validateALEMeshRequirements(result, ctx, options_);
-    validateFieldComponentCounts(result, ctx, options_);
-    validateInterfaceRegionMappings(result, ctx, options_);
     validateMonolithicFormContext(result, ctx, options_);
     auto declaration = declare();
     if (options_.mode == fec::CouplingMode::Partitioned) {
