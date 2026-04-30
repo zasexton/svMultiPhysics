@@ -4553,7 +4553,7 @@ Unit-test verification checklist:
   `forms::SymbolicOptions::use_symbolic_tangent`, or
   `forms::SymbolicOptions::geometry_sensitivity` instead of the coupling-level
   AD-mode, geometry-tangent, and geometry-sensitivity declarations.
-- [ ] `test_CouplingFormBuilder.cpp` verifies `compiler_options.ad_mode` remains
+- [x] `test_CouplingFormBuilder.cpp` verifies `compiler_options.ad_mode` remains
   default or diagnostic-only consistent with top-level
   `systems::FormInstallOptions::ad_mode` and cannot override
   `CouplingFormInstallOptionsDeclaration::ad_mode`.
