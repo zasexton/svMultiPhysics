@@ -782,6 +782,36 @@ TEST(CouplingGraph, AcceptsResolvableRequiredContextReferences)
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
+TEST(CouplingGraph, BuildsGraphForMultipleContractsSharingContext)
+{
+    auto first = graphDeclaration();
+    first.contract_name = "wall_interface";
+
+    auto second = graphDeclaration();
+    second.contract_name = "thermal_interface";
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 2> declarations{
+        first,
+        second,
+    };
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    EXPECT_EQ(snapshot.participants.size(), 1u);
+    EXPECT_EQ(snapshot.fields.size(), 1u);
+    EXPECT_EQ(snapshot.regions.size(), 1u);
+    EXPECT_EQ(snapshot.shared_regions.size(), 1u);
+    ASSERT_EQ(snapshot.contract_types.size(), 1u);
+    EXPECT_EQ(snapshot.contract_types[0].contract_type, "generic");
+    ASSERT_EQ(snapshot.contract_instances.size(), 2u);
+    EXPECT_EQ(snapshot.contract_instances[0].contract_name, "wall_interface");
+    EXPECT_EQ(snapshot.contract_instances[1].contract_name, "thermal_interface");
+}
+
 TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)
 {
     auto declaration = graphDeclaration();

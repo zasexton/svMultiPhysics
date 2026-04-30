@@ -4795,7 +4795,7 @@ Unit-test verification checklist:
 
 - [x] `test_CouplingGraph.cpp` builds a graph for one valid two-participant
   contract.
-- [ ] `test_CouplingGraph.cpp` builds a graph for multiple contracts sharing
+- [x] `test_CouplingGraph.cpp` builds a graph for multiple contracts sharing
   participants and shared regions.
 - [ ] `test_CouplingGraph.cpp` distinguishes reusable contract type nodes from
   configured contract instance nodes and rejects duplicate instance names even
