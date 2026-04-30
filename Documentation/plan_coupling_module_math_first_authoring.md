@@ -1607,7 +1607,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test unsupported monolithic capability diagnostics.
 - [x] Test unsupported partitioned capability diagnostics.
 - [x] Test explicit expert fallback opt-in diagnostics.
-- [ ] Test stable generated names for residuals, exchanges, and relation nodes.
+- [x] Test stable generated names for residuals, exchanges, and relation nodes.
 
 ### CouplingFormBuilder Tests
 

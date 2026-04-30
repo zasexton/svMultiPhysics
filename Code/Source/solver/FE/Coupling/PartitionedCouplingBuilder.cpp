@@ -7,6 +7,7 @@
 
 #include "Coupling/PartitionedCouplingBuilder.h"
 
+#include "Coupling/CouplingDiagnostics.h"
 #include "Core/FEException.h"
 
 #include <algorithm>
@@ -35,6 +36,15 @@ std::string producerPortName(std::string_view exchange_name)
 std::string consumerPortName(std::string_view exchange_name)
 {
     return std::string(exchange_name) + ".consumer";
+}
+
+std::string generatedExchangeName(const CouplingGeneratedNameRequest& request)
+{
+    const auto validation = validateCouplingGeneratedNameRequest(request);
+    FE_THROW_IF(!validation.ok(), InvalidArgumentException,
+                "partitioned exchange generated name is invalid: " +
+                    formatDiagnostics(validation));
+    return makeCouplingGeneratedName(request);
 }
 
 } // namespace
@@ -188,6 +198,14 @@ PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
 }
 
 PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
+    const CouplingGeneratedNameRequest& name,
+    const CouplingFieldUse& producer_field,
+    const CouplingFieldUse& consumer_field)
+{
+    return exchange(generatedExchangeName(name), producer_field, consumer_field);
+}
+
+PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
     std::string_view name,
     CouplingEndpointRef producer_endpoint,
     CouplingEndpointRef consumer_endpoint)
@@ -209,6 +227,16 @@ PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
 
     declarations_.push_back(std::move(declaration));
     return PartitionedExchangeBuilder(*this, declarations_.size() - 1u);
+}
+
+PartitionedExchangeBuilder PartitionedCouplingBuilder::exchange(
+    const CouplingGeneratedNameRequest& name,
+    CouplingEndpointRef producer_endpoint,
+    CouplingEndpointRef consumer_endpoint)
+{
+    return exchange(generatedExchangeName(name),
+                    std::move(producer_endpoint),
+                    std::move(consumer_endpoint));
 }
 
 const std::vector<CouplingExchangeDeclaration>&

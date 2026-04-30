@@ -107,6 +107,51 @@ TEST(PartitionedCouplingBuilder, BuildsFieldExchangeDeclarations)
     EXPECT_EQ(exchange.strategy.max_iterations, 4);
 }
 
+TEST(PartitionedCouplingBuilder, BuildsGeneratedExchangePortNames)
+{
+    PartitionedCouplingBuilder builder("fsi_wall");
+    builder
+        .exchange(CouplingGeneratedNameRequest{
+                      .contract_name = "fsi_wall",
+                      .relation_name = "fsi_interface",
+                      .local_name = "solid_motion",
+                  },
+                  CouplingFieldUse{
+                      .participant_name = "solid",
+                      .field_name = "displacement",
+                  },
+                  CouplingFieldUse{
+                      .participant_name = "fluid",
+                      .field_name = "mesh_displacement",
+                  })
+        .sharedInterface("wall");
+
+    const auto& declarations = builder.declarations();
+    ASSERT_EQ(declarations.size(), 1u);
+    EXPECT_EQ(declarations.front().producer_port.contract_instance_name,
+              "fsi_wall");
+    EXPECT_EQ(declarations.front().producer_port.port_name,
+              "fsi_wall.fsi_interface.solid_motion.producer");
+    EXPECT_EQ(declarations.front().consumer_port.port_name,
+              "fsi_wall.fsi_interface.solid_motion.consumer");
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.exchange(CouplingGeneratedNameRequest{
+                                          .contract_name = "fsi.wall",
+                                          .relation_name = "fsi_interface",
+                                          .local_name = "bad_motion",
+                                      },
+                                      CouplingFieldUse{
+                                          .participant_name = "solid",
+                                          .field_name = "displacement",
+                                      },
+                                      CouplingFieldUse{
+                                          .participant_name = "fluid",
+                                          .field_name = "mesh_displacement",
+                                      })),
+                 InvalidArgumentException);
+}
+
 TEST(PartitionedCouplingBuilder, BuildsGenericEndpointExchangeDeclarations)
 {
     PartitionedCouplingBuilder builder("junction");

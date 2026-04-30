@@ -74,9 +74,17 @@ public:
         std::string_view name,
         const CouplingFieldUse& producer_field,
         const CouplingFieldUse& consumer_field);
+    [[nodiscard]] PartitionedExchangeBuilder exchange(
+        const CouplingGeneratedNameRequest& name,
+        const CouplingFieldUse& producer_field,
+        const CouplingFieldUse& consumer_field);
 
     [[nodiscard]] PartitionedExchangeBuilder exchange(
         std::string_view name,
+        CouplingEndpointRef producer_endpoint,
+        CouplingEndpointRef consumer_endpoint);
+    [[nodiscard]] PartitionedExchangeBuilder exchange(
+        const CouplingGeneratedNameRequest& name,
         CouplingEndpointRef producer_endpoint,
         CouplingEndpointRef consumer_endpoint);
 

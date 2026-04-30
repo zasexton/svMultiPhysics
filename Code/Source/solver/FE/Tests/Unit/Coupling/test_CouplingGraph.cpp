@@ -1625,6 +1625,50 @@ TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)
               std::string::npos);
 }
 
+TEST(CouplingGraph, ReportsGeneratedRelationNamesInDiagnostics)
+{
+    const auto relation_name =
+        makeCouplingGeneratedName(CouplingGeneratedNameRequest{
+            .contract_name = "thermal_wall",
+            .relation_name = "thermal_interface",
+            .local_name = "temperature_balance",
+        });
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "thermal_wall";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.region_relation_requirements.push_back({
+        .relation_name = relation_name,
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+        },
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+
+    const auto validation = buildGraph(graphContext(), declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("relation=thermal_wall.thermal_interface.temperature_balance"),
+              std::string::npos);
+    EXPECT_NE(text.find("selected relation lowering is not declared"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, ReportsApproximateOrLaggedRelationLoweringFidelity)
 {
     CouplingContractDeclaration declaration;
