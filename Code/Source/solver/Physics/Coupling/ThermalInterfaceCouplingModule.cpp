@@ -24,6 +24,8 @@ namespace {
 namespace fec = FE::coupling;
 namespace forms = FE::forms;
 
+constexpr const char* kThermalInterfaceRelationName = "thermal_interface";
+
 fec::CouplingFieldUse fieldUse(const std::string& participant,
                                const std::string& field)
 {
@@ -40,6 +42,16 @@ fec::CouplingValueDescriptor scalarValue(int components)
                                 : fec::CouplingValueRank::Vector,
         .components = components,
     };
+}
+
+std::string generatedName(const ThermalInterfaceCouplingOptions& options,
+                          std::string local_name)
+{
+    return fec::makeCouplingGeneratedName(fec::CouplingGeneratedNameRequest{
+        .contract_name = options.contract_name,
+        .relation_name = kThermalInterfaceRelationName,
+        .local_name = std::move(local_name),
+    });
 }
 
 void declareFieldRequirement(fec::CouplingDefinitionBuilder& builder,
@@ -84,7 +96,7 @@ fec::CouplingRegionRelationRequirement thermalInterfaceRelation(
     const ThermalInterfaceCouplingOptions& options)
 {
     return fec::CouplingRegionRelationRequirement{
-        .relation_name = "thermal_interface",
+        .relation_name = kThermalInterfaceRelationName,
         .relation_kind = fec::CouplingRegionRelationKind::SidePairedInterface,
         .endpoints = {
             fec::CouplingRegionEndpointDeclaration{
@@ -185,7 +197,7 @@ std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
 
     fec::CouplingFormContribution side_a_residual;
     side_a_residual.contribution_name =
-        options.contract_name + "_temperature_continuity_side_a";
+        generatedName(options, "temperature_continuity_side_a");
     side_a_residual.origin = "ThermalInterfaceCouplingModule";
     side_a_residual.operator_name = "equations";
     side_a_residual.field_uses = {fieldUse(options.side_a_name,
@@ -200,7 +212,7 @@ std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
 
     fec::CouplingFormContribution side_b_residual;
     side_b_residual.contribution_name =
-        options.contract_name + "_temperature_continuity_side_b";
+        generatedName(options, "temperature_continuity_side_b");
     side_b_residual.origin = "ThermalInterfaceCouplingModule";
     side_b_residual.operator_name = "equations";
     side_b_residual.field_uses = {fieldUse(options.side_b_name,

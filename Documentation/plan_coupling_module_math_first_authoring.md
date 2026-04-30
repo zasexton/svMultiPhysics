@@ -220,7 +220,7 @@ Checklist:
 - [x] Shared generated-name helper uses
       `<contract_name>.<relation_name>.<contribution_or_exchange_name>` when no
       explicit override is supplied.
-- [ ] Residual contribution names are stable.
+- [x] Residual contribution names are stable.
 - [x] Exchange names are stable.
 - [ ] Coupling-owned field and variable names are stable.
 - [x] Explicit name overrides are available for advanced cases.
@@ -1657,8 +1657,8 @@ enum class ThermalInterfaceFormulation {
 
 - [ ] Test migrated FSI declarations match current participant, field, and
       shared-region requirements.
-- [ ] Test migrated FSI monolithic forms install the same contribution names and
-      dependencies.
+- [x] Test migrated FSI monolithic forms install generated contribution names
+      and dependencies.
 - [ ] Test migrated FSI partitioned exchanges match current logical channels.
 - [x] Test migrated thermal monolithic lowering.
 - [x] Test migrated thermal partitioned exchanges.

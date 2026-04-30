@@ -28,6 +28,8 @@ namespace {
 namespace fec = FE::coupling;
 namespace forms = FE::forms;
 
+constexpr const char* kFSIRelationName = "fsi_interface";
+
 fec::CouplingFieldUse fieldUse(const std::string& participant,
                                const std::string& field)
 {
@@ -64,6 +66,16 @@ fec::CouplingValueDescriptor interfaceVectorValue(const FSICouplingOptions& opti
     };
 }
 
+std::string generatedName(const FSICouplingOptions& options,
+                          std::string local_name)
+{
+    return fec::makeCouplingGeneratedName(fec::CouplingGeneratedNameRequest{
+        .contract_name = options.contract_name,
+        .relation_name = kFSIRelationName,
+        .local_name = std::move(local_name),
+    });
+}
+
 fec::CouplingRelationLoweringRequest selectedLowering(
     fec::CouplingMode mode,
     std::string enforcement_strategy)
@@ -81,7 +93,7 @@ fec::CouplingRegionRelationRequirement fsiInterfaceRelation(
     const FSICouplingOptions& options)
 {
     return fec::CouplingRegionRelationRequirement{
-        .relation_name = "fsi_interface",
+        .relation_name = kFSIRelationName,
         .relation_kind = fec::CouplingRegionRelationKind::SidePairedInterface,
         .endpoints = {
             fec::CouplingRegionEndpointDeclaration{
@@ -212,8 +224,7 @@ std::vector<fec::CouplingFormContribution> buildFSIMonolithicForms(
     }
 
     fec::CouplingFormContribution kinematic;
-    kinematic.contribution_name =
-        options.contract_name + "_velocity_continuity";
+    kinematic.contribution_name = generatedName(options, "velocity_continuity");
     kinematic.origin = "FSICouplingModule";
     kinematic.operator_name = "equations";
     kinematic.field_uses = {fieldUse(options.fluid_name,
@@ -240,7 +251,7 @@ std::vector<fec::CouplingFormContribution> buildFSIMonolithicForms(
 
     fec::CouplingFormContribution traction;
     traction.contribution_name =
-        options.contract_name + "_pressure_traction_balance";
+        generatedName(options, "pressure_traction_balance");
     traction.origin = "FSICouplingModule";
     traction.operator_name = "equations";
     traction.field_uses = {fieldUse(options.solid_name,

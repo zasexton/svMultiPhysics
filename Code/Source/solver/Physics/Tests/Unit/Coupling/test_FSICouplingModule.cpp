@@ -898,10 +898,12 @@ TEST(FSICouplingModule, BuildsFormsAuthoredVelocityContinuity)
     const auto contributions = module.buildMonolithicForms(fixture.context,
                                                            form_builder);
     ASSERT_EQ(contributions.size(), 2u);
-    const auto* contribution =
-        findContribution(contributions, "fsi_velocity_continuity");
+    const auto* contribution = findContribution(
+        contributions,
+        "fsi.fsi_interface.velocity_continuity");
     ASSERT_NE(contribution, nullptr);
-    EXPECT_EQ(contribution->contribution_name, "fsi_velocity_continuity");
+    EXPECT_EQ(contribution->contribution_name,
+              "fsi.fsi_interface.velocity_continuity");
     EXPECT_EQ(contribution->origin, "FSICouplingModule");
     EXPECT_EQ(contribution->operator_name, "equations");
     EXPECT_TRUE(hasFieldUse(contribution->field_uses, "fluid", "velocity"));
@@ -929,8 +931,9 @@ TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
     const auto contributions = module.buildMonolithicForms(fixture.context,
                                                            form_builder);
     ASSERT_EQ(contributions.size(), 2u);
-    const auto* contribution =
-        findContribution(contributions, "fsi_pressure_traction_balance");
+    const auto* contribution = findContribution(
+        contributions,
+        "fsi.fsi_interface.pressure_traction_balance");
     ASSERT_NE(contribution, nullptr);
     EXPECT_EQ(contribution->origin, "FSICouplingModule");
     EXPECT_EQ(contribution->operator_name, "equations");
@@ -999,7 +1002,7 @@ TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
         fieldVariable(fixture.context, "fluid", "pressure");
 
     const auto* kinematic =
-        findMetadata(installed, "fsi_velocity_continuity");
+        findMetadata(installed, "fsi.fsi_interface.velocity_continuity");
     ASSERT_NE(kinematic, nullptr);
     const auto* velocity_dependency =
         findInstalledDependency(*kinematic, fluid_velocity, solid_velocity);
@@ -1011,7 +1014,7 @@ TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
               nullptr);
 
     const auto* traction =
-        findMetadata(installed, "fsi_pressure_traction_balance");
+        findMetadata(installed, "fsi.fsi_interface.pressure_traction_balance");
     ASSERT_NE(traction, nullptr);
     const auto* pressure_dependency =
         findInstalledDependency(*traction, solid_displacement, fluid_pressure);
@@ -1061,7 +1064,7 @@ TEST(FSICouplingModule, ReportsALEGeometrySensitivityProvenance)
         fixture.context,
         std::span<const fec::CouplingFormContribution>(contributions));
     const auto* traction =
-        findMetadata(installed, "fsi_pressure_traction_balance");
+        findMetadata(installed, "fsi.fsi_interface.pressure_traction_balance");
     ASSERT_NE(traction, nullptr);
     EXPECT_EQ(traction->geometry_sensitivity.mode,
               forms::GeometrySensitivityMode::MeshMotionUnknowns);
@@ -1119,8 +1122,9 @@ TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
     const auto contributions = module.buildMonolithicForms(fixture.context,
                                                            form_builder);
     ASSERT_EQ(contributions.size(), 2u);
-    const auto* contribution =
-        findContribution(contributions, "fsi_velocity_continuity");
+    const auto* contribution = findContribution(
+        contributions,
+        "fsi.fsi_interface.velocity_continuity");
     ASSERT_NE(contribution, nullptr);
     EXPECT_TRUE(hasFieldUse(contribution->field_uses, "fluid", "velocity"));
     EXPECT_TRUE(hasFieldUse(contribution->extra_trial_field_uses,

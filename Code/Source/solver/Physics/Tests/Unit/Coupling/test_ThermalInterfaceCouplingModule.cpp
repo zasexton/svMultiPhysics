@@ -309,7 +309,7 @@ TEST(ThermalInterfaceCouplingModule, BuildsPenaltyTemperatureContinuityForms)
 
     const auto* side_a = findContribution(
         contributions,
-        "thermal_interface_temperature_continuity_side_a");
+        "thermal_interface.thermal_interface.temperature_continuity_side_a");
     ASSERT_NE(side_a, nullptr);
     EXPECT_EQ(side_a->origin, "ThermalInterfaceCouplingModule");
     EXPECT_EQ(side_a->operator_name, "equations");
@@ -328,7 +328,7 @@ TEST(ThermalInterfaceCouplingModule, BuildsPenaltyTemperatureContinuityForms)
 
     const auto* side_b = findContribution(
         contributions,
-        "thermal_interface_temperature_continuity_side_b");
+        "thermal_interface.thermal_interface.temperature_continuity_side_b");
     ASSERT_NE(side_b, nullptr);
     EXPECT_TRUE(hasFieldUse(side_b->field_uses, "side_b", "temperature"));
     EXPECT_TRUE(
