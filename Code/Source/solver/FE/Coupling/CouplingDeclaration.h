@@ -20,6 +20,7 @@
 #include "Coupling/PartitionedCouplingPlan.h"
 #include "Core/ParameterValue.h"
 #include "Forms/FormExpr.h"
+#include "Systems/FieldRegistry.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/OperatorRegistry.h"
 
@@ -58,6 +59,22 @@ struct CouplingResidualDependency {
     CouplingVariableUse residual_row;
     CouplingVariableUse dependency;
     CouplingDependencyMode mode{CouplingDependencyMode::ImplicitMonolithic};
+};
+
+struct CouplingFieldRequirement {
+    CouplingFieldUse field;
+    CouplingValueDescriptor value;
+    std::optional<systems::FieldScope> required_scope;
+    CouplingRequirement requirement{CouplingRequirement::Required};
+};
+
+struct CouplingSharedInterfaceRequirement {
+    std::string shared_region_name;
+    std::vector<std::string> participant_names;
+    CouplingRegionKind required_region_kind{CouplingRegionKind::InterfaceFace};
+    bool require_all_participants{true};
+    bool require_opposite_sides_for_two_participants{true};
+    bool require_monolithic_topology{false};
 };
 
 enum class CouplingNonFieldDependencyRequirementKind : std::uint8_t {
@@ -363,8 +380,10 @@ struct CouplingContractDeclaration {
     std::string contract_name;
     std::vector<CouplingParticipantUse> participants;
     std::vector<CouplingFieldUse> fields;
+    std::vector<CouplingFieldRequirement> field_requirements;
     std::vector<CouplingRegionUse> regions;
     std::vector<CouplingSharedRegionUse> shared_regions;
+    std::vector<CouplingSharedInterfaceRequirement> shared_interface_requirements;
     std::vector<CouplingAdditionalFieldDeclaration> additional_fields;
     std::vector<CouplingNonFieldDependencyRequirement> non_field_dependencies;
     std::vector<CouplingResidualDependency> dependencies;

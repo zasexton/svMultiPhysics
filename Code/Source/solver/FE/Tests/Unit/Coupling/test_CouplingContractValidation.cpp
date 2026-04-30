@@ -261,6 +261,63 @@ TEST(CouplingContractValidation, RejectsDuplicateRequirements)
     EXPECT_NE(text.find("duplicate shared-region requirement"), std::string::npos);
 }
 
+TEST(CouplingContractValidation, AcceptsFieldShapeAndSharedInterfaceRequirements)
+{
+    auto declaration = minimalDeclaration();
+    declaration.field_requirements.push_back({
+        .field = {.participant_name = "left", .field_name = "primary"},
+        .value = {.rank = CouplingValueRank::Vector, .components = 3},
+        .required_scope = svmp::FE::systems::FieldScope::InterfaceFace,
+    });
+    declaration.shared_interface_requirements.push_back({
+        .shared_region_name = "interface",
+        .participant_names = {"left", "right"},
+    });
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingContractValidation, ValidatesFieldShapeRequirements)
+{
+    auto declaration = minimalDeclaration();
+    declaration.field_requirements.push_back({
+        .field = {.participant_name = "left", .field_name = "primary"},
+        .value = {.rank = CouplingValueRank::Scalar, .components = 2},
+    });
+    declaration.field_requirements.push_back(declaration.field_requirements.back());
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("scalar coupling values require exactly one component"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate field-shape requirement"), std::string::npos);
+}
+
+TEST(CouplingContractValidation, ValidatesSharedInterfaceRequirements)
+{
+    auto declaration = minimalDeclaration();
+    declaration.shared_interface_requirements.push_back({
+        .shared_region_name = "interface",
+        .participant_names = {"left", "", "left"},
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    declaration.shared_interface_requirements.push_back(
+        declaration.shared_interface_requirements.back());
+
+    const auto validation = validateContractDeclarationShape(declaration);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("shared-interface requirement requires interface-face region kind"),
+              std::string::npos);
+    EXPECT_NE(text.find("shared-interface requirement requires nonempty participant names"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate participant in shared-interface requirement"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate shared-interface requirement"), std::string::npos);
+}
+
 TEST(CouplingContractValidation, ValidatesAdditionalFieldAttachmentRules)
 {
     auto declaration = minimalDeclaration();

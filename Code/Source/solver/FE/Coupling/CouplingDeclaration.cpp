@@ -78,6 +78,11 @@ std::string fieldKey(const CouplingFieldUse& field)
     return field.participant_name + "/" + field.field_name;
 }
 
+std::string fieldRequirementKey(const CouplingFieldRequirement& requirement)
+{
+    return fieldKey(requirement.field);
+}
+
 std::string regionKey(const CouplingRegionUse& region)
 {
     return region.participant_name + "/" + region.region_name;
@@ -246,6 +251,24 @@ CouplingValidationResult validateContractDeclarationShape(
         }
     }
 
+    for (std::size_t i = 0; i < declaration.field_requirements.size(); ++i) {
+        const auto& requirement = declaration.field_requirements[i];
+        const auto& field = requirement.field;
+        if (field.participant_name.empty() || field.field_name.empty()) {
+            result.addError("field-shape requirement requires participant and field names");
+        }
+        result.append(validateCouplingValueDescriptor(requirement.value));
+        for (std::size_t j = i + 1u;
+             j < declaration.field_requirements.size();
+             ++j) {
+            addDuplicateIfRepeated(
+                result,
+                fieldRequirementKey(requirement),
+                fieldRequirementKey(declaration.field_requirements[j]),
+                "duplicate field-shape requirement");
+        }
+    }
+
     for (std::size_t i = 0; i < declaration.regions.size(); ++i) {
         const auto& region = declaration.regions[i];
         if (region.participant_name.empty() || region.region_name.empty()) {
@@ -269,6 +292,46 @@ CouplingValidationResult validateContractDeclarationShape(
                                    shared_region.shared_region_name,
                                    declaration.shared_regions[j].shared_region_name,
                                    "duplicate shared-region requirement");
+        }
+    }
+
+    for (std::size_t i = 0;
+         i < declaration.shared_interface_requirements.size();
+         ++i) {
+        const auto& requirement = declaration.shared_interface_requirements[i];
+        if (requirement.shared_region_name.empty()) {
+            result.addError("shared-interface requirement requires a shared-region name");
+        }
+        if (requirement.participant_names.empty()) {
+            result.addError("shared-interface requirement requires participant names");
+        }
+        if (requirement.required_region_kind != CouplingRegionKind::InterfaceFace) {
+            result.addError(
+                "shared-interface requirement requires interface-face region kind");
+        }
+        for (std::size_t j = i + 1u;
+             j < declaration.shared_interface_requirements.size();
+             ++j) {
+            addDuplicateIfRepeated(
+                result,
+                requirement.shared_region_name,
+                declaration.shared_interface_requirements[j].shared_region_name,
+                "duplicate shared-interface requirement");
+        }
+        for (std::size_t j = 0; j < requirement.participant_names.size(); ++j) {
+            if (requirement.participant_names[j].empty()) {
+                result.addError(
+                    "shared-interface requirement requires nonempty participant names");
+            }
+            for (std::size_t k = j + 1u;
+                 k < requirement.participant_names.size();
+                 ++k) {
+                addDuplicateIfRepeated(
+                    result,
+                    requirement.participant_names[j],
+                    requirement.participant_names[k],
+                    "duplicate participant in shared-interface requirement");
+            }
         }
     }
 
