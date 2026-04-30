@@ -5350,7 +5350,7 @@ Implementation checklist:
   and trace/mortar compatibility must be explicit when the multiplier formulation
   is enabled.
 - [x] Validate FSI field component counts against spatial/interface dimension.
-- [ ] Validate FSI interface region existence and participant-region mappings.
+- [x] Validate FSI interface region existence and participant-region mappings.
 - [ ] Validate ALE FSI fails when the mesh participant or mesh displacement
   field is required but absent.
 - [ ] Author at least one Forms-based FSI-like monolithic kinematic constraint

@@ -104,7 +104,10 @@ struct FSIContextFixture {
     fec::CouplingContext context;
 
     explicit FSIContextFixture(const FSIFieldComponents& components = {},
-                               bool include_mesh = false)
+                               bool include_mesh = false,
+                               bool include_shared_region = true,
+                               bool include_fluid_mapping = true,
+                               bool include_solid_mapping = true)
     {
         fluid_system.setInterfaceMesh(10, std::make_shared<const svmp::InterfaceMesh>());
         solid_system.setInterfaceMesh(20, std::make_shared<const svmp::InterfaceMesh>());
@@ -121,10 +124,13 @@ struct FSIContextFixture {
                                             "solid_interface",
                                             20,
                                             fec::CouplingInterfaceSide::Plus);
-        std::vector<fec::CouplingRegionRef> shared_regions{
-            fluid_region,
-            solid_region,
-        };
+        std::vector<fec::CouplingRegionRef> shared_regions;
+        if (include_fluid_mapping) {
+            shared_regions.push_back(fluid_region);
+        }
+        if (include_solid_mapping) {
+            shared_regions.push_back(solid_region);
+        }
 
         fec::CouplingContextBuilder builder;
         builder.addParticipant(fec::CouplingParticipantRef{
@@ -178,11 +184,13 @@ struct FSIContextFixture {
                                 components.mesh_displacement));
         }
 
-        builder.addSharedRegion(fec::SharedRegionRef{
-            .name = "interface",
-            .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
-            .participant_regions = std::move(shared_regions),
-        });
+        if (include_shared_region) {
+            builder.addSharedRegion(fec::SharedRegionRef{
+                .name = "interface",
+                .required_region_kind = fec::CouplingRegionKind::InterfaceFace,
+                .participant_regions = std::move(shared_regions),
+            });
+        }
         context = builder.build();
     }
 };
@@ -376,6 +384,30 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsAgainstInterfaceDimension)
         module,
         mesh_displacement_fixture.context,
         "FSI mesh displacement field component count must match the interface component count");
+}
+
+TEST(FSICouplingModule, ValidatesInterfaceSharedRegionMappings)
+{
+    FSICouplingOptions options;
+    const FSICouplingModule module(options);
+
+    FSIContextFixture missing_group(FSIFieldComponents{}, false, false);
+    expectValidationFailureContaining(
+        module,
+        missing_group.context,
+        "FSI interface shared region is missing");
+
+    FSIContextFixture missing_fluid(FSIFieldComponents{}, false, true, false, true);
+    expectValidationFailureContaining(
+        module,
+        missing_fluid.context,
+        "FSI interface shared region must map the fluid participant");
+
+    FSIContextFixture missing_solid(FSIFieldComponents{}, false, true, true, false);
+    expectValidationFailureContaining(
+        module,
+        missing_solid.context,
+        "FSI interface shared region must map the solid participant");
 }
 
 TEST(FSICouplingModule, RejectsUnconfiguredPartitionedTransfers)

@@ -9,6 +9,7 @@
 
 #include "FE/Coupling/CouplingGraph.h"
 
+#include <algorithm>
 #include <array>
 #include <span>
 #include <string>
@@ -222,6 +223,71 @@ void validateFieldComponentCounts(fec::CouplingValidationResult& result,
     }
 }
 
+const fec::CouplingRegionRef* findSharedRegionParticipant(
+    const fec::SharedRegionRef& group,
+    const std::string& participant)
+{
+    const auto it = std::find_if(
+        group.participant_regions.begin(),
+        group.participant_regions.end(),
+        [&](const fec::CouplingRegionRef& region) {
+            return region.participant_name == participant;
+        });
+    return it == group.participant_regions.end() ? nullptr : &*it;
+}
+
+void validateInterfaceRegionMappings(fec::CouplingValidationResult& result,
+                                      const fec::CouplingContext& ctx,
+                                      const FSICouplingOptions& options)
+{
+    if (!ctx.hasSharedRegion(options.interface_name)) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .region_name = options.interface_name,
+            .message = "FSI interface shared region is missing",
+        });
+        return;
+    }
+
+    const auto group = ctx.sharedRegionGroup(options.interface_name);
+    const auto* fluid_region =
+        findSharedRegionParticipant(group, options.fluid_name);
+    if (fluid_region == nullptr) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .participant_name = options.fluid_name,
+            .region_name = options.interface_name,
+            .message = "FSI interface shared region must map the fluid participant",
+        });
+    }
+
+    const auto* solid_region =
+        findSharedRegionParticipant(group, options.solid_name);
+    if (solid_region == nullptr) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .participant_name = options.solid_name,
+            .region_name = options.interface_name,
+            .message = "FSI interface shared region must map the solid participant",
+        });
+    }
+
+    if (fluid_region != nullptr && solid_region != nullptr &&
+        fluid_region->side != fec::CouplingInterfaceSide::None &&
+        solid_region->side != fec::CouplingInterfaceSide::None &&
+        fluid_region->side == solid_region->side) {
+        result.add(fec::CouplingDiagnostic{
+            .severity = fec::CouplingDiagnosticSeverity::Error,
+            .contract_name = options.contract_name,
+            .region_name = options.interface_name,
+            .message = "FSI interface shared-region fluid and solid mappings must occupy opposite sides",
+        });
+    }
+}
+
 } // namespace
 
 FSICouplingModule::FSICouplingModule(FSICouplingOptions options)
@@ -304,6 +370,7 @@ void FSICouplingModule::validate(const fec::CouplingContext& ctx) const
 {
     auto result = validateOptionShape(options_);
     validateFieldComponentCounts(result, ctx, options_);
+    validateInterfaceRegionMappings(result, ctx, options_);
     const auto declaration = declare();
     FE::coupling::CouplingGraph graph;
     const std::array<fec::CouplingContractDeclaration, 1> declarations{declaration};
