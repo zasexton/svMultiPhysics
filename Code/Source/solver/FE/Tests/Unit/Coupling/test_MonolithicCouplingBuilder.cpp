@@ -114,6 +114,13 @@ CouplingContext interfaceContext(BuilderFixture& fixture, int marker)
         .marker = marker,
         .side = CouplingInterfaceSide::Minus,
     };
+    left_region.geometry_revision = 43;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    left_region.logical_region = svmp::search::LogicalInterfaceRegionId{
+        .persistent_id = "left_interface",
+        .name = "interface",
+    };
+#endif
     CouplingRegionRef right_region{
         .participant_name = "right",
         .system_name = "shared_system",
@@ -1013,6 +1020,7 @@ TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
             .transform_from_configuration =
                 forms::GeometryConfiguration::Reference,
             .transform_to_configuration = forms::GeometryConfiguration::Current,
+            .quadrature_policy_key = 91,
         },
     };
 
@@ -1059,6 +1067,13 @@ TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
     ASSERT_TRUE(terminal.location.transform_to_configuration.has_value());
     EXPECT_EQ(*terminal.location.transform_to_configuration,
               forms::GeometryConfiguration::Current);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    ASSERT_TRUE(terminal.location.logical_region.has_value());
+    EXPECT_EQ(terminal.location.logical_region->persistent_id,
+              "left_interface");
+#endif
+    EXPECT_EQ(terminal.location.geometry_revision, 43u);
+    EXPECT_EQ(terminal.location.quadrature_policy_key, 91u);
     ASSERT_TRUE(terminal.owner.has_value());
     EXPECT_EQ(terminal.owner->participant_name, "left");
     EXPECT_EQ(terminal.owner->system_name, "shared_system");
@@ -1090,6 +1105,8 @@ TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
     ASSERT_NE(metadata_terminal, metadata.geometry_terminals.end());
     EXPECT_EQ(metadata_terminal->analysis_domain,
               analysis::DomainKind::InterfaceFace);
+    EXPECT_EQ(metadata_terminal->location.geometry_revision, 43u);
+    EXPECT_EQ(metadata_terminal->location.quadrature_policy_key, 91u);
     ASSERT_TRUE(metadata_terminal->owner.has_value());
     EXPECT_EQ(metadata_terminal->owner->participant_name, "left");
 }

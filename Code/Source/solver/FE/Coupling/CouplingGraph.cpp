@@ -336,6 +336,8 @@ ResolvedGeometryRequirement resolveGeometryRequirement(
             location.transform_from_configuration;
         requirement.location.transform_to_configuration =
             location.transform_to_configuration;
+        requirement.location.quadrature_policy_key =
+            location.quadrature_policy_key;
     }
 
     if (geometry.scope.participant_name.has_value() &&

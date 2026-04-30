@@ -185,6 +185,7 @@ CouplingFormGeometryTerminalProvenance resolveGeometryTerminalProvenance(
         location.transform_from_configuration =
             declared.transform_from_configuration;
         location.transform_to_configuration = declared.transform_to_configuration;
+        location.quadrature_policy_key = declared.quadrature_policy_key;
     }
 
     if (resolved_scope.region.has_value()) {

@@ -60,6 +60,7 @@ struct CouplingGeometryTerminalLocationDeclaration {
         forms::GeometryConfiguration::Reference};
     std::optional<forms::GeometryConfiguration> transform_from_configuration;
     std::optional<forms::GeometryConfiguration> transform_to_configuration;
+    std::uint64_t quadrature_policy_key{0};
 };
 
 struct CouplingGeometryTerminalLocationProvenance {

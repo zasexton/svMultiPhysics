@@ -4517,7 +4517,7 @@ Unit-test verification checklist:
   deterministic `terminal_sequence` values after matching, and rejects or
   preserves provenance across transformed expressions according to whether a
   public provenance tag was copied before the transform.
-- [ ] `test_CouplingFormBuilder.cpp` verifies geometry-terminal metadata records
+- [x] `test_CouplingFormBuilder.cpp` verifies geometry-terminal metadata records
   declaration-side location separately from resolved provenance, including
   resolved `analysis::DomainKind`, owner-scope, marker/shared-region, side,
   typed `forms::GeometryConfiguration`, optional frame-transform from/to
