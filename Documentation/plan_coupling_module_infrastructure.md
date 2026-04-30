@@ -4611,7 +4611,7 @@ Unit-test verification checklist:
   `PreviousSolutionRef(k)`/`FieldHistoryValue` requirements validate available
   `SystemStateView::u_history` depth and reject missing or unsupported history
   indices.
-- [ ] `test_CouplingTemporalRequirements.cpp` verifies mesh velocity, mesh
+- [x] `test_CouplingTemporalRequirements.cpp` verifies mesh velocity, mesh
   acceleration, previous mesh velocity, and predicted mesh velocity requirements
   validate owner-scoped `systems::MeshMotionFieldRole` bindings or provider
   metadata, and reject ambiguous shared-region-only mesh temporal requirements in

@@ -185,6 +185,123 @@ struct ResolvedGeometryRequirement {
     std::optional<CouplingGeometryTerminalOwnerProvenance> owner;
 };
 
+bool isMeshTemporalQuantity(CouplingTemporalQuantity quantity) noexcept
+{
+    switch (quantity) {
+    case CouplingTemporalQuantity::MeshVelocity:
+    case CouplingTemporalQuantity::MeshAcceleration:
+    case CouplingTemporalQuantity::PreviousMeshVelocity:
+    case CouplingTemporalQuantity::PredictedMeshVelocity:
+        return true;
+    case CouplingTemporalQuantity::Time:
+    case CouplingTemporalQuantity::TimeStep:
+    case CouplingTemporalQuantity::EffectiveTimeStep:
+    case CouplingTemporalQuantity::FieldDerivative:
+    case CouplingTemporalQuantity::FieldHistoryValue:
+        return false;
+    }
+    return false;
+}
+
+std::optional<std::string> meshScopeParticipant(
+    const CouplingGeometryTerminalScope& scope)
+{
+    if (scope.participant_name.has_value()) {
+        return scope.participant_name;
+    }
+    if (scope.region.has_value() && !scope.region->participant_name.empty()) {
+        return scope.region->participant_name;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> meshScopeSharedRegion(
+    const CouplingGeometryTerminalScope& scope)
+{
+    if (scope.region.has_value() &&
+        scope.region->shared_region_name.has_value()) {
+        return scope.region->shared_region_name;
+    }
+    if (scope.location.has_value() &&
+        scope.location->shared_region_name.has_value()) {
+        return scope.location->shared_region_name;
+    }
+    return std::nullopt;
+}
+
+bool sharedRegionHasParticipant(const SharedRegionRef& group,
+                                const std::string& participant_name)
+{
+    return std::any_of(
+        group.participant_regions.begin(),
+        group.participant_regions.end(),
+        [&](const CouplingRegionRef& region) {
+            return region.participant_name == participant_name;
+        });
+}
+
+void validateMeshTemporalScope(const CouplingContext& context,
+                               const CouplingContractDeclaration& declaration,
+                               const CouplingTemporalRequirement& temporal,
+                               CouplingValidationResult& result)
+{
+    if (!isMeshTemporalQuantity(temporal.quantity) ||
+        !temporal.mesh_motion_scope.has_value() ||
+        !isRequired(temporal.requirement)) {
+        return;
+    }
+
+    const auto& scope = *temporal.mesh_motion_scope;
+    const auto participant_name = meshScopeParticipant(scope);
+    if (participant_name.has_value() &&
+        !context.hasParticipant(*participant_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = *participant_name,
+            .message = "mesh temporal requirement participant is missing from the context",
+        });
+    }
+
+    const auto shared_region_name = meshScopeSharedRegion(scope);
+    if (!shared_region_name.has_value()) {
+        return;
+    }
+    if (!context.hasSharedRegion(*shared_region_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = participant_name.value_or(std::string{}),
+            .region_name = *shared_region_name,
+            .message = "mesh temporal shared region is missing from the context",
+        });
+        return;
+    }
+
+    const auto group = context.sharedRegionGroup(*shared_region_name);
+    if (!participant_name.has_value()) {
+        if (group.participant_regions.size() > 1u) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .region_name = *shared_region_name,
+                .message = "shared-region mesh temporal requirement is ambiguous without a participant owner",
+            });
+        }
+        return;
+    }
+
+    if (!sharedRegionHasParticipant(group, *participant_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = *participant_name,
+            .region_name = *shared_region_name,
+            .message = "mesh temporal shared-region participant mapping is missing from the context",
+        });
+    }
+}
+
 std::vector<ResolvedDeclaredDependency> resolveDeclaredDependencies(
     const CouplingContext& context,
     std::span<const CouplingContractDeclaration> declarations,
@@ -219,6 +336,8 @@ std::vector<ResolvedTemporalRequirement> resolveDeclaredTemporalRequirements(
     std::vector<ResolvedTemporalRequirement> resolved;
     for (const auto& declaration : declarations) {
         for (const auto& temporal : declaration.temporal_requirements) {
+            validateMeshTemporalScope(context, declaration, temporal, result);
+
             ResolvedTemporalRequirement requirement{
                 .contract_name = declaration.contract_name,
                 .quantity = temporal.quantity,
@@ -664,6 +783,78 @@ bool temporalFieldMatches(std::optional<FieldId> declared,
     return *declared == *used;
 }
 
+bool meshScopeRegionMatches(const CouplingRegionEndpointDeclaration& declared,
+                            const CouplingRegionEndpointDeclaration& used)
+{
+    return (declared.participant_name.empty() ||
+            declared.participant_name == used.participant_name) &&
+           (declared.region_name.empty() ||
+            declared.region_name == used.region_name) &&
+           (!declared.shared_region_name.has_value() ||
+            declared.shared_region_name == used.shared_region_name);
+}
+
+bool meshScopeLocationMatches(
+    const CouplingGeometryTerminalLocationDeclaration& declared,
+    const CouplingGeometryTerminalLocationDeclaration& used)
+{
+    return declared.region_kind == used.region_kind &&
+           declared.shared_region_name == used.shared_region_name &&
+           (declared.side == CouplingInterfaceSide::None ||
+            declared.side == used.side) &&
+           declared.coordinate_configuration == used.coordinate_configuration &&
+           declared.transform_from_configuration ==
+               used.transform_from_configuration &&
+           declared.transform_to_configuration == used.transform_to_configuration &&
+           (declared.quadrature_policy_key == 0u ||
+            declared.quadrature_policy_key == used.quadrature_policy_key);
+}
+
+bool meshTemporalScopeMatchesRequirement(
+    const CouplingFormTemporalProvenance& symbol,
+    const ResolvedTemporalRequirement& requirement)
+{
+    if (!requirement.mesh_motion_scope.has_value()) {
+        return true;
+    }
+    if (!symbol.mesh_motion_scope.has_value()) {
+        return false;
+    }
+
+    const auto& declared = *requirement.mesh_motion_scope;
+    const auto& used = *symbol.mesh_motion_scope;
+    if (const auto participant_name = meshScopeParticipant(declared);
+        participant_name.has_value()) {
+        if (const auto used_participant_name = meshScopeParticipant(used);
+            !used_participant_name.has_value() ||
+            *used_participant_name != *participant_name) {
+            return false;
+        }
+    }
+    if (declared.region.has_value()) {
+        if (!used.region.has_value() ||
+            !meshScopeRegionMatches(*declared.region, *used.region)) {
+            return false;
+        }
+    }
+    if (declared.location.has_value()) {
+        if (!used.location.has_value() ||
+            !meshScopeLocationMatches(*declared.location, *used.location)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool meshTemporalRoleMatchesRequirement(
+    const CouplingFormTemporalProvenance& symbol,
+    const ResolvedTemporalRequirement& requirement)
+{
+    return !requirement.mesh_motion_role.has_value() ||
+           (symbol.mesh_motion_role.has_value() &&
+            *symbol.mesh_motion_role == *requirement.mesh_motion_role);
+}
+
 bool temporalSymbolMatchesRequirement(
     const CouplingFormTemporalProvenance& symbol,
     const ResolvedTemporalRequirement& requirement)
@@ -685,7 +876,8 @@ bool temporalSymbolMatchesRequirement(
     case CouplingTemporalQuantity::MeshAcceleration:
     case CouplingTemporalQuantity::PreviousMeshVelocity:
     case CouplingTemporalQuantity::PredictedMeshVelocity:
-        return true;
+        return meshTemporalRoleMatchesRequirement(symbol, requirement) &&
+               meshTemporalScopeMatchesRequirement(symbol, requirement);
     }
     return false;
 }

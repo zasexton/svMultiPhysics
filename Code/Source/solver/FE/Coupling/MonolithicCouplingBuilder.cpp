@@ -634,6 +634,45 @@ void appendTemporalTerminalMetadata(
     });
 }
 
+bool isUnscopedBridgeMeshTemporalSymbol(
+    const CouplingFormTemporalProvenance& temporal,
+    const CouplingFormTerminalProvenanceDeclaration& declaration)
+{
+    return temporal.quantity == declaration.temporal_quantity &&
+           !temporal.field.has_value() &&
+           !temporal.mesh_motion_scope.has_value() &&
+           !temporal.mesh_motion_role.has_value();
+}
+
+void appendDeclaredMeshTemporalMetadata(
+    CouplingFormAnalysisMetadata& adapted,
+    const std::vector<CouplingFormTerminalProvenanceDeclaration>& declarations)
+{
+    for (const auto& declaration : declarations) {
+        if (declaration.kind != CouplingFormTerminalProvenanceKind::MeshTemporal) {
+            continue;
+        }
+
+        adapted.temporal_symbols.erase(
+            std::remove_if(adapted.temporal_symbols.begin(),
+                           adapted.temporal_symbols.end(),
+                           [&](const CouplingFormTemporalProvenance& temporal) {
+                               return isUnscopedBridgeMeshTemporalSymbol(
+                                   temporal,
+                                   declaration);
+                           }),
+            adapted.temporal_symbols.end());
+
+        adapted.temporal_symbols.push_back(CouplingFormTemporalProvenance{
+            .mesh_motion_scope = declaration.scope,
+            .mesh_motion_role = declaration.mesh_motion_role,
+            .quantity = declaration.temporal_quantity,
+            .derivative_order = declaration.derivative_order,
+            .history_index = declaration.history_index,
+        });
+    }
+}
+
 void appendGeometryTerminalMetadata(
     CouplingFormAnalysisMetadata& adapted,
     const analysis::FormTerminalMetadata& terminal)
@@ -1138,6 +1177,7 @@ CouplingFormAnalysisMetadata MonolithicCouplingBuilder::installResolvedFormContr
     validateBridgeMetadataAgainstContribution(contribution, adapted);
     validateInstalledGeometrySensitivityMetadata(contribution, adapted);
     adapted.declaration_terminal_provenance = contribution.terminal_provenance;
+    appendDeclaredMeshTemporalMetadata(adapted, contribution.terminal_provenance);
     adapted.geometry_terminals.insert(adapted.geometry_terminals.end(),
                                       contribution.geometry_terminals.begin(),
                                       contribution.geometry_terminals.end());

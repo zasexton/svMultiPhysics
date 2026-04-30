@@ -1,11 +1,14 @@
 #include "Coupling/CouplingGraph.h"
 #include "Coupling/CouplingTemporalRequirements.h"
+#include "Systems/FESystem.h"
 #include "Systems/SystemState.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 using namespace svmp::FE;
@@ -42,6 +45,96 @@ CouplingContractDeclaration temporalDeclaration()
         .quantity = CouplingTemporalQuantity::EffectiveTimeStep,
     });
     return declaration;
+}
+
+const systems::FESystem* temporalSystemToken(int token)
+{
+    return reinterpret_cast<const systems::FESystem*>(token);
+}
+
+CouplingContext meshTemporalContext()
+{
+    const auto* left_system = temporalSystemToken(1);
+    const auto* right_system = temporalSystemToken(2);
+    const CouplingRegionRef left_interface{
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 7,
+        .side = CouplingInterfaceSide::Minus,
+    };
+    const CouplingRegionRef right_interface{
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+        .region_name = "interface",
+        .kind = CouplingRegionKind::InterfaceFace,
+        .marker = 8,
+        .side = CouplingInterfaceSide::Plus,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addParticipant({
+        .participant_name = "left",
+        .system_name = "left_system",
+        .system = left_system,
+    });
+    builder.addParticipant({
+        .participant_name = "right",
+        .system_name = "right_system",
+        .system = right_system,
+    });
+    builder.addRegion(left_interface);
+    builder.addRegion(right_interface);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {left_interface, right_interface},
+    });
+    return builder.build();
+}
+
+CouplingGeometryTerminalScope participantMeshScope(std::string participant_name)
+{
+    return CouplingGeometryTerminalScope{
+        .participant_name = std::move(participant_name),
+    };
+}
+
+CouplingGeometryTerminalScope sharedInterfaceLocationScope()
+{
+    return CouplingGeometryTerminalScope{
+        .location = CouplingGeometryTerminalLocationDeclaration{
+            .region_kind = CouplingRegionKind::InterfaceFace,
+            .shared_region_name = "interface",
+        },
+    };
+}
+
+CouplingTemporalRequirement meshTemporalRequirement(
+    CouplingTemporalQuantity quantity,
+    systems::MeshMotionFieldRole role,
+    CouplingGeometryTerminalScope scope)
+{
+    return CouplingTemporalRequirement{
+        .quantity = quantity,
+        .mesh_motion_scope = std::move(scope),
+        .mesh_motion_role = role,
+    };
+}
+
+CouplingFormTemporalProvenance meshTemporalSymbol(
+    CouplingTemporalQuantity quantity,
+    systems::MeshMotionFieldRole role,
+    CouplingGeometryTerminalScope scope)
+{
+    return CouplingFormTemporalProvenance{
+        .mesh_motion_scope = std::move(scope),
+        .mesh_motion_role = role,
+        .quantity = quantity,
+    };
 }
 
 } // namespace
@@ -206,4 +299,100 @@ TEST(CouplingTemporalRequirements, CouplingGraphRequiresInstalledTemporalSymbols
             .history_index = 2,
         });
     EXPECT_TRUE(run_validation().ok());
+}
+
+TEST(CouplingTemporalRequirements, CouplingGraphValidatesMeshTemporalScopeAndRoles)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "mesh_temporal_contract";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.temporal_requirements.push_back(meshTemporalRequirement(
+        CouplingTemporalQuantity::MeshVelocity,
+        systems::MeshMotionFieldRole::Velocity,
+        participantMeshScope("left")));
+    declaration.temporal_requirements.push_back(meshTemporalRequirement(
+        CouplingTemporalQuantity::MeshAcceleration,
+        systems::MeshMotionFieldRole::Acceleration,
+        participantMeshScope("left")));
+    declaration.temporal_requirements.push_back(meshTemporalRequirement(
+        CouplingTemporalQuantity::PreviousMeshVelocity,
+        systems::MeshMotionFieldRole::PreviousVelocity,
+        participantMeshScope("left")));
+    declaration.temporal_requirements.push_back(meshTemporalRequirement(
+        CouplingTemporalQuantity::PredictedMeshVelocity,
+        systems::MeshMotionFieldRole::PredictedVelocity,
+        participantMeshScope("left")));
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "mesh_temporal_form";
+    metadata.temporal_symbols.push_back(meshTemporalSymbol(
+        CouplingTemporalQuantity::MeshVelocity,
+        systems::MeshMotionFieldRole::Velocity,
+        participantMeshScope("left")));
+    metadata.temporal_symbols.push_back(meshTemporalSymbol(
+        CouplingTemporalQuantity::MeshAcceleration,
+        systems::MeshMotionFieldRole::Acceleration,
+        participantMeshScope("left")));
+    metadata.temporal_symbols.push_back(meshTemporalSymbol(
+        CouplingTemporalQuantity::PreviousMeshVelocity,
+        systems::MeshMotionFieldRole::PreviousVelocity,
+        participantMeshScope("left")));
+    metadata.temporal_symbols.push_back(meshTemporalSymbol(
+        CouplingTemporalQuantity::PredictedMeshVelocity,
+        systems::MeshMotionFieldRole::PredictedVelocity,
+        participantMeshScope("left")));
+
+    const auto validate = [&](const CouplingFormAnalysisMetadata& installed_metadata) {
+        CouplingGraph graph;
+        const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+        const std::array<CouplingFormAnalysisMetadata, 1> installed{installed_metadata};
+        return graph.buildFinalizedGraph(
+            meshTemporalContext(),
+            std::span<const CouplingContractDeclaration>(declarations),
+            std::span<const CouplingFormAnalysisMetadata>(installed));
+    };
+
+    EXPECT_TRUE(validate(metadata).ok());
+
+    auto wrong_role = metadata;
+    wrong_role.temporal_symbols[0].mesh_motion_role =
+        systems::MeshMotionFieldRole::Acceleration;
+    const auto role_validation = validate(wrong_role);
+    EXPECT_FALSE(role_validation.ok());
+    EXPECT_NE(formatDiagnostics(role_validation).find("mesh_velocity"),
+              std::string::npos);
+
+    auto wrong_scope = metadata;
+    wrong_scope.temporal_symbols[1].mesh_motion_scope =
+        participantMeshScope("right");
+    const auto scope_validation = validate(wrong_scope);
+    EXPECT_FALSE(scope_validation.ok());
+    EXPECT_NE(formatDiagnostics(scope_validation).find("mesh_acceleration"),
+              std::string::npos);
+}
+
+TEST(CouplingTemporalRequirements, CouplingGraphRejectsAmbiguousSharedRegionMeshTemporalScope)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "mesh_temporal_contract";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.temporal_requirements.push_back(meshTemporalRequirement(
+        CouplingTemporalQuantity::MeshVelocity,
+        systems::MeshMotionFieldRole::Velocity,
+        sharedInterfaceLocationScope()));
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = graph.buildFinalizedGraph(
+        meshTemporalContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>{});
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("ambiguous"), std::string::npos);
+    EXPECT_NE(text.find("interface"), std::string::npos);
 }
