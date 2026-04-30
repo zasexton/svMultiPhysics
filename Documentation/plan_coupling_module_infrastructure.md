@@ -4873,7 +4873,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` verifies contribution name, origin, and
   owning-system provenance distinguish two contracts that install into the same
   operator tag.
-- [ ] `test_CouplingGraph.cpp` treats Systems-reported geometry-sensitivity
+- [x] `test_CouplingGraph.cpp` treats Systems-reported geometry-sensitivity
   dependencies as valid implicit dependencies for expected-block diagnostics.
 - [x] `test_CouplingGraph.cpp` detects undeclared installed blocks.
 - [x] `test_CouplingGraph.cpp` aggregates temporal requirements across

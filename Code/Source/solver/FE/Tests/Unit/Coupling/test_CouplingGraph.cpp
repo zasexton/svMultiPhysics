@@ -2449,6 +2449,44 @@ TEST(CouplingGraph, PreservesInstalledBlockDomainProvenance)
     EXPECT_EQ(domains[2], analysis::DomainKind::AuxiliaryCoupling);
 }
 
+TEST(CouplingGraph, AcceptsGeometrySensitivityDependencyEvidence)
+{
+    auto declaration = twoParticipantDependencyDeclaration();
+    declaration.expected_blocks[0].expect_matrix_block = false;
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "geometry_sensitivity_coupling";
+    metadata.origin = "CouplingGraphTest";
+    metadata.system_name = "system";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic installed dependency fixture"});
+    metadata.field_uses.push_back(CouplingFormFieldProvenance{
+        .residual_row = 2,
+        .field = 1,
+        .appears_as_geometry_sensitivity = true,
+    });
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        declaration,
+        installed_forms);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    metadata.field_uses[0].appears_as_geometry_sensitivity = false;
+    const std::vector<CouplingFormAnalysisMetadata> missing_forms{metadata};
+    const auto missing = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        declaration,
+        missing_forms);
+    EXPECT_FALSE(missing.ok());
+    EXPECT_NE(formatDiagnostics(missing).find(
+                  "declared implicit coupling dependency is not reported"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, DistinguishesExternalLaggedDependenciesFromImplicitEdges)
 {
     auto implicit = twoParticipantDependencyDeclaration();
