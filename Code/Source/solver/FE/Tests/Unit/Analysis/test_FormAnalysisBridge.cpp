@@ -183,6 +183,123 @@ TEST(FormAnalysisBridge, ReportsTemporalAndGeometryTerminalCoverage)
     EXPECT_EQ(geometry_gate->status, FormBridgeFeatureStatus::Partial);
 }
 
+TEST(FormAnalysisBridge, ReportsPublicCouplingTerminalVocabulary)
+{
+    const auto space = scalarH1();
+    const auto u = FormExpr::stateField(2, *space, "u");
+    const auto v = FormExpr::testFunction(2, *space, "v");
+    const auto coefficient =
+        FormExpr::coefficient("body_force",
+                              [](Real, Real, Real) { return Real(2.0); });
+    const auto boundary_functional =
+        FormExpr::boundaryIntegral(u, 7, "Q_wall");
+
+    const auto terminals_expr =
+        FormExpr::parameter("penalty") +
+        FormExpr::parameterRef(4) +
+        coefficient +
+        boundary_functional +
+        FormExpr::boundaryIntegralRef(3) +
+        FormExpr::auxiliaryState("raw_state") +
+        FormExpr::auxiliaryStateRef(5) +
+        FormExpr::auxiliaryInput("inlet_flow") +
+        FormExpr::auxiliaryInputRef(6) +
+        FormExpr::auxiliaryOutput("model/traction") +
+        FormExpr::auxiliaryOutputRef(7) +
+        FormExpr::materialStateOldRef(8) +
+        FormExpr::materialStateWorkRef(16) +
+        u.dt(2) +
+        FormExpr::previousSolution(1) +
+        FormExpr::time() +
+        FormExpr::timeStep() +
+        FormExpr::effectiveTimeStep() +
+        FormExpr::meshVelocity().component(0) +
+        FormExpr::currentNormal().component(0);
+    const auto residual = (terminals_expr * v).ds(7);
+
+    FormAnalysisBridgeOptions options;
+    options.contribution_name = "terminal_vocabulary";
+    options.origin = "unit_test";
+    const auto terminals =
+        collectFormTerminalMetadata(*residual.node(), options, "equations");
+
+    const auto* parameter =
+        findTerminal(terminals, FormTerminalKind::ParameterSymbol);
+    ASSERT_NE(parameter, nullptr);
+    EXPECT_EQ(parameter->symbol_name, "penalty");
+
+    const auto* parameter_ref =
+        findTerminal(terminals, FormTerminalKind::ParameterRef);
+    ASSERT_NE(parameter_ref, nullptr);
+    ASSERT_TRUE(parameter_ref->slot.has_value());
+    EXPECT_EQ(*parameter_ref->slot, 4u);
+
+    const auto* coefficient_terminal =
+        findTerminal(terminals, FormTerminalKind::Coefficient);
+    ASSERT_NE(coefficient_terminal, nullptr);
+    EXPECT_FALSE(coefficient_terminal->symbol_name.empty());
+
+    const auto* functional =
+        findTerminal(terminals, FormTerminalKind::BoundaryFunctionalSymbol);
+    ASSERT_NE(functional, nullptr);
+    EXPECT_EQ(functional->symbol_name, "Q_wall");
+    EXPECT_EQ(functional->boundary_marker, 7);
+
+    const auto* integral_ref =
+        findTerminal(terminals, FormTerminalKind::BoundaryIntegralRef);
+    ASSERT_NE(integral_ref, nullptr);
+    ASSERT_TRUE(integral_ref->slot.has_value());
+    EXPECT_EQ(*integral_ref->slot, 3u);
+
+    const auto* auxiliary_state =
+        findTerminal(terminals, FormTerminalKind::AuxiliaryStateSymbol);
+    ASSERT_NE(auxiliary_state, nullptr);
+    EXPECT_EQ(auxiliary_state->symbol_name, "raw_state");
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::AuxiliaryStateRef),
+              nullptr);
+
+    const auto* auxiliary_input =
+        findTerminal(terminals, FormTerminalKind::AuxiliaryInputSymbol);
+    ASSERT_NE(auxiliary_input, nullptr);
+    EXPECT_EQ(auxiliary_input->symbol_name, "inlet_flow");
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::AuxiliaryInputRef),
+              nullptr);
+
+    const auto* auxiliary_output =
+        findTerminal(terminals, FormTerminalKind::AuxiliaryOutputSymbol);
+    ASSERT_NE(auxiliary_output, nullptr);
+    EXPECT_EQ(auxiliary_output->symbol_name, "model/traction");
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::AuxiliaryOutputRef),
+              nullptr);
+
+    const auto* old_state =
+        findTerminal(terminals, FormTerminalKind::MaterialStateOldRef);
+    ASSERT_NE(old_state, nullptr);
+    ASSERT_TRUE(old_state->state_offset_bytes.has_value());
+    EXPECT_EQ(*old_state->state_offset_bytes, 8u);
+    const auto* work_state =
+        findTerminal(terminals, FormTerminalKind::MaterialStateWorkRef);
+    ASSERT_NE(work_state, nullptr);
+    ASSERT_TRUE(work_state->state_offset_bytes.has_value());
+    EXPECT_EQ(*work_state->state_offset_bytes, 16u);
+
+    const auto* derivative =
+        findTerminal(terminals, FormTerminalKind::TimeDerivative);
+    ASSERT_NE(derivative, nullptr);
+    EXPECT_EQ(derivative->derivative_order, 2);
+    const auto* previous =
+        findTerminal(terminals, FormTerminalKind::PreviousSolutionRef);
+    ASSERT_NE(previous, nullptr);
+    ASSERT_TRUE(previous->history_index.has_value());
+    EXPECT_EQ(*previous->history_index, 1);
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::Time), nullptr);
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::TimeStep), nullptr);
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::EffectiveTimeStep),
+              nullptr);
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::MeshVelocity), nullptr);
+    EXPECT_NE(findTerminal(terminals, FormTerminalKind::CurrentNormal), nullptr);
+}
+
 TEST(FormAnalysisBridge, PreservesGeometrySensitivityProvenanceOptions)
 {
     FormulationRecord formulation;

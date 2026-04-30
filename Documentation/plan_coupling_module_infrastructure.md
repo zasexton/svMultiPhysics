@@ -4533,7 +4533,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingFormBuilder.cpp` verifies dependency metadata consumption
   for one residual row and multiple state dependencies using the public
   Forms/Systems coupling-analysis metadata bridge.
-- [ ] `test_CouplingFormBuilder.cpp` verifies the public scanner/bridge reports
+- [x] `test_CouplingFormBuilder.cpp` verifies the public scanner/bridge reports
   Forms parameter refs/symbols, coefficients, boundary functionals, boundary
   integrals, raw auxiliary state, `AuxiliaryInput`, `AuxiliaryOutput`,
   material-state old/work refs, geometry terminals, and temporal terminals using
