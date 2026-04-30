@@ -3741,7 +3741,7 @@ Implementation checklist:
   with existing `FE/Analysis/CouplingGraphAnalyzer`,
   `ContributionDescriptor`, and `FormulationRecord` metadata rather than
   duplicating their installed-form analysis role.
-- [ ] Confirm expert monolithic coupling hooks use approved Systems extension
+- [x] Confirm expert monolithic coupling hooks use approved Systems extension
   points and do not call internal raw kernel registration methods directly.
 
 Unit-test verification checklist:
@@ -3755,7 +3755,7 @@ Unit-test verification checklist:
 - [ ] Add a dependency-boundary test or build assertion that `FE/Coupling`
   uses only public Forms/Systems headers for Forms residual installation and
   analysis.
-- [ ] Add a dependency-boundary test or build assertion that expert hook test
+- [x] Add a dependency-boundary test or build assertion that expert hook test
   fixtures cannot call internal `FESystem::add*Kernel` registration paths.
 - [ ] Add a bridge-readiness test that fails when installed-form validators are
   enabled without a public bridge or explicit synthetic metadata fixture.

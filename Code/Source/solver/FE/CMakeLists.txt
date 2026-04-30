@@ -2533,6 +2533,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Coupling/test_CouplingGeometryRequirements.cpp
                 Tests/Unit/Coupling/test_CouplingGraph.cpp
                 Tests/Unit/Coupling/test_CouplingHeaders.cpp
+                Tests/Unit/Coupling/test_CouplingSourceBoundaries.cpp
                 Tests/Unit/Coupling/test_CouplingTemporalRequirements.cpp
                 Tests/Unit/Coupling/test_CouplingContext.cpp
                 Tests/Unit/Coupling/test_CouplingRegistry.cpp
@@ -2548,6 +2549,10 @@ if(FE_BUILD_TESTS)
                 PRIVATE
                     svfe
                     ${GTEST_LIBRARIES}
+            )
+            target_compile_definitions(test_fe_coupling
+                PRIVATE
+                    SVMP_FE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
             )
             add_test(NAME FE_Coupling_Tests COMMAND test_fe_coupling)
         endif()
