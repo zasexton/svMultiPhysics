@@ -4434,7 +4434,7 @@ Implementation checklist:
   history data.
 - [x] Validate declared temporal requirements against the selected
   problem-level temporal policy before assembly.
-- [ ] Validate that symbolic temporal terms used by Forms residuals are
+- [x] Validate that symbolic temporal terms used by Forms residuals are
   declared by the contract.
 - [ ] Validate that geometry terminals used by Forms residuals are declared by
   the contract and supported by the selected geometry transaction,

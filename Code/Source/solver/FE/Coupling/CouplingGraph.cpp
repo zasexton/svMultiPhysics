@@ -166,6 +166,16 @@ struct ResolvedExpectedBlock {
     bool expect_matrix_block{true};
 };
 
+struct ResolvedTemporalRequirement {
+    std::string contract_name;
+    CouplingTemporalQuantity quantity{CouplingTemporalQuantity::Time};
+    std::optional<FieldId> field;
+    std::optional<CouplingGeometryTerminalScope> mesh_motion_scope;
+    std::optional<systems::MeshMotionFieldRole> mesh_motion_role;
+    int derivative_order{0};
+    int history_index{0};
+};
+
 std::vector<ResolvedDeclaredDependency> resolveDeclaredDependencies(
     const CouplingContext& context,
     std::span<const CouplingContractDeclaration> declarations,
@@ -187,6 +197,48 @@ std::vector<ResolvedDeclaredDependency> resolveDeclaredDependencies(
                 .dependency = *col,
                 .mode = dependency.mode,
             });
+        }
+    }
+    return resolved;
+}
+
+std::vector<ResolvedTemporalRequirement> resolveDeclaredTemporalRequirements(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    CouplingValidationResult& result)
+{
+    std::vector<ResolvedTemporalRequirement> resolved;
+    for (const auto& declaration : declarations) {
+        for (const auto& temporal : declaration.temporal_requirements) {
+            ResolvedTemporalRequirement requirement{
+                .contract_name = declaration.contract_name,
+                .quantity = temporal.quantity,
+                .mesh_motion_scope = temporal.mesh_motion_scope,
+                .mesh_motion_role = temporal.mesh_motion_role,
+                .derivative_order = temporal.derivative_order,
+                .history_index = temporal.history_index,
+            };
+
+            if (temporal.field.has_value()) {
+                if (context.hasField(temporal.field->participant_name,
+                                     temporal.field->field_name)) {
+                    requirement.field =
+                        context.field(temporal.field->participant_name,
+                                      temporal.field->field_name).field_id;
+                } else if (isRequired(temporal.field->requirement) &&
+                           isRequired(temporal.requirement)) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .contract_name = declaration.contract_name,
+                        .participant_name = temporal.field->participant_name,
+                        .field_name = temporal.field->field_name,
+                        .message = "temporal requirement field is missing from the context",
+                    });
+                    continue;
+                }
+            }
+
+            resolved.push_back(std::move(requirement));
         }
     }
     return resolved;
@@ -315,6 +367,89 @@ bool hasInstalledNonzeroEvidence(
         }
     }
     return false;
+}
+
+std::string temporalSymbolLabel(const CouplingFormTemporalProvenance& temporal)
+{
+    std::ostringstream os;
+    os << toString(temporal.quantity);
+    if (temporal.field.has_value()) {
+        os << " field=" << *temporal.field;
+    }
+    if (temporal.quantity == CouplingTemporalQuantity::FieldDerivative) {
+        os << " order=" << temporal.derivative_order;
+    }
+    if (temporal.quantity == CouplingTemporalQuantity::FieldHistoryValue) {
+        os << " history=" << temporal.history_index;
+    }
+    return os.str();
+}
+
+bool temporalFieldMatches(std::optional<FieldId> declared,
+                          std::optional<FieldId> used) noexcept
+{
+    if (!declared.has_value() || !used.has_value()) {
+        return true;
+    }
+    return *declared == *used;
+}
+
+bool temporalSymbolMatchesRequirement(
+    const CouplingFormTemporalProvenance& symbol,
+    const ResolvedTemporalRequirement& requirement)
+{
+    if (symbol.quantity != requirement.quantity ||
+        !temporalFieldMatches(requirement.field, symbol.field)) {
+        return false;
+    }
+
+    switch (symbol.quantity) {
+    case CouplingTemporalQuantity::FieldDerivative:
+        return symbol.derivative_order == requirement.derivative_order;
+    case CouplingTemporalQuantity::FieldHistoryValue:
+        return symbol.history_index == requirement.history_index;
+    case CouplingTemporalQuantity::Time:
+    case CouplingTemporalQuantity::TimeStep:
+    case CouplingTemporalQuantity::EffectiveTimeStep:
+    case CouplingTemporalQuantity::MeshVelocity:
+    case CouplingTemporalQuantity::MeshAcceleration:
+    case CouplingTemporalQuantity::PreviousMeshVelocity:
+    case CouplingTemporalQuantity::PredictedMeshVelocity:
+        return true;
+    }
+    return false;
+}
+
+bool hasDeclaredTemporalSymbol(
+    const std::vector<ResolvedTemporalRequirement>& temporal_requirements,
+    const CouplingFormTemporalProvenance& symbol)
+{
+    return std::any_of(
+        temporal_requirements.begin(),
+        temporal_requirements.end(),
+        [&](const ResolvedTemporalRequirement& requirement) {
+            return temporalSymbolMatchesRequirement(symbol, requirement);
+        });
+}
+
+void validateTemporalSymbolEvidence(
+    const std::vector<ResolvedTemporalRequirement>& temporal_requirements,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    CouplingValidationResult& result)
+{
+    for (const auto& form : installed_forms) {
+        for (const auto& symbol : form.temporal_symbols) {
+            if (hasDeclaredTemporalSymbol(temporal_requirements, symbol)) {
+                continue;
+            }
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .message = "installed form temporal symbol has no declared temporal requirement: " +
+                           form.contribution_name + " " +
+                           temporalSymbolLabel(symbol),
+            });
+        }
+    }
 }
 
 bool installedFormFeatureAvailable(const CouplingFormAnalysisMetadata& form,
@@ -751,7 +886,13 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
 
     const auto declared_dependencies =
         resolveDeclaredDependencies(context, declarations_, result);
+    const auto declared_temporal_requirements =
+        resolveDeclaredTemporalRequirements(context, declarations_, result);
     const auto expected_blocks = resolveExpectedBlocks(context, declarations_, result);
+    validateTemporalSymbolEvidence(
+        declared_temporal_requirements,
+        installed_forms,
+        result);
     validateFinalizedDependencyEvidence(
         declared_dependencies,
         expected_blocks,

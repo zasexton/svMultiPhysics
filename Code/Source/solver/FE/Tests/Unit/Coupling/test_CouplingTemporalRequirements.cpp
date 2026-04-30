@@ -156,3 +156,54 @@ TEST(CouplingTemporalRequirements, CouplingGraphValidatesAggregatedDeclarations)
     sufficient.provides_effective_time_step = true;
     EXPECT_TRUE(graph.validateTemporalRequirements(sufficient).ok());
 }
+
+TEST(CouplingTemporalRequirements, CouplingGraphRequiresInstalledTemporalSymbolsDeclared)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "temporal_form";
+    metadata.temporal_symbols.push_back(
+        CouplingFormTemporalProvenance{
+            .quantity = CouplingTemporalQuantity::TimeStep,
+        });
+    metadata.temporal_symbols.push_back(
+        CouplingFormTemporalProvenance{
+            .quantity = CouplingTemporalQuantity::FieldHistoryValue,
+            .history_index = 2,
+        });
+
+    const auto run_validation = [&]() {
+        CouplingGraph graph;
+        const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+        const std::array<CouplingFormAnalysisMetadata, 1> installed{metadata};
+        return graph.buildFinalizedGraph(
+            CouplingContext{},
+            std::span<const CouplingContractDeclaration>(declarations),
+            std::span<const CouplingFormAnalysisMetadata>(installed));
+    };
+
+    const auto missing = run_validation();
+    EXPECT_FALSE(missing.ok());
+    const auto missing_text = formatDiagnostics(missing);
+    EXPECT_NE(missing_text.find("time_step"), std::string::npos);
+    EXPECT_NE(missing_text.find("field_history_value"), std::string::npos);
+
+    declaration.temporal_requirements.push_back(
+        CouplingTemporalRequirement{
+            .quantity = CouplingTemporalQuantity::TimeStep,
+        });
+    const auto partially_declared = run_validation();
+    EXPECT_FALSE(partially_declared.ok());
+    EXPECT_NE(formatDiagnostics(partially_declared).find("field_history_value"),
+              std::string::npos);
+
+    declaration.temporal_requirements.push_back(
+        CouplingTemporalRequirement{
+            .quantity = CouplingTemporalQuantity::FieldHistoryValue,
+            .history_index = 2,
+        });
+    EXPECT_TRUE(run_validation().ok());
+}
