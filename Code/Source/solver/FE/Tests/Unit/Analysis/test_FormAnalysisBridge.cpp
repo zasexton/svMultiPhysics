@@ -98,6 +98,39 @@ TEST(FormAnalysisBridge, NormalizesBoundaryFunctionalAndBoundaryIntegralRef)
     EXPECT_EQ(nested_state->boundary_marker, 7);
 }
 
+TEST(FormAnalysisBridge, NormalizesTerminalRecordIdentityScopeAndValue)
+{
+    const auto space = scalarH1();
+    const auto u = FormExpr::stateField(0, *space, "u");
+    const auto v = FormExpr::testFunction(0, *space, "v");
+    const auto residual = (u * v).ds(7);
+
+    FormAnalysisBridgeOptions options;
+    options.contribution_name = "coupled_boundary";
+    options.origin = "unit_test";
+    options.system_name = "wall_system";
+    options.owner_participant_name = "wall_participant";
+
+    const auto terminals =
+        collectFormTerminalMetadata(*residual.node(), options, "equations");
+
+    const auto* nested_state = findTerminal(terminals, FormTerminalKind::StateField);
+    ASSERT_NE(nested_state, nullptr);
+    EXPECT_EQ(nested_state->provider, "Forms");
+    EXPECT_EQ(nested_state->value_type, FieldType::Scalar);
+    EXPECT_EQ(nested_state->value_dimension, 1);
+    EXPECT_EQ(nested_state->owner_system_name, "wall_system");
+    EXPECT_EQ(nested_state->owner_participant_name, "wall_participant");
+    EXPECT_EQ(nested_state->contribution_name, "coupled_boundary");
+    EXPECT_EQ(nested_state->origin, "unit_test");
+    EXPECT_EQ(nested_state->operator_tag, "equations");
+    EXPECT_EQ(nested_state->domain, DomainKind::Boundary);
+    EXPECT_EQ(nested_state->boundary_marker, 7);
+    ASSERT_TRUE(nested_state->graph_variable.has_value());
+    EXPECT_EQ(nested_state->graph_variable->kind, VariableKind::FieldComponent);
+    EXPECT_EQ(nested_state->graph_variable->field_id, FieldId{0});
+}
+
 TEST(FormAnalysisBridge, ReportsTemporalAndGeometryTerminalCoverage)
 {
     const auto space = scalarH1();

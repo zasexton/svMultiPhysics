@@ -117,6 +117,10 @@ struct FormTerminalMetadata {
     FormTerminalKind kind{FormTerminalKind::StateField};
     std::size_t terminal_sequence{0u};
     std::string provider{"Forms"};
+    FieldType value_type{FieldType::Scalar};
+    int value_dimension{1};
+    std::string owner_system_name;
+    std::string owner_participant_name;
     std::string contribution_name;
     std::string origin;
     std::string operator_tag;
@@ -156,6 +160,7 @@ struct FormAnalysisBridgeOptions {
     std::string contribution_name;
     std::string origin;
     std::string system_name;
+    std::string owner_participant_name;
     forms::GeometrySensitivityOptions geometry_sensitivity{};
 };
 

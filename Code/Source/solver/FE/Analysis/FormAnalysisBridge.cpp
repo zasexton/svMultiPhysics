@@ -221,6 +221,12 @@ void appendTerminal(const forms::FormExprNode& node,
     FormTerminalMetadata terminal;
     terminal.kind = *kind;
     terminal.terminal_sequence = terminals.size();
+    if (const auto* signature = node.spaceSignature()) {
+        terminal.value_type = signature->field_type;
+        terminal.value_dimension = signature->value_dimension;
+    }
+    terminal.owner_system_name = options.system_name;
+    terminal.owner_participant_name = options.owner_participant_name;
     terminal.contribution_name = options.contribution_name;
     terminal.origin = options.origin.empty() ? std::string{"Forms"} : options.origin;
     terminal.operator_tag = operator_tag;

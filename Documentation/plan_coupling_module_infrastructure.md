@@ -3725,7 +3725,7 @@ Implementation checklist:
   including source-level field/test dependencies, non-field terminals, temporal
   terminals, geometry terminals, geometry-sensitivity provenance, contribution
   identity, owning-system identity, and installed block/domain evidence.
-- [ ] Define the public bridge's normalized terminal record shape before coupling
+- [x] Define the public bridge's normalized terminal record shape before coupling
   graph integration: terminal kind, Forms-native provider identity, optional
   `analysis::VariableKey` graph identity, value type, owner scope, integration
   location, and source contribution provenance must be explicit fields rather
