@@ -91,6 +91,12 @@ bool additionalFieldSelected(
     return field.requirement == CouplingRequirement::Required || field.enabled;
 }
 
+struct AdditionalFieldTargetResolution {
+    std::string participant_name;
+    std::string system_name;
+    const systems::FESystem* system{nullptr};
+};
+
 std::optional<CouplingVariableKind> graphVariableKindForNonFieldRequirement(
     CouplingNonFieldDependencyRequirementKind kind) noexcept
 {
@@ -286,10 +292,84 @@ void populateDeclarationSnapshot(
     }
 }
 
+std::optional<AdditionalFieldTargetResolution> participantAdditionalFieldTarget(
+    const CouplingContext& context,
+    const std::string& participant_name)
+{
+    if (participant_name.empty() || !context.hasParticipant(participant_name)) {
+        return std::nullopt;
+    }
+    const auto participant = context.participant(participant_name);
+    if (participant.system == nullptr) {
+        return std::nullopt;
+    }
+    return AdditionalFieldTargetResolution{
+        .participant_name = participant.participant_name,
+        .system_name = participant.system_name,
+        .system = participant.system,
+    };
+}
+
+std::optional<AdditionalFieldTargetResolution> sharedRegionAdditionalFieldTarget(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    if (!field.shared_region_name.has_value() ||
+        !context.hasSharedRegion(*field.shared_region_name)) {
+        return std::nullopt;
+    }
+    const auto group = context.sharedRegionGroup(*field.shared_region_name);
+    if (group.participant_regions.empty()) {
+        return std::nullopt;
+    }
+
+    const auto& first = group.participant_regions.front();
+    if (first.system == nullptr) {
+        return std::nullopt;
+    }
+    const auto same_system = std::all_of(
+        group.participant_regions.begin(),
+        group.participant_regions.end(),
+        [&](const CouplingRegionRef& region) {
+            return region.system == first.system;
+        });
+    if (!same_system) {
+        return std::nullopt;
+    }
+    return AdditionalFieldTargetResolution{
+        .participant_name = first.participant_name,
+        .system_name = first.system_name,
+        .system = first.system,
+    };
+}
+
+std::optional<AdditionalFieldTargetResolution> additionalFieldTarget(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    if (!field.system_participant_name.empty()) {
+        return participantAdditionalFieldTarget(context,
+                                                field.system_participant_name);
+    }
+    if (field.field_namespace == CouplingAdditionalFieldNamespace::Participant) {
+        return participantAdditionalFieldTarget(context, field.namespace_name);
+    }
+    if (field.field_namespace == CouplingAdditionalFieldNamespace::Contract &&
+        field.shared_region_name.has_value()) {
+        return sharedRegionAdditionalFieldTarget(context, field);
+    }
+    return std::nullopt;
+}
+
 std::string additionalFieldRegistrationTargetKey(
     const CouplingContext& context,
     const CouplingAdditionalFieldDeclaration& field)
 {
+    const auto target = additionalFieldTarget(context, field);
+    if (target.has_value()) {
+        return target->system_name;
+    }
+
     std::string participant_name = field.system_participant_name;
     if (participant_name.empty() &&
         field.field_namespace == CouplingAdditionalFieldNamespace::Participant) {
@@ -302,6 +382,43 @@ std::string additionalFieldRegistrationTargetKey(
         }
     }
     return participant_name;
+}
+
+void validateContractOwnedAdditionalField(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingAdditionalFieldDeclaration& field,
+    CouplingValidationResult& result)
+{
+    if (field.field_namespace != CouplingAdditionalFieldNamespace::Contract ||
+        !additionalFieldSelected(field)) {
+        return;
+    }
+    if (field.namespace_name != declaration.contract_name) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .field_name = field.field_name,
+            .message = "contract-owned additional field namespace must match the contract instance name",
+        });
+    }
+    if (context.hasParticipant(field.namespace_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = field.namespace_name,
+            .field_name = field.field_name,
+            .message = "contract-owned additional field namespace must not be a participant",
+        });
+    }
+    if (!additionalFieldTarget(context, field).has_value()) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .field_name = field.field_name,
+            .message = "contract-owned additional field does not resolve to a target system",
+        });
+    }
 }
 
 std::string additionalFieldGraphKey(
@@ -357,6 +474,10 @@ void validateAdditionalFieldGraphDeclarations(
             if (!additionalFieldSelected(field)) {
                 continue;
             }
+            validateContractOwnedAdditionalField(context,
+                                                 declaration,
+                                                 field,
+                                                 result);
             if (additionalFieldCollidesWithBaseField(context, field)) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,

@@ -988,6 +988,48 @@ TEST(CouplingGraph, RejectsDuplicateAdditionalFieldsAcrossContractsAndBaseCollis
     EXPECT_NE(text.find("collides with a base field"), std::string::npos);
 }
 
+TEST(CouplingGraph, ValidatesContractOwnedAdditionalFieldNamespaceAndTarget)
+{
+    auto valid = graphDeclaration();
+    valid.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Contract,
+        "generic_instance",
+        "lambda",
+        "left"));
+    EXPECT_TRUE(buildGraph(graphContext(), valid).ok());
+
+    auto wrong_namespace = graphDeclaration();
+    wrong_namespace.contract_name = "wrong_namespace_instance";
+    wrong_namespace.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Contract,
+        "generic_instance",
+        "lambda",
+        "left"));
+
+    auto missing_target = graphDeclaration();
+    missing_target.contract_name = "missing_target_instance";
+    missing_target.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Contract,
+        "missing_target_instance",
+        "lambda"));
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 2> declarations{
+        wrong_namespace,
+        missing_target,
+    };
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("namespace must match the contract instance name"),
+              std::string::npos);
+    EXPECT_NE(text.find("does not resolve to a target system"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsRegionKindMismatches)
 {
     auto declaration = graphDeclaration();

@@ -4672,7 +4672,7 @@ Implementation checklist:
 - [x] Validate that additional field declarations across all contracts are
   unique by namespace kind, namespace name, field name, registration target
   system, scope, and attachment, and do not collide with base physics fields.
-- [ ] Validate that contract-owned additional fields use a contract instance
+- [x] Validate that contract-owned additional fields use a contract instance
   namespace, are not treated as participants, and resolve to a concrete target
   `FESystem` before registration.
 - [ ] Validate optional additional fields are either selected and fully
@@ -4808,7 +4808,7 @@ Unit-test verification checklist:
   participant-local regions, and shared regions.
 - [x] `test_CouplingGraph.cpp` rejects duplicate additional field declarations
   across contracts.
-- [ ] `test_CouplingGraph.cpp` verifies participant-scoped and contract-owned
+- [x] `test_CouplingGraph.cpp` verifies participant-scoped and contract-owned
   additional field namespaces do not collide accidentally and that
   contract-owned fields resolve a concrete target `FESystem`.
 - [ ] `test_CouplingGraph.cpp` verifies skipped optional additional fields leave
