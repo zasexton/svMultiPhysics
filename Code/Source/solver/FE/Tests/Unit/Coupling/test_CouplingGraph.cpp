@@ -287,6 +287,97 @@ TEST(CouplingGraph, AcceptsResolvableRequiredContextReferences)
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
+TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)
+{
+    auto declaration = graphDeclaration();
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+        .participant_name = "left",
+        .name = "inlet_signal",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+        .participant_name = "left",
+        .name = "density",
+    });
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+    });
+    declaration.expected_blocks.push_back(CouplingBlockExpectation{
+        .residual_row = declaration.dependencies.back().residual_row,
+        .dependency = declaration.dependencies.back().dependency,
+    });
+    declaration.temporal_requirements.push_back({
+        .quantity = CouplingTemporalQuantity::TimeStep,
+    });
+    declaration.geometry_requirements.push_back({
+        .quantity = CouplingGeometryTerminalQuantity::Coordinate,
+    });
+    declaration.partitioned_exchange_declarations.push_back(
+        CouplingExchangeDeclaration{
+            .producer_port = {
+                .contract_instance_name = "generic_instance",
+                .port_name = "left_out",
+            },
+            .consumer_port = {
+                .contract_instance_name = "generic_instance",
+                .port_name = "left_in",
+            },
+            .value = CouplingValueDescriptor{
+                .rank = CouplingValueRank::Scalar,
+                .components = 1,
+            },
+            .producer = graphFieldEndpoint("left"),
+            .consumer = graphFieldEndpoint("left"),
+            .transfer = CouplingTransferDeclaration{
+                .kind = CouplingTransferKind::Identity,
+            },
+        });
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    EXPECT_EQ(snapshot.participants.size(), 1u);
+    EXPECT_EQ(snapshot.fields.size(), 1u);
+    EXPECT_EQ(snapshot.regions.size(), 1u);
+    EXPECT_EQ(snapshot.shared_regions.size(), 1u);
+    ASSERT_EQ(snapshot.contract_types.size(), 1u);
+    EXPECT_EQ(snapshot.contract_types[0].contract_type, "generic");
+    ASSERT_EQ(snapshot.contract_instances.size(), 1u);
+    EXPECT_EQ(snapshot.contract_instances[0].contract_name,
+              "generic_instance");
+    ASSERT_EQ(snapshot.non_field_variables.size(), 1u);
+    ASSERT_TRUE(snapshot.non_field_variables[0].variable.has_value());
+    EXPECT_EQ(snapshot.non_field_variables[0].variable->kind,
+              analysis::VariableKind::AuxiliaryInput);
+    ASSERT_EQ(snapshot.provider_metadata_requirements.size(), 1u);
+    EXPECT_EQ(snapshot.provider_metadata_requirements[0].requirement.kind,
+              CouplingNonFieldDependencyRequirementKind::Parameter);
+    EXPECT_EQ(snapshot.temporal_requirements.size(), 1u);
+    EXPECT_EQ(snapshot.geometry_requirements.size(), 1u);
+    EXPECT_EQ(snapshot.partitioned_exchange_declarations.size(), 1u);
+    ASSERT_EQ(snapshot.dependency_expectations.size(), 1u);
+    EXPECT_TRUE(snapshot.dependency_expectations[0].residual_row.has_value());
+    EXPECT_TRUE(snapshot.dependency_expectations[0].dependency.has_value());
+    ASSERT_EQ(snapshot.expected_blocks.size(), 1u);
+    EXPECT_TRUE(snapshot.expected_blocks[0].residual_row.has_value());
+    EXPECT_TRUE(snapshot.expected_blocks[0].dependency.has_value());
+}
+
 TEST(CouplingGraph, RejectsMissingRequiredContextReferences)
 {
     auto declaration = graphDeclaration();
@@ -562,6 +653,34 @@ TEST(CouplingGraph, AcceptsGeneratedPartitionedPlanMatchingDeclarations)
 
     const auto validation = buildFinalizedGraph(context, declaration, plan);
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, RecordsResolvedPartitionedExchangeNodes)
+{
+    const auto context = twoParticipantGraphContext();
+    const auto declaration = partitionedGraphDeclaration();
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    CouplingGraph graph;
+    const std::array<CouplingFormAnalysisMetadata, 0> installed_forms{};
+    const auto validation = graph.buildFinalizedGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms),
+        plan);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    ASSERT_EQ(snapshot.resolved_partitioned_exchanges.size(),
+              plan.exchanges.size());
+    EXPECT_EQ(snapshot.resolved_partitioned_exchanges[0]
+                  .exchange.producer_port.port_name,
+              "left_out");
 }
 
 TEST(CouplingGraph, RejectsGeneratedPartitionedPlanMissingDeclaredExchange)

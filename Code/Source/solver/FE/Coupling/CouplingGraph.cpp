@@ -82,6 +82,172 @@ bool isRequired(CouplingRequirement requirement) noexcept
     return requirement == CouplingRequirement::Required;
 }
 
+std::optional<CouplingVariableKind> graphVariableKindForNonFieldRequirement(
+    CouplingNonFieldDependencyRequirementKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingNonFieldDependencyRequirementKind::BoundaryFunctional:
+        return CouplingVariableKind::BoundaryFunctional;
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryState:
+        return CouplingVariableKind::AuxiliaryState;
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryInput:
+        return CouplingVariableKind::AuxiliaryInput;
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput:
+        return CouplingVariableKind::AuxiliaryOutput;
+    case CouplingNonFieldDependencyRequirementKind::Parameter:
+    case CouplingNonFieldDependencyRequirementKind::Coefficient:
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateOld:
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateWork:
+    case CouplingNonFieldDependencyRequirementKind::BoundaryIntegral:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+std::optional<analysis::VariableKey> resolveNonFieldRequirementVariable(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement)
+{
+    const auto kind = graphVariableKindForNonFieldRequirement(requirement.kind);
+    if (!kind.has_value()) {
+        return std::nullopt;
+    }
+    return resolveCouplingVariableUse(
+        context,
+        CouplingVariableUse{
+            .kind = *kind,
+            .participant_name = requirement.participant_name,
+            .name = requirement.name,
+            .requirement = requirement.requirement,
+        });
+}
+
+bool isNonFieldVariableRequirement(
+    const CouplingNonFieldDependencyRequirement& requirement) noexcept
+{
+    return graphVariableKindForNonFieldRequirement(requirement.kind).has_value();
+}
+
+bool hasContractTypeNode(const CouplingGraphSnapshot& snapshot,
+                         const std::string& contract_type)
+{
+    return std::any_of(
+        snapshot.contract_types.begin(),
+        snapshot.contract_types.end(),
+        [&](const CouplingGraphContractTypeNode& node) {
+            return node.contract_type == contract_type;
+        });
+}
+
+void populateDeclarationSnapshot(
+    CouplingGraphSnapshot& snapshot,
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations)
+{
+    snapshot = CouplingGraphSnapshot{};
+
+    for (const auto& participant : context.participants()) {
+        snapshot.participants.push_back({.participant = participant});
+    }
+    for (const auto& field : context.fields()) {
+        snapshot.fields.push_back({.field = field});
+    }
+    for (const auto& region : context.regions()) {
+        snapshot.regions.push_back({.region = region});
+    }
+    for (const auto& shared_region : context.sharedRegions()) {
+        snapshot.shared_regions.push_back({.shared_region = shared_region});
+    }
+
+    for (const auto& declaration : declarations) {
+        if (!declaration.contract_type.empty() &&
+            !hasContractTypeNode(snapshot, declaration.contract_type)) {
+            snapshot.contract_types.push_back(
+                {.contract_type = declaration.contract_type});
+        }
+        snapshot.contract_instances.push_back({
+            .contract_type = declaration.contract_type,
+            .contract_name = declaration.contract_name,
+        });
+
+        for (const auto& additional_field : declaration.additional_fields) {
+            snapshot.additional_fields.push_back({
+                .contract_name = declaration.contract_name,
+                .declaration = additional_field,
+            });
+        }
+        for (const auto& requirement : declaration.non_field_dependencies) {
+            if (isNonFieldVariableRequirement(requirement)) {
+                snapshot.non_field_variables.push_back({
+                    .contract_name = declaration.contract_name,
+                    .requirement = requirement,
+                    .variable = resolveNonFieldRequirementVariable(
+                        context,
+                        requirement),
+                });
+            } else {
+                snapshot.provider_metadata_requirements.push_back({
+                    .contract_name = declaration.contract_name,
+                    .requirement = requirement,
+                });
+            }
+        }
+        for (const auto& temporal : declaration.temporal_requirements) {
+            snapshot.temporal_requirements.push_back({
+                .contract_name = declaration.contract_name,
+                .requirement = temporal,
+            });
+        }
+        for (const auto& geometry : declaration.geometry_requirements) {
+            snapshot.geometry_requirements.push_back({
+                .contract_name = declaration.contract_name,
+                .requirement = geometry,
+            });
+        }
+        for (const auto& exchange :
+             declaration.partitioned_exchange_declarations) {
+            snapshot.partitioned_exchange_declarations.push_back({
+                .contract_name = declaration.contract_name,
+                .declaration = exchange,
+            });
+        }
+        for (const auto& dependency : declaration.dependencies) {
+            snapshot.dependency_expectations.push_back({
+                .contract_name = declaration.contract_name,
+                .declaration = dependency,
+                .residual_row = resolveCouplingVariableUse(
+                    context,
+                    dependency.residual_row),
+                .dependency = resolveCouplingVariableUse(
+                    context,
+                    dependency.dependency),
+            });
+        }
+        for (const auto& expected_block : declaration.expected_blocks) {
+            snapshot.expected_blocks.push_back({
+                .contract_name = declaration.contract_name,
+                .declaration = expected_block,
+                .residual_row = resolveCouplingVariableUse(
+                    context,
+                    expected_block.residual_row),
+                .dependency = resolveCouplingVariableUse(
+                    context,
+                    expected_block.dependency),
+            });
+        }
+    }
+}
+
+void appendResolvedPartitionedExchangeNodes(
+    CouplingGraphSnapshot& snapshot,
+    const PartitionedCouplingPlan& partitioned_plan)
+{
+    snapshot.resolved_partitioned_exchanges.clear();
+    for (const auto& exchange : partitioned_plan.exchanges) {
+        snapshot.resolved_partitioned_exchanges.push_back({.exchange = exchange});
+    }
+}
+
 std::string variableLabel(const analysis::VariableKey& variable)
 {
     std::ostringstream os;
@@ -1461,6 +1627,11 @@ CouplingValidationResult CouplingGraph::buildDeclarationGraph(
 {
     declarations_.assign(declarations.begin(), declarations.end());
     installed_forms_.clear();
+    populateDeclarationSnapshot(
+        snapshot_,
+        context,
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()));
 
     CouplingValidationResult result;
     for (std::size_t i = 0; i < declarations_.size(); ++i) {
@@ -1526,6 +1697,7 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         std::span<const CouplingExchangeDeclaration>{},
         partitioned_plan,
         result);
+    appendResolvedPartitionedExchangeNodes(snapshot_, partitioned_plan);
     return result;
 }
 
@@ -1544,6 +1716,7 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         exchange_templates,
         partitioned_plan,
         result);
+    appendResolvedPartitionedExchangeNodes(snapshot_, partitioned_plan);
     return result;
 }
 
@@ -1586,6 +1759,11 @@ const std::vector<CouplingFormAnalysisMetadata>&
 CouplingGraph::installedFormMetadata() const noexcept
 {
     return installed_forms_;
+}
+
+const CouplingGraphSnapshot& CouplingGraph::snapshot() const noexcept
+{
+    return snapshot_;
 }
 
 } // namespace coupling

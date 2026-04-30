@@ -4636,7 +4636,7 @@ Unit-test verification checklist:
 
 Implementation checklist:
 
-- [ ] Implement `CouplingGraph` nodes for participants, fields,
+- [x] Implement `CouplingGraph` nodes for participants, fields,
   participant-local regions, non-field variables adapted to
   `analysis::VariableKey`, non-field data/provenance requirements that remain
   provider metadata, shared regions, contract types, contract instances,
