@@ -61,6 +61,19 @@ FieldDescriptor hDivField(FieldId id, int order, std::string name)
     return fd;
 }
 
+FieldDescriptor l2Field(FieldId id, int order, std::string name)
+{
+    FieldDescriptor fd;
+    fd.field_id = id;
+    fd.name = std::move(name);
+    fd.field_type = FieldType::Scalar;
+    fd.value_dimension = 1;
+    fd.polynomial_order = order;
+    fd.space_family = SpaceFamily::L2;
+    fd.trace_capabilities = TraceCapabilityFlags::None;
+    return fd;
+}
+
 OperatorBlockId scalarBlock(std::string tag,
                             DomainKind domain = DomainKind::Cell)
 {
@@ -1742,6 +1755,77 @@ TEST(AnalysisEvidenceContracts, HDivH1MixedPairNeedsExplicitCertifiedEvidence)
         }
     }
     EXPECT_TRUE(saw_certified_hdiv_h1);
+}
+
+TEST(AnalysisEvidenceContracts, HDivL2MixedPairNeedsExplicitCertifiedEvidence)
+{
+    const auto flux = VariableKey::field(1);
+    const auto multiplier = VariableKey::field(0);
+
+    auto add_mixed_pair = [&](ProblemAnalysisContext& ctx) {
+        ctx.addFieldDescriptor(hDivField(1, 1, "hdiv-flux"));
+        ctx.addFieldDescriptor(l2Field(0, 0, "l2-multiplier"));
+        ctx.addContribution(ContributionDescriptor::diagonalSymmetric(
+            flux, "flux-block", "evidence-contract"));
+        ctx.addContribution(ContributionDescriptor::constraintPairDesc(
+            flux, multiplier, "mixed-pair", "divergence-l2-pair",
+            "evidence-contract"));
+    };
+
+    ProblemAnalysisContext heuristic_ctx;
+    add_mixed_pair(heuristic_ctx);
+    const auto heuristic_report = analyze(std::move(heuristic_ctx));
+    const auto* heuristic = firstFrom(
+        heuristic_report, PropertyKind::SpaceCompatibility,
+        "SpaceCompatibilityAnalyzer");
+    ASSERT_NE(heuristic, nullptr);
+    EXPECT_EQ(heuristic->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(heuristic->certification_class.has_value());
+    EXPECT_EQ(*heuristic->certification_class,
+              CertificationClass::NotCertified);
+    ASSERT_TRUE(heuristic->space_compatibility_class.has_value());
+    EXPECT_EQ(*heuristic->space_compatibility_class,
+              SpaceCompatibilityClass::Unknown);
+
+    ProblemAnalysisContext certified_ctx;
+    add_mixed_pair(certified_ctx);
+    AnalysisSummarySet summaries;
+    InfSupPairCertificationSummary certified_pair;
+    certified_pair.block.operator_tag = "divergence-l2-pair";
+    certified_pair.block.test_variables = {flux, multiplier};
+    certified_pair.block.trial_variables = {flux, multiplier};
+    certified_pair.primal_variable = flux;
+    certified_pair.multiplier_variable = multiplier;
+    certified_pair.pair_family = "documented HDiv/L2 saddle pair";
+    certified_pair.primal_polynomial_order = 1;
+    certified_pair.multiplier_polynomial_order = 0;
+    certified_pair.primal_space_family = SpaceFamily::HDiv;
+    certified_pair.multiplier_space_family = SpaceFamily::L2;
+    certified_pair.known_stable_pair = true;
+    certified_pair.mesh_assumption_evidence_present = true;
+    certified_pair.domain_assumption_evidence_present = true;
+    certified_pair.boundary_condition_scope_present = true;
+    certified_pair.beta_lower_bound_present = true;
+    certified_pair.beta_lower_bound = 0.1;
+    certified_pair.inf_sup_theorem_id = "documented HDiv/L2 Fortin theorem";
+    summaries.inf_sup_pair_certifications.push_back(certified_pair);
+    certified_ctx.setAnalysisSummaries(std::move(summaries));
+
+    const auto certified_report = analyze(std::move(certified_ctx));
+    bool saw_certified_hdiv_l2 = false;
+    for (const auto& claim : certified_report.claims) {
+        if (claim.kind == PropertyKind::SpaceCompatibility &&
+            claim.claim_origin == "SpaceCompatibilityAnalyzer" &&
+            claim.certification_class &&
+            *claim.certification_class == CertificationClass::Certified) {
+            saw_certified_hdiv_l2 = true;
+            EXPECT_EQ(claim.status, PropertyStatus::Preserved);
+            ASSERT_TRUE(claim.space_compatibility_class.has_value());
+            EXPECT_EQ(*claim.space_compatibility_class,
+                      SpaceCompatibilityClass::Compatible);
+        }
+    }
+    EXPECT_TRUE(saw_certified_hdiv_l2);
 }
 
 TEST(AnalysisEvidenceContracts, AdjointCertificationRequiresDiscreteResidualEvidence)

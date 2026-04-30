@@ -528,7 +528,9 @@ Typical outputs:
 Checks:
 
 - BC trace requests against field trace capabilities
-- mixed-system space pair compatibility when a verified mixed pair is available
+- mixed-system space pair compatibility when a verified mixed pair is available;
+  `H1/H1`, `HDiv/H1`, and non-`L2`/`L2` multiplier pairs are not certified
+  from space-family labels alone
 - exact-sequence / compatible-complex metadata from field descriptors and
   `CompatibleComplexSummary`
 

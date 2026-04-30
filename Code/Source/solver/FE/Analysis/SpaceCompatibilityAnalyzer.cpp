@@ -419,22 +419,47 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             continue;
         }
 
-        // L2 constraint with non-L2 momentum -- weakly compatible (DG/mixed methods)
+        // L2 multipliers are common in divergence-conforming and DG/mixed
+        // methods, but stability is a property of the particular pair and mesh
+        // assumptions.  Require a certified inf-sup or compatible-complex
+        // claim before marking the pair compatible.
         if (constraint_fd->space_family == SpaceFamily::L2) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
-            claim.status = PropertyStatus::Likely;
-            claim.confidence = AnalysisConfidence::Medium;
-            claim.space_compatibility_class = SpaceCompatibilityClass::WeaklyCompatible;
             claim.variables = sc->variables;
-            claim.description =
-                "Mixed system has " + std::string(toString(momentum_fd->space_family)) +
-                "/L2 space pair (" + momentum_fd->name + "/" + constraint_fd->name +
-                "): weakly compatible (DG or mixed method)";
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
-            claim.addEvidence("SpaceCompatibilityAnalyzer",
-                "L2 constraint field in saddle-point system",
-                AnalysisConfidence::Medium);
+            const bool certified_infsup =
+                hasCertifiedInfSupEvidence(report, sc->variables);
+            const bool certified_complex =
+                hasCertifiedCompatibleComplexEvidence(report, sc->variables);
+            if (certified_infsup || certified_complex) {
+                claim.status = PropertyStatus::Preserved;
+                claim.confidence = AnalysisConfidence::High;
+                claim.certification_class = CertificationClass::Certified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
+                claim.description =
+                    "Mixed " +
+                    std::string(toString(momentum_fd->space_family)) +
+                    "/L2 space pair is backed by certified compatibility evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    certified_infsup
+                        ? "Certified InfSupCondition claim covers this L2 multiplier pair"
+                        : "Certified CompatibleComplexStructure claim covers this L2 multiplier pair");
+            } else {
+                claim.status = PropertyStatus::Unknown;
+                claim.confidence = AnalysisConfidence::Medium;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
+                claim.description =
+                    "Mixed system has " +
+                    std::string(toString(momentum_fd->space_family)) +
+                    "/L2 space pair (" + momentum_fd->name + "/" +
+                    constraint_fd->name +
+                    ") without explicit inf-sup or compatible-complex evidence";
+                claim.addEvidence("SpaceCompatibilityAnalyzer",
+                    "L2 multiplier compatibility requires theorem-backed stable-pair, Fortin, or compatible-complex evidence",
+                    AnalysisConfidence::Medium);
+            }
             report.claims.push_back(std::move(claim));
             continue;
         }
