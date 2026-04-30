@@ -380,6 +380,122 @@ CouplingFormAnalysisMetadata nonFieldGraphDependencyMetadata(FieldId row_field)
     return metadata;
 }
 
+CouplingContractDeclaration providerMetadataDeclaration()
+{
+    auto declaration = graphDeclaration();
+    declaration.non_field_dependencies = {
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Parameter,
+            .participant_name = "left",
+            .name = "penalty",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+                .shared_region_name = "interface",
+            },
+            .required_region_kind = CouplingRegionKind::Boundary,
+            .expected_parameter_value_type = params::ValueType::Real,
+            .expected_value_type = "scalar",
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::Coefficient,
+            .participant_name = "left",
+            .name = "wall_speed",
+            .expected_value_type = "vector",
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::MaterialStateOld,
+            .participant_name = "left",
+            .name = "history_old",
+            .expected_value_type = "tensor",
+            .material_state_byte_offset = 8,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::MaterialStateWork,
+            .participant_name = "left",
+            .name = "history_work",
+            .expected_value_type = "tensor",
+            .material_state_byte_offset = 16,
+        },
+        CouplingNonFieldDependencyRequirement{
+            .kind = CouplingNonFieldDependencyRequirementKind::BoundaryIntegral,
+            .participant_name = "left",
+            .name = "traction_integral",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+                .shared_region_name = "interface",
+            },
+            .required_region_kind = CouplingRegionKind::Boundary,
+            .expected_value_type = "scalar",
+        },
+    };
+    return declaration;
+}
+
+CouplingFormAnalysisMetadata providerMetadataFixture()
+{
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "provider_metadata_coupling";
+    metadata.system_name = "system";
+    metadata.non_field_dependencies = {
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::Parameter,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "penalty",
+            .domain = analysis::DomainKind::Boundary,
+            .region_name = "surface",
+            .shared_region_name = "interface",
+            .marker = 4,
+            .slot = 5,
+            .provider = "forms",
+            .value_type = "scalar",
+            .parameter_value_type = params::ValueType::Real,
+        },
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::Coefficient,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "wall_speed",
+            .provider = "forms",
+            .value_type = "vector",
+        },
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::MaterialStateOld,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "history_old",
+            .byte_offset = 8,
+            .provider = "forms",
+            .value_type = "tensor",
+        },
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::MaterialStateWork,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "history_work",
+            .byte_offset = 16,
+            .provider = "forms",
+            .value_type = "tensor",
+        },
+        CouplingFormNonFieldDependencyProvenance{
+            .kind = CouplingFormNonFieldDependencyKind::BoundaryIntegral,
+            .participant_name = "left",
+            .system_name = "system",
+            .name = "traction_integral",
+            .domain = analysis::DomainKind::Boundary,
+            .region_name = "surface",
+            .shared_region_name = "interface",
+            .marker = 4,
+            .slot = 6,
+            .provider = "forms",
+            .value_type = "scalar",
+        },
+    };
+    return metadata;
+}
+
 CouplingEndpointRef graphFieldEndpoint(std::string participant)
 {
     return CouplingEndpointRef{
@@ -679,6 +795,49 @@ TEST(CouplingGraph, RejectsMissingRequiredNonFieldGraphVariablesInSystemRegistri
     EXPECT_NE(text.find("BoundaryReductionService"), std::string::npos);
     EXPECT_NE(text.find("ParameterRegistry"), std::string::npos);
     EXPECT_NE(text.find("left_system/coefficient"), std::string::npos);
+}
+
+TEST(CouplingGraph, ValidatesProviderOnlyNonFieldRequirements)
+{
+    const auto declaration = providerMetadataDeclaration();
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{
+        providerMetadataFixture()};
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    EXPECT_TRUE(snapshot.non_field_variables.empty());
+    ASSERT_EQ(snapshot.provider_metadata_requirements.size(), 5u);
+    EXPECT_EQ(snapshot.provider_metadata_requirements.front().requirement.kind,
+              CouplingNonFieldDependencyRequirementKind::Parameter);
+    EXPECT_EQ(snapshot.provider_metadata_requirements.back().requirement.kind,
+              CouplingNonFieldDependencyRequirementKind::BoundaryIntegral);
+}
+
+TEST(CouplingGraph, RejectsMissingProviderOnlyNonFieldMetadata)
+{
+    const auto declaration = providerMetadataDeclaration();
+    auto metadata = providerMetadataFixture();
+    metadata.non_field_dependencies.pop_back();
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+
+    const auto validation = buildFinalizedGraph(
+        graphContext(),
+        declaration,
+        installed_forms);
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("required provider metadata is missing"),
+              std::string::npos);
+    EXPECT_NE(text.find("BoundaryIntegral(left/traction_integral)"),
+              std::string::npos);
 }
 
 TEST(CouplingGraph, RejectsMissingRequiredContextReferences)

@@ -4660,7 +4660,7 @@ Implementation checklist:
   BoundaryReductionService functional names, and global scalar keys where used,
   with canonical owning-system or participant-qualified
   `analysis::VariableKey` names.
-- [ ] Validate that provenance-only non-field requirements such as parameters,
+- [x] Validate that provenance-only non-field requirements such as parameters,
   coefficients, material-state old/work data, and boundary-integral provenance
   resolve to provider metadata without forcing them into graph-variable edges.
 - [x] Validate that FE-backed participant, field, and region nodes retain
@@ -4839,7 +4839,7 @@ Unit-test verification checklist:
   expectations against installed `analysis::VariableKey` edges for
   BoundaryFunctional, AuxiliaryState, AuxiliaryInput, AuxiliaryOutput, and
   GlobalScalar variables.
-- [ ] `test_CouplingGraph.cpp` validates provenance-only non-field requirements
+- [x] `test_CouplingGraph.cpp` validates provenance-only non-field requirements
   against provider metadata without requiring installed `analysis::VariableKey`
   edges for parameters, coefficients, material-state old/work data, and
   boundary-integral provenance unless explicitly marked as graph variables.

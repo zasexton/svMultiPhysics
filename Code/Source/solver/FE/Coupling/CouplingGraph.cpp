@@ -131,6 +131,30 @@ bool isNonFieldVariableRequirement(
     return graphVariableKindForNonFieldRequirement(requirement.kind).has_value();
 }
 
+std::optional<CouplingFormNonFieldDependencyKind>
+providerMetadataKindForRequirement(
+    CouplingNonFieldDependencyRequirementKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingNonFieldDependencyRequirementKind::Parameter:
+        return CouplingFormNonFieldDependencyKind::Parameter;
+    case CouplingNonFieldDependencyRequirementKind::Coefficient:
+        return CouplingFormNonFieldDependencyKind::Coefficient;
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateOld:
+        return CouplingFormNonFieldDependencyKind::MaterialStateOld;
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateWork:
+        return CouplingFormNonFieldDependencyKind::MaterialStateWork;
+    case CouplingNonFieldDependencyRequirementKind::BoundaryIntegral:
+        return CouplingFormNonFieldDependencyKind::BoundaryIntegral;
+    case CouplingNonFieldDependencyRequirementKind::BoundaryFunctional:
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryState:
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryInput:
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
 bool isGraphNonFieldVariableKind(CouplingVariableKind kind) noexcept
 {
     switch (kind) {
@@ -279,6 +303,44 @@ std::string variableLabel(const analysis::VariableKey& variable)
         os << variable.name;
     }
     os << ")";
+    return os.str();
+}
+
+const char* providerMetadataKindName(
+    CouplingNonFieldDependencyRequirementKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingNonFieldDependencyRequirementKind::Parameter:
+        return "Parameter";
+    case CouplingNonFieldDependencyRequirementKind::Coefficient:
+        return "Coefficient";
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateOld:
+        return "MaterialStateOld";
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateWork:
+        return "MaterialStateWork";
+    case CouplingNonFieldDependencyRequirementKind::BoundaryIntegral:
+        return "BoundaryIntegral";
+    case CouplingNonFieldDependencyRequirementKind::BoundaryFunctional:
+        return "BoundaryFunctional";
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryState:
+        return "AuxiliaryState";
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryInput:
+        return "AuxiliaryInput";
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput:
+        return "AuxiliaryOutput";
+    }
+    return "NonField";
+}
+
+std::string providerMetadataRequirementLabel(
+    const CouplingNonFieldDependencyRequirement& requirement)
+{
+    std::ostringstream os;
+    os << providerMetadataKindName(requirement.kind) << "(";
+    if (!requirement.participant_name.empty()) {
+        os << requirement.participant_name << "/";
+    }
+    os << requirement.name << ")";
     return os.str();
 }
 
@@ -558,6 +620,181 @@ void validateRequiredNonFieldGraphVariables(
                 declaration,
                 block.dependency,
                 result);
+        }
+    }
+}
+
+bool providerParticipantMatches(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement,
+    const CouplingFormNonFieldDependencyProvenance& provenance)
+{
+    if (requirement.participant_name.empty()) {
+        return true;
+    }
+    if (!provenance.participant_name.empty() &&
+        provenance.participant_name != requirement.participant_name) {
+        return false;
+    }
+    if (!context.hasParticipant(requirement.participant_name)) {
+        return true;
+    }
+    const auto participant = context.participant(requirement.participant_name);
+    return participant.system_name.empty() || provenance.system_name.empty() ||
+           provenance.system_name == participant.system_name;
+}
+
+std::optional<CouplingRegionRef> providerRequirementRegion(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement)
+{
+    if (!requirement.region.has_value()) {
+        return std::nullopt;
+    }
+    const auto& region = *requirement.region;
+    const auto participant_name = region.participant_name.empty()
+                                      ? requirement.participant_name
+                                      : region.participant_name;
+    if (region.shared_region_name.has_value() &&
+        context.hasSharedRegion(*region.shared_region_name)) {
+        if (!participant_name.empty()) {
+            return context.sharedRegion(*region.shared_region_name,
+                                        participant_name);
+        }
+        const auto group = context.sharedRegionGroup(*region.shared_region_name);
+        if (group.participant_regions.size() == 1u) {
+            return group.participant_regions.front();
+        }
+    }
+    if (!participant_name.empty() &&
+        context.hasRegion(participant_name, region.region_name)) {
+        return context.region(participant_name, region.region_name);
+    }
+    return std::nullopt;
+}
+
+bool providerRegionMatches(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement,
+    const CouplingFormNonFieldDependencyProvenance& provenance)
+{
+    if (requirement.required_region_kind.has_value()) {
+        const auto expected_domain =
+            toAnalysisDomainKind(*requirement.required_region_kind);
+        if (expected_domain.has_value() && provenance.domain != *expected_domain) {
+            return false;
+        }
+    }
+    if (!requirement.region.has_value()) {
+        return true;
+    }
+
+    const auto& region = *requirement.region;
+    if (!region.region_name.empty() && provenance.region_name.has_value() &&
+        *provenance.region_name != region.region_name) {
+        return false;
+    }
+    if (region.shared_region_name.has_value() &&
+        provenance.shared_region_name.has_value() &&
+        *provenance.shared_region_name != *region.shared_region_name) {
+        return false;
+    }
+
+    const auto resolved_region = providerRequirementRegion(context, requirement);
+    if (!resolved_region.has_value()) {
+        return true;
+    }
+    if (provenance.marker >= 0 &&
+        provenance.marker != resolved_region->marker) {
+        return false;
+    }
+    if (provenance.side != CouplingInterfaceSide::None &&
+        resolved_region->side != CouplingInterfaceSide::None &&
+        provenance.side != resolved_region->side) {
+        return false;
+    }
+    return true;
+}
+
+bool providerValueMetadataMatches(
+    const CouplingNonFieldDependencyRequirement& requirement,
+    const CouplingFormNonFieldDependencyProvenance& provenance)
+{
+    if (!requirement.expected_value_type.empty() &&
+        provenance.value_type != requirement.expected_value_type) {
+        return false;
+    }
+    if (requirement.expected_parameter_value_type.has_value() &&
+        (!provenance.parameter_value_type.has_value() ||
+         *provenance.parameter_value_type !=
+             *requirement.expected_parameter_value_type)) {
+        return false;
+    }
+    if (requirement.material_state_byte_offset.has_value() &&
+        (!provenance.byte_offset.has_value() ||
+         *provenance.byte_offset !=
+             *requirement.material_state_byte_offset)) {
+        return false;
+    }
+    return true;
+}
+
+bool providerMetadataMatchesRequirement(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement,
+    const CouplingFormNonFieldDependencyProvenance& provenance)
+{
+    const auto expected_kind = providerMetadataKindForRequirement(requirement.kind);
+    if (!expected_kind.has_value() || provenance.kind != *expected_kind) {
+        return false;
+    }
+    return provenance.name == requirement.name &&
+           providerParticipantMatches(context, requirement, provenance) &&
+           providerRegionMatches(context, requirement, provenance) &&
+           providerValueMetadataMatches(requirement, provenance);
+}
+
+bool hasProviderMetadataEvidence(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms)
+{
+    for (const auto& form : installed_forms) {
+        for (const auto& provenance : form.non_field_dependencies) {
+            if (providerMetadataMatchesRequirement(context,
+                                                   requirement,
+                                                   provenance)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void validateProviderMetadataRequirements(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    CouplingValidationResult& result)
+{
+    for (const auto& declaration : declarations) {
+        for (const auto& requirement : declaration.non_field_dependencies) {
+            if (!isRequired(requirement.requirement) ||
+                !providerMetadataKindForRequirement(requirement.kind).has_value()) {
+                continue;
+            }
+            if (hasProviderMetadataEvidence(context,
+                                            requirement,
+                                            installed_forms)) {
+                continue;
+            }
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = requirement.participant_name,
+                .message = "required provider metadata is missing for non-field dependency: " +
+                           providerMetadataRequirementLabel(requirement),
+            });
         }
     }
 }
@@ -1969,6 +2206,12 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         context,
         std::span<const CouplingContractDeclaration>(declarations_.data(),
                                                      declarations_.size()),
+        result);
+    validateProviderMetadataRequirements(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        installed_forms,
         result);
     validateTemporalSymbolEvidence(
         declared_temporal_requirements,
