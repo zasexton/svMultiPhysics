@@ -231,6 +231,68 @@ CouplingFormGeometryTerminalProvenance resolveGeometryTerminalProvenance(
     return provenance;
 }
 
+void applySymbolicOptionsDeclaration(
+    const CouplingSymbolicOptionsDeclaration& declaration,
+    forms::SymbolicOptions& options)
+{
+    if (declaration.jit.has_value()) {
+        options.jit = *declaration.jit;
+    }
+    if (declaration.simplify_expressions.has_value()) {
+        options.simplify_expressions = *declaration.simplify_expressions;
+    }
+    if (declaration.exploit_sparsity.has_value()) {
+        options.exploit_sparsity = *declaration.exploit_sparsity;
+    }
+    if (declaration.cache_expressions.has_value()) {
+        options.cache_expressions = *declaration.cache_expressions;
+    }
+    if (declaration.verbose.has_value()) {
+        options.verbose = *declaration.verbose;
+    }
+}
+
+void applyGeometrySensitivityDeclaration(
+    const CouplingContext& context,
+    const CouplingGeometrySensitivityDeclaration& declaration,
+    forms::SymbolicOptions& options)
+{
+    options.geometry_sensitivity.mode = declaration.mode;
+    if (declaration.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns) {
+        FE_THROW_IF(!declaration.mesh_motion_field.has_value(),
+                    InvalidArgumentException,
+                    "mesh-motion geometry sensitivity requires a coupling field");
+        const auto field = context.field(
+            declaration.mesh_motion_field->participant_name,
+            declaration.mesh_motion_field->field_name);
+        options.geometry_sensitivity.mesh_motion_field = field.field_id;
+    } else {
+        options.geometry_sensitivity.mesh_motion_field = INVALID_FIELD_ID;
+    }
+    options.geometry_tangent_path = declaration.tangent_path;
+    options.use_symbolic_tangent = declaration.use_symbolic_tangent;
+}
+
+systems::FormInstallOptions resolveFormInstallOptions(
+    const CouplingContext& context,
+    const CouplingFormContribution& contribution)
+{
+    auto options = contribution.install_options;
+    const auto& declaration = contribution.install_options_declaration;
+    if (declaration.ad_mode.has_value()) {
+        options.ad_mode = *declaration.ad_mode;
+    }
+    applySymbolicOptionsDeclaration(declaration.compiler_options,
+                                    options.compiler_options);
+    if (declaration.geometry_sensitivity.has_value()) {
+        applyGeometrySensitivityDeclaration(
+            context,
+            *declaration.geometry_sensitivity,
+            options.compiler_options);
+    }
+    return options;
+}
+
 AdditionalFieldTarget explicitAdditionalFieldTarget(
     const CouplingContext& context,
     const CouplingAdditionalFieldDeclaration& field)
@@ -421,7 +483,7 @@ ResolvedCouplingFormContribution MonolithicCouplingBuilder::resolveFormContribut
     resolved.contribution_name = contribution.contribution_name;
     resolved.origin = contribution.origin;
     resolved.operator_name = contribution.operator_name;
-    resolved.install_options = contribution.install_options;
+    resolved.install_options = resolveFormInstallOptions(context, contribution);
     resolved.terminal_provenance = contribution.terminal_provenance;
 
     const systems::FESystem* owning_system = nullptr;

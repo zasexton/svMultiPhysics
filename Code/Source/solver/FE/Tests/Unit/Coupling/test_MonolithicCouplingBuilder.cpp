@@ -300,6 +300,58 @@ TEST(MonolithicCouplingBuilder, ResolvesFormContributionThroughContext)
     EXPECT_EQ(resolved.system_name, "shared_system");
 }
 
+TEST(MonolithicCouplingBuilder, ResolvesDeclaredFormInstallOptions)
+{
+    BuilderFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const MonolithicCouplingBuilder builder;
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "declared_options";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.field_uses = {{.participant_name = "right", .field_name = "primary"}};
+    contribution.residual =
+        (forms.state("right", "primary", "u") *
+         forms.test("right", "primary", "w")).dx();
+
+    svmp::FE::forms::JITOptions jit_options;
+    jit_options.enable = false;
+    jit_options.optimization_level = 1;
+    contribution.install_options_declaration.ad_mode =
+        svmp::FE::forms::ADMode::Reverse;
+    contribution.install_options_declaration.compiler_options.jit = jit_options;
+    contribution.install_options_declaration.compiler_options.simplify_expressions =
+        false;
+    contribution.install_options_declaration.compiler_options.verbose = true;
+    contribution.install_options_declaration.geometry_sensitivity =
+        CouplingGeometrySensitivityDeclaration{
+            .mode = svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            .mesh_motion_field = CouplingFieldUse{
+                .participant_name = "left",
+                .field_name = "primary",
+            },
+            .tangent_path =
+                svmp::FE::forms::GeometryTangentPath::SymbolicRequired,
+            .use_symbolic_tangent = true,
+        };
+
+    const auto resolved = builder.resolveFormContribution(fixture.context, contribution);
+    EXPECT_EQ(resolved.install_options.ad_mode,
+              svmp::FE::forms::ADMode::Reverse);
+    EXPECT_FALSE(resolved.install_options.compiler_options.jit.enable);
+    EXPECT_EQ(resolved.install_options.compiler_options.jit.optimization_level, 1);
+    EXPECT_FALSE(resolved.install_options.compiler_options.simplify_expressions);
+    EXPECT_TRUE(resolved.install_options.compiler_options.verbose);
+    EXPECT_EQ(resolved.install_options.compiler_options.geometry_sensitivity.mode,
+              svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    EXPECT_EQ(resolved.install_options.compiler_options.geometry_sensitivity
+                  .mesh_motion_field,
+              fixture.left_field);
+    EXPECT_EQ(resolved.install_options.compiler_options.geometry_tangent_path,
+              svmp::FE::forms::GeometryTangentPath::SymbolicRequired);
+    EXPECT_TRUE(resolved.install_options.compiler_options.use_symbolic_tangent);
+}
+
 TEST(MonolithicCouplingBuilder, RejectsOverlappingPrimaryAndExtraTrialFields)
 {
     BuilderFixture fixture;

@@ -4364,7 +4364,7 @@ Implementation checklist:
   pullback/pushforward from/to configurations.
 - [x] Make `CouplingFormBuilder` region and shared-region helpers delegate to
   `CouplingContext` and preserve diagnostics for failed lookups.
-- [ ] Resolve `CouplingFormInstallOptionsDeclaration` into
+- [x] Resolve `CouplingFormInstallOptionsDeclaration` into
   `ResolvedCouplingFormContribution::install_options` so the monolithic builder
   can forward concrete `systems::FormInstallOptions` to `installFormulation()`.
 - [ ] Make `CouplingSymbolicOptionsDeclaration` mirror only non-geometry

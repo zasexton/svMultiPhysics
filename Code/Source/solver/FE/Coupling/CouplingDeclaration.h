@@ -101,6 +101,20 @@ struct CouplingGeometrySensitivityDeclaration {
     bool use_symbolic_tangent{false};
 };
 
+struct CouplingSymbolicOptionsDeclaration {
+    std::optional<forms::JITOptions> jit;
+    std::optional<bool> simplify_expressions;
+    std::optional<bool> exploit_sparsity;
+    std::optional<bool> cache_expressions;
+    std::optional<bool> verbose;
+};
+
+struct CouplingFormInstallOptionsDeclaration {
+    std::optional<forms::ADMode> ad_mode;
+    CouplingSymbolicOptionsDeclaration compiler_options;
+    std::optional<CouplingGeometrySensitivityDeclaration> geometry_sensitivity;
+};
+
 enum class CouplingFormTerminalProvenanceKind : std::uint8_t {
     PreviousSolution,
     MeshTemporal,
@@ -201,6 +215,7 @@ struct CouplingFormContribution {
     std::vector<CouplingFieldUse> field_uses;
     std::vector<CouplingFieldUse> extra_trial_field_uses;
     std::vector<CouplingFormTerminalProvenanceDeclaration> terminal_provenance;
+    CouplingFormInstallOptionsDeclaration install_options_declaration{};
     systems::FormInstallOptions install_options{};
     forms::FormExpr residual;
 };
