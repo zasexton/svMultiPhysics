@@ -7,12 +7,15 @@
 
 #include "Coupling/CouplingGraph.h"
 
+#include "Auxiliary/AuxiliaryStateManager.h"
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <exception>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -126,6 +129,21 @@ bool isNonFieldVariableRequirement(
     const CouplingNonFieldDependencyRequirement& requirement) noexcept
 {
     return graphVariableKindForNonFieldRequirement(requirement.kind).has_value();
+}
+
+bool isGraphNonFieldVariableKind(CouplingVariableKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingVariableKind::AuxiliaryState:
+    case CouplingVariableKind::AuxiliaryInput:
+    case CouplingVariableKind::AuxiliaryOutput:
+    case CouplingVariableKind::BoundaryFunctional:
+    case CouplingVariableKind::GlobalScalar:
+        return true;
+    case CouplingVariableKind::Field:
+        return false;
+    }
+    return false;
 }
 
 bool hasContractTypeNode(const CouplingGraphSnapshot& snapshot,
@@ -262,6 +280,286 @@ std::string variableLabel(const analysis::VariableKey& variable)
     }
     os << ")";
     return os.str();
+}
+
+const char* graphVariableRegistryName(CouplingVariableKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingVariableKind::AuxiliaryState:
+        return "AuxiliaryStateManager";
+    case CouplingVariableKind::AuxiliaryInput:
+        return "AuxiliaryInputRegistry";
+    case CouplingVariableKind::AuxiliaryOutput:
+        return "AuxiliaryOutputRegistry";
+    case CouplingVariableKind::BoundaryFunctional:
+        return "BoundaryReductionService";
+    case CouplingVariableKind::GlobalScalar:
+        return "ParameterRegistry";
+    case CouplingVariableKind::Field:
+        return "FieldRegistry";
+    }
+    return "registry";
+}
+
+std::string graphVariableDiagnosticLabel(const CouplingContext& context,
+                                         const CouplingVariableUse& variable)
+{
+    const auto resolved = resolveCouplingVariableUse(context, variable);
+    if (resolved.has_value()) {
+        return variableLabel(*resolved);
+    }
+    return variable.name;
+}
+
+bool isMissingIndex(std::size_t value) noexcept
+{
+    return value == static_cast<std::size_t>(-1);
+}
+
+std::size_t auxiliaryOutputSlotOf(const systems::FESystem& system,
+                                  std::string_view name)
+{
+    const auto slash = name.find('/');
+    if (slash != std::string_view::npos) {
+        return system.auxiliaryOutputSlotOf(name.substr(0, slash),
+                                            name.substr(slash + 1));
+    }
+    return system.auxiliaryOutputSlotOf(name);
+}
+
+bool hasBoundaryFunctional(const CouplingContext& context,
+                           const std::string& participant_name,
+                           std::string_view functional_name)
+{
+    if (!context.hasParticipant(participant_name)) {
+        return false;
+    }
+    const auto participant = context.participant(participant_name);
+    if (participant.system == nullptr) {
+        return false;
+    }
+    return std::any_of(
+        context.fields().begin(),
+        context.fields().end(),
+        [&](const CouplingFieldRef& field) {
+            if (field.participant_name != participant_name) {
+                return false;
+            }
+            const auto* service =
+                participant.system->boundaryReductionServiceIfPresent(field.field_id);
+            return service != nullptr &&
+                   service->hasFunctional(functional_name);
+        });
+}
+
+void reportMissingNonFieldGraphVariable(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingVariableUse& variable,
+    CouplingValidationResult& result)
+{
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .contract_name = declaration.contract_name,
+        .participant_name = variable.participant_name,
+        .message = "required non-field graph variable is missing from " +
+                   std::string(graphVariableRegistryName(variable.kind)) + ": " +
+                   graphVariableDiagnosticLabel(context, variable),
+    });
+}
+
+void reportNonFieldGraphVariableRegistryFailure(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingVariableUse& variable,
+    std::string message,
+    CouplingValidationResult& result)
+{
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .contract_name = declaration.contract_name,
+        .participant_name = variable.participant_name,
+        .message = std::move(message) + ": " +
+                   graphVariableDiagnosticLabel(context, variable),
+    });
+}
+
+void validateRequiredNonFieldGraphVariable(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    const CouplingVariableUse& variable,
+    CouplingValidationResult& result)
+{
+    if (!isGraphNonFieldVariableKind(variable.kind) ||
+        !isRequired(variable.requirement)) {
+        return;
+    }
+    if (variable.name.empty()) {
+        return;
+    }
+    if (variable.kind == CouplingVariableKind::GlobalScalar &&
+        variable.participant_name.empty()) {
+        return;
+    }
+    if (variable.participant_name.empty()) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .message = "required non-field graph variable needs a participant scope: " +
+                       graphVariableDiagnosticLabel(context, variable),
+        });
+        return;
+    }
+    if (!context.hasParticipant(variable.participant_name)) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = variable.participant_name,
+            .message = "non-field graph variable participant is missing from the context",
+        });
+        return;
+    }
+
+    const auto participant = context.participant(variable.participant_name);
+    if (participant.system == nullptr) {
+        result.add(CouplingDiagnostic{
+            .severity = CouplingDiagnosticSeverity::Error,
+            .contract_name = declaration.contract_name,
+            .participant_name = variable.participant_name,
+            .message = "non-field graph variable participant has no owning system",
+        });
+        return;
+    }
+
+    switch (variable.kind) {
+    case CouplingVariableKind::AuxiliaryState: {
+        const auto* manager = participant.system->auxiliaryStateManagerIfPresent();
+        if (manager == nullptr || !manager->hasBlock(variable.name)) {
+            reportMissingNonFieldGraphVariable(
+                context,
+                declaration,
+                variable,
+                result);
+        }
+        return;
+    }
+    case CouplingVariableKind::AuxiliaryInput: {
+        const auto* registry = participant.system->auxiliaryInputRegistryIfPresent();
+        if (registry == nullptr || !registry->hasInput(variable.name)) {
+            reportMissingNonFieldGraphVariable(
+                context,
+                declaration,
+                variable,
+                result);
+            return;
+        }
+        (void)registry->slotOf(variable.name);
+        return;
+    }
+    case CouplingVariableKind::AuxiliaryOutput:
+        try {
+            const auto slot = auxiliaryOutputSlotOf(*participant.system,
+                                                    variable.name);
+            if (isMissingIndex(slot)) {
+                reportMissingNonFieldGraphVariable(
+                    context,
+                    declaration,
+                    variable,
+                    result);
+                return;
+            }
+            const auto id = participant.system->auxiliaryOutputIdOf(variable.name);
+            if (participant.system->auxiliaryOutputDescriptor(id) == nullptr) {
+                reportMissingNonFieldGraphVariable(
+                    context,
+                    declaration,
+                    variable,
+                    result);
+            }
+        } catch (const std::exception& ex) {
+            reportNonFieldGraphVariableRegistryFailure(
+                context,
+                declaration,
+                variable,
+                std::string("AuxiliaryOutputRegistry lookup failed: ") + ex.what(),
+                result);
+        }
+        return;
+    case CouplingVariableKind::BoundaryFunctional:
+        if (!hasBoundaryFunctional(context,
+                                   variable.participant_name,
+                                   variable.name)) {
+            reportMissingNonFieldGraphVariable(
+                context,
+                declaration,
+                variable,
+                result);
+        }
+        return;
+    case CouplingVariableKind::GlobalScalar: {
+        const auto* spec = participant.system->parameterRegistry().find(variable.name);
+        const auto slot = participant.system->parameterRegistry().slotOf(variable.name);
+        if (spec == nullptr || !slot.has_value()) {
+            reportMissingNonFieldGraphVariable(
+                context,
+                declaration,
+                variable,
+                result);
+        }
+        return;
+    }
+    case CouplingVariableKind::Field:
+        return;
+    }
+}
+
+void validateRequiredNonFieldGraphVariables(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    CouplingValidationResult& result)
+{
+    for (const auto& declaration : declarations) {
+        for (const auto& requirement : declaration.non_field_dependencies) {
+            const auto kind = graphVariableKindForNonFieldRequirement(requirement.kind);
+            if (!kind.has_value()) {
+                continue;
+            }
+            validateRequiredNonFieldGraphVariable(
+                context,
+                declaration,
+                CouplingVariableUse{
+                    .kind = *kind,
+                    .participant_name = requirement.participant_name,
+                    .name = requirement.name,
+                    .requirement = requirement.requirement,
+                },
+                result);
+        }
+        for (const auto& dependency : declaration.dependencies) {
+            validateRequiredNonFieldGraphVariable(
+                context,
+                declaration,
+                dependency.residual_row,
+                result);
+            validateRequiredNonFieldGraphVariable(
+                context,
+                declaration,
+                dependency.dependency,
+                result);
+        }
+        for (const auto& block : declaration.expected_blocks) {
+            validateRequiredNonFieldGraphVariable(
+                context,
+                declaration,
+                block.residual_row,
+                result);
+            validateRequiredNonFieldGraphVariable(
+                context,
+                declaration,
+                block.dependency,
+                result);
+        }
+    }
 }
 
 std::optional<analysis::VariableKey> resolveVariable(
@@ -1667,6 +1965,11 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
     const auto declared_geometry_requirements =
         resolveDeclaredGeometryRequirements(context, declarations_, result);
     const auto expected_blocks = resolveExpectedBlocks(context, declarations_, result);
+    validateRequiredNonFieldGraphVariables(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        result);
     validateTemporalSymbolEvidence(
         declared_temporal_requirements,
         installed_forms,

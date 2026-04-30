@@ -1,15 +1,25 @@
 #include "Coupling/CouplingGraph.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 
+#include "Assembly/AssemblyContext.h"
+#include "Assembly/AssemblyKernel.h"
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
+#include "Forms/BoundaryFunctional.h"
 #include "Spaces/H1Space.h"
+#include "Systems/FESystem.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace svmp::FE;
@@ -21,6 +31,82 @@ const systems::FESystem* graphSystemToken()
 {
     return reinterpret_cast<const systems::FESystem*>(1);
 }
+
+class GraphParameterKernel final : public assembly::BilinearFormKernel {
+public:
+    [[nodiscard]] assembly::RequiredData getRequiredData() const override
+    {
+        return assembly::RequiredData::None;
+    }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        params::Spec spec;
+        spec.key = "coefficient";
+        spec.type = params::ValueType::Real;
+        spec.required = true;
+        spec.default_value = params::Value{Real(1.0)};
+        return {spec};
+    }
+
+    void computeCell(const assembly::AssemblyContext&,
+                     assembly::KernelOutput& output) override
+    {
+        output.reserve(0, 0, true, false);
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "GraphParameterKernel";
+    }
+};
+
+class GraphScalarOutputModel final : public systems::AuxiliaryStateModel {
+public:
+    [[nodiscard]] std::string modelName() const override
+    {
+        return "GraphScalarOutputModel";
+    }
+
+    [[nodiscard]] int dimension() const override
+    {
+        return 1;
+    }
+
+    [[nodiscard]] systems::AuxiliaryStructuralMetadata structuralMetadata()
+        const override
+    {
+        systems::AuxiliaryStructuralMetadata metadata;
+        metadata.variable_kinds = {systems::AuxiliaryVariableKind::Differential};
+        return metadata;
+    }
+
+    void evaluateResidual(const systems::AuxiliaryLocalContext&,
+                          systems::AuxiliaryResidualRequest& request) const override
+    {
+        if (!request.residual.empty()) {
+            request.residual[0] = 0.0;
+        }
+    }
+
+    [[nodiscard]] int outputCount() const override
+    {
+        return 1;
+    }
+
+    [[nodiscard]] std::vector<std::string> outputNames() const override
+    {
+        return {"out_value"};
+    }
+
+    void evaluateOutputs(const systems::AuxiliaryLocalContext& ctx,
+                         std::span<Real> output) const override
+    {
+        if (!output.empty()) {
+            output[0] = ctx.x.empty() ? 0.0 : ctx.x[0];
+        }
+    }
+};
 
 CouplingContext graphContext()
 {
@@ -58,6 +144,97 @@ CouplingContext graphContext()
     });
     return builder.build();
 }
+
+struct NonFieldGraphFixture {
+    std::shared_ptr<spaces::H1Space> space;
+    std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh;
+    systems::FESystem system;
+    FieldId field{INVALID_FIELD_ID};
+    CouplingContext context;
+
+    explicit NonFieldGraphFixture(bool register_variables)
+        : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
+        , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
+        , system(mesh)
+    {
+        field = system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+
+        if (register_variables) {
+            system.auxiliaryStateManager().registerBlock(
+                systems::AuxiliaryStateSpec{
+                    .name = "aux_state",
+                    .size = 1,
+                    .scope = systems::AuxiliaryStateScope::Global,
+                },
+                1);
+
+            systems::AuxiliaryInputSpec input;
+            input.name = "driver_input";
+            input.size = 1;
+            input.producer = systems::AuxiliaryInputProducer::DirectUserData;
+            system.auxiliaryInputRegistry().registerInput(input);
+
+            system.deployAuxiliaryModel(
+                systems::use(std::make_shared<GraphScalarOutputModel>())
+                    .name("output_block")
+                    .global()
+                    .partitioned("ForwardEuler")
+                    .initialize({0.0}));
+
+            forms::BoundaryFunctional functional;
+            functional.name = "surface_measure";
+            functional.integrand = forms::FormExpr::constant(1.0);
+            functional.boundary_marker = 1;
+            system.boundaryReductionService(field)
+                .addBoundaryFunctional(std::move(functional));
+
+            system.addOperator("op");
+            system.addCellKernel(
+                "op",
+                field,
+                std::make_shared<GraphParameterKernel>());
+            systems::SetupInputs inputs;
+            inputs.topology_override = timestepping::test::singleTetraTopology();
+            system.setup({}, inputs);
+        }
+
+        CouplingRegionRef surface{
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &system,
+            .region_name = "surface",
+            .kind = CouplingRegionKind::Boundary,
+            .marker = 1,
+        };
+
+        CouplingContextBuilder builder;
+        builder.addParticipant({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &system,
+        });
+        builder.addField({
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &system,
+            .field_name = "primary",
+            .field_id = field,
+            .space = space,
+            .components = 1,
+        });
+        builder.addRegion(surface);
+        builder.addSharedRegion(SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = CouplingRegionKind::Boundary,
+            .participant_regions = {surface},
+        });
+        context = builder.build();
+    }
+};
 
 CouplingContext twoParticipantGraphContext()
 {
@@ -141,6 +318,66 @@ CouplingContractDeclaration twoParticipantDependencyDeclaration()
         .dependency = declaration.dependencies.back().dependency,
     });
     return declaration;
+}
+
+CouplingContractDeclaration nonFieldGraphDeclaration()
+{
+    auto declaration = graphDeclaration();
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryState,
+        .participant_name = "left",
+        .name = "aux_state",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+        .participant_name = "left",
+        .name = "driver_input",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput,
+        .participant_name = "left",
+        .name = "out_value",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::BoundaryFunctional,
+        .participant_name = "left",
+        .name = "surface_measure",
+    });
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::GlobalScalar,
+            .participant_name = "left",
+            .name = "coefficient",
+        },
+    });
+    return declaration;
+}
+
+CouplingFormAnalysisMetadata nonFieldGraphDependencyMetadata(FieldId row_field)
+{
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "non_field_variable_coupling";
+    metadata.system_name = "left_system";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic non-field dependency fixture"});
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = analysis::VariableKey::field(row_field),
+        .dependency = analysis::VariableKey::named(
+            analysis::VariableKind::GlobalScalar,
+            "left_system/coefficient"),
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+        .domain = analysis::DomainKind::Global,
+        .contributes_vector = true,
+        .provider = "forms",
+    });
+    return metadata;
 }
 
 CouplingEndpointRef graphFieldEndpoint(std::string participant)
@@ -376,6 +613,72 @@ TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)
     ASSERT_EQ(snapshot.expected_blocks.size(), 1u);
     EXPECT_TRUE(snapshot.expected_blocks[0].residual_row.has_value());
     EXPECT_TRUE(snapshot.expected_blocks[0].dependency.has_value());
+}
+
+TEST(CouplingGraph, ValidatesRequiredNonFieldGraphVariablesThroughSystemRegistries)
+{
+    NonFieldGraphFixture fixture(/*register_variables=*/true);
+    const auto declaration = nonFieldGraphDeclaration();
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{
+        nonFieldGraphDependencyMetadata(fixture.field)};
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+
+    CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed_forms));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    auto has_variable = [&](analysis::VariableKind kind,
+                            const std::string& name) {
+        return std::any_of(
+            snapshot.non_field_variables.begin(),
+            snapshot.non_field_variables.end(),
+            [&](const CouplingGraphNonFieldVariableNode& node) {
+                return node.variable.has_value() &&
+                       node.variable->kind == kind &&
+                       node.variable->name == name;
+            });
+    };
+
+    EXPECT_TRUE(has_variable(analysis::VariableKind::AuxiliaryState,
+                             "left_system/aux_state"));
+    EXPECT_TRUE(has_variable(analysis::VariableKind::AuxiliaryInput,
+                             "left_system/driver_input"));
+    EXPECT_TRUE(has_variable(analysis::VariableKind::AuxiliaryOutput,
+                             "left_system/out_value"));
+    EXPECT_TRUE(has_variable(analysis::VariableKind::BoundaryFunctional,
+                             "left_system/surface_measure"));
+    ASSERT_EQ(snapshot.dependency_expectations.size(), 1u);
+    ASSERT_TRUE(snapshot.dependency_expectations[0].dependency.has_value());
+    EXPECT_EQ(snapshot.dependency_expectations[0].dependency->kind,
+              analysis::VariableKind::GlobalScalar);
+    EXPECT_EQ(snapshot.dependency_expectations[0].dependency->name,
+              "left_system/coefficient");
+}
+
+TEST(CouplingGraph, RejectsMissingRequiredNonFieldGraphVariablesInSystemRegistries)
+{
+    NonFieldGraphFixture fixture(/*register_variables=*/false);
+    const auto declaration = nonFieldGraphDeclaration();
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{
+        nonFieldGraphDependencyMetadata(fixture.field)};
+
+    const auto validation = buildFinalizedGraph(
+        fixture.context,
+        declaration,
+        installed_forms);
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("AuxiliaryStateManager"), std::string::npos);
+    EXPECT_NE(text.find("AuxiliaryInputRegistry"), std::string::npos);
+    EXPECT_NE(text.find("AuxiliaryOutputRegistry"), std::string::npos);
+    EXPECT_NE(text.find("BoundaryReductionService"), std::string::npos);
+    EXPECT_NE(text.find("ParameterRegistry"), std::string::npos);
+    EXPECT_NE(text.find("left_system/coefficient"), std::string::npos);
 }
 
 TEST(CouplingGraph, RejectsMissingRequiredContextReferences)

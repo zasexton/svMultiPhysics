@@ -4654,7 +4654,7 @@ Implementation checklist:
 - [x] Validate that each contract declaration's `contract_type` matches the
   registered `CouplingContract::name()` and that configured contract instance
   names are unique.
-- [ ] Validate that all required monolithic non-field graph variables resolve
+- [x] Validate that all required monolithic non-field graph variables resolve
   through existing Systems/Analysis metadata: auxiliary state names,
   AuxiliaryInput names/slots, AuxiliaryOutput names/ids,
   BoundaryReductionService functional names, and global scalar keys where used,
