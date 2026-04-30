@@ -4669,7 +4669,7 @@ Implementation checklist:
 - [x] Validate that optional participants, fields, participant-local regions, and
   shared regions are tracked when present and ignored with diagnostics or
   metadata when absent.
-- [ ] Validate that additional field declarations across all contracts are
+- [x] Validate that additional field declarations across all contracts are
   unique by namespace kind, namespace name, field name, registration target
   system, scope, and attachment, and do not collide with base physics fields.
 - [ ] Validate that contract-owned additional fields use a contract instance
@@ -4806,7 +4806,7 @@ Unit-test verification checklist:
   participant-local regions, and shared regions.
 - [x] `test_CouplingGraph.cpp` accepts absent optional participants, fields,
   participant-local regions, and shared regions.
-- [ ] `test_CouplingGraph.cpp` rejects duplicate additional field declarations
+- [x] `test_CouplingGraph.cpp` rejects duplicate additional field declarations
   across contracts.
 - [ ] `test_CouplingGraph.cpp` verifies participant-scoped and contract-owned
   additional field namespaces do not collide accidentally and that

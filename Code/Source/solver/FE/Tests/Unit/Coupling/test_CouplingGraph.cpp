@@ -292,6 +292,22 @@ CouplingContractDeclaration graphDeclaration()
     return declaration;
 }
 
+CouplingAdditionalFieldDeclaration graphAdditionalField(
+    CouplingAdditionalFieldNamespace field_namespace,
+    std::string namespace_name,
+    std::string field_name,
+    std::string system_participant_name = {})
+{
+    return CouplingAdditionalFieldDeclaration{
+        .field_namespace = field_namespace,
+        .namespace_name = std::move(namespace_name),
+        .system_participant_name = std::move(system_participant_name),
+        .field_name = std::move(field_name),
+        .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1),
+        .components = 1,
+    };
+}
+
 CouplingContractDeclaration twoParticipantDependencyDeclaration()
 {
     CouplingContractDeclaration declaration;
@@ -900,6 +916,76 @@ TEST(CouplingGraph, AllowsAbsentOptionalContextReferences)
 
     const auto validation = buildGraph(graphContext(), declaration);
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, AcceptsUniqueAdditionalFieldsAcrossContracts)
+{
+    auto first = graphDeclaration();
+    first.contract_name = "first_instance";
+    first.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "lambda"));
+
+    auto second = graphDeclaration();
+    second.contract_name = "second_instance";
+    second.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Contract,
+        "second_instance",
+        "lambda",
+        "left"));
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 2> declarations{
+        first,
+        second,
+    };
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+    EXPECT_EQ(graph.snapshot().additional_fields.size(), 2u);
+}
+
+TEST(CouplingGraph, RejectsDuplicateAdditionalFieldsAcrossContractsAndBaseCollisions)
+{
+    auto first = graphDeclaration();
+    first.contract_name = "first_instance";
+    first.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "lambda"));
+
+    auto duplicate = graphDeclaration();
+    duplicate.contract_name = "second_instance";
+    duplicate.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "lambda"));
+
+    auto collision = graphDeclaration();
+    collision.contract_name = "third_instance";
+    collision.additional_fields.push_back(graphAdditionalField(
+        CouplingAdditionalFieldNamespace::Participant,
+        "left",
+        "primary"));
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 3> declarations{
+        first,
+        duplicate,
+        collision,
+    };
+    const auto validation = graph.buildDeclarationGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations));
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("duplicate additional field declaration"),
+              std::string::npos);
+    EXPECT_NE(text.find("collides with a base field"), std::string::npos);
 }
 
 TEST(CouplingGraph, RejectsRegionKindMismatches)

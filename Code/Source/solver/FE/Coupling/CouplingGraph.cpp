@@ -85,6 +85,12 @@ bool isRequired(CouplingRequirement requirement) noexcept
     return requirement == CouplingRequirement::Required;
 }
 
+bool additionalFieldSelected(
+    const CouplingAdditionalFieldDeclaration& field) noexcept
+{
+    return field.requirement == CouplingRequirement::Required || field.enabled;
+}
+
 std::optional<CouplingVariableKind> graphVariableKindForNonFieldRequirement(
     CouplingNonFieldDependencyRequirementKind kind) noexcept
 {
@@ -275,6 +281,109 @@ void populateDeclarationSnapshot(
                 .dependency = resolveCouplingVariableUse(
                     context,
                     expected_block.dependency),
+            });
+        }
+    }
+}
+
+std::string additionalFieldRegistrationTargetKey(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    std::string participant_name = field.system_participant_name;
+    if (participant_name.empty() &&
+        field.field_namespace == CouplingAdditionalFieldNamespace::Participant) {
+        participant_name = field.namespace_name;
+    }
+    if (!participant_name.empty() && context.hasParticipant(participant_name)) {
+        const auto participant = context.participant(participant_name);
+        if (!participant.system_name.empty()) {
+            return participant.system_name;
+        }
+    }
+    return participant_name;
+}
+
+std::string additionalFieldGraphKey(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    std::ostringstream os;
+    os << static_cast<int>(field.field_namespace) << "/"
+       << field.namespace_name << "/"
+       << field.field_name << "/"
+       << additionalFieldRegistrationTargetKey(context, field) << "/"
+       << static_cast<int>(field.scope) << "/"
+       << field.region_name.value_or(std::string{}) << "/"
+       << field.shared_region_name.value_or(std::string{});
+    return os.str();
+}
+
+bool additionalFieldCollidesWithBaseField(
+    const CouplingContext& context,
+    const CouplingAdditionalFieldDeclaration& field)
+{
+    const auto target_system = additionalFieldRegistrationTargetKey(context, field);
+    return std::any_of(
+        context.fields().begin(),
+        context.fields().end(),
+        [&](const CouplingFieldRef& base_field) {
+            if (base_field.field_name != field.field_name) {
+                return false;
+            }
+            if (field.field_namespace ==
+                    CouplingAdditionalFieldNamespace::Participant &&
+                base_field.participant_name == field.namespace_name) {
+                return true;
+            }
+            return !target_system.empty() &&
+                   !base_field.system_name.empty() &&
+                   base_field.system_name == target_system;
+        });
+}
+
+void validateAdditionalFieldGraphDeclarations(
+    const CouplingContext& context,
+    std::span<const CouplingContractDeclaration> declarations,
+    CouplingValidationResult& result)
+{
+    struct SeenAdditionalField {
+        std::string key;
+    };
+    std::vector<SeenAdditionalField> seen;
+
+    for (const auto& declaration : declarations) {
+        for (const auto& field : declaration.additional_fields) {
+            if (!additionalFieldSelected(field)) {
+                continue;
+            }
+            if (additionalFieldCollidesWithBaseField(context, field)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .field_name = field.field_name,
+                    .message = "additional field declaration collides with a base field",
+                });
+            }
+
+            const auto key = additionalFieldGraphKey(context, field);
+            const auto duplicate = std::find_if(
+                seen.begin(),
+                seen.end(),
+                [&](const SeenAdditionalField& prior) {
+                    return prior.key == key;
+                });
+            if (duplicate != seen.end()) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .contract_name = declaration.contract_name,
+                    .field_name = field.field_name,
+                    .message = "duplicate additional field declaration in coupling graph",
+                });
+                continue;
+            }
+            seen.push_back(SeenAdditionalField{
+                .key = key,
             });
         }
     }
@@ -2184,6 +2293,11 @@ CouplingValidationResult CouplingGraph::buildDeclarationGraph(
             }
         }
     }
+    validateAdditionalFieldGraphDeclarations(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        result);
     return result;
 }
 
