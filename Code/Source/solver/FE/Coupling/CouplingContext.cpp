@@ -668,6 +668,15 @@ CouplingValidationResult CouplingContextBuilder::validate() const
                     .message = "duplicate coupling participant",
                 });
             }
+            if (!participant.system_name.empty() &&
+                participant.system_name == context_.participants_[j].system_name &&
+                participant.system != context_.participants_[j].system) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = participant.participant_name,
+                    .message = "coupling system name is bound to multiple owning systems",
+                });
+            }
         }
     }
 

@@ -185,6 +185,18 @@ TEST(CouplingContext, RejectsDuplicateFieldMappings)
               std::string::npos);
 }
 
+TEST(CouplingContext, RejectsSystemNameBoundToDifferentSystems)
+{
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("left", "shared_system", systemToken(1)))
+        .addParticipant(participant("right", "shared_system", systemToken(2)));
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("system name is bound to multiple"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsDuplicateFieldIdAliasesForParticipant)
 {
     const auto* system = systemToken(1);
