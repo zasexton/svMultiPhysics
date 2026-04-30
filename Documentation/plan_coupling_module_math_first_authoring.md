@@ -217,10 +217,13 @@ Naming rule:
 
 Checklist:
 
+- [x] Shared generated-name helper uses
+      `<contract_name>.<relation_name>.<contribution_or_exchange_name>` when no
+      explicit override is supplied.
 - [ ] Residual contribution names are stable.
 - [ ] Exchange names are stable.
 - [ ] Coupling-owned field and variable names are stable.
-- [ ] Explicit name overrides are available for advanced cases.
+- [x] Explicit name overrides are available for advanced cases.
 - [ ] Generated names appear in diagnostics and installed metadata.
 
 ### Relation Lowering Capabilities

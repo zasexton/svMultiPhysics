@@ -24,6 +24,47 @@ TEST(CouplingTypes, PortIdentityUsesContractInstanceAndPortName)
     EXPECT_FALSE(validateCouplingPortId(invalid).ok());
 }
 
+TEST(CouplingTypes, GeneratedNamesUseStableContractRelationAndLocalParts)
+{
+    CouplingGeneratedNameRequest request{
+        .contract_name = "fsi_wall",
+        .relation_name = "interface",
+        .local_name = "traction_balance",
+    };
+
+    EXPECT_TRUE(validateCouplingGeneratedNameRequest(request).ok());
+    EXPECT_EQ(makeCouplingGeneratedName(request),
+              "fsi_wall.interface.traction_balance");
+
+    request.explicit_name = "custom_traction_form";
+    EXPECT_TRUE(validateCouplingGeneratedNameRequest(request).ok());
+    EXPECT_EQ(makeCouplingGeneratedName(request), "custom_traction_form");
+}
+
+TEST(CouplingTypes, GeneratedNameValidationRejectsAmbiguousParts)
+{
+    CouplingGeneratedNameRequest request{
+        .contract_name = "fsi.wall",
+        .relation_name = "",
+        .local_name = "traction.balance",
+    };
+
+    const auto validation = validateCouplingGeneratedNameRequest(request);
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("contract name part must not contain"), std::string::npos);
+    EXPECT_NE(text.find("relation name part must be nonempty"), std::string::npos);
+    EXPECT_NE(text.find("local name part must not contain"), std::string::npos);
+
+    request.explicit_name = "";
+    const auto override_validation =
+        validateCouplingGeneratedNameRequest(request);
+    EXPECT_FALSE(override_validation.ok());
+    EXPECT_NE(formatDiagnostics(override_validation).find(
+                  "explicit generated-name override must be nonempty"),
+              std::string::npos);
+}
+
 TEST(CouplingTypes, ValueDescriptorValidatesGeneralTensorShape)
 {
     CouplingValueDescriptor value;

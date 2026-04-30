@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <string_view>
 #include <tuple>
 
 namespace svmp {
@@ -183,6 +184,29 @@ const char* toString(CouplingEndpointKind kind) noexcept
     return "unknown";
 }
 
+namespace {
+
+bool generatedNamePartContainsSeparator(std::string_view part) noexcept
+{
+    return part.find('.') != std::string_view::npos;
+}
+
+void validateGeneratedNamePart(CouplingValidationResult& result,
+                               std::string_view part,
+                               std::string_view label)
+{
+    if (part.empty()) {
+        result.addError(std::string(label) + " name part must be nonempty");
+        return;
+    }
+    if (generatedNamePartContainsSeparator(part)) {
+        result.addError(std::string(label) +
+                        " name part must not contain the generated-name separator");
+    }
+}
+
+} // namespace
+
 CouplingValidationResult validateCouplingPortId(const CouplingPortId& port)
 {
     CouplingValidationResult result;
@@ -193,6 +217,32 @@ CouplingValidationResult validateCouplingPortId(const CouplingPortId& port)
         result.addError("coupling port requires a port name");
     }
     return result;
+}
+
+CouplingValidationResult validateCouplingGeneratedNameRequest(
+    const CouplingGeneratedNameRequest& request)
+{
+    CouplingValidationResult result;
+    if (request.explicit_name.has_value()) {
+        if (request.explicit_name->empty()) {
+            result.addError("explicit generated-name override must be nonempty");
+        }
+        return result;
+    }
+
+    validateGeneratedNamePart(result, request.contract_name, "contract");
+    validateGeneratedNamePart(result, request.relation_name, "relation");
+    validateGeneratedNamePart(result, request.local_name, "local");
+    return result;
+}
+
+std::string makeCouplingGeneratedName(const CouplingGeneratedNameRequest& request)
+{
+    if (request.explicit_name.has_value()) {
+        return *request.explicit_name;
+    }
+    return request.contract_name + "." + request.relation_name + "." +
+           request.local_name;
 }
 
 std::uint64_t couplingTensorExtentProduct(const std::vector<int>& extents) noexcept

@@ -166,6 +166,13 @@ struct CouplingRegionEndpointDeclaration {
     std::optional<std::string> shared_region_name;
 };
 
+struct CouplingGeneratedNameRequest {
+    std::string contract_name;
+    std::string relation_name;
+    std::string local_name;
+    std::optional<std::string> explicit_name;
+};
+
 [[nodiscard]] const char* toString(CouplingMode mode) noexcept;
 [[nodiscard]] const char* toString(CouplingRequirement requirement) noexcept;
 [[nodiscard]] const char* toString(CouplingDependencyMode mode) noexcept;
@@ -185,6 +192,11 @@ struct CouplingRegionEndpointDeclaration {
     const CouplingTemporalSlotDescriptor& temporal);
 [[nodiscard]] CouplingValidationResult validateCouplingEndpointRef(
     const CouplingEndpointRef& endpoint);
+[[nodiscard]] CouplingValidationResult validateCouplingGeneratedNameRequest(
+    const CouplingGeneratedNameRequest& request);
+
+[[nodiscard]] std::string makeCouplingGeneratedName(
+    const CouplingGeneratedNameRequest& request);
 
 [[nodiscard]] bool couplingValueDescriptorsCompatible(
     const CouplingValueDescriptor& producer,
