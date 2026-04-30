@@ -247,15 +247,6 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& builder) const
             options_.mode == fec::CouplingMode::Monolithic,
     });
 
-    if (options_.use_solid_displacement_derivative) {
-        builder.temporalRequirement(fec::CouplingTemporalRequirement{
-            .quantity = fec::CouplingTemporalQuantity::FieldDerivative,
-            .field = fieldUse(options_.solid_name,
-                              options_.solid_displacement_field),
-            .derivative_order = 1,
-        });
-    }
-
     if (options_.multiplier.enabled) {
         const auto multiplier_namespace =
             options_.multiplier.contract_field_namespace.empty()

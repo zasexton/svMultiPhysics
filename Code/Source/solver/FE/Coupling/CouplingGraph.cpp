@@ -2373,6 +2373,35 @@ bool hasDeclaredTemporalSymbol(
         });
 }
 
+void appendInstalledFormTemporalInferences(
+    std::span<const CouplingContractDeclaration> declarations,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    std::vector<ResolvedTemporalRequirement>& temporal_requirements)
+{
+    if (!dependencyModeInfersInstalledForms(declarations)) {
+        return;
+    }
+
+    for (const auto& form : installed_forms) {
+        const auto contract_name =
+            inferredDependencyContractName(declarations, form);
+        for (const auto& symbol : form.temporal_symbols) {
+            if (hasDeclaredTemporalSymbol(temporal_requirements, symbol)) {
+                continue;
+            }
+            temporal_requirements.push_back(ResolvedTemporalRequirement{
+                .contract_name = contract_name,
+                .quantity = symbol.quantity,
+                .field = symbol.field,
+                .mesh_motion_scope = symbol.mesh_motion_scope,
+                .mesh_motion_role = symbol.mesh_motion_role,
+                .derivative_order = symbol.derivative_order,
+                .history_index = symbol.history_index,
+            });
+        }
+    }
+}
+
 void validateTemporalSymbolEvidence(
     const std::vector<ResolvedTemporalRequirement>& temporal_requirements,
     std::span<const CouplingFormAnalysisMetadata> installed_forms,
@@ -3356,7 +3385,7 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
 
     auto declared_dependencies =
         resolveDeclaredDependencies(context, declarations_, result);
-    const auto declared_temporal_requirements =
+    auto declared_temporal_requirements =
         resolveDeclaredTemporalRequirements(context, declarations_, result);
     auto declared_geometry_requirements =
         resolveDeclaredGeometryRequirements(context, declarations_, result);
@@ -3367,6 +3396,11 @@ CouplingValidationResult CouplingGraph::buildFinalizedGraph(
         installed_forms,
         declared_dependencies,
         expected_blocks);
+    appendInstalledFormTemporalInferences(
+        std::span<const CouplingContractDeclaration>(declarations_.data(),
+                                                     declarations_.size()),
+        installed_forms,
+        declared_temporal_requirements);
     appendInstalledFormGeometryInferences(
         std::span<const CouplingContractDeclaration>(declarations_.data(),
                                                      declarations_.size()),

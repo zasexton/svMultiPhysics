@@ -1301,7 +1301,7 @@ enum class CouplingDependencyDeclarationMode {
 
 - [x] FSI no longer manually appends monolithic dependencies.
 - [x] FSI no longer manually appends expected blocks.
-- [ ] Temporal requirements from `dt(...)` can be inferred or verified.
+- [x] Temporal requirements from `dt(...)` can be inferred or verified.
 - [x] Geometry terminal requirements from `normal()` can be inferred or
       verified.
 - [ ] Non-field variable dependencies from Forms terminals can be inferred or
@@ -1620,8 +1620,8 @@ enum class ThermalInterfaceFormulation {
 - [ ] Test residual-row inference from test fields.
 - [ ] Test dependency inference from state fields.
 - [x] Test expected-block inference from installed block metadata.
-- [ ] Test temporal requirement inference from time derivatives.
-- [ ] Test geometry requirement inference from normal terminals.
+- [x] Test temporal requirement inference from time derivatives.
+- [x] Test geometry requirement inference from normal terminals.
 - [ ] Test geometry-sensitivity field-use inference.
 - [ ] Test non-field dependency inference.
 - [ ] Test global scalar dependency inference.

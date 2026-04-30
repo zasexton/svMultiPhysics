@@ -2095,6 +2095,53 @@ TEST(CouplingGraph, InfersGeometryTerminalRequirementsFromInstalledForms)
               std::string::npos);
 }
 
+TEST(CouplingGraph, InfersTemporalRequirementsFromInstalledForms)
+{
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::InferFromInstalledForms;
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.fields.push_back({
+        .participant_name = "left",
+        .field_name = "primary",
+    });
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "temporal_form";
+    metadata.system_name = "system";
+    metadata.temporal_symbols.push_back(CouplingFormTemporalProvenance{
+        .field = FieldId{1},
+        .quantity = CouplingTemporalQuantity::FieldDerivative,
+        .derivative_order = 1,
+    });
+
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const std::array<CouplingFormAnalysisMetadata, 1> installed{metadata};
+    const auto validation = graph.buildFinalizedGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    auto verify_declaration = declaration;
+    verify_declaration.dependency_declaration_mode =
+        CouplingDependencyDeclarationMode::DeclareAndVerify;
+    const std::array<CouplingContractDeclaration, 1> verify_declarations{
+        verify_declaration};
+    CouplingGraph verify_graph;
+    const auto verify_validation = verify_graph.buildFinalizedGraph(
+        graphContext(),
+        std::span<const CouplingContractDeclaration>(verify_declarations),
+        std::span<const CouplingFormAnalysisMetadata>(installed));
+    EXPECT_FALSE(verify_validation.ok());
+    EXPECT_NE(formatDiagnostics(verify_validation)
+                  .find("installed form temporal symbol has no declared temporal requirement"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, AggregatesFieldHistoryAndMeshTemporalRequirementsAcrossContracts)
 {
     CouplingContractDeclaration history_contract;

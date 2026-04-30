@@ -539,7 +539,7 @@ TEST(FSICouplingModule, DeclaresMultiplierFieldWhenEnabled)
     EXPECT_EQ(*field.shared_region_name, "interface");
 }
 
-TEST(FSICouplingModule, DeclaresTemporalDerivativeWhenSolidVelocityDerived)
+TEST(FSICouplingModule, OmitsSolidVelocityFieldWhenUsingDisplacementDerivative)
 {
     FSICouplingOptions options;
     options.use_solid_displacement_derivative = true;
@@ -548,13 +548,7 @@ TEST(FSICouplingModule, DeclaresTemporalDerivativeWhenSolidVelocityDerived)
     const auto declaration = module.declare();
 
     EXPECT_FALSE(hasField(declaration, "solid", "velocity"));
-    ASSERT_EQ(declaration.temporal_requirements.size(), 1u);
-    const auto& requirement = declaration.temporal_requirements.front();
-    EXPECT_EQ(requirement.quantity, fec::CouplingTemporalQuantity::FieldDerivative);
-    ASSERT_TRUE(requirement.field.has_value());
-    EXPECT_EQ(requirement.field->participant_name, "solid");
-    EXPECT_EQ(requirement.field->field_name, "displacement");
-    EXPECT_EQ(requirement.derivative_order, 1);
+    EXPECT_TRUE(declaration.temporal_requirements.empty());
 }
 
 TEST(FSICouplingModule, DeclaresMonolithicInferenceMode)
@@ -1058,7 +1052,15 @@ TEST(FSICouplingModule, ReportsALEGeometrySensitivityProvenance)
 
 TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
 {
-    FSIContextFixture fixture;
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true);
     const fec::CouplingFormBuilder form_builder(fixture.context);
 
     FSICouplingOptions options;
@@ -1077,6 +1079,20 @@ TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
                             "displacement"));
     EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::TimeDerivative));
+
+    const fec::MonolithicCouplingBuilder monolithic_builder;
+    const auto installed = monolithic_builder.installFormContributions(
+        fixture.fluid_system,
+        fixture.context,
+        std::span<const fec::CouplingFormContribution>(contributions));
+    const std::array<fec::CouplingContractDeclaration, 1> declarations{
+        module.declare()};
+    fec::CouplingGraph graph;
+    const auto validation = graph.buildFinalizedGraph(
+        fixture.context,
+        std::span<const fec::CouplingContractDeclaration>(declarations),
+        std::span<const fec::CouplingFormAnalysisMetadata>(installed));
+    EXPECT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
 }
 
 TEST(FSICouplingModule, ReportsMonolithicIncompatibleSystemsThroughGraph)
