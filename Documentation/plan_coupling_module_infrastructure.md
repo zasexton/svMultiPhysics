@@ -3757,7 +3757,7 @@ Unit-test verification checklist:
   analysis.
 - [x] Add a dependency-boundary test or build assertion that expert hook test
   fixtures cannot call internal `FESystem::add*Kernel` registration paths.
-- [ ] Add a bridge-readiness test that fails when installed-form validators are
+- [x] Add a bridge-readiness test that fails when installed-form validators are
   enabled without a public bridge or explicit synthetic metadata fixture.
 - [x] Add a scanner-normalization test fixture that proves bridge consumers see
   explicit terminal kinds rather than relying on scanner container names.

@@ -196,6 +196,14 @@ CouplingFormAnalysisMetadata installedDependencyMetadata()
     metadata.contribution_name = "generic_cell_coupling";
     metadata.origin = "CouplingGraphTest";
     metadata.system_name = "system";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic installed dependency fixture"});
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledBlocks,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic installed block fixture"});
     metadata.installed_fields = {2, 1};
     metadata.installed_dependencies.push_back(CouplingInstalledDependency{
         .residual_row = analysis::VariableKey::field(2),
@@ -354,6 +362,25 @@ TEST(CouplingGraph, AcceptsInstalledImplicitDependencyAndExpectedBlock)
         installed_forms);
 
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, RejectsInstalledMetadataWithoutBridgeReadinessGates)
+{
+    auto metadata = installedDependencyMetadata();
+    metadata.feature_gates.clear();
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        twoParticipantDependencyDeclaration(),
+        installed_forms);
+
+    EXPECT_FALSE(validation.ok());
+    const auto text = formatDiagnostics(validation);
+    EXPECT_NE(text.find("installed-form validators require public bridge feature gate"),
+              std::string::npos);
+    EXPECT_NE(text.find("InstalledDependencies"), std::string::npos);
+    EXPECT_NE(text.find("InstalledBlocks"), std::string::npos);
 }
 
 TEST(CouplingGraph, RejectsDeclaredImplicitDependencyMissingFromInstalledMetadata)

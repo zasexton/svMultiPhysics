@@ -295,6 +295,82 @@ bool hasInstalledNonzeroEvidence(
     return false;
 }
 
+bool installedFormFeatureAvailable(const CouplingFormAnalysisMetadata& form,
+                                   analysis::FormBridgeFeature feature) noexcept
+{
+    const auto it = std::find_if(
+        form.feature_gates.begin(),
+        form.feature_gates.end(),
+        [feature](const auto& gate) {
+            return gate.feature == feature;
+        });
+    return it != form.feature_gates.end() &&
+           it->status == analysis::FormBridgeFeatureStatus::Available;
+}
+
+bool anyInstalledBlocks(std::span<const CouplingFormAnalysisMetadata> installed_forms)
+{
+    return std::any_of(
+        installed_forms.begin(),
+        installed_forms.end(),
+        [](const auto& form) {
+            return !form.installed_blocks.empty();
+        });
+}
+
+void addMissingBridgeGateDiagnostic(const CouplingFormAnalysisMetadata& form,
+                                    analysis::FormBridgeFeature feature,
+                                    CouplingValidationResult& result)
+{
+    result.add(CouplingDiagnostic{
+        .severity = CouplingDiagnosticSeverity::Error,
+        .message = std::string{"installed-form validators require public bridge feature gate: "} +
+                   form.contribution_name + " " + analysis::toString(feature),
+    });
+}
+
+void validateInstalledFormBridgeReadiness(
+    const std::vector<ResolvedDeclaredDependency>& declared_dependencies,
+    const std::vector<ResolvedExpectedBlock>& expected_blocks,
+    std::span<const CouplingFormAnalysisMetadata> installed_forms,
+    CouplingValidationResult& result)
+{
+    if (installed_forms.empty()) {
+        return;
+    }
+
+    const bool dependency_validators_enabled =
+        !declared_dependencies.empty() || !expected_blocks.empty();
+    const bool block_validators_enabled =
+        anyInstalledBlocks(installed_forms) ||
+        std::any_of(expected_blocks.begin(),
+                    expected_blocks.end(),
+                    [](const auto& block) {
+                        return block.expected_nonzero && block.expect_matrix_block;
+                    });
+
+    for (const auto& form : installed_forms) {
+        if (dependency_validators_enabled &&
+            !installedFormFeatureAvailable(
+                form,
+                analysis::FormBridgeFeature::InstalledDependencies)) {
+            addMissingBridgeGateDiagnostic(
+                form,
+                analysis::FormBridgeFeature::InstalledDependencies,
+                result);
+        }
+        if (block_validators_enabled &&
+            !installedFormFeatureAvailable(
+                form,
+                analysis::FormBridgeFeature::InstalledBlocks)) {
+            addMissingBridgeGateDiagnostic(
+                form,
+                analysis::FormBridgeFeature::InstalledBlocks,
+                result);
+        }
+    }
+}
+
 bool sameTemporalSlot(const CouplingTemporalSlotDescriptor& lhs,
                       const CouplingTemporalSlotDescriptor& rhs) noexcept
 {
@@ -416,6 +492,12 @@ void validateFinalizedDependencyEvidence(
     std::span<const CouplingFormAnalysisMetadata> installed_forms,
     CouplingValidationResult& result)
 {
+    validateInstalledFormBridgeReadiness(
+        declared_dependencies,
+        expected_blocks,
+        installed_forms,
+        result);
+
     for (const auto& dependency : declared_dependencies) {
         if (dependency.mode != CouplingDependencyMode::ImplicitMonolithic) {
             continue;
