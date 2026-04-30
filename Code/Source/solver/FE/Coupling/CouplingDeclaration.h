@@ -86,11 +86,26 @@ enum class CouplingRegionRelationKind : std::uint8_t {
     AuxiliaryPDECoupling,
 };
 
+enum class CouplingRelationLoweringKind : std::uint8_t {
+    MonolithicForms,
+    MonolithicExpert,
+    PartitionedExchange,
+    PartitionedExpert,
+};
+
+struct CouplingRelationLoweringCapability {
+    CouplingRelationLoweringKind lowering_kind{
+        CouplingRelationLoweringKind::MonolithicForms};
+    bool supported{true};
+    std::string unsupported_reason;
+};
+
 struct CouplingRegionRelationRequirement {
     std::string relation_name;
     CouplingRegionRelationKind relation_kind{
         CouplingRegionRelationKind::SidePairedInterface};
     std::vector<CouplingRegionEndpointDeclaration> endpoints;
+    std::vector<CouplingRelationLoweringCapability> lowering_capabilities;
     std::optional<CouplingRegionKind> required_region_kind;
     bool require_all_endpoints{true};
     bool require_distinct_participants{false};

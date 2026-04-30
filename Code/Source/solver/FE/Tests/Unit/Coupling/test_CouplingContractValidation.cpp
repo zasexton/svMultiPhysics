@@ -335,6 +335,15 @@ TEST(CouplingContractValidation, AcceptsRegionRelationRequirements)
                 .shared_region_name = "interface",
             },
         },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+            },
+        },
         .require_distinct_participants = true,
         .require_registered_topology = true,
     });
@@ -359,6 +368,15 @@ TEST(CouplingContractValidation, ValidatesRegionRelationRequirements)
                 .region_name = "surface",
             },
         },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .supported = false,
+            },
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
         .required_region_kind = CouplingRegionKind::Boundary,
         .require_distinct_participants = true,
         .require_opposite_sides_for_side_pair = true,
@@ -376,11 +394,41 @@ TEST(CouplingContractValidation, ValidatesRegionRelationRequirements)
             },
         },
     });
+    declaration.region_relation_requirements.push_back({
+        .relation_name = "no_supported_lowering",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "surface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "surface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .supported = false,
+                .unsupported_reason = "requires custom assembly",
+            },
+        },
+    });
 
     const auto validation = validateContractDeclarationShape(declaration);
     EXPECT_FALSE(validation.ok());
     const auto text = formatDiagnostics(validation);
     EXPECT_NE(text.find("opposite-side relation requires interface-face region kind"),
+              std::string::npos);
+    EXPECT_NE(text.find("unsupported relation lowering capability requires a reason"),
+              std::string::npos);
+    EXPECT_NE(text.find("duplicate relation lowering capability"),
+              std::string::npos);
+    EXPECT_NE(text.find("region-relation requirement requires lowering capabilities"),
+              std::string::npos);
+    EXPECT_NE(text.find(
+                  "region-relation requirement requires at least one supported lowering capability"),
               std::string::npos);
     EXPECT_NE(text.find("duplicate region-relation requirement"), std::string::npos);
     EXPECT_NE(text.find("duplicate endpoint in region-relation requirement"),

@@ -1148,6 +1148,8 @@ struct CouplingRegionRelationRequirement {
 };
 ```
 
+- [x] Add relation lowering capability records and declaration-time
+      diagnostics for missing, duplicate, or unsupported lowering declarations.
 - [ ] Prefer `CouplingRegionRelationRequirement` for new code when a relation is
       not exactly a simple two-side shared interface.
 - [ ] Teach `CouplingGraph` to validate field rank, component count, and field

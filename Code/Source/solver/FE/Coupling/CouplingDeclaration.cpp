@@ -94,6 +94,12 @@ std::string regionEndpointKey(const CouplingRegionEndpointDeclaration& endpoint)
            endpoint.shared_region_name.value_or("");
 }
 
+std::string relationLoweringCapabilityKey(
+    const CouplingRelationLoweringCapability& capability)
+{
+    return std::to_string(static_cast<int>(capability.lowering_kind));
+}
+
 std::string variableKey(const CouplingVariableUse& variable)
 {
     return std::to_string(static_cast<int>(variable.kind)) + "/" +
@@ -360,6 +366,37 @@ CouplingValidationResult validateContractDeclarationShape(
         if (requirement.relation_kind == CouplingRegionRelationKind::NWayInterface &&
             requirement.endpoints.size() < 2u) {
             result.addError("N-way interface relation requires at least two endpoints");
+        }
+        if (requirement.lowering_capabilities.empty()) {
+            result.addError(
+                "region-relation requirement requires lowering capabilities");
+        }
+        bool has_supported_lowering = false;
+        for (std::size_t j = 0;
+             j < requirement.lowering_capabilities.size();
+             ++j) {
+            const auto& capability = requirement.lowering_capabilities[j];
+            has_supported_lowering =
+                has_supported_lowering || capability.supported;
+            if (!capability.supported && capability.unsupported_reason.empty()) {
+                result.addError(
+                    "unsupported relation lowering capability requires a reason");
+            }
+            for (std::size_t k = j + 1u;
+                 k < requirement.lowering_capabilities.size();
+                 ++k) {
+                addDuplicateIfRepeated(
+                    result,
+                    relationLoweringCapabilityKey(capability),
+                    relationLoweringCapabilityKey(
+                        requirement.lowering_capabilities[k]),
+                    "duplicate relation lowering capability");
+            }
+        }
+        if (!requirement.lowering_capabilities.empty() &&
+            !has_supported_lowering) {
+            result.addError(
+                "region-relation requirement requires at least one supported lowering capability");
         }
         if (requirement.require_opposite_sides_for_side_pair &&
             requirement.required_region_kind.has_value() &&
