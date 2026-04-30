@@ -2250,6 +2250,51 @@ TEST(MonolithicCouplingBuilder, RefreshesFinalizedGraphAfterFormsAndExpertMetada
     EXPECT_FALSE(fixture.system.isSetup());
 }
 
+TEST(MonolithicCouplingBuilder, AllowsExternalLaggedDependenciesWithoutBlocks)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "external_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.participants.push_back({.participant_name = "right"});
+    declaration.fields.push_back({.participant_name = "left", .field_name = "primary"});
+    declaration.fields.push_back({.participant_name = "right", .field_name = "primary"});
+    declaration.dependencies.push_back(CouplingResidualDependency{
+        .residual_row = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "right",
+            .name = "primary",
+        },
+        .dependency = {
+            .kind = CouplingVariableKind::Field,
+            .participant_name = "left",
+            .name = "primary",
+        },
+        .mode = CouplingDependencyMode::ExternalLagged,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto declaration_validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(declaration_validation.ok())
+        << formatDiagnostics(declaration_validation);
+
+    CouplingGraph graph;
+    const std::array<CouplingFormAnalysisMetadata, 0> no_metadata{};
+    const auto finalized_validation = builder.refreshFinalizedGraph(
+        graph,
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations),
+        std::span<const CouplingFormAnalysisMetadata>(no_metadata));
+    EXPECT_TRUE(finalized_validation.ok())
+        << formatDiagnostics(finalized_validation);
+    EXPECT_FALSE(fixture.system.isSetup());
+}
+
 TEST(MonolithicCouplingBuilder, GenericInterfaceContractInstallsAndFinalizesGraph)
 {
     BuilderFixture fixture;

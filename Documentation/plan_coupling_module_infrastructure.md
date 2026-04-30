@@ -5048,7 +5048,7 @@ Unit-test verification checklist:
   `MonolithicCouplingInstallContext`.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies missing expected blocks
   fail before setup.
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies external/lagged
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies external/lagged
   dependencies do not produce expected block requirements.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies temporal-policy failures
   stop setup before assembly.
