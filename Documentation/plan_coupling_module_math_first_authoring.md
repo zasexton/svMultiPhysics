@@ -1641,17 +1641,17 @@ enum class ThermalInterfaceFormulation {
 - [x] Test scalar field exchange descriptor inference.
 - [x] Test vector field exchange descriptor inference.
 - [x] Test explicit descriptor override for non-field payloads.
-- [ ] Test automatic shared-region endpoint attachment.
-- [ ] Test auxiliary endpoint exchange descriptors.
+- [x] Test automatic shared-region endpoint attachment.
+- [x] Test auxiliary endpoint exchange descriptors.
 - [ ] Test global-scalar exchange descriptors.
-- [ ] Test N-way exchange group validation.
+- [x] Test N-way exchange group validation.
 - [x] Test partitioned relaxation and convergence metadata validation.
 - [x] Test subcycling and time-window metadata validation.
 - [ ] Test AuxiliaryState endpoints admitted into a partitioned coupling inherit
       the coupling contract partitioned strategy and temporal policy.
-- [ ] Test transfer-kind validation remains in `PartitionedCouplingPlanGenerator`.
-- [ ] Test temporal slot validation remains in `PartitionedCouplingPlanGenerator`.
-- [ ] Test interface runtime handle validation remains unchanged.
+- [x] Test transfer-kind validation remains in `PartitionedCouplingPlanGenerator`.
+- [x] Test temporal slot validation remains in `PartitionedCouplingPlanGenerator`.
+- [x] Test interface runtime handle validation remains unchanged.
 
 ### Physics Tests
 
