@@ -2170,6 +2170,45 @@ TEST(PartitionedCouplingPlanGenerator, GeneratesExternalBufferEndpointWithDescri
     EXPECT_EQ(plan.exchanges[0].producer.registry_revision_key, 5u);
 }
 
+TEST(PartitionedCouplingPlanGenerator, GeneratesGlobalScalarExternalBufferEndpoint)
+{
+    auto exchange = identityExchange();
+    exchange.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::Scalar,
+        .components = 1,
+    };
+    exchange.producer = externalBufferEndpoint("junction_pressure");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    auto builder = partitionedContextBuilder(1);
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = externalBufferDescriptor(
+            "junction_pressure",
+            exchange.value,
+            CouplingExternalBufferAccess::ReadOnly,
+            {CouplingTemporalSlotDescriptor{.slot = CouplingTemporalSlot::External}}),
+    });
+    const auto context = builder.build();
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(
+        context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    ASSERT_TRUE(plan.exchanges[0].producer.external_buffer.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer.value.rank, CouplingValueRank::Scalar);
+    EXPECT_EQ(plan.exchanges[0].producer.value.components, 1);
+    EXPECT_EQ(plan.exchanges[0].producer.resolved_endpoint_key,
+              "junction_pressure");
+    EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
+              CouplingResolvedTemporalBackingKind::ExternalBuffer);
+}
+
 TEST(PartitionedCouplingPlanGenerator, ResolvesPredictedExternalBufferEndpoint)
 {
     auto exchange = identityExchange();

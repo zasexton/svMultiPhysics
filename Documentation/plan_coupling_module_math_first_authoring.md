@@ -1348,7 +1348,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 - [x] Infer `CouplingValueDescriptor` from field requirements when possible.
 - [x] Require explicit value descriptors only for mixed-block, packed tensor, or
       driver-owned payloads.
-- [ ] Support exchanges involving field endpoints, region data, auxiliary
+- [x] Support exchanges involving field endpoints, region data, auxiliary
       state/input/output, parameters, boundary functionals, external buffers,
       global scalars, and driver-owned buffers.
 - [x] Support N-way exchange groups for junctions and hub-and-spoke couplings.
@@ -1368,7 +1368,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 - [x] Thermal partitioned exchange definitions are reduced to logical channels
       and transfer choices.
 - [x] Physics modules do not manually attach producer/consumer region endpoints.
-- [ ] Multi-PDE auxiliary and global-scalar exchanges are expressible through
+- [x] Multi-PDE auxiliary and global-scalar exchanges are expressible through
       existing endpoint records.
 - [ ] N-way partitioned exchange groups validate through the existing plan
       generator.
@@ -1643,7 +1643,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test explicit descriptor override for non-field payloads.
 - [x] Test automatic shared-region endpoint attachment.
 - [x] Test auxiliary endpoint exchange descriptors.
-- [ ] Test global-scalar exchange descriptors.
+- [x] Test global-scalar exchange descriptors.
 - [x] Test N-way exchange group validation.
 - [x] Test partitioned relaxation and convergence metadata validation.
 - [x] Test subcycling and time-window metadata validation.
