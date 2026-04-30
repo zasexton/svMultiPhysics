@@ -411,8 +411,69 @@ TEST(CouplingGraph, RejectsDeclaredImplicitDependencyMissingFromInstalledMetadat
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find(
-                  "declared implicit coupling dependency is not reported"),
+              "declared implicit coupling dependency is not reported"),
               std::string::npos);
+}
+
+TEST(CouplingGraph, AcceptsDeclaredImplicitDependencyFromFieldUseMetadata)
+{
+    auto declaration = twoParticipantDependencyDeclaration();
+    declaration.expected_blocks.clear();
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "field_use_coupling";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic field-use dependency fixture"});
+    metadata.field_uses.push_back(CouplingFormFieldProvenance{
+        .residual_row = 2,
+        .field = 1,
+        .appears_as_state_field = true,
+    });
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        declaration,
+        installed_forms);
+
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+}
+
+TEST(CouplingGraph, AcceptsDeclaredImplicitDependencyFromVariableMetadata)
+{
+    auto declaration = twoParticipantDependencyDeclaration();
+    declaration.expected_blocks.clear();
+    declaration.dependencies[0].dependency = CouplingVariableUse{
+        .kind = CouplingVariableKind::GlobalScalar,
+        .name = "lambda",
+    };
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "variable_coupling";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic variable dependency fixture"});
+    metadata.variable_dependencies.push_back(CouplingFormVariableDependencyProvenance{
+        .residual_row = analysis::VariableKey::field(2),
+        .dependency = analysis::VariableKey::named(
+            analysis::VariableKind::GlobalScalar,
+            "lambda"),
+        .mode = CouplingDependencyMode::ImplicitMonolithic,
+        .domain = analysis::DomainKind::Global,
+        .contributes_vector = true,
+        .provider = "forms",
+    });
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        twoParticipantGraphContext(),
+        declaration,
+        installed_forms);
+
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
 TEST(CouplingGraph, RejectsExpectedBlockWithoutInstalledMatrixEvidence)

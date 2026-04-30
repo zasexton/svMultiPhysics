@@ -4454,7 +4454,7 @@ Implementation checklist:
   `scope.region.shared_region_name` and `scope.location.shared_region_name`,
   inheriting the region owner shared-region name into the location when omitted,
   and rejecting shared-side terminals with no shared-region scope.
-- [ ] Validate that declared implicit dependencies appear as actual
+- [x] Validate that declared implicit dependencies appear as actual
   `StateField` or Systems-recognized geometry-sensitivity dependencies in
   Forms-authored residuals, or as supported non-field `analysis::VariableKey`
   dependencies, unless the contract intentionally uses the expert install hook.

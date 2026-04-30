@@ -501,6 +501,44 @@ const ResolvedDeclaredDependency* findDeclaredDependency(
     return it == dependencies.end() ? nullptr : &*it;
 }
 
+bool variableReferencesField(const analysis::VariableKey& variable,
+                             FieldId field) noexcept
+{
+    return variable.kind == analysis::VariableKind::FieldComponent &&
+           variable.field_id == field;
+}
+
+bool hasVariableDependencyEvidence(const CouplingFormAnalysisMetadata& form,
+                                   const analysis::VariableKey& row,
+                                   const analysis::VariableKey& dependency)
+{
+    return std::any_of(
+        form.variable_dependencies.begin(),
+        form.variable_dependencies.end(),
+        [&](const CouplingFormVariableDependencyProvenance& variable) {
+            return sameVariables(variable.residual_row,
+                                 variable.dependency,
+                                 row,
+                                 dependency);
+        });
+}
+
+bool hasFieldUseDependencyEvidence(const CouplingFormAnalysisMetadata& form,
+                                   const analysis::VariableKey& row,
+                                   const analysis::VariableKey& dependency)
+{
+    return std::any_of(
+        form.field_uses.begin(),
+        form.field_uses.end(),
+        [&](const CouplingFormFieldProvenance& field) {
+            return variableReferencesField(row, field.residual_row) &&
+                   variableReferencesField(dependency, field.field) &&
+                   (field.appears_as_state_field ||
+                    field.appears_as_discrete_field ||
+                    field.appears_as_geometry_sensitivity);
+        });
+}
+
 bool hasInstalledDependencyEvidence(
     std::span<const CouplingFormAnalysisMetadata> installed_forms,
     const analysis::VariableKey& row,
@@ -519,6 +557,10 @@ bool hasInstalledDependencyEvidence(
             if (sameVariables(block.residual_row, block.dependency, row, dependency)) {
                 return true;
             }
+        }
+        if (hasVariableDependencyEvidence(form, row, dependency) ||
+            hasFieldUseDependencyEvidence(form, row, dependency)) {
+            return true;
         }
     }
     return false;
@@ -542,6 +584,15 @@ bool hasInstalledMatrixEvidence(
         for (const auto& block : form.installed_blocks) {
             if (sameVariables(block.residual_row, block.dependency, row, dependency) &&
                 block.has_matrix) {
+                return true;
+            }
+        }
+        for (const auto& variable : form.variable_dependencies) {
+            if (sameVariables(variable.residual_row,
+                              variable.dependency,
+                              row,
+                              dependency) &&
+                variable.contributes_matrix_block) {
                 return true;
             }
         }
@@ -569,6 +620,18 @@ bool hasInstalledNonzeroEvidence(
                 (block.has_matrix || block.has_vector)) {
                 return true;
             }
+        }
+        for (const auto& variable : form.variable_dependencies) {
+            if (sameVariables(variable.residual_row,
+                              variable.dependency,
+                              row,
+                              dependency) &&
+                (variable.contributes_matrix_block || variable.contributes_vector)) {
+                return true;
+            }
+        }
+        if (hasFieldUseDependencyEvidence(form, row, dependency)) {
+            return true;
         }
     }
     return false;
