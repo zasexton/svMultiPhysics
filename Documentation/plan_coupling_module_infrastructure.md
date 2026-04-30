@@ -5293,7 +5293,7 @@ Unit-test verification checklist:
   pass-through components only when component layout is documented.
 - [x] `test_PartitionedCouplingPlan.cpp` rejects stale interface maps,
   wrong-system maps, and trial/accepted interface-map state mismatches.
-- [ ] `test_PartitionedCouplingPlan.cpp` verifies interface transfer declarations
+- [x] `test_PartitionedCouplingPlan.cpp` verifies interface transfer declarations
   fail validation cleanly when mesh/interface-operator support is disabled.
 - [x] `test_PartitionedCouplingPlan.cpp` rejects incompatible region scopes for
   a requested transfer declaration.

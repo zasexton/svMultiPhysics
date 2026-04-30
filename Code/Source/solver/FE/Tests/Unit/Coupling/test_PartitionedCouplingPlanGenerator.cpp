@@ -1252,6 +1252,29 @@ TEST(PartitionedCouplingPlanGenerator, RejectsTrue2DVectorInterfaceTransformWith
               std::string::npos);
 }
 
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+TEST(PartitionedCouplingPlanGenerator, RejectsInterfaceTransferWhenMeshSupportDisabled)
+{
+    const auto exchange = interfaceExchange(
+        CouplingValueDescriptor{
+            .rank = CouplingValueRank::Scalar,
+            .components = 1,
+        },
+        CouplingInterfaceFramePolicy::None);
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        partitionedContextWithSharedRegion(),
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "interface partitioned transfers require mesh interface support"),
+              std::string::npos);
+}
+#endif
+
 TEST(PartitionedCouplingPlanGenerator, RejectsVectorFramePassThroughWithoutLayout)
 {
     const auto exchange = interfaceExchange(
