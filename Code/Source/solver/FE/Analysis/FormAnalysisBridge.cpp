@@ -8,6 +8,7 @@
 #include "Analysis/FormAnalysisBridge.h"
 
 #include <algorithm>
+#include <functional>
 #include <span>
 #include <utility>
 
@@ -208,6 +209,37 @@ struct TerminalWalkContext {
     }
 }
 
+void populateTimeDerivativeFieldMetadata(const forms::FormExprNode& node,
+                                         FormTerminalMetadata& terminal)
+{
+    if (terminal.kind != FormTerminalKind::TimeDerivative) {
+        return;
+    }
+
+    const std::function<bool(const forms::FormExprNode&)> visit =
+        [&](const forms::FormExprNode& current) {
+            if (auto field_id = current.fieldId()) {
+                terminal.field_id = *field_id;
+                if (auto symbol_name = current.symbolName()) {
+                    terminal.symbol_name = std::string(*symbol_name);
+                }
+                return true;
+            }
+            for (const auto& child : current.childrenShared()) {
+                if (child && visit(*child)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+    for (const auto& child : node.childrenShared()) {
+        if (child && visit(*child)) {
+            return;
+        }
+    }
+}
+
 void appendTerminal(const forms::FormExprNode& node,
                     const FormAnalysisBridgeOptions& options,
                     const std::string& operator_tag,
@@ -255,6 +287,7 @@ void appendTerminal(const forms::FormExprNode& node,
     if (auto derivative_order = node.timeDerivativeOrder()) {
         terminal.derivative_order = *derivative_order;
     }
+    populateTimeDerivativeFieldMetadata(node, terminal);
     if (auto boundary_marker = node.boundaryMarker()) {
         terminal.boundary_marker = *boundary_marker;
         if (terminal.kind == FormTerminalKind::BoundaryFunctionalSymbol) {

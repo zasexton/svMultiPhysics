@@ -1613,7 +1613,7 @@ enum class ThermalInterfaceFormulation {
 
 - [x] Test interface-side `state(...)` maps to the expected side restriction.
 - [x] Test interface-side `test(...)` maps to the expected side restriction.
-- [ ] Test interface-side `dt(...)` records temporal provenance.
+- [x] Test interface-side `dt(...)` records temporal provenance.
 - [x] Test interface-side `normal()` records geometry terminal provenance.
 - [x] Test interface `integral(...)` uses the shared-region integration path.
 - [x] Test missing side mappings produce clear diagnostics.

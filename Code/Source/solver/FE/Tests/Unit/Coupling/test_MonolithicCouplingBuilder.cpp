@@ -1535,6 +1535,45 @@ TEST(MonolithicCouplingBuilder, InstallsResolvedFormAndAdaptsBridgeMetadata)
     EXPECT_TRUE(block_it->has_vector);
 }
 
+TEST(MonolithicCouplingBuilder, RecordsInterfaceTimeDerivativeTemporalMetadata)
+{
+    BuilderFixture fixture;
+    const auto context = interfaceContext(fixture, kInterfaceMarker);
+    const CouplingFormBuilder forms(context);
+    const MonolithicCouplingBuilder builder;
+    const auto interface = forms.sharedInterface("interface");
+    const auto left = interface.side("left");
+    const auto right = interface.side("right");
+
+    CouplingFormContribution contribution;
+    contribution.contribution_name = "interface_time_derivative";
+    contribution.origin = "MonolithicCouplingBuilderTest";
+    contribution.operator_name = "equations";
+    contribution.field_uses = {
+        {.participant_name = "right", .field_name = "primary"}};
+    contribution.extra_trial_field_uses = {
+        {.participant_name = "left", .field_name = "primary"}};
+    contribution.residual =
+        interface.integral(left.dt("primary", "du_left_dt", 2) *
+                               right.test("primary", "w_right"),
+                           "right");
+
+    const auto resolved =
+        builder.resolveFormContribution(context, contribution);
+    const auto metadata =
+        builder.installResolvedFormContribution(fixture.system, resolved);
+
+    const auto temporal = std::find_if(
+        metadata.temporal_symbols.begin(),
+        metadata.temporal_symbols.end(),
+        [&](const CouplingFormTemporalProvenance& symbol) {
+            return symbol.field == fixture.left_field &&
+                   symbol.quantity == CouplingTemporalQuantity::FieldDerivative;
+    });
+    ASSERT_NE(temporal, metadata.temporal_symbols.end());
+    EXPECT_EQ(temporal->derivative_order, 2);
+}
+
 TEST(MonolithicCouplingBuilder, ResolvesGeometryTerminalProvenanceMetadata)
 {
     BuilderFixture fixture;
