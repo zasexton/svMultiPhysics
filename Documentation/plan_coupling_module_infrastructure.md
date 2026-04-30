@@ -4528,7 +4528,7 @@ Unit-test verification checklist:
   scope, reject ambiguous shared-region-only requirements, and reject conflicting
   participant names when both `scope.participant_name` and `scope.region` are
   present.
-- [ ] `test_CouplingFormBuilder.cpp` verifies an interface residual is authored
+- [x] `test_CouplingFormBuilder.cpp` verifies an interface residual is authored
   explicitly with `.dI(marker)` and side restrictions.
 - [x] `test_CouplingFormBuilder.cpp` verifies dependency metadata consumption
   for one residual row and multiple state dependencies using the public

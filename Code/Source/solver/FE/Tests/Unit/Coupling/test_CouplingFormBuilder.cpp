@@ -97,6 +97,20 @@ CouplingContext makeBuilderContext()
     return builder.build();
 }
 
+bool containsFormExprType(const forms::FormExprNode& node,
+                          forms::FormExprType type)
+{
+    if (node.type() == type) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsFormExprType(*child, type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 TEST(CouplingFormBuilder, BuildsFieldBoundStateAndTestSymbols)
@@ -489,6 +503,26 @@ TEST(CouplingFormBuilder, LowersRegionKindsToFormsMeasures)
     const auto shared_region = builder.sharedRegion("shared_interface", "participant");
     EXPECT_EQ(shared_region.marker, 17);
     EXPECT_EQ(shared_region.side, CouplingInterfaceSide::Minus);
+}
+
+TEST(CouplingFormBuilder, AuthorsInterfaceResidualWithSideRestrictions)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const auto state = builder.state("participant", "primary", "u");
+    const auto test = builder.test("participant", "primary", "w");
+
+    const auto residual =
+        ((state.minus() - state.plus()) * test.minus()).dI(17);
+
+    ASSERT_TRUE(residual.isValid());
+    ASSERT_EQ(residual.node()->type(), forms::FormExprType::InterfaceIntegral);
+    ASSERT_TRUE(residual.node()->interfaceMarker().has_value());
+    EXPECT_EQ(*residual.node()->interfaceMarker(), 17);
+    EXPECT_TRUE(
+        containsFormExprType(*residual.node(), forms::FormExprType::RestrictMinus));
+    EXPECT_TRUE(
+        containsFormExprType(*residual.node(), forms::FormExprType::RestrictPlus));
 }
 
 TEST(CouplingFormBuilder, RejectsUserDefinedRegionFormsLowering)
