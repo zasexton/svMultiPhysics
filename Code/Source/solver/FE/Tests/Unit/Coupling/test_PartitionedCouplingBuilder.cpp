@@ -176,7 +176,8 @@ TEST(PartitionedCouplingBuilder, BuildsGenericEndpointExchangeDeclarations)
             .consumerRegion(CouplingRegionEndpointDeclaration{
                 .participant_name = "branch",
                 .region_name = "outlet",
-            });
+            })
+            .value(vectorDescriptor(2));
 
     const auto& exchange = handle.declaration();
     ASSERT_TRUE(exchange.producer.has_value());
@@ -187,6 +188,8 @@ TEST(PartitionedCouplingBuilder, BuildsGenericEndpointExchangeDeclarations)
     EXPECT_EQ(exchange.producer_region->region_name, "node");
     ASSERT_TRUE(exchange.consumer_region.has_value());
     EXPECT_EQ(exchange.consumer_region->region_name, "outlet");
+    EXPECT_EQ(exchange.value.rank, CouplingValueRank::Vector);
+    EXPECT_EQ(exchange.value.components, 2);
 
     auto declarations = builder.takeDeclarations();
     ASSERT_EQ(declarations.size(), 1u);

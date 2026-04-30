@@ -1640,7 +1640,7 @@ enum class ThermalInterfaceFormulation {
 
 - [x] Test scalar field exchange descriptor inference.
 - [x] Test vector field exchange descriptor inference.
-- [ ] Test explicit descriptor override for non-field payloads.
+- [x] Test explicit descriptor override for non-field payloads.
 - [ ] Test automatic shared-region endpoint attachment.
 - [ ] Test auxiliary endpoint exchange descriptors.
 - [ ] Test global-scalar exchange descriptors.
