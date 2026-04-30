@@ -4698,7 +4698,7 @@ Implementation checklist:
   monolithic Jacobian blocks.
 - [x] Validate expected nonzero and expected zero block declarations against
   dependency declarations.
-- [ ] Validate non-field dependency expectations against installed
+- [x] Validate non-field dependency expectations against installed
   `analysis::VariableKey` edges and only require matrix-block evidence when the
   relevant Systems metadata reports a true linearized matrix contribution.
 - [ ] Validate `CouplingNonFieldDependencyRequirement` records against installed
@@ -4835,7 +4835,7 @@ Unit-test verification checklist:
 - [x] `test_CouplingGraph.cpp` detects missing expected blocks after Forms
   dependency analysis through the public Forms/Systems coupling-analysis
   metadata bridge.
-- [ ] `test_CouplingGraph.cpp` validates declared non-field dependency
+- [x] `test_CouplingGraph.cpp` validates declared non-field dependency
   expectations against installed `analysis::VariableKey` edges for
   BoundaryFunctional, AuxiliaryState, AuxiliaryInput, AuxiliaryOutput, and
   GlobalScalar variables.

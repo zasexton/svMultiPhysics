@@ -1430,6 +1430,116 @@ TEST(CouplingGraph, AcceptsDeclaredImplicitDependencyFromVariableMetadata)
     EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
+TEST(CouplingGraph, ValidatesNonFieldDependencyExpectationsThroughVariableKeys)
+{
+    NonFieldGraphFixture fixture(true);
+    auto declaration = graphDeclaration();
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryState,
+        .participant_name = "left",
+        .name = "aux_state",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryInput,
+        .participant_name = "left",
+        .name = "driver_input",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput,
+        .participant_name = "left",
+        .name = "out_value",
+    });
+    declaration.non_field_dependencies.push_back({
+        .kind = CouplingNonFieldDependencyRequirementKind::BoundaryFunctional,
+        .participant_name = "left",
+        .name = "surface_measure",
+    });
+
+    const CouplingVariableUse row{
+        .kind = CouplingVariableKind::Field,
+        .participant_name = "left",
+        .name = "primary",
+    };
+    auto add_dependency = [&](CouplingVariableKind kind,
+                              std::string name,
+                              analysis::VariableKind analysis_kind) {
+        CouplingVariableUse dependency{
+            .kind = kind,
+            .participant_name = "left",
+            .name = std::move(name),
+        };
+        declaration.dependencies.push_back(CouplingResidualDependency{
+            .residual_row = row,
+            .dependency = dependency,
+        });
+        declaration.expected_blocks.push_back(CouplingBlockExpectation{
+            .residual_row = row,
+            .dependency = dependency,
+            .expect_matrix_block = false,
+        });
+        return analysis::VariableKey::named(
+            analysis_kind,
+            "left_system/" + dependency.name);
+    };
+
+    std::vector<analysis::VariableKey> dependencies;
+    dependencies.push_back(add_dependency(
+        CouplingVariableKind::BoundaryFunctional,
+        "surface_measure",
+        analysis::VariableKind::BoundaryFunctional));
+    dependencies.push_back(add_dependency(CouplingVariableKind::AuxiliaryState,
+                                          "aux_state",
+                                          analysis::VariableKind::AuxiliaryState));
+    dependencies.push_back(add_dependency(CouplingVariableKind::AuxiliaryInput,
+                                          "driver_input",
+                                          analysis::VariableKind::AuxiliaryInput));
+    dependencies.push_back(add_dependency(CouplingVariableKind::AuxiliaryOutput,
+                                          "out_value",
+                                          analysis::VariableKind::AuxiliaryOutput));
+    dependencies.push_back(add_dependency(CouplingVariableKind::GlobalScalar,
+                                          "coefficient",
+                                          analysis::VariableKind::GlobalScalar));
+
+    CouplingFormAnalysisMetadata metadata;
+    metadata.contribution_name = "non_field_expectation_coupling";
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledDependencies,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic non-field expectation fixture"});
+    metadata.feature_gates.push_back(analysis::FormBridgeFeatureGate{
+        analysis::FormBridgeFeature::InstalledBlocks,
+        analysis::FormBridgeFeatureStatus::Available,
+        "Synthetic non-field expectation fixture"});
+    for (const auto& dependency : dependencies) {
+        metadata.variable_dependencies.push_back(
+            CouplingFormVariableDependencyProvenance{
+                .residual_row = analysis::VariableKey::field(fixture.field),
+                .dependency = dependency,
+                .mode = CouplingDependencyMode::ImplicitMonolithic,
+                .domain = analysis::DomainKind::Global,
+                .contributes_vector = true,
+                .provider = "forms",
+            });
+    }
+
+    const std::vector<CouplingFormAnalysisMetadata> installed_forms{metadata};
+    const auto validation = buildFinalizedGraph(
+        fixture.context,
+        declaration,
+        installed_forms);
+    EXPECT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    declaration.expected_blocks[0].expect_matrix_block = true;
+    const auto matrix_validation = buildFinalizedGraph(
+        fixture.context,
+        declaration,
+        installed_forms);
+    EXPECT_FALSE(matrix_validation.ok());
+    EXPECT_NE(formatDiagnostics(matrix_validation).find(
+                  "expected monolithic block is missing installed matrix evidence"),
+              std::string::npos);
+}
+
 TEST(CouplingGraph, RejectsExpectedBlockWithoutInstalledMatrixEvidence)
 {
     auto metadata = installedDependencyMetadata();
