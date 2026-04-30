@@ -873,6 +873,121 @@ TEST(CouplingGraph, RecordsDeclarationGraphNodeCategories)
     EXPECT_TRUE(snapshot.expected_blocks[0].dependency.has_value());
 }
 
+TEST(CouplingGraph, AggregatesGeometryTerminalRequirementsAcrossContracts)
+{
+    CouplingContractDeclaration left;
+    left.contract_type = "generic";
+    left.contract_name = "left_geometry";
+    left.participants.push_back({.participant_name = "left"});
+    left.regions.push_back({
+        .participant_name = "left",
+        .region_name = "inlet",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    left.temporal_requirements.push_back({
+        .quantity = CouplingTemporalQuantity::TimeStep,
+    });
+    left.geometry_requirements.push_back({
+        .quantity = CouplingGeometryTerminalQuantity::CurrentNormal,
+        .scope = CouplingGeometryTerminalScope{
+            .participant_name = "left",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "inlet",
+            },
+            .location = CouplingGeometryTerminalLocationDeclaration{
+                .region_kind = CouplingRegionKind::Boundary,
+                .coordinate_configuration =
+                    forms::GeometryConfiguration::Current,
+                .transform_from_configuration =
+                    forms::GeometryConfiguration::Reference,
+                .transform_to_configuration =
+                    forms::GeometryConfiguration::Current,
+                .quadrature_policy_key = 42,
+            },
+        },
+    });
+
+    CouplingContractDeclaration right;
+    right.contract_type = "generic";
+    right.contract_name = "right_geometry";
+    right.participants.push_back({.participant_name = "left"});
+    right.regions.push_back({
+        .participant_name = "left",
+        .region_name = "outlet",
+        .required_region_kind = CouplingRegionKind::Boundary,
+    });
+    right.geometry_requirements.push_back({
+        .quantity = CouplingGeometryTerminalQuantity::CellDomainId,
+        .scope = CouplingGeometryTerminalScope{
+            .participant_name = "left",
+            .region = CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "outlet",
+            },
+            .location = CouplingGeometryTerminalLocationDeclaration{
+                .region_kind = CouplingRegionKind::Boundary,
+            },
+        },
+    });
+
+    const auto context = twoBoundaryRegionGraphContext();
+    CouplingGraph graph;
+    const std::array<CouplingContractDeclaration, 2> declarations{left, right};
+    const auto validation = graph.buildDeclarationGraph(
+        context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto& snapshot = graph.snapshot();
+    ASSERT_EQ(snapshot.geometry_requirements.size(), 2u);
+    EXPECT_EQ(snapshot.geometry_requirements[0].contract_name, "left_geometry");
+    ASSERT_TRUE(snapshot.geometry_requirements[0]
+                    .requirement.scope.location.has_value());
+    EXPECT_EQ(snapshot.geometry_requirements[0]
+                  .requirement.scope.location->region_kind,
+              CouplingRegionKind::Boundary);
+    EXPECT_EQ(snapshot.geometry_requirements[0]
+                  .requirement.scope.location->coordinate_configuration,
+              forms::GeometryConfiguration::Current);
+    EXPECT_EQ(snapshot.geometry_requirements[0]
+                  .requirement.scope.location->transform_from_configuration,
+              forms::GeometryConfiguration::Reference);
+    EXPECT_EQ(snapshot.geometry_requirements[0]
+                  .requirement.scope.location->transform_to_configuration,
+              forms::GeometryConfiguration::Current);
+    EXPECT_EQ(snapshot.geometry_requirements[0]
+                  .requirement.scope.location->quadrature_policy_key,
+              42u);
+    EXPECT_EQ(snapshot.geometry_requirements[1].contract_name, "right_geometry");
+    ASSERT_TRUE(snapshot.geometry_requirements[1]
+                    .requirement.scope.location.has_value());
+    EXPECT_EQ(snapshot.geometry_requirements[1]
+                  .requirement.scope.location->region_kind,
+              CouplingRegionKind::Boundary);
+
+    CouplingTemporalAvailability temporal_availability;
+    temporal_availability.provides_time_step = false;
+    const auto temporal_validation =
+        graph.validateTemporalRequirements(temporal_availability);
+    EXPECT_FALSE(temporal_validation.ok());
+    EXPECT_NE(formatDiagnostics(temporal_validation).find("time-step"),
+              std::string::npos);
+
+    const CouplingGeometryTerminalAvailability geometry_availability{
+        .supported_quantities = {CouplingGeometryTerminalQuantity::CellDomainId},
+        .supported_domains = {analysis::DomainKind::Boundary},
+        .supports_reference_configuration = true,
+        .supports_current_configuration = true,
+    };
+    const auto geometry_validation =
+        graph.validateGeometryTerminalRequirements(context, geometry_availability);
+    EXPECT_FALSE(geometry_validation.ok());
+    const auto text = formatDiagnostics(geometry_validation);
+    EXPECT_NE(text.find("geometry terminal quantity"), std::string::npos);
+    EXPECT_EQ(text.find("time-step"), std::string::npos);
+}
+
 TEST(CouplingGraph, ValidatesRequiredNonFieldGraphVariablesThroughSystemRegistries)
 {
     NonFieldGraphFixture fixture(/*register_variables=*/true);

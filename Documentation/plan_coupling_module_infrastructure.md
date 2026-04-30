@@ -4743,7 +4743,7 @@ Implementation checklist:
 - [x] Aggregate temporal requirements by contract, participant, field, derivative
   order, mesh-motion owner scope, and mesh-motion role, including field-history
   depth, mesh temporal symbols, and effective-time-step requirements.
-- [ ] Aggregate geometry-terminal requirements by contract and participant,
+- [x] Aggregate geometry-terminal requirements by contract and participant,
   including mesh displacement, coordinate, Jacobian, Jacobian-inverse, normal,
   measure, surface-Jacobian, cell-metric, and cell-domain-id terminals, with
   boundary/interface location, resolved `analysis::DomainKind`, owner-scope, side,
@@ -4880,7 +4880,7 @@ Unit-test verification checklist:
   multiple contracts.
 - [ ] `test_CouplingGraph.cpp` aggregates explicit field-history and mesh
   temporal requirements across multiple contracts.
-- [ ] `test_CouplingGraph.cpp` aggregates geometry-terminal requirements across
+- [x] `test_CouplingGraph.cpp` aggregates geometry-terminal requirements across
   multiple contracts and reports unsupported geometry terminals independently
   from temporal-policy failures, preserving boundary/interface location, resolved
   `analysis::DomainKind`, owner-scope, frame-transform configuration, and typed
