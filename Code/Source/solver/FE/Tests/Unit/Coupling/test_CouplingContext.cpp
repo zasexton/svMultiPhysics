@@ -632,6 +632,25 @@ TEST(CouplingContext, RejectsExternalBufferWithoutRevisionKeys)
     EXPECT_NE(diagnostics.find("requires a data revision key"), std::string::npos);
 }
 
+TEST(CouplingContext, RejectsExternalBufferExtentProductMismatch)
+{
+    auto descriptor = externalBuffer("driver_value", 1);
+    descriptor.value = CouplingValueDescriptor{
+        .rank = CouplingValueRank::Vector,
+        .components = 2,
+    };
+
+    CouplingContextBuilder builder;
+    builder.addExternalBuffer(CouplingExternalBufferRegistration{
+        .descriptor = descriptor,
+    });
+
+    const auto validation = builder.validate();
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find("extent product must match"),
+              std::string::npos);
+}
+
 TEST(CouplingContext, RejectsInvalidDriverOwnedTransferDescriptors)
 {
     auto descriptor = driverOwnedTransfer("");

@@ -51,6 +51,23 @@ bool temporalSlotsEqual(const CouplingTemporalSlotDescriptor& lhs,
            lhs.stage_index == rhs.stage_index;
 }
 
+std::optional<std::uint64_t> extentProduct(
+    const std::vector<std::int64_t>& extents) noexcept
+{
+    std::uint64_t product = 1u;
+    for (const auto extent : extents) {
+        if (extent <= 0) {
+            return std::nullopt;
+        }
+        const auto next = product * static_cast<std::uint64_t>(extent);
+        if (next < product) {
+            return std::nullopt;
+        }
+        product = next;
+    }
+    return product;
+}
+
 bool hasMatchingInterfaceRegion(const std::vector<CouplingRegionRef>& regions,
                                 const CouplingFieldRef& field) noexcept
 {
@@ -851,6 +868,13 @@ CouplingValidationResult CouplingContextBuilder::validate() const
             if (extent <= 0) {
                 result.addError("external buffer descriptor extents must be positive");
             }
+        }
+        const auto product = extentProduct(descriptor.extents);
+        if (product.has_value() &&
+            descriptor.value.components > 0 &&
+            *product != static_cast<std::uint64_t>(descriptor.value.components)) {
+            result.addError(
+                "external buffer extent product must match the value component count");
         }
         for (const auto stride : descriptor.strides) {
             if (stride == 0) {
