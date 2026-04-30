@@ -4059,7 +4059,7 @@ Unit-test verification checklist:
   per-participant `.dI(marker)` marker and side/orientation metadata.
 - [x] `test_SharedRegionRegistry.cpp` verifies minus/plus side ownership is
   recorded per participant and rejected when ambiguous.
-- [ ] `test_SharedRegionRegistry.cpp` rejects interface shared regions whose
+- [x] `test_SharedRegionRegistry.cpp` rejects interface shared regions whose
   marker has no registered interface topology for monolithic Forms use.
 - [ ] `test_CouplingContext.cpp` verifies boundary, interior-face, and
   interface-face regions map to the expected Forms measure categories.

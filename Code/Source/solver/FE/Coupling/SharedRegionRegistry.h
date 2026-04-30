@@ -33,6 +33,7 @@ public:
         std::string_view participant) const noexcept;
 
     [[nodiscard]] CouplingValidationResult validate() const;
+    [[nodiscard]] CouplingValidationResult validateMonolithicFormsTopology() const;
     [[nodiscard]] const std::vector<SharedRegionRef>& records() const noexcept;
 
 private:

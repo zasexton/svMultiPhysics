@@ -7,6 +7,8 @@
 
 #include "Coupling/SharedRegionRegistry.h"
 
+#include "Systems/FESystem.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -123,6 +125,36 @@ CouplingValidationResult SharedRegionRegistry::validate() const
             }
         }
         validateInterfaceSideOwnership(record, result);
+    }
+    return result;
+}
+
+CouplingValidationResult SharedRegionRegistry::validateMonolithicFormsTopology() const
+{
+    CouplingValidationResult result;
+    for (const auto& record : records_) {
+        for (const auto& region : record.participant_regions) {
+            if (region.kind != CouplingRegionKind::InterfaceFace) {
+                continue;
+            }
+            if (region.marker < 0) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region.participant_name,
+                    .region_name = record.name,
+                    .message = "interface shared-region participant mapping requires an interface marker",
+                });
+                continue;
+            }
+            if (region.system == nullptr || !region.system->hasInterfaceMesh(region.marker)) {
+                result.add(CouplingDiagnostic{
+                    .severity = CouplingDiagnosticSeverity::Error,
+                    .participant_name = region.participant_name,
+                    .region_name = record.name,
+                    .message = "interface shared-region participant mapping is missing registered interface topology",
+                });
+            }
+        }
     }
     return result;
 }

@@ -1,7 +1,10 @@
 #include "Coupling/SharedRegionRegistry.h"
 
 #include "Forms/FormExpr.h"
+#include "Mesh/Core/InterfaceMesh.h"
 #include "Spaces/H1Space.h"
+#include "Systems/FESystem.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <gtest/gtest.h>
 
@@ -30,6 +33,24 @@ CouplingRegionRef registryRegion(std::string participant_name,
         .participant_name = std::move(participant_name),
         .system_name = "system",
         .system = registrySystemToken(1),
+        .region_name = std::move(region_name),
+        .kind = kind,
+        .marker = marker,
+        .side = side,
+    };
+}
+
+CouplingRegionRef registryRegionForSystem(const systems::FESystem* system,
+                                          std::string participant_name,
+                                          std::string region_name,
+                                          CouplingRegionKind kind,
+                                          int marker,
+                                          CouplingInterfaceSide side)
+{
+    return CouplingRegionRef{
+        .participant_name = std::move(participant_name),
+        .system_name = "system",
+        .system = system,
         .region_name = std::move(region_name),
         .kind = kind,
         .marker = marker,
@@ -87,6 +108,35 @@ TEST(SharedRegionRegistry, RejectsAmbiguousInterfaceSideOwnership)
               std::string::npos);
     EXPECT_NE(diagnostics.find("side ownership is ambiguous"),
               std::string::npos);
+}
+
+TEST(SharedRegionRegistry, RejectsMissingInterfaceTopologyForMonolithicForms)
+{
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    systems::FESystem system(mesh);
+
+    SharedRegionRegistry registry;
+    registry.add(SharedRegionRef{
+        .name = "interface",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .participant_regions = {
+            registryRegionForSystem(&system, "left", "surface",
+                                    CouplingRegionKind::InterfaceFace,
+                                    17, CouplingInterfaceSide::Minus),
+            registryRegionForSystem(&system, "right", "surface",
+                                    CouplingRegionKind::InterfaceFace,
+                                    17, CouplingInterfaceSide::Plus),
+        },
+    });
+
+    ASSERT_TRUE(registry.validate().ok()) << formatDiagnostics(registry.validate());
+    const auto missing_topology = registry.validateMonolithicFormsTopology();
+    EXPECT_FALSE(missing_topology.ok());
+    EXPECT_NE(formatDiagnostics(missing_topology).find("missing registered interface topology"),
+              std::string::npos);
+
+    system.setInterfaceMesh(17, std::make_shared<const svmp::InterfaceMesh>());
+    EXPECT_TRUE(registry.validateMonolithicFormsTopology().ok());
 }
 
 TEST(SharedRegionRegistry, ExposesInterfaceMarkersAndSidesForFormsLowering)
