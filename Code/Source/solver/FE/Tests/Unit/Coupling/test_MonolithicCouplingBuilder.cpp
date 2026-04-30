@@ -10,6 +10,7 @@
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <gtest/gtest.h>
 
@@ -1434,6 +1435,51 @@ TEST(MonolithicCouplingBuilder, SkipsDisabledOptionalAdditionalFields)
         std::span<const CouplingContractDeclaration>(declarations));
     EXPECT_TRUE(registered.empty());
     EXPECT_FALSE(fixture.system.hasField("generic_instance.lambda"));
+}
+
+TEST(MonolithicCouplingBuilder, EnforcesAdditionalFieldRegistrationBeforeSetup)
+{
+    BuilderFixture fixture;
+    const MonolithicCouplingBuilder builder;
+
+    CouplingContractDeclaration declaration;
+    declaration.contract_type = "generic";
+    declaration.contract_name = "generic_instance";
+    declaration.participants.push_back({.participant_name = "left"});
+    declaration.additional_fields.push_back({
+        .field_namespace = CouplingAdditionalFieldNamespace::Participant,
+        .namespace_name = "left",
+        .field_name = "lambda",
+        .space = fixture.space,
+        .components = 1,
+    });
+
+    const std::array<CouplingContractDeclaration, 1> declarations{declaration};
+    const auto validation = builder.validateDeclarations(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+    EXPECT_FALSE(fixture.system.isSetup());
+
+    const auto registered = builder.registerAdditionalFields(
+        fixture.context,
+        std::span<const CouplingContractDeclaration>(declarations));
+    ASSERT_EQ(registered.size(), 1u);
+    EXPECT_EQ(registered[0].field_spec.name, "left.lambda");
+    EXPECT_EQ(fixture.system.findFieldByName("left.lambda"),
+              registered[0].field_id);
+    EXPECT_FALSE(fixture.system.isSetup());
+
+    systems::SetupInputs inputs;
+    inputs.topology_override = timestepping::test::singleTetraTopology();
+    fixture.system.setup({}, inputs);
+    ASSERT_TRUE(fixture.system.isSetup());
+
+    EXPECT_THROW(static_cast<void>(builder.registerAdditionalFields(
+                     fixture.context,
+                     std::span<const CouplingContractDeclaration>(declarations))),
+                 systems::InvalidStateException);
+    EXPECT_TRUE(fixture.system.isSetup());
 }
 
 TEST(MonolithicCouplingBuilder, GenericContractInstallsAndFinalizesGraph)

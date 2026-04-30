@@ -1160,6 +1160,11 @@ MonolithicCouplingBuilder::registerAdditionalFields(
     std::span<const CouplingContractDeclaration> declarations) const
 {
     auto resolved = resolveAdditionalFields(context, declarations);
+    for (const auto& field : resolved) {
+        const auto& system = mutableSystemByName(context, field.system_name);
+        FE_THROW_IF(system.isSetup(), systems::InvalidStateException,
+                    "coupling additional fields must be registered before FESystem::setup()");
+    }
     for (auto& field : resolved) {
         auto& system = mutableSystemByName(context, field.system_name);
         field.field_id = system.addField(field.field_spec);

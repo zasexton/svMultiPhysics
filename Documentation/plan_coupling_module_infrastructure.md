@@ -4908,7 +4908,7 @@ Implementation checklist:
 
 - [x] Implement `MonolithicCouplingBuilder` as the owner of the pre-setup
   coupling lifecycle.
-- [ ] Ensure the builder runs after base physics field registration and before
+- [x] Ensure the builder runs after base physics field registration and before
   `FESystem::setup()`.
 - [ ] Build the initial `CouplingContext` from registered participants, fields,
   regions, and shared regions.
@@ -4980,7 +4980,7 @@ Implementation checklist:
 
 Unit-test verification checklist:
 
-- [ ] `test_MonolithicCouplingBuilder.cpp` verifies the lifecycle order from
+- [x] `test_MonolithicCouplingBuilder.cpp` verifies the lifecycle order from
   context creation through pre-setup validation.
 - [x] `test_MonolithicCouplingBuilder.cpp` verifies additional fields are
   registered before `FESystem::setup()`.
