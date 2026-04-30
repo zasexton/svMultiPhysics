@@ -1611,14 +1611,14 @@ enum class ThermalInterfaceFormulation {
 
 ### CouplingFormBuilder Tests
 
-- [ ] Test interface-side `state(...)` maps to the expected side restriction.
-- [ ] Test interface-side `test(...)` maps to the expected side restriction.
+- [x] Test interface-side `state(...)` maps to the expected side restriction.
+- [x] Test interface-side `test(...)` maps to the expected side restriction.
 - [ ] Test interface-side `dt(...)` records temporal provenance.
-- [ ] Test interface-side `normal()` records geometry terminal provenance.
-- [ ] Test interface `integral(...)` uses the shared-region integration path.
-- [ ] Test missing side mappings produce clear diagnostics.
-- [ ] Test generic relation endpoints for N-way residual authoring.
-- [ ] Test mixed-dimensional relation integrals select the expected domain.
+- [x] Test interface-side `normal()` records geometry terminal provenance.
+- [x] Test interface `integral(...)` uses the shared-region integration path.
+- [x] Test missing side mappings produce clear diagnostics.
+- [x] Test generic relation endpoints for N-way residual authoring.
+- [x] Test mixed-dimensional relation integrals select the expected domain.
 - [x] Test normal and tangential projection helpers lower to Forms expressions.
 
 ### Metadata Inference Tests

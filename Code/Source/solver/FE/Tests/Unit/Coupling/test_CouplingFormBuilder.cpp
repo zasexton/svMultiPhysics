@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -95,6 +96,45 @@ CouplingContext makeBuilderContext()
             .side = CouplingInterfaceSide::Minus,
         }},
     });
+    return builder.build();
+}
+
+CouplingContext makeNWayBuilderContext()
+{
+    const auto* system = builderSystemToken();
+    const auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    const std::array<std::string, 3> participants{
+        "branch_a",
+        "branch_b",
+        "branch_c",
+    };
+
+    CouplingContextBuilder builder;
+    for (std::size_t i = 0; i < participants.size(); ++i) {
+        builder.addParticipant({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+        });
+        builder.addField({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+            .field_name = "flow",
+            .field_id = static_cast<FieldId>(20 + i),
+            .space = space,
+            .components = 1,
+        });
+        builder.addRegion({
+            .participant_name = participants[i],
+            .system_name = "system",
+            .system = system,
+            .region_name = "outlet",
+            .kind = CouplingRegionKind::Boundary,
+            .marker = static_cast<int>(30 + i),
+        });
+    }
     return builder.build();
 }
 
@@ -673,6 +713,59 @@ TEST(CouplingFormBuilder, BuildsRegionRelationViewsThroughFormsVocabulary)
     EXPECT_THROW(static_cast<void>(
                      relation.endpoint("participant", "missing")),
                  InvalidArgumentException);
+}
+
+TEST(CouplingFormBuilder, BuildsNWayRelationResidualThroughEndpointViews)
+{
+    const auto context = makeNWayBuilderContext();
+    const CouplingFormBuilder builder(context);
+    CouplingRegionRelationRequirement requirement{
+        .relation_name = "junction_balance",
+        .relation_kind = CouplingRegionRelationKind::NWayInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "branch_a",
+                .region_name = "outlet",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "branch_b",
+                .region_name = "outlet",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "branch_c",
+                .region_name = "outlet",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            },
+        },
+    };
+
+    const auto relation = builder.regionRelation(std::move(requirement));
+    const auto branch_a = relation.endpoint("branch_a", "outlet");
+    const auto branch_b = relation.endpoint("branch_b", "outlet");
+    const auto branch_c = relation.endpoint("branch_c", "outlet");
+
+    const std::array<forms::FormExpr, 3> branch_terms{
+        branch_a.integral(branch_a.state("flow", "q_a") *
+                          branch_a.test("flow", "w_a")),
+        branch_b.integral(branch_b.state("flow", "q_b") *
+                          branch_b.test("flow", "w_b")),
+        branch_c.integral(branch_c.state("flow", "q_c") *
+                          branch_c.test("flow", "w_c")),
+    };
+
+    for (std::size_t i = 0; i < branch_terms.size(); ++i) {
+        ASSERT_TRUE(branch_terms[i].isValid());
+        ASSERT_EQ(branch_terms[i].node()->type(),
+                  forms::FormExprType::BoundaryIntegral);
+        ASSERT_TRUE(branch_terms[i].node()->boundaryMarker().has_value());
+        EXPECT_EQ(*branch_terms[i].node()->boundaryMarker(),
+                  static_cast<int>(30 + i));
+    }
+    EXPECT_TRUE(relation.sum(branch_terms).isValid());
 }
 
 TEST(CouplingFormBuilder, AuthorsInterfaceResidualWithSideRestrictions)
