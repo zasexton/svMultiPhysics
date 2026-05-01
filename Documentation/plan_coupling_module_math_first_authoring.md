@@ -1704,38 +1704,38 @@ enum class ThermalInterfaceFormulation {
 
 The migration is complete when:
 
-- [ ] Physics coupling files primarily contain physical roles, equations, and
+- [x] Physics coupling files primarily contain physical roles, equations, and
       high-level strategy options.
-- [ ] Generic validation lives in FE/Coupling.
-- [ ] Monolithic dependency and expected-block evidence comes from installed
+- [x] Generic validation lives in FE/Coupling.
+- [x] Monolithic dependency and expected-block evidence comes from installed
       Forms metadata by default.
-- [ ] Partitioned exchange validation and plan generation remain in
+- [x] Partitioned exchange validation and plan generation remain in
       `PartitionedCouplingPlanGenerator`.
-- [ ] Relation capability validation rejects unsupported lowerings before
+- [x] Relation capability validation rejects unsupported lowerings before
       installation or execution.
-- [ ] Stable generated names appear in residual, exchange, relation, diagnostic,
+- [x] Stable generated names appear in residual, exchange, relation, diagnostic,
       and metadata records.
-- [ ] Exact, approximate, lagged, and unavailable lowerings are visible through
+- [x] Exact, approximate, lagged, and unavailable lowerings are visible through
       relation diagnostics.
-- [ ] Default physics configuration stays short, with advanced and expert
+- [x] Default physics configuration stays short, with advanced and expert
       options isolated.
-- [ ] FSI and thermal modules no longer duplicate field, shared-region,
+- [x] FSI and thermal modules no longer duplicate field, shared-region,
       topology, same-system, or endpoint-region checks.
-- [ ] At least one N-participant coupling, one mixed-dimensional coupling, one
+- [x] At least one N-participant coupling, one mixed-dimensional coupling, one
       multiplier coupling, and one multi-PDE auxiliary or global-variable
       coupling are represented by the authoring facade.
-- [ ] AuxiliaryState models admitted into a coupling contract inherit the
+- [x] AuxiliaryState models admitted into a coupling contract inherit the
       selected monolithic or partitioned strategy for that contract.
-- [ ] Mixed AuxiliaryState/PDE coupling strategies inside one contract are
+- [x] Mixed AuxiliaryState/PDE coupling strategies inside one contract are
       rejected unless represented by an explicit expert strategy with complete
       diagnostics.
-- [ ] Coupling math that belongs in a monolithic residual is expressible through
+- [x] Coupling math that belongs in a monolithic residual is expressible through
       Forms unless a documented public Forms gap requires an expert hook.
-- [ ] Partitioned driver algorithms are represented as strategy metadata and do
+- [x] Partitioned driver algorithms are represented as strategy metadata and do
       not leak into Forms residual authoring.
-- [ ] Direct low-level `CouplingContract` authoring remains available for expert
+- [x] Direct low-level `CouplingContract` authoring remains available for expert
       contracts.
-- [ ] No duplicate FE registry, graph, form scanner, installer, or partitioned
+- [x] No duplicate FE registry, graph, form scanner, installer, or partitioned
       planner has been introduced.
 
 ## Suggested Implementation Order
