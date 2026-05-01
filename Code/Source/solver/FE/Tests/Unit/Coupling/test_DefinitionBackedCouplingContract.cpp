@@ -835,6 +835,12 @@ protected:
 class AuxiliaryExchangeDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
+    explicit AuxiliaryExchangeDefinitionContract(
+        CouplingMode mode = CouplingMode::Partitioned)
+        : mode_(mode)
+    {
+    }
+
     [[nodiscard]] std::string name() const override
     {
         return "auxiliary_exchange_fixture";
@@ -843,6 +849,53 @@ public:
 protected:
     void define(CouplingDefinitionBuilder& builder) const override
     {
+        CouplingRegionRelationRequirement relation_requirement{
+            .relation_name = "shared_auxiliary_relation",
+            .relation_kind = CouplingRegionRelationKind::AuxiliaryPDECoupling,
+            .endpoints = {
+                CouplingRegionEndpointDeclaration{
+                    .participant_name = "left",
+                    .region_name = "interface",
+                    .shared_region_name = "interface",
+                },
+                CouplingRegionEndpointDeclaration{
+                    .participant_name = "right",
+                    .region_name = "interface",
+                    .shared_region_name = "interface",
+                },
+            },
+            .lowering_capabilities = {
+                CouplingRelationLoweringCapability{
+                    .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                    .enforcement_strategies = {"auxiliary_load"},
+                },
+                CouplingRelationLoweringCapability{
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::PartitionedExchange,
+                    .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                    .partitioned_solve_strategies = {
+                        CouplingPartitionedSolveStrategy::ExplicitLagged,
+                    },
+                },
+            },
+            .selected_lowering = CouplingRelationLoweringRequest{
+                .mode = mode_,
+                .lowering_kind =
+                    mode_ == CouplingMode::Monolithic
+                        ? CouplingRelationLoweringKind::MonolithicForms
+                        : CouplingRelationLoweringKind::PartitionedExchange,
+                .enforcement_strategy =
+                    mode_ == CouplingMode::Monolithic ? "auxiliary_load" : "",
+                .partitioned_solve_strategy =
+                    mode_ == CouplingMode::Partitioned
+                        ? std::optional<CouplingPartitionedSolveStrategy>(
+                              CouplingPartitionedSolveStrategy::ExplicitLagged)
+                        : std::nullopt,
+            },
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .require_distinct_participants = true,
+        };
+
         builder.participant("left")
             .participant("right")
             .fieldRequirement(scalarFieldRequirement("left", "primary"))
@@ -865,39 +918,27 @@ protected:
                 .name = "interface_response",
                 .require_analysis_variable_key = true,
             })
-            .regionRelation(CouplingRegionRelationRequirement{
-                .relation_name = "shared_auxiliary_relation",
-                .relation_kind = CouplingRegionRelationKind::AuxiliaryPDECoupling,
-                .endpoints = {
-                    CouplingRegionEndpointDeclaration{
-                        .participant_name = "left",
-                        .region_name = "interface",
-                        .shared_region_name = "interface",
-                    },
-                    CouplingRegionEndpointDeclaration{
-                        .participant_name = "right",
-                        .region_name = "interface",
-                        .shared_region_name = "interface",
-                    },
-                },
-                .lowering_capabilities = {
-                    CouplingRelationLoweringCapability{
-                        .lowering_kind =
-                            CouplingRelationLoweringKind::PartitionedExchange,
-                        .partitioned_solve_strategies = {
-                            CouplingPartitionedSolveStrategy::ExplicitLagged,
-                        },
-                    },
-                },
-                .selected_lowering = CouplingRelationLoweringRequest{
-                    .mode = CouplingMode::Partitioned,
-                    .lowering_kind =
-                        CouplingRelationLoweringKind::PartitionedExchange,
-                    .partitioned_solve_strategy =
-                        CouplingPartitionedSolveStrategy::ExplicitLagged,
-                },
-                .required_region_kind = CouplingRegionKind::InterfaceFace,
-                .require_distinct_participants = true,
+            .regionRelation(relation_requirement)
+            .monolithic([](const CouplingContext&,
+                           const CouplingFormBuilder& forms) {
+                const auto gamma = forms.sharedInterface("interface");
+                const auto right = gamma.side("right");
+                const auto response =
+                    forms::AuxiliaryOutput("interface_response");
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "auxiliary_exchange_fixture.interface_response_load";
+                contribution.origin = "AuxiliaryExchangeDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {CouplingFieldUse{
+                    .participant_name = "right",
+                    .field_name = "primary",
+                }};
+                contribution.residual = gamma.integral(
+                    response * right.test("primary", "w_right"),
+                    "right");
+                return std::vector<CouplingFormContribution>{contribution};
             });
 
         builder.exchange(
@@ -937,6 +978,9 @@ protected:
             .value(scalarDescriptor())
             .transfer(test::identityTransfer());
     }
+
+private:
+    CouplingMode mode_{CouplingMode::Partitioned};
 };
 
 class ElectroThermalDefinitionContract final
@@ -1584,15 +1628,19 @@ TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryExchangeFixture)
     const auto& relation = declaration.region_relation_requirements.front();
     EXPECT_EQ(relation.relation_kind,
               CouplingRegionRelationKind::AuxiliaryPDECoupling);
-    ASSERT_EQ(relation.lowering_capabilities.size(), 1u);
-    EXPECT_EQ(relation.lowering_capabilities.front().lowering_kind,
+    ASSERT_EQ(relation.lowering_capabilities.size(), 2u);
+    EXPECT_EQ(relation.lowering_capabilities[0].lowering_kind,
+              CouplingRelationLoweringKind::MonolithicForms);
+    EXPECT_EQ(relation.lowering_capabilities[1].lowering_kind,
               CouplingRelationLoweringKind::PartitionedExchange);
-    ASSERT_EQ(relation.lowering_capabilities.front()
+    ASSERT_EQ(relation.lowering_capabilities[1]
                   .partitioned_solve_strategies.size(),
               1u);
-    EXPECT_EQ(relation.lowering_capabilities.front()
+    EXPECT_EQ(relation.lowering_capabilities[1]
                   .partitioned_solve_strategies.front(),
               CouplingPartitionedSolveStrategy::ExplicitLagged);
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->mode, CouplingMode::Partitioned);
     ASSERT_EQ(declaration.non_field_dependencies.size(), 2u);
     EXPECT_EQ(declaration.non_field_dependencies[0].kind,
               CouplingNonFieldDependencyRequirementKind::AuxiliaryInput);
@@ -1635,6 +1683,34 @@ TEST(DefinitionBackedCouplingContract, ValidatesAuxiliaryFixtureThroughPlanGener
               CouplingEndpointKind::AuxiliaryOutput);
     EXPECT_EQ(plan.exchanges[1].producer.registry_provider,
               "AuxiliaryOutputRegistry");
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryMonolithicFixture)
+{
+    AuxiliaryExchangeContextFixture fixture;
+    const CouplingFormBuilder forms(fixture.context);
+    const AuxiliaryExchangeDefinitionContract contract(CouplingMode::Monolithic);
+
+    EXPECT_NO_THROW(contract.validate(fixture.context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->mode, CouplingMode::Monolithic);
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::MonolithicForms);
+    EXPECT_EQ(relation.selected_lowering->enforcement_strategy,
+              "auxiliary_load");
+
+    const auto contributions =
+        contract.buildMonolithicForms(fixture.context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "auxiliary_exchange_fixture.interface_response_load");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+    EXPECT_TRUE(contract.supportsMonolithicLowering());
+    EXPECT_TRUE(contract.supportsPartitionedLowering());
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsElectroThermalCapabilityFixture)
