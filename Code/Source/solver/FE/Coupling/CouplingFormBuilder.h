@@ -20,6 +20,7 @@
 #include "Forms/Vocabulary.h"
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -30,9 +31,38 @@ namespace FE {
 namespace coupling {
 
 class CouplingInterfaceSideView;
+class CouplingEquationSetBuilder;
 class CouplingRegionEndpointView;
 class CouplingRegionRelationView;
 class CouplingSharedInterfaceView;
+
+struct CouplingEquationSetRequest {
+    std::string contract_name;
+    std::string relation_name;
+    std::string origin;
+    std::string operator_name{"equations"};
+    std::optional<CouplingGeometrySensitivityDeclaration> geometry_sensitivity;
+};
+
+struct CouplingNamedEquationRequest {
+    std::string local_name;
+    std::optional<std::string> explicit_name;
+    std::vector<CouplingFieldUse> residual_field_uses;
+    std::vector<CouplingFieldUse> trial_field_uses;
+    std::optional<CouplingGeometrySensitivityDeclaration> geometry_sensitivity;
+    bool include_geometry_sensitivity_field_as_trial{true};
+    systems::FormInstallOptions install_options{};
+    forms::FormExpr residual;
+};
+
+struct CouplingInferredEquationRequest {
+    std::string local_name;
+    std::optional<std::string> explicit_name;
+    std::optional<CouplingGeometrySensitivityDeclaration> geometry_sensitivity;
+    bool include_geometry_sensitivity_field_as_trial{true};
+    systems::FormInstallOptions install_options{};
+    forms::FormExpr residual;
+};
 
 class CouplingFormBuilder {
 public:
@@ -43,19 +73,36 @@ public:
     [[nodiscard]] forms::FormExpr state(std::string_view participant,
                                         std::string_view field,
                                         std::string symbol) const;
+    [[nodiscard]] forms::FormExpr requiredState(
+        std::string_view participant,
+        const std::optional<std::string>& field,
+        std::string symbol) const;
 
     [[nodiscard]] forms::FormExpr test(std::string_view participant,
                                        std::string_view field,
                                        std::string symbol) const;
+    [[nodiscard]] forms::FormExpr requiredTest(
+        std::string_view participant,
+        const std::optional<std::string>& field,
+        std::string symbol) const;
 
     [[nodiscard]] forms::FormExpr timeDerivative(std::string_view participant,
                                                  std::string_view field,
                                                  std::string symbol,
                                                  int order = 1) const;
+    [[nodiscard]] forms::FormExpr requiredTimeDerivative(
+        std::string_view participant,
+        const std::optional<std::string>& field,
+        std::string symbol,
+        int order = 1) const;
 
     [[nodiscard]] forms::FormExpr previousSolution(std::string_view participant,
                                                    std::string_view field,
                                                    int steps_back = 1) const;
+    [[nodiscard]] forms::FormExpr requiredPreviousSolution(
+        std::string_view participant,
+        const std::optional<std::string>& field,
+        int steps_back = 1) const;
 
     [[nodiscard]] forms::FormExpr time() const;
     [[nodiscard]] forms::FormExpr timeStep() const;
@@ -82,6 +129,8 @@ public:
     attachTerminalProvenance(CouplingFormContribution contribution) const;
     [[nodiscard]] CouplingFormContribution
     equationContribution(CouplingEquationContributionRequest request) const;
+    [[nodiscard]] CouplingEquationSetBuilder equationSet(
+        CouplingEquationSetRequest request) const;
 
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
                                             const CouplingRegionRef& region) const;
@@ -119,6 +168,23 @@ private:
     mutable std::vector<RecordedTerminalProvenance> recorded_terminals_;
 };
 
+class CouplingEquationSetBuilder {
+public:
+    CouplingEquationSetBuilder(const CouplingFormBuilder& builder,
+                               CouplingEquationSetRequest request);
+
+    [[nodiscard]] CouplingFormContribution
+    equation(CouplingNamedEquationRequest request) const;
+    [[nodiscard]] CouplingFormContribution
+    inferredEquation(CouplingInferredEquationRequest request) const;
+    [[nodiscard]] std::vector<CouplingFormContribution>
+    infer(std::vector<CouplingInferredEquationRequest> requests) const;
+
+private:
+    const CouplingFormBuilder* builder_{nullptr};
+    CouplingEquationSetRequest request_;
+};
+
 class CouplingInterfaceSideView {
 public:
     CouplingInterfaceSideView(const CouplingFormBuilder& builder,
@@ -131,11 +197,21 @@ public:
 
     [[nodiscard]] forms::FormExpr state(std::string_view field,
                                         std::string symbol) const;
+    [[nodiscard]] forms::FormExpr requiredState(
+        const std::optional<std::string>& field,
+        std::string symbol) const;
     [[nodiscard]] forms::FormExpr test(std::string_view field,
                                        std::string symbol) const;
+    [[nodiscard]] forms::FormExpr requiredTest(
+        const std::optional<std::string>& field,
+        std::string symbol) const;
     [[nodiscard]] forms::FormExpr dt(std::string_view field,
                                      std::string symbol,
                                      int order = 1) const;
+    [[nodiscard]] forms::FormExpr requiredDt(
+        const std::optional<std::string>& field,
+        std::string symbol,
+        int order = 1) const;
     [[nodiscard]] forms::FormExpr geometryTerminal(
         CouplingGeometryTerminalQuantity quantity) const;
     [[nodiscard]] forms::FormExpr normal() const;
@@ -183,11 +259,21 @@ public:
 
     [[nodiscard]] forms::FormExpr state(std::string_view field,
                                         std::string symbol) const;
+    [[nodiscard]] forms::FormExpr requiredState(
+        const std::optional<std::string>& field,
+        std::string symbol) const;
     [[nodiscard]] forms::FormExpr test(std::string_view field,
                                        std::string symbol) const;
+    [[nodiscard]] forms::FormExpr requiredTest(
+        const std::optional<std::string>& field,
+        std::string symbol) const;
     [[nodiscard]] forms::FormExpr dt(std::string_view field,
                                      std::string symbol,
                                      int order = 1) const;
+    [[nodiscard]] forms::FormExpr requiredDt(
+        const std::optional<std::string>& field,
+        std::string symbol,
+        int order = 1) const;
     [[nodiscard]] forms::FormExpr geometryTerminal(
         CouplingGeometryTerminalQuantity quantity) const;
     [[nodiscard]] forms::FormExpr normal() const;

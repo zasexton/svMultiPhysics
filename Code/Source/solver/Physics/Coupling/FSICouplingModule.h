@@ -74,9 +74,6 @@ public:
 protected:
     [[nodiscard]] std::string contractInstanceName() const override;
     void define(FE::coupling::CouplingDefinitionBuilder& builder) const override;
-    void validateDefinitionOptions(
-        const FE::coupling::CouplingContext& ctx,
-        FE::coupling::CouplingValidationResult& result) const override;
 
 private:
     FSICouplingOptions options_{};

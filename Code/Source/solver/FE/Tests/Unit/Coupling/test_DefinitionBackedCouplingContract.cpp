@@ -1975,6 +1975,128 @@ std::string validationFailureText(const Contract& contract,
 
 } // namespace
 
+TEST(CouplingDefinitionBuilder, AuthoringHelpersDeclareCommonCouplingRecords)
+{
+    CouplingDefinitionBuilder builder("helper_fixture", "interface_pair");
+    const auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    builder.sidePairedPDECoupling(CouplingSidePairedPDERequest{
+        .interface = sidePairedInterface(
+            "paired_interface",
+            "interface",
+            "left",
+            "right",
+            CouplingMode::Partitioned,
+            "interface_balance",
+            {
+                CouplingPartitionedSolveStrategy::ExplicitLagged,
+                CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+            }),
+        .required_fields = {
+            vectorFieldRole("left", "primary_vector", 3),
+            scalarFieldRole("left", "primary_scalar"),
+            vectorFieldRole("right", "secondary_vector", 3),
+        },
+        .interface_field =
+            contractInterfaceField("interface_unknown", space, "interface"),
+        .partitioned_channels = {
+            fieldExchange("left_primary_vector",
+                          "left",
+                          "primary_vector",
+                          "right",
+                          "secondary_vector"),
+        },
+    });
+
+    const auto declaration = builder.compileDeclaration();
+    ASSERT_EQ(declaration.participants.size(), 2u);
+    EXPECT_EQ(declaration.participants[0].participant_name, "left");
+    EXPECT_EQ(declaration.participants[1].participant_name, "right");
+    ASSERT_EQ(declaration.fields.size(), 3u);
+    ASSERT_EQ(declaration.field_requirements.size(), 3u);
+    EXPECT_EQ(declaration.field_requirements[0].value.rank,
+              CouplingValueRank::Vector);
+    EXPECT_EQ(declaration.field_requirements[1].value.rank,
+              CouplingValueRank::Scalar);
+
+    ASSERT_EQ(declaration.shared_regions.size(), 1u);
+    EXPECT_EQ(declaration.shared_regions[0].shared_region_name, "interface");
+    ASSERT_EQ(declaration.shared_interface_requirements.size(), 1u);
+    EXPECT_TRUE(declaration.shared_interface_requirements[0]
+                    .require_opposite_sides_for_two_participants);
+
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_kind,
+              CouplingRegionRelationKind::SidePairedInterface);
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::PartitionedExchange);
+    ASSERT_TRUE(relation.selected_lowering->partitioned_solve_strategy.has_value());
+    EXPECT_EQ(*relation.selected_lowering->partitioned_solve_strategy,
+              CouplingPartitionedSolveStrategy::ExplicitLagged);
+
+    ASSERT_EQ(declaration.additional_fields.size(), 1u);
+    EXPECT_EQ(declaration.additional_fields[0].namespace_name,
+              "interface_pair");
+    EXPECT_EQ(declaration.additional_fields[0].components,
+              space->value_dimension());
+
+    ASSERT_EQ(declaration.partitioned_exchange_declarations.size(), 1u);
+    const auto& exchange = declaration.partitioned_exchange_declarations.front();
+    EXPECT_EQ(exchange.producer_port.port_name, "left_primary_vector");
+    EXPECT_EQ(exchange.consumer_port.port_name, "right_primary_vector");
+    EXPECT_EQ(exchange.shared_region_name, "interface");
+    EXPECT_EQ(exchange.value.rank, CouplingValueRank::Vector);
+    EXPECT_EQ(exchange.value.components, 3);
+
+    ASSERT_EQ(declaration.group_hints.size(), 1u);
+    EXPECT_EQ(declaration.group_hints.front().name,
+              "interface_pair_participants");
+    EXPECT_EQ(declaration.group_hints.front().participant_names,
+              (std::vector<std::string>{"left", "right"}));
+}
+
+TEST(CouplingDefinitionBuilder, SidePairedPDECouplingRecordsOptionDiagnostics)
+{
+    CouplingDefinitionBuilder builder("helper_fixture", "interface_pair");
+    builder.sidePairedPDECoupling(CouplingSidePairedPDERequest{
+        .interface = CouplingSidePairedInterfaceRequest{
+            .relation_name = "paired_interface",
+            .shared_region_name = "interface",
+            .first_participant_name = "left",
+            .second_participant_name = "right",
+            .mode = CouplingMode::Monolithic,
+            .enforcement_strategy = "interface_balance",
+        },
+        .optional_fields = {
+            optionalVectorFieldRole(
+                std::optional<std::string>{"mesh"},
+                std::nullopt,
+                3,
+                optionErrorDiagnostic({},
+                                      "mesh motion needs a field",
+                                      "mesh")),
+            optionalVectorFieldRole(
+                std::optional<std::string>{"auxiliary"},
+                std::nullopt,
+                3),
+        },
+    });
+
+    const auto validation = builder.optionValidation();
+    ASSERT_FALSE(validation.ok());
+    ASSERT_EQ(validation.diagnostics.size(), 2u);
+    EXPECT_EQ(validation.diagnostics[0].contract_name, "interface_pair");
+    EXPECT_EQ(validation.diagnostics[0].participant_name, "mesh");
+    EXPECT_EQ(validation.diagnostics[0].message, "mesh motion needs a field");
+    EXPECT_EQ(validation.diagnostics[1].contract_name, "interface_pair");
+    EXPECT_EQ(validation.diagnostics[1].participant_name, "auxiliary");
+    EXPECT_EQ(validation.diagnostics[1].message,
+              "enabled coupling field role requires participant and field names");
+}
+
 TEST(DefinitionBackedCouplingContract, CompilesDefinitionToBackendRecords)
 {
     const FixtureDefinitionContract contract;

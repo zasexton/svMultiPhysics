@@ -1316,7 +1316,7 @@ TEST(FSICouplingModule, RejectsALEWithoutMeshDisplacement)
         expectValidationFailureContaining(
             module,
             fixture.context,
-            "FSI ALE mode requires a mesh displacement field");
+            "enabled coupling field role requires participant and field names");
     }
 
     {
@@ -1325,7 +1325,7 @@ TEST(FSICouplingModule, RejectsALEWithoutMeshDisplacement)
         expectValidationFailureContaining(
             module,
             fixture.context,
-            "FSI ALE mode requires a registered mesh participant");
+            "required coupling participant is missing from the context");
     }
 
     {
@@ -1339,7 +1339,7 @@ TEST(FSICouplingModule, RejectsALEWithoutMeshDisplacement)
         expectValidationFailureContaining(
             module,
             fixture.context,
-            "FSI ALE mode requires a registered mesh displacement field");
+            "required coupling field is missing from the context");
     }
 }
 

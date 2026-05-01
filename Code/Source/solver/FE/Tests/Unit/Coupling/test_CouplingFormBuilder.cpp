@@ -45,6 +45,15 @@ CouplingContext makeBuilderContext()
         .space = space,
         .components = 1,
     });
+    builder.addField({
+        .participant_name = "participant",
+        .system_name = "system",
+        .system = system,
+        .field_name = "secondary",
+        .field_id = 8,
+        .space = space,
+        .components = 1,
+    });
     builder.addRegion({
         .participant_name = "participant",
         .system_name = "system",
@@ -497,6 +506,139 @@ TEST(CouplingFormBuilder, BuildsEquationContributionsWithTerminalProvenance)
               CouplingGeometryTerminalQuantity::CurrentNormal);
 }
 
+TEST(CouplingFormBuilder, AddsEquationGeometrySensitivityTrialField)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    const auto u = builder.state("participant", "primary", "u");
+    const auto w = builder.test("participant", "primary", "w");
+
+    auto contribution = builder.equationContribution(
+        CouplingEquationContributionRequest{
+            .contribution_name = "participant.primary.mesh_sensitive",
+            .origin = "CouplingFormBuilderTest",
+            .residual_field_uses = {
+                CouplingFieldUse{
+                    .participant_name = "participant",
+                    .field_name = "primary",
+                },
+            },
+            .trial_field_uses = {
+                CouplingFieldUse{
+                    .participant_name = "participant",
+                    .field_name = "primary",
+                },
+            },
+            .geometry_sensitivity =
+                CouplingGeometrySensitivityDeclaration{
+                    .mode = forms::GeometrySensitivityMode::MeshMotionUnknowns,
+                    .mesh_motion_field = CouplingFieldUse{
+                        .participant_name = "mesh",
+                        .field_name = "displacement",
+                    },
+                },
+            .residual = (u * w).dx(),
+        });
+
+    ASSERT_TRUE(contribution.install_options_declaration
+                    .geometry_sensitivity.has_value());
+    EXPECT_EQ(contribution.install_options_declaration.geometry_sensitivity
+                  ->mode,
+              forms::GeometrySensitivityMode::MeshMotionUnknowns);
+    ASSERT_TRUE(contribution.install_options_declaration.geometry_sensitivity
+                    ->mesh_motion_field.has_value());
+    EXPECT_EQ(contribution.install_options_declaration.geometry_sensitivity
+                  ->mesh_motion_field->participant_name,
+              "mesh");
+    EXPECT_EQ(contribution.install_options_declaration.geometry_sensitivity
+                  ->mesh_motion_field->field_name,
+              "displacement");
+    ASSERT_EQ(contribution.extra_trial_field_uses.size(), 2u);
+    EXPECT_EQ(contribution.extra_trial_field_uses[1].participant_name, "mesh");
+    EXPECT_EQ(contribution.extra_trial_field_uses[1].field_name,
+              "displacement");
+}
+
+TEST(CouplingFormBuilder, EquationSetGeneratesNamesAndDefaultOptions)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    const auto u = builder.state("participant", "primary", "u");
+    const auto w = builder.test("participant", "primary", "w");
+    const auto equations = builder.equationSet(CouplingEquationSetRequest{
+        .contract_name = "wall",
+        .relation_name = "interface",
+        .origin = "CouplingFormBuilderTest",
+        .geometry_sensitivity = meshMotionGeometrySensitivity(
+            fieldUse("mesh", "displacement")),
+    });
+
+    const auto contribution = equations.equation(CouplingNamedEquationRequest{
+        .local_name = "balance",
+        .residual_field_uses = {
+            fieldUse("participant", "primary"),
+        },
+        .trial_field_uses = {
+            fieldUse("participant", "primary"),
+        },
+        .residual = (u * w).dx(),
+    });
+
+    EXPECT_EQ(contribution.contribution_name, "wall.interface.balance");
+    EXPECT_EQ(contribution.origin, "CouplingFormBuilderTest");
+    ASSERT_TRUE(contribution.install_options_declaration
+                    .geometry_sensitivity.has_value());
+    ASSERT_EQ(contribution.extra_trial_field_uses.size(), 2u);
+    EXPECT_EQ(contribution.extra_trial_field_uses[1].participant_name, "mesh");
+    EXPECT_EQ(contribution.extra_trial_field_uses[1].field_name,
+              "displacement");
+}
+
+TEST(CouplingFormBuilder, EquationSetInfersFieldUsesFromResidualForms)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+
+    const auto u = builder.state("participant", "secondary", "u");
+    const auto u_previous =
+        builder.previousSolution("participant", "primary", 1);
+    const auto w = builder.test("participant", "primary", "w");
+    const auto equations = builder.equationSet(CouplingEquationSetRequest{
+        .contract_name = "wall",
+        .relation_name = "interface",
+        .origin = "CouplingFormBuilderTest",
+        .geometry_sensitivity = meshMotionGeometrySensitivity(
+            fieldUse("mesh", "displacement")),
+    });
+
+    const auto contributions = equations.infer({
+        CouplingInferredEquationRequest{
+            .local_name = "balance",
+            .residual = ((u + u_previous) * w).dx(),
+        },
+    });
+
+    ASSERT_EQ(contributions.size(), 1u);
+    const auto& contribution = contributions.front();
+    EXPECT_EQ(contribution.contribution_name, "wall.interface.balance");
+    EXPECT_EQ(contribution.origin, "CouplingFormBuilderTest");
+    ASSERT_EQ(contribution.field_uses.size(), 1u);
+    EXPECT_EQ(contribution.field_uses.front().participant_name, "participant");
+    EXPECT_EQ(contribution.field_uses.front().field_name, "primary");
+    ASSERT_EQ(contribution.extra_trial_field_uses.size(), 2u);
+    EXPECT_EQ(contribution.extra_trial_field_uses[0].participant_name,
+              "participant");
+    EXPECT_EQ(contribution.extra_trial_field_uses[0].field_name, "secondary");
+    EXPECT_EQ(contribution.extra_trial_field_uses[1].participant_name, "mesh");
+    EXPECT_EQ(contribution.extra_trial_field_uses[1].field_name,
+              "displacement");
+    ASSERT_EQ(contribution.terminal_provenance.size(), 1u);
+    EXPECT_EQ(contribution.terminal_provenance.front().kind,
+              CouplingFormTerminalProvenanceKind::PreviousSolution);
+}
+
 TEST(CouplingFormBuilder, RejectsTerminalTransformsThatLoseProvenanceIdentity)
 {
     const auto context = makeBuilderContext();
@@ -545,6 +687,30 @@ TEST(CouplingFormBuilder, RejectsInvalidTemporalRequestsAndUnknownFields)
     EXPECT_THROW(static_cast<void>(builder.previousSolution("participant", "primary", 0)),
                  InvalidArgumentException);
     EXPECT_THROW(static_cast<void>(builder.state("participant", "missing", "u")),
+                 InvalidArgumentException);
+}
+
+TEST(CouplingFormBuilder, RequiredFieldHelpersRejectMissingFieldOptions)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const std::optional<std::string> missing_field;
+    const std::optional<std::string> empty_field{""};
+    const std::optional<std::string> primary_field{"primary"};
+
+    const auto state =
+        builder.requiredState("participant", primary_field, "u");
+    ASSERT_TRUE(state.isValid());
+    EXPECT_EQ(state.node()->type(), forms::FormExprType::StateField);
+
+    EXPECT_THROW(static_cast<void>(
+                     builder.requiredState("participant", missing_field, "u")),
+                 InvalidArgumentException);
+    EXPECT_THROW(static_cast<void>(
+                     builder.requiredTest("participant", empty_field, "w")),
+                 InvalidArgumentException);
+    EXPECT_THROW(static_cast<void>(
+                     requiredFieldUse("participant", missing_field)),
                  InvalidArgumentException);
 }
 

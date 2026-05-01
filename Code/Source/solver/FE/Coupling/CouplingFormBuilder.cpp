@@ -182,6 +182,103 @@ bool declarationMatchesNodeTerminal(
     }
 }
 
+bool sameFieldUse(const CouplingFieldUse& lhs,
+                  const CouplingFieldUse& rhs) noexcept
+{
+    return lhs.participant_name == rhs.participant_name &&
+           lhs.field_name == rhs.field_name;
+}
+
+void appendUniqueFieldUse(std::vector<CouplingFieldUse>& fields,
+                          CouplingFieldUse field)
+{
+    const auto exists = std::find_if(
+        fields.begin(),
+        fields.end(),
+        [&](const CouplingFieldUse& existing) {
+            return sameFieldUse(existing, field);
+        });
+    if (exists == fields.end()) {
+        fields.push_back(std::move(field));
+    }
+}
+
+CouplingFieldUse fieldUseForFieldId(const CouplingContext& context,
+                                    FieldId field_id)
+{
+    const CouplingFieldRef* matched = nullptr;
+    for (const auto& field : context.fields()) {
+        if (field.field_id != field_id) {
+            continue;
+        }
+        if (matched != nullptr) {
+            FE_THROW(InvalidArgumentException,
+                     "coupling equation field-use inference found an ambiguous field id");
+        }
+        matched = &field;
+    }
+    FE_THROW_IF(matched == nullptr, InvalidArgumentException,
+                "coupling equation field-use inference found an unknown field id");
+    return fieldUse(matched->participant_name, matched->field_name);
+}
+
+void appendFieldUseForNode(std::vector<CouplingFieldUse>& fields,
+                           const CouplingContext& context,
+                           const forms::FormExprNode& node)
+{
+    const auto field_id = node.fieldId();
+    if (!field_id.has_value() || *field_id == INVALID_FIELD_ID) {
+        return;
+    }
+    appendUniqueFieldUse(fields, fieldUseForFieldId(context, *field_id));
+}
+
+void inferEquationFieldUses(const CouplingContext& context,
+                            const forms::FormExprNode& node,
+                            std::vector<CouplingFieldUse>& residual_fields,
+                            std::vector<CouplingFieldUse>& trial_fields)
+{
+    switch (node.type()) {
+    case forms::FormExprType::TestFunction:
+        appendFieldUseForNode(residual_fields, context, node);
+        break;
+    case forms::FormExprType::DiscreteField:
+    case forms::FormExprType::StateField:
+        appendFieldUseForNode(trial_fields, context, node);
+        break;
+    default:
+        break;
+    }
+
+    for (const auto* child : node.children()) {
+        if (child != nullptr) {
+            inferEquationFieldUses(context,
+                                   *child,
+                                   residual_fields,
+                                   trial_fields);
+        }
+    }
+}
+
+void removeResidualFieldOverlaps(std::vector<CouplingFieldUse>& trial_fields,
+                                 const std::vector<CouplingFieldUse>&
+                                     residual_fields)
+{
+    trial_fields.erase(
+        std::remove_if(
+            trial_fields.begin(),
+            trial_fields.end(),
+            [&](const CouplingFieldUse& trial_field) {
+                return std::any_of(
+                    residual_fields.begin(),
+                    residual_fields.end(),
+                    [&](const CouplingFieldUse& residual_field) {
+                        return sameFieldUse(trial_field, residual_field);
+                    });
+            }),
+        trial_fields.end());
+}
+
 forms::FormExpr restrictToInterfaceSide(const forms::FormExpr& expr,
                                         CouplingInterfaceSide side)
 {
@@ -229,6 +326,17 @@ forms::FormExpr CouplingFormBuilder::state(std::string_view participant_name,
     return forms::StateField(ref.field_id, *ref.space, std::move(symbol));
 }
 
+forms::FormExpr CouplingFormBuilder::requiredState(
+    std::string_view participant_name,
+    const std::optional<std::string>& field_name,
+    std::string symbol) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return state(participant_name,
+                 std::string_view(required_field),
+                 std::move(symbol));
+}
+
 forms::FormExpr CouplingFormBuilder::test(std::string_view participant_name,
                                           std::string_view field_name,
                                           std::string symbol) const
@@ -239,6 +347,17 @@ forms::FormExpr CouplingFormBuilder::test(std::string_view participant_name,
     return forms::TestField(ref.field_id, *ref.space, std::move(symbol));
 }
 
+forms::FormExpr CouplingFormBuilder::requiredTest(
+    std::string_view participant_name,
+    const std::optional<std::string>& field_name,
+    std::string symbol) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return test(participant_name,
+                std::string_view(required_field),
+                std::move(symbol));
+}
+
 forms::FormExpr CouplingFormBuilder::timeDerivative(std::string_view participant_name,
                                                     std::string_view field_name,
                                                     std::string symbol,
@@ -247,6 +366,19 @@ forms::FormExpr CouplingFormBuilder::timeDerivative(std::string_view participant
     FE_THROW_IF(order <= 0, InvalidArgumentException,
                 "coupling time derivative order must be positive");
     return state(participant_name, field_name, std::move(symbol)).dt(order);
+}
+
+forms::FormExpr CouplingFormBuilder::requiredTimeDerivative(
+    std::string_view participant_name,
+    const std::optional<std::string>& field_name,
+    std::string symbol,
+    int order) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return timeDerivative(participant_name,
+                          std::string_view(required_field),
+                          std::move(symbol),
+                          order);
 }
 
 forms::FormExpr CouplingFormBuilder::previousSolution(std::string_view participant_name,
@@ -266,6 +398,17 @@ forms::FormExpr CouplingFormBuilder::previousSolution(std::string_view participa
     declaration.history_index = steps_back;
     return recordTerminal(forms::FormExpr::previousSolution(steps_back),
                           std::move(declaration));
+}
+
+forms::FormExpr CouplingFormBuilder::requiredPreviousSolution(
+    std::string_view participant_name,
+    const std::optional<std::string>& field_name,
+    int steps_back) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return previousSolution(participant_name,
+                            std::string_view(required_field),
+                            steps_back);
 }
 
 forms::FormExpr CouplingFormBuilder::time() const
@@ -479,9 +622,26 @@ CouplingFormContribution CouplingFormBuilder::equationContribution(
     contribution.extra_trial_field_uses = std::move(request.trial_field_uses);
     contribution.install_options_declaration =
         std::move(request.install_options_declaration);
+    if (request.geometry_sensitivity.has_value()) {
+        const auto mesh_motion_field =
+            request.geometry_sensitivity->mesh_motion_field;
+        contribution.install_options_declaration.geometry_sensitivity =
+            std::move(request.geometry_sensitivity);
+        if (request.include_geometry_sensitivity_field_as_trial &&
+            mesh_motion_field.has_value()) {
+            appendUniqueFieldUse(contribution.extra_trial_field_uses,
+                                 *mesh_motion_field);
+        }
+    }
     contribution.install_options = std::move(request.install_options);
     contribution.residual = std::move(request.residual);
     return attachTerminalProvenance(std::move(contribution));
+}
+
+CouplingEquationSetBuilder CouplingFormBuilder::equationSet(
+    CouplingEquationSetRequest request) const
+{
+    return CouplingEquationSetBuilder(*this, std::move(request));
 }
 
 forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
@@ -556,6 +716,91 @@ SharedRegionRef CouplingFormBuilder::sharedRegionGroup(std::string_view name) co
     return context().sharedRegionGroup(name);
 }
 
+CouplingEquationSetBuilder::CouplingEquationSetBuilder(
+    const CouplingFormBuilder& builder,
+    CouplingEquationSetRequest request)
+    : builder_(&builder)
+    , request_(std::move(request))
+{
+}
+
+CouplingFormContribution CouplingEquationSetBuilder::equation(
+    CouplingNamedEquationRequest request) const
+{
+    FE_CHECK_NOT_NULL(builder_, "coupling equation set form builder");
+    auto geometry_sensitivity = std::move(request.geometry_sensitivity);
+    if (!geometry_sensitivity.has_value()) {
+        geometry_sensitivity = request_.geometry_sensitivity;
+    }
+    return builder_->equationContribution(CouplingEquationContributionRequest{
+        .contribution_name =
+            makeCouplingGeneratedName(CouplingGeneratedNameRequest{
+                .contract_name = request_.contract_name,
+                .relation_name = request_.relation_name,
+                .local_name = std::move(request.local_name),
+                .explicit_name = std::move(request.explicit_name),
+            }),
+        .origin = request_.origin,
+        .operator_name = request_.operator_name,
+        .residual_field_uses = std::move(request.residual_field_uses),
+        .trial_field_uses = std::move(request.trial_field_uses),
+        .geometry_sensitivity = std::move(geometry_sensitivity),
+        .include_geometry_sensitivity_field_as_trial =
+            request.include_geometry_sensitivity_field_as_trial,
+        .install_options = std::move(request.install_options),
+        .residual = std::move(request.residual),
+    });
+}
+
+CouplingFormContribution CouplingEquationSetBuilder::inferredEquation(
+    CouplingInferredEquationRequest request) const
+{
+    FE_CHECK_NOT_NULL(builder_, "coupling equation set form builder");
+    FE_THROW_IF(!request.residual.isValid(), InvalidArgumentException,
+                "coupling inferred equation requires a residual form");
+
+    std::vector<CouplingFieldUse> residual_fields;
+    std::vector<CouplingFieldUse> trial_fields;
+    inferEquationFieldUses(builder_->context(),
+                           *request.residual.node(),
+                           residual_fields,
+                           trial_fields);
+
+    for (const auto& terminal :
+         builder_->terminalProvenanceFor(request.residual)) {
+        if (terminal.field.has_value()) {
+            appendUniqueFieldUse(trial_fields, *terminal.field);
+        }
+    }
+
+    FE_THROW_IF(residual_fields.empty(), InvalidArgumentException,
+                "coupling inferred equation requires a field-bound test function");
+    removeResidualFieldOverlaps(trial_fields, residual_fields);
+
+    return equation(CouplingNamedEquationRequest{
+        .local_name = std::move(request.local_name),
+        .explicit_name = std::move(request.explicit_name),
+        .residual_field_uses = std::move(residual_fields),
+        .trial_field_uses = std::move(trial_fields),
+        .geometry_sensitivity = std::move(request.geometry_sensitivity),
+        .include_geometry_sensitivity_field_as_trial =
+            request.include_geometry_sensitivity_field_as_trial,
+        .install_options = std::move(request.install_options),
+        .residual = std::move(request.residual),
+    });
+}
+
+std::vector<CouplingFormContribution> CouplingEquationSetBuilder::infer(
+    std::vector<CouplingInferredEquationRequest> requests) const
+{
+    std::vector<CouplingFormContribution> contributions;
+    contributions.reserve(requests.size());
+    for (auto& request : requests) {
+        contributions.push_back(inferredEquation(std::move(request)));
+    }
+    return contributions;
+}
+
 CouplingInterfaceSideView::CouplingInterfaceSideView(
     const CouplingFormBuilder& builder,
     std::string shared_region_name,
@@ -589,12 +834,28 @@ forms::FormExpr CouplingInterfaceSideView::state(std::string_view field_name,
         region_.side);
 }
 
+forms::FormExpr CouplingInterfaceSideView::requiredState(
+    const std::optional<std::string>& field_name,
+    std::string symbol) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return state(std::string_view(required_field), std::move(symbol));
+}
+
 forms::FormExpr CouplingInterfaceSideView::test(std::string_view field_name,
                                                 std::string symbol) const
 {
     return restrictToInterfaceSide(
         builder_->test(region_.participant_name, field_name, std::move(symbol)),
         region_.side);
+}
+
+forms::FormExpr CouplingInterfaceSideView::requiredTest(
+    const std::optional<std::string>& field_name,
+    std::string symbol) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return test(std::string_view(required_field), std::move(symbol));
 }
 
 forms::FormExpr CouplingInterfaceSideView::dt(std::string_view field_name,
@@ -607,6 +868,15 @@ forms::FormExpr CouplingInterfaceSideView::dt(std::string_view field_name,
                                  std::move(symbol),
                                  order),
         region_.side);
+}
+
+forms::FormExpr CouplingInterfaceSideView::requiredDt(
+    const std::optional<std::string>& field_name,
+    std::string symbol,
+    int order) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return dt(std::string_view(required_field), std::move(symbol), order);
 }
 
 forms::FormExpr CouplingInterfaceSideView::geometryTerminal(
@@ -725,12 +995,28 @@ forms::FormExpr CouplingRegionEndpointView::state(std::string_view field_name,
         region_);
 }
 
+forms::FormExpr CouplingRegionEndpointView::requiredState(
+    const std::optional<std::string>& field_name,
+    std::string symbol) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return state(std::string_view(required_field), std::move(symbol));
+}
+
 forms::FormExpr CouplingRegionEndpointView::test(std::string_view field_name,
                                                  std::string symbol) const
 {
     return restrictToRegionSideIfNeeded(
         builder_->test(region_.participant_name, field_name, std::move(symbol)),
         region_);
+}
+
+forms::FormExpr CouplingRegionEndpointView::requiredTest(
+    const std::optional<std::string>& field_name,
+    std::string symbol) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return test(std::string_view(required_field), std::move(symbol));
 }
 
 forms::FormExpr CouplingRegionEndpointView::dt(std::string_view field_name,
@@ -743,6 +1029,15 @@ forms::FormExpr CouplingRegionEndpointView::dt(std::string_view field_name,
                                  std::move(symbol),
                                  order),
         region_);
+}
+
+forms::FormExpr CouplingRegionEndpointView::requiredDt(
+    const std::optional<std::string>& field_name,
+    std::string symbol,
+    int order) const
+{
+    const auto required_field = requiredFieldName(field_name);
+    return dt(std::string_view(required_field), std::move(symbol), order);
 }
 
 forms::FormExpr CouplingRegionEndpointView::geometryTerminal(

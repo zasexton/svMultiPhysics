@@ -5316,7 +5316,7 @@ Unit-test verification checklist:
   and driver-owned transfer-registry metadata.
 - [x] `test_PartitionedCouplingPlan.cpp` verifies `Predicted` temporal slots
   resolve to explicit predicted backing kinds or a declared provider-defined
-  backing and never reuse Current or Accepted backing metadata.
+  backing and never reuse Current or Accepted backing metadata. (double-check this)
 - [x] `test_PartitionedCouplingPlan.cpp` rejects general tensors for FE interface
   transfers and accepts them only for explicitly driver-owned transfers with
   validated extents and packing metadata.

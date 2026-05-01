@@ -26,7 +26,10 @@ void DefinitionBackedCouplingContract::validate(const CouplingContext& ctx) cons
     CouplingValidationResult validation;
     validateDefinitionOptions(ctx, validation);
 
-    const auto declaration = declare();
+    const auto definition = buildDefinition();
+    validation.append(definition.optionValidation());
+
+    const auto declaration = definition.compileDeclaration();
     if (declaration.contract_type != name()) {
         validation.addError(
             "coupling contract declaration type does not match the contract registry key");

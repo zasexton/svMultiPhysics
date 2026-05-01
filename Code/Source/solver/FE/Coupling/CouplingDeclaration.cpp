@@ -7,6 +7,7 @@
 
 #include "Coupling/CouplingDeclaration.h"
 
+#include "Core/FEException.h"
 #include "Spaces/FunctionSpace.h"
 
 #include <string>
@@ -84,6 +85,99 @@ bool relationLoweringKindMatchesMode(CouplingRelationLoweringKind kind,
                kind == CouplingRelationLoweringKind::PartitionedExpert;
     }
     return false;
+}
+
+CouplingFieldUse fieldUse(std::string participant_name,
+                          std::string field_name,
+                          CouplingRequirement requirement)
+{
+    return CouplingFieldUse{
+        .participant_name = std::move(participant_name),
+        .field_name = std::move(field_name),
+        .requirement = requirement,
+    };
+}
+
+std::string requiredFieldName(const std::optional<std::string>& field_name)
+{
+    FE_THROW_IF(!field_name.has_value() || field_name->empty(),
+                InvalidArgumentException,
+                "coupling field role requires a configured field name");
+    return *field_name;
+}
+
+CouplingFieldUse requiredFieldUse(std::string participant_name,
+                                  const std::optional<std::string>& field_name,
+                                  CouplingRequirement requirement)
+{
+    return fieldUse(std::move(participant_name),
+                    requiredFieldName(field_name),
+                    requirement);
+}
+
+CouplingValueDescriptor scalarValue()
+{
+    return CouplingValueDescriptor{
+        .rank = CouplingValueRank::Scalar,
+        .components = 1,
+    };
+}
+
+CouplingValueDescriptor vectorValue(int components)
+{
+    return CouplingValueDescriptor{
+        .rank = CouplingValueRank::Vector,
+        .components = components,
+    };
+}
+
+CouplingRelationLoweringRequest selectedLoweringForMode(
+    CouplingMode mode,
+    std::string enforcement_strategy,
+    std::optional<CouplingPartitionedSolveStrategy>
+        partitioned_solve_strategy)
+{
+    return CouplingRelationLoweringRequest{
+        .mode = mode,
+        .lowering_kind = mode == CouplingMode::Monolithic
+                             ? CouplingRelationLoweringKind::MonolithicForms
+                             : CouplingRelationLoweringKind::PartitionedExchange,
+        .enforcement_strategy = std::move(enforcement_strategy),
+        .partitioned_solve_strategy =
+            mode == CouplingMode::Partitioned
+                ? std::move(partitioned_solve_strategy)
+                : std::nullopt,
+    };
+}
+
+CouplingGeometrySensitivityDeclaration meshMotionGeometrySensitivity(
+    CouplingFieldUse mesh_motion_field,
+    forms::GeometryTangentPath tangent_path,
+    bool use_symbolic_tangent)
+{
+    return CouplingGeometrySensitivityDeclaration{
+        .mode = forms::GeometrySensitivityMode::MeshMotionUnknowns,
+        .mesh_motion_field = std::move(mesh_motion_field),
+        .tangent_path = tangent_path,
+        .use_symbolic_tangent = use_symbolic_tangent,
+    };
+}
+
+std::optional<CouplingGeometrySensitivityDeclaration>
+meshMotionGeometrySensitivity(
+    const std::optional<std::string>& participant_name,
+    const std::optional<std::string>& field_name,
+    forms::GeometryTangentPath tangent_path,
+    bool use_symbolic_tangent)
+{
+    if (!participant_name.has_value() || participant_name->empty() ||
+        !field_name.has_value() || field_name->empty()) {
+        return std::nullopt;
+    }
+    return meshMotionGeometrySensitivity(fieldUse(*participant_name,
+                                                  *field_name),
+                                         tangent_path,
+                                         use_symbolic_tangent);
 }
 
 std::optional<analysis::VariableKind> analysisVariableKindForNonFieldRequirement(

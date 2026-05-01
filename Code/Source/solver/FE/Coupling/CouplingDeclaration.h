@@ -182,6 +182,38 @@ struct CouplingGeometrySensitivityDeclaration {
     bool use_symbolic_tangent{false};
 };
 
+[[nodiscard]] CouplingFieldUse fieldUse(
+    std::string participant_name,
+    std::string field_name,
+    CouplingRequirement requirement = CouplingRequirement::Required);
+[[nodiscard]] CouplingFieldUse requiredFieldUse(
+    std::string participant_name,
+    const std::optional<std::string>& field_name,
+    CouplingRequirement requirement = CouplingRequirement::Required);
+[[nodiscard]] std::string requiredFieldName(
+    const std::optional<std::string>& field_name);
+
+[[nodiscard]] CouplingValueDescriptor scalarValue();
+[[nodiscard]] CouplingValueDescriptor vectorValue(int components);
+
+[[nodiscard]] CouplingRelationLoweringRequest selectedLoweringForMode(
+    CouplingMode mode,
+    std::string enforcement_strategy,
+    std::optional<CouplingPartitionedSolveStrategy>
+        partitioned_solve_strategy = std::nullopt);
+
+[[nodiscard]] CouplingGeometrySensitivityDeclaration
+meshMotionGeometrySensitivity(
+    CouplingFieldUse mesh_motion_field,
+    forms::GeometryTangentPath tangent_path = forms::GeometryTangentPath::Auto,
+    bool use_symbolic_tangent = false);
+[[nodiscard]] std::optional<CouplingGeometrySensitivityDeclaration>
+meshMotionGeometrySensitivity(
+    const std::optional<std::string>& participant_name,
+    const std::optional<std::string>& field_name,
+    forms::GeometryTangentPath tangent_path = forms::GeometryTangentPath::Auto,
+    bool use_symbolic_tangent = false);
+
 struct CouplingSymbolicOptionsDeclaration {
     std::optional<forms::JITOptions> jit;
     std::optional<bool> simplify_expressions;
@@ -316,6 +348,9 @@ struct CouplingEquationContributionRequest {
     std::vector<CouplingFieldUse> residual_field_uses;
     std::vector<CouplingFieldUse> trial_field_uses;
     CouplingFormInstallOptionsDeclaration install_options_declaration{};
+    std::optional<CouplingGeometrySensitivityDeclaration>
+        geometry_sensitivity;
+    bool include_geometry_sensitivity_field_as_trial{true};
     systems::FormInstallOptions install_options{};
     forms::FormExpr residual;
 };
