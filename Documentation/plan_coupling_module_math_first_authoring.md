@@ -1182,7 +1182,7 @@ struct CouplingRegionRelationRequirement {
       before Forms installation or partitioned plan execution.
 - [ ] Orientation policy diagnostics cover side-paired, N-way, flux-balance,
       and traction-balance relations.
-- [ ] Existing `CouplingGraph` diagnostics remain the single validation surface.
+- [x] Existing `CouplingGraph` diagnostics remain the single validation surface.
 
 ## Phase 2: Extend CouplingFormBuilder With Interface Views
 
@@ -1530,7 +1530,7 @@ families future modules are likely to need.
       residual.
 - [x] Each partitioned fixture lowers to existing exchange declarations and
       plan-generator validation.
-- [ ] Each fixture produces graph diagnostics from backend metadata rather than
+- [x] Each fixture produces graph diagnostics from backend metadata rather than
       custom physics-local checks.
 
 ## Phase 9: Migrate Thermal Interface Coupling

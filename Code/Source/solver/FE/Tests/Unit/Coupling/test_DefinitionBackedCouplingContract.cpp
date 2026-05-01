@@ -181,7 +181,7 @@ CouplingContext makeMixedDimensionalContext()
     return builder.build();
 }
 
-CouplingContext makeElectroThermalContext()
+CouplingContext makeElectroThermalContext(bool include_heat_source = true)
 {
     const auto electric = test::participantBinding("electric", 31u);
     const auto thermal = test::participantBinding("thermal", 31u);
@@ -192,13 +192,15 @@ CouplingContext makeElectroThermalContext()
     builder.addParticipant(test::participantRef(thermal));
     builder.addField(test::fieldRef(electric, "potential", 51, space, 1));
     builder.addField(test::fieldRef(thermal, "temperature", 52, space, 1));
-    builder.addField(test::fieldRef(thermal, "heat_source", 53, space, 1));
+    if (include_heat_source) {
+        builder.addField(test::fieldRef(thermal, "heat_source", 53, space, 1));
+    }
     builder.addRegion(domainRegionRef(electric, "domain"));
     builder.addRegion(domainRegionRef(thermal, "domain"));
     return builder.build();
 }
 
-CouplingContext makeContactContext()
+CouplingContext makeContactContext(bool include_shared_region = true)
 {
     const auto master = test::participantBinding("master", 41u);
     const auto slave = test::participantBinding("slave", 42u);
@@ -223,12 +225,14 @@ CouplingContext makeContactContext()
     builder.addField(test::fieldRef(slave, "displacement", 62, space, 2));
     builder.addRegion(master_contact);
     builder.addRegion(slave_contact);
-    builder.addSharedRegion(SharedRegionRef{
-        .name = "contact",
-        .required_region_kind = CouplingRegionKind::InterfaceFace,
-        .required_participant_names = {"master", "slave"},
-        .participant_regions = {master_contact, slave_contact},
-    });
+    if (include_shared_region) {
+        builder.addSharedRegion(SharedRegionRef{
+            .name = "contact",
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .required_participant_names = {"master", "slave"},
+            .participant_regions = {master_contact, slave_contact},
+        });
+    }
     return builder.build();
 }
 
@@ -1247,6 +1251,18 @@ protected:
     }
 };
 
+template <typename Contract>
+std::string validationFailureText(const Contract& contract,
+                                  const CouplingContext& context)
+{
+    try {
+        contract.validate(context);
+    } catch (const InvalidArgumentException& e) {
+        return e.what();
+    }
+    return {};
+}
+
 } // namespace
 
 TEST(DefinitionBackedCouplingContract, CompilesDefinitionToBackendRecords)
@@ -1334,6 +1350,27 @@ TEST(DefinitionBackedCouplingContract, ValidatesThroughCouplingGraph)
     const FixtureDefinitionContract contract;
 
     EXPECT_NO_THROW(contract.validate(context));
+}
+
+TEST(DefinitionBackedCouplingContract, ReportsFixtureDiagnosticsThroughCouplingGraph)
+{
+    const ElectroThermalDefinitionContract electro_thermal;
+    const auto missing_field_text = validationFailureText(
+        electro_thermal,
+        makeElectroThermalContext(/*include_heat_source=*/false));
+    EXPECT_NE(missing_field_text.find(
+                  "required coupling field-shape field is missing from the context"),
+              std::string::npos);
+    EXPECT_NE(missing_field_text.find("heat_source"), std::string::npos);
+
+    const ContactFrictionDefinitionContract contact;
+    const auto missing_contact_text = validationFailureText(
+        contact,
+        makeContactContext(/*include_shared_region=*/false));
+    EXPECT_NE(missing_contact_text.find(
+                  "required shared-interface region is missing from the context"),
+              std::string::npos);
+    EXPECT_NE(missing_contact_text.find("contact"), std::string::npos);
 }
 
 TEST(DefinitionBackedCouplingContract, RunsDefinitionOptionValidationHook)
