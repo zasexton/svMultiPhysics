@@ -1668,7 +1668,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test at least one multi-PDE auxiliary/global-scalar coupling.
 - [x] Test multi-PDE auxiliary coupling in both monolithic and partitioned
       strategies.
-- [ ] Test that a mismatched AuxiliaryState strategy inside one coupling
+- [x] Test that a mismatched AuxiliaryState strategy inside one coupling
       contract is rejected unless an explicit expert strategy is declared.
 - [x] Test at least one mixed-dimensional coupling.
 - [x] Test at least one moving-interface coupling.

@@ -314,6 +314,124 @@ bool isGraphNonFieldVariableKind(CouplingVariableKind kind) noexcept
     return false;
 }
 
+const char* auxiliarySolveModeName(systems::AuxiliarySolveMode mode) noexcept
+{
+    switch (mode) {
+    case systems::AuxiliarySolveMode::Partitioned:
+        return "partitioned";
+    case systems::AuxiliarySolveMode::Monolithic:
+        return "monolithic";
+    }
+    return "unknown";
+}
+
+std::optional<systems::AuxiliarySolveMode> auxiliarySolveModeForRequirement(
+    const CouplingContext& context,
+    const CouplingNonFieldDependencyRequirement& requirement)
+{
+    if (requirement.participant_name.empty() ||
+        !context.hasParticipant(requirement.participant_name)) {
+        return std::nullopt;
+    }
+    const auto participant = context.participant(requirement.participant_name);
+    if (participant.system == nullptr) {
+        return std::nullopt;
+    }
+
+    switch (requirement.kind) {
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryState: {
+        const auto* manager = participant.system->auxiliaryStateManagerIfPresent();
+        if (manager == nullptr || !manager->hasBlock(requirement.name)) {
+            return std::nullopt;
+        }
+        return manager->getSpec(requirement.name).solve_mode;
+    }
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryOutput: {
+        std::size_t output_id = static_cast<std::size_t>(-1);
+        try {
+            output_id = participant.system->auxiliaryOutputIdOf(requirement.name);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+        const auto* descriptor =
+            participant.system->auxiliaryOutputDescriptor(output_id);
+        const auto* manager = participant.system->auxiliaryStateManagerIfPresent();
+        if (descriptor == nullptr || manager == nullptr ||
+            !manager->hasBlock(descriptor->instance_name)) {
+            return std::nullopt;
+        }
+        return manager->getSpec(descriptor->instance_name).solve_mode;
+    }
+    case CouplingNonFieldDependencyRequirementKind::Parameter:
+    case CouplingNonFieldDependencyRequirementKind::Coefficient:
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateOld:
+    case CouplingNonFieldDependencyRequirementKind::MaterialStateWork:
+    case CouplingNonFieldDependencyRequirementKind::BoundaryFunctional:
+    case CouplingNonFieldDependencyRequirementKind::BoundaryIntegral:
+    case CouplingNonFieldDependencyRequirementKind::AuxiliaryInput:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+void validateAuxiliaryStrategyInheritance(
+    const CouplingContext& context,
+    const CouplingContractDeclaration& declaration,
+    CouplingValidationResult& result)
+{
+    bool requires_monolithic = false;
+    bool requires_partitioned = false;
+    for (const auto& relation : declaration.region_relation_requirements) {
+        if (!relation.selected_lowering.has_value()) {
+            continue;
+        }
+        const auto& selected = *relation.selected_lowering;
+        if (isExpertRelationLoweringKind(selected.lowering_kind)) {
+            continue;
+        }
+        if (selected.mode == CouplingMode::Monolithic) {
+            requires_monolithic = true;
+        } else {
+            requires_partitioned = true;
+        }
+    }
+    if (!requires_monolithic && !requires_partitioned) {
+        return;
+    }
+
+    const auto report_mismatch =
+        [&](const CouplingNonFieldDependencyRequirement& requirement,
+            systems::AuxiliarySolveMode solve_mode,
+            CouplingMode selected_mode) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .contract_name = declaration.contract_name,
+                .participant_name = requirement.participant_name,
+                .endpoint_name = requirement.name,
+                .message =
+                    "auxiliary dependency solve mode does not match selected coupling strategy: selected=" +
+                    std::string(toString(selected_mode)) + ", auxiliary=" +
+                    auxiliarySolveModeName(solve_mode),
+            });
+        };
+
+    for (const auto& requirement : declaration.non_field_dependencies) {
+        const auto solve_mode =
+            auxiliarySolveModeForRequirement(context, requirement);
+        if (!solve_mode.has_value()) {
+            continue;
+        }
+        if (requires_monolithic &&
+            *solve_mode != systems::AuxiliarySolveMode::Monolithic) {
+            report_mismatch(requirement, *solve_mode, CouplingMode::Monolithic);
+        }
+        if (requires_partitioned &&
+            *solve_mode != systems::AuxiliarySolveMode::Partitioned) {
+            report_mismatch(requirement, *solve_mode, CouplingMode::Partitioned);
+        }
+    }
+}
+
 bool hasContractTypeNode(const CouplingGraphSnapshot& snapshot,
                          const std::string& contract_type)
 {
@@ -3185,6 +3303,8 @@ void validateContextReferences(const CouplingContext& context,
             }
         }
     }
+
+    validateAuxiliaryStrategyInheritance(context, declaration, result);
 
     for (const auto& requirement : declaration.region_relation_requirements) {
         if (requirement.selected_lowering.has_value()) {
