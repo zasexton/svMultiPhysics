@@ -980,6 +980,89 @@ protected:
     }
 };
 
+class CouplingOwnedUnknownsDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "coupling_owned_unknowns_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto space =
+            std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        builder.participant("left")
+            .participant("right")
+            .participant("shared_auxiliary")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .additionalField(CouplingAdditionalFieldDeclaration{
+                .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+                .namespace_name = name(),
+                .system_participant_name = "left",
+                .field_name = "interface_penalty_weight",
+                .space = space,
+                .components = 1,
+                .scope = CouplingAdditionalFieldScope::InterfaceFace,
+                .shared_region_name = "interface",
+            })
+            .additionalField(CouplingAdditionalFieldDeclaration{
+                .field_namespace = CouplingAdditionalFieldNamespace::Contract,
+                .namespace_name = name(),
+                .system_participant_name = "left",
+                .field_name = "stabilization_trace",
+                .space = space,
+                .components = 1,
+                .scope = CouplingAdditionalFieldScope::InterfaceFace,
+                .shared_region_name = "interface",
+            })
+            .nonFieldDependency(CouplingNonFieldDependencyRequirement{
+                .kind =
+                    CouplingNonFieldDependencyRequirementKind::AuxiliaryState,
+                .participant_name = "shared_auxiliary",
+                .name = "shared_response",
+                .require_analysis_variable_key = true,
+            })
+            .regionRelation(CouplingRegionRelationRequirement{
+                .relation_name = "owned_unknown_interface",
+                .relation_kind = CouplingRegionRelationKind::AuxiliaryPDECoupling,
+                .endpoints = {
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "left",
+                        .region_name = "interface",
+                        .shared_region_name = "interface",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "right",
+                        .region_name = "interface",
+                        .shared_region_name = "interface",
+                    },
+                },
+                .lowering_capabilities = {
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::MonolithicExpert,
+                        .enforcement_strategies = {"owned_unknowns"},
+                    },
+                },
+                .selected_lowering = CouplingRelationLoweringRequest{
+                    .mode = CouplingMode::Monolithic,
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::MonolithicExpert,
+                    .expert_fallback_enabled = true,
+                    .enforcement_strategy = "owned_unknowns",
+                },
+                .required_region_kind = CouplingRegionKind::InterfaceFace,
+            });
+    }
+};
+
 class BoundaryFunctionalDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
@@ -2089,6 +2172,45 @@ TEST(DefinitionBackedCouplingContract, SupportsMultiplierExpertFixture)
               CouplingRelationLoweringKind::MonolithicExpert);
     EXPECT_TRUE(relation.selected_lowering->expert_fallback_enabled);
     EXPECT_FALSE(contract.supportsMonolithicLowering());
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsCouplingOwnedUnknownsFixture)
+{
+    AuxiliaryExchangeContextFixture fixture(
+        systems::AuxiliarySolveMode::Monolithic);
+    const CouplingOwnedUnknownsDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(fixture.context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.additional_fields.size(), 2u);
+    EXPECT_EQ(declaration.additional_fields[0].field_namespace,
+              CouplingAdditionalFieldNamespace::Contract);
+    EXPECT_EQ(declaration.additional_fields[0].field_name,
+              "interface_penalty_weight");
+    EXPECT_EQ(declaration.additional_fields[0].scope,
+              CouplingAdditionalFieldScope::InterfaceFace);
+    ASSERT_TRUE(declaration.additional_fields[0].shared_region_name.has_value());
+    EXPECT_EQ(*declaration.additional_fields[0].shared_region_name,
+              "interface");
+    EXPECT_EQ(declaration.additional_fields[1].field_name,
+              "stabilization_trace");
+
+    ASSERT_EQ(declaration.non_field_dependencies.size(), 1u);
+    EXPECT_EQ(declaration.non_field_dependencies.front().kind,
+              CouplingNonFieldDependencyRequirementKind::AuxiliaryState);
+    EXPECT_EQ(declaration.non_field_dependencies.front().participant_name,
+              "shared_auxiliary");
+    EXPECT_EQ(declaration.non_field_dependencies.front().name,
+              "shared_response");
+
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_kind,
+              CouplingRegionRelationKind::AuxiliaryPDECoupling);
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::MonolithicExpert);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsMixedDimensionalFormsFixture)

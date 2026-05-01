@@ -941,8 +941,8 @@ exchange, endpoint, AuxiliaryState, or variable-dependency records.
 The definition layer must expose clean authoring for coupling-owned unknowns:
 
 - [x] Interface-owned multiplier fields.
-- [ ] Interface-owned penalty or stabilization fields.
-- [ ] Contract-owned auxiliary state variables.
+- [x] Interface-owned penalty or stabilization fields.
+- [x] Contract-owned auxiliary state variables.
 - [x] Auxiliary input/output variables.
 - [x] Boundary functional variables.
 - [x] Global scalar variables.
@@ -1646,6 +1646,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test non-field dependency inference.
 - [x] Test global scalar dependency inference.
 - [x] Test coupling-owned field dependency inference.
+- [x] Test coupling-owned interface penalty/stabilization fields and
+      contract-owned auxiliary state dependencies.
 - [x] Test approximate and lagged lowering disclosures appear in diagnostics.
 - [x] Test explicit dependency declarations can still be verified.
 - [x] Test mismatched explicit declarations produce diagnostics.
