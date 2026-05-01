@@ -481,6 +481,8 @@ forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
         case CouplingRegionKind::InterfaceFace:
             return integrand.dI(region.marker);
         case CouplingRegionKind::UserDefined:
+        case CouplingRegionKind::Curve:
+        case CouplingRegionKind::Point:
             break;
     }
     FE_THROW(InvalidArgumentException,

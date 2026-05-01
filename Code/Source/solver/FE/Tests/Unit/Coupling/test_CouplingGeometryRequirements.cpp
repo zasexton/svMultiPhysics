@@ -264,6 +264,8 @@ TEST(CouplingGeometryRequirements, MapsRegionKindsToAnalysisDomains)
     EXPECT_EQ(toAnalysisDomainKind(CouplingRegionKind::InterfaceFace),
               analysis::DomainKind::InterfaceFace);
     EXPECT_FALSE(toAnalysisDomainKind(CouplingRegionKind::UserDefined).has_value());
+    EXPECT_FALSE(toAnalysisDomainKind(CouplingRegionKind::Curve).has_value());
+    EXPECT_FALSE(toAnalysisDomainKind(CouplingRegionKind::Point).has_value());
 }
 
 TEST(CouplingGeometryRequirements, SummarizesQuantitiesDomainsAndConfigurations)

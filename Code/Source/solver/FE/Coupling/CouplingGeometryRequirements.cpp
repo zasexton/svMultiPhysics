@@ -183,6 +183,8 @@ std::optional<analysis::DomainKind> toAnalysisDomainKind(CouplingRegionKind kind
     case CouplingRegionKind::InterfaceFace:
         return analysis::DomainKind::InterfaceFace;
     case CouplingRegionKind::UserDefined:
+    case CouplingRegionKind::Curve:
+    case CouplingRegionKind::Point:
         return std::nullopt;
     }
     return std::nullopt;

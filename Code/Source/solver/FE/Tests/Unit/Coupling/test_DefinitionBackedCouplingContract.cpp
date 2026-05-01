@@ -118,6 +118,21 @@ CouplingRegionRef domainRegionRef(const test::ParticipantBinding& binding,
     };
 }
 
+CouplingRegionRef regionRef(const test::ParticipantBinding& binding,
+                            std::string region_name,
+                            CouplingRegionKind kind,
+                            int marker = -1)
+{
+    return CouplingRegionRef{
+        .participant_name = binding.participant_name,
+        .system_name = binding.system_name,
+        .system = binding.system,
+        .region_name = std::move(region_name),
+        .kind = kind,
+        .marker = marker,
+    };
+}
+
 CouplingContext makeDefinitionContext()
 {
     const auto left = test::participantBinding("left", 1u);
@@ -178,6 +193,23 @@ CouplingContext makeMixedDimensionalContext()
     builder.addField(test::fieldRef(body, "primary", 41, space, 1));
     builder.addRegion(domainRegionRef(body, "volume"));
     builder.addRegion(test::boundaryRegionRef(body, "surface", 42));
+    return builder.build();
+}
+
+CouplingContext makeCurvePointContext()
+{
+    const auto body = test::participantBinding("body", 22u);
+    const auto space =
+        std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(test::participantRef(body));
+    builder.addField(test::fieldRef(body, "primary", 43, space, 1));
+    builder.addRegion(domainRegionRef(body, "volume"));
+    builder.addRegion(test::boundaryRegionRef(body, "surface", 44));
+    builder.addRegion(
+        regionRef(body, "centerline", CouplingRegionKind::Curve));
+    builder.addRegion(regionRef(body, "anchor", CouplingRegionKind::Point));
     return builder.build();
 }
 
@@ -1500,6 +1532,167 @@ protected:
     }
 };
 
+class LowerDimensionalDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "lower_dimensional_definition_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        builder.participant("body")
+            .fieldRequirement(scalarFieldRequirement("body", "primary"))
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "volume",
+                .required_region_kind = CouplingRegionKind::Domain,
+            })
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "surface",
+                .required_region_kind = CouplingRegionKind::Boundary,
+            })
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "centerline",
+                .required_region_kind = CouplingRegionKind::Curve,
+            })
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "anchor",
+                .required_region_kind = CouplingRegionKind::Point,
+            })
+            .regionRelation(CouplingRegionRelationRequirement{
+                .relation_name = "curve_surface_transfer",
+                .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+                .endpoints = {
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "centerline",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "surface",
+                    },
+                },
+                .lowering_capabilities = {
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::PartitionedExchange,
+                        .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                        .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::ExplicitLagged,
+                        },
+                    },
+                },
+                .selected_lowering = CouplingRelationLoweringRequest{
+                    .mode = CouplingMode::Partitioned,
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::PartitionedExchange,
+                    .partitioned_solve_strategy =
+                        CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+            })
+            .regionRelation(CouplingRegionRelationRequirement{
+                .relation_name = "point_volume_boundary_transfer",
+                .relation_kind =
+                    CouplingRegionRelationKind::SameParticipantRegions,
+                .endpoints = {
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "anchor",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "volume",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "surface",
+                    },
+                },
+                .lowering_capabilities = {
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::PartitionedExchange,
+                        .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                        .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::ExplicitLagged,
+                        },
+                    },
+                },
+                .selected_lowering = CouplingRelationLoweringRequest{
+                    .mode = CouplingMode::Partitioned,
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::PartitionedExchange,
+                    .partitioned_solve_strategy =
+                        CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+            });
+
+        builder
+            .exchange("curve_state_to_surface",
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      })
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "centerline",
+            })
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "surface",
+            })
+            .transfer(test::identityTransfer());
+        builder
+            .exchange("point_state_to_volume",
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      })
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "anchor",
+            })
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "volume",
+            })
+            .transfer(test::identityTransfer());
+        builder
+            .exchange("point_state_to_boundary",
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      })
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "anchor",
+            })
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "surface",
+            })
+            .transfer(test::identityTransfer());
+    }
+};
+
 class PartitionedStrategyDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
@@ -1916,6 +2109,54 @@ TEST(DefinitionBackedCouplingContract, SupportsMixedDimensionalFormsFixture)
     EXPECT_EQ(contributions.front().contribution_name,
               "mixed_dimensional_definition_fixture.volume_surface_balance");
     EXPECT_TRUE(contributions.front().residual.isValid());
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsCurveAndPointRegionFixtures)
+{
+    const auto context = makeCurvePointContext();
+    const LowerDimensionalDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.regions.size(), 4u);
+    EXPECT_EQ(*declaration.regions[2].required_region_kind,
+              CouplingRegionKind::Curve);
+    EXPECT_EQ(*declaration.regions[3].required_region_kind,
+              CouplingRegionKind::Point);
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 2u);
+    EXPECT_EQ(declaration.region_relation_requirements[0].relation_name,
+              "curve_surface_transfer");
+    EXPECT_EQ(declaration.region_relation_requirements[0].endpoints[0]
+                  .region_name,
+              "centerline");
+    EXPECT_EQ(declaration.region_relation_requirements[1].relation_name,
+              "point_volume_boundary_transfer");
+    EXPECT_EQ(declaration.region_relation_requirements[1].endpoints[0]
+                  .region_name,
+              "anchor");
+
+    const auto exchanges =
+        contract.buildPartitionedExchangeDeclarations(context);
+    ASSERT_EQ(exchanges.size(), 3u);
+    const std::span<const CouplingExchangeDeclaration> exchange_span(
+        exchanges.data(),
+        exchanges.size());
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(context, exchange_span);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(context, exchange_span);
+    ASSERT_EQ(plan.exchanges.size(), 3u);
+    ASSERT_TRUE(plan.exchanges[0].producer_region.has_value());
+    EXPECT_EQ(plan.exchanges[0].producer_region->kind,
+              CouplingRegionKind::Curve);
+    ASSERT_TRUE(plan.exchanges[1].producer_region.has_value());
+    EXPECT_EQ(plan.exchanges[1].producer_region->kind,
+              CouplingRegionKind::Point);
+    ASSERT_TRUE(plan.exchanges[2].consumer_region.has_value());
+    EXPECT_EQ(plan.exchanges[2].consumer_region->kind,
+              CouplingRegionKind::Boundary);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsBoundaryFunctionalFixture)

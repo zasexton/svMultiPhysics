@@ -923,8 +923,8 @@ interface-face pairs:
 
 - [x] Volume-to-boundary coupling.
 - [x] Surface-to-surface coupling.
-- [ ] Line-to-surface or curve-to-surface coupling.
-- [ ] Point-to-volume and point-to-boundary coupling.
+- [x] Line-to-surface or curve-to-surface coupling.
+- [x] Point-to-volume and point-to-boundary coupling.
 - [x] Multi-PDE auxiliary-state coupling when an auxiliary model consumes or
       drives multiple PDE participants.
 - [x] Boundary-functional or integrated-quantity coupling.
@@ -1606,6 +1606,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test N-way interface diagnostics.
 - [x] Test repeated participant groups on one shared junction relation.
 - [x] Test mixed-dimensional region relation diagnostics.
+- [x] Test curve-surface and point-volume/point-boundary relation metadata
+      through partitioned exchange plans.
 - [x] Test optional endpoint validation.
 - [x] Test monolithic mixed-system diagnostics.
 - [x] Test missing interface topology diagnostics.
