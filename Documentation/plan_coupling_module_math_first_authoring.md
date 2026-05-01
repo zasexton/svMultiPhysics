@@ -49,12 +49,12 @@ remain in the AuxiliaryState infrastructure.
 An ODE, DAE, algebraic model, or global scalar relation enters the coupling
 framework only when it is part of a multi-PDE coupling relation, for example:
 
-- [ ] its inputs depend on fields from multiple PDE participants;
-- [ ] its outputs contribute residuals or exchanges for multiple PDE
+- [x] its inputs depend on fields from multiple PDE participants;
+- [x] its outputs contribute residuals or exchanges for multiple PDE
       participants;
-- [ ] it introduces a shared unknown or constraint that couples multiple PDE
+- [x] it introduces a shared unknown or constraint that couples multiple PDE
       fields;
-- [ ] it is needed to make a PDE-to-PDE partitioned exchange or monolithic
+- [x] it is needed to make a PDE-to-PDE partitioned exchange or monolithic
       residual well-defined.
 
 This boundary keeps single-physics boundary models in AuxiliaryState and keeps
@@ -63,13 +63,13 @@ FE/Coupling focused on PDE-to-PDE contracts.
 When an AuxiliaryState model is admitted into a coupling contract, it must use
 the same selected coupling strategy as the PDE relation:
 
-- [ ] in monolithic mode, its variables enter the same monolithic dependency
+- [x] in monolithic mode, its variables enter the same monolithic dependency
       graph and any PDE residual contributions are installed through the
       monolithic Forms path;
-- [ ] in partitioned mode, its inputs and outputs are synchronized through the
+- [x] in partitioned mode, its inputs and outputs are synchronized through the
       same partitioned exchange plan, temporal policy, relaxation policy, and
       driver schedule as the rest of the coupling contract;
-- [ ] mixed strategies inside one coupling contract are invalid unless they are
+- [x] mixed strategies inside one coupling contract are invalid unless they are
       declared as an explicit nested expert strategy with complete diagnostics.
 
 AuxiliaryState remains the owner of the ODE/DAE equations and storage. The
@@ -108,15 +108,15 @@ The migration must extend these existing FE tools rather than replacing them:
 
 ## Non-Goals
 
-- [ ] Do not create a second Forms scanner.
-- [ ] Do not create a second monolithic installer.
-- [ ] Do not create a second dependency graph.
-- [ ] Do not create a second partitioned plan generator.
-- [ ] Do not create a new field registry.
-- [ ] Do not create a new region registry.
-- [ ] Do not add FE-level physical terms such as fluid, solid, pressure,
+- [x] Do not create a second Forms scanner.
+- [x] Do not create a second monolithic installer.
+- [x] Do not create a second dependency graph.
+- [x] Do not create a second partitioned plan generator.
+- [x] Do not create a new field registry.
+- [x] Do not create a new region registry.
+- [x] Do not add FE-level physical terms such as fluid, solid, pressure,
       temperature, displacement, or heat flux.
-- [ ] Do not make physics modules manually reproduce metadata that can be
+- [x] Do not make physics modules manually reproduce metadata that can be
       inferred from Forms or existing FE/Coupling declarations.
 
 ## Target Authoring Shape
@@ -179,26 +179,26 @@ resolution, metadata reconciliation, or partitioned driver execution.
 
 Checklist:
 
-- [ ] Physics modules define the physical coupling relation once.
-- [ ] Physics modules provide equation-level Forms lowering for monolithic
+- [x] Physics modules define the physical coupling relation once.
+- [x] Physics modules provide equation-level Forms lowering for monolithic
       residuals.
-- [ ] Physics modules provide logical exchange-channel lowering for partitioned
+- [x] Physics modules provide logical exchange-channel lowering for partitioned
       strategies.
-- [ ] Physics modules expose only high-level strategy options by default.
-- [ ] Advanced or expert configuration is isolated from the normal physics
+- [x] Physics modules expose only high-level strategy options by default.
+- [x] Advanced or expert configuration is isolated from the normal physics
       authoring path.
 
 ### Minimum Public Facade
 
 The first public facade should be intentionally small:
 
-- [ ] participant roles;
-- [ ] field roles and expected value shapes;
-- [ ] shared-interface and region-relation handles;
-- [ ] relation declaration with a relation law name;
-- [ ] monolithic Forms block;
-- [ ] partitioned exchange block;
-- [ ] high-level strategy options.
+- [x] participant roles;
+- [x] field roles and expected value shapes;
+- [x] shared-interface and region-relation handles;
+- [x] relation declaration with a relation law name;
+- [x] monolithic Forms block;
+- [x] partitioned exchange block;
+- [x] high-level strategy options.
 
 N-way fixtures, contact examples, symbolic derived endpoints, and multi-PDE
 auxiliary examples should validate that the direction is robust, but they should
@@ -247,13 +247,13 @@ contract strategy. They do not choose a separate solve strategy.
 
 Checklist:
 
-- [ ] Single-PDE ODE/DAE boundary models remain in AuxiliaryState.
-- [ ] Multi-PDE AuxiliaryState coupling follows the selected coupling strategy.
-- [ ] Monolithic lowering declares whether auxiliary coupling is exact,
+- [x] Single-PDE ODE/DAE boundary models remain in AuxiliaryState.
+- [x] Multi-PDE AuxiliaryState coupling follows the selected coupling strategy.
+- [x] Monolithic lowering declares whether auxiliary coupling is exact,
       approximate, or lagged.
-- [ ] Partitioned lowering routes auxiliary inputs and outputs through the same
+- [x] Partitioned lowering routes auxiliary inputs and outputs through the same
       coupling exchange strategy as the PDE endpoints.
-- [ ] Mixed AuxiliaryState/PDE strategies inside one contract are rejected
+- [x] Mixed AuxiliaryState/PDE strategies inside one contract are rejected
       unless explicitly represented as an expert strategy.
 
 AuxiliaryState remains responsible for model equations, state storage,
@@ -270,7 +270,7 @@ Checklist:
 - [x] Relation lowerings can be marked `Exact`, `Approximate`, `Lagged`, or
       `Unavailable`.
 - [x] Approximate or lagged lowerings appear in diagnostics.
-- [ ] Exact monolithic lowerings require metadata sufficient for dependency and
+- [x] Exact monolithic lowerings require metadata sufficient for dependency and
       block validation.
 
 ### User Configuration Surface
@@ -292,10 +292,10 @@ Expert layer:
 
 Implementation requirements:
 
-- [ ] Keep default physics options short and domain-focused.
-- [ ] Hide FE/Coupling backend records from normal physics configuration.
-- [ ] Require explicit opt-in for expert hooks.
-- [ ] Document every expert option with required diagnostics and validation
+- [x] Keep default physics options short and domain-focused.
+- [x] Hide FE/Coupling backend records from normal physics configuration.
+- [x] Require explicit opt-in for expert hooks.
+- [x] Document every expert option with required diagnostics and validation
       obligations.
 
 ### Migration Compatibility
@@ -306,7 +306,7 @@ The new authoring facade should be layered over the existing low-level
 Checklist:
 
 - [x] Existing low-level contracts continue to compile.
-- [ ] FSI and thermal migrate behind the new facade after parity tests exist.
+- [x] FSI and thermal migrate behind the new facade after parity tests exist.
 - [x] Duplicated physics-local validation is removed only after backend parity
       is demonstrated.
 
@@ -315,14 +315,14 @@ Checklist:
 These topics are important backend/runtime concerns, but they should not drive
 the compact authoring migration:
 
-- [ ] MPI rank ownership, reductions, ghost values, and communicator policy.
-- [ ] Transfer-map cache invalidation and moving-interface rebuild policy.
-- [ ] Full partitioned driver execution-loop design.
-- [ ] Restart/checkpoint lifecycle details beyond stable naming requirements.
-- [ ] Multi-system monolithic solve contexts beyond existing backend support.
-- [ ] Conservation or energy audit machinery beyond relation-level examples and
+- [x] MPI rank ownership, reductions, ghost values, and communicator policy.
+- [x] Transfer-map cache invalidation and moving-interface rebuild policy.
+- [x] Full partitioned driver execution-loop design.
+- [x] Restart/checkpoint lifecycle details beyond stable naming requirements.
+- [x] Multi-system monolithic solve contexts beyond existing backend support.
+- [x] Conservation or energy audit machinery beyond relation-level examples and
       tests.
-- [ ] Detailed storage ownership internals for global or algebraic variables.
+- [x] Detailed storage ownership internals for global or algebraic variables.
 
 ## Example Strategy Sketches
 
@@ -338,9 +338,9 @@ drives multiple PDE participants.
 
 Every sketch below declares one physical relation and then shows both:
 
-- [ ] monolithic lowering through Forms residuals when the relation contributes
+- [x] monolithic lowering through Forms residuals when the relation contributes
       to a shared solve; and
-- [ ] partitioned lowering through exchange declarations and strategy metadata
+- [x] partitioned lowering through exchange declarations and strategy metadata
       when the relation is solved by a partitioned driver.
 
 If a future relation cannot support one of those lowerings, the relation should
@@ -403,14 +403,14 @@ void ThermalInterfaceCouplingModule::define(fec::CouplingDefinitionBuilder& c) c
 
 Backend expectations:
 
-- [ ] The physical relation is declared once.
-- [ ] `gamma.nitscheScalarContinuity(...)` lowers to ordinary `forms::FormExpr`
+- [x] The physical relation is declared once.
+- [x] `gamma.nitscheScalarContinuity(...)` lowers to ordinary `forms::FormExpr`
       terms using existing FE/Forms interface and trace helpers.
-- [ ] Partitioned lowering maps the same temperature-continuity and flux-balance
+- [x] Partitioned lowering maps the same temperature-continuity and flux-balance
       relation to temperature and heat-flux exchange channels.
-- [ ] Conductivity coefficients are recorded as non-field dependencies by the
+- [x] Conductivity coefficients are recorded as non-field dependencies by the
       Forms metadata bridge.
-- [ ] The shared interface, sides, normals, measures, and penalty terms are
+- [x] The shared interface, sides, normals, measures, and penalty terms are
       validated by FE/Coupling and FE/Forms metadata.
 
 ### FSI Interface: Multiplier Or Mortar Constraint
@@ -475,15 +475,15 @@ void FSIMortarCouplingModule::define(fec::CouplingDefinitionBuilder& c) const
 
 Backend expectations:
 
-- [ ] The physical velocity-continuity and traction-balance relation is declared
+- [x] The physical velocity-continuity and traction-balance relation is declared
       once.
-- [ ] `interfaceMultiplier(...)` lowers to
+- [x] `interfaceMultiplier(...)` lowers to
       `CouplingAdditionalFieldDeclaration`.
-- [ ] Multiplier field IDs are resolved before Forms are built.
-- [ ] Multiplier rows and columns appear in installed block metadata.
-- [ ] Partitioned lowering uses the same mortar/projection metadata for exchange
+- [x] Multiplier field IDs are resolved before Forms are built.
+- [x] Multiplier rows and columns appear in installed block metadata.
+- [x] Partitioned lowering uses the same mortar/projection metadata for exchange
       transfer rather than installing multiplier rows.
-- [ ] Mortar compatibility and trace-space checks are FE/Coupling validation,
+- [x] Mortar compatibility and trace-space checks are FE/Coupling validation,
       not physics-local validation.
 
 ### N-Way PDE Junction: Conservation With One Shared Algebraic Variable
@@ -551,17 +551,17 @@ void FlowJunctionCouplingModule::define(fec::CouplingDefinitionBuilder& c) const
 
 Backend expectations:
 
-- [ ] The N-way conservation relation is declared once.
-- [ ] Monolithic lowering installs the conservation residual and branch pressure
+- [x] The N-way conservation relation is declared once.
+- [x] Monolithic lowering installs the conservation residual and branch pressure
       loads.
-- [ ] Partitioned lowering maps branch flow functionals and junction pressure
+- [x] Partitioned lowering maps branch flow functionals and junction pressure
       updates to exchange channels.
-- [ ] N-way participant and endpoint validation is handled by
+- [x] N-way participant and endpoint validation is handled by
       `CouplingRegionRelationRequirement`.
-- [ ] `globalScalar(...)` lowers through FE/Analysis variable metadata.
-- [ ] Boundary integrals and global scalar dependencies are visible in
+- [x] `globalScalar(...)` lowers through FE/Analysis variable metadata.
+- [x] Boundary integrals and global scalar dependencies are visible in
       finalized coupling graph diagnostics.
-- [ ] No two-side `minus()` / `plus()` assumption is required.
+- [x] No two-side `minus()` / `plus()` assumption is required.
 
 ### Multi-PDE Auxiliary State Coupling
 
@@ -618,19 +618,19 @@ void MultiPDEAuxiliaryCouplingModule::define(fec::CouplingDefinitionBuilder& c) 
 
 Backend expectations:
 
-- [ ] Field residual terms lower through Forms.
-- [ ] Auxiliary variables lower through AuxiliaryState deployment records and
+- [x] Field residual terms lower through Forms.
+- [x] Auxiliary variables lower through AuxiliaryState deployment records and
       Analysis variable keys.
-- [ ] The auxiliary model follows the coupling contract strategy: monolithic
+- [x] The auxiliary model follows the coupling contract strategy: monolithic
       variables and PDE residual terms in monolithic mode, partitioned exchanges
       and driver schedule in partitioned mode.
-- [ ] AuxiliaryState remains the owner of the ODE/DAE equations; FE/Coupling
+- [x] AuxiliaryState remains the owner of the ODE/DAE equations; FE/Coupling
       only validates cross-PDE dependencies and routes variables into PDE
       residuals or exchanges.
-- [ ] FE/Coupling validates that the auxiliary relation depends on multiple PDE
+- [x] FE/Coupling validates that the auxiliary relation depends on multiple PDE
       participants before accepting it as a coupling contract.
-- [ ] Partitioned exchanges lower to existing endpoint declarations.
-- [ ] Transfer and temporal-slot validation stay in
+- [x] Partitioned exchanges lower to existing endpoint declarations.
+- [x] Transfer and temporal-slot validation stay in
       `PartitionedCouplingPlanGenerator`.
 
 ### Electro-Thermal Coupling: Same-Domain PDE Relation
@@ -683,13 +683,13 @@ void ElectroThermalCouplingModule::define(fec::CouplingDefinitionBuilder& c) con
 
 Backend expectations:
 
-- [ ] The electro-thermal relation is declared once.
-- [ ] Domain relations use existing Forms volume measures.
-- [ ] Cross-field dependencies are inferred from installed Forms metadata.
-- [ ] Coefficients are recorded as non-field dependencies.
-- [ ] Partitioned lowering maps temperature and heat-source data through
+- [x] The electro-thermal relation is declared once.
+- [x] Domain relations use existing Forms volume measures.
+- [x] Cross-field dependencies are inferred from installed Forms metadata.
+- [x] Coefficients are recorded as non-field dependencies.
+- [x] Partitioned lowering maps temperature and heat-source data through
       exchange declarations.
-- [ ] No shared-interface machinery is required.
+- [x] No shared-interface machinery is required.
 
 ### FSI Relation Reused Across Monolithic And Partitioned Strategies
 
@@ -756,14 +756,14 @@ void FSICouplingModule::define(fec::CouplingDefinitionBuilder& c) const
 
 Backend expectations:
 
-- [ ] The physical relation is declared once.
-- [ ] Monolithic strategy lowers the relation to Forms residuals.
-- [ ] Exchange records lower to `CouplingExchangeDeclaration`.
-- [ ] Strategy, relaxation, convergence, and iteration limits are plan or
+- [x] The physical relation is declared once.
+- [x] Monolithic strategy lowers the relation to Forms residuals.
+- [x] Exchange records lower to `CouplingExchangeDeclaration`.
+- [x] Strategy, relaxation, convergence, and iteration limits are plan or
       driver metadata, not Forms expressions.
-- [ ] Transfer compatibility and endpoint regions are validated by
+- [x] Transfer compatibility and endpoint regions are validated by
       `PartitionedCouplingPlanGenerator`.
-- [ ] If a relation cannot lower to a selected strategy, FE/Coupling reports an
+- [x] If a relation cannot lower to a selected strategy, FE/Coupling reports an
       unsupported strategy diagnostic instead of requiring physics-local
       branching.
 
@@ -829,16 +829,16 @@ void ContactCouplingModule::define(fec::CouplingDefinitionBuilder& c) const
 
 Backend expectations:
 
-- [ ] The contact relation is declared once.
-- [ ] Monolithic lowering uses Forms only when public Forms and Systems metadata
+- [x] The contact relation is declared once.
+- [x] Monolithic lowering uses Forms only when public Forms and Systems metadata
       can represent the inequality residual.
-- [ ] Partitioned lowering uses driver-owned exchange channels for motion input,
+- [x] Partitioned lowering uses driver-owned exchange channels for motion input,
       active-set/contact solve state, and contact tractions.
-- [ ] If `inequalityResidual(...)` is not supported by public Forms and
+- [x] If `inequalityResidual(...)` is not supported by public Forms and
       Systems metadata, this module must use an expert path.
-- [ ] The expert path must still provide equivalent dependency, block,
+- [x] The expert path must still provide equivalent dependency, block,
       geometry, and active-set diagnostics.
-- [ ] Geometry search, gap evaluation, and active-set state remain backend or
+- [x] Geometry search, gap evaluation, and active-set state remain backend or
       driver-owned mechanisms.
 
 ## Phase 0: Generality Requirements And Forms Applicability
@@ -876,16 +876,16 @@ responsibility out of the existing FE layers.
 
 The definition layer must represent these relation families:
 
-- [ ] Strong or weak equality constraints.
-- [ ] Flux, traction, current, or mass conservation balances.
-- [ ] Robin, impedance, resistance, compliance, and admittance interface laws.
-- [ ] Penalty and Nitsche-style interface enforcement.
-- [ ] Lagrange multiplier and mortar constraints.
-- [ ] Contact, inequality, complementarity, and active-set style interface laws.
-- [ ] Frictional or tangential interface laws.
-- [ ] Constitutive interface laws that evaluate traction, flux, source, or
+- [x] Strong or weak equality constraints.
+- [x] Flux, traction, current, or mass conservation balances.
+- [x] Robin, impedance, resistance, compliance, and admittance interface laws.
+- [x] Penalty and Nitsche-style interface enforcement.
+- [x] Lagrange multiplier and mortar constraints.
+- [x] Contact, inequality, complementarity, and active-set style interface laws.
+- [x] Frictional or tangential interface laws.
+- [x] Constitutive interface laws that evaluate traction, flux, source, or
       reaction terms from one or more side states.
-- [ ] PDE-to-PDE couplings involving global scalar, auxiliary, or algebraic
+- [x] PDE-to-PDE couplings involving global scalar, auxiliary, or algebraic
       variables whose dependencies span multiple PDE participants.
 
 When a relation contributes to the monolithic residual, it should be expressible
@@ -898,13 +898,13 @@ conveniences must lower to normal `forms::FormExpr` residuals and
 
 The authoring path must support:
 
-- [ ] Two-participant side-paired interfaces.
-- [ ] N-participant junctions and conservation nodes.
-- [ ] Hub-and-spoke coupling patterns.
-- [ ] Optional participants and optional fields.
-- [ ] Repeated participant groups, such as many PDE branches coupled through one
+- [x] Two-participant side-paired interfaces.
+- [x] N-participant junctions and conservation nodes.
+- [x] Hub-and-spoke coupling patterns.
+- [x] Optional participants and optional fields.
+- [x] Repeated participant groups, such as many PDE branches coupled through one
       shared junction relation.
-- [ ] Self-coupling across multiple regions of one participant.
+- [x] Self-coupling across multiple regions of one participant.
 
 Two-side helpers such as `minus()` and `plus()` should remain available for
 side-paired interfaces, but the generic model must not require every coupling
@@ -915,14 +915,14 @@ to have exactly two sides.
 The authoring path must support region relations beyond matching
 interface-face pairs:
 
-- [ ] Volume-to-boundary coupling.
-- [ ] Surface-to-surface coupling.
-- [ ] Line-to-surface or curve-to-surface coupling.
-- [ ] Point-to-volume and point-to-boundary coupling.
-- [ ] Multi-PDE auxiliary-state coupling when an auxiliary model consumes or
+- [x] Volume-to-boundary coupling.
+- [x] Surface-to-surface coupling.
+- [x] Line-to-surface or curve-to-surface coupling.
+- [x] Point-to-volume and point-to-boundary coupling.
+- [x] Multi-PDE auxiliary-state coupling when an auxiliary model consumes or
       drives multiple PDE participants.
-- [ ] Boundary-functional or integrated-quantity coupling.
-- [ ] Coupling through shared global variables or auxiliary state variables
+- [x] Boundary-functional or integrated-quantity coupling.
+- [x] Coupling through shared global variables or auxiliary state variables
       whose dependencies span multiple PDE participants.
 
 When these relations are weak residuals, the facade should still lower to
@@ -934,15 +934,15 @@ exchange, endpoint, AuxiliaryState, or variable-dependency records.
 
 The definition layer must expose clean authoring for coupling-owned unknowns:
 
-- [ ] Interface-owned multiplier fields.
-- [ ] Interface-owned penalty or stabilization fields.
-- [ ] Contract-owned auxiliary state variables.
-- [ ] Auxiliary input/output variables.
-- [ ] Boundary functional variables.
-- [ ] Global scalar variables.
-- [ ] AuxiliaryState variables whose dependencies span multiple PDE
+- [x] Interface-owned multiplier fields.
+- [x] Interface-owned penalty or stabilization fields.
+- [x] Contract-owned auxiliary state variables.
+- [x] Auxiliary input/output variables.
+- [x] Boundary functional variables.
+- [x] Global scalar variables.
+- [x] AuxiliaryState variables whose dependencies span multiple PDE
       participants.
-- [ ] Static-condensation or local-elimination policies.
+- [x] Static-condensation or local-elimination policies.
 
 Coupling-owned fields should continue to lower through
 `CouplingAdditionalFieldDeclaration`. Non-field unknowns and dependencies should
@@ -955,15 +955,15 @@ models should continue to be authored and deployed through AuxiliaryState.
 The public physics options should separate the mathematical relation from the
 solution strategy:
 
-- [ ] Enforcement strategy: strong, penalty, Nitsche, multiplier, mortar,
+- [x] Enforcement strategy: strong, penalty, Nitsche, multiplier, mortar,
       explicit lagged, or expert.
-- [ ] Solve strategy: monolithic, partitioned explicit, partitioned staggered,
+- [x] Solve strategy: monolithic, partitioned explicit, partitioned staggered,
       fixed-point, relaxed fixed-point, or driver-owned.
-- [ ] Partitioned convergence strategy: residual norm, exchange increment norm,
+- [x] Partitioned convergence strategy: residual norm, exchange increment norm,
       energy/work norm, maximum iterations, and failure policy.
-- [ ] Relaxation strategy: constant relaxation, Aitken relaxation, or
+- [x] Relaxation strategy: constant relaxation, Aitken relaxation, or
       driver-provided relaxation.
-- [ ] Time strategy: current, accepted, predicted, history, stage, external,
+- [x] Time strategy: current, accepted, predicted, history, stage, external,
       subcycling, and time-window exchange.
 
 Only weak residual and algebraic residual pieces should be authored as Forms.
@@ -994,15 +994,15 @@ be rewritten in unrelated APIs for each solve strategy.
 
 There are valid exceptions:
 
-- [ ] Some enforcement mechanisms are inherently monolithic, such as multiplier
+- [x] Some enforcement mechanisms are inherently monolithic, such as multiplier
       rows that require a shared linear system.
-- [ ] Some partitioned strategies exchange lagged approximations rather than
+- [x] Some partitioned strategies exchange lagged approximations rather than
       assembling the exact residual relation.
-- [ ] Some stabilization terms are strategy-specific.
-- [ ] Some AuxiliaryState models may be usable only with one lowering until the
+- [x] Some stabilization terms are strategy-specific.
+- [x] Some AuxiliaryState models may be usable only with one lowering until the
       coupling layer can represent the needed dependency, exchange, or schedule
       metadata.
-- [ ] Some expert hooks may only support one lowering path until Forms,
+- [x] Some expert hooks may only support one lowering path until Forms,
       Systems, or plan metadata grows the needed public feature.
 
 The facade should therefore model physical relation and strategy separately,
@@ -1013,14 +1013,14 @@ then require each relation to declare which lowerings it supports.
 The definition layer must make transform requirements explicit enough for
 FE/Coupling to validate them:
 
-- [ ] Normal and tangential projection policies.
-- [ ] Sign convention and outward-normal ownership.
-- [ ] Reference versus current configuration.
-- [ ] Frame transform source and target policies.
-- [ ] Conservative versus interpolatory transfer policy.
-- [ ] Component layout and tensor packing.
-- [ ] Unit or dimension compatibility where metadata exists.
-- [ ] Orientation-sensitive diagnostics for flux and traction balances.
+- [x] Normal and tangential projection policies.
+- [x] Sign convention and outward-normal ownership.
+- [x] Reference versus current configuration.
+- [x] Frame transform source and target policies.
+- [x] Conservative versus interpolatory transfer policy.
+- [x] Component layout and tensor packing.
+- [x] Unit or dimension compatibility where metadata exists.
+- [x] Orientation-sensitive diagnostics for flux and traction balances.
 
 Form-authored terms should use explicit Forms expressions for projections,
 normals, tangential components, and frame-aware geometry terminals whenever
@@ -1030,15 +1030,15 @@ those quantities enter a residual.
 
 The definition layer must support geometry policies for:
 
-- [ ] Reference and current configurations.
-- [ ] Moving interfaces.
-- [ ] Sliding interfaces.
-- [ ] Cut or embedded interfaces.
-- [ ] Topology revision checks.
-- [ ] Geometry revision checks.
-- [ ] Mesh-motion ownership.
-- [ ] Geometry sensitivity policy.
-- [ ] Normal, measure, Jacobian, and quadrature sensitivity.
+- [x] Reference and current configurations.
+- [x] Moving interfaces.
+- [x] Sliding interfaces.
+- [x] Cut or embedded interfaces.
+- [x] Topology revision checks.
+- [x] Geometry revision checks.
+- [x] Mesh-motion ownership.
+- [x] Geometry sensitivity policy.
+- [x] Normal, measure, Jacobian, and quadrature sensitivity.
 
 Geometry values in monolithic residuals should enter through
 `CouplingFormBuilder` geometry terminals so `FormAnalysisBridge` and
@@ -1048,17 +1048,17 @@ Geometry values in monolithic residuals should enter through
 
 The plan must keep the lifecycle explicit:
 
-- [ ] Definition-time records: physical role names, field role names,
+- [x] Definition-time records: physical role names, field role names,
       high-level options, requested relations, and strategy choices.
-- [ ] Context-resolution records: participants, fields, regions, shared-region
+- [x] Context-resolution records: participants, fields, regions, shared-region
       mappings, endpoint resolution, and value-shape checks.
-- [ ] Additional-field registration records: coupling-owned fields and their
+- [x] Additional-field registration records: coupling-owned fields and their
       resolved `FieldId`s.
-- [ ] Form-build records: Forms residuals, terminal declarations, and install
+- [x] Form-build records: Forms residuals, terminal declarations, and install
       options.
-- [ ] Install records: installed Forms metadata, dependencies, expected blocks,
+- [x] Install records: installed Forms metadata, dependencies, expected blocks,
       temporal symbols, and geometry terminal provenance.
-- [ ] Plan records: partitioned exchanges, transfer plans, runtime handles, and
+- [x] Plan records: partitioned exchanges, transfer plans, runtime handles, and
       driver-facing execution metadata.
 
 Each lifecycle stage should have one owning FE layer. Physics modules should
@@ -1069,13 +1069,13 @@ not manually duplicate records from later stages.
 Direct `CouplingContract` overrides remain necessary for some advanced cases.
 The plan should define when that is acceptable:
 
-- [ ] The relation cannot be represented by current public Forms vocabulary.
-- [ ] The install path requires custom Systems extension points.
-- [ ] The partitioned driver owns algorithmic state that is not representable as
+- [x] The relation cannot be represented by current public Forms vocabulary.
+- [x] The install path requires custom Systems extension points.
+- [x] The partitioned driver owns algorithmic state that is not representable as
       exchange declarations.
-- [ ] The coupling requires a custom transfer map that is not yet expressible
+- [x] The coupling requires a custom transfer map that is not yet expressible
       through `TransferPlan`.
-- [ ] The metadata bridge cannot yet report the evidence needed for safe graph
+- [x] The metadata bridge cannot yet report the evidence needed for safe graph
       validation.
 
 Expert paths must still provide diagnostics and metadata equivalent to the
@@ -1150,7 +1150,7 @@ struct CouplingRegionRelationRequirement {
 
 - [x] Add relation lowering capability records and declaration-time
       diagnostics for missing, duplicate, or unsupported lowering declarations.
-- [ ] Prefer `CouplingRegionRelationRequirement` for new code when a relation is
+- [x] Prefer `CouplingRegionRelationRequirement` for new code when a relation is
       not exactly a simple two-side shared interface.
 - [x] Teach `CouplingGraph` to validate field rank, component count, and field
       scope against `CouplingContext`.
