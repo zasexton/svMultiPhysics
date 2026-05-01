@@ -430,7 +430,8 @@ CouplingRegionRelationRequirement electroThermalRelationRequirement()
     };
 }
 
-CouplingRegionRelationRequirement contactFrictionRelationRequirement()
+CouplingRegionRelationRequirement contactFrictionRelationRequirement(
+    CouplingMode mode = CouplingMode::Monolithic)
 {
     return CouplingRegionRelationRequirement{
         .relation_name = "contact_friction_interface",
@@ -455,16 +456,25 @@ CouplingRegionRelationRequirement contactFrictionRelationRequirement()
             CouplingRelationLoweringCapability{
                 .lowering_kind = CouplingRelationLoweringKind::PartitionedExpert,
                 .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                .enforcement_strategies = {"active_set", "friction"},
                 .partitioned_solve_strategies = {
                     CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
                 },
             },
         },
         .selected_lowering = CouplingRelationLoweringRequest{
-            .mode = CouplingMode::Monolithic,
-            .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+            .mode = mode,
+            .lowering_kind =
+                mode == CouplingMode::Monolithic
+                    ? CouplingRelationLoweringKind::MonolithicExpert
+                    : CouplingRelationLoweringKind::PartitionedExpert,
             .expert_fallback_enabled = true,
             .enforcement_strategy = "active_set",
+            .partitioned_solve_strategy =
+                mode == CouplingMode::Partitioned
+                    ? std::optional<CouplingPartitionedSolveStrategy>(
+                          CouplingPartitionedSolveStrategy::StaggeredFixedPoint)
+                    : std::nullopt,
         },
         .required_region_kind = CouplingRegionKind::InterfaceFace,
         .require_opposite_sides_for_side_pair = true,
@@ -1311,6 +1321,12 @@ protected:
 class ContactFrictionDefinitionContract final
     : public DefinitionBackedCouplingContract {
 public:
+    explicit ContactFrictionDefinitionContract(
+        CouplingMode mode = CouplingMode::Monolithic)
+        : mode_(mode)
+    {
+    }
+
     [[nodiscard]] std::string name() const override
     {
         return "contact_friction_fixture";
@@ -1328,8 +1344,51 @@ protected:
                 .shared_region_name = "contact",
                 .participant_names = {"master", "slave"},
             })
-            .regionRelation(contactFrictionRelationRequirement());
+            .regionRelation(contactFrictionRelationRequirement(mode_));
+
+        if (mode_ != CouplingMode::Partitioned) {
+            return;
+        }
+
+        const CouplingPartitionedStrategyDeclaration strategy{
+            .solve_strategy =
+                CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+            .relaxation_strategy =
+                CouplingPartitionedRelaxationStrategy::Aitken,
+            .convergence_norm =
+                CouplingPartitionedConvergenceNorm::ExchangeIncrement,
+            .max_iterations = 8,
+        };
+        builder
+            .exchange("master_motion_to_contact",
+                      CouplingFieldUse{
+                          .participant_name = "master",
+                          .field_name = "displacement",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "slave",
+                          .field_name = "displacement",
+                      })
+            .sharedInterface("contact")
+            .transfer(test::identityTransfer())
+            .strategy(strategy);
+        builder
+            .exchange("slave_motion_to_contact",
+                      CouplingFieldUse{
+                          .participant_name = "slave",
+                          .field_name = "displacement",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "master",
+                          .field_name = "displacement",
+                      })
+            .sharedInterface("contact")
+            .transfer(test::identityTransfer())
+            .strategy(strategy);
     }
+
+private:
+    CouplingMode mode_{CouplingMode::Monolithic};
 };
 
 class NWayDefinitionContract final : public DefinitionBackedCouplingContract {
@@ -2098,6 +2157,39 @@ TEST(DefinitionBackedCouplingContract, SupportsContactFrictionCapabilityFixture)
     EXPECT_EQ(relation.lowering_capabilities[1].fidelity,
               CouplingRelationLoweringFidelity::Lagged);
     ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::MonolithicExpert);
     EXPECT_TRUE(relation.selected_lowering->expert_fallback_enabled);
     EXPECT_FALSE(contract.supportsMonolithicLowering());
+
+    const ContactFrictionDefinitionContract partitioned_contract(
+        CouplingMode::Partitioned);
+    EXPECT_NO_THROW(partitioned_contract.validate(context));
+
+    const auto partitioned_declaration = partitioned_contract.declare();
+    ASSERT_EQ(partitioned_declaration.region_relation_requirements.size(), 1u);
+    const auto& partitioned_relation =
+        partitioned_declaration.region_relation_requirements.front();
+    ASSERT_TRUE(partitioned_relation.selected_lowering.has_value());
+    EXPECT_EQ(partitioned_relation.selected_lowering->lowering_kind,
+              CouplingRelationLoweringKind::PartitionedExpert);
+    ASSERT_TRUE(partitioned_relation.selected_lowering
+                    ->partitioned_solve_strategy.has_value());
+    EXPECT_EQ(*partitioned_relation.selected_lowering
+                   ->partitioned_solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+    EXPECT_TRUE(partitioned_contract.supportsPartitionedLowering());
+
+    const auto exchanges =
+        partitioned_contract.buildPartitionedExchangeDeclarations(context);
+    ASSERT_EQ(exchanges.size(), 2u);
+    EXPECT_EQ(exchanges.front().strategy.relaxation_strategy,
+              CouplingPartitionedRelaxationStrategy::Aitken);
+
+    const std::span<const CouplingExchangeDeclaration> exchange_span(
+        exchanges.data(),
+        exchanges.size());
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(context, exchange_span);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }

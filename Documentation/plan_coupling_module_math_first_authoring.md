@@ -887,8 +887,8 @@ The definition layer must represent these relation families:
 - [x] Robin, impedance, resistance, compliance, and admittance interface laws.
 - [x] Penalty and Nitsche-style interface enforcement.
 - [x] Lagrange multiplier and mortar constraints.
-- [ ] Contact, inequality, complementarity, and active-set style interface laws.
-- [ ] Frictional or tangential interface laws.
+- [x] Contact, inequality, complementarity, and active-set style interface laws.
+- [x] Frictional or tangential interface laws.
 - [x] Constitutive interface laws that evaluate traction, flux, source, or
       reaction terms from one or more side states.
 - [x] PDE-to-PDE couplings involving global scalar, auxiliary, or algebraic
@@ -1613,6 +1613,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test relation lowering capability validation.
 - [x] Test Robin, impedance, resistance, compliance, and admittance relation
       authoring with monolithic Forms and partitioned exchange lowerings.
+- [x] Test contact/friction relation authoring with monolithic expert and
+      partitioned expert lowerings.
 - [x] Test unsupported monolithic capability diagnostics.
 - [x] Test unsupported partitioned capability diagnostics.
 - [x] Test explicit expert fallback opt-in diagnostics.
