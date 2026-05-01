@@ -23,6 +23,8 @@ namespace fec = FE::coupling;
 namespace forms = FE::forms;
 
 constexpr const char* kThermalInterfaceRelationName = "thermal_interface";
+constexpr const char* kThermalInterfaceOrigin =
+    "ThermalInterfaceCouplingModule";
 
 fec::CouplingFieldUse fieldUse(const std::string& participant,
                                const std::string& field)
@@ -169,65 +171,81 @@ void appendPartitionedExchangeDeclarations(
                   {options.side_a_name, options.side_b_name});
 }
 
-std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
+struct ThermalPenaltyEquations {
+    forms::FormExpr side_a_temperature_balance;
+    forms::FormExpr side_b_temperature_balance;
+};
+
+ThermalPenaltyEquations thermalPenaltyEquations(
     const ThermalInterfaceCouplingOptions& options,
-    const fec::CouplingContext& ctx,
     const fec::CouplingFormBuilder& form_builder)
 {
-    static_cast<void>(ctx);
-
     const auto interface = form_builder.sharedInterface(options.interface_name);
     const auto side_a = interface.side(options.side_a_name);
     const auto side_b = interface.side(options.side_b_name);
 
-    const auto temperature_a =
-        side_a.state(options.side_a_temperature_field, "T_a");
-    const auto temperature_a_test =
-        side_a.test(options.side_a_temperature_field, "w_a");
-    const auto temperature_b =
-        side_b.state(options.side_b_temperature_field, "T_b");
-    const auto temperature_b_test =
-        side_b.test(options.side_b_temperature_field, "w_b");
+    const auto T_a = side_a.state(options.side_a_temperature_field, "T_a");
+    const auto w_a = side_a.test(options.side_a_temperature_field, "w_a");
+    const auto T_b = side_b.state(options.side_b_temperature_field, "T_b");
+    const auto w_b = side_b.test(options.side_b_temperature_field, "w_b");
+
     forms::bc::TraceNitscheOptions penalty_options;
     penalty_options.gamma = options.temperature_penalty;
     penalty_options.scale_with_p = false;
     const auto penalty_terms = forms::interface::scalarContinuityPenaltyTerms(
-        temperature_a,
-        temperature_a_test,
-        temperature_b,
-        temperature_b_test,
+        T_a,
+        w_a,
+        T_b,
+        w_b,
         forms::FormExpr::constant(1.0),
         penalty_options);
 
+    return ThermalPenaltyEquations{
+        .side_a_temperature_balance =
+            interface.integral(penalty_terms.first_side, options.side_a_name),
+        .side_b_temperature_balance =
+            interface.integral(penalty_terms.second_side, options.side_b_name),
+    };
+}
+
+std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
+    const ThermalInterfaceCouplingOptions& options,
+    const fec::CouplingContext&,
+    const fec::CouplingFormBuilder& form_builder)
+{
+    auto equations = thermalPenaltyEquations(options, form_builder);
     std::vector<fec::CouplingFormContribution> contributions;
-
-    fec::CouplingFormContribution side_a_residual;
-    side_a_residual.contribution_name =
-        generatedName(options, "temperature_continuity_side_a");
-    side_a_residual.origin = "ThermalInterfaceCouplingModule";
-    side_a_residual.operator_name = "equations";
-    side_a_residual.field_uses = {fieldUse(options.side_a_name,
-                                           options.side_a_temperature_field)};
-    side_a_residual.extra_trial_field_uses = {
-        fieldUse(options.side_b_name, options.side_b_temperature_field)};
-    side_a_residual.residual =
-        interface.integral(penalty_terms.first_side, options.side_a_name);
-    contributions.push_back(
-        form_builder.attachTerminalProvenance(std::move(side_a_residual)));
-
-    fec::CouplingFormContribution side_b_residual;
-    side_b_residual.contribution_name =
-        generatedName(options, "temperature_continuity_side_b");
-    side_b_residual.origin = "ThermalInterfaceCouplingModule";
-    side_b_residual.operator_name = "equations";
-    side_b_residual.field_uses = {fieldUse(options.side_b_name,
-                                           options.side_b_temperature_field)};
-    side_b_residual.extra_trial_field_uses = {
-        fieldUse(options.side_a_name, options.side_a_temperature_field)};
-    side_b_residual.residual =
-        interface.integral(penalty_terms.second_side, options.side_b_name);
-    contributions.push_back(
-        form_builder.attachTerminalProvenance(std::move(side_b_residual)));
+    contributions.reserve(2);
+    contributions.push_back(form_builder.equationContribution(
+        fec::CouplingEquationContributionRequest{
+            .contribution_name =
+                generatedName(options, "temperature_continuity_side_a"),
+            .origin = kThermalInterfaceOrigin,
+            .residual_field_uses = {
+                fieldUse(options.side_a_name,
+                         options.side_a_temperature_field),
+            },
+            .trial_field_uses = {
+                fieldUse(options.side_b_name,
+                         options.side_b_temperature_field),
+            },
+            .residual = std::move(equations.side_a_temperature_balance),
+        }));
+    contributions.push_back(form_builder.equationContribution(
+        fec::CouplingEquationContributionRequest{
+            .contribution_name =
+                generatedName(options, "temperature_continuity_side_b"),
+            .origin = kThermalInterfaceOrigin,
+            .residual_field_uses = {
+                fieldUse(options.side_b_name,
+                         options.side_b_temperature_field),
+            },
+            .trial_field_uses = {
+                fieldUse(options.side_a_name,
+                         options.side_a_temperature_field),
+            },
+            .residual = std::move(equations.side_b_temperature_balance),
+        }));
 
     return contributions;
 }

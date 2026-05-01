@@ -1580,6 +1580,8 @@ enum class ThermalInterfaceFormulation {
       formulation.
 - [x] Reuse `FE/Forms/InterfaceConditions.h` and `BoundaryConditions.h` helpers
       for Nitsche-style scalar diffusion when applicable.
+- [x] Route thermal monolithic residuals through the FE equation-contribution
+      helper so the physics file keeps the temperature-jump math isolated.
 - [x] Define partitioned temperature and heat-flux channels through
       `PartitionedCouplingBuilder`.
 - [x] Remove local validation that backend field and partitioned checks now
