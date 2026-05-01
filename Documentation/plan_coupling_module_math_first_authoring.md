@@ -1570,7 +1570,7 @@ enum class ThermalInterfaceFormulation {
 
 - [x] Implement monolithic temperature-continuity Forms for the selected
       formulation.
-- [ ] Reuse `FE/Forms/InterfaceConditions.h` and `BoundaryConditions.h` helpers
+- [x] Reuse `FE/Forms/InterfaceConditions.h` and `BoundaryConditions.h` helpers
       for Nitsche-style scalar diffusion when applicable.
 - [x] Define partitioned temperature and heat-flux channels through
       `PartitionedCouplingBuilder`.
@@ -1583,7 +1583,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Thermal partitioned mode behavior is preserved.
 - [x] Thermal tests cover scalar temperature continuity.
 - [x] Thermal tests cover partitioned temperature and heat-flux exchanges.
-- [ ] Thermal examples are short enough to serve as authoring documentation.
+- [x] Thermal examples are short enough to serve as authoring documentation.
 
 ## Phase 10: Tests
 

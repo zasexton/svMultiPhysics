@@ -8,6 +8,7 @@
 #include "Physics/Coupling/ThermalInterfaceCouplingModule.h"
 
 #include "FE/Coupling/CouplingDefinitionBuilder.h"
+#include "FE/Forms/InterfaceConditions.h"
 
 #include <utility>
 #include <vector>
@@ -187,8 +188,16 @@ std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
         side_b.state(options.side_b_temperature_field, "T_b");
     const auto temperature_b_test =
         side_b.test(options.side_b_temperature_field, "w_b");
-    const auto penalty = forms::FormExpr::constant(options.temperature_penalty);
-    const auto temperature_jump = temperature_a - temperature_b;
+    forms::bc::TraceNitscheOptions penalty_options;
+    penalty_options.gamma = options.temperature_penalty;
+    penalty_options.scale_with_p = false;
+    const auto penalty_terms = forms::interface::scalarContinuityPenaltyTerms(
+        temperature_a,
+        temperature_a_test,
+        temperature_b,
+        temperature_b_test,
+        forms::FormExpr::constant(1.0),
+        penalty_options);
 
     std::vector<fec::CouplingFormContribution> contributions;
 
@@ -202,8 +211,7 @@ std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
     side_a_residual.extra_trial_field_uses = {
         fieldUse(options.side_b_name, options.side_b_temperature_field)};
     side_a_residual.residual =
-        interface.integral(penalty * temperature_jump * temperature_a_test,
-                           options.side_a_name);
+        interface.integral(penalty_terms.first_side, options.side_a_name);
     contributions.push_back(
         form_builder.attachTerminalProvenance(std::move(side_a_residual)));
 
@@ -217,8 +225,7 @@ std::vector<fec::CouplingFormContribution> buildThermalPenaltyForms(
     side_b_residual.extra_trial_field_uses = {
         fieldUse(options.side_a_name, options.side_a_temperature_field)};
     side_b_residual.residual =
-        interface.integral(-penalty * temperature_jump * temperature_b_test,
-                           options.side_b_name);
+        interface.integral(penalty_terms.second_side, options.side_b_name);
     contributions.push_back(
         form_builder.attachTerminalProvenance(std::move(side_b_residual)));
 

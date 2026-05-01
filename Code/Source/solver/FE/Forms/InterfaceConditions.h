@@ -34,6 +34,31 @@ struct NitscheInterfaceOptions {
     bool scale_with_p{true};
 };
 
+struct ScalarContinuityPenaltyTerms {
+    FormExpr first_side;
+    FormExpr second_side;
+};
+
+/**
+ * @brief Equal-and-opposite scalar continuity penalty terms for two traced sides
+ */
+[[nodiscard]] inline ScalarContinuityPenaltyTerms scalarContinuityPenaltyTerms(
+    const FormExpr& first_value,
+    const FormExpr& first_test,
+    const FormExpr& second_value,
+    const FormExpr& second_test,
+    const FormExpr& penalty_weight,
+    const bc::TraceNitscheOptions& opts = {})
+{
+    const auto jump = first_value - second_value;
+    const auto penalty =
+        bc::buildTraceNitschePenalty(penalty_weight, first_value, opts);
+    return ScalarContinuityPenaltyTerms{
+        .first_side = penalty * jump * first_test,
+        .second_side = -penalty * jump * second_test,
+    };
+}
+
 /**
  * @brief Legacy Nitsche/SIPG-style interface integrand for scalar diffusion operators
  *
