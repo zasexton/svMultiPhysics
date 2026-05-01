@@ -185,6 +185,7 @@ std::optional<analysis::DomainKind> toAnalysisDomainKind(CouplingRegionKind kind
     case CouplingRegionKind::UserDefined:
     case CouplingRegionKind::Curve:
     case CouplingRegionKind::Point:
+    case CouplingRegionKind::CutInterface:
         return std::nullopt;
     }
     return std::nullopt;

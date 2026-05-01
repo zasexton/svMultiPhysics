@@ -89,6 +89,8 @@ const char* toString(CouplingRegionKind kind) noexcept
         return "curve";
     case CouplingRegionKind::Point:
         return "point";
+    case CouplingRegionKind::CutInterface:
+        return "cut_interface";
     }
     return "unknown";
 }

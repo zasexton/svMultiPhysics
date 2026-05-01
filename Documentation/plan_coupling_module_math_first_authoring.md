@@ -1039,7 +1039,7 @@ The definition layer must support geometry policies for:
 - [x] Reference and current configurations.
 - [x] Moving interfaces.
 - [x] Sliding interfaces.
-- [ ] Cut or embedded interfaces.
+- [x] Cut or embedded interfaces.
 - [x] Topology revision checks.
 - [x] Geometry revision checks.
 - [x] Mesh-motion ownership.
@@ -1608,6 +1608,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test mixed-dimensional region relation diagnostics.
 - [x] Test curve-surface and point-volume/point-boundary relation metadata
       through partitioned exchange plans.
+- [x] Test cut-interface and embedded relation metadata through partitioned
+      exchange plans.
 - [x] Test optional endpoint validation.
 - [x] Test monolithic mixed-system diagnostics.
 - [x] Test missing interface topology diagnostics.

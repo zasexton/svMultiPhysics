@@ -49,6 +49,7 @@ enum class CouplingRegionKind : std::uint8_t {
     UserDefined,
     Curve,
     Point,
+    CutInterface,
 };
 
 enum class CouplingInterfaceSide : std::uint8_t {

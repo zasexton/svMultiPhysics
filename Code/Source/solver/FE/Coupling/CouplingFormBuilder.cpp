@@ -483,6 +483,7 @@ forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
         case CouplingRegionKind::UserDefined:
         case CouplingRegionKind::Curve:
         case CouplingRegionKind::Point:
+        case CouplingRegionKind::CutInterface:
             break;
     }
     FE_THROW(InvalidArgumentException,

@@ -210,6 +210,8 @@ CouplingContext makeCurvePointContext()
     builder.addRegion(
         regionRef(body, "centerline", CouplingRegionKind::Curve));
     builder.addRegion(regionRef(body, "anchor", CouplingRegionKind::Point));
+    builder.addRegion(
+        regionRef(body, "cut_surface", CouplingRegionKind::CutInterface));
     return builder.build();
 }
 
@@ -1652,6 +1654,11 @@ protected:
                 .region_name = "anchor",
                 .required_region_kind = CouplingRegionKind::Point,
             })
+            .region(CouplingRegionUse{
+                .participant_name = "body",
+                .region_name = "cut_surface",
+                .required_region_kind = CouplingRegionKind::CutInterface,
+            })
             .regionRelation(CouplingRegionRelationRequirement{
                 .relation_name = "curve_surface_transfer",
                 .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
@@ -1663,6 +1670,37 @@ protected:
                     CouplingRegionEndpointDeclaration{
                         .participant_name = "body",
                         .region_name = "surface",
+                    },
+                },
+                .lowering_capabilities = {
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::PartitionedExchange,
+                        .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                        .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::ExplicitLagged,
+                        },
+                    },
+                },
+                .selected_lowering = CouplingRelationLoweringRequest{
+                    .mode = CouplingMode::Partitioned,
+                    .lowering_kind =
+                        CouplingRelationLoweringKind::PartitionedExchange,
+                    .partitioned_solve_strategy =
+                        CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+            })
+            .regionRelation(CouplingRegionRelationRequirement{
+                .relation_name = "cut_embedded_transfer",
+                .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+                .endpoints = {
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "cut_surface",
+                    },
+                    CouplingRegionEndpointDeclaration{
+                        .participant_name = "body",
+                        .region_name = "volume",
                     },
                 },
                 .lowering_capabilities = {
@@ -1752,6 +1790,25 @@ protected:
             .producerRegion(CouplingRegionEndpointDeclaration{
                 .participant_name = "body",
                 .region_name = "anchor",
+            })
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "volume",
+            })
+            .transfer(test::identityTransfer());
+        builder
+            .exchange("cut_state_to_volume",
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "body",
+                          .field_name = "primary",
+                      })
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "body",
+                .region_name = "cut_surface",
             })
             .consumerRegion(CouplingRegionEndpointDeclaration{
                 .participant_name = "body",
@@ -2282,26 +2339,33 @@ TEST(DefinitionBackedCouplingContract, SupportsCurveAndPointRegionFixtures)
     EXPECT_NO_THROW(contract.validate(context));
 
     const auto declaration = contract.declare();
-    ASSERT_EQ(declaration.regions.size(), 4u);
+    ASSERT_EQ(declaration.regions.size(), 5u);
     EXPECT_EQ(*declaration.regions[2].required_region_kind,
               CouplingRegionKind::Curve);
     EXPECT_EQ(*declaration.regions[3].required_region_kind,
               CouplingRegionKind::Point);
-    ASSERT_EQ(declaration.region_relation_requirements.size(), 2u);
+    EXPECT_EQ(*declaration.regions[4].required_region_kind,
+              CouplingRegionKind::CutInterface);
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 3u);
     EXPECT_EQ(declaration.region_relation_requirements[0].relation_name,
               "curve_surface_transfer");
     EXPECT_EQ(declaration.region_relation_requirements[0].endpoints[0]
                   .region_name,
               "centerline");
     EXPECT_EQ(declaration.region_relation_requirements[1].relation_name,
-              "point_volume_boundary_transfer");
+              "cut_embedded_transfer");
     EXPECT_EQ(declaration.region_relation_requirements[1].endpoints[0]
+                  .region_name,
+              "cut_surface");
+    EXPECT_EQ(declaration.region_relation_requirements[2].relation_name,
+              "point_volume_boundary_transfer");
+    EXPECT_EQ(declaration.region_relation_requirements[2].endpoints[0]
                   .region_name,
               "anchor");
 
     const auto exchanges =
         contract.buildPartitionedExchangeDeclarations(context);
-    ASSERT_EQ(exchanges.size(), 3u);
+    ASSERT_EQ(exchanges.size(), 4u);
     const std::span<const CouplingExchangeDeclaration> exchange_span(
         exchanges.data(),
         exchanges.size());
@@ -2310,7 +2374,7 @@ TEST(DefinitionBackedCouplingContract, SupportsCurveAndPointRegionFixtures)
     ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
 
     const auto plan = generator.generate(context, exchange_span);
-    ASSERT_EQ(plan.exchanges.size(), 3u);
+    ASSERT_EQ(plan.exchanges.size(), 4u);
     ASSERT_TRUE(plan.exchanges[0].producer_region.has_value());
     EXPECT_EQ(plan.exchanges[0].producer_region->kind,
               CouplingRegionKind::Curve);
@@ -2319,6 +2383,12 @@ TEST(DefinitionBackedCouplingContract, SupportsCurveAndPointRegionFixtures)
               CouplingRegionKind::Point);
     ASSERT_TRUE(plan.exchanges[2].consumer_region.has_value());
     EXPECT_EQ(plan.exchanges[2].consumer_region->kind,
+              CouplingRegionKind::Domain);
+    ASSERT_TRUE(plan.exchanges[2].producer_region.has_value());
+    EXPECT_EQ(plan.exchanges[2].producer_region->kind,
+              CouplingRegionKind::CutInterface);
+    ASSERT_TRUE(plan.exchanges[3].consumer_region.has_value());
+    EXPECT_EQ(plan.exchanges[3].consumer_region->kind,
               CouplingRegionKind::Boundary);
 }
 
