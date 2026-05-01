@@ -6,6 +6,11 @@ Establish a coupling-module infrastructure for the new OOP solver that supports
 both monolithic and partitioned multiphysics workflows, including
 N-participant coupling contracts.
 
+## Follow-On Authoring Plan
+
+The compact, math-first physics authoring migration for this infrastructure is
+tracked in `Documentation/plan_coupling_module_math_first_authoring.md`.
+
 The design should keep physics-agnostic data-flow and formulation construction
 support inside the FE library, while placing physics-specific coupling contracts
 inside `Physics/Coupling`.

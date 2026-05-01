@@ -1697,7 +1697,7 @@ enum class ThermalInterfaceFormulation {
       patterns.
 - [x] Document transform, orientation, frame, and geometry lifecycle policies.
 - [x] Include compact FSI and thermal examples.
-- [ ] Update `Documentation/plan_coupling_module_infrastructure.md` to point to
+- [x] Update `Documentation/plan_coupling_module_infrastructure.md` to point to
       this follow-on authoring migration plan.
 
 ## Review Gates
