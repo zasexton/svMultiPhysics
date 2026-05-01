@@ -1357,7 +1357,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
       exchange without encoding those algorithms in Forms.
 - [x] Move shared-region endpoint attachment into FE/Coupling preprocessing or
       `PartitionedCouplingPlanGenerator`.
-- [ ] Keep transfer validation in `PartitionedCouplingPlanGenerator`.
+- [x] Keep transfer validation in `PartitionedCouplingPlanGenerator`.
 - [x] Keep endpoint scope, temporal slot, frame transform, component layout, and
       runtime handle validation in `PartitionedCouplingPlanGenerator`.
 
@@ -1370,7 +1370,7 @@ exchange(name, producer_endpoint, consumer_endpoint)
 - [x] Physics modules do not manually attach producer/consumer region endpoints.
 - [x] Multi-PDE auxiliary and global-scalar exchanges are expressible through
       existing endpoint records.
-- [ ] N-way partitioned exchange groups validate through the existing plan
+- [x] N-way partitioned exchange groups validate through the existing plan
       generator.
 - [x] Existing partitioned plan tests continue to validate resolved exchanges.
 - [x] New tests verify inferred value descriptors from scalar and vector fields.
@@ -1655,11 +1655,11 @@ enum class ThermalInterfaceFormulation {
 
 ### Physics Tests
 
-- [ ] Test migrated FSI declarations match current participant, field, and
+- [x] Test migrated FSI declarations match current participant, field, and
       shared-region requirements.
 - [x] Test migrated FSI monolithic forms install generated contribution names
       and dependencies.
-- [ ] Test migrated FSI partitioned exchanges match current logical channels.
+- [x] Test migrated FSI partitioned exchanges match current logical channels.
 - [x] Test migrated thermal monolithic lowering.
 - [x] Test migrated thermal partitioned exchanges.
 - [x] Test at least one N-way conservation coupling.
