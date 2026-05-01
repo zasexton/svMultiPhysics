@@ -1729,7 +1729,7 @@ enum class ThermalInterfaceFormulation {
 
 The migration is complete when:
 
-- [ ] Phase 0 generality gaps have implementation and test coverage, or have
+- [x] Phase 0 generality gaps have implementation and test coverage, or have
       been explicitly moved to a separate follow-on plan.
 - [x] Physics coupling files primarily contain physical roles, equations, and
       high-level strategy options.
