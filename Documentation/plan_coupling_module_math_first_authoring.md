@@ -1196,12 +1196,13 @@ integrals. That mapping is generic FE/Coupling work.
 
 - [x] Add lightweight interface helper types in FE/Coupling:
       `CouplingSharedInterfaceView` and `CouplingInterfaceSideView`.
-- [ ] Add `CouplingInterfaceIntegralView` if a dedicated integral object is
-      needed beyond `CouplingSharedInterfaceView::integral(...)`.
+- [x] Do not add `CouplingInterfaceIntegralView`; the existing
+      `CouplingSharedInterfaceView::integral(...)` method covers this without
+      another public helper object.
 - [x] Add lightweight region-relation helper types for N-way and
       mixed-dimensional relations that do not have `minus()` / `plus()` sides.
 - [x] Implement the helpers inside or next to `CouplingFormBuilder`.
-- [ ] Add:
+- [x] Add:
 
 ```cpp
 CouplingSharedInterfaceView sharedInterface(std::string_view name) const;
@@ -1216,7 +1217,7 @@ forms::FormExpr CouplingSharedInterfaceView::integral(
     std::string_view integration_participant) const;
 ```
 
-- [ ] Add generic relation helpers:
+- [x] Add generic relation helpers:
 
 ```cpp
 CouplingRegionRelationView regionRelation(std::string_view name) const;
