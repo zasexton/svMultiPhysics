@@ -939,17 +939,25 @@ CouplingValidationResult validatePartitionedStrategyDeclaration(
     if (strategy.time_window_steps <= 0) {
         result.addError("partitioned strategy requires positive time-window steps");
     }
-    if (strategy.relaxation_strategy !=
-            CouplingPartitionedRelaxationStrategy::None &&
+    const bool uses_internal_relaxation =
+        strategy.relaxation_strategy ==
+            CouplingPartitionedRelaxationStrategy::Constant ||
+        strategy.relaxation_strategy ==
+            CouplingPartitionedRelaxationStrategy::Aitken;
+    if (uses_internal_relaxation &&
         (strategy.relaxation_factor <= 0.0 || strategy.relaxation_factor > 1.0)) {
         result.addError(
             "partitioned relaxation factor must be in the interval (0, 1]");
     }
-    if (strategy.solve_strategy ==
-            CouplingPartitionedSolveStrategy::StaggeredFixedPoint &&
+    const bool fixed_point_strategy =
+        strategy.solve_strategy ==
+            CouplingPartitionedSolveStrategy::StaggeredFixedPoint ||
+        strategy.solve_strategy ==
+            CouplingPartitionedSolveStrategy::RelaxedFixedPoint;
+    if (fixed_point_strategy &&
         strategy.max_iterations < 2) {
         result.addError(
-            "staggered fixed-point partitioned strategy requires at least two iterations");
+            "fixed-point partitioned strategy requires at least two iterations");
     }
     if (strategy.convergence_norm != CouplingPartitionedConvergenceNorm::None &&
         strategy.max_iterations < 2) {

@@ -785,13 +785,15 @@ TEST(PartitionedCouplingPlanGenerator, CarriesPartitionedStrategyMetadata)
 {
     auto exchange = identityExchange();
     exchange.strategy = CouplingPartitionedStrategyDeclaration{
-        .solve_strategy = CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
-        .relaxation_strategy = CouplingPartitionedRelaxationStrategy::Aitken,
-        .convergence_norm = CouplingPartitionedConvergenceNorm::Residual,
+        .solve_strategy = CouplingPartitionedSolveStrategy::RelaxedFixedPoint,
+        .relaxation_strategy =
+            CouplingPartitionedRelaxationStrategy::DriverProvided,
+        .convergence_norm = CouplingPartitionedConvergenceNorm::EnergyWork,
         .relaxation_factor = 0.8,
         .max_iterations = 5,
         .subcycles = 2,
         .time_window_steps = 3,
+        .failure_policy = CouplingPartitionedFailurePolicy::DriverProvided,
     };
     const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
 
@@ -806,15 +808,40 @@ TEST(PartitionedCouplingPlanGenerator, CarriesPartitionedStrategyMetadata)
         std::span<const CouplingExchangeDeclaration>(exchanges));
     ASSERT_EQ(plan.exchanges.size(), 1u);
     EXPECT_EQ(plan.exchanges[0].strategy.solve_strategy,
-              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+              CouplingPartitionedSolveStrategy::RelaxedFixedPoint);
     EXPECT_EQ(plan.exchanges[0].strategy.relaxation_strategy,
-              CouplingPartitionedRelaxationStrategy::Aitken);
+              CouplingPartitionedRelaxationStrategy::DriverProvided);
     EXPECT_EQ(plan.exchanges[0].strategy.convergence_norm,
-              CouplingPartitionedConvergenceNorm::Residual);
+              CouplingPartitionedConvergenceNorm::EnergyWork);
     EXPECT_EQ(plan.exchanges[0].strategy.relaxation_factor, 0.8);
     EXPECT_EQ(plan.exchanges[0].strategy.max_iterations, 5);
     EXPECT_EQ(plan.exchanges[0].strategy.subcycles, 2);
     EXPECT_EQ(plan.exchanges[0].strategy.time_window_steps, 3);
+    EXPECT_EQ(plan.exchanges[0].strategy.failure_policy,
+              CouplingPartitionedFailurePolicy::DriverProvided);
+
+    auto driver_owned = identityExchange();
+    driver_owned.producer_port = port("driver_out");
+    driver_owned.consumer_port = port("driver_in");
+    driver_owned.strategy = CouplingPartitionedStrategyDeclaration{
+        .solve_strategy = CouplingPartitionedSolveStrategy::DriverOwned,
+        .failure_policy = CouplingPartitionedFailurePolicy::AcceptLast,
+    };
+    const std::array<CouplingExchangeDeclaration, 1> driver_exchanges{
+        driver_owned};
+    const auto driver_validation = generator.validate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(driver_exchanges));
+    ASSERT_TRUE(driver_validation.ok()) << formatDiagnostics(driver_validation);
+
+    const auto driver_plan = generator.generate(
+        partitionedContext(),
+        std::span<const CouplingExchangeDeclaration>(driver_exchanges));
+    ASSERT_EQ(driver_plan.exchanges.size(), 1u);
+    EXPECT_EQ(driver_plan.exchanges[0].strategy.solve_strategy,
+              CouplingPartitionedSolveStrategy::DriverOwned);
+    EXPECT_EQ(driver_plan.exchanges[0].strategy.failure_policy,
+              CouplingPartitionedFailurePolicy::AcceptLast);
 }
 
 TEST(PartitionedCouplingPlanGenerator, RejectsInvalidPartitionedStrategyMetadata)

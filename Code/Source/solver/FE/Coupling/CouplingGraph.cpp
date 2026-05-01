@@ -93,6 +93,10 @@ const char* toString(CouplingPartitionedSolveStrategy strategy) noexcept
         return "explicit_lagged";
     case CouplingPartitionedSolveStrategy::StaggeredFixedPoint:
         return "staggered_fixed_point";
+    case CouplingPartitionedSolveStrategy::RelaxedFixedPoint:
+        return "relaxed_fixed_point";
+    case CouplingPartitionedSolveStrategy::DriverOwned:
+        return "driver_owned";
     }
     return "unknown";
 }

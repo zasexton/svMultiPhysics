@@ -961,13 +961,13 @@ models should continue to be authored and deployed through AuxiliaryState.
 The public physics options should separate the mathematical relation from the
 solution strategy:
 
-- [ ] Enforcement strategy: strong, penalty, Nitsche, multiplier, mortar,
+- [x] Enforcement strategy: strong, penalty, Nitsche, multiplier, mortar,
       explicit lagged, or expert.
-- [ ] Solve strategy: monolithic, partitioned explicit, partitioned staggered,
+- [x] Solve strategy: monolithic, partitioned explicit, partitioned staggered,
       fixed-point, relaxed fixed-point, or driver-owned.
-- [ ] Partitioned convergence strategy: residual norm, exchange increment norm,
+- [x] Partitioned convergence strategy: residual norm, exchange increment norm,
       energy/work norm, maximum iterations, and failure policy.
-- [ ] Relaxation strategy: constant relaxation, Aitken relaxation, or
+- [x] Relaxation strategy: constant relaxation, Aitken relaxation, or
       driver-provided relaxation.
 - [x] Time strategy: current, accepted, predicted, history, stage, external,
       subcycling, and time-window exchange.
@@ -1664,6 +1664,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test global-scalar exchange descriptors.
 - [x] Test N-way exchange group validation.
 - [x] Test partitioned relaxation and convergence metadata validation.
+- [x] Test driver-owned and relaxed fixed-point partitioned strategy metadata,
+      energy/work convergence, failure policy, and driver-provided relaxation.
 - [x] Test subcycling and time-window metadata validation.
 - [x] Test AuxiliaryState endpoints admitted into a partitioned coupling inherit
       the coupling contract partitioned strategy and temporal policy.

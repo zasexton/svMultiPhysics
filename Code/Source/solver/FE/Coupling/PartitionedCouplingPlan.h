@@ -30,18 +30,28 @@ namespace coupling {
 enum class CouplingPartitionedSolveStrategy : std::uint8_t {
     ExplicitLagged,
     StaggeredFixedPoint,
+    RelaxedFixedPoint,
+    DriverOwned,
 };
 
 enum class CouplingPartitionedRelaxationStrategy : std::uint8_t {
     None,
     Constant,
     Aitken,
+    DriverProvided,
 };
 
 enum class CouplingPartitionedConvergenceNorm : std::uint8_t {
     None,
     ExchangeIncrement,
     Residual,
+    EnergyWork,
+};
+
+enum class CouplingPartitionedFailurePolicy : std::uint8_t {
+    ErrorOnFailure,
+    AcceptLast,
+    DriverProvided,
 };
 
 struct CouplingPartitionedStrategyDeclaration {
@@ -55,6 +65,8 @@ struct CouplingPartitionedStrategyDeclaration {
     int max_iterations{1};
     int subcycles{1};
     int time_window_steps{1};
+    CouplingPartitionedFailurePolicy failure_policy{
+        CouplingPartitionedFailurePolicy::ErrorOnFailure};
 };
 
 struct CouplingExchangeDeclaration {

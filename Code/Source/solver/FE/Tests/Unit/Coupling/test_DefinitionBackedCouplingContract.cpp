@@ -1817,9 +1817,40 @@ protected:
                 .lowering_capabilities = {
                     CouplingRelationLoweringCapability{
                         .lowering_kind =
+                            CouplingRelationLoweringKind::MonolithicForms,
+                        .enforcement_strategies = {
+                            "strong",
+                            "penalty",
+                            "nitsche",
+                        },
+                    },
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::MonolithicExpert,
+                        .enforcement_strategies = {
+                            "multiplier",
+                            "mortar",
+                            "expert",
+                        },
+                    },
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
                             CouplingRelationLoweringKind::PartitionedExchange,
+                        .enforcement_strategies = {"explicit_lagged"},
                         .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::ExplicitLagged,
                             CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                            CouplingPartitionedSolveStrategy::RelaxedFixedPoint,
+                            CouplingPartitionedSolveStrategy::DriverOwned,
+                        },
+                    },
+                    CouplingRelationLoweringCapability{
+                        .lowering_kind =
+                            CouplingRelationLoweringKind::PartitionedExpert,
+                        .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                        .enforcement_strategies = {"expert"},
+                        .partitioned_solve_strategies = {
+                            CouplingPartitionedSolveStrategy::DriverOwned,
                         },
                     },
                 },
@@ -1827,8 +1858,9 @@ protected:
                     .mode = CouplingMode::Partitioned,
                     .lowering_kind =
                         CouplingRelationLoweringKind::PartitionedExchange,
+                    .enforcement_strategy = "explicit_lagged",
                     .partitioned_solve_strategy =
-                        CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                        CouplingPartitionedSolveStrategy::DriverOwned,
                 },
                 .required_region_kind = CouplingRegionKind::InterfaceFace,
                 .require_opposite_sides_for_side_pair = true,
@@ -1848,13 +1880,14 @@ protected:
             .transfer(test::identityTransfer())
             .strategy(CouplingPartitionedStrategyDeclaration{
                 .solve_strategy =
-                    CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                    CouplingPartitionedSolveStrategy::DriverOwned,
                 .relaxation_strategy =
-                    CouplingPartitionedRelaxationStrategy::Constant,
+                    CouplingPartitionedRelaxationStrategy::DriverProvided,
                 .convergence_norm =
-                    CouplingPartitionedConvergenceNorm::ExchangeIncrement,
-                .relaxation_factor = 0.4,
+                    CouplingPartitionedConvergenceNorm::EnergyWork,
                 .max_iterations = 6,
+                .failure_policy =
+                    CouplingPartitionedFailurePolicy::DriverProvided,
             });
     }
 };
@@ -2324,16 +2357,43 @@ TEST(DefinitionBackedCouplingContract, SupportsPartitionedStrategyFixture)
     const auto& relation = declaration.region_relation_requirements.front();
     ASSERT_TRUE(relation.selected_lowering.has_value());
     EXPECT_EQ(relation.selected_lowering->mode, CouplingMode::Partitioned);
+    ASSERT_EQ(relation.lowering_capabilities.size(), 4u);
+    EXPECT_EQ(relation.lowering_capabilities[0].enforcement_strategies[0],
+              "strong");
+    EXPECT_EQ(relation.lowering_capabilities[1].enforcement_strategies[0],
+              "multiplier");
+    EXPECT_EQ(relation.lowering_capabilities[2].enforcement_strategies[0],
+              "explicit_lagged");
+    ASSERT_EQ(relation.lowering_capabilities[2]
+                  .partitioned_solve_strategies.size(),
+              4u);
+    EXPECT_EQ(relation.lowering_capabilities[2]
+                  .partitioned_solve_strategies[2],
+              CouplingPartitionedSolveStrategy::RelaxedFixedPoint);
+    EXPECT_EQ(relation.lowering_capabilities[2]
+                  .partitioned_solve_strategies[3],
+              CouplingPartitionedSolveStrategy::DriverOwned);
     ASSERT_TRUE(relation.selected_lowering->partitioned_solve_strategy.has_value());
     EXPECT_EQ(*relation.selected_lowering->partitioned_solve_strategy,
-              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+              CouplingPartitionedSolveStrategy::DriverOwned);
+    EXPECT_EQ(relation.selected_lowering->enforcement_strategy,
+              "explicit_lagged");
     ASSERT_EQ(declaration.partitioned_exchange_declarations.size(), 1u);
     EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
                   .strategy.solve_strategy,
-              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+              CouplingPartitionedSolveStrategy::DriverOwned);
+    EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
+                  .strategy.relaxation_strategy,
+              CouplingPartitionedRelaxationStrategy::DriverProvided);
+    EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
+                  .strategy.convergence_norm,
+              CouplingPartitionedConvergenceNorm::EnergyWork);
     EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
                   .strategy.max_iterations,
               6);
+    EXPECT_EQ(declaration.partitioned_exchange_declarations.front()
+                  .strategy.failure_policy,
+              CouplingPartitionedFailurePolicy::DriverProvided);
 
     const std::array<CouplingContractDeclaration, 1> declarations{declaration};
     const PartitionedCouplingPlanGenerator generator;
@@ -2342,7 +2402,7 @@ TEST(DefinitionBackedCouplingContract, SupportsPartitionedStrategyFixture)
         std::span<const CouplingContractDeclaration>(declarations));
     ASSERT_EQ(plan.exchanges.size(), 1u);
     EXPECT_EQ(plan.exchanges.front().strategy.solve_strategy,
-              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+              CouplingPartitionedSolveStrategy::DriverOwned);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryExchangeFixture)
