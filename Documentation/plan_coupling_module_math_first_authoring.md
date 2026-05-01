@@ -948,7 +948,7 @@ The definition layer must expose clean authoring for coupling-owned unknowns:
 - [x] Global scalar variables.
 - [x] AuxiliaryState variables whose dependencies span multiple PDE
       participants.
-- [ ] Static-condensation or local-elimination policies.
+- [x] Static-condensation or local-elimination policies.
 
 Coupling-owned fields should continue to lower through
 `CouplingAdditionalFieldDeclaration`. Non-field unknowns and dependencies should
@@ -1648,6 +1648,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test coupling-owned field dependency inference.
 - [x] Test coupling-owned interface penalty/stabilization fields and
       contract-owned auxiliary state dependencies.
+- [x] Test static-condensation and local-elimination policy metadata on
+      coupling-owned fields.
 - [x] Test approximate and lagged lowering disclosures appear in diagnostics.
 - [x] Test explicit dependency declarations can still be verified.
 - [x] Test mismatched explicit declarations produce diagnostics.

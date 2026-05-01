@@ -226,6 +226,12 @@ enum class CouplingAdditionalFieldNamespace : std::uint8_t {
     Contract,
 };
 
+enum class CouplingLocalEliminationPolicy : std::uint8_t {
+    None,
+    StaticCondensation,
+    LocalElimination,
+};
+
 struct CouplingAdditionalFieldDeclaration {
     CouplingAdditionalFieldNamespace field_namespace{
         CouplingAdditionalFieldNamespace::Participant};
@@ -239,6 +245,8 @@ struct CouplingAdditionalFieldDeclaration {
     std::optional<std::string> shared_region_name;
     CouplingRequirement requirement{CouplingRequirement::Required};
     bool enabled{true};
+    CouplingLocalEliminationPolicy local_elimination_policy{
+        CouplingLocalEliminationPolicy::None};
 };
 
 struct ResolvedCouplingAdditionalFieldDeclaration {

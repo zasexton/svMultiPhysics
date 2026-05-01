@@ -1011,6 +1011,8 @@ protected:
                 .components = 1,
                 .scope = CouplingAdditionalFieldScope::InterfaceFace,
                 .shared_region_name = "interface",
+                .local_elimination_policy =
+                    CouplingLocalEliminationPolicy::StaticCondensation,
             })
             .additionalField(CouplingAdditionalFieldDeclaration{
                 .field_namespace = CouplingAdditionalFieldNamespace::Contract,
@@ -1021,6 +1023,8 @@ protected:
                 .components = 1,
                 .scope = CouplingAdditionalFieldScope::InterfaceFace,
                 .shared_region_name = "interface",
+                .local_elimination_policy =
+                    CouplingLocalEliminationPolicy::LocalElimination,
             })
             .nonFieldDependency(CouplingNonFieldDependencyRequirement{
                 .kind =
@@ -2190,11 +2194,15 @@ TEST(DefinitionBackedCouplingContract, SupportsCouplingOwnedUnknownsFixture)
               "interface_penalty_weight");
     EXPECT_EQ(declaration.additional_fields[0].scope,
               CouplingAdditionalFieldScope::InterfaceFace);
+    EXPECT_EQ(declaration.additional_fields[0].local_elimination_policy,
+              CouplingLocalEliminationPolicy::StaticCondensation);
     ASSERT_TRUE(declaration.additional_fields[0].shared_region_name.has_value());
     EXPECT_EQ(*declaration.additional_fields[0].shared_region_name,
               "interface");
     EXPECT_EQ(declaration.additional_fields[1].field_name,
               "stabilization_trace");
+    EXPECT_EQ(declaration.additional_fields[1].local_elimination_policy,
+              CouplingLocalEliminationPolicy::LocalElimination);
 
     ASSERT_EQ(declaration.non_field_dependencies.size(), 1u);
     EXPECT_EQ(declaration.non_field_dependencies.front().kind,
