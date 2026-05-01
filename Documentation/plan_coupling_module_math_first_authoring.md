@@ -1648,7 +1648,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test N-way exchange group validation.
 - [x] Test partitioned relaxation and convergence metadata validation.
 - [x] Test subcycling and time-window metadata validation.
-- [ ] Test AuxiliaryState endpoints admitted into a partitioned coupling inherit
+- [x] Test AuxiliaryState endpoints admitted into a partitioned coupling inherit
       the coupling contract partitioned strategy and temporal policy.
 - [x] Test transfer-kind validation remains in `PartitionedCouplingPlanGenerator`.
 - [x] Test temporal slot validation remains in `PartitionedCouplingPlanGenerator`.

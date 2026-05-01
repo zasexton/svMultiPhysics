@@ -300,7 +300,10 @@ struct AuxiliaryOutputEndpointFixture {
     FieldId left_field{INVALID_FIELD_ID};
     CouplingContext context;
 
-    explicit AuxiliaryOutputEndpointFixture(bool deploy_output = true)
+    explicit AuxiliaryOutputEndpointFixture(
+        bool deploy_output = true,
+        systems::AuxiliarySolveMode solve_mode =
+            systems::AuxiliarySolveMode::Partitioned)
         : space(std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1))
         , mesh(std::make_shared<forms::test::SingleTetraMeshAccess>())
         , left_system(mesh)
@@ -312,12 +315,14 @@ struct AuxiliaryOutputEndpointFixture {
         });
         if (deploy_output) {
             auto model = std::make_shared<ScalarOutputModel>();
-            left_system.deployAuxiliaryModel(
-                systems::use(model)
-                    .name("output_block")
-                    .global()
-                    .partitioned("ForwardEuler")
-                    .initialize({0.0}));
+            auto instance = systems::use(model).name("output_block").global();
+            if (solve_mode == systems::AuxiliarySolveMode::Partitioned) {
+                instance.partitioned("ForwardEuler");
+            } else {
+                instance.monolithic();
+            }
+            instance.initialize({0.0});
+            left_system.deployAuxiliaryModel(std::move(instance));
             left_system.finalizeAuxiliaryLayout();
         }
 
@@ -1740,6 +1745,27 @@ TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryStateUnsupportedTemporalS
               std::string::npos);
 }
 
+TEST(PartitionedCouplingPlanGenerator,
+     RejectsMonolithicAuxiliaryStateInPartitionedExchange)
+{
+    AuxiliaryOutputEndpointFixture fixture(
+        true,
+        systems::AuxiliarySolveMode::Monolithic);
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryStateEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "requires a partitioned AuxiliaryState block"),
+              std::string::npos);
+}
+
 TEST(PartitionedCouplingPlanGenerator, GeneratesAuxiliaryOutputEndpointFromRegistry)
 {
     AuxiliaryOutputEndpointFixture fixture;
@@ -1809,6 +1835,27 @@ TEST(PartitionedCouplingPlanGenerator, RejectsAuxiliaryOutputUnsupportedTemporal
 
     EXPECT_FALSE(validation.ok());
     EXPECT_NE(formatDiagnostics(validation).find("auxiliary output endpoint temporal slot"),
+              std::string::npos);
+}
+
+TEST(PartitionedCouplingPlanGenerator,
+     RejectsMonolithicAuxiliaryOutputInPartitionedExchange)
+{
+    AuxiliaryOutputEndpointFixture fixture(
+        true,
+        systems::AuxiliarySolveMode::Monolithic);
+    auto exchange = identityExchange();
+    exchange.producer = auxiliaryOutputEndpoint("left");
+    const std::array<CouplingExchangeDeclaration, 1> exchanges{exchange};
+
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(
+        fixture.context,
+        std::span<const CouplingExchangeDeclaration>(exchanges));
+
+    EXPECT_FALSE(validation.ok());
+    EXPECT_NE(formatDiagnostics(validation).find(
+                  "requires a partitioned AuxiliaryState block"),
               std::string::npos);
 }
 

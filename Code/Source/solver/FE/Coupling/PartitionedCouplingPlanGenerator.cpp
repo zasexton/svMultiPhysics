@@ -482,6 +482,17 @@ CouplingValidationResult validateEndpointResolutionSupport(
             return result;
         }
 
+        const auto& spec = manager->getSpec(endpoint.endpoint_name);
+        if (spec.solve_mode != systems::AuxiliarySolveMode::Partitioned) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Error,
+                .participant_name = *endpoint.participant_name,
+                .endpoint_name = endpoint.endpoint_name,
+                .message = "partitioned " + std::string(role) +
+                           " auxiliary state endpoint requires a partitioned AuxiliaryState block",
+            });
+        }
+
         const auto& block = manager->getBlock(endpoint.endpoint_name);
         if (block.componentStride() != value.components) {
             result.add(CouplingDiagnostic{
@@ -599,6 +610,24 @@ CouplingValidationResult validateEndpointResolutionSupport(
                            " auxiliary output endpoint requires a deployed auxiliary output",
             });
             return result;
+        }
+        const auto* descriptor =
+            participant.system->auxiliaryOutputDescriptor(output_id);
+        if (const auto* manager =
+                participant.system->auxiliaryStateManagerIfPresent()) {
+            if (descriptor != nullptr &&
+                manager->hasBlock(descriptor->instance_name)) {
+                const auto& spec = manager->getSpec(descriptor->instance_name);
+                if (spec.solve_mode != systems::AuxiliarySolveMode::Partitioned) {
+                    result.add(CouplingDiagnostic{
+                        .severity = CouplingDiagnosticSeverity::Error,
+                        .participant_name = *endpoint.participant_name,
+                        .endpoint_name = endpoint.endpoint_name,
+                        .message = "partitioned " + std::string(role) +
+                                   " auxiliary output endpoint requires a partitioned AuxiliaryState block",
+                    });
+                }
+            }
         }
         if (!fitsUint32(output_id)) {
             result.add(CouplingDiagnostic{
