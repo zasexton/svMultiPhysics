@@ -1601,7 +1601,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test optional endpoint validation.
 - [x] Test monolithic mixed-system diagnostics.
 - [x] Test missing interface topology diagnostics.
-- [ ] Test transform, orientation, component-layout, and frame-policy
+- [x] Test transform, orientation, component-layout, and frame-policy
       diagnostics.
 - [x] Test relation lowering capability validation.
 - [x] Test unsupported monolithic capability diagnostics.
