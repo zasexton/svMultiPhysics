@@ -1268,12 +1268,12 @@ evidence.
 
 ### Concrete Changes
 
-- [ ] Extend `MonolithicCouplingBuilder` to run declaration validation in two
+- [x] Extend `MonolithicCouplingBuilder` to run declaration validation in two
       stages:
       1. Pre-install validation from declared participants, fields, and
          shared-region requirements.
       2. Finalized validation from installed `CouplingFormAnalysisMetadata`.
-- [ ] Use `FormAnalysisBridge` metadata to infer:
+- [x] Use `FormAnalysisBridge` metadata to infer:
       - residual rows from test fields
       - dependencies from state fields and trial fields
       - non-field dependencies from auxiliary, parameter, global scalar,
@@ -1296,7 +1296,7 @@ enum class CouplingDependencyDeclarationMode {
 - [x] Default new physics modules to `InferFromInstalledForms`.
 - [x] Keep current explicit `dependencies` and `expected_blocks` as
       compatibility and expert-check paths.
-- [ ] Add diagnostics when explicit declarations disagree with installed Forms
+- [x] Add diagnostics when explicit declarations disagree with installed Forms
       metadata.
 
 ### Completion Checklist
@@ -1306,11 +1306,11 @@ enum class CouplingDependencyDeclarationMode {
 - [x] Temporal requirements from `dt(...)` can be inferred or verified.
 - [x] Geometry terminal requirements from `normal()` can be inferred or
       verified.
-- [ ] Non-field variable dependencies from Forms terminals can be inferred or
+- [x] Non-field variable dependencies from Forms terminals can be inferred or
       verified.
 - [x] Coupling-owned additional fields participate in dependency inference.
-- [ ] Existing bridge feature gates are reported through `CouplingGraph`.
-- [ ] Missing bridge metadata produces actionable diagnostics rather than
+- [x] Existing bridge feature gates are reported through `CouplingGraph`.
+- [x] Missing bridge metadata produces actionable diagnostics rather than
       silent acceptance.
 
 ## Phase 4: Add Partitioned Exchange Convenience Helpers
@@ -1623,18 +1623,18 @@ enum class ThermalInterfaceFormulation {
 
 ### Metadata Inference Tests
 
-- [ ] Test residual-row inference from test fields.
-- [ ] Test dependency inference from state fields.
+- [x] Test residual-row inference from test fields.
+- [x] Test dependency inference from state fields.
 - [x] Test expected-block inference from installed block metadata.
 - [x] Test temporal requirement inference from time derivatives.
 - [x] Test geometry requirement inference from normal terminals.
-- [ ] Test geometry-sensitivity field-use inference.
-- [ ] Test non-field dependency inference.
-- [ ] Test global scalar dependency inference.
+- [x] Test geometry-sensitivity field-use inference.
+- [x] Test non-field dependency inference.
+- [x] Test global scalar dependency inference.
 - [x] Test coupling-owned field dependency inference.
 - [x] Test approximate and lagged lowering disclosures appear in diagnostics.
-- [ ] Test explicit dependency declarations can still be verified.
-- [ ] Test mismatched explicit declarations produce diagnostics.
+- [x] Test explicit dependency declarations can still be verified.
+- [x] Test mismatched explicit declarations produce diagnostics.
 
 ### Partitioned Tests
 
