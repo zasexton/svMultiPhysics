@@ -1,9 +1,13 @@
 #include "Coupling/DefinitionBackedCouplingContract.h"
 
+#include "Auxiliary/AuxiliaryBindings.h"
+#include "Auxiliary/AuxiliaryStateManager.h"
 #include "Coupling/CouplingFormBuilder.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
 #include "CouplingTestHelpers.h"
 #include "Spaces/H1Space.h"
+#include "Systems/FESystem.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <gtest/gtest.h>
 
@@ -19,6 +23,47 @@ using namespace svmp::FE;
 using namespace svmp::FE::coupling;
 
 namespace {
+
+class SharedAuxiliaryOutputModel final : public systems::AuxiliaryStateModel {
+public:
+    [[nodiscard]] std::string modelName() const override
+    {
+        return "SharedAuxiliaryOutputModel";
+    }
+
+    [[nodiscard]] int dimension() const override { return 1; }
+
+    [[nodiscard]] systems::AuxiliaryStructuralMetadata structuralMetadata()
+        const override
+    {
+        systems::AuxiliaryStructuralMetadata metadata;
+        metadata.variable_kinds = {systems::AuxiliaryVariableKind::Differential};
+        return metadata;
+    }
+
+    void evaluateResidual(const systems::AuxiliaryLocalContext&,
+                          systems::AuxiliaryResidualRequest& request) const override
+    {
+        if (!request.residual.empty()) {
+            request.residual[0] = 0.0;
+        }
+    }
+
+    [[nodiscard]] int outputCount() const override { return 1; }
+
+    [[nodiscard]] std::vector<std::string> outputNames() const override
+    {
+        return {"interface_response"};
+    }
+
+    void evaluateOutputs(const systems::AuxiliaryLocalContext& ctx,
+                         std::span<Real> output) const override
+    {
+        if (!output.empty()) {
+            output[0] = ctx.x.empty() ? 0.0 : ctx.x[0];
+        }
+    }
+};
 
 CouplingValueDescriptor scalarDescriptor()
 {
@@ -186,6 +231,94 @@ CouplingContext makeContactContext()
     });
     return builder.build();
 }
+
+struct AuxiliaryExchangeContextFixture {
+    std::shared_ptr<spaces::H1Space> space{
+        std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1)};
+    std::shared_ptr<forms::test::SingleTetraMeshAccess> mesh{
+        std::make_shared<forms::test::SingleTetraMeshAccess>()};
+    systems::FESystem left_system{mesh};
+    systems::FESystem right_system{mesh};
+    systems::FESystem auxiliary_system{mesh};
+    FieldId left_field{INVALID_FIELD_ID};
+    FieldId right_field{INVALID_FIELD_ID};
+    CouplingContext context;
+
+    AuxiliaryExchangeContextFixture()
+    {
+        left_field = left_system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+        right_field = right_system.addField(systems::FieldSpec{
+            .name = "primary",
+            .space = space,
+            .components = 1,
+        });
+
+        systems::AuxiliaryInputSpec input;
+        input.name = "left_primary";
+        input.size = 1;
+        input.producer = systems::AuxiliaryInputProducer::DirectUserData;
+        auxiliary_system.auxiliaryInputRegistry().registerInput(input);
+
+        auto model = std::make_shared<SharedAuxiliaryOutputModel>();
+        auxiliary_system.deployAuxiliaryModel(
+            systems::use(model)
+                .name("shared_response")
+                .global()
+                .partitioned("ForwardEuler")
+                .initialize({0.0}));
+        auxiliary_system.finalizeAuxiliaryLayout();
+
+        const test::ParticipantBinding left{
+            .participant_name = "left",
+            .system_name = "left_system",
+            .system = &left_system,
+        };
+        const test::ParticipantBinding right{
+            .participant_name = "right",
+            .system_name = "right_system",
+            .system = &right_system,
+        };
+        const test::ParticipantBinding shared_auxiliary{
+            .participant_name = "shared_auxiliary",
+            .system_name = "shared_auxiliary_system",
+            .system = &auxiliary_system,
+        };
+        const auto left_interface = test::interfaceRegionRef(
+            left,
+            "interface",
+            71,
+            CouplingInterfaceSide::Minus,
+            500u);
+        const auto right_interface = test::interfaceRegionRef(
+            right,
+            "interface",
+            72,
+            CouplingInterfaceSide::Plus,
+            600u);
+
+        CouplingContextBuilder builder;
+        builder.addParticipant(test::participantRef(left));
+        builder.addParticipant(test::participantRef(right));
+        builder.addParticipant(test::participantRef(shared_auxiliary));
+        builder.addField(
+            test::fieldRef(left, "primary", left_field, space, 1));
+        builder.addField(
+            test::fieldRef(right, "primary", right_field, space, 1));
+        builder.addRegion(left_interface);
+        builder.addRegion(right_interface);
+        builder.addSharedRegion(SharedRegionRef{
+            .name = "interface",
+            .required_region_kind = CouplingRegionKind::InterfaceFace,
+            .required_participant_names = {"left", "right"},
+            .participant_regions = {left_interface, right_interface},
+        });
+        context = builder.build();
+    }
+};
 
 CouplingRegionRelationRequirement nWayRelationRequirement()
 {
@@ -775,7 +908,10 @@ protected:
                        .participant_name = "shared_auxiliary",
                        .endpoint_name = "left_primary",
                    })
-            .sharedInterface("interface")
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "interface",
+            })
             .value(scalarDescriptor())
             .transfer(test::identityTransfer());
         builder.exchange(
@@ -790,7 +926,10 @@ protected:
                        .participant_name = "right",
                        .endpoint_name = "primary",
                    })
-            .sharedInterface("interface")
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "interface",
+            })
             .value(scalarDescriptor())
             .transfer(test::identityTransfer());
     }
@@ -1433,6 +1572,34 @@ TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryExchangeFixture)
               CouplingEndpointKind::AuxiliaryOutput);
 }
 
+TEST(DefinitionBackedCouplingContract, ValidatesAuxiliaryFixtureThroughPlanGenerator)
+{
+    AuxiliaryExchangeContextFixture fixture;
+    const AuxiliaryExchangeDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(fixture.context));
+
+    const auto exchanges =
+        contract.buildPartitionedExchangeDeclarations(fixture.context);
+    const std::span<const CouplingExchangeDeclaration> exchange_span(
+        exchanges.data(),
+        exchanges.size());
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(fixture.context, exchange_span);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+
+    const auto plan = generator.generate(fixture.context, exchange_span);
+    ASSERT_EQ(plan.exchanges.size(), 2u);
+    EXPECT_EQ(plan.exchanges[0].consumer.resolved_kind,
+              CouplingEndpointKind::AuxiliaryInput);
+    EXPECT_EQ(plan.exchanges[0].consumer.registry_provider,
+              "AuxiliaryInputRegistry");
+    EXPECT_EQ(plan.exchanges[1].producer.resolved_kind,
+              CouplingEndpointKind::AuxiliaryOutput);
+    EXPECT_EQ(plan.exchanges[1].producer.registry_provider,
+              "AuxiliaryOutputRegistry");
+}
+
 TEST(DefinitionBackedCouplingContract, SupportsElectroThermalCapabilityFixture)
 {
     const auto context = makeElectroThermalContext();
@@ -1469,6 +1636,18 @@ TEST(DefinitionBackedCouplingContract, SupportsElectroThermalCapabilityFixture)
     ASSERT_EQ(exchanges.size(), 2u);
     ASSERT_TRUE(exchanges.front().producer_region.has_value());
     EXPECT_EQ(exchanges.front().producer_region->region_name, "domain");
+
+    const std::span<const CouplingExchangeDeclaration> exchange_span(
+        exchanges.data(),
+        exchanges.size());
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(context, exchange_span);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
+    const auto plan = generator.generate(context, exchange_span);
+    ASSERT_EQ(plan.exchanges.size(), 2u);
+    ASSERT_TRUE(plan.exchanges.front().producer_region.has_value());
+    EXPECT_EQ(plan.exchanges.front().producer_region->kind,
+              CouplingRegionKind::Domain);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsContactFrictionCapabilityFixture)

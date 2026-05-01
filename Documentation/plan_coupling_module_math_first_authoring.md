@@ -1528,7 +1528,7 @@ families future modules are likely to need.
       documented expert-path reason.
 - [x] Each monolithic fixture lowers through Forms where the coupling is a
       residual.
-- [ ] Each partitioned fixture lowers to existing exchange declarations and
+- [x] Each partitioned fixture lowers to existing exchange declarations and
       plan-generator validation.
 - [ ] Each fixture produces graph diagnostics from backend metadata rather than
       custom physics-local checks.
