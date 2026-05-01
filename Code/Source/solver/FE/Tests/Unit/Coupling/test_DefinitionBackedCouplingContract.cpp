@@ -28,6 +28,14 @@ CouplingValueDescriptor scalarDescriptor()
     };
 }
 
+CouplingValueDescriptor vectorDescriptor(int components)
+{
+    return CouplingValueDescriptor{
+        .rank = CouplingValueRank::Vector,
+        .components = components,
+    };
+}
+
 CouplingFieldRequirement scalarFieldRequirement(std::string participant,
                                                 std::string field)
 {
@@ -37,6 +45,31 @@ CouplingFieldRequirement scalarFieldRequirement(std::string participant,
             .field_name = std::move(field),
         },
         .value = scalarDescriptor(),
+    };
+}
+
+CouplingFieldRequirement vectorFieldRequirement(std::string participant,
+                                                std::string field,
+                                                int components)
+{
+    return CouplingFieldRequirement{
+        .field = CouplingFieldUse{
+            .participant_name = std::move(participant),
+            .field_name = std::move(field),
+        },
+        .value = vectorDescriptor(components),
+    };
+}
+
+CouplingRegionRef domainRegionRef(const test::ParticipantBinding& binding,
+                                  std::string region_name)
+{
+    return CouplingRegionRef{
+        .participant_name = binding.participant_name,
+        .system_name = binding.system_name,
+        .system = binding.system,
+        .region_name = std::move(region_name),
+        .kind = CouplingRegionKind::Domain,
     };
 }
 
@@ -98,14 +131,59 @@ CouplingContext makeMixedDimensionalContext()
     CouplingContextBuilder builder;
     builder.addParticipant(test::participantRef(body));
     builder.addField(test::fieldRef(body, "primary", 41, space, 1));
-    builder.addRegion(CouplingRegionRef{
-        .participant_name = "body",
-        .system_name = body.system_name,
-        .system = body.system,
-        .region_name = "volume",
-        .kind = CouplingRegionKind::Domain,
-    });
+    builder.addRegion(domainRegionRef(body, "volume"));
     builder.addRegion(test::boundaryRegionRef(body, "surface", 42));
+    return builder.build();
+}
+
+CouplingContext makeElectroThermalContext()
+{
+    const auto electric = test::participantBinding("electric", 31u);
+    const auto thermal = test::participantBinding("thermal", 31u);
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(test::participantRef(electric));
+    builder.addParticipant(test::participantRef(thermal));
+    builder.addField(test::fieldRef(electric, "potential", 51, space, 1));
+    builder.addField(test::fieldRef(thermal, "temperature", 52, space, 1));
+    builder.addField(test::fieldRef(thermal, "heat_source", 53, space, 1));
+    builder.addRegion(domainRegionRef(electric, "domain"));
+    builder.addRegion(domainRegionRef(thermal, "domain"));
+    return builder.build();
+}
+
+CouplingContext makeContactContext()
+{
+    const auto master = test::participantBinding("master", 41u);
+    const auto slave = test::participantBinding("slave", 42u);
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 2);
+    const auto master_contact = test::interfaceRegionRef(
+        master,
+        "contact",
+        17,
+        CouplingInterfaceSide::Minus,
+        300u);
+    const auto slave_contact = test::interfaceRegionRef(
+        slave,
+        "contact",
+        18,
+        CouplingInterfaceSide::Plus,
+        400u);
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(test::participantRef(master));
+    builder.addParticipant(test::participantRef(slave));
+    builder.addField(test::fieldRef(master, "displacement", 61, space, 2));
+    builder.addField(test::fieldRef(slave, "displacement", 62, space, 2));
+    builder.addRegion(master_contact);
+    builder.addRegion(slave_contact);
+    builder.addSharedRegion(SharedRegionRef{
+        .name = "contact",
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .required_participant_names = {"master", "slave"},
+        .participant_regions = {master_contact, slave_contact},
+    });
     return builder.build();
 }
 
@@ -170,6 +248,85 @@ CouplingRegionRelationRequirement mixedDimensionalRelationRequirement()
             .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
             .enforcement_strategy = "balance",
         },
+    };
+}
+
+CouplingRegionRelationRequirement electroThermalRelationRequirement()
+{
+    return CouplingRegionRelationRequirement{
+        .relation_name = "joule_heating",
+        .relation_kind = CouplingRegionRelationKind::EmbeddedRelation,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "electric",
+                .region_name = "domain",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "thermal",
+                .region_name = "domain",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {"source"},
+            },
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+                .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                .partitioned_solve_strategies = {
+                    CouplingPartitionedSolveStrategy::ExplicitLagged,
+                },
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .enforcement_strategy = "source",
+        },
+        .required_region_kind = CouplingRegionKind::Domain,
+    };
+}
+
+CouplingRegionRelationRequirement contactFrictionRelationRequirement()
+{
+    return CouplingRegionRelationRequirement{
+        .relation_name = "contact_friction_interface",
+        .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "master",
+                .region_name = "contact",
+                .shared_region_name = "contact",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "slave",
+                .region_name = "contact",
+                .shared_region_name = "contact",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+                .enforcement_strategies = {"active_set", "friction"},
+            },
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::PartitionedExpert,
+                .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                .partitioned_solve_strategies = {
+                    CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                },
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicExpert,
+            .expert_fallback_enabled = true,
+            .enforcement_strategy = "active_set",
+        },
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .require_opposite_sides_for_side_pair = true,
     };
 }
 
@@ -639,6 +796,132 @@ protected:
     }
 };
 
+class ElectroThermalDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "electro_thermal_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto relation_requirement = electroThermalRelationRequirement();
+        builder.participant("electric")
+            .participant("thermal")
+            .fieldRequirement(scalarFieldRequirement("electric", "potential"))
+            .fieldRequirement(scalarFieldRequirement("thermal", "temperature"))
+            .fieldRequirement(scalarFieldRequirement("thermal", "heat_source"))
+            .region(CouplingRegionUse{
+                .participant_name = "electric",
+                .region_name = "domain",
+                .required_region_kind = CouplingRegionKind::Domain,
+            })
+            .region(CouplingRegionUse{
+                .participant_name = "thermal",
+                .region_name = "domain",
+                .required_region_kind = CouplingRegionKind::Domain,
+            })
+            .nonFieldDependency(CouplingNonFieldDependencyRequirement{
+                .kind = CouplingNonFieldDependencyRequirementKind::Coefficient,
+                .participant_name = "electric",
+                .name = "conductivity",
+            })
+            .regionRelation(relation_requirement)
+            .monolithic([relation_requirement](const CouplingContext&,
+                                                const CouplingFormBuilder& forms) {
+                const auto relation = forms.regionRelation(relation_requirement);
+                const auto electric = relation.endpoint("electric", "domain");
+                const auto thermal = relation.endpoint("thermal", "domain");
+                const auto phi = electric.state("potential", "phi");
+                const auto theta = thermal.test("temperature", "theta");
+
+                CouplingFormContribution contribution;
+                contribution.contribution_name =
+                    "electro_thermal_fixture.joule_heat_source";
+                contribution.origin = "ElectroThermalDefinitionContract";
+                contribution.operator_name = "equations";
+                contribution.field_uses = {CouplingFieldUse{
+                    .participant_name = "thermal",
+                    .field_name = "temperature",
+                }};
+                contribution.extra_trial_field_uses = {CouplingFieldUse{
+                    .participant_name = "electric",
+                    .field_name = "potential",
+                }};
+                contribution.residual =
+                    thermal.integral(-forms::inner(forms::grad(phi),
+                                                   forms::grad(phi)) *
+                                     theta);
+                return std::vector<CouplingFormContribution>{contribution};
+            });
+
+        builder
+            .exchange("temperature_to_electric",
+                      CouplingFieldUse{
+                          .participant_name = "thermal",
+                          .field_name = "temperature",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "electric",
+                          .field_name = "potential",
+                      })
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "thermal",
+                .region_name = "domain",
+            })
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "electric",
+                .region_name = "domain",
+            })
+            .transfer(test::identityTransfer());
+        builder
+            .exchange("joule_heat_to_thermal",
+                      CouplingFieldUse{
+                          .participant_name = "electric",
+                          .field_name = "potential",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "thermal",
+                          .field_name = "heat_source",
+                      })
+            .producerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "electric",
+                .region_name = "domain",
+            })
+            .consumerRegion(CouplingRegionEndpointDeclaration{
+                .participant_name = "thermal",
+                .region_name = "domain",
+            })
+            .transfer(test::identityTransfer());
+    }
+};
+
+class ContactFrictionDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    [[nodiscard]] std::string name() const override
+    {
+        return "contact_friction_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        builder.participant("master")
+            .participant("slave")
+            .fieldRequirement(
+                vectorFieldRequirement("master", "displacement", 2))
+            .fieldRequirement(vectorFieldRequirement("slave", "displacement", 2))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "contact",
+                .participant_names = {"master", "slave"},
+            })
+            .regionRelation(contactFrictionRelationRequirement());
+    }
+};
+
 class NWayDefinitionContract final : public DefinitionBackedCouplingContract {
 public:
     [[nodiscard]] std::string name() const override
@@ -939,12 +1222,17 @@ TEST(DefinitionBackedCouplingContract, SupportsNWayFormsFixture)
 
     const auto declaration = contract.declare();
     ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
-    EXPECT_EQ(declaration.region_relation_requirements.front().relation_kind,
-              CouplingRegionRelationKind::NWayInterface);
-    ASSERT_TRUE(
-        declaration.region_relation_requirements.front().selected_lowering.has_value());
-    EXPECT_EQ(declaration.region_relation_requirements.front()
-                  .selected_lowering->lowering_kind,
+    const auto& relation = declaration.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_kind, CouplingRegionRelationKind::NWayInterface);
+    ASSERT_EQ(relation.lowering_capabilities.size(), 1u);
+    EXPECT_EQ(relation.lowering_capabilities.front().lowering_kind,
+              CouplingRelationLoweringKind::MonolithicForms);
+    ASSERT_EQ(relation.lowering_capabilities.front().enforcement_strategies.size(),
+              1u);
+    EXPECT_EQ(relation.lowering_capabilities.front().enforcement_strategies.front(),
+              "conservation");
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_EQ(relation.selected_lowering->lowering_kind,
               CouplingRelationLoweringKind::MonolithicForms);
 
     const auto contributions = contract.buildMonolithicForms(context, forms);
@@ -1019,6 +1307,13 @@ TEST(DefinitionBackedCouplingContract, SupportsMultiplierExpertFixture)
     EXPECT_EQ(declaration.additional_fields.front().field_name, "lambda");
     ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
     const auto& relation = declaration.region_relation_requirements.front();
+    ASSERT_EQ(relation.lowering_capabilities.size(), 1u);
+    EXPECT_EQ(relation.lowering_capabilities.front().lowering_kind,
+              CouplingRelationLoweringKind::MonolithicExpert);
+    ASSERT_EQ(relation.lowering_capabilities.front().enforcement_strategies.size(),
+              1u);
+    EXPECT_EQ(relation.lowering_capabilities.front().enforcement_strategies.front(),
+              "multiplier");
     ASSERT_TRUE(relation.selected_lowering.has_value());
     EXPECT_EQ(relation.selected_lowering->lowering_kind,
               CouplingRelationLoweringKind::MonolithicExpert);
@@ -1110,8 +1405,18 @@ TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryExchangeFixture)
     EXPECT_TRUE(validateContractDeclarationShape(declaration).ok())
         << formatDiagnostics(validateContractDeclarationShape(declaration));
     ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
-    EXPECT_EQ(declaration.region_relation_requirements.front().relation_kind,
+    const auto& relation = declaration.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_kind,
               CouplingRegionRelationKind::AuxiliaryPDECoupling);
+    ASSERT_EQ(relation.lowering_capabilities.size(), 1u);
+    EXPECT_EQ(relation.lowering_capabilities.front().lowering_kind,
+              CouplingRelationLoweringKind::PartitionedExchange);
+    ASSERT_EQ(relation.lowering_capabilities.front()
+                  .partitioned_solve_strategies.size(),
+              1u);
+    EXPECT_EQ(relation.lowering_capabilities.front()
+                  .partitioned_solve_strategies.front(),
+              CouplingPartitionedSolveStrategy::ExplicitLagged);
     ASSERT_EQ(declaration.non_field_dependencies.size(), 2u);
     EXPECT_EQ(declaration.non_field_dependencies[0].kind,
               CouplingNonFieldDependencyRequirementKind::AuxiliaryInput);
@@ -1126,4 +1431,70 @@ TEST(DefinitionBackedCouplingContract, SupportsAuxiliaryExchangeFixture)
     ASSERT_TRUE(exchanges[1].producer.has_value());
     EXPECT_EQ(exchanges[1].producer->kind,
               CouplingEndpointKind::AuxiliaryOutput);
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsElectroThermalCapabilityFixture)
+{
+    const auto context = makeElectroThermalContext();
+    const CouplingFormBuilder forms(context);
+    const ElectroThermalDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_kind, CouplingRegionRelationKind::EmbeddedRelation);
+    ASSERT_EQ(relation.lowering_capabilities.size(), 2u);
+    EXPECT_EQ(relation.lowering_capabilities[0].lowering_kind,
+              CouplingRelationLoweringKind::MonolithicForms);
+    EXPECT_EQ(relation.lowering_capabilities[0].enforcement_strategies.front(),
+              "source");
+    EXPECT_EQ(relation.lowering_capabilities[1].lowering_kind,
+              CouplingRelationLoweringKind::PartitionedExchange);
+    EXPECT_EQ(relation.lowering_capabilities[1].fidelity,
+              CouplingRelationLoweringFidelity::Lagged);
+    ASSERT_EQ(declaration.non_field_dependencies.size(), 1u);
+    EXPECT_EQ(declaration.non_field_dependencies.front().kind,
+              CouplingNonFieldDependencyRequirementKind::Coefficient);
+
+    const auto contributions = contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "electro_thermal_fixture.joule_heat_source");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+
+    const auto exchanges =
+        contract.buildPartitionedExchangeDeclarations(context);
+    ASSERT_EQ(exchanges.size(), 2u);
+    ASSERT_TRUE(exchanges.front().producer_region.has_value());
+    EXPECT_EQ(exchanges.front().producer_region->region_name, "domain");
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsContactFrictionCapabilityFixture)
+{
+    const auto context = makeContactContext();
+    const ContactFrictionDefinitionContract contract;
+
+    EXPECT_NO_THROW(contract.validate(context));
+
+    const auto declaration = contract.declare();
+    ASSERT_EQ(declaration.region_relation_requirements.size(), 1u);
+    const auto& relation = declaration.region_relation_requirements.front();
+    EXPECT_EQ(relation.relation_kind,
+              CouplingRegionRelationKind::SidePairedInterface);
+    ASSERT_EQ(relation.lowering_capabilities.size(), 2u);
+    EXPECT_EQ(relation.lowering_capabilities[0].lowering_kind,
+              CouplingRelationLoweringKind::MonolithicExpert);
+    EXPECT_EQ(relation.lowering_capabilities[0].enforcement_strategies[0],
+              "active_set");
+    EXPECT_EQ(relation.lowering_capabilities[0].enforcement_strategies[1],
+              "friction");
+    EXPECT_EQ(relation.lowering_capabilities[1].lowering_kind,
+              CouplingRelationLoweringKind::PartitionedExpert);
+    EXPECT_EQ(relation.lowering_capabilities[1].fidelity,
+              CouplingRelationLoweringFidelity::Lagged);
+    ASSERT_TRUE(relation.selected_lowering.has_value());
+    EXPECT_TRUE(relation.selected_lowering->expert_fallback_enabled);
+    EXPECT_FALSE(contract.supportsMonolithicLowering());
 }

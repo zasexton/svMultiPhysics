@@ -1434,7 +1434,7 @@ strategy, while FE/Coupling decides whether that combination is supported.
 - [x] Add the relation lowering capability declarations described in "Resolved
       Authoring Decisions".
 - [x] Add capability records for the initial FSI and thermal relations.
-- [ ] Add capability records for fixture relations: N-way conservation,
+- [x] Add capability records for fixture relations: N-way conservation,
       multiplier, multi-PDE auxiliary, electro-thermal, and contact/friction.
 - [x] Add validation that checks selected `CouplingMode`, enforcement strategy,
       partitioned strategy, and expert fallback options against the relation
