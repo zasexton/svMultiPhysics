@@ -872,17 +872,23 @@ the public Forms, Systems, Analysis, or Coupling surfaces.
 The authoring facade must make those choices explicit without moving backend
 responsibility out of the existing FE layers.
 
+Status rule: Phase 0 is the generality envelope for the authoring facade, not a
+single implementation increment. Checked items below have current
+implementation, fixture, or test evidence in this migration. Unchecked items
+remain explicit generality gaps that should be implemented before claiming full
+Phase 0 coverage.
+
 ### Coupling Relation Types
 
 The definition layer must represent these relation families:
 
 - [x] Strong or weak equality constraints.
 - [x] Flux, traction, current, or mass conservation balances.
-- [x] Robin, impedance, resistance, compliance, and admittance interface laws.
+- [ ] Robin, impedance, resistance, compliance, and admittance interface laws.
 - [x] Penalty and Nitsche-style interface enforcement.
 - [x] Lagrange multiplier and mortar constraints.
-- [x] Contact, inequality, complementarity, and active-set style interface laws.
-- [x] Frictional or tangential interface laws.
+- [ ] Contact, inequality, complementarity, and active-set style interface laws.
+- [ ] Frictional or tangential interface laws.
 - [x] Constitutive interface laws that evaluate traction, flux, source, or
       reaction terms from one or more side states.
 - [x] PDE-to-PDE couplings involving global scalar, auxiliary, or algebraic
@@ -902,7 +908,7 @@ The authoring path must support:
 - [x] N-participant junctions and conservation nodes.
 - [x] Hub-and-spoke coupling patterns.
 - [x] Optional participants and optional fields.
-- [x] Repeated participant groups, such as many PDE branches coupled through one
+- [ ] Repeated participant groups, such as many PDE branches coupled through one
       shared junction relation.
 - [x] Self-coupling across multiple regions of one participant.
 
@@ -917,8 +923,8 @@ interface-face pairs:
 
 - [x] Volume-to-boundary coupling.
 - [x] Surface-to-surface coupling.
-- [x] Line-to-surface or curve-to-surface coupling.
-- [x] Point-to-volume and point-to-boundary coupling.
+- [ ] Line-to-surface or curve-to-surface coupling.
+- [ ] Point-to-volume and point-to-boundary coupling.
 - [x] Multi-PDE auxiliary-state coupling when an auxiliary model consumes or
       drives multiple PDE participants.
 - [x] Boundary-functional or integrated-quantity coupling.
@@ -935,14 +941,14 @@ exchange, endpoint, AuxiliaryState, or variable-dependency records.
 The definition layer must expose clean authoring for coupling-owned unknowns:
 
 - [x] Interface-owned multiplier fields.
-- [x] Interface-owned penalty or stabilization fields.
-- [x] Contract-owned auxiliary state variables.
+- [ ] Interface-owned penalty or stabilization fields.
+- [ ] Contract-owned auxiliary state variables.
 - [x] Auxiliary input/output variables.
 - [x] Boundary functional variables.
 - [x] Global scalar variables.
 - [x] AuxiliaryState variables whose dependencies span multiple PDE
       participants.
-- [x] Static-condensation or local-elimination policies.
+- [ ] Static-condensation or local-elimination policies.
 
 Coupling-owned fields should continue to lower through
 `CouplingAdditionalFieldDeclaration`. Non-field unknowns and dependencies should
@@ -955,13 +961,13 @@ models should continue to be authored and deployed through AuxiliaryState.
 The public physics options should separate the mathematical relation from the
 solution strategy:
 
-- [x] Enforcement strategy: strong, penalty, Nitsche, multiplier, mortar,
+- [ ] Enforcement strategy: strong, penalty, Nitsche, multiplier, mortar,
       explicit lagged, or expert.
-- [x] Solve strategy: monolithic, partitioned explicit, partitioned staggered,
+- [ ] Solve strategy: monolithic, partitioned explicit, partitioned staggered,
       fixed-point, relaxed fixed-point, or driver-owned.
-- [x] Partitioned convergence strategy: residual norm, exchange increment norm,
+- [ ] Partitioned convergence strategy: residual norm, exchange increment norm,
       energy/work norm, maximum iterations, and failure policy.
-- [x] Relaxation strategy: constant relaxation, Aitken relaxation, or
+- [ ] Relaxation strategy: constant relaxation, Aitken relaxation, or
       driver-provided relaxation.
 - [x] Time strategy: current, accepted, predicted, history, stage, external,
       subcycling, and time-window exchange.
@@ -1019,7 +1025,7 @@ FE/Coupling to validate them:
 - [x] Frame transform source and target policies.
 - [x] Conservative versus interpolatory transfer policy.
 - [x] Component layout and tensor packing.
-- [x] Unit or dimension compatibility where metadata exists.
+- [ ] Unit or dimension compatibility where metadata exists.
 - [x] Orientation-sensitive diagnostics for flux and traction balances.
 
 Form-authored terms should use explicit Forms expressions for projections,
@@ -1033,12 +1039,12 @@ The definition layer must support geometry policies for:
 - [x] Reference and current configurations.
 - [x] Moving interfaces.
 - [x] Sliding interfaces.
-- [x] Cut or embedded interfaces.
+- [ ] Cut or embedded interfaces.
 - [x] Topology revision checks.
 - [x] Geometry revision checks.
 - [x] Mesh-motion ownership.
 - [x] Geometry sensitivity policy.
-- [x] Normal, measure, Jacobian, and quadrature sensitivity.
+- [ ] Normal, measure, Jacobian, and quadrature sensitivity.
 
 Geometry values in monolithic residuals should enter through
 `CouplingFormBuilder` geometry terminals so `FormAnalysisBridge` and
@@ -1704,6 +1710,8 @@ enum class ThermalInterfaceFormulation {
 
 The migration is complete when:
 
+- [ ] Phase 0 generality gaps have implementation and test coverage, or have
+      been explicitly moved to a separate follow-on plan.
 - [x] Physics coupling files primarily contain physical roles, equations, and
       high-level strategy options.
 - [x] Generic validation lives in FE/Coupling.
