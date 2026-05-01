@@ -1507,7 +1507,14 @@ TEST(CouplingGraph, ValidatesRegionRelationRequirementsAgainstContext)
             CouplingRelationLoweringCapability{
                 .lowering_kind =
                     CouplingRelationLoweringKind::PartitionedExchange,
+                .enforcement_strategies = {"flux_balance"},
             },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Partitioned,
+            .lowering_kind =
+                CouplingRelationLoweringKind::PartitionedExchange,
+            .enforcement_strategy = "flux_balance",
         },
         .required_region_kind = CouplingRegionKind::Boundary,
     });
@@ -1520,8 +1527,13 @@ TEST(CouplingGraph, ValidatesRegionRelationRequirementsAgainstContext)
         .region_name = "missing";
     const auto missing_validation = buildGraph(fixture.context, missing_endpoint);
     EXPECT_FALSE(missing_validation.ok());
-    EXPECT_NE(formatDiagnostics(missing_validation).find(
+    const auto missing_text = formatDiagnostics(missing_validation);
+    EXPECT_NE(missing_text.find(
                   "region-relation endpoint is missing from the context"),
+              std::string::npos);
+    EXPECT_NE(missing_text.find("relation=chain_balance"), std::string::npos);
+    EXPECT_NE(missing_text.find("kind=n_way_interface"), std::string::npos);
+    EXPECT_NE(missing_text.find("enforcement=flux_balance"),
               std::string::npos);
 
     auto optional_endpoint = missing_endpoint;
@@ -1674,16 +1686,30 @@ TEST(CouplingGraph, RejectsSameSideInterfaceMappings)
             CouplingRelationLoweringCapability{
                 .lowering_kind =
                     CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = {"traction_balance"},
             },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = CouplingMode::Monolithic,
+            .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+            .enforcement_strategy = "traction_balance",
         },
         .require_opposite_sides_for_side_pair = true,
     });
 
     const auto relation_validation = buildGraph(context, relation);
     EXPECT_FALSE(relation_validation.ok());
-    EXPECT_NE(formatDiagnostics(relation_validation).find(
+    const auto text = formatDiagnostics(relation_validation);
+    EXPECT_NE(text.find(
                   "side-paired region relation needs opposite nonempty sides"),
               std::string::npos);
+    EXPECT_NE(text.find("region-relation orientation policy failed"),
+              std::string::npos);
+    EXPECT_NE(text.find("relation=same_side_relation"), std::string::npos);
+    EXPECT_NE(text.find("kind=side_paired_interface"), std::string::npos);
+    EXPECT_NE(text.find("enforcement=traction_balance"), std::string::npos);
+    EXPECT_NE(text.find("left/interface{side=minus}"), std::string::npos);
+    EXPECT_NE(text.find("right/interface{side=minus}"), std::string::npos);
 }
 
 TEST(CouplingGraph, ValidatesSelectedRelationLoweringCapability)

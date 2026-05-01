@@ -1180,7 +1180,7 @@ struct CouplingRegionRelationRequirement {
       `CouplingGraph`.
 - [x] Relation capability records reject unsupported mode/lowering combinations
       before Forms installation or partitioned plan execution.
-- [ ] Orientation policy diagnostics cover side-paired, N-way, flux-balance,
+- [x] Orientation policy diagnostics cover side-paired, N-way, flux-balance,
       and traction-balance relations.
 - [x] Existing `CouplingGraph` diagnostics remain the single validation surface.
 

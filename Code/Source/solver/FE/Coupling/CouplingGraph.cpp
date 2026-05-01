@@ -202,6 +202,69 @@ std::string availableLoweringDescription(
     return stream.str();
 }
 
+std::string relationContextDescription(
+    const CouplingRegionRelationRequirement& requirement)
+{
+    std::ostringstream stream;
+    stream << "relation=" << requirement.relation_name
+           << ", kind=" << toString(requirement.relation_kind);
+    if (requirement.selected_lowering.has_value()) {
+        stream << ", selected=("
+               << selectedLoweringDescription(*requirement.selected_lowering)
+               << ")";
+    }
+    return stream.str();
+}
+
+std::string regionEndpointName(const CouplingRegionRef& endpoint)
+{
+    std::ostringstream stream;
+    stream << endpoint.participant_name << "/";
+    if (!endpoint.region_name.empty()) {
+        stream << endpoint.region_name;
+    } else {
+        stream << "<unnamed>";
+    }
+    stream << "{side=" << toString(endpoint.side) << "}";
+    return stream.str();
+}
+
+std::string resolvedEndpointDescription(
+    std::span<const CouplingRegionRef> endpoints)
+{
+    std::ostringstream stream;
+    stream << "endpoints=[";
+    for (std::size_t i = 0; i < endpoints.size(); ++i) {
+        if (i != 0u) {
+            stream << ", ";
+        }
+        stream << regionEndpointName(endpoints[i]);
+    }
+    stream << "]";
+    return stream.str();
+}
+
+std::string relationDiagnosticMessage(
+    const CouplingRegionRelationRequirement& requirement,
+    std::string_view message)
+{
+    std::ostringstream stream;
+    stream << message << "; " << relationContextDescription(requirement);
+    return stream.str();
+}
+
+std::string relationOrientationDiagnosticMessage(
+    const CouplingRegionRelationRequirement& requirement,
+    std::span<const CouplingRegionRef> endpoints,
+    std::string_view message)
+{
+    std::ostringstream stream;
+    stream << "region-relation orientation policy failed: " << message
+           << "; " << relationContextDescription(requirement)
+           << "; " << resolvedEndpointDescription(endpoints);
+    return stream.str();
+}
+
 bool isRequiredFieldRequirement(const CouplingFieldRequirement& requirement) noexcept
 {
     return isRequired(requirement.requirement) &&
@@ -3390,7 +3453,9 @@ void validateContextReferences(const CouplingContext& context,
                         .contract_name = declaration.contract_name,
                         .participant_name = endpoint.participant_name,
                         .region_name = *endpoint.shared_region_name,
-                        .message = "region-relation endpoint shared region is missing from the context",
+                        .message = relationDiagnosticMessage(
+                            requirement,
+                            "region-relation endpoint shared region is missing from the context"),
                     });
                     continue;
                 }
@@ -3412,10 +3477,12 @@ void validateContextReferences(const CouplingContext& context,
                         .participant_name = endpoint.participant_name,
                         .region_name =
                             endpoint.shared_region_name.value_or(endpoint.region_name),
-                        .message = endpoint.region_name.empty() &&
-                                           endpoint.shared_region_name.has_value()
-                                       ? "region-relation endpoint shared-region mapping is missing from the context"
-                                       : "region-relation endpoint is missing from the context",
+                        .message = relationDiagnosticMessage(
+                            requirement,
+                            endpoint.region_name.empty() &&
+                                    endpoint.shared_region_name.has_value()
+                                ? "region-relation endpoint shared-region mapping is missing from the context"
+                                : "region-relation endpoint is missing from the context"),
                     });
                 }
                 continue;
@@ -3429,7 +3496,9 @@ void validateContextReferences(const CouplingContext& context,
                     .contract_name = declaration.contract_name,
                     .participant_name = endpoint.participant_name,
                     .region_name = resolved_region->region_name,
-                    .message = "region-relation endpoint kind does not satisfy the declaration",
+                    .message = relationDiagnosticMessage(
+                        requirement,
+                        "region-relation endpoint kind does not satisfy the declaration"),
                 });
             }
             if (requirement.require_registered_topology) {
@@ -3448,7 +3517,9 @@ void validateContextReferences(const CouplingContext& context,
                     .contract_name = declaration.contract_name,
                     .participant_name = endpoint.participant_name,
                     .region_name = *endpoint.shared_region_name,
-                    .message = "region-relation endpoint shared region is missing from the context",
+                    .message = relationDiagnosticMessage(
+                        requirement,
+                        "region-relation endpoint shared region is missing from the context"),
                 });
                 continue;
             }
@@ -3464,7 +3535,9 @@ void validateContextReferences(const CouplingContext& context,
                     .contract_name = declaration.contract_name,
                     .participant_name = endpoint.participant_name,
                     .region_name = *endpoint.shared_region_name,
-                    .message = "region-relation endpoint shared-region mapping is missing from the context",
+                    .message = relationDiagnosticMessage(
+                        requirement,
+                        "region-relation endpoint shared-region mapping is missing from the context"),
                 });
             }
         }
@@ -3479,7 +3552,11 @@ void validateContextReferences(const CouplingContext& context,
             result.add(CouplingDiagnostic{
                 .severity = CouplingDiagnosticSeverity::Error,
                 .contract_name = declaration.contract_name,
-                .message = "side-paired region relation needs opposite nonempty sides",
+                .message = relationOrientationDiagnosticMessage(
+                    requirement,
+                    std::span<const CouplingRegionRef>(resolved_endpoints.data(),
+                                                       resolved_endpoints.size()),
+                    "side-paired region relation needs opposite nonempty sides"),
             });
         }
         if (requirement.require_common_monolithic_system &&
@@ -3495,7 +3572,9 @@ void validateContextReferences(const CouplingContext& context,
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,
                     .contract_name = declaration.contract_name,
-                    .message = "region-relation endpoints must resolve to one owning system for monolithic lowering",
+                    .message = relationDiagnosticMessage(
+                        requirement,
+                        "region-relation endpoints must resolve to one owning system for monolithic lowering"),
                 });
             }
         }
