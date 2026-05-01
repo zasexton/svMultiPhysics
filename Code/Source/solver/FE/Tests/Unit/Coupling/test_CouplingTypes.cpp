@@ -137,6 +137,33 @@ TEST(CouplingTypes, ValueDescriptorValidatesRankComponentMinimums)
     EXPECT_TRUE(validateCouplingValueDescriptor(value).ok());
 }
 
+TEST(CouplingTypes, ValueDescriptorChecksUnitAndDimensionMetadataWhenPresent)
+{
+    CouplingValueDescriptor pressure;
+    pressure.rank = CouplingValueRank::Scalar;
+    pressure.components = 1;
+    pressure.physical_dimension = "pressure";
+    pressure.unit = "Pa";
+    EXPECT_TRUE(validateCouplingValueDescriptor(pressure).ok());
+
+    CouplingValueDescriptor incomplete_unit = pressure;
+    incomplete_unit.physical_dimension.clear();
+    EXPECT_FALSE(validateCouplingValueDescriptor(incomplete_unit).ok());
+
+    CouplingValueDescriptor unspecified;
+    unspecified.rank = CouplingValueRank::Scalar;
+    unspecified.components = 1;
+    EXPECT_TRUE(couplingValueDescriptorsCompatible(pressure, unspecified));
+
+    CouplingValueDescriptor pressure_kpa = pressure;
+    pressure_kpa.unit = "kPa";
+    EXPECT_FALSE(couplingValueDescriptorsCompatible(pressure, pressure_kpa));
+
+    CouplingValueDescriptor force = pressure;
+    force.physical_dimension = "force";
+    EXPECT_FALSE(couplingValueDescriptorsCompatible(pressure, force));
+}
+
 TEST(CouplingTypes, TemporalSlotValidationUsesLogicalHistoryAndStageRules)
 {
     CouplingTemporalSlotDescriptor history;

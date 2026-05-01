@@ -324,6 +324,9 @@ CouplingValidationResult validateCouplingValueDescriptor(const CouplingValueDesc
     if (value.rank == CouplingValueRank::MixedBlock && value.component_layout.empty()) {
         result.addError("mixed block values require component layout metadata");
     }
+    if (!value.unit.empty() && value.physical_dimension.empty()) {
+        result.addError("unit metadata requires a physical dimension");
+    }
 
     return result;
 }
@@ -379,11 +382,21 @@ bool couplingValueDescriptorsCompatible(
     const CouplingValueDescriptor& producer,
     const CouplingValueDescriptor& consumer) noexcept
 {
+    const bool dimensions_compatible =
+        producer.physical_dimension.empty() ||
+        consumer.physical_dimension.empty() ||
+        producer.physical_dimension == consumer.physical_dimension;
+    const bool units_compatible =
+        producer.unit.empty() ||
+        consumer.unit.empty() ||
+        producer.unit == consumer.unit;
     return producer.rank == consumer.rank &&
            producer.components == consumer.components &&
            producer.component_layout == consumer.component_layout &&
            producer.tensor_extents == consumer.tensor_extents &&
-           producer.tensor_packing == consumer.tensor_packing;
+           producer.tensor_packing == consumer.tensor_packing &&
+           dimensions_compatible &&
+           units_compatible;
 }
 
 } // namespace coupling

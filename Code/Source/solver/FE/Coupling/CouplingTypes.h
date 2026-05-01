@@ -123,6 +123,8 @@ struct CouplingValueDescriptor {
     std::vector<std::string> component_layout;
     std::vector<int> tensor_extents;
     std::string tensor_packing;
+    std::string physical_dimension;
+    std::string unit;
 };
 
 struct CouplingTemporalSlotDescriptor {

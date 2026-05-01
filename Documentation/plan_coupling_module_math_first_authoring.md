@@ -1025,7 +1025,7 @@ FE/Coupling to validate them:
 - [x] Frame transform source and target policies.
 - [x] Conservative versus interpolatory transfer policy.
 - [x] Component layout and tensor packing.
-- [ ] Unit or dimension compatibility where metadata exists.
+- [x] Unit or dimension compatibility where metadata exists.
 - [x] Orientation-sensitive diagnostics for flux and traction balances.
 
 Form-authored terms should use explicit Forms expressions for projections,
@@ -1613,6 +1613,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test missing interface topology diagnostics.
 - [x] Test transform, orientation, component-layout, and frame-policy
       diagnostics.
+- [x] Test unit and dimension compatibility metadata on coupling value
+      descriptors.
 - [x] Test relation lowering capability validation.
 - [x] Test Robin, impedance, resistance, compliance, and admittance relation
       authoring with monolithic Forms and partitioned exchange lowerings.
