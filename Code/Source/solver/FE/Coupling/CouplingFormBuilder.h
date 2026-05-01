@@ -80,6 +80,8 @@ public:
 
     [[nodiscard]] CouplingFormContribution
     attachTerminalProvenance(CouplingFormContribution contribution) const;
+    [[nodiscard]] CouplingFormContribution
+    equationContribution(CouplingEquationContributionRequest request) const;
 
     [[nodiscard]] forms::FormExpr integrate(const forms::FormExpr& integrand,
                                             const CouplingRegionRef& region) const;

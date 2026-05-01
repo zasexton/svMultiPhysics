@@ -309,6 +309,17 @@ struct CouplingFormContribution {
     forms::FormExpr residual;
 };
 
+struct CouplingEquationContributionRequest {
+    std::string contribution_name;
+    std::string origin;
+    std::string operator_name{"equations"};
+    std::vector<CouplingFieldUse> residual_field_uses;
+    std::vector<CouplingFieldUse> trial_field_uses;
+    CouplingFormInstallOptionsDeclaration install_options_declaration{};
+    systems::FormInstallOptions install_options{};
+    forms::FormExpr residual;
+};
+
 struct ResolvedCouplingFormContribution {
     std::string contribution_name;
     std::string origin;

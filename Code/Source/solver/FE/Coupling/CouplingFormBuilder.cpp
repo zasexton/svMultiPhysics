@@ -468,6 +468,22 @@ CouplingFormContribution CouplingFormBuilder::attachTerminalProvenance(
     return contribution;
 }
 
+CouplingFormContribution CouplingFormBuilder::equationContribution(
+    CouplingEquationContributionRequest request) const
+{
+    CouplingFormContribution contribution;
+    contribution.contribution_name = std::move(request.contribution_name);
+    contribution.origin = std::move(request.origin);
+    contribution.operator_name = std::move(request.operator_name);
+    contribution.field_uses = std::move(request.residual_field_uses);
+    contribution.extra_trial_field_uses = std::move(request.trial_field_uses);
+    contribution.install_options_declaration =
+        std::move(request.install_options_declaration);
+    contribution.install_options = std::move(request.install_options);
+    contribution.residual = std::move(request.residual);
+    return attachTerminalProvenance(std::move(contribution));
+}
+
 forms::FormExpr CouplingFormBuilder::integrate(const forms::FormExpr& integrand,
                                                const CouplingRegionRef& region) const
 {

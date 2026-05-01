@@ -1638,6 +1638,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test generic relation endpoints for N-way residual authoring.
 - [x] Test mixed-dimensional relation integrals select the expected domain.
 - [x] Test normal and tangential projection helpers lower to Forms expressions.
+- [x] Test equation contribution helper preserves row fields, dependencies,
+      residuals, and terminal provenance.
 
 ### Metadata Inference Tests
 

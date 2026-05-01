@@ -446,6 +446,57 @@ TEST(CouplingFormBuilder, AttachesTerminalProvenanceInResidualEncounterOrder)
               CouplingGeometryTerminalQuantity::CurrentNormal);
 }
 
+TEST(CouplingFormBuilder, BuildsEquationContributionsWithTerminalProvenance)
+{
+    const auto context = makeBuilderContext();
+    const CouplingFormBuilder builder(context);
+    const CouplingGeometryTerminalScope scope{
+        .participant_name = "participant",
+    };
+
+    const auto u = builder.state("participant", "primary", "u");
+    const auto w = builder.test("participant", "primary", "w");
+    const auto normal = builder.geometryTerminal(
+        CouplingGeometryTerminalQuantity::CurrentNormal, scope);
+
+    auto contribution = builder.equationContribution(
+        CouplingEquationContributionRequest{
+            .contribution_name = "participant.primary.normal_balance",
+            .origin = "CouplingFormBuilderTest",
+            .residual_field_uses = {
+                CouplingFieldUse{
+                    .participant_name = "participant",
+                    .field_name = "primary",
+                },
+            },
+            .trial_field_uses = {
+                CouplingFieldUse{
+                    .participant_name = "participant",
+                    .field_name = "primary",
+                },
+            },
+            .residual = (forms::dot(u, normal) * w).dx(),
+        });
+
+    EXPECT_EQ(contribution.contribution_name,
+              "participant.primary.normal_balance");
+    EXPECT_EQ(contribution.origin, "CouplingFormBuilderTest");
+    EXPECT_EQ(contribution.operator_name, "equations");
+    ASSERT_EQ(contribution.field_uses.size(), 1u);
+    EXPECT_EQ(contribution.field_uses.front().participant_name, "participant");
+    EXPECT_EQ(contribution.field_uses.front().field_name, "primary");
+    ASSERT_EQ(contribution.extra_trial_field_uses.size(), 1u);
+    EXPECT_EQ(contribution.extra_trial_field_uses.front().participant_name,
+              "participant");
+    EXPECT_EQ(contribution.extra_trial_field_uses.front().field_name,
+              "primary");
+    ASSERT_EQ(contribution.terminal_provenance.size(), 1u);
+    EXPECT_EQ(contribution.terminal_provenance.front().kind,
+              CouplingFormTerminalProvenanceKind::GeometryTerminal);
+    EXPECT_EQ(contribution.terminal_provenance.front().geometry_quantity,
+              CouplingGeometryTerminalQuantity::CurrentNormal);
+}
+
 TEST(CouplingFormBuilder, RejectsTerminalTransformsThatLoseProvenanceIdentity)
 {
     const auto context = makeBuilderContext();
