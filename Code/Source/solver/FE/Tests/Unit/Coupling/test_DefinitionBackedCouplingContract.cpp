@@ -471,6 +471,64 @@ CouplingRegionRelationRequirement contactFrictionRelationRequirement()
     };
 }
 
+std::vector<std::string> interfaceLawStrategies()
+{
+    return {"robin", "impedance", "resistance", "compliance", "admittance"};
+}
+
+CouplingRegionRelationRequirement interfaceLawRelationRequirement(
+    CouplingMode mode)
+{
+    return CouplingRegionRelationRequirement{
+        .relation_name = "admittance_interface",
+        .relation_kind = CouplingRegionRelationKind::SidePairedInterface,
+        .endpoints = {
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "left",
+                .region_name = "interface",
+                .shared_region_name = "interface",
+            },
+            CouplingRegionEndpointDeclaration{
+                .participant_name = "right",
+                .region_name = "interface",
+                .shared_region_name = "interface",
+            },
+        },
+        .lowering_capabilities = {
+            CouplingRelationLoweringCapability{
+                .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
+                .enforcement_strategies = interfaceLawStrategies(),
+            },
+            CouplingRelationLoweringCapability{
+                .lowering_kind =
+                    CouplingRelationLoweringKind::PartitionedExchange,
+                .fidelity = CouplingRelationLoweringFidelity::Lagged,
+                .enforcement_strategies = interfaceLawStrategies(),
+                .partitioned_solve_strategies = {
+                    CouplingPartitionedSolveStrategy::ExplicitLagged,
+                    CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                },
+            },
+        },
+        .selected_lowering = CouplingRelationLoweringRequest{
+            .mode = mode,
+            .lowering_kind =
+                mode == CouplingMode::Monolithic
+                    ? CouplingRelationLoweringKind::MonolithicForms
+                    : CouplingRelationLoweringKind::PartitionedExchange,
+            .enforcement_strategy = "robin",
+            .partitioned_solve_strategy =
+                mode == CouplingMode::Partitioned
+                    ? std::optional<CouplingPartitionedSolveStrategy>(
+                          CouplingPartitionedSolveStrategy::StaggeredFixedPoint)
+                    : std::nullopt,
+        },
+        .required_region_kind = CouplingRegionKind::InterfaceFace,
+        .require_distinct_participants = true,
+        .require_opposite_sides_for_side_pair = true,
+    };
+}
+
 CouplingRegionRelationRequirement sidePairedInterfaceRelationRequirement(
     std::string relation_name,
     std::string enforcement_strategy,
@@ -746,6 +804,99 @@ protected:
                 return std::vector<CouplingFormContribution>{contribution};
             });
     }
+};
+
+class InterfaceLawDefinitionContract final
+    : public DefinitionBackedCouplingContract {
+public:
+    explicit InterfaceLawDefinitionContract(
+        CouplingMode mode = CouplingMode::Monolithic)
+        : mode_(mode)
+    {
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "interface_law_fixture";
+    }
+
+protected:
+    void define(CouplingDefinitionBuilder& builder) const override
+    {
+        const auto relation_requirement = interfaceLawRelationRequirement(mode_);
+        builder.participant("left")
+            .participant("right")
+            .fieldRequirement(scalarFieldRequirement("left", "primary"))
+            .fieldRequirement(scalarFieldRequirement("right", "primary"))
+            .sharedInterface(CouplingSharedInterfaceRequirement{
+                .shared_region_name = "interface",
+                .participant_names = {"left", "right"},
+            })
+            .regionRelation(relation_requirement);
+
+        if (mode_ == CouplingMode::Monolithic) {
+            builder.monolithic(
+                [relation_requirement](const CouplingContext&,
+                                       const CouplingFormBuilder& forms) {
+                    const auto relation =
+                        forms.regionRelation(relation_requirement);
+                    const auto left = relation.endpoint("left", "interface");
+                    const auto right = relation.endpoint("right", "interface");
+                    const auto u_left = left.state("primary", "u_left");
+                    const auto u_right = right.state("primary", "u_right");
+                    const auto w_left = left.test("primary", "w_left");
+                    const auto admittance = forms::FormExpr::constant(0.25);
+                    const auto compliance = forms::FormExpr::constant(0.5);
+
+                    CouplingFormContribution contribution;
+                    contribution.contribution_name =
+                        "interface_law_fixture.admittance_interface";
+                    contribution.origin = "InterfaceLawDefinitionContract";
+                    contribution.operator_name = "equations";
+                    contribution.field_uses = {CouplingFieldUse{
+                        .participant_name = "left",
+                        .field_name = "primary",
+                    }};
+                    contribution.extra_trial_field_uses = {CouplingFieldUse{
+                        .participant_name = "right",
+                        .field_name = "primary",
+                    }};
+                    contribution.residual =
+                        left.integral((admittance * (u_left - u_right) +
+                                       compliance * u_left) *
+                                      w_left);
+                    return std::vector<CouplingFormContribution>{
+                        contribution};
+                });
+            return;
+        }
+
+        builder
+            .exchange("interface_admittance_response",
+                      CouplingFieldUse{
+                          .participant_name = "right",
+                          .field_name = "primary",
+                      },
+                      CouplingFieldUse{
+                          .participant_name = "left",
+                          .field_name = "primary",
+                      })
+            .sharedInterface("interface")
+            .transfer(test::identityTransfer())
+            .strategy(CouplingPartitionedStrategyDeclaration{
+                .solve_strategy =
+                    CouplingPartitionedSolveStrategy::StaggeredFixedPoint,
+                .relaxation_strategy =
+                    CouplingPartitionedRelaxationStrategy::Constant,
+                .convergence_norm =
+                    CouplingPartitionedConvergenceNorm::Residual,
+                .relaxation_factor = 0.5,
+                .max_iterations = 4,
+            });
+    }
+
+private:
+    CouplingMode mode_{CouplingMode::Monolithic};
 };
 
 class MultiplierExpertDefinitionContract final
@@ -1585,6 +1736,73 @@ TEST(DefinitionBackedCouplingContract, SupportsSharedRegionOnlyRelationEndpoints
     ASSERT_TRUE(
         contributions.front().residual.node()->interfaceMarker().has_value());
     EXPECT_EQ(*contributions.front().residual.node()->interfaceMarker(), 7);
+}
+
+TEST(DefinitionBackedCouplingContract, SupportsRobinImpedanceInterfaceLawFixture)
+{
+    const auto context = makeDefinitionContext();
+    const CouplingFormBuilder forms(context);
+    const InterfaceLawDefinitionContract monolithic_contract;
+
+    EXPECT_NO_THROW(monolithic_contract.validate(context));
+
+    const auto monolithic_declaration = monolithic_contract.declare();
+    ASSERT_EQ(monolithic_declaration.region_relation_requirements.size(), 1u);
+    const auto& monolithic_relation =
+        monolithic_declaration.region_relation_requirements.front();
+    ASSERT_EQ(monolithic_relation.lowering_capabilities.size(), 2u);
+    EXPECT_EQ(monolithic_relation.lowering_capabilities[0].lowering_kind,
+              CouplingRelationLoweringKind::MonolithicForms);
+    EXPECT_EQ(monolithic_relation.lowering_capabilities[0]
+                  .enforcement_strategies,
+              interfaceLawStrategies());
+    EXPECT_EQ(monolithic_relation.lowering_capabilities[1].lowering_kind,
+              CouplingRelationLoweringKind::PartitionedExchange);
+    ASSERT_TRUE(monolithic_relation.selected_lowering.has_value());
+    EXPECT_EQ(monolithic_relation.selected_lowering->enforcement_strategy,
+              "robin");
+
+    const auto contributions =
+        monolithic_contract.buildMonolithicForms(context, forms);
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions.front().contribution_name,
+              "interface_law_fixture.admittance_interface");
+    EXPECT_TRUE(contributions.front().residual.isValid());
+    ASSERT_EQ(contributions.front().extra_trial_field_uses.size(), 1u);
+    EXPECT_EQ(contributions.front().extra_trial_field_uses.front()
+                  .participant_name,
+              "right");
+
+    const InterfaceLawDefinitionContract partitioned_contract(
+        CouplingMode::Partitioned);
+    EXPECT_NO_THROW(partitioned_contract.validate(context));
+
+    const auto partitioned_declaration = partitioned_contract.declare();
+    const auto& partitioned_relation =
+        partitioned_declaration.region_relation_requirements.front();
+    ASSERT_TRUE(partitioned_relation.selected_lowering.has_value());
+    EXPECT_EQ(partitioned_relation.selected_lowering->mode,
+              CouplingMode::Partitioned);
+    ASSERT_TRUE(partitioned_relation.selected_lowering
+                    ->partitioned_solve_strategy.has_value());
+    EXPECT_EQ(*partitioned_relation.selected_lowering
+                   ->partitioned_solve_strategy,
+              CouplingPartitionedSolveStrategy::StaggeredFixedPoint);
+    ASSERT_EQ(partitioned_declaration.partitioned_exchange_declarations.size(),
+              1u);
+
+    const auto exchanges =
+        partitioned_contract.buildPartitionedExchangeDeclarations(context);
+    ASSERT_EQ(exchanges.size(), 1u);
+    EXPECT_EQ(exchanges.front().strategy.convergence_norm,
+              CouplingPartitionedConvergenceNorm::Residual);
+
+    const std::span<const CouplingExchangeDeclaration> exchange_span(
+        exchanges.data(),
+        exchanges.size());
+    const PartitionedCouplingPlanGenerator generator;
+    const auto validation = generator.validate(context, exchange_span);
+    ASSERT_TRUE(validation.ok()) << formatDiagnostics(validation);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsMultiplierExpertFixture)

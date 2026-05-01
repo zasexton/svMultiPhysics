@@ -884,7 +884,7 @@ The definition layer must represent these relation families:
 
 - [x] Strong or weak equality constraints.
 - [x] Flux, traction, current, or mass conservation balances.
-- [ ] Robin, impedance, resistance, compliance, and admittance interface laws.
+- [x] Robin, impedance, resistance, compliance, and admittance interface laws.
 - [x] Penalty and Nitsche-style interface enforcement.
 - [x] Lagrange multiplier and mortar constraints.
 - [ ] Contact, inequality, complementarity, and active-set style interface laws.
@@ -1611,6 +1611,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test transform, orientation, component-layout, and frame-policy
       diagnostics.
 - [x] Test relation lowering capability validation.
+- [x] Test Robin, impedance, resistance, compliance, and admittance relation
+      authoring with monolithic Forms and partitioned exchange lowerings.
 - [x] Test unsupported monolithic capability diagnostics.
 - [x] Test unsupported partitioned capability diagnostics.
 - [x] Test explicit expert fallback opt-in diagnostics.
