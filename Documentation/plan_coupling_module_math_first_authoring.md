@@ -1672,7 +1672,7 @@ enum class ThermalInterfaceFormulation {
       contract is rejected unless an explicit expert strategy is declared.
 - [x] Test at least one mixed-dimensional coupling.
 - [x] Test at least one moving-interface coupling.
-- [ ] Keep existing `test_fe_coupling` and `test_physics` coverage green.
+- [x] Keep existing `test_fe_coupling` and `test_physics` coverage green.
 
 ## Phase 11: Documentation
 
