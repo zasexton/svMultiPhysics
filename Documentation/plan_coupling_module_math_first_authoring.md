@@ -307,7 +307,7 @@ Checklist:
 
 - [x] Existing low-level contracts continue to compile.
 - [ ] FSI and thermal migrate behind the new facade after parity tests exist.
-- [ ] Duplicated physics-local validation is removed only after backend parity
+- [x] Duplicated physics-local validation is removed only after backend parity
       is demonstrated.
 
 ## Out Of Scope For This Authoring Plan

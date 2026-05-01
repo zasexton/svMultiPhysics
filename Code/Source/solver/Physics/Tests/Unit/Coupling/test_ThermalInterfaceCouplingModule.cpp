@@ -353,6 +353,29 @@ TEST(ThermalInterfaceCouplingModule, RejectsInvalidOptionsDuringValidation)
     EXPECT_THROW(module.validate(fec::CouplingContext{}), FE::InvalidArgumentException);
 }
 
+TEST(ThermalInterfaceCouplingModule,
+     RejectsUnsupportedMonolithicFormulationThroughRelationCapability)
+{
+    ThermalContextFixture fixture;
+    ThermalInterfaceCouplingOptions options;
+    options.formulation =
+        ThermalInterfaceFormulation::SymmetricNitscheDiffusion;
+
+    const ThermalInterfaceCouplingModule module(options);
+    try {
+        module.validate(fixture.context);
+        FAIL() << "expected relation capability diagnostic";
+    } catch (const FE::InvalidArgumentException& e) {
+        const std::string text = e.what();
+        EXPECT_NE(text.find("selected relation lowering strategy is unsupported"),
+                  std::string::npos);
+        EXPECT_NE(text.find("enforcement=symmetric_nitsche_diffusion"),
+                  std::string::npos);
+        EXPECT_NE(text.find("enforcement=temperature_continuity_penalty"),
+                  std::string::npos);
+    }
+}
+
 TEST(ThermalInterfaceCouplingModule, RejectsUnconfiguredPartitionedTransfers)
 {
     ThermalInterfaceCouplingOptions options;

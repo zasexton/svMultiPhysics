@@ -248,12 +248,6 @@ fec::CouplingValidationResult validateOptionShape(
     if (!(options.temperature_penalty > 0.0)) {
         result.addError("thermal interface temperature penalty must be positive");
     }
-    if (options.mode == fec::CouplingMode::Monolithic &&
-        options.formulation !=
-            ThermalInterfaceFormulation::TemperatureContinuityPenalty) {
-        result.addError(
-            "thermal interface monolithic mode currently supports the temperature-continuity penalty formulation");
-    }
     if (options.mode == fec::CouplingMode::Partitioned) {
         if (options.side_a_heat_flux_field.empty() ||
             options.side_b_heat_flux_field.empty()) {
