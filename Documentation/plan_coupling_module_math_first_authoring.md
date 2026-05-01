@@ -1044,7 +1044,7 @@ The definition layer must support geometry policies for:
 - [x] Geometry revision checks.
 - [x] Mesh-motion ownership.
 - [x] Geometry sensitivity policy.
-- [ ] Normal, measure, Jacobian, and quadrature sensitivity.
+- [x] Normal, measure, Jacobian, and quadrature sensitivity.
 
 Geometry values in monolithic residuals should enter through
 `CouplingFormBuilder` geometry terminals so `FormAnalysisBridge` and
@@ -1647,6 +1647,8 @@ enum class ThermalInterfaceFormulation {
 - [x] Test temporal requirement inference from time derivatives.
 - [x] Test geometry requirement inference from normal terminals.
 - [x] Test geometry-sensitivity field-use inference.
+- [x] Test normal, measure, Jacobian, surface-Jacobian, and
+      quadrature-sensitivity metadata coverage.
 - [x] Test non-field dependency inference.
 - [x] Test global scalar dependency inference.
 - [x] Test coupling-owned field dependency inference.

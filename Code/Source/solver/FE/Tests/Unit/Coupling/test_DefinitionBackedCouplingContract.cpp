@@ -747,6 +747,13 @@ protected:
                 const auto test = left.test("primary", "w_left");
                 const auto current_normal = left.geometryTerminal(
                     CouplingGeometryTerminalQuantity::CurrentNormal);
+                const auto current_measure = left.geometryTerminal(
+                    CouplingGeometryTerminalQuantity::CurrentMeasure);
+                const auto current_jacobian = left.geometryTerminal(
+                    CouplingGeometryTerminalQuantity::
+                        CurrentJacobianDeterminant);
+                const auto surface_jacobian = left.geometryTerminal(
+                    CouplingGeometryTerminalQuantity::SurfaceJacobian);
 
                 CouplingFormContribution contribution;
                 contribution.contribution_name =
@@ -762,7 +769,12 @@ protected:
                     .field_name = "primary",
                 }};
                 contribution.residual = gamma.integral(
-                    jump * test + forms::dot(current_normal, current_normal) * test,
+                    jump * test +
+                        forms::dot(current_normal, current_normal) * test +
+                        current_measure * current_jacobian * test +
+                        forms::doubleContraction(surface_jacobian,
+                                                 surface_jacobian) *
+                            test,
                     "left");
                 contribution =
                     forms.attachTerminalProvenance(std::move(contribution));
@@ -2142,9 +2154,35 @@ TEST(DefinitionBackedCouplingContract, SupportsPenaltyGeometryFixture)
     EXPECT_EQ(contributions.front().contribution_name,
               "interface_penalty_geometry_fixture.penalty_interface");
     EXPECT_TRUE(contributions.front().residual.isValid());
-    ASSERT_EQ(contributions.front().terminal_provenance.size(), 1u);
-    EXPECT_EQ(contributions.front().terminal_provenance.front().geometry_quantity,
-              CouplingGeometryTerminalQuantity::CurrentNormal);
+    ASSERT_EQ(contributions.front().terminal_provenance.size(), 4u);
+    const auto has_terminal =
+        [&](CouplingGeometryTerminalQuantity quantity) {
+            for (const auto& provenance :
+                 contributions.front().terminal_provenance) {
+                if (provenance.geometry_quantity == quantity) {
+                    return true;
+                }
+            }
+            return false;
+        };
+    EXPECT_TRUE(has_terminal(CouplingGeometryTerminalQuantity::CurrentNormal));
+    EXPECT_TRUE(has_terminal(CouplingGeometryTerminalQuantity::CurrentMeasure));
+    EXPECT_TRUE(has_terminal(
+        CouplingGeometryTerminalQuantity::CurrentJacobianDeterminant));
+    EXPECT_TRUE(has_terminal(CouplingGeometryTerminalQuantity::SurfaceJacobian));
+
+    CouplingGeometrySensitivityProvenance sensitivity;
+    sensitivity.kind = CouplingGeometrySensitivityProvenanceKind::CutGeometry;
+    sensitivity.quadrature_policy_key = 17u;
+    sensitivity.jacobian_sensitivity_available = true;
+    sensitivity.measure_sensitivity_available = true;
+    sensitivity.normal_sensitivity_available = true;
+    sensitivity.quadrature_weight_sensitivity_available = true;
+    EXPECT_EQ(sensitivity.quadrature_policy_key, 17u);
+    EXPECT_TRUE(sensitivity.jacobian_sensitivity_available);
+    EXPECT_TRUE(sensitivity.measure_sensitivity_available);
+    EXPECT_TRUE(sensitivity.normal_sensitivity_available);
+    EXPECT_TRUE(sensitivity.quadrature_weight_sensitivity_available);
 }
 
 TEST(DefinitionBackedCouplingContract, SupportsSharedRegionOnlyRelationEndpoints)
