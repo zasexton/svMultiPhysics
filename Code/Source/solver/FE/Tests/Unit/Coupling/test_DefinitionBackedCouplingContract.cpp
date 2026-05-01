@@ -1409,6 +1409,8 @@ protected:
             .fieldRequirement(scalarFieldRequirement("branch_b", "primary"))
             .fieldRequirement(scalarFieldRequirement("branch_c", "primary"))
             .regionRelation(relation_requirement)
+            .group("junction_branches",
+                   {"branch_a", "branch_b", "branch_c"})
             .monolithic([relation_requirement](const CouplingContext&,
                                                 const CouplingFormBuilder& forms) {
                 const auto relation = forms.regionRelation(relation_requirement);
@@ -1736,6 +1738,12 @@ TEST(DefinitionBackedCouplingContract, SupportsNWayFormsFixture)
     ASSERT_TRUE(relation.selected_lowering.has_value());
     EXPECT_EQ(relation.selected_lowering->lowering_kind,
               CouplingRelationLoweringKind::MonolithicForms);
+    ASSERT_EQ(declaration.group_hints.size(), 1u);
+    EXPECT_EQ(declaration.group_hints.front().name, "junction_branches");
+    ASSERT_EQ(declaration.group_hints.front().participant_names.size(), 3u);
+    EXPECT_EQ(declaration.group_hints.front().participant_names[0], "branch_a");
+    EXPECT_EQ(declaration.group_hints.front().participant_names[1], "branch_b");
+    EXPECT_EQ(declaration.group_hints.front().participant_names[2], "branch_c");
 
     const auto contributions = contract.buildMonolithicForms(context, forms);
     ASSERT_EQ(contributions.size(), 1u);

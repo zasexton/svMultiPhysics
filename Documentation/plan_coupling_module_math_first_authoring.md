@@ -908,7 +908,7 @@ The authoring path must support:
 - [x] N-participant junctions and conservation nodes.
 - [x] Hub-and-spoke coupling patterns.
 - [x] Optional participants and optional fields.
-- [ ] Repeated participant groups, such as many PDE branches coupled through one
+- [x] Repeated participant groups, such as many PDE branches coupled through one
       shared junction relation.
 - [x] Self-coupling across multiple regions of one participant.
 
@@ -1604,6 +1604,7 @@ enum class ThermalInterfaceFormulation {
 - [x] Test missing shared-interface participant diagnostics.
 - [x] Test same-side interface diagnostics.
 - [x] Test N-way interface diagnostics.
+- [x] Test repeated participant groups on one shared junction relation.
 - [x] Test mixed-dimensional region relation diagnostics.
 - [x] Test optional endpoint validation.
 - [x] Test monolithic mixed-system diagnostics.
