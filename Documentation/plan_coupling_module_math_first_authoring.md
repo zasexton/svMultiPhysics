@@ -1486,6 +1486,8 @@ equation definitions, and partitioned strategy choices.
       Forms.
 - [x] Define the monolithic pressure-traction residual with interface-view
       Forms.
+- [x] Route FSI monolithic residuals through the FE equation-contribution helper
+      so the physics file keeps contribution plumbing outside the math block.
 - [x] Preserve optional solid velocity versus time derivative of solid
       displacement.
 - [x] Preserve optional mesh-displacement geometry sensitivity.
