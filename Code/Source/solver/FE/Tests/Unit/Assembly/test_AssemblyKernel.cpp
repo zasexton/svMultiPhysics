@@ -206,9 +206,13 @@ private:
 
 class TemporalOrderKernel final : public AssemblyKernel {
 public:
-    explicit TemporalOrderKernel(int order) : order_(order) {}
+    explicit TemporalOrderKernel(int order, bool explicit_time = false)
+        : order_(order),
+          explicit_time_(explicit_time)
+    {}
     [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return order_; }
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override { return explicit_time_; }
 
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
     {
@@ -218,6 +222,7 @@ public:
 
 private:
     int order_{0};
+    bool explicit_time_{false};
 };
 
 } // namespace
@@ -879,6 +884,20 @@ TEST(AssemblyKernelQuery, MaxTemporalDerivativeOrder) {
     EXPECT_EQ(dt0.maxTemporalDerivativeOrder(), 0);
     EXPECT_EQ(dt1.maxTemporalDerivativeOrder(), 1);
     EXPECT_EQ(dt2.maxTemporalDerivativeOrder(), 2);
+}
+
+TEST(AssemblyKernelQuery, CompositeTemporalMetadata) {
+    auto dt0 = std::make_shared<TemporalOrderKernel>(0);
+    auto dt2 = std::make_shared<TemporalOrderKernel>(2);
+    auto explicit_time = std::make_shared<TemporalOrderKernel>(0, true);
+
+    CompositeKernel composite;
+    composite.addKernel(dt0);
+    composite.addKernel(dt2);
+    composite.addKernel(explicit_time);
+
+    EXPECT_EQ(composite.maxTemporalDerivativeOrder(), 2);
+    EXPECT_TRUE(composite.hasExplicitTimeDependency());
 }
 
 } // namespace test

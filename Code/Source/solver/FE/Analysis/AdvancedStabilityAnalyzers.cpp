@@ -1804,6 +1804,7 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
         claim.invariant_set_id = summary.invariant_set_id;
         claim.invariant_domain_metadata_present = summary.limiter_evidence_present;
         claim.claim_origin = "PreservationStructureAnalyzer";
+        claim.applicability_class = ApplicabilityClass::Applicable;
         if (active_bounds_invalid) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;

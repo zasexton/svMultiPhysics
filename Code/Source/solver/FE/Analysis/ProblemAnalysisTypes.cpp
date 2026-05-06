@@ -875,6 +875,23 @@ void ProblemAnalysisReport::printApplicationLog(std::ostream& out) const {
     }
     out << "\n";
 
+    if (!request_plan.empty()) {
+        std::vector<std::string> available_kinds;
+        std::vector<std::string> missing_kinds;
+        for (const auto& request : request_plan.summary_requests) {
+            if (request.already_available) {
+                appendUniqueString(available_kinds, toString(request.summary_kind));
+            } else {
+                appendUniqueString(missing_kinds, toString(request.summary_kind));
+            }
+        }
+        out << "[FE/Analysis] Summary availability: available="
+            << (available_kinds.empty() ? "none" : joinStrings(available_kinds))
+            << " missing="
+            << (missing_kinds.empty() ? "none" : joinStrings(missing_kinds))
+            << "\n";
+    }
+
     bool emitted_claim = false;
     for (const auto& claim : claims) {
         if (!shouldEmitClaim(claim)) {
@@ -973,6 +990,58 @@ void ProblemAnalysisReport::printTraceLog(
                            summary.free_free_matrix);
     }
 
+    for (const auto& summary : summaries->inf_sup_estimates) {
+        out << "[FE/Analysis][trace] InfSupEstimate coupling_summary"
+            << " block=" << blockLabel(summary.block)
+            << " estimate=" << std::setprecision(17) << summary.estimate_value
+            << " tolerance=" << summary.estimate_tolerance
+            << " test_rows=" << summary.test_rows
+            << " test_cols=" << summary.test_cols
+            << " estimator_metadata="
+            << (summary.estimator_metadata_present ? "true" : "false")
+            << " norm_metadata="
+            << (summary.norm_metadata_present ? "true" : "false")
+            << " scope=" << summary.estimate_scope
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->schur_complements) {
+        out << "[FE/Analysis][trace] SchurComplement block_summary"
+            << " id=" << summary.schur_id
+            << " block=" << blockLabel(summary.block)
+            << " available=" << (summary.schur_available ? "true" : "false")
+            << " exact_for_analysis="
+            << (summary.reduction_exact_for_analysis ? "true" : "false")
+            << " primal_invertible="
+            << (summary.primal_block_invertible_evidence_present ? "true" : "false")
+            << " inf_sup="
+            << (summary.inf_sup_evidence_present ? "true" : "false")
+            << " nullspace_metadata="
+            << (summary.nullspace_handling_evidence_present ? "true" : "false")
+            << " condition_estimate_present="
+            << (summary.condition_estimate_present ? "true" : "false");
+        if (summary.condition_estimate_present) {
+            out << " condition_estimate="
+                << std::setprecision(17) << summary.condition_estimate;
+        }
+        out << "\n";
+    }
+
+    for (const auto& summary : summaries->stabilization_adequacy) {
+        out << "[FE/Analysis][trace] StabilizationAdequacy parameter_summary"
+            << " id=" << summary.stabilization_id
+            << " method=" << summary.method_family
+            << " block=" << blockLabel(summary.block)
+            << " parameter_formula="
+            << (summary.parameter_formula_metadata_present ? "true" : "false")
+            << " residual_consistency="
+            << (summary.residual_consistency_evidence_present ? "true" : "false")
+            << " method_scope="
+            << (summary.method_scope_metadata_present ? "true" : "false")
+            << " violation_count=" << summary.violation_count
+            << "\n";
+    }
+
     for (const auto& summary : summaries->local_stencils) {
         out << "[FE/Analysis][trace] LocalStencil row_summary"
             << " block=" << blockLabel(summary.block)
@@ -1004,6 +1073,64 @@ void ProblemAnalysisReport::printTraceLog(
         }
     }
 
+    for (const auto& summary : summaries->coefficient_properties) {
+        out << "[FE/Analysis][trace] CoefficientProperties coefficient_summary"
+            << " coefficient=" << summary.coefficient
+            << " block=" << blockLabel(summary.block)
+            << " tensor_rank=" << static_cast<int>(summary.tensor_rank)
+            << " symmetry=" << static_cast<int>(summary.symmetry)
+            << " positivity=" << static_cast<int>(summary.positivity)
+            << " min=" << std::setprecision(17) << summary.min_eigenvalue
+            << " max=" << summary.max_eigenvalue
+            << " coverage_scope=" << summary.coverage_scope
+            << " quadrature_coverage="
+            << (summary.quadrature_point_coverage_complete ? "true" : "false")
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->parameter_scales) {
+        out << "[FE/Analysis][trace] ParameterScale scale_summary"
+            << " id=" << summary.nondimensional_parameter_id
+            << " role=" << static_cast<int>(summary.role)
+            << " block=" << blockLabel(summary.block)
+            << " min=" << std::setprecision(17) << summary.min_scale_value
+            << " max=" << summary.max_scale_value
+            << " required_lower_bound_present="
+            << (summary.required_lower_bound_present ? "true" : "false")
+            << " theorem=" << summary.scale_theorem_id
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->boundary_symbols) {
+        out << "[FE/Analysis][trace] BoundarySymbol symbol_summary"
+            << " block=" << blockLabel(summary.block)
+            << " principal_order=" << summary.principal_operator_order
+            << " boundary_order=" << summary.boundary_operator_order
+            << " bc_count=" << summary.boundary_condition_count
+            << " required_bc_count="
+            << summary.required_boundary_condition_count
+            << " missing_symbols=" << summary.missing_symbol_count
+            << " component_coverage="
+            << (summary.component_coverage_complete ? "true" : "false")
+            << " dof_coverage="
+            << (summary.dof_coverage_complete ? "true" : "false")
+            << " scope=" << summary.evidence_scope
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->temporal_stability) {
+        out << "[FE/Analysis][trace] TemporalStability stability_summary"
+            << " scheme=" << summary.time_scheme
+            << " block=" << blockLabel(summary.block)
+            << " cfl_present="
+            << (summary.cfl_estimate_present ? "true" : "false")
+            << " stability_metadata="
+            << (summary.stability_metadata_present ? "true" : "false")
+            << " operator_scope="
+            << (summary.operator_scope_metadata_present ? "true" : "false")
+            << "\n";
+    }
+
     for (const auto& summary : summaries->initial_compatibility) {
         out << "[FE/Analysis][trace] InitialCompatibility constraint_summary"
             << " initial_constraint_residual="
@@ -1013,6 +1140,46 @@ void ProblemAnalysisReport::printTraceLog(
             << " invariant_domain_initial_violations="
             << summary.invariant_domain_initial_violation_count
             << " tolerance=" << summary.residual_tolerance
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->dae_structure_evidence) {
+        out << "[FE/Analysis][trace] DAEStructure dae_summary"
+            << " system=" << summary.system_id
+            << " variables=" << summary.variables.size()
+            << " form_class=" << static_cast<int>(summary.dae_form_class)
+            << " mass_rank="
+            << (summary.mass_matrix_rank_metadata_present ? "true" : "false")
+            << " algebraic_rank="
+            << (summary.algebraic_jacobian_rank_metadata_present ? "true" : "false")
+            << " hidden_constraints="
+            << summary.hidden_constraint_count
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->flux_balances) {
+        out << "[FE/Analysis][trace] FluxBalance balance_summary"
+            << " group=" << summary.balance_group
+            << " block=" << blockLabel(summary.block)
+            << " local=" << std::setprecision(17)
+            << summary.local_residual_norm
+            << " global=" << summary.global_residual_norm
+            << " interface=" << summary.interface_pair_residual_norm
+            << " symbolic="
+            << (summary.symbolic_balance_evidence_present ? "true" : "false")
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->coupled_system_stability) {
+        out << "[FE/Analysis][trace] CoupledSystemStability coupling_summary"
+            << " group=" << summary.coupling_group
+            << " variables=" << summary.variables.size()
+            << " monolithic="
+            << (summary.monolithic_coupling ? "true" : "false")
+            << " partitioned="
+            << (summary.partitioned_coupling ? "true" : "false")
+            << " exchange_residual_present="
+            << (summary.exchange_residual_present ? "true" : "false")
             << "\n";
     }
 }

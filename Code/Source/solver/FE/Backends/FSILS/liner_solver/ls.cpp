@@ -53,6 +53,9 @@ void fsils_ls_create(FSILS_lsType& ls, LinearSolverType LS_type, double relTol, 
   ls.RI.disable_reorth = false;
   ls.GM.disable_reorth = false;
   ls.CG.disable_reorth = false;
+  ls.RI.convergence_ref_norm = -1.0;
+  ls.GM.convergence_ref_norm = -1.0;
+  ls.CG.convergence_ref_norm = -1.0;
 
   // Set default parameters for each solver type.
   //

@@ -976,6 +976,25 @@ bool CompositeKernel::hasBoundaryFace() const noexcept
     return false;
 }
 
+int CompositeKernel::maxTemporalDerivativeOrder() const noexcept
+{
+    int max_order = 0;
+    for (const auto& entry : kernels_) {
+        max_order = std::max(max_order, entry.kernel->maxTemporalDerivativeOrder());
+    }
+    return max_order;
+}
+
+bool CompositeKernel::hasExplicitTimeDependency() const noexcept
+{
+    for (const auto& entry : kernels_) {
+        if (entry.kernel->hasExplicitTimeDependency()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace assembly
 } // namespace FE
 } // namespace svmp

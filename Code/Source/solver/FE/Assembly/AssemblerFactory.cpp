@@ -167,6 +167,7 @@ std::unique_ptr<Assembler> createAssembler(const AssemblyOptions& options,
             reportLine("  - needs: DG=" + std::string(form.needsDG() ? "yes" : "no") +
                        ", solution=" + std::string(form.needsSolution() ? "yes" : "no") +
                        ", transient=" + std::string(form.isTransient() ? "yes" : "no") +
+                       ", explicit_time=" + std::string(form.has_explicit_time_dependency ? "yes" : "no") +
                        ", material_state=" + std::string(form.needsMaterialState() ? "yes" : "no") +
                        ", field_requirements=" + std::string(form.needsFieldSolutions() ? "yes" : "no"));
         }

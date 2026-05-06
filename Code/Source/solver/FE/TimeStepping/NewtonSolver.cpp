@@ -174,6 +174,34 @@ void traceLog(const std::string& msg)
     FE_LOG_INFO(msg);
 }
 
+[[nodiscard]] bool analysisTraceLogRequested()
+{
+    const char* env = std::getenv("SVMP_FE_ANALYSIS_LOG");
+    if (env == nullptr) {
+        return false;
+    }
+    std::string mode(env);
+    std::transform(mode.begin(), mode.end(), mode.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return mode == "trace" || mode == "full";
+}
+
+void logPostTangentAnalysisReport(const systems::FESystem& system,
+                                  bool numeric_summaries_updated)
+{
+    std::ostringstream oss;
+    oss << "[FE/Analysis] Post-tangent analysis report"
+        << " numeric_summaries="
+        << (numeric_summaries_updated ? "updated" : "unavailable")
+        << "\n";
+    const auto& report = system.analysisReport();
+    report.printApplicationLog(oss);
+    if (analysisTraceLogRequested()) {
+        report.printTraceLog(oss, system.latestAnalysisSummaries());
+    }
+    FE_LOG_INFO(oss.str());
+}
+
 [[nodiscard]] int mpiRank() noexcept
 {
 #if FE_HAS_MPI
@@ -3093,6 +3121,8 @@ NewtonSolver::NewtonSolver(NewtonOptions options)
 {
     FE_THROW_IF(options_.max_iterations <= 0, InvalidArgumentException,
                 "NewtonSolver: max_iterations must be > 0");
+    FE_THROW_IF(options_.min_iterations < 0, InvalidArgumentException,
+                "NewtonSolver: min_iterations must be >= 0");
     FE_THROW_IF(options_.abs_tolerance < 0.0 || !std::isfinite(options_.abs_tolerance),
                 InvalidArgumentException,
                 "NewtonSolver: abs_tolerance must be finite and >= 0");
@@ -3322,12 +3352,14 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     }
 
     const int max_it = options_.max_iterations;
+    const int min_it = options_.min_iterations;
 
     if (oopTraceEnabled()) {
         const auto& lopts = linear.getOptions();
         std::ostringstream oss;
         oss << "NewtonSolver::solveStep: time=" << solve_time << " dt=" << base_state.dt
             << " max_it=" << max_it
+            << " min_it=" << min_it
             << " abs_tol=" << options_.abs_tolerance << " rel_tol=" << options_.rel_tolerance
             << " step_tol=" << options_.step_tolerance
             << " residual_op='" << options_.residual_op << "' jacobian_op='" << options_.jacobian_op << "'"
@@ -3950,6 +3982,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         return field_ok && aux_ok;
     };
 
+    auto minIterationsSatisfied = [&](int completed_iterations) -> bool {
+        return completed_iterations >= min_it;
+    };
+
     auto assembleDtOnlyJacobianAndLumpedDiagonal = [&](const systems::SystemStateView& state) -> bool {
         if (!ptc_can_run) {
             return false;
@@ -4086,6 +4122,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     // =================================
 
     double prev_residual_norm = -1.0;
+    bool tangent_analysis_report_logged = false;
     for (int it = 0; it < max_it; ++it) {
         ntp0 = NTP();
         syncHistoryState();
@@ -4196,7 +4233,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         }
 
-        if (tolerancesSatisfied(/*pre_first_update=*/it == 0)) {
+        if (minIterationsSatisfied(it) &&
+            tolerancesSatisfied(/*pre_first_update=*/it == 0)) {
             report.converged = true;
             report.iterations = it;
             if (oopTraceEnabled()) {
@@ -5110,6 +5148,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 linear_rhs = &residual_scratch;
                 if (oopTraceEnabled() && reduced_rhs_shift == &algebraic_aux_reduction.rhs_shift) {
                     traceLog("NewtonSolver: applied pure algebraic reduced RHS shift");
+                }
+            }
+            if (!tangent_analysis_report_logged) {
+                tangent_analysis_report_logged = true;
+                const bool numeric_summaries_updated =
+                    transient.system().updateAnalysisSummariesFromAssembledOperator(
+                        J, options_.jacobian_op, &state);
+                if (numeric_summaries_updated) {
+                    logPostTangentAnalysisReport(transient.system(), numeric_summaries_updated);
                 }
             }
             if (oopTraceEnabled()) {
@@ -6133,7 +6180,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     oss << "NewtonSolver: step ||du||=" << du_norm << " step_tol=" << options_.step_tolerance;
                     traceLog(oss.str());
                 }
-                if (du_norm <= options_.step_tolerance) {
+                if (minIterationsSatisfied(it + 1) &&
+                    du_norm <= options_.step_tolerance) {
                     report.converged = true;
                     report.iterations = it + 1;
                     if (oopTraceEnabled()) {
@@ -6316,7 +6364,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     << " step_tol=" << options_.step_tolerance;
                 traceLog(oss.str());
             }
-            if (step_norm <= options_.step_tolerance) {
+            if (minIterationsSatisfied(it + 1) &&
+                step_norm <= options_.step_tolerance) {
                 report.converged = true;
                 report.iterations = it + 1;
                 updateResidualReport();
@@ -6329,6 +6378,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         if (!reverted_to_original &&
+            minIterationsSatisfied(it + 1) &&
             tolerancesSatisfied(/*pre_first_update=*/false)) {
             report.converged = true;
             report.iterations = it + 1;

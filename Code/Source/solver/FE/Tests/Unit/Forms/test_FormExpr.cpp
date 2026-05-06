@@ -69,6 +69,23 @@ TEST(FormExprTest, Coefficients)
     EXPECT_EQ(cg.node()->type(), FormExprType::Coefficient);
 }
 
+TEST(FormExprTest, ComponentOfPackedAggregateReturnsPackedChild)
+{
+    const auto a = FormExpr::parameterRef(0);
+    const auto b = FormExpr::parameterRef(1);
+    const auto c = FormExpr::parameterRef(2);
+    const auto d = FormExpr::parameterRef(3);
+
+    const auto vector = FormExpr::asVector({a, b, c, d});
+    EXPECT_EQ(vector.component(2).nodeShared(), c.nodeShared());
+
+    const auto tensor = FormExpr::asTensor({{a, b}, {c, d}});
+    EXPECT_EQ(tensor.component(1, 0).nodeShared(), c.nodeShared());
+
+    EXPECT_EQ(vector.component(8).node()->type(), FormExprType::Component);
+    EXPECT_EQ(tensor.component(2, 0).node()->type(), FormExprType::Component);
+}
+
 TEST(FormExprTest, OperatorsAndMeasures)
 {
     spaces::H1Space space(ElementType::Tetra4, 1);

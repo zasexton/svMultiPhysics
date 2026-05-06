@@ -21,6 +21,12 @@
 #include <string>
 
 namespace svmp {
+namespace FE {
+namespace forms {
+class ConstitutiveModel;
+} // namespace forms
+} // namespace FE
+
 namespace Physics {
 namespace coupling {
 
@@ -52,6 +58,10 @@ struct FSICouplingOptions {
 
     std::string fluid_velocity_field{"velocity"};
     std::string fluid_pressure_field{"pressure"};
+    // Fallback dynamic viscosity used only when the fluid participant does not
+    // publish DynamicViscosity residual metadata.
+    FE::Real fluid_viscosity{0.01};
+    std::shared_ptr<const FE::forms::ConstitutiveModel> fluid_viscosity_model{};
     std::string solid_displacement_field{"displacement"};
     std::optional<std::string> solid_velocity_field{std::string{"velocity"}};
     std::optional<std::string> mesh_displacement_field{std::string{"displacement"}};

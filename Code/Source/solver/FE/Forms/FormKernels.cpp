@@ -13947,6 +13947,12 @@ int LinearFormKernel::maxTemporalDerivativeOrder() const noexcept
     return std::max(a, b);
 }
 
+bool LinearFormKernel::hasExplicitTimeDependency() const noexcept
+{
+    return bilinear_ir_.hasExplicitTimeDependency() ||
+           (linear_ir_.has_value() && linear_ir_->hasExplicitTimeDependency());
+}
+
 bool LinearFormKernel::hasCell() const noexcept
 {
     return bilinear_ir_.hasCellTerms() || (linear_ir_.has_value() && linear_ir_->hasCellTerms());
@@ -16759,6 +16765,14 @@ int CoupledResidualSensitivityKernel::maxTemporalDerivativeOrder() const noexcep
         return base_->maxTemporalDerivativeOrder();
     }
     return base_symbolic_->maxTemporalDerivativeOrder();
+}
+
+bool CoupledResidualSensitivityKernel::hasExplicitTimeDependency() const noexcept
+{
+    if (base_ != nullptr) {
+        return base_->hasExplicitTimeDependency();
+    }
+    return base_symbolic_->hasExplicitTimeDependency();
 }
 
 bool CoupledResidualSensitivityKernel::hasCell() const noexcept

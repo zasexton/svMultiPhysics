@@ -12,6 +12,7 @@
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITFunctionalKernelWrapper.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/SpaceFactory.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
@@ -60,6 +61,26 @@ TEST(JITCompilerErrorHandling, InvalidFormExprType_ReturnsErrorNotCrash)
     const auto r = compiler->compileFunctional(bad, IntegralDomain::Cell, vopt);
     EXPECT_FALSE(r.ok);
     EXPECT_FALSE(r.message.empty());
+}
+
+TEST(JITCompilerErrorHandling, FunctionalAllowsMultipleFieldsOnSameTopologicalDimension)
+{
+    requireLLVMJITOrSkip();
+
+    const auto displacement_space = spaces::Space(spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
+    const auto pressure_space = spaces::Space(spaces::SpaceType::H1, ElementType::Tetra4, 1);
+    const auto displacement = FormExpr::stateField(0, *displacement_space, "u");
+    const auto pressure = FormExpr::stateField(1, *pressure_space, "p");
+    const auto integrand = displacement.component(0) + pressure;
+
+    auto compiler = jit::JITCompiler::getOrCreate(makeUnitTestJITOptions());
+    ASSERT_TRUE(compiler != nullptr);
+
+    jit::ValidationOptions vopt;
+    vopt.strictness = jit::Strictness::Strict;
+
+    const auto r = compiler->compileFunctional(integrand, IntegralDomain::Cell, vopt);
+    EXPECT_TRUE(r.ok) << r.message;
 }
 
 TEST(JITFunctionalKernelWrapper, CompilationFailure_FallsBackToInterpreter)

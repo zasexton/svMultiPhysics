@@ -16,6 +16,7 @@
 #include "Coupling/CouplingContext.h"
 #include "Coupling/TransferPlan.h"
 #include "Core/ParameterValue.h"
+#include "Forms/FormExpr.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -54,6 +55,52 @@ enum class CouplingPartitionedFailurePolicy : std::uint8_t {
     DriverProvided,
 };
 
+enum class CouplingPayloadKind : std::uint8_t {
+    CoefficientExpression,
+    PrimalValue,
+    DualResidualVector,
+    ResidualRecipe,
+    ConstraintResidual,
+    DriverOwned,
+};
+
+enum class CouplingPayloadFallbackPolicy : std::uint8_t {
+    Error,
+    WarnAndUseDualResidual,
+    WarnAndUseResidualRecipe,
+    WarnAndSplitSymmetric,
+    WarnAndUseConstraintResidual,
+    WarnAndUseDriverOwned,
+};
+
+enum class CouplingPayloadExtractionReason : std::uint8_t {
+    Exact,
+    NoConsumerTest,
+    MultipleConsumerTestsInTerm,
+    NonlinearInConsumerTest,
+    BothSideStateDependency,
+    SymmetricWeakEnforcement,
+    StabilizedTraceOperator,
+    ConstraintResidualNotLoad,
+    MissingDirection,
+    MissingTransferPolicy,
+    UnsupportedRuntimeProvider,
+    ContributionNotFound,
+};
+
+struct CouplingPartitionedPayloadMetadata {
+    CouplingPayloadKind preferred_kind{CouplingPayloadKind::CoefficientExpression};
+    CouplingPayloadKind payload_kind{CouplingPayloadKind::CoefficientExpression};
+    CouplingPayloadFallbackPolicy fallback_policy{
+        CouplingPayloadFallbackPolicy::WarnAndUseResidualRecipe};
+    CouplingPayloadExtractionReason reason{CouplingPayloadExtractionReason::Exact};
+    bool exact{true};
+    std::string source_contribution_name;
+    std::string provider_name;
+    std::string diagnostic_message;
+    forms::FormExpr payload_expression;
+};
+
 struct CouplingPartitionedStrategyDeclaration {
     CouplingPartitionedSolveStrategy solve_strategy{
         CouplingPartitionedSolveStrategy::ExplicitLagged};
@@ -80,6 +127,7 @@ struct CouplingExchangeDeclaration {
     std::optional<CouplingRegionEndpointDeclaration> consumer_region;
     CouplingTransferDeclaration transfer{};
     CouplingPartitionedStrategyDeclaration strategy{};
+    std::optional<CouplingPartitionedPayloadMetadata> extracted_payload;
 };
 
 enum class CouplingResolvedTemporalBackingKind : std::uint8_t {
@@ -110,6 +158,10 @@ enum class CouplingRegionDataProviderKind : std::uint8_t {
     None,
     FEQuantity,
     BoundaryReductionFunctional,
+    FormsCoefficientExpression,
+    FormsDualResidualVector,
+    FormsResidualRecipe,
+    FormsConstraintResidual,
     ProviderExtension,
 };
 
@@ -150,6 +202,7 @@ struct ResolvedCouplingEndpoint {
     std::optional<std::uint32_t> auxiliary_output_flat_slot;
     std::string auxiliary_key;
     std::optional<CouplingExternalBufferDescriptor> external_buffer;
+    std::optional<CouplingPartitionedPayloadMetadata> extracted_payload;
     std::uint64_t layout_revision_key{0};
     std::uint64_t registry_revision_key{0};
 };
@@ -165,6 +218,7 @@ struct CouplingExchange {
     std::optional<CouplingRegionRef> consumer_region;
     ResolvedCouplingTransfer transfer{};
     CouplingPartitionedStrategyDeclaration strategy{};
+    std::optional<CouplingPartitionedPayloadMetadata> extracted_payload;
 };
 
 struct CouplingGroupHint {
@@ -181,6 +235,10 @@ struct PartitionedCouplingPlan {
     std::vector<CouplingGroupHint> group_hints;
     std::vector<CouplingExchangeCycle> cycles;
 };
+
+[[nodiscard]] const char* toString(CouplingPayloadKind kind) noexcept;
+[[nodiscard]] const char* toString(CouplingPayloadFallbackPolicy policy) noexcept;
+[[nodiscard]] const char* toString(CouplingPayloadExtractionReason reason) noexcept;
 
 } // namespace coupling
 } // namespace FE

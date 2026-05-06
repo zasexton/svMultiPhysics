@@ -7,11 +7,42 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <variant>
 
 namespace {
+
+template <typename T>
+std::string snapshot_value_string(const Parameter<T>& p)
+{
+  if constexpr (std::is_floating_point_v<T>) {
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<T>::max_digits10) << p.value();
+    return out.str();
+  } else {
+    return p.svalue();
+  }
+}
+
+template <typename T>
+std::string snapshot_value_string(const VectorParameter<T>& p)
+{
+  if constexpr (std::is_floating_point_v<T>) {
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<T>::max_digits10);
+    for (const auto v : p.value()) {
+      out << ' ' << v;
+    }
+    return out.str();
+  } else {
+    return p.svalue();
+  }
+}
 
 svmp::Physics::ParameterMap snapshot_params(const ParameterLists& list)
 {
@@ -22,7 +53,7 @@ svmp::Physics::ParameterMap snapshot_params(const ParameterLists& list)
           if (!p) {
             return;
           }
-          out[p->name()] = svmp::Physics::ParameterValue{p->defined(), p->svalue()};
+          out[p->name()] = svmp::Physics::ParameterValue{p->defined(), snapshot_value_string(*p)};
         },
         v);
   }
@@ -49,6 +80,12 @@ svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)
     append(domain.fluid_viscosity.newtonian_model, "Viscosity.");
     append(domain.fluid_viscosity.carreau_yasuda_model, "Viscosity.");
     append(domain.fluid_viscosity.cassons_model, "Viscosity.");
+  }
+
+  if (domain.constitutive_model.defined() && domain.constitutive_model.type.defined()) {
+    out.params["Constitutive_model.type"] =
+        svmp::Physics::ParameterValue{domain.constitutive_model.type.defined(),
+                                      domain.constitutive_model.type.value()};
   }
 
   return out;
@@ -141,6 +178,23 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
         continue;
       }
       input.domains.push_back(snapshot_domain(*d));
+    }
+  }
+
+  if (!eq_params.outputs.empty()) {
+    input.outputs.reserve(eq_params.outputs.size());
+    for (const auto* output : eq_params.outputs) {
+      if (!output) {
+        continue;
+      }
+
+      svmp::Physics::OutputRequestInput output_in{};
+      output_in.type = output->type.value();
+      for (const auto& param : output->output_list) {
+        output_in.params[param.name()] =
+            svmp::Physics::ParameterValue{param.defined(), snapshot_value_string(param)};
+      }
+      input.outputs.push_back(std::move(output_in));
     }
   }
 

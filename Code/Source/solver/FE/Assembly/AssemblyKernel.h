@@ -716,6 +716,16 @@ public:
     [[nodiscard]] virtual int maxTemporalDerivativeOrder() const noexcept { return 0; }
 
     /**
+     * @brief Whether this kernel has explicit dependence on time/stage data
+     *
+     * This covers terms such as `t()`, `deltat()`, `deltat_eff()`, and
+     * time-aware coefficients. A kernel with maxTemporalDerivativeOrder()==0
+     * can still need time advancement when loads or weak boundary terms vary
+     * with time.
+     */
+    [[nodiscard]] virtual bool hasExplicitTimeDependency() const noexcept { return false; }
+
+    /**
      * @brief True when matrix entries are independent of the current nonlinear state.
      *
      * This is intentionally conservative. Returning true means the matrix can be
@@ -983,6 +993,8 @@ public:
                              KernelOutput& output) override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] std::string name() const override { return "CompositeKernel"; }
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override;
 
 private:
     struct KernelEntry {

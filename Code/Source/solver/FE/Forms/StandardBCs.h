@@ -316,6 +316,114 @@ private:
 };
 
 /**
+ * @brief Essential BC on selected components of a vector-valued field
+ *
+ * Unlike EssentialBC's dense vector constructor, this class can constrain a
+ * sparse subset of components on a marker.
+ */
+class ComponentEssentialBC final : public BoundaryCondition {
+public:
+    ComponentEssentialBC(int boundary_marker,
+                         std::vector<std::pair<int, FormExpr>> components,
+                         std::string symbol = "u",
+                         std::string source_name = "ComponentEssentialBC")
+        : boundary_marker_(boundary_marker)
+        , components_(std::move(components))
+        , symbol_(std::move(symbol))
+        , source_name_(std::move(source_name))
+    {
+        if (boundary_marker_ < 0) {
+            throw std::invalid_argument("ComponentEssentialBC: boundary_marker must be >= 0");
+        }
+        if (components_.empty()) {
+            throw std::invalid_argument("ComponentEssentialBC: empty component list");
+        }
+        for (const auto& [component, value] : components_) {
+            if (component < 0) {
+                throw std::invalid_argument("ComponentEssentialBC: component must be >= 0");
+            }
+            if (!value.isValid()) {
+                throw std::invalid_argument("ComponentEssentialBC: invalid value expression");
+            }
+        }
+    }
+
+    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
+    [[nodiscard]] bool hasWeakTerms() const override { return false; }
+
+    void contributeToResidual(FormExpr& /*residual*/,
+                              const FormExpr& /*u*/,
+                              const FormExpr& /*v*/) const override
+    {
+    }
+
+    [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId field_id) const override
+    {
+        std::vector<StrongDirichlet> out;
+        out.reserve(components_.size());
+        for (const auto& [component, value] : components_) {
+            out.push_back(strongDirichlet(field_id, boundary_marker_, value, symbol_, component));
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
+    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
+    {
+        std::vector<analysis::BoundaryConditionDescriptor> descs;
+        descs.reserve(components_.size());
+        for (const auto& [component, _] : components_) {
+            analysis::BoundaryConditionDescriptor d;
+            d.primary_variable = analysis::VariableKey::field(field_id, component);
+            d.component = component;
+            d.boundary_marker = boundary_marker_;
+            d.trace_kind = analysis::TraceKind::Value;
+            d.enforcement_kind = analysis::EnforcementKind::Strong;
+            d.anchors_constant_mode = true;
+            d.anchors_rigid_body_translation = true;
+            d.anchors_rigid_body_rotation = false;
+            d.source = source_name_ + " comp " + std::to_string(component) +
+                       " on marker " + std::to_string(boundary_marker_);
+            descs.push_back(std::move(d));
+        }
+        return descs;
+    }
+
+private:
+    int boundary_marker_{-1};
+    std::vector<std::pair<int, FormExpr>> components_{};
+    std::string symbol_{"u"};
+    std::string source_name_{"ComponentEssentialBC"};
+};
+
+template <class Values, class ActiveComponents>
+[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+vectorComponentEssentialBC(const Values& values,
+                           const ActiveComponents& active_components,
+                           int dim,
+                           int marker,
+                           std::string_view value_prefix,
+                           std::string_view symbol,
+                           std::string_view source_name,
+                           ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+{
+    std::vector<std::pair<int, FormExpr>> components;
+    components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        if (!active_components[static_cast<std::size_t>(d)]) {
+            continue;
+        }
+        components.emplace_back(
+            d,
+            toScalarExpr(values[static_cast<std::size_t>(d)],
+                         detail::makeComponentValueName(value_prefix, marker, d, name_style)));
+    }
+
+    return std::make_unique<ComponentEssentialBC>(
+        marker, std::move(components), std::string(symbol), std::string(source_name));
+}
+
+/**
  * @brief Essential BC on the scalar normal trace of an H(div) field: u·n = g
  */
 class NormalTraceEssentialBC final : public BoundaryCondition {

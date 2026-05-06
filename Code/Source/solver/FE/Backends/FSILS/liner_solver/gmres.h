@@ -40,13 +40,15 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
     const Array<double>& Val, const Array<double>& R, Array<double>& X);
 
 void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
-    fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R);
+    fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R,
+    const Vector<double>* row_scaling = nullptr);
 
 void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Vector<double>& Val, Vector<double>& R);
 
 void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
-    fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R);
+    fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R,
+    const Array<double>* row_scaling = nullptr);
 
 void gmres_v(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS_subLsType& ls, const int dof,
     const Array<double>& Val, Array<double>& R);

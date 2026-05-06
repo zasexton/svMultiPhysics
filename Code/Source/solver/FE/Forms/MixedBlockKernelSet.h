@@ -102,6 +102,7 @@ public:
         return assembly::SemanticKernelKind::MixedBlockSet;
     }
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override;
     [[nodiscard]] bool isSymmetric() const noexcept override { return false; }
     [[nodiscard]] bool isMatrixOnly() const noexcept override;
     [[nodiscard]] bool isVectorOnly() const noexcept override;

@@ -2715,6 +2715,23 @@ FormExpr FormExpr::conditional(const FormExpr& then_expr, const FormExpr& else_e
 FormExpr FormExpr::component(int i, int j) const
 {
     if (!node_) return {};
+    if (node_->type() == FormExprType::AsVector && j < 0) {
+        const auto kids = node_->childrenShared();
+        if (i >= 0 && static_cast<std::size_t>(i) < kids.size() && kids[static_cast<std::size_t>(i)]) {
+            return FormExpr(kids[static_cast<std::size_t>(i)]);
+        }
+    }
+    if (node_->type() == FormExprType::AsTensor && j >= 0) {
+        const auto rows = node_->tensorRows().value_or(0);
+        const auto cols = node_->tensorCols().value_or(0);
+        const auto kids = node_->childrenShared();
+        if (i >= 0 && j >= 0 && i < rows && j < cols) {
+            const auto idx = static_cast<std::size_t>(i * cols + j);
+            if (idx < kids.size() && kids[idx]) {
+                return FormExpr(kids[idx]);
+            }
+        }
+    }
     return FormExpr(std::make_shared<ComponentNode>(node_, i, j));
 }
 

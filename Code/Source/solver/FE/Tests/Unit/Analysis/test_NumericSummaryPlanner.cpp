@@ -15,6 +15,7 @@
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/ContributionDescriptor.h"
+#include "Analysis/FormulationRecord.h"
 #include "Analysis/NumericSummaryPlanner.h"
 #include "Analysis/ProblemAnalyzer.h"
 #include "Analysis/ProblemAnalysisContext.h"
@@ -168,6 +169,27 @@ TEST(NumericSummaryPlanner, MixedBlockSystemTriggersInfSupAndSaddlePointRequests
     EXPECT_TRUE(report.request_plan.hasSourceAnalyzer("InfSupAnalyzer"));
 }
 
+TEST(NumericSummaryPlanner, StabilizedSurrogateInfSupDoesNotRequestStablePairCertification) {
+    ProblemAnalysisContext ctx;
+    ProblemAnalysisReport report;
+
+    auto mixed = claimFrom("MixedOperatorAnalyzer", PropertyKind::MixedSaddlePoint);
+    mixed.variables = {VariableKey::field(0), VariableKey::field(1)};
+    report.claims.push_back(std::move(mixed));
+
+    auto surrogate = claimFrom("InfSupAnalyzer", PropertyKind::InfSupCondition);
+    surrogate.variables = {VariableKey::field(0), VariableKey::field(1)};
+    surrogate.inf_sup_class = InfSupClass::StabilizedSurrogate;
+    report.claims.push_back(std::move(surrogate));
+
+    NumericSummaryPlanner planner;
+    planner.run(ctx, report);
+
+    EXPECT_TRUE(report.request_plan.has(AnalysisSummaryKind::InfSupEstimate));
+    EXPECT_TRUE(report.request_plan.has(AnalysisSummaryKind::SchurComplement));
+    EXPECT_FALSE(report.request_plan.has(AnalysisSummaryKind::InfSupPairCertification));
+}
+
 TEST(NumericSummaryPlanner, FirstOrderOperatorsTriggerTransportAndStabilizationRequests) {
     auto analyzer = ProblemAnalyzer::createDefault();
     ProblemAnalysisContext ctx;
@@ -193,6 +215,25 @@ TEST(NumericSummaryPlanner, FirstOrderOperatorsTriggerTransportAndStabilizationR
                                       "stabilization parameter"));
     EXPECT_TRUE(report.request_plan.hasSourceAnalyzer("TransportCharacterAnalyzer"));
     EXPECT_TRUE(report.request_plan.hasSourceAnalyzer("StabilizationAnalyzer"));
+}
+
+TEST(NumericSummaryPlanner, CellFormulationRequestsCoefficientPropertiesUpFront) {
+    ProblemAnalysisContext ctx;
+    FormulationRecord record;
+    record.operator_tag = "cell-form";
+    record.active_fields = {0};
+    record.active_variables = {VariableKey::field(0)};
+    record.active_domains = {DomainKind::Cell};
+    ctx.addFormulationRecord(record);
+
+    ProblemAnalysisReport report;
+    NumericSummaryPlanner planner;
+    planner.run(ctx, report);
+
+    EXPECT_TRUE(report.request_plan.has(AnalysisSummaryKind::CoefficientProperties));
+    EXPECT_TRUE(requestReasonsContain(report.request_plan,
+                                      AnalysisSummaryKind::CoefficientProperties,
+                                      "before matrix-based operator classification"));
 }
 
 TEST(NumericSummaryPlanner, DGAndInterfaceFormsTriggerPenaltyAndFluxRequests) {

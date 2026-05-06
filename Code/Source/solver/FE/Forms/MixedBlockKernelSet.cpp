@@ -159,6 +159,16 @@ int MixedBlockKernelSet::maxTemporalDerivativeOrder() const noexcept
     return max_order;
 }
 
+bool MixedBlockKernelSet::hasExplicitTimeDependency() const noexcept
+{
+    for (const auto& b : blocks_) {
+        if (b.fallback_kernel && b.fallback_kernel->hasExplicitTimeDependency()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool MixedBlockKernelSet::isMatrixOnly() const noexcept
 {
     return std::all_of(blocks_.begin(), blocks_.end(),

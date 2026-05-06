@@ -436,7 +436,7 @@ void InfSupAnalyzer::run(const ProblemAnalysisContext& context,
                 " for pairing group '" + pi.pairing_group + "'";
             claim.claim_origin = "InfSupAnalyzer";
             claim.addEvidence("InfSupAnalyzer",
-                "StabilizedConstraintPair found for pairing group",
+                "StabilizedConstraintPair or stabilization-surrogate flag found for pairing group",
                 AnalysisConfidence::Medium);
             report.claims.push_back(std::move(claim));
             continue;

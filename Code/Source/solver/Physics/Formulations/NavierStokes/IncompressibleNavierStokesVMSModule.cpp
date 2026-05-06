@@ -8,7 +8,9 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
+#include "Physics/Materials/Fluid/NewtonianViscosity.h"
 
+#include "FE/Constitutive/MetadataTaggedModel.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/ALEBinding.h"
@@ -139,15 +141,25 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
     const auto f = FormExpr::asVector(std::move(f_comp));
 
-    // Viscosity (constant or constitutive mu(gamma)).
-    FormExpr mu;
-    if (options_.viscosity_model) {
-        const auto eps_u = sym(grad(u));
-        const auto gamma = sqrt(FormExpr::constant(2.0) * inner(eps_u, eps_u));
-        mu = constitutive(options_.viscosity_model, gamma).out(0);
-    } else {
-        mu = FormExpr::constant(options_.viscosity);
-    }
+    // Viscosity is represented as a tagged constitutive expression so
+    // installFormulation() can publish the law from the residual DAG.
+    const auto eps_for_mu = sym(grad(u));
+    const auto gamma_for_mu =
+        sqrt(FormExpr::constant(2.0) * inner(eps_for_mu, eps_for_mu));
+    std::shared_ptr<const FE::forms::ConstitutiveModel> viscosity_model =
+        options_.viscosity_model
+            ? options_.viscosity_model
+            : std::make_shared<materials::fluid::NewtonianViscosity>(
+                  options_.viscosity);
+    auto viscosity_metadata = FE::analysis::dynamicViscosityMetadata(
+        FE::INVALID_FIELD_ID,
+        options_.viscosity,
+        options_.viscosity_model);
+    viscosity_model = FE::constitutive::withConstitutiveLawMetadata(
+        std::move(viscosity_model),
+        0u,
+        std::move(viscosity_metadata));
+    const auto mu = constitutive(std::move(viscosity_model), gamma_for_mu).out(0);
 
     // ALE uses relative convection u - w_mesh. Static/default paths remain unchanged.
     const auto zero = zeroVector(dim);

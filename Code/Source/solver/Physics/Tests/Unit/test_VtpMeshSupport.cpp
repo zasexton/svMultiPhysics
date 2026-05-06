@@ -7,7 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
+#include <string_view>
+#include <vector>
 
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
@@ -28,6 +31,35 @@ TEST(VtpMeshSupport, RequiresFeWithMesh)
 }
 
 #else
+
+namespace {
+
+struct ExpectedSurfaceData {
+    std::string_view name;
+    std::size_t cells;
+};
+
+struct ExpectedParticipantMeshData {
+    std::string_view variant;
+    std::string_view participant;
+    std::size_t points;
+    std::size_t tetrahedra;
+    std::vector<ExpectedSurfaceData> surfaces;
+};
+
+svmp::MeshBase loadVtkMeshBase(const std::filesystem::path& path,
+                               std::string_view format)
+{
+    svmp::MeshIOOptions opts;
+    opts.format = std::string(format);
+    opts.path = path.string();
+    opts.kv["force_min_dim"] = "3";
+    opts.kv["codim1_topology"] = "none";
+    opts.kv["edge_topology"] = "false";
+    return svmp::MeshBase::load(opts);
+}
+
+} // namespace
 
 TEST(VtpMeshSupport, LoadsSquareMeshAndAssemblesPoisson)
 {
@@ -102,6 +134,86 @@ TEST(VtpMeshSupport, LoadsSquareMeshAndAssemblesPoisson)
     ASSERT_TRUE(jac.success) << jac.error_message;
     EXPECT_EQ(J.numRows(), ndofs);
     EXPECT_EQ(J.numCols(), ndofs);
+#  endif
+}
+
+TEST(VtpMeshSupport, LoadsElasticPipeFsiMeshes)
+{
+#  if !defined(MESH_HAS_VTK)
+    GTEST_SKIP() << "Requires Mesh built with VTK support (MESH_ENABLE_VTK=ON).";
+#  else
+    const std::array<ExpectedParticipantMeshData, 4> expected = {{
+        ExpectedParticipantMeshData{
+            .variant = "coarse",
+            .participant = "fluid",
+            .points = 325,
+            .tetrahedra = 1344,
+            .surfaces = {
+                {"inlet", 112},
+                {"outlet", 112},
+                {"fsi_interface", 128},
+            },
+        },
+        ExpectedParticipantMeshData{
+            .variant = "coarse",
+            .participant = "solid",
+            .points = 160,
+            .tetrahedra = 391,
+            .surfaces = {
+                {"solid_inlet", 32},
+                {"solid_outlet", 32},
+                {"fsi_interface", 128},
+                {"outer_wall", 128},
+            },
+        },
+        ExpectedParticipantMeshData{
+            .variant = "refined",
+            .participant = "fluid",
+            .points = 1089,
+            .tetrahedra = 5184,
+            .surfaces = {
+                {"inlet", 216},
+                {"outlet", 216},
+                {"fsi_interface", 384},
+            },
+        },
+        ExpectedParticipantMeshData{
+            .variant = "refined",
+            .participant = "solid",
+            .points = 432,
+            .tetrahedra = 1163,
+            .surfaces = {
+                {"solid_inlet", 48},
+                {"solid_outlet", 48},
+                {"fsi_interface", 384},
+                {"outer_wall", 384},
+            },
+        },
+    }};
+
+    for (const auto& mesh_data : expected) {
+        const auto mesh_path = elasticPipeParticipantMeshVtuPath(
+            mesh_data.variant,
+            mesh_data.participant);
+        ASSERT_TRUE(std::filesystem::exists(mesh_path)) << mesh_path;
+
+        const auto mesh = loadVtkMeshBase(mesh_path, "vtu");
+        EXPECT_EQ(mesh.dim(), 3) << mesh_path;
+        EXPECT_EQ(mesh.n_vertices(), mesh_data.points) << mesh_path;
+        EXPECT_EQ(mesh.n_cells(), mesh_data.tetrahedra) << mesh_path;
+
+        for (const auto& surface_data : mesh_data.surfaces) {
+            const auto surface_path = elasticPipeParticipantSurfaceVtpPath(
+                mesh_data.variant,
+                mesh_data.participant,
+                surface_data.name);
+            ASSERT_TRUE(std::filesystem::exists(surface_path)) << surface_path;
+
+            const auto surface = loadVtkMeshBase(surface_path, "vtp");
+            EXPECT_EQ(surface.dim(), 3) << surface_path;
+            EXPECT_EQ(surface.n_cells(), surface_data.cells) << surface_path;
+        }
+    }
 #  endif
 }
 

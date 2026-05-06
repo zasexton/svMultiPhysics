@@ -38,6 +38,7 @@ struct FormCharacteristics {
     bool has_global_terms{false};
     bool has_field_requirements{false};
     bool has_parameter_specs{false};
+    bool has_explicit_time_dependency{false};
 
     int max_time_derivative_order{0};
     RequiredData required_data{RequiredData::None};
@@ -94,6 +95,8 @@ inline void mergeFormCharacteristics(FormCharacteristics& dst, const FormCharact
     dst.has_global_terms = dst.has_global_terms || src.has_global_terms;
     dst.has_field_requirements = dst.has_field_requirements || src.has_field_requirements;
     dst.has_parameter_specs = dst.has_parameter_specs || src.has_parameter_specs;
+    dst.has_explicit_time_dependency =
+        dst.has_explicit_time_dependency || src.has_explicit_time_dependency;
     dst.max_time_derivative_order = std::max(dst.max_time_derivative_order, src.max_time_derivative_order);
     dst.required_data |= src.required_data;
 }

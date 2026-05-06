@@ -129,7 +129,7 @@ std::shared_ptr<svmp::Mesh> load_volume_with_face(const std::filesystem::path& v
 
 } // namespace
 
-TEST(MeshTranslatorFaceLabels, MatchesFaceByGlobalVertexIdsBeforeCoordinates)
+TEST(MeshTranslatorFaceLabels, FallsBackToGlobalVertexIdsWhenCoordinatesDiffer)
 {
 #ifndef MESH_HAS_VTK
   GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
@@ -140,8 +140,9 @@ TEST(MeshTranslatorFaceLabels, MatchesFaceByGlobalVertexIdsBeforeCoordinates)
   volume_path.replace_extension(".vtu");
   write_volume_mesh(volume_path);
 
-  // Coordinates are deliberately offset. Matching should still succeed because
-  // the face file carries nonlocal GlobalVertexID values from the volume mesh.
+  // Coordinates are deliberately offset. Coordinate matching fails, but matching
+  // should still succeed because the face file carries nonlocal GlobalVertexID
+  // values from the volume mesh.
   write_face_mesh(face_path,
                   {
                       20.0, 20.0, 20.0,
@@ -183,6 +184,58 @@ TEST(MeshTranslatorFaceLabels, FallsBackToCompactCoordinateKeysForDefaultFaceGid
                       0.0, 0.0, 0.0,
                   },
                   {0, 1, 2});
+
+  auto mesh = load_volume_with_face(volume_path, "coordinate_marked", face_path);
+  std::filesystem::remove(volume_path);
+  std::filesystem::remove(face_path);
+
+  const auto label = mesh->base().label_from_name("coordinate_marked");
+  ASSERT_NE(label, svmp::INVALID_LABEL);
+  const auto marked_faces = mesh->base().faces_with_label(label);
+  ASSERT_EQ(marked_faces.size(), 1u);
+  EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "coordinate_marked").size(), 1u);
+#endif
+}
+
+TEST(MeshTranslatorFaceLabels, FallsBackToCoordinatesWhenOnlyFaceHasNonlocalGids)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  auto volume_path = unique_temp_path("svmp_meshtranslator_local_gid_volume");
+  const auto face_path = unique_temp_path("svmp_meshtranslator_one_based_face");
+  volume_path.replace_extension(".vtu");
+
+  svmp::MeshBase volume;
+  volume.build_from_arrays(3,
+                           {
+                               0.0, 0.0, 0.0,
+                               1.0, 0.0, 0.0,
+                               0.0, 1.0, 0.0,
+                               0.0, 0.0, 1.0,
+                           },
+                           {0, 4},
+                           {0, 1, 2, 3},
+                           {make_shape(svmp::CellFamily::Tetra, 4)});
+  volume.set_vertex_gids({0, 1, 2, 3});
+
+  svmp::MeshIOOptions volume_opts{};
+  volume_opts.format = "vtu";
+  volume_opts.path = volume_path.string();
+  volume_opts.kv["codim1_topology"] = "none";
+  volume_opts.kv["edge_topology"] = "false";
+  svmp::VTKWriter::write(volume, volume_opts);
+
+  // These one-based face GIDs would map to the wrong volume vertices if the
+  // translator trusted them while the volume only has synthetic local-iota GIDs.
+  write_face_mesh(face_path,
+                  {
+                      0.0, 0.0, 0.0,
+                      1.0, 0.0, 0.0,
+                      0.0, 1.0, 0.0,
+                  },
+                  {1, 2, 3});
 
   auto mesh = load_volume_with_face(volume_path, "coordinate_marked", face_path);
   std::filesystem::remove(volume_path);

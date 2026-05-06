@@ -107,6 +107,12 @@ struct Spec {
     bool required{true};
     std::optional<Value> default_value{};
     std::string doc{};
+    std::optional<Real> lower_bound{};
+    std::optional<Real> upper_bound{};
+    std::string units{};
+    std::string scale_role{};
+    std::string theorem_id{};
+    std::string admissible_range_scope{};
 };
 
 template <class T>

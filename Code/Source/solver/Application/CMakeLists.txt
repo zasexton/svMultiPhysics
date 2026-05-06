@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.12)
 
 add_library(svapplication STATIC
   Core/ApplicationDriver.cpp
+  Core/MeshCollection.cpp
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp
   Translators/EquationTranslator.cpp

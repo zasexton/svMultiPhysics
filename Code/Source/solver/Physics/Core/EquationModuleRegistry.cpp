@@ -12,6 +12,10 @@ namespace svmp::Physics::formulations::poisson {
 void forceLink_PoissonRegister();
 }
 
+namespace svmp::Physics::formulations::ustruct {
+void forceLink_UstructRegister();
+}
+
 namespace svmp::Physics {
 
 namespace {
@@ -20,6 +24,7 @@ void forceLinkBuiltInEquationRegistrations()
 {
   formulations::navier_stokes::forceLink_NavierStokesRegister();
   formulations::poisson::forceLink_PoissonRegister();
+  formulations::ustruct::forceLink_UstructRegister();
 }
 
 } // namespace

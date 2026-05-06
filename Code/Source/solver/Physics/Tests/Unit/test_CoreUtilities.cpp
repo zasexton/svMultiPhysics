@@ -10,11 +10,14 @@
 #include "Physics/Core/Domain.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/ParameterSchema.h"
+#include "Physics/Core/TemporalValues.h"
 
 #include "FE/Core/FEException.h"
 #include "FE/Systems/SystemState.h"
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <string>
 
@@ -52,6 +55,50 @@ private:
 };
 
 } // namespace
+
+TEST(TemporalValues, ReadsAndInterpolatesClampedScalarTable)
+{
+    const auto path = std::filesystem::temp_directory_path() / "svmp_temporal_values_clamped.dat";
+    {
+        std::ofstream out(path);
+        out << "3 1\n"
+            << "0.0 0.0\n"
+            << "0.5 10.0\n"
+            << "1.0 20.0\n";
+    }
+
+    const auto values = readTemporalValuesFile(path.string(), /*num_components=*/1, TemporalEndBehavior::Clamp);
+    ASSERT_EQ(values->num_time_points, 3);
+    ASSERT_EQ(values->num_components, 1);
+    EXPECT_DOUBLE_EQ(values->firstTime(), 0.0);
+    EXPECT_DOUBLE_EQ(values->lastTime(), 1.0);
+    EXPECT_DOUBLE_EQ(values->firstValue(), 0.0);
+    EXPECT_DOUBLE_EQ(values->lastValue(), 20.0);
+    EXPECT_DOUBLE_EQ(values->interpolate(-1.0), 0.0);
+    EXPECT_DOUBLE_EQ(values->interpolate(0.25), 5.0);
+    EXPECT_DOUBLE_EQ(values->interpolate(0.75), 15.0);
+    EXPECT_DOUBLE_EQ(values->interpolate(2.0), 20.0);
+
+    std::filesystem::remove(path);
+}
+
+TEST(TemporalValues, SupportsPeriodicEndBehaviorForLegacyFlowFiles)
+{
+    const auto path = std::filesystem::temp_directory_path() / "svmp_temporal_values_periodic.dat";
+    {
+        std::ofstream out(path);
+        out << "2 1\n"
+            << "0.0 0.0\n"
+            << "1.0 10.0\n";
+    }
+
+    const auto values = readTemporalValuesFile(path.string(), /*num_components=*/1, TemporalEndBehavior::Periodic);
+    EXPECT_DOUBLE_EQ(values->interpolate(0.25), 2.5);
+    EXPECT_DOUBLE_EQ(values->interpolate(1.25), 2.5);
+    EXPECT_DOUBLE_EQ(values->interpolate(1.0), 0.0);
+
+    std::filesystem::remove(path);
+}
 
 TEST(MarkerSet, EmptyIsAll)
 {

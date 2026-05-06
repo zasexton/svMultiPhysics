@@ -59,6 +59,8 @@ void fsils_apply_shared_dirichlet_face_mask(const FSILS_lhsType& lhs,
 
 void fsils_reverse_scatterv_contribution_buffer(const FSILS_lhsType& lhs, int dof, Array<double>& R);
 
+void fsils_reverse_scatterv_max_buffer(const FSILS_lhsType& lhs, int dof, Array<double>& R);
+
 void fsils_syncs_owned_to_ghost(const FSILS_lhsType& lhs, Vector<double>& R);
 
 void fsils_syncv_owned_to_ghost(const FSILS_lhsType& lhs, int dof, Array<double>& R);

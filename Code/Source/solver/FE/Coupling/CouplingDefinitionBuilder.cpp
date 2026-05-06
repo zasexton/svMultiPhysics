@@ -135,6 +135,18 @@ std::string defaultConsumerPortName(
     return channel.channel_name + ".consumer";
 }
 
+std::string defaultConsumerPortName(
+    const CouplingPayloadExtractionRequest& request)
+{
+    const std::string participant_prefix =
+        request.producer_participant_name + "_";
+    if (startsWith(request.exchange_name, participant_prefix)) {
+        return request.consumer_participant_name + "_" +
+               request.exchange_name.substr(participant_prefix.size());
+    }
+    return request.exchange_name + ".consumer";
+}
+
 void applySidePairedChannelDefaults(
     CouplingPartitionedFieldChannelRequest& channel,
     const CouplingSidePairedInterfaceRequest& interface,
@@ -149,6 +161,23 @@ void applySidePairedChannelDefaults(
     }
     if (infer_ports && channel.consumer_port_name.empty()) {
         channel.consumer_port_name = defaultConsumerPortName(channel);
+    }
+}
+
+void applySidePairedPayloadExtractionDefaults(
+    CouplingPayloadExtractionRequest& request,
+    const CouplingSidePairedInterfaceRequest& interface,
+    bool infer_shared_region,
+    bool infer_ports)
+{
+    if (infer_shared_region && request.shared_region_name.empty()) {
+        request.shared_region_name = interface.shared_region_name;
+    }
+    if (infer_ports && request.producer_port_name.empty()) {
+        request.producer_port_name = request.exchange_name;
+    }
+    if (infer_ports && request.consumer_port_name.empty()) {
+        request.consumer_port_name = defaultConsumerPortName(request);
     }
 }
 
@@ -389,6 +418,548 @@ CouplingPartitionedGroupRequest partitionedGroup(
         .group_name = std::move(group_name),
         .participant_names = std::move(participant_names),
     };
+}
+
+CouplingOptionalFieldRoleBuilder::CouplingOptionalFieldRoleBuilder(
+    CouplingSidePairedPDEBuilder& builder,
+    std::size_t role_index)
+    : builder_(&builder)
+    , role_index_(role_index)
+{
+}
+
+CouplingOptionalFieldRoleBuilder& CouplingOptionalFieldRoleBuilder::diagnostic(
+    CouplingDiagnostic missing_field_diagnostic)
+{
+    FE_THROW_IF(builder_ == nullptr, InvalidArgumentException,
+                "optional coupling field role builder is empty");
+    builder_->optionalRole(role_index_).missing_field_diagnostic =
+        std::move(missing_field_diagnostic);
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder&
+CouplingOptionalFieldRoleBuilder::requiredWhen(bool enabled)
+{
+    FE_THROW_IF(builder_ == nullptr, InvalidArgumentException,
+                "optional coupling field role builder is empty");
+    builder_->optionalRole(role_index_).enabled = enabled;
+    return *builder_;
+}
+
+CouplingInterfaceFieldBuilder::CouplingInterfaceFieldBuilder(
+    CouplingSidePairedPDEBuilder& builder)
+    : builder_(&builder)
+{
+}
+
+CouplingContractInterfaceFieldRequest& CouplingInterfaceFieldBuilder::request()
+{
+    FE_THROW_IF(builder_ == nullptr, InvalidArgumentException,
+                "interface field builder is empty");
+    return builder_->ensureInterfaceField();
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::enabled(
+    bool enabled)
+{
+    request().enabled = enabled;
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::name(
+    std::string field_name)
+{
+    request().field_name = std::move(field_name);
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::space(
+    std::shared_ptr<const spaces::FunctionSpace> space)
+{
+    request().space = std::move(space);
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::components(
+    int components)
+{
+    request().components = components;
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::fieldNamespace(
+    std::string field_namespace)
+{
+    request().field_namespace = std::move(field_namespace);
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder&
+CouplingInterfaceFieldBuilder::systemParticipant(
+    std::optional<std::string> participant_name)
+{
+    request().system_participant_name = std::move(participant_name);
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder&
+CouplingInterfaceFieldBuilder::systemParticipant(std::string participant_name)
+{
+    return systemParticipant(
+        std::optional<std::string>{std::move(participant_name)});
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::sharedRegion(
+    std::string shared_region_name)
+{
+    request().shared_region_name = std::move(shared_region_name);
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder& CouplingInterfaceFieldBuilder::requirement(
+    CouplingRequirement requirement)
+{
+    request().requirement = requirement;
+    return *this;
+}
+
+CouplingInterfaceFieldBuilder&
+CouplingInterfaceFieldBuilder::localEliminationPolicy(
+    CouplingLocalEliminationPolicy policy)
+{
+    request().local_elimination_policy = policy;
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder::
+    CouplingPartitionedExchangeAuthoringBuilder(
+        CouplingSidePairedPDEBuilder& builder,
+        std::size_t channel_index)
+    : builder_(&builder)
+    , channel_index_(channel_index)
+{
+}
+
+CouplingPartitionedFieldChannelRequest&
+CouplingPartitionedExchangeAuthoringBuilder::channel()
+{
+    FE_THROW_IF(builder_ == nullptr, InvalidArgumentException,
+                "partitioned exchange builder is empty");
+    return builder_->channel(channel_index_);
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::from(
+    const CouplingFieldRoleHandle& producer_field)
+{
+    auto& request = channel();
+    request.producer_participant_name = producer_field.field.participant_name;
+    request.producer_field_name = producer_field.field.field_name;
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::to(
+    const CouplingFieldRoleHandle& consumer_field)
+{
+    auto& request = channel();
+    request.consumer_participant_name = consumer_field.field.participant_name;
+    request.consumer_field_name = consumer_field.field.field_name;
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::transfer(
+    CouplingTransferDeclaration declaration)
+{
+    channel().transfer = std::move(declaration);
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::strategy(
+    CouplingPartitionedStrategyDeclaration declaration)
+{
+    channel().strategy = declaration;
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::producerTemporal(
+    CouplingTemporalSlotDescriptor temporal)
+{
+    channel().producer_temporal = temporal;
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::consumerTemporal(
+    CouplingTemporalSlotDescriptor temporal)
+{
+    channel().consumer_temporal = temporal;
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::producerPort(
+    std::string port_name)
+{
+    channel().producer_port_name = std::move(port_name);
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::consumerPort(
+    std::string port_name)
+{
+    channel().consumer_port_name = std::move(port_name);
+    return *this;
+}
+
+CouplingPartitionedExchangeAuthoringBuilder&
+CouplingPartitionedExchangeAuthoringBuilder::sharedRegion(
+    std::string shared_region_name)
+{
+    channel().shared_region_name = std::move(shared_region_name);
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder::
+    CouplingPartitionedPayloadExtractionAuthoringBuilder(
+        CouplingSidePairedPDEBuilder& builder,
+        std::size_t extraction_index)
+    : builder_(&builder)
+    , extraction_index_(extraction_index)
+{
+}
+
+CouplingPayloadExtractionRequest&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::request()
+{
+    FE_THROW_IF(builder_ == nullptr, InvalidArgumentException,
+                "partitioned payload extraction builder is empty");
+    return builder_->payloadExtraction(extraction_index_);
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::contribution(
+    std::string contribution_name)
+{
+    request().contribution_name = std::move(contribution_name);
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::from(
+    const CouplingFieldRoleHandle& producer_field)
+{
+    auto& req = request();
+    req.producer_participant_name = producer_field.field.participant_name;
+    req.producer_field_name = producer_field.field.field_name;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::to(
+    const CouplingFieldRoleHandle& consumer_field)
+{
+    auto& req = request();
+    req.consumer_participant_name = consumer_field.field.participant_name;
+    req.consumer_field_name = consumer_field.field.field_name;
+    req.value = consumer_field.value;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::preferred(
+    CouplingPayloadKind kind)
+{
+    request().preferred_kind = kind;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::fallback(
+    CouplingPayloadFallbackPolicy policy)
+{
+    request().fallback_policy = policy;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::transfer(
+    CouplingTransferDeclaration declaration)
+{
+    request().transfer = std::move(declaration);
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::strategy(
+    CouplingPartitionedStrategyDeclaration declaration)
+{
+    request().strategy = declaration;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::producerTemporal(
+    CouplingTemporalSlotDescriptor temporal)
+{
+    request().producer_temporal = temporal;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::consumerTemporal(
+    CouplingTemporalSlotDescriptor temporal)
+{
+    request().consumer_temporal = temporal;
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::producerPort(
+    std::string port_name)
+{
+    request().producer_port_name = std::move(port_name);
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::consumerPort(
+    std::string port_name)
+{
+    request().consumer_port_name = std::move(port_name);
+    return *this;
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder&
+CouplingPartitionedPayloadExtractionAuthoringBuilder::sharedRegion(
+    std::string shared_region_name)
+{
+    request().shared_region_name = std::move(shared_region_name);
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder::CouplingSidePairedPDEBuilder(
+    CouplingDefinitionBuilder& builder,
+    std::string relation_name)
+    : builder_(&builder)
+{
+    request_.interface.relation_name = std::move(relation_name);
+}
+
+CouplingSidePairedPDEBuilder& CouplingSidePairedPDEBuilder::onInterface(
+    std::string shared_region_name)
+{
+    request_.interface.shared_region_name = std::move(shared_region_name);
+    if (request_.interface_field.has_value() &&
+        request_.interface_field->shared_region_name.empty()) {
+        request_.interface_field->shared_region_name =
+            request_.interface.shared_region_name;
+    }
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder& CouplingSidePairedPDEBuilder::between(
+    std::string first_participant_name,
+    std::string second_participant_name)
+{
+    request_.interface.first_participant_name =
+        std::move(first_participant_name);
+    request_.interface.second_participant_name =
+        std::move(second_participant_name);
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder& CouplingSidePairedPDEBuilder::mode(
+    CouplingMode mode)
+{
+    request_.interface.mode = mode;
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder& CouplingSidePairedPDEBuilder::enforcement(
+    std::string enforcement_strategy)
+{
+    request_.interface.enforcement_strategy =
+        std::move(enforcement_strategy);
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder&
+CouplingSidePairedPDEBuilder::partitionedStrategies(
+    std::vector<CouplingPartitionedSolveStrategy> strategies)
+{
+    request_.interface.partitioned_solve_strategies = std::move(strategies);
+    return *this;
+}
+
+CouplingFieldRoleHandle CouplingSidePairedPDEBuilder::scalarField(
+    std::string participant_name,
+    std::string field_name)
+{
+    auto role =
+        scalarFieldRole(std::move(participant_name), std::move(field_name));
+    auto handle = CouplingFieldRoleHandle{
+        .field = role.field,
+        .value = role.value,
+    };
+    request_.required_fields.push_back(std::move(role));
+    return handle;
+}
+
+CouplingFieldRoleHandle CouplingSidePairedPDEBuilder::vectorField(
+    std::string participant_name,
+    std::string field_name,
+    int components)
+{
+    auto role = vectorFieldRole(std::move(participant_name),
+                                std::move(field_name),
+                                components);
+    auto handle = CouplingFieldRoleHandle{
+        .field = role.field,
+        .value = role.value,
+    };
+    request_.required_fields.push_back(std::move(role));
+    return handle;
+}
+
+CouplingSidePairedPDEBuilder&
+CouplingSidePairedPDEBuilder::requiredScalarField(
+    std::string participant_name,
+    std::string field_name)
+{
+    request_.required_fields.push_back(
+        scalarFieldRole(std::move(participant_name), std::move(field_name)));
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder&
+CouplingSidePairedPDEBuilder::requiredVectorField(
+    std::string participant_name,
+    std::string field_name,
+    int components)
+{
+    request_.required_fields.push_back(
+        vectorFieldRole(std::move(participant_name),
+                        std::move(field_name),
+                        components));
+    return *this;
+}
+
+CouplingOptionalFieldRoleBuilder CouplingSidePairedPDEBuilder::optionalField(
+    std::optional<std::string> participant_name,
+    std::optional<std::string> field_name,
+    CouplingValueDescriptor value)
+{
+    request_.optional_fields.push_back(optionalFieldRole(
+        std::move(participant_name),
+        std::move(field_name),
+        std::move(value),
+        false));
+    return CouplingOptionalFieldRoleBuilder(
+        *this,
+        request_.optional_fields.size() - 1);
+}
+
+CouplingOptionalFieldRoleBuilder
+CouplingSidePairedPDEBuilder::optionalVectorField(
+    std::optional<std::string> participant_name,
+    std::optional<std::string> field_name,
+    int components)
+{
+    return optionalField(std::move(participant_name),
+                         std::move(field_name),
+                         vectorValue(components));
+}
+
+CouplingInterfaceFieldBuilder CouplingSidePairedPDEBuilder::interfaceField()
+{
+    ensureInterfaceField();
+    return CouplingInterfaceFieldBuilder(*this);
+}
+
+CouplingPartitionedExchangeAuthoringBuilder
+CouplingSidePairedPDEBuilder::partitionedExchange(std::string channel_name)
+{
+    request_.partitioned_channels.push_back(
+        CouplingPartitionedFieldChannelRequest{
+            .channel_name = std::move(channel_name),
+        });
+    return CouplingPartitionedExchangeAuthoringBuilder(
+        *this,
+        request_.partitioned_channels.size() - 1);
+}
+
+CouplingPartitionedPayloadExtractionAuthoringBuilder
+CouplingSidePairedPDEBuilder::partitionedPayloadFromForm(
+    std::string exchange_name)
+{
+    request_.partitioned_payload_extractions.push_back(
+        CouplingPayloadExtractionRequest{
+            .exchange_name = std::move(exchange_name),
+        });
+    return CouplingPartitionedPayloadExtractionAuthoringBuilder(
+        *this,
+        request_.partitioned_payload_extractions.size() - 1);
+}
+
+CouplingDefinitionBuilder& CouplingSidePairedPDEBuilder::monolithicForms(
+    CouplingMonolithicFormsCallback callback)
+{
+    request_.monolithic_forms = std::move(callback);
+    return install();
+}
+
+CouplingDefinitionBuilder& CouplingSidePairedPDEBuilder::install()
+{
+    FE_THROW_IF(builder_ == nullptr, InvalidArgumentException,
+                "side-paired PDE builder is empty");
+    FE_THROW_IF(installed_, InvalidArgumentException,
+                "side-paired PDE coupling has already been installed");
+    installed_ = true;
+    return builder_->sidePairedPDECoupling(std::move(request_));
+}
+
+CouplingContractInterfaceFieldRequest&
+CouplingSidePairedPDEBuilder::ensureInterfaceField()
+{
+    if (!request_.interface_field.has_value()) {
+        request_.interface_field = CouplingContractInterfaceFieldRequest{
+            .shared_region_name = request_.interface.shared_region_name,
+        };
+    }
+    return *request_.interface_field;
+}
+
+CouplingPartitionedFieldChannelRequest& CouplingSidePairedPDEBuilder::channel(
+    std::size_t channel_index)
+{
+    FE_THROW_IF(channel_index >= request_.partitioned_channels.size(),
+                InvalidArgumentException,
+                "partitioned exchange index is out of range");
+    return request_.partitioned_channels[channel_index];
+}
+
+CouplingPayloadExtractionRequest&
+CouplingSidePairedPDEBuilder::payloadExtraction(std::size_t extraction_index)
+{
+    FE_THROW_IF(extraction_index >= request_.partitioned_payload_extractions.size(),
+                InvalidArgumentException,
+                "partitioned payload extraction index is out of range");
+    return request_.partitioned_payload_extractions[extraction_index];
+}
+
+CouplingOptionalFieldRoleRequest& CouplingSidePairedPDEBuilder::optionalRole(
+    std::size_t role_index)
+{
+    FE_THROW_IF(role_index >= request_.optional_fields.size(),
+                InvalidArgumentException,
+                "optional coupling field role index is out of range");
+    return request_.optional_fields[role_index];
 }
 
 CouplingDefinitionBuilder::CouplingDefinitionBuilder(
@@ -674,6 +1245,12 @@ CouplingDefinitionBuilder& CouplingDefinitionBuilder::sidePairedInterface(
     return *this;
 }
 
+CouplingSidePairedPDEBuilder CouplingDefinitionBuilder::sidePairedPDE(
+    std::string relation_name)
+{
+    return CouplingSidePairedPDEBuilder(*this, std::move(relation_name));
+}
+
 CouplingDefinitionBuilder& CouplingDefinitionBuilder::sidePairedPDECoupling(
     CouplingSidePairedPDERequest request)
 {
@@ -728,6 +1305,14 @@ CouplingDefinitionBuilder& CouplingDefinitionBuilder::sidePairedPDECoupling(
                 request.infer_partitioned_channel_ports);
             partitionedFieldChannel(std::move(channel));
         }
+        for (auto& extraction : request.partitioned_payload_extractions) {
+            applySidePairedPayloadExtractionDefaults(
+                extraction,
+                interface_defaults,
+                request.infer_partitioned_channel_shared_regions,
+                request.infer_partitioned_channel_ports);
+            payloadExtraction(std::move(extraction));
+        }
         if (request.partitioned_group.has_value()) {
             group(std::move(request.partitioned_group->group_name),
                   std::move(request.partitioned_group->participant_names));
@@ -740,7 +1325,9 @@ CouplingDefinitionBuilder& CouplingDefinitionBuilder::sidePairedPDECoupling(
         }
     }
 
-    if (mode == CouplingMode::Monolithic && request.monolithic_forms) {
+    if ((mode == CouplingMode::Monolithic ||
+         !request.partitioned_payload_extractions.empty()) &&
+        request.monolithic_forms) {
         monolithic(std::move(request.monolithic_forms));
     }
 
@@ -752,6 +1339,13 @@ CouplingDefinitionBuilder& CouplingDefinitionBuilder::group(
     std::vector<std::string> participant_names)
 {
     partitioned_.group(std::move(name), std::move(participant_names));
+    return *this;
+}
+
+CouplingDefinitionBuilder& CouplingDefinitionBuilder::payloadExtraction(
+    CouplingPayloadExtractionRequest request)
+{
+    payload_extraction_requests_.push_back(std::move(request));
     return *this;
 }
 
@@ -814,7 +1408,13 @@ bool CouplingDefinitionBuilder::hasMonolithicForms() const noexcept
 
 bool CouplingDefinitionBuilder::hasPartitionedExchanges() const noexcept
 {
-    return !partitioned_.declarations().empty();
+    return !partitioned_.declarations().empty() ||
+           !payload_extraction_requests_.empty();
+}
+
+bool CouplingDefinitionBuilder::hasPayloadExtractions() const noexcept
+{
+    return !payload_extraction_requests_.empty();
 }
 
 CouplingValidationResult CouplingDefinitionBuilder::optionValidation() const
@@ -830,6 +1430,10 @@ CouplingContractDeclaration CouplingDefinitionBuilder::compileDeclaration() cons
         declaration.partitioned_exchange_declarations.end(),
         exchanges.begin(),
         exchanges.end());
+    declaration.payload_extraction_requests.insert(
+        declaration.payload_extraction_requests.end(),
+        payload_extraction_requests_.begin(),
+        payload_extraction_requests_.end());
     const auto& groups = partitioned_.groupHints();
     declaration.group_hints.insert(declaration.group_hints.end(),
                                    groups.begin(),
@@ -856,6 +1460,12 @@ std::vector<CouplingExchangeDeclaration>
 CouplingDefinitionBuilder::buildPartitionedExchangeDeclarations() const
 {
     return partitioned_.declarations();
+}
+
+const std::vector<CouplingPayloadExtractionRequest>&
+CouplingDefinitionBuilder::payloadExtractionRequests() const noexcept
+{
+    return payload_extraction_requests_;
 }
 
 } // namespace coupling

@@ -11,7 +11,9 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
 
+#include <cmath>
 #include <map>
+#include <set>
 
 namespace svmp {
 namespace FE {
@@ -106,6 +108,88 @@ void appendBoundaryInsensitiveNullspaceHint(ContributionDescriptor& d,
 
     const auto filtered = fsa.analyzeField(*interior_expr.node(), field);
     appendNullspaceHintIfPresent(d, field, filtered);
+}
+
+[[nodiscard]] bool isFieldVariable(const VariableKey& key)
+{
+    return key.kind == VariableKind::FieldComponent &&
+           key.field_id != INVALID_FIELD_ID;
+}
+
+void attachStabilizationSurrogates(std::vector<ContributionDescriptor>& contributions)
+{
+    std::set<FieldId> stabilized_fields;
+
+    for (const auto& contribution : contributions) {
+        if (contribution.role != ContributionRole::StabilizationBlock) {
+            continue;
+        }
+
+        for (const auto& key : contribution.test_variables) {
+            if (isFieldVariable(key)) {
+                stabilized_fields.insert(key.field_id);
+            }
+        }
+        for (const auto& key : contribution.trial_variables) {
+            if (isFieldVariable(key)) {
+                stabilized_fields.insert(key.field_id);
+            }
+        }
+    }
+
+    if (stabilized_fields.empty()) {
+        return;
+    }
+
+    for (auto& contribution : contributions) {
+        for (auto& pairing : contribution.pairings) {
+            const bool row_stabilized =
+                isFieldVariable(pairing.row_var) &&
+                stabilized_fields.count(pairing.row_var.field_id) != 0;
+            const bool col_stabilized =
+                isFieldVariable(pairing.col_var) &&
+                stabilized_fields.count(pairing.col_var.field_id) != 0;
+            if (row_stabilized || col_stabilized) {
+                pairing.has_stabilizing_surrogate = true;
+            }
+        }
+    }
+}
+
+void attachRuntimeMetadata(ContributionDescriptor& d,
+                           const FormExprScanResult& scan)
+{
+    d.parameter_usages = scan.parameter_usages;
+    d.coefficient_usages = scan.coefficient_usages;
+    d.scale_usages = scan.scale_usages;
+
+    if (!scan.scale_usages.empty()) {
+        ScalingDescriptor scaling;
+        for (const auto& scale : scan.scale_usages) {
+            if (std::abs(scale.h_power) > std::abs(scaling.h_power)) {
+                scaling.h_power = scale.h_power;
+            }
+            if (std::abs(scale.dt_power) > std::abs(scaling.dt_power)) {
+                scaling.dt_power = scale.dt_power;
+            }
+            scaling.parameter_scaled =
+                scaling.parameter_scaled ||
+                !scale.parameter_names.empty() ||
+                !scale.parameter_slots.empty();
+            scaling.coefficient_scaled =
+                scaling.coefficient_scaled || !scale.coefficient_names.empty();
+        }
+        d.scaling = scaling;
+    } else if (!scan.parameter_usages.empty() ||
+               !scan.coefficient_usages.empty() ||
+               scan.has_cell_diameter ||
+               scan.has_time_derivative) {
+        ScalingDescriptor scaling;
+        scaling.h_power = scan.has_cell_diameter ? 1 : 0;
+        scaling.parameter_scaled = !scan.parameter_usages.empty();
+        scaling.coefficient_scaled = !scan.coefficient_usages.empty();
+        d.scaling = scaling;
+    }
 }
 
 } // namespace
@@ -204,6 +288,7 @@ lowerFormulation(const FormulationRecord& rec) {
                     d.boundary_marker = scan_src.boundary_markers[0];
                     d.domain = DomainKind::Boundary;
                 }
+                attachRuntimeMetadata(d, scan_src);
 
                 d.ensureStableContributionId();
                 contributions.push_back(std::move(d));
@@ -259,10 +344,16 @@ lowerFormulation(const FormulationRecord& rec) {
                 }
             }
 
+            const bool block_has_stabilization =
+                rec.has_stabilization_terms && fs.has_stabilization;
+            const bool emit_separate_stabilization_surrogate =
+                block_has_stabilization && rec.active_fields.size() > 1;
+
             // Classify role
             bool is_diagonal = (test_fid == trial_fid);
             if (is_diagonal) {
-                if (rec.has_stabilization_terms && fs.has_stabilization) {
+                if (block_has_stabilization &&
+                    !emit_separate_stabilization_surrogate) {
                     d.role = ContributionRole::StabilizationBlock;
                 } else if (fs.only_through_annihilating_ops && !fs.has_absolute_value) {
                     d.role = ContributionRole::DiagonalBlock;
@@ -377,6 +468,7 @@ lowerFormulation(const FormulationRecord& rec) {
                 d.interface_marker = scan.interface_markers[0];
                 d.domain = DomainKind::InterfaceFace;
             }
+            attachRuntimeMetadata(d, scan);
 
             // Emit nullspace hints for fields through annihilating ops
             if (is_diagonal) {
@@ -386,6 +478,33 @@ lowerFormulation(const FormulationRecord& rec) {
 
             d.ensureStableContributionId();
             contributions.push_back(std::move(d));
+
+            if (emit_separate_stabilization_surrogate) {
+                ContributionDescriptor stab;
+                stab.operator_tag = rec.operator_tag;
+                stab.origin = "FormsInstaller(stabilization surrogate, " +
+                              contributions.back().block_context + ")";
+                stab.domain = contributions.back().domain;
+                stab.boundary_marker = contributions.back().boundary_marker;
+                stab.interface_scope = contributions.back().interface_scope;
+                stab.interface_marker = contributions.back().interface_marker;
+                stab.test_variables = contributions.back().test_variables;
+                stab.trial_variables = contributions.back().trial_variables;
+                stab.role = ContributionRole::StabilizationBlock;
+                stab.traits = OperatorTraitFlags::HasSecondOrder;
+                stab.confidence = AnalysisConfidence::High;
+                stab.temporal = TemporalDescriptor{0, TemporalContributionKind::None};
+                stab.consistency_kind = ConsistencyKind::ConsistentPerturbation;
+                stab.parameter_usages = contributions.back().parameter_usages;
+                stab.coefficient_usages = contributions.back().coefficient_usages;
+                stab.scale_usages = contributions.back().scale_usages;
+                stab.scaling = contributions.back().scaling;
+                stab.source_block_key = contributions.back().source_block_key;
+                stab.source_expression = contributions.back().source_expression;
+                stab.block_context = contributions.back().block_context;
+                stab.ensureStableContributionId();
+                contributions.push_back(std::move(stab));
+            }
             } // end for trial_fields_to_analyze
         }
     } else if (!rec.active_fields.empty()) {
@@ -459,6 +578,10 @@ lowerFormulation(const FormulationRecord& rec) {
             appendBoundaryInsensitiveNullspaceHint(
                 d, fid, fs, residual_expr, residual_has_boundary_terms, fsa);
 
+            if (rec.residual_expr) {
+                attachRuntimeMetadata(d, scanFormExpr(*rec.residual_expr));
+            }
+
             d.ensureStableContributionId();
             contributions.push_back(std::move(d));
         }
@@ -473,6 +596,7 @@ lowerFormulation(const FormulationRecord& rec) {
         // fabricated contribution metadata.
     }
 
+    attachStabilizationSurrogates(contributions);
     return contributions;
 }
 

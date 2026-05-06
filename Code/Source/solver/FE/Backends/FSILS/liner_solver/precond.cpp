@@ -813,6 +813,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
   // Row and column scaling
   //*****************************************************
   //
+  const fsils_int scale_rows = lhs.owned_row_operator ? lhs.mynNo : nNo;
   while (flag) {
     Wr = 0.0;
     Wc = 0.0;
@@ -827,7 +828,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
     //
     switch (dof) {
       case 1:
-        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < scale_rows; Ac++) {
           double mx = 0.0;
           for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             double av = fabs(Val(0,j));
@@ -840,7 +841,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
       break;
 
       case 2:
-        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < scale_rows; Ac++) {
           double mx0 = 0.0, mx1 = 0.0;
           for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             // Row max: rows 0-1 for dof 0, rows 2-3 for dof 1
@@ -862,7 +863,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
       break;
 
       case 3:
-        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < scale_rows; Ac++) {
           double mx0 = 0.0, mx1 = 0.0, mx2 = 0.0;
           for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             double av;
@@ -895,7 +896,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
       break;
 
       case 4:
-        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < scale_rows; Ac++) {
           double mx0 = 0.0, mx1 = 0.0, mx2 = 0.0, mx3 = 0.0;
           for (fsils_int j = rowPtr(0,Ac); j <= rowPtr(1,Ac); j++) {
             double av;
@@ -943,7 +944,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
       break;
 
       default:
-        for (fsils_int Ac = 0; Ac < nNo; Ac++) {
+        for (fsils_int Ac = 0; Ac < scale_rows; Ac++) {
           // Row max: for each dof row i, scan entries [i*dof .. (i+1)*dof-1] across all columns
           for (int i = 0; i < dof; i++) {
             double mx = 0.0;
@@ -975,7 +976,7 @@ void precond_rcs(fe_fsi_linear_solver::FSILS_lhsType& lhs, const Array<fsils_int
     }
 
     fsils_syncv_owned_to_ghost(lhs, dof, Wr);
-    fsils_reverse_scatterv_contribution_buffer(lhs, dof, Wc);
+    fsils_reverse_scatterv_max_buffer(lhs, dof, Wc);
     fsils_syncv_owned_to_ghost(lhs, dof, Wc);
 
     if ((max(abs(1.0 - Wr)) < tol) && (max(abs(1.0 - Wc)) < tol)) {

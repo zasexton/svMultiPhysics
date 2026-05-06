@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
+#include "Analysis/ConstitutiveLawMetadata.h"
 #include "FE/Assembly/Assembler.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
@@ -234,6 +236,104 @@ TEST(NavierStokesPressureGauge, PressureNotPinnedWhenUnconstrainedBoundaryExists
     system.setup({}, inputs);
 
     EXPECT_EQ(countConstrainedPressureDofs(system, /*pressure_field_name=*/"p"), 0u);
+}
+
+TEST(NavierStokesPressureGauge, PublishesDynamicViscosityConstitutiveMetadata)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.007;
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    module.registerOn(system);
+
+    ASSERT_FALSE(system.formulationRecords().empty());
+    const auto& record = system.formulationRecords().back();
+    ASSERT_EQ(record.constitutive_laws.size(), 1u);
+    const auto& law = record.constitutive_laws.front();
+    EXPECT_EQ(law.name, "dynamic_viscosity");
+    EXPECT_EQ(law.role, FE::analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(law.input_measure,
+              FE::analysis::ConstitutiveLawInputMeasure::
+                  SymmetricGradientSecondInvariant);
+    EXPECT_EQ(law.primary_field, system.findFieldByName("u"));
+    EXPECT_TRUE(law.constant_value_available);
+    EXPECT_NEAR(law.constant_value, 0.007, 1e-14);
+    EXPECT_EQ(law.model, nullptr);
+    EXPECT_EQ(law.source_operator_tag, "equations");
+}
+
+TEST(NavierStokesPressureGauge, PublishesVariableDynamicViscosityFromResidualExpression)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        mesh,
+        /*order=*/1,
+        /*components=*/1);
+
+    auto viscosity_model =
+        std::make_shared<materials::fluid::CarreauYasudaViscosity>(
+            0.16,
+            0.0035,
+            8.2,
+            0.2128,
+            0.64);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity_model = viscosity_model;
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    module.registerOn(system);
+
+    ASSERT_FALSE(system.formulationRecords().empty());
+    const auto& record = system.formulationRecords().back();
+    ASSERT_EQ(record.constitutive_laws.size(), 1u);
+    const auto& law = record.constitutive_laws.front();
+    EXPECT_EQ(law.name, "dynamic_viscosity");
+    EXPECT_EQ(law.role, FE::analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(law.input_measure,
+              FE::analysis::ConstitutiveLawInputMeasure::
+                  SymmetricGradientSecondInvariant);
+    EXPECT_EQ(law.primary_field, system.findFieldByName("u"));
+    EXPECT_FALSE(law.constant_value_available);
+    EXPECT_EQ(law.model, viscosity_model);
+    EXPECT_EQ(law.source_operator_tag, "equations");
 }
 
 TEST(NavierStokesPressureGauge, PressurePinnedWhenVelocityIsEssentialOnAllBoundaryMarkers)

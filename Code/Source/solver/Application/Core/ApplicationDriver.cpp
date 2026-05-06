@@ -389,11 +389,11 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
 
   oopCout() << "[svMultiPhysics::Application] <Use_new_OOP_solver>=true; running new OOP solver path." << std::endl;
   oopCout()
-      << "[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes; "
-         "single <Add_mesh>; steady constant BCs; transient time loop (Generalized-α)."
+      << "[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes, ustruct; "
+         "single <Add_mesh>; steady constant BCs; selected file-driven temporal BCs; transient time loop (Generalized-α)."
       << std::endl;
   oopCout() << "[svMultiPhysics::Application] Not supported yet: Domain_file_path, multiple domains, "
-               "spatial/temporal BC files, user-defined profiles, restart/continuation, FSI/etc. "
+               "general spatial/temporal BC files, user-defined profiles, restart/continuation, FSI/etc. "
                "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver."
             << std::endl;
 
@@ -440,6 +440,18 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
   const double dt = params.general_simulation_parameters.time_step_size.value();
   oopCout() << "[svMultiPhysics::Application] Time stepping: Number_of_time_steps=" << num_steps
             << " Time_step_size=" << dt << std::endl;
+  bool requires_time_advancement = true;
+  if (sim.fe_system) {
+    const int temporal_order = sim.fe_system->temporalOrder();
+    const bool has_explicit_time_terms = sim.fe_system->hasExplicitTimeDependency();
+    const bool has_time_dependent_constraints = sim.fe_system->hasTimeDependentConstraints();
+    requires_time_advancement = sim.fe_system->requiresTimeAdvancement();
+    oopCout() << "[svMultiPhysics::Application] FE temporal dependency: max_dt_order=" << temporal_order
+              << " explicit_time_terms=" << (has_explicit_time_terms ? "yes" : "no")
+              << " time_dependent_constraints=" << (has_time_dependent_constraints ? "yes" : "no")
+              << " requires_time_advancement=" << (requires_time_advancement ? "yes" : "no")
+              << std::endl;
+  }
 
   VtkTimeSeriesCollection pvd{};
   VtkTimeSeriesCollection* pvd_ptr = nullptr;
@@ -469,7 +481,13 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
     pvd_ptr = &pvd;
   }
 
-  if (num_steps == 0) {
+  const bool run_quasi_static = (num_steps == 0) || (sim.fe_system && !requires_time_advancement);
+  if (run_quasi_static) {
+    if (num_steps > 0 && !requires_time_advancement) {
+      oopCout() << "[svMultiPhysics::Application] No time-dependent FE terms or constraints detected; "
+                   "running a single quasi-static solve instead of a transient time loop."
+                << std::endl;
+    }
     oopCout() << "[svMultiPhysics::Application] Starting steady-state solve." << std::endl;
     runSteadyState(sim, params, pvd_ptr);
   } else {
@@ -501,6 +519,9 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   if (const auto* eq = first_equation(params)) {
     if (eq->max_iterations.defined()) {
       newton_opts.max_iterations = eq->max_iterations.value();
+    }
+    if (eq->min_iterations.defined()) {
+      newton_opts.min_iterations = std::max(0, eq->min_iterations.value());
     }
     if (eq->tolerance.defined()) {
       const double tol = eq->tolerance.value();
@@ -546,7 +567,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   const double solve_time = sim.time_history->time();
   oopCout() << "[svMultiPhysics::Application] Steady solve: time=" << solve_time
-            << " newton(max_it=" << newton_opts.max_iterations << ", abs_tol=" << newton_opts.abs_tolerance
+            << " newton(max_it=" << newton_opts.max_iterations << ", min_it=" << newton_opts.min_iterations
+            << ", abs_tol=" << newton_opts.abs_tolerance
             << ", rel_tol=" << newton_opts.rel_tolerance << ")" << std::endl;
 
   const auto report = newton.solveStep(transient, *sim.linear_solver, solve_time, *sim.time_history, workspace);
@@ -616,6 +638,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     if (eq->max_iterations.defined()) {
       opts.newton.max_iterations = eq->max_iterations.value();
     }
+    if (eq->min_iterations.defined()) {
+      opts.newton.min_iterations = std::max(0, eq->min_iterations.value());
+    }
     if (eq->tolerance.defined()) {
       const double tol = eq->tolerance.value();
       if (tol > 0.0) {
@@ -659,7 +684,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   oopCout() << "[svMultiPhysics::Application] Transient solve: t0=" << opts.t0 << " dt=" << opts.dt
             << " t_end=" << opts.t_end << " max_steps=" << opts.max_steps
             << " scheme=GeneralizedAlpha rho_inf=" << opts.generalized_alpha_rho_inf
-            << " newton(max_it=" << opts.newton.max_iterations << ", abs_tol=" << opts.newton.abs_tolerance
+            << " newton(max_it=" << opts.newton.max_iterations << ", min_it=" << opts.newton.min_iterations
+            << ", abs_tol=" << opts.newton.abs_tolerance
             << ", rel_tol=" << opts.newton.rel_tolerance << ")" << std::endl;
 
   // Ensure time-history vectors use the same backend layout as the solver workspace.

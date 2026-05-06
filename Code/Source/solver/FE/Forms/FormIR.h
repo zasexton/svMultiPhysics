@@ -94,6 +94,7 @@ public:
     [[nodiscard]] const std::optional<FormExprNode::SpaceSignature>& trialSpace() const noexcept;
     [[nodiscard]] int maxTimeDerivativeOrder() const noexcept;
     [[nodiscard]] bool isTransient() const noexcept { return maxTimeDerivativeOrder() > 0; }
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept;
     [[nodiscard]] const GeometrySensitivityOptions& geometrySensitivityOptions() const noexcept;
     [[nodiscard]] bool hasGeometrySensitivityTerminals() const noexcept;
     [[nodiscard]] bool geometrySensitivityActive() const noexcept;
@@ -146,6 +147,7 @@ private:
     void setTestSpace(std::optional<FormExprNode::SpaceSignature> sig);
     void setTrialSpace(std::optional<FormExprNode::SpaceSignature> sig);
     void setMaxTimeDerivativeOrder(int order);
+    void setHasExplicitTimeDependency(bool has_time_dependency);
     void setGeometrySensitivityOptions(GeometrySensitivityOptions options);
     void setHasGeometrySensitivityTerminals(bool has_terminals);
     void setTerms(std::vector<IntegralTerm> terms);

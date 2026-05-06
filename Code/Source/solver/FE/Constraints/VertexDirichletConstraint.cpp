@@ -77,13 +77,8 @@ namespace {
     }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    const auto* mesh = system.mesh();
-    if (mesh == nullptr) {
-        throw std::invalid_argument(
-            "VertexDirichletConstraint: GlobalVertexGid mode requires FESystem constructed from svmp::Mesh");
-    }
-
-    const auto local = mesh->base().global_to_local_vertex(static_cast<svmp::gid_t>(vertex_id));
+    const auto& mesh = system.singleMesh("VertexDirichletConstraint: GlobalVertexGid mode");
+    const auto local = mesh.base().global_to_local_vertex(static_cast<svmp::gid_t>(vertex_id));
     return static_cast<GlobalIndex>(local);
 #else
     (void)system;

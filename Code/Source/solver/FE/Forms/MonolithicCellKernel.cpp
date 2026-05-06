@@ -317,6 +317,22 @@ int MonolithicCellKernel::maxTemporalDerivativeOrder() const noexcept
     return max_order;
 }
 
+bool MonolithicCellKernel::hasExplicitTimeDependency() const noexcept
+{
+    for (const auto& block : blocks_) {
+        if (block.fallback_kernel && block.fallback_kernel->hasExplicitTimeDependency()) {
+            return true;
+        }
+        if (block.tangent_ir && block.tangent_ir->hasExplicitTimeDependency()) {
+            return true;
+        }
+        if (block.residual_ir && block.residual_ir->hasExplicitTimeDependency()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool MonolithicCellKernel::isMatrixOnly() const noexcept
 {
     return std::all_of(

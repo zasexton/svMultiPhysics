@@ -14,6 +14,7 @@
 #include "Core/Types.h"
 #include "Core/ParameterValue.h"
 #include "Core/StateVariableMetadata.h"
+#include "Analysis/ConstitutiveLawMetadata.h"
 #include "Forms/Dual.h"
 #include "Forms/Value.h"
 
@@ -266,6 +267,22 @@ public:
             throw std::invalid_argument("ConstitutiveModel::outputSpec: output_index out of range");
         }
         return {};
+    }
+
+    /**
+     * @brief Optional semantic metadata for a model output.
+     *
+     * The Forms installer scans residual expression DAGs and publishes this
+     * metadata into FormulationRecord so downstream coupling contracts can
+     * recover the constitutive laws actually used by the formulation.
+     */
+    [[nodiscard]] virtual std::optional<analysis::ConstitutiveLawMetadata>
+    constitutiveLawMetadata(std::size_t output_index) const
+    {
+        if (output_index >= outputCount()) {
+            throw std::invalid_argument("ConstitutiveModel::constitutiveLawMetadata: output_index out of range");
+        }
+        return std::nullopt;
     }
 
     virtual void evaluateNaryOutputs(std::span<const Value<Real>> inputs,

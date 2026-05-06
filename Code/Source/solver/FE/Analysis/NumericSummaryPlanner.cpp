@@ -122,6 +122,27 @@ bool sameVariableSet(const std::vector<VariableKey>& a,
            });
 }
 
+bool stabilizedInfSupSurrogateCovers(const ProblemAnalysisReport& report,
+                                     const PropertyClaim& claim) {
+    return std::any_of(report.claims.begin(), report.claims.end(),
+                       [&](const PropertyClaim& other) {
+                           return other.kind == PropertyKind::InfSupCondition &&
+                                  other.inf_sup_class.has_value() &&
+                                  *other.inf_sup_class == InfSupClass::StabilizedSurrogate &&
+                                  !other.variables.empty() &&
+                                  sameVariableSet(other.variables, claim.variables);
+                       });
+}
+
+bool shouldRequestStablePairCertification(const ProblemAnalysisReport& report,
+                                          const PropertyClaim& claim) {
+    if (claim.inf_sup_class.has_value() &&
+        *claim.inf_sup_class == InfSupClass::StabilizedSurrogate) {
+        return false;
+    }
+    return !stabilizedInfSupSurrogateCovers(report, claim);
+}
+
 void appendVariableId(std::ostringstream& os, const VariableKey& variable) {
     os << static_cast<int>(variable.kind) << ':'
        << variable.field_id << ':'
@@ -256,6 +277,40 @@ bool isWeakPenaltyLike(EnforcementKind kind) noexcept {
            kind == EnforcementKind::WeakInequality;
 }
 
+bool isNonlocalCouplingContribution(const ContributionDescriptor& contribution) noexcept {
+    if (contribution.domain == DomainKind::InterfaceFace ||
+        contribution.domain == DomainKind::CoupledBoundary ||
+        contribution.domain == DomainKind::Global ||
+        contribution.domain == DomainKind::AuxiliaryCoupling) {
+        return true;
+    }
+    if (contribution.role == ContributionRole::GlobalCoupling ||
+        contribution.role == ContributionRole::FieldToAuxiliary ||
+        contribution.role == ContributionRole::AuxiliaryToField ||
+        contribution.role == ContributionRole::AuxiliaryToAuxiliary ||
+        contribution.role == ContributionRole::AuxiliarySelf) {
+        return true;
+    }
+    return contribution.balance.has_value() &&
+           contribution.balance->role == BalanceRole::ExchangeLike;
+}
+
+bool contextHasNonlocalCoupling(const ProblemAnalysisContext& context) noexcept {
+    for (const auto& contribution : context.contributions()) {
+        if (isNonlocalCouplingContribution(contribution)) {
+            return true;
+        }
+    }
+    for (const auto& bc : context.bcDescriptors()) {
+        if (bc.domain == DomainKind::InterfaceFace ||
+            bc.domain == DomainKind::CoupledBoundary ||
+            bc.introduces_global_coupling) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 std::string NumericSummaryPlanner::name() const {
@@ -308,9 +363,11 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request numerical inf-sup estimate");
-            addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
-                       claim.domain, claim.variables, i, claim,
-                       source + " detected saddle-point structure; request known stable-pair, Fortin, mesh, and domain assumption evidence");
+            if (shouldRequestStablePairCertification(report, claim)) {
+                addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                           claim.domain, claim.variables, i, claim,
+                           source + " detected saddle-point structure; request known stable-pair, Fortin, mesh, and domain assumption evidence");
+            }
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request constrained/reduced block classification");
@@ -327,9 +384,11 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted an inf-sup claim; request estimate value, scope, and nullspace handling");
-            addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
-                       claim.domain, claim.variables, i, claim,
-                       source + " emitted an inf-sup claim; request stable-pair/Fortin certification metadata");
+            if (shouldRequestStablePairCertification(report, claim)) {
+                addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                           claim.domain, claim.variables, i, claim,
+                           source + " emitted an inf-sup claim; request stable-pair/Fortin certification metadata");
+            }
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted an inf-sup claim; request reduced saddle-point block evidence");
@@ -393,9 +452,11 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                 addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                            claim.domain, claim.variables, i, claim,
                            source + " emitted a mixed space compatibility claim; request inf-sup evidence for the space pair");
-                addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
-                           claim.domain, claim.variables, i, claim,
-                           source + " emitted a mixed space compatibility claim; request known stable-pair and Fortin metadata");
+                if (shouldRequestStablePairCertification(report, claim)) {
+                    addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                               claim.domain, claim.variables, i, claim,
+                               source + " emitted a mixed space compatibility claim; request known stable-pair and Fortin metadata");
+                }
             }
         }
 
@@ -552,7 +613,8 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         }
 
         if (claim.kind == PropertyKind::CoupledSystemStructure &&
-            hasSourceAnalyzer(claim, "CoupledSystemStabilityAnalyzer")) {
+            hasSourceAnalyzer(claim, "CoupledSystemStabilityAnalyzer") &&
+            contextHasNonlocalCoupling(context)) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::CoupledSystemStability,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted coupled-system stability evidence; request finite exchange residual, constraint drift, tolerance, partition spectral radius, contraction/coercive/nonnormal bounds, coupled-operator evidence, relaxation, added-mass, and partition metadata");
@@ -640,10 +702,21 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
         bool has_interior_face = record.has_interior_face_terms;
         bool has_interface_face = false;
         bool has_boundary_face = false;
+        bool has_cell_terms = false;
         for (DomainKind domain : record.active_domains) {
+            has_cell_terms = has_cell_terms || domain == DomainKind::Cell;
             has_interior_face = has_interior_face || domain == DomainKind::InteriorFace;
             has_interface_face = has_interface_face || domain == DomainKind::InterfaceFace;
             has_boundary_face = has_boundary_face || domain == DomainKind::Boundary;
+        }
+
+        if (has_cell_terms || record.active_domains.empty()) {
+            addContextRequest(report.request_plan, context, AnalysisSummaryKind::CoefficientProperties,
+                              DomainKind::Cell, variables,
+                              "FormulationRecord '" + record.operator_tag +
+                                  "' has cell operator terms; request coefficient, constitutive, or implicit-form metadata before matrix-based operator classification",
+                              AnalysisConfidence::Medium,
+                              record.operator_tag);
         }
 
         if (has_interior_face) {

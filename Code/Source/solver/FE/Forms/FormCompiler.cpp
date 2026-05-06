@@ -10,6 +10,7 @@
 #include "Core/FEException.h"
 #include "Forms/BlockForm.h"
 #include "Forms/MixedFormIR.h"
+#include "Forms/PointEvaluator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1057,9 +1058,11 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     assembly::RequiredData required = assembly::RequiredData::None;
     std::unordered_map<FieldId, assembly::RequiredData> field_required{};
     int max_time_order = 0;
+    bool has_explicit_time_dependency = false;
     for (auto& t : terms) {
         t.time_derivative_order = detail::analyzeTimeDerivativeOrder(*t.integrand.node(), kind);
         max_time_order = std::max(max_time_order, t.time_derivative_order);
+        has_explicit_time_dependency = has_explicit_time_dependency || isTimeDependent(t.integrand);
 
         t.required_data = detail::analyzeRequiredData(*t.integrand.node(), kind);
         for (const auto& fr : detail::analyzeFieldRequirements(*t.integrand.node())) {
@@ -1114,6 +1117,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     ir.setRequiredData(required);
     ir.setFieldRequirements(std::move(field_requirements));
     ir.setMaxTimeDerivativeOrder(max_time_order);
+    ir.setHasExplicitTimeDependency(has_explicit_time_dependency);
     ir.setGeometrySensitivityOptions(impl_->options.geometry_sensitivity);
     ir.setHasGeometrySensitivityTerminals(form_has_geometry_sensitivity_terminals);
     ir.setCompiled(true);

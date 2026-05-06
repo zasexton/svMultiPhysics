@@ -30,6 +30,11 @@ namespace FE {
 namespace forms {
 namespace bc {
 
+enum class ComponentValueNameStyle : std::uint8_t {
+    Indexed,
+    Component
+};
+
 namespace detail {
 
 [[noreturn]] inline void throwInvalidMarker(std::string_view where)
@@ -67,6 +72,60 @@ template <class BC>
     out.push_back('_');
     out.append(idx);
     return out;
+}
+
+[[nodiscard]] inline std::string makeMarkerValueName(std::string_view prefix,
+                                                     int boundary_marker)
+{
+    const std::string marker = std::to_string(boundary_marker);
+
+    std::string out;
+    if (prefix.empty()) {
+        out = marker;
+    } else {
+        out.reserve(prefix.size() + 1 + marker.size());
+        out.append(prefix.data(), prefix.size());
+        out.push_back('_');
+        out.append(marker);
+    }
+    return out;
+}
+
+[[nodiscard]] inline std::string makeComponentValueName(std::string_view prefix,
+                                                        int boundary_marker,
+                                                        int component)
+{
+    const std::string marker = std::to_string(boundary_marker);
+    const std::string comp = std::to_string(component);
+
+    std::string out;
+    if (prefix.empty()) {
+        out.reserve(marker.size() + 2 + comp.size());
+        out.append(marker);
+    } else {
+        out.reserve(prefix.size() + 1 + marker.size() + 2 + comp.size());
+        out.append(prefix.data(), prefix.size());
+        out.push_back('_');
+        out.append(marker);
+    }
+    out.append("_c");
+    out.append(comp);
+    return out;
+}
+
+[[nodiscard]] inline std::string makeComponentValueName(std::string_view prefix,
+                                                        int boundary_marker,
+                                                        int component,
+                                                        ComponentValueNameStyle style)
+{
+    switch (style) {
+    case ComponentValueNameStyle::Indexed:
+        return makeValueName(prefix, boundary_marker, static_cast<std::size_t>(component));
+    case ComponentValueNameStyle::Component:
+        return makeComponentValueName(prefix, boundary_marker, component);
+    }
+
+    return makeValueName(prefix, boundary_marker, static_cast<std::size_t>(component));
 }
 
 [[nodiscard]] inline int polynomialOrderOrDefault(const FormExpr& expr, int default_order = 1)
@@ -184,6 +243,17 @@ enum class InterfaceTraceReduction : std::uint8_t {
  */
 using ScalarValue = std::variant<Real, ScalarCoefficient, TimeScalarCoefficient, FormExpr>;
 
+[[nodiscard]] inline bool isConstantScalarValue(const ScalarValue& value)
+{
+    return std::holds_alternative<Real>(value);
+}
+
+[[nodiscard]] inline bool isZeroConstantScalarValue(const ScalarValue& value)
+{
+    const auto* real = std::get_if<Real>(&value);
+    return real && *real == Real{0.0};
+}
+
 /**
  * @brief Convert common scalar value types into a scalar FormExpr
  *
@@ -218,6 +288,44 @@ template <class... Ts>
 [[nodiscard]] inline FormExpr toScalarExpr(const std::variant<Ts...>& value, std::string_view name)
 {
     return std::visit([&](const auto& v) { return toScalarExpr(v, name); }, value);
+}
+
+[[nodiscard]] inline std::string markerValueName(std::string_view prefix,
+                                                 int boundary_marker)
+{
+    return detail::makeMarkerValueName(prefix, boundary_marker);
+}
+
+[[nodiscard]] inline std::string indexedComponentValueName(std::string_view prefix,
+                                                          int boundary_marker,
+                                                          int component)
+{
+    return detail::makeValueName(prefix, boundary_marker, static_cast<std::size_t>(component));
+}
+
+[[nodiscard]] inline std::string componentValueName(std::string_view prefix,
+                                                    int boundary_marker,
+                                                    int component)
+{
+    return detail::makeComponentValueName(prefix, boundary_marker, component);
+}
+
+template <class Values>
+[[nodiscard]] inline std::vector<FormExpr> toVectorExpr(
+    const Values& values,
+    int dim,
+    std::string_view name_prefix,
+    int boundary_marker,
+    ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+{
+    std::vector<FormExpr> out;
+    out.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        out.push_back(toScalarExpr(
+            values[static_cast<std::size_t>(d)],
+            detail::makeComponentValueName(name_prefix, boundary_marker, d, name_style)));
+    }
+    return out;
 }
 
 /**

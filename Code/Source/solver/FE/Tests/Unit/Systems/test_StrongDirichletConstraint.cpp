@@ -217,6 +217,10 @@ TEST(StrongDirichletConstraint, UpdateConstraintsRefreshesTimeDependentValues)
 
     sys.setup();
 
+    EXPECT_TRUE(sys.hasTimeDependentConstraints());
+    EXPECT_TRUE(sys.requiresTimeAdvancement());
+    EXPECT_FALSE(sys.isTransient());
+
     const auto constrained = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
     ASSERT_EQ(constrained.size(), 2u);
 

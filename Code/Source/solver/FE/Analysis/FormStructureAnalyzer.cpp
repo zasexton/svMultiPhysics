@@ -15,6 +15,26 @@ namespace svmp {
 namespace FE {
 namespace analysis {
 
+namespace {
+
+[[nodiscard]] bool subtreeContainsCellDiameter(const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+    if (node.type() == FT::CellDiameter) {
+        return true;
+    }
+
+    for (const auto* child : node.children()) {
+        if (child && subtreeContainsCellDiameter(*child)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+} // namespace
+
 // ============================================================================
 // FormStructureAnalyzer::analyze
 // ============================================================================
@@ -387,7 +407,7 @@ void FormStructureAnalyzer::walkNode(const forms::FormExprNode& node,
     bool subtree_has_cell_diameter = false;
     if (ty == FT::Multiply || ty == FT::InnerProduct || ty == FT::DoubleContraction) {
         for (const auto* child : children) {
-            if (child && child->type() == FT::CellDiameter) {
+            if (child && subtreeContainsCellDiameter(*child)) {
                 subtree_has_cell_diameter = true;
                 break;
             }

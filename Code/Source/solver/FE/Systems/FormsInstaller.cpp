@@ -483,6 +483,11 @@ public:
         return primary_->maxTemporalDerivativeOrder();
     }
 
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override
+    {
+        return primary_->hasExplicitTimeDependency();
+    }
+
     [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override
     {
         return primary_->hasStateIndependentMatrix();
@@ -2545,6 +2550,7 @@ CoupledResidualKernels installFormulation(
         rec.active_fields.assign(trial_fields.begin(), trial_fields.end());
         rec.residual_expr = residual.nodeShared();
         rec.is_mixed = (fields.size() > 1 || trial_fields.size() > 1);
+        rec.constitutive_laws = options.constitutive_laws;
 
         // Scan the DAG for structural properties.
         auto scan = analysis::scanFormExpr(*residual.node());
@@ -2552,6 +2558,18 @@ CoupledResidualKernels installFormulation(
         rec.has_stabilization_terms = scan.has_stabilization();
         rec.has_interior_face_terms = scan.has_interior_face_terms();
         rec.active_domains = scan.activeDomains();
+        rec.parameter_usages = scan.parameter_usages;
+        rec.coefficient_usages = scan.coefficient_usages;
+        rec.scale_usages = scan.scale_usages;
+        for (auto& law : scan.constitutive_laws) {
+            analysis::addConstitutiveLawIfAbsent(rec.constitutive_laws,
+                                                 std::move(law));
+        }
+        for (auto& law : rec.constitutive_laws) {
+            if (law.source_operator_tag.empty()) {
+                law.source_operator_tag = op;
+            }
+        }
 
         // Extract field names from the expression for mixed-form diagnostics.
         // Map FieldId → field name using FESystem's field registry, and collect

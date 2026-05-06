@@ -77,23 +77,14 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
     return false;
 }
 
-[[nodiscard]] bool sameSpaceSignature(const FormExprNode::SpaceSignature& a,
-                                      const FormExprNode::SpaceSignature& b) noexcept
-{
-    return a.space_type == b.space_type &&
-           a.field_type == b.field_type &&
-           a.continuity == b.continuity &&
-           a.value_dimension == b.value_dimension &&
-           a.topological_dimension == b.topological_dimension &&
-           a.polynomial_order == b.polynomial_order &&
-           a.element_type == b.element_type;
-}
-
 [[nodiscard]] std::optional<FormExprNode::SpaceSignature>
-inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict) noexcept
+inferFunctionalReferenceSpaceSignature(const FormExprNode& node,
+                                       int dim_hint,
+                                       bool& out_conflict) noexcept
 {
     out_conflict = false;
     std::optional<FormExprNode::SpaceSignature> sig;
+    int reference_topological_dim = 0;
 
     const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
         if (out_conflict) {
@@ -102,11 +93,19 @@ inferFunctionalTrialSpaceSignature(const FormExprNode& node, bool& out_conflict)
 
         if (n.type() == FormExprType::DiscreteField || n.type() == FormExprType::StateField) {
             if (const auto* s = n.spaceSignature()) {
+                if (s->topological_dimension > 0) {
+                    if (reference_topological_dim == 0) {
+                        reference_topological_dim = s->topological_dimension;
+                    } else if (reference_topological_dim != s->topological_dimension) {
+                        out_conflict = true;
+                        return;
+                    }
+                }
                 if (!sig) {
                     sig = *s;
-                } else if (!sameSpaceSignature(*sig, *s)) {
-                    out_conflict = true;
-                    return;
+                } else if (sig->topological_dimension != dim_hint &&
+                           s->topological_dimension == dim_hint) {
+                    sig = *s;
                 }
             }
         }
@@ -1356,10 +1355,10 @@ JITCompileResult JITCompiler::compileFunctional(const FormExpr& integrand,
     }
 
     bool conflict = false;
-    auto trial_sig = inferFunctionalTrialSpaceSignature(root, conflict);
+    auto trial_sig = inferFunctionalReferenceSpaceSignature(root, safe_dim, conflict);
     if (conflict) {
         out.message =
-            "JITCompiler::compileFunctional: multiple distinct DiscreteField/StateField space signatures found; multi-field functional kernels are not supported";
+            "JITCompiler::compileFunctional: DiscreteField/StateField operands use incompatible topological dimensions";
         out.cacheable = false;
         return out;
     }

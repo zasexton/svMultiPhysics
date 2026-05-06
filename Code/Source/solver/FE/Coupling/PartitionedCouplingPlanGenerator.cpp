@@ -1501,6 +1501,52 @@ bool hasPort(const std::vector<CouplingPortId>& stack, const CouplingPortId& por
     return std::find(stack.begin(), stack.end(), port) != stack.end();
 }
 
+bool endpointUsesExtractedPayload(const CouplingExchangeDeclaration& exchange,
+                                  const CouplingEndpointRef& endpoint) noexcept
+{
+    return exchange.extracted_payload.has_value() &&
+           endpoint.endpoint_name == exchange.extracted_payload->provider_name &&
+           (endpoint.kind == CouplingEndpointKind::RegionData ||
+            endpoint.kind == CouplingEndpointKind::ExternalBuffer);
+}
+
+CouplingRegionDataProviderKind providerKindForPayload(
+    CouplingPayloadKind kind) noexcept
+{
+    switch (kind) {
+    case CouplingPayloadKind::CoefficientExpression:
+    case CouplingPayloadKind::PrimalValue:
+        return CouplingRegionDataProviderKind::FormsCoefficientExpression;
+    case CouplingPayloadKind::DualResidualVector:
+        return CouplingRegionDataProviderKind::FormsDualResidualVector;
+    case CouplingPayloadKind::ResidualRecipe:
+        return CouplingRegionDataProviderKind::FormsResidualRecipe;
+    case CouplingPayloadKind::ConstraintResidual:
+        return CouplingRegionDataProviderKind::FormsConstraintResidual;
+    case CouplingPayloadKind::DriverOwned:
+        return CouplingRegionDataProviderKind::ProviderExtension;
+    }
+    return CouplingRegionDataProviderKind::ProviderExtension;
+}
+
+void applyExtractedPayloadResolution(
+    const CouplingExchangeDeclaration& declaration,
+    const CouplingEndpointRef& endpoint,
+    ResolvedCouplingEndpoint& resolved)
+{
+    if (!endpointUsesExtractedPayload(declaration, endpoint)) {
+        return;
+    }
+    resolved.extracted_payload = declaration.extracted_payload;
+    resolved.registry_provider = "CouplingPayloadDetangler";
+    resolved.temporal.provider_name = "FormsPayloadProvider";
+    resolved.temporal.backing = CouplingResolvedTemporalBackingKind::ProviderDefined;
+    resolved.region_data_provider_name =
+        declaration.extracted_payload->provider_name;
+    resolved.region_data_provider_kind =
+        providerKindForPayload(declaration.extracted_payload->payload_kind);
+}
+
 ResolvedCouplingEndpoint resolveEndpoint(const CouplingContext& ctx,
                                          const CouplingEndpointRef& endpoint,
                                          const CouplingValueDescriptor& value)
@@ -1816,10 +1862,22 @@ CouplingValidationResult PartitionedCouplingPlanGenerator::validate(
         result.append(validateGeneralTensorEndpointDescriptors(exchange));
         result.append(validateCouplingEndpointRef(*exchange.producer));
         result.append(validateCouplingEndpointRef(*exchange.consumer));
-        result.append(validateEndpointResolutionSupport(
-            ctx, *exchange.producer, exchange.value, "producer"));
-        result.append(validateEndpointResolutionSupport(
-            ctx, *exchange.consumer, exchange.value, "consumer"));
+        if (exchange.extracted_payload.has_value() &&
+            !exchange.extracted_payload->diagnostic_message.empty()) {
+            result.add(CouplingDiagnostic{
+                .severity = CouplingDiagnosticSeverity::Warning,
+                .endpoint_name = exchange.producer_port.port_name,
+                .message = exchange.extracted_payload->diagnostic_message,
+            });
+        }
+        if (!endpointUsesExtractedPayload(exchange, *exchange.producer)) {
+            result.append(validateEndpointResolutionSupport(
+                ctx, *exchange.producer, exchange.value, "producer"));
+        }
+        if (!endpointUsesExtractedPayload(exchange, *exchange.consumer)) {
+            result.append(validateEndpointResolutionSupport(
+                ctx, *exchange.consumer, exchange.value, "consumer"));
+        }
         result.append(validateFieldEndpointValueDescriptor(
             ctx, *exchange.producer, exchange.value, "producer"));
         result.append(validateFieldEndpointValueDescriptor(
@@ -1976,6 +2034,12 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
         resolved.value = exchange.value;
         resolved.producer = resolveEndpoint(ctx, *exchange.producer, exchange.value);
         resolved.consumer = resolveEndpoint(ctx, *exchange.consumer, exchange.value);
+        applyExtractedPayloadResolution(exchange,
+                                        *exchange.producer,
+                                        resolved.producer);
+        applyExtractedPayloadResolution(exchange,
+                                        *exchange.consumer,
+                                        resolved.consumer);
         resolved.shared_region_name = exchange.shared_region_name;
         const auto producer_region = effectiveExchangeRegionEndpoint(
             ctx,
@@ -1993,6 +2057,7 @@ PartitionedCouplingPlan PartitionedCouplingPlanGenerator::generate(
             ctx, exchange.shared_region_name, consumer_region);
         resolved.transfer = resolveTransfer(ctx, exchange);
         resolved.strategy = exchange.strategy;
+        resolved.extracted_payload = exchange.extracted_payload;
         plan.exchanges.push_back(std::move(resolved));
     }
     plan.group_hints = uniqueGroupHints(group_hints);

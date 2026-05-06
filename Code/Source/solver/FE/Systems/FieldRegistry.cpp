@@ -34,6 +34,8 @@ FieldId FieldRegistry::add(FieldSpec spec)
     rec.components = spec.components > 0 ? spec.components : rec.space->value_dimension();
     rec.scope = spec.scope;
     rec.interface_marker = spec.interface_marker;
+    rec.participant_name = std::move(spec.participant_name);
+    rec.participant_domain_id = spec.participant_domain_id;
     rec.source_kind = spec.source_kind;
     rec.derived = spec.derived;
 
@@ -61,6 +63,15 @@ FieldId FieldRegistry::add(FieldSpec spec)
                     "FieldRegistry::add: volume field '" + rec.name +
                         "' cannot specify interface_marker");
     }
+    if (rec.participant_name.has_value()) {
+        FE_THROW_IF(rec.participant_name->empty(), InvalidArgumentException,
+                    "FieldRegistry::add: participant-scoped field '" + rec.name +
+                        "' cannot use an empty participant name");
+    }
+    FE_THROW_IF(rec.participant_name.has_value() && rec.participant_domain_id.has_value(),
+                InvalidArgumentException,
+                "FieldRegistry::add: field '" + rec.name +
+                    "' cannot specify both participant_name and participant_domain_id");
 
     if (rec.source_kind == FieldSourceKind::DerivedFromUnknown) {
         FE_THROW_IF(rec.derived.source_field == INVALID_FIELD_ID,

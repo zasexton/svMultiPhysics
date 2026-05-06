@@ -879,6 +879,51 @@ public:
     }
 };
 
+class RequestEchoKernel final : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        const bool want_vector = output.has_vector || !output.local_vector.empty();
+
+        if (want_matrix && want_vector) {
+            ++matrix_vector_calls_;
+        } else if (want_matrix) {
+            ++matrix_only_calls_;
+        } else if (want_vector) {
+            ++vector_only_calls_;
+        }
+
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+
+        if (want_matrix) {
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                for (LocalIndex j = 0; j < n_trial; ++j) {
+                    output.matrixEntry(i, j) = (i == j) ? Real(2.0) : Real(0.0);
+                }
+            }
+        }
+        if (want_vector) {
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                output.vectorEntry(i) = Real(3.0);
+            }
+        }
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+
+    [[nodiscard]] int matrixOnlyCalls() const noexcept { return matrix_only_calls_; }
+    [[nodiscard]] int vectorOnlyCalls() const noexcept { return vector_only_calls_; }
+    [[nodiscard]] int matrixVectorCalls() const noexcept { return matrix_vector_calls_; }
+
+private:
+    int matrix_only_calls_{0};
+    int vector_only_calls_{0};
+    int matrix_vector_calls_{0};
+};
+
 class RectangularMassKernel final : public AssemblyKernel {
 public:
     void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
@@ -2631,6 +2676,28 @@ TEST_F(StandardAssemblerTest, AssembleBoth) {
     EXPECT_EQ(result.elements_assembled, 2);
     EXPECT_GT(result.matrix_entries_inserted, 0);
     EXPECT_GT(result.vector_entries_inserted, 0);
+}
+
+TEST_F(StandardAssemblerTest, AssembleBothRequestsVectorAfterMatrixOnlyAssembly)
+{
+    assembler_->initialize();
+
+    RequestEchoKernel kernel;
+    auto matrix_result = assembler_->assembleMatrix(*mesh_, *space_, *space_, kernel, *system_);
+    ASSERT_TRUE(matrix_result.success);
+    EXPECT_EQ(kernel.matrixOnlyCalls(), 2);
+
+    system_->zero();
+    auto both_result = assembler_->assembleBoth(*mesh_, *space_, *space_, kernel, *system_, *system_);
+    ASSERT_TRUE(both_result.success);
+    EXPECT_EQ(kernel.matrixVectorCalls(), 2);
+    EXPECT_GT(both_result.vector_entries_inserted, 0);
+
+    Real vector_l1 = 0.0;
+    for (Real value : system_->vectorData()) {
+        vector_l1 += std::abs(value);
+    }
+    EXPECT_GT(vector_l1, 0.0);
 }
 
 TEST_F(StandardAssemblerTest, UsesBatchedCellPathWhenEnabled)

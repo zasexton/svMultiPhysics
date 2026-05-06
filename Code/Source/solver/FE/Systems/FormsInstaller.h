@@ -19,6 +19,7 @@
 
 #include "Core/Types.h"
 
+#include "Analysis/ConstitutiveLawMetadata.h"
 #include "Analysis/FormAnalysisBridge.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/MixedFormIR.h"
@@ -28,6 +29,8 @@
 #include <initializer_list>
 #include <memory>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -54,6 +57,25 @@ struct FormInstallOptions {
     /// couplings such as ALE fluid residuals differentiated with respect to a
     /// solved mesh-displacement field.
     std::vector<FieldId> extra_trial_fields{};
+
+    /// Constitutive laws used by the residual. Physics modules should publish
+    /// material/model choices here so coupling contracts can consume the same
+    /// law without duplicating physics-specific options.
+    std::vector<analysis::ConstitutiveLawMetadata> constitutive_laws{};
+
+    FormInstallOptions& recordDynamicViscosity(
+        FieldId velocity_field,
+        Real constant_viscosity,
+        std::shared_ptr<const forms::ConstitutiveModel> model = {},
+        std::string name = "dynamic_viscosity")
+    {
+        constitutive_laws.push_back(analysis::dynamicViscosityMetadata(
+            velocity_field,
+            constant_viscosity,
+            std::move(model),
+            std::move(name)));
+        return *this;
+    }
 };
 
 using KernelPtr = std::shared_ptr<assembly::AssemblyKernel>;

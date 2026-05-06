@@ -75,6 +75,32 @@ namespace {
     return enabled;
 }
 
+void prepareKernelOutputRequest(KernelOutput& output,
+                                LocalIndex n_test,
+                                LocalIndex n_trial,
+                                bool want_matrix,
+                                bool want_vector)
+{
+    const auto matrix_size =
+        static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial);
+    const auto vector_size = static_cast<std::size_t>(n_test);
+
+    if (output.n_test_dofs != n_test ||
+        output.n_trial_dofs != n_trial ||
+        output.has_matrix != want_matrix ||
+        output.has_vector != want_vector ||
+        (want_matrix && output.local_matrix.size() != matrix_size) ||
+        (want_vector && output.local_vector.size() != vector_size)) {
+        output.reserveNoZero(n_test, n_trial, want_matrix, want_vector);
+    } else {
+        output.n_test_dofs = n_test;
+        output.n_trial_dofs = n_trial;
+        output.has_matrix = want_matrix;
+        output.has_vector = want_vector;
+    }
+    output.clear();
+}
+
 [[nodiscard]] inline double assemblyTimeNow() noexcept {
     if (!assemblyTimingEnabled()) return 0.0;
     return std::chrono::duration<double>(
@@ -2953,7 +2979,11 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                 }
 
                 // Compute local contributions
-                kernel_output_.clear();
+                prepareKernelOutputRequest(kernel_output_,
+                                           context_.numTestDofs(),
+                                           context_.numTrialDofs(),
+                                           matrix_view != nullptr,
+                                           vector_view != nullptr);
                 kernel_impl.computeBoundaryFace(context_, boundary_marker, kernel_output_);
 
                 if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
@@ -3285,11 +3315,27 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                                               view.old_lifecycle, view.work_lifecycle);
             }
 
-            // Compute DG face contributions
-            output_minus.clear();
-            output_plus.clear();
-            coupling_mp.clear();
-            coupling_pm.clear();
+            // Compute DG face contributions.
+            prepareKernelOutputRequest(output_minus,
+                                       context_.numTestDofs(),
+                                       context_.numTrialDofs(),
+                                       insert_matrix_view != nullptr,
+                                       insert_vector_view != nullptr);
+            prepareKernelOutputRequest(output_plus,
+                                       context_plus.numTestDofs(),
+                                       context_plus.numTrialDofs(),
+                                       insert_matrix_view != nullptr,
+                                       insert_vector_view != nullptr);
+            prepareKernelOutputRequest(coupling_mp,
+                                       context_.numTestDofs(),
+                                       context_plus.numTrialDofs(),
+                                       insert_matrix_view != nullptr,
+                                       false);
+            prepareKernelOutputRequest(coupling_pm,
+                                       context_plus.numTestDofs(),
+                                       context_.numTrialDofs(),
+                                       insert_matrix_view != nullptr,
+                                       false);
 
             kernel_impl.computeInteriorFace(context_, context_plus,
                                             output_minus, output_plus,
@@ -3638,7 +3684,11 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                                               view.old_lifecycle, view.work_lifecycle);
                 }
 
-                output_minus.clear();
+                prepareKernelOutputRequest(output_minus,
+                                           context_.numTestDofs(),
+                                           context_.numTrialDofs(),
+                                           insert_matrix_view != nullptr,
+                                           insert_vector_view != nullptr);
                 kernel_impl.computeBoundaryFace(context_, interface_marker, output_minus);
 
                 if (output_minus.has_matrix || output_minus.has_vector) {
@@ -3919,10 +3969,26 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         }
 
         // Compute interface face contributions
-        output_minus.clear();
-        output_plus.clear();
-        coupling_mp.clear();
-        coupling_pm.clear();
+        prepareKernelOutputRequest(output_minus,
+                                   context_.numTestDofs(),
+                                   context_.numTrialDofs(),
+                                   insert_matrix_view != nullptr,
+                                   insert_vector_view != nullptr);
+        prepareKernelOutputRequest(output_plus,
+                                   context_plus.numTestDofs(),
+                                   context_plus.numTrialDofs(),
+                                   insert_matrix_view != nullptr,
+                                   insert_vector_view != nullptr);
+        prepareKernelOutputRequest(coupling_mp,
+                                   context_.numTestDofs(),
+                                   context_plus.numTrialDofs(),
+                                   insert_matrix_view != nullptr,
+                                   false);
+        prepareKernelOutputRequest(coupling_pm,
+                                   context_plus.numTestDofs(),
+                                   context_.numTrialDofs(),
+                                   insert_matrix_view != nullptr,
+                                   false);
 
         kernel_impl.computeInterfaceFace(context_, context_plus, interface_marker,
                                          output_minus, output_plus,
@@ -4261,7 +4327,11 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                 tp_prepare += TP() - tp0;
 
                 tp0 = TP();
-                kernel_output_.clear();
+                prepareKernelOutputRequest(kernel_output_,
+                                           context_.numTestDofs(),
+                                           context_.numTrialDofs(),
+                                           assemble_matrix,
+                                           assemble_vector);
                 kernel_impl.computeCell(context_, kernel_output_);
                 tp_kernel += TP() - tp0;
 
@@ -10712,7 +10782,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
             // f. Compute kernel
             tp_a = TP();
-            kernel_output_.clear();
+            prepareKernelOutputRequest(kernel_output_,
+                                       context_.numTestDofs(),
+                                       context_.numTrialDofs(),
+                                       t.assemble_matrix,
+                                       t.assemble_vector);
             t.kernel->computeCell(context_, kernel_output_);
             tp_fused_kernel += TP() - tp_a;
 

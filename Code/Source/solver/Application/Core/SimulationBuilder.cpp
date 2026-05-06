@@ -8,6 +8,7 @@
 #include "FE/Backends/Interfaces/BackendKind.h"
 #include "FE/Backends/Interfaces/LinearSolver.h"
 #include "FE/Backends/Utils/BackendOptions.h"
+#include "FE/Assembly/CompositeMeshAccess.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Systems/FESystem.h"
@@ -212,6 +213,17 @@ std::string codim1StorageName(svmp::MeshCodim1StorageMode mode)
   return "unknown";
 }
 
+bool firstEquationTypeIs(const Parameters& params, const std::string& equation_type)
+{
+  for (const auto* e : params.equation_parameters) {
+    if (!e) {
+      continue;
+    }
+    return e->type.defined() && lower_copy(e->type.value()) == equation_type;
+  }
+  return false;
+}
+
 svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& params,
                                                          svmp::FE::backends::BackendKind backend_kind)
 {
@@ -259,6 +271,18 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     if (backend_kind == svmp::FE::backends::BackendKind::Trilinos && la.configuration_file.defined()) {
       opts.trilinos_xml_file = la.configuration_file.value();
     }
+  }
+
+  const bool is_oop_ustruct =
+      eq->type.defined() && lower_copy(eq->type.value()) == "ustruct";
+  if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+      is_oop_ustruct &&
+      opts.method != svmp::FE::backends::SolverMethod::Direct &&
+      opts.method != svmp::FE::backends::SolverMethod::BlockSchur &&
+      (opts.preconditioner == svmp::FE::backends::PreconditionerType::None ||
+       opts.preconditioner == svmp::FE::backends::PreconditionerType::Diagonal)) {
+    opts.preconditioner = svmp::FE::backends::PreconditionerType::RowColumnScaling;
+    opts.fsils_use_rcs = true;
   }
 
   // FSILS GMRES legacy semantics:
@@ -477,6 +501,11 @@ SimulationComponents SimulationBuilder::build()
 
 void SimulationBuilder::loadMeshes()
 {
+  components_.mesh_collection.clear();
+  components_.meshes.clear();
+  components_.primary_mesh.reset();
+  components_.primary_mesh_name.clear();
+
   const auto declared =
       static_cast<int>(std::count_if(params_.mesh_parameters.begin(), params_.mesh_parameters.end(),
                                      [](const auto* p) { return p != nullptr; }));
@@ -506,6 +535,8 @@ void SimulationBuilder::loadMeshes()
     oopCout() << std::endl;
 
     auto mesh = application::translators::MeshTranslator::loadMesh(*mesh_params);
+    auto participant = MeshParticipant::fromLoadedMesh(*mesh_params, mesh);
+    components_.mesh_collection.addParticipant(std::move(participant));
     components_.meshes.emplace(mesh_name, mesh);
 
     if (mesh) {
@@ -538,10 +569,40 @@ void SimulationBuilder::createFESystem()
         "Check your <Add_mesh> section or set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
   }
 
-  components_.fe_system =
-      std::make_unique<svmp::FE::systems::FESystem>(components_.primary_mesh, svmp::Configuration::Reference);
-  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh '"
-            << components_.primary_mesh_name << "'" << std::endl;
+  const auto& loaded_participants = components_.mesh_collection.participants();
+  if (loaded_participants.size() <= 1u) {
+    svmp::FE::systems::MeshParticipantInfo participant_info{};
+    participant_info.name = components_.primary_mesh_name.empty() ? "mesh" : components_.primary_mesh_name;
+    if (!loaded_participants.empty()) {
+      participant_info.name = loaded_participants.front().name;
+      participant_info.domain_id = loaded_participants.front().domain_id;
+    }
+
+    components_.fe_system = std::make_unique<svmp::FE::systems::FESystem>(
+        components_.primary_mesh, std::move(participant_info), svmp::Configuration::Reference);
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: created FE system from primary mesh '"
+              << components_.primary_mesh_name << "'" << std::endl;
+    return;
+  }
+
+  std::vector<svmp::FE::assembly::CompositeMeshParticipant> composite_participants;
+  composite_participants.reserve(loaded_participants.size());
+  for (const auto& participant : loaded_participants) {
+    if (!participant.mesh) {
+      throw std::runtime_error("[svMultiPhysics::Application] Mesh participant '" + participant.name +
+                               "' has no loaded mesh.");
+    }
+    composite_participants.push_back(svmp::FE::assembly::CompositeMeshParticipant{
+        .name = participant.name,
+        .mesh = participant.mesh.get(),
+        .domain_id = participant.domain_id});
+  }
+
+  auto composite_access = std::make_shared<svmp::FE::assembly::CompositeMeshAccess>(
+      std::move(composite_participants));
+  components_.fe_system = std::make_unique<svmp::FE::systems::FESystem>(std::move(composite_access));
+  oopCout() << "[svMultiPhysics::Application] SimulationBuilder: created FE system from "
+            << static_cast<int>(loaded_participants.size()) << " mesh participants" << std::endl;
 #endif
 }
 
@@ -763,6 +824,37 @@ void SimulationBuilder::createSolvers()
         offset += ncomp;
       }
 
+      const bool is_ustruct_blockschur =
+          backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur &&
+          firstEquationTypeIs(params_, "ustruct");
+      if (is_ustruct_blockschur) {
+        const auto* displacement = layout.findBlock("Displacement");
+        const auto* velocity = layout.findBlock("Velocity");
+        const auto* pressure = layout.findBlock("Pressure");
+        if (displacement && velocity && pressure &&
+            displacement->n_components == velocity->n_components &&
+            pressure->n_components == 1 &&
+            displacement->start_component == 0 &&
+            velocity->start_component == displacement->n_components &&
+            pressure->start_component == displacement->n_components + velocity->n_components) {
+          svmp::FE::backends::BlockLayout grouped_layout{};
+          grouped_layout.blocks.push_back({
+              "UstructKinematicMomentum",
+              displacement->start_component,
+              displacement->n_components + velocity->n_components,
+              svmp::FE::backends::BlockRole::PrimaryField});
+          grouped_layout.blocks.push_back({
+              pressure->name,
+              pressure->start_component,
+              pressure->n_components,
+              svmp::FE::backends::BlockRole::ConstraintField});
+          grouped_layout.momentum_block = 0;
+          grouped_layout.constraint_block = 1;
+          layout = std::move(grouped_layout);
+        }
+      }
+
       // Identify saddle-point block pair when the solver/backend can benefit from
       // explicit momentum/constraint roles.  For FSILS this is also required by
       // native outlet-coupled GMRES solves, not just the BlockSchur path.
@@ -821,6 +913,20 @@ void SimulationBuilder::createSolvers()
     }
   }
   oopCout() << std::endl;
+
+  components_.fe_system->setAnalysisSolverOptions(solver_options);
+  const char* analysis_log = std::getenv("SVMP_FE_ANALYSIS_LOG");
+  const auto analysis_log_mode = analysis_log ? lower_copy(analysis_log) : std::string{};
+  const auto& report = components_.fe_system->analysisReport();
+  if (analysis_log_mode == "full") {
+    report.print(oopCout());
+  } else {
+    report.printApplicationLog(oopCout());
+    if (analysis_log_mode == "trace") {
+      report.printTraceLog(oopCout(), components_.fe_system->latestAnalysisSummaries());
+    }
+  }
+
   components_.linear_solver = components_.backend->createLinearSolver(solver_options);
   if (!components_.linear_solver) {
     throw std::runtime_error("[svMultiPhysics::Application] Failed to create FE linear solver.");

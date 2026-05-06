@@ -1,9 +1,12 @@
 #include "Coupling/CouplingContext.h"
 
+#include "Analysis/FormulationRecord.h"
 #include "Coupling/CouplingFormBuilder.h"
 #include "Core/FEException.h"
 #include "Spaces/H1Space.h"
+#include "Systems/FESystem.h"
 #include "Systems/InterfaceOperators.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <gtest/gtest.h>
 
@@ -176,6 +179,62 @@ TEST(CouplingContext, ResolvesParticipantsFieldsAndRegions)
     EXPECT_EQ(context.participant("left").system_name, "shared_system");
     EXPECT_EQ(context.field("left", "primary").field_id, 0);
     EXPECT_EQ(context.region("left", "surface").marker, 12);
+}
+
+TEST(CouplingContext, SkipsFormulationMetadataImportByDefault)
+{
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    systems::FESystem system(mesh);
+    analysis::FormulationRecord record;
+    record.constitutive_laws.push_back(analysis::ConstitutiveLawMetadata{
+        .name = "test.dynamic_viscosity",
+        .role = analysis::ConstitutiveLawRole::DynamicViscosity,
+        .primary_field = 3,
+        .constant_value_available = true,
+        .constant_value = 0.125,
+        .source_operator_tag = "equations",
+    });
+    system.addFormulationRecord(std::move(record));
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(participant("fluid", "fluid_system", &system));
+
+    const auto context = builder.build();
+    EXPECT_TRUE(context.constitutiveLaws().empty());
+}
+
+TEST(CouplingContext, ImportsOptInConstitutiveLawMetadataFromParticipantSystem)
+{
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    systems::FESystem system(mesh);
+    analysis::FormulationRecord record;
+    record.constitutive_laws.push_back(analysis::ConstitutiveLawMetadata{
+        .name = "test.dynamic_viscosity",
+        .role = analysis::ConstitutiveLawRole::DynamicViscosity,
+        .primary_field = 3,
+        .constant_value_available = true,
+        .constant_value = 0.125,
+        .source_operator_tag = "equations",
+    });
+    system.addFormulationRecord(std::move(record));
+
+    auto fluid = participant("fluid", "fluid_system", &system);
+    fluid.import_formulation_metadata = true;
+
+    CouplingContextBuilder builder;
+    builder.addParticipant(std::move(fluid));
+
+    const auto context = builder.build();
+    ASSERT_EQ(context.constitutiveLaws().size(), 1u);
+    const auto& law_ref = context.constitutiveLaws().front();
+    EXPECT_EQ(law_ref.participant_name, "fluid");
+    EXPECT_EQ(law_ref.system_name, "fluid_system");
+    EXPECT_EQ(law_ref.system, &system);
+    EXPECT_EQ(law_ref.law.name, "test.dynamic_viscosity");
+    EXPECT_EQ(law_ref.law.role, analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(law_ref.law.primary_field, 3);
+    EXPECT_TRUE(law_ref.law.constant_value_available);
+    EXPECT_DOUBLE_EQ(law_ref.law.constant_value, 0.125);
 }
 
 TEST(CouplingContext, RejectsDuplicateFieldMappings)

@@ -31,6 +31,64 @@ bool isFaceOrBoundary(DomainKind domain) noexcept
            domain == DomainKind::CoupledBoundary;
 }
 
+bool isWeakPenaltyLike(EnforcementKind kind) noexcept
+{
+    return kind == EnforcementKind::WeakPenalty ||
+           kind == EnforcementKind::WeakNitsche ||
+           kind == EnforcementKind::WeakInequality;
+}
+
+bool markerMatchesBoundary(const BoundaryConditionDescriptor& bc,
+                           const OperatorBlockId& block) noexcept
+{
+    if (block.domain == DomainKind::InterfaceFace) {
+        return block.marker < 0 || bc.interface_marker < 0 ||
+               block.marker == bc.interface_marker;
+    }
+    if (block.domain == DomainKind::Boundary ||
+        block.domain == DomainKind::CoupledBoundary) {
+        return block.marker < 0 || bc.boundary_marker < 0 ||
+               block.marker == bc.boundary_marker;
+    }
+    return true;
+}
+
+bool weakBoundaryCoercivityApplies(const ProblemAnalysisContext& context,
+                                   const AnalysisSummarySet& summaries,
+                                   const BoundarySymbolSummary& boundary)
+{
+    if (!isFaceOrBoundary(boundary.block.domain)) {
+        return false;
+    }
+
+    for (const auto& scale : summaries.parameter_scales) {
+        if (parameterScaleCovers(scale,
+                                 boundary.block,
+                                 ParameterScaleRole::WeakBoundaryPenalty)) {
+            return true;
+        }
+    }
+
+    const auto boundary_variables = variablesForBlock(boundary.block);
+    for (const auto& bc : context.bcDescriptors()) {
+        if (!isWeakPenaltyLike(bc.enforcement_kind)) {
+            continue;
+        }
+        if (bc.domain != boundary.block.domain ||
+            !markerMatchesBoundary(bc, boundary.block)) {
+            continue;
+        }
+        std::vector<VariableKey> bc_variables{bc.primary_variable};
+        for (const auto& variable : bc.related_variables) {
+            appendUniqueVariable(bc_variables, variable);
+        }
+        if (variableSetsIntersect(bc_variables, boundary_variables)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool hasScopedSymbolicBalance(const FluxBalanceSummary& summary)
 {
     if (!summary.symbolic_balance_evidence_present) {
@@ -159,7 +217,7 @@ void emitBoundaryAndFluxEvidence(const ProblemAnalysisContext& context,
             report.claims.push_back(std::move(claim));
         }
 
-        if (isFaceOrBoundary(boundary.block.domain)) {
+        if (weakBoundaryCoercivityApplies(context, *summaries, boundary)) {
             Real reported_penalty_scale = Real{};
             Real reported_required_lower_bound = Real{};
             bool has_penalty_scale = false;

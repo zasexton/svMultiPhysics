@@ -109,6 +109,7 @@ public:
                          : assembly::SemanticKernelKind::SingleForm;
     }
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override;
     [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override;
     [[nodiscard]] bool isSymmetric() const noexcept override;
     [[nodiscard]] bool isMatrixOnly() const noexcept override;

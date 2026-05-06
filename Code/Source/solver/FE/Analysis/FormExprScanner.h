@@ -20,6 +20,8 @@
  */
 
 #include "Forms/FormExpr.h"
+#include "Analysis/ConstitutiveLawMetadata.h"
+#include "Analysis/FormRuntimeMetadata.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include <string>
@@ -59,6 +61,18 @@ struct FormExprScanResult {
 
     /// Exact interface markers found on InterfaceIntegral nodes
     std::vector<int> interface_markers;
+
+    /// Constitutive law metadata discovered from constitutive model nodes
+    std::vector<ConstitutiveLawMetadata> constitutive_laws;
+
+    /// Runtime parameter terminals referenced by this expression.
+    std::vector<FormParameterUsage> parameter_usages;
+
+    /// Callback coefficient terminals referenced by this expression.
+    std::vector<FormCoefficientUsage> coefficient_usages;
+
+    /// Recognized multiplicative h/dt/parameter/coefficient scale factors.
+    std::vector<FormScaleUsage> scale_usages;
 
     /// Convenience
     [[nodiscard]] bool has_stabilization() const noexcept { return has_cell_diameter; }

@@ -11,9 +11,12 @@
 
 #include "Core/FEException.h"
 #include "Dofs/MeshTopologyBuilder.h"
+#include "Elements/ReferenceElement.h"
 
 #include "Mesh/Core/MeshBase.h"
 
+#include <algorithm>
+#include <optional>
 #include <stdexcept>
 
 namespace svmp {
@@ -73,6 +76,62 @@ ElementType element_type_from_mesh_cell(const svmp::MeshBase& mesh, GlobalIndex 
 
     throw FEException("MeshAccess: unsupported cell type for assembly",
                       __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
+}
+
+std::optional<LocalIndex> local_face_index_from_stored_face(const svmp::MeshBase& mesh,
+                                                            GlobalIndex face_id,
+                                                            GlobalIndex cell_id)
+{
+    if (face_id < 0 || cell_id < 0 ||
+        face_id >= static_cast<GlobalIndex>(mesh.n_faces()) ||
+        cell_id >= static_cast<GlobalIndex>(mesh.n_cells())) {
+        return std::nullopt;
+    }
+
+    const auto [face_ptr, face_count] =
+        mesh.face_vertices_span(static_cast<svmp::index_t>(face_id));
+    const auto [cell_ptr, cell_count] =
+        mesh.cell_vertices_span(static_cast<svmp::index_t>(cell_id));
+    if (face_ptr == nullptr || cell_ptr == nullptr || face_count == 0u ||
+        face_count > 4u || cell_count == 0u) {
+        return std::nullopt;
+    }
+
+    std::array<MeshIndex, 4> face_key{MeshIndex{0}, MeshIndex{0}, MeshIndex{0}, MeshIndex{0}};
+    for (std::size_t i = 0; i < face_count; ++i) {
+        face_key[i] = static_cast<MeshIndex>(face_ptr[i]);
+    }
+    std::sort(face_key.begin(), face_key.begin() + static_cast<std::ptrdiff_t>(face_count));
+
+    const ElementType cell_type = element_type_from_mesh_cell(mesh, cell_id);
+    const auto ref = elements::ReferenceElement::create(cell_type);
+    for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
+        const auto& ref_face = ref.face_nodes(lf);
+        if (ref_face.size() != face_count || ref_face.size() > 4u) {
+            continue;
+        }
+
+        std::array<MeshIndex, 4> cell_face_key{MeshIndex{0}, MeshIndex{0}, MeshIndex{0}, MeshIndex{0}};
+        bool valid = true;
+        for (std::size_t i = 0; i < ref_face.size(); ++i) {
+            const auto local_vertex = static_cast<std::size_t>(ref_face[i]);
+            if (local_vertex >= cell_count) {
+                valid = false;
+                break;
+            }
+            cell_face_key[i] = static_cast<MeshIndex>(cell_ptr[local_vertex]);
+        }
+        if (!valid) {
+            continue;
+        }
+        std::sort(cell_face_key.begin(),
+                  cell_face_key.begin() + static_cast<std::ptrdiff_t>(ref_face.size()));
+        if (cell_face_key == face_key) {
+            return static_cast<LocalIndex>(lf);
+        }
+    }
+
+    return std::nullopt;
 }
 
 std::array<Real, 3> vertex_coords_from_mesh(const svmp::MeshBase& mesh,
@@ -377,6 +436,10 @@ LocalIndex MeshAccess::getLocalFaceIndex(GlobalIndex face_id, GlobalIndex cell_i
     if (cell_id < 0 || cell_id >= numCells()) {
         throw FEException("MeshAccess: cell_id out of range",
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+
+    if (auto local_face = local_face_index_from_stored_face(mesh_.base(), face_id, cell_id)) {
+        return *local_face;
     }
 
     ensureCellToFace();

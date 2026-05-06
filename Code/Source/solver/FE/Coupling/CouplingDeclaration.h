@@ -248,6 +248,47 @@ struct CouplingFormTerminalProvenanceDeclaration {
     int history_index{0};
 };
 
+struct CouplingPayloadExtractionRequest {
+    std::string exchange_name;
+    std::string contribution_name;
+    std::string producer_participant_name;
+    std::string producer_field_name;
+    std::string consumer_participant_name;
+    std::string consumer_field_name;
+    std::string producer_port_name;
+    std::string consumer_port_name;
+    std::string shared_region_name;
+    CouplingValueDescriptor value{};
+    CouplingPayloadKind preferred_kind{
+        CouplingPayloadKind::CoefficientExpression};
+    CouplingPayloadFallbackPolicy fallback_policy{
+        CouplingPayloadFallbackPolicy::WarnAndUseResidualRecipe};
+    CouplingTransferDeclaration transfer{};
+    CouplingPartitionedStrategyDeclaration strategy{};
+    CouplingTemporalSlotDescriptor producer_temporal{};
+    CouplingTemporalSlotDescriptor consumer_temporal{};
+};
+
+struct CouplingPayloadExtractionDiagnostic {
+    CouplingDiagnosticSeverity severity{CouplingDiagnosticSeverity::Warning};
+    std::string exchange_name;
+    std::string contribution_name;
+    CouplingPayloadKind preferred_kind{
+        CouplingPayloadKind::CoefficientExpression};
+    CouplingPayloadKind selected_kind{
+        CouplingPayloadKind::CoefficientExpression};
+    CouplingPayloadFallbackPolicy fallback_policy{
+        CouplingPayloadFallbackPolicy::WarnAndUseResidualRecipe};
+    CouplingPayloadExtractionReason reason{
+        CouplingPayloadExtractionReason::Exact};
+    std::string message;
+};
+
+struct CouplingPayloadExtractionResult {
+    std::vector<CouplingExchangeDeclaration> exchanges;
+    std::vector<CouplingPayloadExtractionDiagnostic> diagnostics;
+};
+
 enum class CouplingAdditionalFieldScope : std::uint8_t {
     VolumeCell,
     InterfaceFace,
@@ -339,6 +380,7 @@ struct CouplingFormContribution {
     CouplingFormInstallOptionsDeclaration install_options_declaration{};
     systems::FormInstallOptions install_options{};
     forms::FormExpr residual;
+    std::vector<CouplingPayloadExtractionRequest> payload_extractions;
 };
 
 struct CouplingEquationContributionRequest {
@@ -526,6 +568,7 @@ struct CouplingContractDeclaration {
     std::vector<CouplingGeometryTerminalRequirement> geometry_requirements;
     std::vector<CouplingBlockExpectation> expected_blocks;
     std::vector<CouplingExchangeDeclaration> partitioned_exchange_declarations;
+    std::vector<CouplingPayloadExtractionRequest> payload_extraction_requests;
     std::vector<CouplingGroupHint> group_hints;
 };
 

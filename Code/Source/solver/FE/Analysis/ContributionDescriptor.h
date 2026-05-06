@@ -21,6 +21,7 @@
  */
 
 #include "Core/Types.h"
+#include "Analysis/FormRuntimeMetadata.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include <cstdint>
@@ -285,6 +286,9 @@ struct ContributionDescriptor {
     std::optional<BalanceDescriptor> balance;
     std::vector<PairingDescriptor> pairings;
     std::optional<TransportCharacter> transport_character;
+    std::vector<FormParameterUsage> parameter_usages;
+    std::vector<FormCoefficientUsage> coefficient_usages;
+    std::vector<FormScaleUsage> scale_usages;
 
     // ---- Mixed-form provenance (Phase 4) ----
 

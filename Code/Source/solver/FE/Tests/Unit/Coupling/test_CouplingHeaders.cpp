@@ -11,6 +11,7 @@
 #include "Coupling/CouplingTypes.h"
 #include "Coupling/DefinitionBackedCouplingContract.h"
 #include "Coupling/MonolithicCouplingBuilder.h"
+#include "Coupling/CouplingPayloadDetangler.h"
 #include "Coupling/PartitionedCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlan.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"

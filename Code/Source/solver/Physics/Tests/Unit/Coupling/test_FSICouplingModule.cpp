@@ -8,6 +8,7 @@
 #include "Coupling/CouplingGraph.h"
 #include "Coupling/MonolithicCouplingBuilder.h"
 #include "Coupling/PartitionedCouplingPlanGenerator.h"
+#include "Analysis/FormulationRecord.h"
 #include "Core/FEException.h"
 #include "Mesh/Core/InterfaceMesh.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
@@ -260,7 +261,8 @@ struct FSIContextFixture {
                                bool include_mesh_displacement = true,
                                bool use_shared_system = true,
                                bool include_interface_topology = true,
-                               bool register_system_fields = false)
+                               bool register_system_fields = false,
+                               bool include_fluid_viscosity_metadata = true)
     {
         auto* fluid_system_ref = &fluid_system;
         auto* solid_system_ref = use_shared_system ? &fluid_system : &solid_system;
@@ -314,6 +316,26 @@ struct FSIContextFixture {
             }
         }
 
+        if (include_fluid_viscosity_metadata) {
+            FE::analysis::FormulationRecord record;
+            record.operator_tag = "fluid_equations";
+            record.active_fields = {fluid_velocity_id, fluid_pressure_id};
+            record.constitutive_laws.push_back(
+                FE::analysis::ConstitutiveLawMetadata{
+                    .name = "test.dynamic_viscosity",
+                    .role = FE::analysis::ConstitutiveLawRole::
+                        DynamicViscosity,
+                    .input_measure =
+                        FE::analysis::ConstitutiveLawInputMeasure::
+                            SymmetricGradientSecondInvariant,
+                    .primary_field = fluid_velocity_id,
+                    .constant_value_available = true,
+                    .constant_value = 0.01,
+                    .source_operator_tag = "fluid_equations",
+                });
+            fluid_system_ref->addFormulationRecord(std::move(record));
+        }
+
         if (include_interface_topology) {
             fluid_system_ref->setInterfaceMesh(
                 fluid_marker,
@@ -350,6 +372,8 @@ struct FSIContextFixture {
                    .participant_name = "fluid",
                    .system_name = fluid_system_name,
                    .system = fluid_system_ref,
+                   .import_formulation_metadata =
+                       include_fluid_viscosity_metadata,
                })
             .addParticipant(fec::CouplingParticipantRef{
                 .participant_name = "solid",
@@ -643,7 +667,7 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     const FSICouplingModule module(options);
     const auto declaration = module.declare();
 
-    ASSERT_EQ(declaration.partitioned_exchange_declarations.size(), 2u);
+    ASSERT_EQ(declaration.partitioned_exchange_declarations.size(), 1u);
     const auto& displacement = declaration.partitioned_exchange_declarations[0];
     EXPECT_EQ(displacement.producer_port.contract_instance_name, "fsi");
     EXPECT_EQ(displacement.producer_port.port_name, "solid_displacement");
@@ -665,17 +689,19 @@ TEST(FSICouplingModule, DeclaresPartitionedExchanges)
     EXPECT_FALSE(displacement.consumer_region.has_value());
     EXPECT_EQ(displacement.transfer.kind, fec::CouplingTransferKind::Identity);
 
-    const auto& load = declaration.partitioned_exchange_declarations[1];
-    EXPECT_EQ(load.producer_port.port_name, "fluid_load");
-    EXPECT_EQ(load.consumer_port.port_name, "solid_load");
-    ASSERT_TRUE(load.producer.has_value());
-    EXPECT_EQ(load.producer->participant_name, "fluid");
-    EXPECT_EQ(load.producer->temporal.slot,
-              fec::CouplingTemporalSlot::Current);
-    ASSERT_TRUE(load.consumer.has_value());
-    EXPECT_EQ(load.consumer->participant_name, "solid");
-    EXPECT_EQ(load.consumer->temporal.slot,
-              fec::CouplingTemporalSlot::Current);
+    ASSERT_EQ(declaration.payload_extraction_requests.size(), 1u);
+    const auto& load = declaration.payload_extraction_requests.front();
+    EXPECT_EQ(load.exchange_name, "fluid_load");
+    EXPECT_EQ(load.contribution_name,
+              "fsi.fsi_interface.fluid_traction_balance");
+    EXPECT_EQ(load.producer_port_name, "fluid_load");
+    EXPECT_EQ(load.consumer_port_name, "solid_load");
+    EXPECT_EQ(load.producer_participant_name, "fluid");
+    EXPECT_EQ(load.consumer_participant_name, "solid");
+    EXPECT_EQ(load.preferred_kind,
+              fec::CouplingPayloadKind::CoefficientExpression);
+    EXPECT_EQ(load.fallback_policy,
+              fec::CouplingPayloadFallbackPolicy::WarnAndUseResidualRecipe);
 
     ASSERT_EQ(declaration.group_hints.size(), 1u);
     EXPECT_EQ(declaration.group_hints[0].name, "fsi_participants");
@@ -715,6 +741,17 @@ TEST(FSICouplingModule, ValidatesPartitionedIdentityTransfersWithResolvedRegions
     ASSERT_EQ(plan.exchanges.size(), 2u);
     EXPECT_EQ(plan.exchanges[0].producer.field_id, static_cast<FE::FieldId>(3));
     EXPECT_EQ(plan.exchanges[0].consumer.field_id, static_cast<FE::FieldId>(1));
+    ASSERT_TRUE(plan.exchanges[1].extracted_payload.has_value());
+    EXPECT_EQ(plan.exchanges[1].extracted_payload->payload_kind,
+              fec::CouplingPayloadKind::CoefficientExpression);
+    EXPECT_TRUE(containsFormExprType(
+        *plan.exchanges[1].extracted_payload->payload_expression.node(),
+        forms::FormExprType::Gradient));
+    EXPECT_TRUE(containsFormExprType(
+        *plan.exchanges[1].extracted_payload->payload_expression.node(),
+        forms::FormExprType::SymmetricPart));
+    EXPECT_EQ(plan.exchanges[1].producer.region_data_provider_kind,
+              fec::CouplingRegionDataProviderKind::FormsCoefficientExpression);
     EXPECT_EQ(plan.exchanges[0].producer.temporal.backing,
               fec::CouplingResolvedTemporalBackingKind::SystemStateCurrent);
     EXPECT_EQ(plan.exchanges[0].consumer.temporal.backing,
@@ -798,7 +835,7 @@ TEST(FSICouplingModule, ResolvesExplicitPartitionedFieldTemporalSlots)
     EXPECT_EQ(plan.exchanges[0].consumer.temporal.backing,
               fec::CouplingResolvedTemporalBackingKind::SystemStatePredicted);
     EXPECT_EQ(plan.exchanges[1].producer.temporal.backing,
-              fec::CouplingResolvedTemporalBackingKind::SystemStatePredicted);
+              fec::CouplingResolvedTemporalBackingKind::ProviderDefined);
     EXPECT_EQ(plan.exchanges[1].consumer.temporal.backing,
               fec::CouplingResolvedTemporalBackingKind::SystemStateHistory);
     ASSERT_TRUE(plan.exchanges[1].consumer.temporal.storage_index.has_value());
@@ -938,7 +975,7 @@ TEST(FSICouplingModule, BuildsFormsAuthoredVelocityContinuity)
                                      forms::FormExprType::RestrictPlus));
 }
 
-TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
+TEST(FSICouplingModule, BuildsFormsAuthoredFluidTractionBalance)
 {
     FSIContextFixture fixture;
     const fec::CouplingFormBuilder form_builder(fixture.context);
@@ -949,7 +986,7 @@ TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
     ASSERT_EQ(contributions.size(), 2u);
     const auto* contribution = findContribution(
         contributions,
-        "fsi.fsi_interface.pressure_traction_balance");
+        "fsi.fsi_interface.fluid_traction_balance");
     ASSERT_NE(contribution, nullptr);
     EXPECT_EQ(contribution->origin, "FSICouplingModule");
     EXPECT_EQ(contribution->operator_name, "equations");
@@ -958,6 +995,8 @@ TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
                             "displacement"));
     EXPECT_TRUE(
         hasFieldUse(contribution->extra_trial_field_uses, "fluid", "pressure"));
+    EXPECT_TRUE(
+        hasFieldUse(contribution->extra_trial_field_uses, "fluid", "velocity"));
     ASSERT_EQ(contribution->terminal_provenance.size(), 1u);
     EXPECT_EQ(contribution->terminal_provenance[0].kind,
               fec::CouplingFormTerminalProvenanceKind::GeometryTerminal);
@@ -972,9 +1011,70 @@ TEST(FSICouplingModule, BuildsFormsAuthoredPressureTractionBalance)
     EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::Normal));
     EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::Gradient));
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::SymmetricPart));
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::RestrictMinus));
     EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
                                      forms::FormExprType::RestrictPlus));
+}
+
+TEST(FSICouplingModule, InfersFluidViscosityMetadataBeforeFallback)
+{
+    FSIContextFixture fixture;
+    ASSERT_FALSE(fixture.context.constitutiveLaws().empty());
+
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    FSICouplingOptions options;
+    options.fluid_viscosity = 0.0;
+    const FSICouplingModule module(options);
+
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    const auto* contribution = findContribution(
+        contributions,
+        "fsi.fsi_interface.fluid_traction_balance");
+    ASSERT_NE(contribution, nullptr);
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::Gradient));
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::SymmetricPart));
+}
+
+TEST(FSICouplingModule, AllowsPressureOnlyTractionWhenViscosityIsZero)
+{
+    FSIContextFixture fixture(FSIFieldComponents{},
+                              false,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              true,
+                              false,
+                              false);
+    const fec::CouplingFormBuilder form_builder(fixture.context);
+    FSICouplingOptions options;
+    options.fluid_viscosity = 0.0;
+    const FSICouplingModule module(options);
+
+    const auto contributions = module.buildMonolithicForms(fixture.context,
+                                                           form_builder);
+    const auto* contribution = findContribution(
+        contributions,
+        "fsi.fsi_interface.fluid_traction_balance");
+    ASSERT_NE(contribution, nullptr);
+    EXPECT_TRUE(
+        hasFieldUse(contribution->extra_trial_field_uses, "fluid", "pressure"));
+    EXPECT_FALSE(
+        hasFieldUse(contribution->extra_trial_field_uses, "fluid", "velocity"));
+    EXPECT_TRUE(containsFormExprType(*contribution->residual.node(),
+                                     forms::FormExprType::Normal));
+    EXPECT_FALSE(containsFormExprType(*contribution->residual.node(),
+                                      forms::FormExprType::Gradient));
+    EXPECT_FALSE(containsFormExprType(*contribution->residual.node(),
+                                      forms::FormExprType::SymmetricPart));
 }
 
 TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
@@ -1030,7 +1130,7 @@ TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
               nullptr);
 
     const auto* traction =
-        findMetadata(installed, "fsi.fsi_interface.pressure_traction_balance");
+        findMetadata(installed, "fsi.fsi_interface.fluid_traction_balance");
     ASSERT_NE(traction, nullptr);
     const auto* pressure_dependency =
         findInstalledDependency(*traction, solid_displacement, fluid_pressure);
@@ -1039,6 +1139,14 @@ TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
               FE::analysis::DomainKind::InterfaceFace);
     EXPECT_TRUE(pressure_dependency->contributes_matrix_block);
     ASSERT_NE(findInstalledBlock(*traction, solid_displacement, fluid_pressure),
+              nullptr);
+    const auto* traction_velocity_dependency =
+        findInstalledDependency(*traction, solid_displacement, fluid_velocity);
+    ASSERT_NE(traction_velocity_dependency, nullptr);
+    EXPECT_EQ(traction_velocity_dependency->domain,
+              FE::analysis::DomainKind::InterfaceFace);
+    EXPECT_TRUE(traction_velocity_dependency->contributes_matrix_block);
+    ASSERT_NE(findInstalledBlock(*traction, solid_displacement, fluid_velocity),
               nullptr);
 }
 
@@ -1080,7 +1188,7 @@ TEST(FSICouplingModule, ReportsALEGeometrySensitivityProvenance)
         fixture.context,
         std::span<const fec::CouplingFormContribution>(contributions));
     const auto* traction =
-        findMetadata(installed, "fsi.fsi_interface.pressure_traction_balance");
+        findMetadata(installed, "fsi.fsi_interface.fluid_traction_balance");
     ASSERT_NE(traction, nullptr);
     EXPECT_EQ(traction->geometry_sensitivity.mode,
               forms::GeometrySensitivityMode::MeshMotionUnknowns);

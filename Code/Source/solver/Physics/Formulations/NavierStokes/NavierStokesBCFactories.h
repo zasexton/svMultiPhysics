@@ -33,28 +33,6 @@ namespace Factories {
 
 namespace detail {
 
-[[nodiscard]] inline std::string markerName(std::string_view prefix, int boundary_marker)
-{
-    std::string out;
-    out.reserve(prefix.size() + 1 + 20);
-    out.append(prefix.data(), prefix.size());
-    out.push_back('_');
-    out.append(std::to_string(boundary_marker));
-    return out;
-}
-
-[[nodiscard]] inline std::string componentName(std::string_view prefix, int boundary_marker, int component)
-{
-    std::string out;
-    out.reserve(prefix.size() + 1 + 20 + 2 + 8);
-    out.append(prefix.data(), prefix.size());
-    out.push_back('_');
-    out.append(std::to_string(boundary_marker));
-    out.append("_c");
-    out.append(std::to_string(component));
-    return out;
-}
-
 [[nodiscard]] inline FE::forms::FormExpr discreteFieldLike(const FE::forms::FormExpr& expr)
 {
     if (!expr.isValid() || !expr.node()) {
@@ -146,13 +124,8 @@ namespace detail {
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionBC");
 
-    std::vector<FE::forms::FormExpr> t_comp;
-    t_comp.reserve(static_cast<std::size_t>(dim));
-    for (int d = 0; d < dim; ++d) {
-        t_comp.push_back(FE::forms::bc::toScalarExpr(
-            bc.traction[static_cast<std::size_t>(d)],
-            detail::componentName("ns_traction_neumann", marker, d)));
-    }
+    auto t_comp = FE::forms::bc::toVectorExpr(
+        bc.traction, dim, "ns_traction_neumann", marker, FE::forms::bc::ComponentValueNameStyle::Component);
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, FE::forms::FormExpr::asVector(std::move(t_comp)));
 }
 
@@ -163,15 +136,11 @@ namespace detail {
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionRobinBC");
 
-    const auto alpha = FE::forms::bc::toScalarExpr(bc.alpha, detail::markerName("ns_traction_robin_alpha", marker));
+    const auto alpha = FE::forms::bc::toScalarExpr(
+        bc.alpha, FE::forms::bc::markerValueName("ns_traction_robin_alpha", marker));
 
-    std::vector<FE::forms::FormExpr> r_comp;
-    r_comp.reserve(static_cast<std::size_t>(dim));
-    for (int d = 0; d < dim; ++d) {
-        r_comp.push_back(FE::forms::bc::toScalarExpr(
-            bc.rhs[static_cast<std::size_t>(d)],
-            detail::componentName("ns_traction_robin_rhs", marker, d)));
-    }
+    auto r_comp = FE::forms::bc::toVectorExpr(
+        bc.rhs, dim, "ns_traction_robin_rhs", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
     return std::make_unique<FE::forms::bc::RobinBC>(
         marker, alpha, FE::forms::FormExpr::asVector(std::move(r_comp)));
@@ -185,13 +154,8 @@ namespace detail {
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toVelocityEssentialBC");
 
-    std::vector<FE::forms::FormExpr> uD_comp;
-    uD_comp.reserve(static_cast<std::size_t>(dim));
-    for (int d = 0; d < dim; ++d) {
-        uD_comp.push_back(FE::forms::bc::toScalarExpr(
-            bc.value[static_cast<std::size_t>(d)],
-            detail::componentName("ns_u_dirichlet", marker, d)));
-    }
+    auto uD_comp = FE::forms::bc::toVectorExpr(
+        bc.value, dim, "ns_u_dirichlet", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
     return std::make_unique<FE::forms::bc::EssentialBC>(marker, std::move(uD_comp), std::string(symbol));
 }
@@ -202,7 +166,8 @@ namespace detail {
 {
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toPressureEssentialBC");
-    const auto value = FE::forms::bc::toScalarExpr(bc.value, detail::markerName("ns_p_dirichlet", marker));
+    const auto value =
+        FE::forms::bc::toScalarExpr(bc.value, FE::forms::bc::markerValueName("ns_p_dirichlet", marker));
     return std::make_unique<FE::forms::bc::EssentialBC>(marker, value, std::string(symbol));
 }
 
@@ -218,8 +183,10 @@ namespace detail {
     const auto max_backflow =
         FE::forms::FormExpr::constant(0.5) * (FE::forms::abs(un) - un); // max(0, -u·n)
 
-    const auto p_out = FE::forms::bc::toScalarExpr(bc.pressure, detail::markerName("ns_p_out", marker));
-    const auto beta = FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_backflow_beta", marker));
+    const auto p_out =
+        FE::forms::bc::toScalarExpr(bc.pressure, FE::forms::bc::markerValueName("ns_p_out", marker));
+    const auto beta =
+        FE::forms::bc::toScalarExpr(bc.backflow_beta, FE::forms::bc::markerValueName("ns_backflow_beta", marker));
 
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
@@ -263,7 +230,8 @@ namespace detail {
     const auto un = inner(u, n);
     const auto max_backflow = FormExpr::constant(0.5) * (abs(un) - un);
     const auto beta =
-        FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcr_backflow_beta", marker));
+        FE::forms::bc::toScalarExpr(
+            bc.backflow_beta, FE::forms::bc::markerValueName("ns_rcr_backflow_beta", marker));
 
     if (C == 0.0) {
         FE::forms::BoundaryFunctional flow_rate;
@@ -337,7 +305,8 @@ namespace detail {
     const auto un = inner(u, n);
     const auto max_backflow = FormExpr::constant(0.5) * (abs(un) - un);
     const auto beta =
-        FE::forms::bc::toScalarExpr(bc.backflow_beta, detail::markerName("ns_rcrcr_backflow_beta", marker));
+        FE::forms::bc::toScalarExpr(
+            bc.backflow_beta, FE::forms::bc::markerValueName("ns_rcrcr_backflow_beta", marker));
 
     FE::forms::BoundaryFunctional flow_rate;
     flow_rate.integrand = inner(u, n);
@@ -409,13 +378,8 @@ inline void applyVelocityNitscheBCs(
         const int marker =
             FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::applyVelocityNitscheBCs");
 
-        std::vector<FE::forms::FormExpr> uD_comp;
-        uD_comp.reserve(static_cast<std::size_t>(dim));
-        for (int d = 0; d < dim; ++d) {
-            uD_comp.push_back(FE::forms::bc::toScalarExpr(
-                bc.value[static_cast<std::size_t>(d)],
-                detail::componentName("ns_uD", marker, d)));
-        }
+        auto uD_comp = FE::forms::bc::toVectorExpr(
+            bc.value, dim, "ns_uD", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
         const auto uD = FE::forms::FormExpr::asVector(std::move(uD_comp));
         const auto diff = u - uD;

@@ -15,6 +15,7 @@
 #include "Analysis/FormExprScanner.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 
+#include "Forms/ConstitutiveModel.h"
 #include "Forms/FormExpr.h"
 #include "Forms/AffineAnalysis.h"
 #include "Spaces/H1Space.h"
@@ -22,12 +23,44 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
+#include <stdexcept>
 
 using namespace svmp::FE;
 using namespace svmp::FE::analysis;
 using namespace svmp::FE::forms;
 
 namespace {
+
+class MatrixIdentityConstitutiveModel final : public forms::ConstitutiveModel {
+public:
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& input, int /*dim*/) const override
+    {
+        return input;
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& input,
+                                       int /*dim*/,
+                                       DualWorkspace& /*workspace*/) const override
+    {
+        return input;
+    }
+
+    [[nodiscard]] std::optional<ValueKind> expectedInputKind() const override
+    {
+        return ValueKind::Matrix;
+    }
+
+    [[nodiscard]] OutputSpec outputSpec(std::size_t output_index) const override
+    {
+        if (output_index != 0u) {
+            throw std::invalid_argument("MatrixIdentityConstitutiveModel: output index out of range");
+        }
+        OutputSpec spec;
+        spec.kind = ValueKind::Matrix;
+        return spec;
+    }
+};
 
 std::shared_ptr<spaces::FunctionSpace> scalarH1() {
     return std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
@@ -111,6 +144,65 @@ TEST(FormExprScanner, ScanResultConvenience) {
     auto domains = empty.activeDomains();
     ASSERT_EQ(domains.size(), 1u);
     EXPECT_EQ(domains[0], DomainKind::Cell);  // Default when no integral nodes found
+}
+
+TEST(FormExprScanner, RuntimeMetadataForParameterCoefficientScale) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    ScalarCoefficient mu_func = [](Real, Real, Real) { return Real(2.0); };
+    auto gamma = FormExpr::parameter("gamma");
+    auto mu = FormExpr::coefficient("mu", mu_func);
+    auto expr = ((gamma * mu / FormExpr::cellDiameter()) * u * v).ds(3);
+
+    auto result = scanFormExpr(*expr.node());
+
+    ASSERT_EQ(result.parameter_usages.size(), 1u);
+    EXPECT_EQ(result.parameter_usages[0].name, "gamma");
+    EXPECT_EQ(result.parameter_usages[0].domain, DomainKind::Boundary);
+    EXPECT_EQ(result.parameter_usages[0].boundary_marker, 3);
+
+    ASSERT_EQ(result.coefficient_usages.size(), 1u);
+    EXPECT_EQ(result.coefficient_usages[0].name, "mu");
+    EXPECT_EQ(result.coefficient_usages[0].rank, FormCoefficientRank::Scalar);
+    EXPECT_EQ(result.coefficient_usages[0].domain, DomainKind::Boundary);
+
+    auto scale_it = std::find_if(
+        result.scale_usages.begin(), result.scale_usages.end(),
+        [](const FormScaleUsage& usage) {
+            return usage.h_power == -1 &&
+                   std::find(usage.parameter_names.begin(),
+                             usage.parameter_names.end(),
+                             "gamma") != usage.parameter_names.end() &&
+                   std::find(usage.coefficient_names.begin(),
+                             usage.coefficient_names.end(),
+                             "mu") != usage.coefficient_names.end();
+        });
+    ASSERT_NE(scale_it, result.scale_usages.end());
+    EXPECT_EQ(scale_it->domain, DomainKind::Boundary);
+    EXPECT_EQ(scale_it->boundary_marker, 3);
+    EXPECT_TRUE(scale_it->exact_for_analysis);
+}
+
+TEST(FormExprScanner, InfersGenericConstitutiveMetadataFromDag) {
+    auto space = vectorH1();
+    auto u = FormExpr::stateField(7, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto model = std::make_shared<MatrixIdentityConstitutiveModel>();
+    auto sigma = FormExpr::constitutive(model, grad(u));
+    auto expr = inner(sigma, grad(v)).dx();
+
+    auto result = scanFormExpr(*expr.node());
+
+    ASSERT_EQ(result.constitutive_laws.size(), 1u);
+    const auto& law = result.constitutive_laws.front();
+    EXPECT_NE(law.name.find("constitutive:type:"), std::string::npos);
+    EXPECT_EQ(law.primary_field, 7);
+    EXPECT_EQ(law.tensor_rank, "rank2");
+    EXPECT_EQ(law.symmetry_class, "");
+    EXPECT_EQ(law.model.get(), model.get());
+    EXPECT_FALSE(law.state_dependent);
+    EXPECT_FALSE(law.time_dependent);
 }
 
 // ============================================================================

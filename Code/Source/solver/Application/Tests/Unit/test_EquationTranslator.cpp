@@ -162,6 +162,53 @@ TEST(EquationTranslatorNodePressureConstraints, BuildInputPopulatesNodePressureC
   EXPECT_EQ(input.node_pressure_constraints->values_file_path, "known_pressure_nodes.csv");
 }
 
+TEST(EquationTranslatorPrecision, BuildInputPreservesHighPrecisionBoundaryValues)
+{
+  auto mesh = buildTranslatorMesh();
+  mesh->base().register_label("loaded", 42);
+
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="ustruct">
+  <Add_BC name="loaded">
+    <Type>Neumann</Type>
+    <Value>4811974.1220499845</Value>
+    <Follower_pressure_load>true</Follower_pressure_load>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  ASSERT_EQ(input.boundary_conditions.size(), 1u);
+  const auto value = input.boundary_conditions.front().params.at("Value").value;
+  EXPECT_EQ(value, "4811974.1220499845");
+}
+
+TEST(EquationTranslatorOutputs, BuildInputCopiesOutputBlocks)
+{
+  auto mesh = buildTranslatorMesh();
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="ustruct">
+  <Output type="Spatial">
+    <Jacobian>true</Jacobian>
+    <Stress>false</Stress>
+    <Cauchy_stress>true</Cauchy_stress>
+  </Output>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  ASSERT_EQ(input.outputs.size(), 1u);
+  EXPECT_EQ(input.outputs.front().type, "Spatial");
+  EXPECT_EQ(input.outputs.front().params.at("Jacobian").value, "1");
+  EXPECT_TRUE(input.outputs.front().params.at("Jacobian").defined);
+  EXPECT_EQ(input.outputs.front().params.at("Stress").value, "0");
+  EXPECT_TRUE(input.outputs.front().params.at("Stress").defined);
+  EXPECT_EQ(input.outputs.front().params.at("Cauchy_stress").value, "1");
+  EXPECT_TRUE(input.outputs.front().params.at("Cauchy_stress").defined);
+}
+
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)
 {
   auto mesh = buildTranslatorMesh();

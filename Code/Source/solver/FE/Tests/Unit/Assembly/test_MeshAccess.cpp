@@ -99,6 +99,38 @@ Mesh build_two_triangles_mesh() {
     return Mesh(std::move(base), svmp::MeshComm::self());
 }
 
+Mesh build_two_triangles_boundary_only_mesh() {
+    auto base = std::make_shared<MeshBase>();
+    auto& mesh = *base;
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0
+    };
+
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 3, 6};
+    const std::vector<svmp::index_t> cell2vertex = {
+        0, 1, 2,
+        1, 3, 2
+    };
+
+    std::vector<CellShape> cell_shapes(2);
+    for (auto& cs : cell_shapes) {
+        cs.family = CellFamily::Triangle;
+        cs.order = 1;
+        cs.num_corners = 3;
+    }
+
+    mesh.build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, cell_shapes);
+    mesh.finalize(svmp::MeshFinalizeOptions{
+        .codim1_storage = svmp::MeshCodim1StorageMode::BoundaryOnly,
+        .edge_storage = false,
+    });
+    return Mesh(std::move(base), svmp::MeshComm::self());
+}
+
 Mesh build_two_tetrahedra_mesh() {
     auto base = std::make_shared<MeshBase>();
     auto& mesh = *base;
@@ -242,6 +274,28 @@ TEST(MeshAccess, TwoTrianglesBoundaryAndInteriorFaces) {
     const auto adj = access.getInteriorFaceCells(1);
     EXPECT_EQ(adj.first, 0);
     EXPECT_EQ(adj.second, 1);
+}
+
+TEST(MeshAccess, BoundaryOnlyFacesResolveLocalReferenceFace)
+{
+    auto mesh = build_two_triangles_boundary_only_mesh();
+    MeshAccess access(mesh);
+
+    ASSERT_EQ(mesh.base().codim1_storage_mode(), svmp::MeshCodim1StorageMode::BoundaryOnly);
+    ASSERT_EQ(access.numCells(), 2);
+    ASSERT_EQ(mesh.base().n_faces(), 4u);
+
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mesh.base().n_faces()); ++f) {
+        const auto cells = mesh.base().face_cells(f);
+        ASSERT_NE(cells[0], svmp::INVALID_INDEX);
+        ASSERT_EQ(cells[1], svmp::INVALID_INDEX);
+
+        const auto local_face =
+            access.getLocalFaceIndex(static_cast<GlobalIndex>(f),
+                                     static_cast<GlobalIndex>(cells[0]));
+        EXPECT_GE(local_face, LocalIndex{0});
+        EXPECT_LT(local_face, LocalIndex{3});
+    }
 }
 
 TEST(MeshAccess, RevisionQueriesFollowMeshState)

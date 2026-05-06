@@ -569,6 +569,8 @@ set(FE_ANALYSIS_HEADERS
     Analysis/ProblemAnalysisContext.h
     Analysis/ProblemAnalyzer.h
     Analysis/FormulationRecord.h
+    Analysis/ConstitutiveLawMetadata.h
+    Analysis/FormRuntimeMetadata.h
     Analysis/FormAnalysisBridge.h
     Analysis/FormExprScanner.h
     Analysis/FormStructureAnalyzer.h
@@ -705,9 +707,11 @@ set(FE_ASSEMBLY_SOURCES
 
 if(FE_WITH_MESH)
     list(APPEND FE_ASSEMBLY_HEADERS
+        Assembly/CompositeMeshAccess.h
         Assembly/MeshAccess.h
     )
     list(APPEND FE_ASSEMBLY_SOURCES
+        Assembly/CompositeMeshAccess.cpp
         Assembly/MeshAccess.cpp
     )
 endif()
@@ -900,6 +904,7 @@ set(FE_COUPLING_HEADERS
     Coupling/CouplingTemporalRequirements.h
     Coupling/CouplingGeometryRequirements.h
     Coupling/MonolithicCouplingBuilder.h
+    Coupling/CouplingPayloadDetangler.h
     Coupling/PartitionedCouplingBuilder.h
     Coupling/PartitionedCouplingPlan.h
     Coupling/PartitionedCouplingPlanGenerator.h
@@ -921,6 +926,7 @@ set(FE_COUPLING_SOURCES
     Coupling/CouplingTemporalRequirements.cpp
     Coupling/CouplingGeometryRequirements.cpp
     Coupling/MonolithicCouplingBuilder.cpp
+    Coupling/CouplingPayloadDetangler.cpp
     Coupling/PartitionedCouplingBuilder.cpp
     Coupling/PartitionedCouplingPlan.cpp
     Coupling/PartitionedCouplingPlanGenerator.cpp
@@ -1079,6 +1085,7 @@ set(FE_FORMS_SOURCES
 # Constitutive sources (header-only; depends on FE/Forms boundary)
 set(FE_CONSTITUTIVE_HEADERS
     Constitutive/ModelCRTP.h
+    Constitutive/MetadataTaggedModel.h
     Constitutive/ValueChecks.h
     Constitutive/StateLayout.h
     Constitutive/StateView.h
@@ -2443,6 +2450,7 @@ if(FE_BUILD_TESTS)
         )
         if(FE_WITH_MESH)
             list(APPEND FE_ASSEMBLY_TEST_SOURCES
+                Tests/Unit/Assembly/test_CompositeMeshAccess.cpp
                 Tests/Unit/Assembly/test_MeshAccess.cpp
                 Tests/Unit/Assembly/test_MeshAccess_HighOrder.cpp
             )
@@ -2501,6 +2509,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_GeometricNonlinearity.cpp
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
+		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
 		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
@@ -2547,6 +2556,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Coupling/test_CouplingRegistry.cpp
                 Tests/Unit/Coupling/test_CouplingTypes.cpp
                 Tests/Unit/Coupling/test_MonolithicCouplingBuilder.cpp
+                Tests/Unit/Coupling/test_CouplingPayloadDetangler.cpp
                 Tests/Unit/Coupling/test_PartitionedCouplingBuilder.cpp
                 Tests/Unit/Coupling/test_PartitionedCouplingPlanGenerator.cpp
                 Tests/Unit/Coupling/test_SharedRegionRegistry.cpp

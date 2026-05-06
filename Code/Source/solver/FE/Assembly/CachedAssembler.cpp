@@ -331,6 +331,7 @@ public:
 
     [[nodiscard]] std::string name() const override { return inner_.name(); }
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return inner_.maxTemporalDerivativeOrder(); }
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override { return inner_.hasExplicitTimeDependency(); }
     [[nodiscard]] bool isSymmetric() const noexcept override { return inner_.isSymmetric(); }
     [[nodiscard]] bool isMatrixOnly() const noexcept override { return inner_.isMatrixOnly(); }
     [[nodiscard]] bool isVectorOnly() const noexcept override { return inner_.isVectorOnly(); }

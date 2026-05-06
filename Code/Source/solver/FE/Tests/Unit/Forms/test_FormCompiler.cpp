@@ -522,10 +522,41 @@ TEST(FormCompilerTest, TemporalOrderSignalsThroughKernelAndSystem)
 
     auto kernel = std::make_shared<FormKernel>(std::move(ir));
     EXPECT_EQ(kernel->maxTemporalDerivativeOrder(), 2);
+    EXPECT_FALSE(kernel->hasExplicitTimeDependency());
 
     sys.addCellKernel("op", u_field, u_field, kernel);
     EXPECT_EQ(sys.temporalOrder(), 2);
     EXPECT_TRUE(sys.isTransient());
+    EXPECT_TRUE(sys.requiresTimeAdvancement());
+}
+
+TEST(FormCompilerTest, ExplicitTimeDependencySignalsThroughKernelAndSystem)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+
+    systems::FESystem sys(mesh);
+    auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(*space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+    auto ir = compiler.compileBilinear((FormExpr::time() * u * v).dx());
+
+    EXPECT_EQ(ir.maxTimeDerivativeOrder(), 0);
+    EXPECT_FALSE(ir.isTransient());
+    EXPECT_TRUE(ir.hasExplicitTimeDependency());
+
+    auto kernel = std::make_shared<FormKernel>(std::move(ir));
+    EXPECT_EQ(kernel->maxTemporalDerivativeOrder(), 0);
+    EXPECT_TRUE(kernel->hasExplicitTimeDependency());
+
+    sys.addCellKernel("op", u_field, u_field, kernel);
+    EXPECT_EQ(sys.temporalOrder(), 0);
+    EXPECT_FALSE(sys.isTransient());
+    EXPECT_TRUE(sys.hasExplicitTimeDependency());
+    EXPECT_TRUE(sys.requiresTimeAdvancement());
 }
 
 TEST(FormCompilerTest, HessianSetsRequiredDataFlags)

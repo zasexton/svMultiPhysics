@@ -123,6 +123,197 @@ void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value
     }
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+[[nodiscard]] dofs::MeshTopologyInfo meshTopologyFromAccess(
+    const assembly::IMeshAccess& access,
+    int owner_rank)
+{
+    dofs::MeshTopologyInfo topology;
+    topology.n_cells = access.numCells();
+    topology.n_vertices = access.numVertices();
+    topology.dim = access.dimension();
+
+    FE_THROW_IF(topology.n_cells <= 0, InvalidArgumentException,
+                "FESystem::setup: meshAccess() has no cells");
+    FE_THROW_IF(topology.n_vertices <= 0, InvalidArgumentException,
+                "FESystem::setup: meshAccess() has no vertices");
+    FE_THROW_IF(topology.dim <= 0, InvalidArgumentException,
+                "FESystem::setup: meshAccess() has invalid spatial dimension");
+
+    topology.cell2vertex_offsets.resize(static_cast<std::size_t>(topology.n_cells) + 1u, 0);
+    topology.cell_gids.reserve(static_cast<std::size_t>(topology.n_cells));
+    topology.cell_owner_ranks.assign(static_cast<std::size_t>(topology.n_cells), owner_rank);
+
+    std::vector<GlobalIndex> nodes;
+    for (GlobalIndex cell = 0; cell < topology.n_cells; ++cell) {
+        access.getCellNodes(cell, nodes);
+        topology.cell_gids.push_back(static_cast<dofs::gid_t>(cell));
+        topology.cell2vertex_offsets[static_cast<std::size_t>(cell + 1)] =
+            topology.cell2vertex_offsets[static_cast<std::size_t>(cell)] +
+            static_cast<MeshOffset>(nodes.size());
+        for (const auto node : nodes) {
+            topology.cell2vertex_data.push_back(static_cast<MeshIndex>(node));
+        }
+    }
+
+    topology.vertex_gids.reserve(static_cast<std::size_t>(topology.n_vertices));
+    topology.vertex_coords.resize(static_cast<std::size_t>(topology.n_vertices) *
+                                  static_cast<std::size_t>(topology.dim));
+    for (GlobalIndex vertex = 0; vertex < topology.n_vertices; ++vertex) {
+        topology.vertex_gids.push_back(static_cast<dofs::gid_t>(vertex));
+        const auto x = access.getNodeCoordinates(vertex);
+        for (int d = 0; d < topology.dim; ++d) {
+            topology.vertex_coords[static_cast<std::size_t>(vertex) *
+                                       static_cast<std::size_t>(topology.dim) +
+                                   static_cast<std::size_t>(d)] = x[static_cast<std::size_t>(d)];
+        }
+    }
+
+    return topology;
+}
+
+[[nodiscard]] dofs::MeshTopologyInfo participantTopologyFromAccess(
+    const assembly::IMeshAccess& access,
+    const MeshParticipantInfo& participant,
+    int owner_rank)
+{
+    dofs::MeshTopologyInfo topology;
+    topology.n_cells = participant.num_cells;
+    topology.n_vertices = participant.num_vertices;
+    topology.dim = access.dimension();
+
+    FE_THROW_IF(participant.num_cells <= 0, InvalidArgumentException,
+                "FESystem::setup: participant-scoped field has no participant cells");
+    FE_THROW_IF(participant.num_vertices <= 0, InvalidArgumentException,
+                "FESystem::setup: participant-scoped field has no participant vertices");
+
+    topology.cell2vertex_offsets.resize(static_cast<std::size_t>(topology.n_cells) + 1u, 0);
+    topology.cell_gids.reserve(static_cast<std::size_t>(topology.n_cells));
+    topology.cell_owner_ranks.assign(static_cast<std::size_t>(topology.n_cells), owner_rank);
+
+    std::vector<GlobalIndex> global_nodes;
+    for (GlobalIndex local_cell = 0; local_cell < topology.n_cells; ++local_cell) {
+        const auto global_cell = participant.cell_offset + local_cell;
+        access.getCellNodes(global_cell, global_nodes);
+        topology.cell_gids.push_back(static_cast<dofs::gid_t>(global_cell));
+        topology.cell2vertex_offsets[static_cast<std::size_t>(local_cell + 1)] =
+            topology.cell2vertex_offsets[static_cast<std::size_t>(local_cell)] +
+            static_cast<MeshOffset>(global_nodes.size());
+        for (const auto global_node : global_nodes) {
+            FE_THROW_IF(global_node < participant.vertex_offset ||
+                            global_node >= participant.vertex_offset + participant.num_vertices,
+                        InvalidArgumentException,
+                        "FESystem::setup: participant cell references a vertex outside the participant");
+            topology.cell2vertex_data.push_back(
+                static_cast<MeshIndex>(global_node - participant.vertex_offset));
+        }
+    }
+
+    topology.vertex_gids.reserve(static_cast<std::size_t>(topology.n_vertices));
+    topology.vertex_coords.resize(static_cast<std::size_t>(topology.n_vertices) *
+                                  static_cast<std::size_t>(topology.dim));
+    for (GlobalIndex local_vertex = 0; local_vertex < topology.n_vertices; ++local_vertex) {
+        const auto global_vertex = participant.vertex_offset + local_vertex;
+        topology.vertex_gids.push_back(static_cast<dofs::gid_t>(global_vertex));
+        const auto x = access.getNodeCoordinates(global_vertex);
+        for (int d = 0; d < topology.dim; ++d) {
+            topology.vertex_coords[static_cast<std::size_t>(local_vertex) *
+                                       static_cast<std::size_t>(topology.dim) +
+                                   static_cast<std::size_t>(d)] = x[static_cast<std::size_t>(d)];
+        }
+    }
+
+    return topology;
+}
+
+[[nodiscard]] dofs::DofHandler remapParticipantDofHandler(
+    const dofs::DofHandler& local_handler,
+    const MeshParticipantInfo& participant,
+    const assembly::IMeshAccess& access,
+    const dofs::DofDistributionOptions& options)
+{
+    dofs::DofMap global_map(access.numCells(),
+                            local_handler.getNumDofs(),
+                            local_handler.getDofMap().getMaxDofsPerCell());
+    global_map.setNumDofs(local_handler.getNumDofs());
+    global_map.setNumLocalDofs(local_handler.getPartition().localOwnedSize());
+    global_map.setMyRank(options.my_rank);
+
+    std::vector<GlobalIndex> mapped_cell_dofs;
+    for (GlobalIndex global_cell = 0; global_cell < access.numCells(); ++global_cell) {
+        if (global_cell >= participant.cell_offset &&
+            global_cell < participant.cell_offset + participant.num_cells) {
+            const auto local_cell = global_cell - participant.cell_offset;
+            const auto dofs = local_handler.getDofMap().getCellDofs(local_cell);
+            mapped_cell_dofs.assign(dofs.begin(), dofs.end());
+        } else {
+            mapped_cell_dofs.clear();
+        }
+        global_map.setCellDofs(global_cell, mapped_cell_dofs);
+    }
+
+    std::vector<int> dof_owner_by_local_id(static_cast<std::size_t>(local_handler.getNumDofs()), 0);
+    for (GlobalIndex dof = 0; dof < local_handler.getNumDofs(); ++dof) {
+        dof_owner_by_local_id[static_cast<std::size_t>(dof)] =
+            local_handler.getDofMap().getDofOwner(dof);
+    }
+    global_map.setDofOwnership(
+        [owners = std::move(dof_owner_by_local_id)](GlobalIndex dof) {
+            if (dof < 0 || static_cast<std::size_t>(dof) >= owners.size()) {
+                return 0;
+            }
+            return owners[static_cast<std::size_t>(dof)];
+        });
+
+    dofs::DofHandler global_handler;
+    global_handler.setDofMap(std::move(global_map));
+
+    auto partition = local_handler.getPartition();
+    partition.setGlobalSize(local_handler.getNumDofs());
+    global_handler.setPartition(std::move(partition));
+    global_handler.setRankInfo(options.my_rank, options.world_size);
+
+    if (const auto* local_entities = local_handler.getEntityDofMap()) {
+        auto global_entities = std::make_unique<dofs::EntityDofMap>();
+        global_entities->reserve(access.numVertices(), 0, 0, access.numCells());
+
+        std::vector<GlobalIndex> entity_dofs;
+        for (GlobalIndex global_vertex = 0; global_vertex < access.numVertices(); ++global_vertex) {
+            entity_dofs.clear();
+            if (global_vertex >= participant.vertex_offset &&
+                global_vertex < participant.vertex_offset + participant.num_vertices) {
+                const auto local_vertex = global_vertex - participant.vertex_offset;
+                if (local_vertex < local_entities->numVertices()) {
+                    const auto dofs = local_entities->getVertexDofs(local_vertex);
+                    entity_dofs.assign(dofs.begin(), dofs.end());
+                }
+            }
+            global_entities->setVertexDofs(global_vertex, entity_dofs);
+        }
+
+        for (GlobalIndex global_cell = 0; global_cell < access.numCells(); ++global_cell) {
+            entity_dofs.clear();
+            if (global_cell >= participant.cell_offset &&
+                global_cell < participant.cell_offset + participant.num_cells) {
+                const auto local_cell = global_cell - participant.cell_offset;
+                if (local_cell < local_entities->numCells()) {
+                    const auto dofs = local_entities->getCellInteriorDofs(local_cell);
+                    entity_dofs.assign(dofs.begin(), dofs.end());
+                }
+            }
+            global_entities->setCellInteriorDofs(global_cell, entity_dofs);
+        }
+
+        global_entities->buildReverseMapping();
+        global_entities->finalize();
+        global_handler.setEntityDofMap(std::move(global_entities));
+    }
+
+    global_handler.finalize();
+    return global_handler;
+}
+#endif
+
 #if FE_HAS_MPI
 constexpr std::uint64_t kConsistencyHashSeed = 1469598103934665603ULL;
 
@@ -1805,6 +1996,22 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     }
 #endif
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::optional<dofs::MeshTopologyInfo> mesh_access_topology_override;
+    if (!mesh_ && !inputs.topology_override.has_value() && mesh_access_) {
+        mesh_access_topology_override = meshTopologyFromAccess(*mesh_access_, opts.dof_options.my_rank);
+    }
+#endif
+    const dofs::MeshTopologyInfo* active_topology_override = nullptr;
+    if (inputs.topology_override.has_value()) {
+        active_topology_override = &*inputs.topology_override;
+    }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    else if (mesh_access_topology_override.has_value()) {
+        active_topology_override = &*mesh_access_topology_override;
+    }
+#endif
+
     const auto n_fields = field_registry_.size();
     field_dof_handlers_.resize(n_fields);
     field_dof_offsets_.assign(n_fields, 0);
@@ -1864,11 +2071,33 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
 #endif
 
-        if (inputs.topology_override.has_value()) {
+        if (rec.participant_name.has_value() || rec.participant_domain_id.has_value()) {
+            FE_THROW_IF(rec.scope == FieldScope::InterfaceFace, InvalidArgumentException,
+                        "FESystem::setup: participant-scoped interface fields are not supported");
+            const auto* participant = fieldMeshParticipant(rec.id);
+            FE_CHECK_NOT_NULL(participant, "FESystem::setup: participant-scoped field participant");
+            FE_THROW_IF(mesh_access_ == nullptr, InvalidArgumentException,
+                        "FESystem::setup: participant-scoped fields require meshAccess()");
+
+            auto participant_topology =
+                participantTopologyFromAccess(*mesh_access_, *participant, opts.dof_options.my_rank);
+
+            dofs::DofHandler local_handler;
+            local_handler.distributeDofs(participant_topology, *rec.space, opts.dof_options);
+            local_handler.finalize();
+
+            return remapParticipantDofHandler(
+                local_handler,
+                *participant,
+                *mesh_access_,
+                opts.dof_options);
+        }
+
+        if (active_topology_override != nullptr) {
             FE_THROW_IF(rec.scope == FieldScope::InterfaceFace, InvalidArgumentException,
                         "FESystem::setup: interface-scoped field '" + rec.name +
                             "' requires Mesh and InterfaceMesh input; topology_override is volume-only");
-            const auto& topology = *inputs.topology_override;
+            const auto& topology = *active_topology_override;
             FE_THROW_IF(topology.n_cells <= 0, InvalidArgumentException,
                         "FESystem::setup: topology_override has no cells");
 
@@ -1880,6 +2109,12 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         FE_THROW(InvalidArgumentException,
                  "FESystem::setup: need Mesh (SVMP_FE_WITH_MESH) or topology_override for DOF distribution");
     };
+
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.participant_name.has_value() || rec.participant_domain_id.has_value()) {
+            (void)fieldMeshParticipant(rec.id);
+        }
+    }
 
     for (const auto& rec : field_registry_.records()) {
         const auto idx = static_cast<std::size_t>(rec.id);
@@ -2487,8 +2722,30 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         // vector-valued field ordering does not distort region detection.
         gauge::GaugeRegistry::RegionProvider region_provider;
         std::shared_ptr<std::map<int, std::vector<int>>> marker_regions;
+        bool allow_local_region_scoping = true;
+#if FE_HAS_MPI
         {
-            if (mesh_access_) {
+            int mpi_initialized = 0;
+            MPI_Initialized(&mpi_initialized);
+            if (mpi_initialized) {
+                int world_size = 1;
+                int rank = 0;
+                MPI_Comm_size(dof_handler_.mpiComm(), &world_size);
+                MPI_Comm_rank(dof_handler_.mpiComm(), &rank);
+                if (world_size > 1) {
+                    allow_local_region_scoping = false;
+                    if (rank == 0) {
+                        std::fprintf(stderr,
+                            "[GaugeRegistry] MPI run: using global gauge scoping; "
+                            "per-region gauge scoping requires globally consistent "
+                            "connected-component labels.\n");
+                    }
+                }
+            }
+        }
+#endif
+        {
+            if (mesh_access_ && allow_local_region_scoping) {
                 const auto& mesh_ref = meshAccess();
                 auto topo = analysis::TopologyAnalysisContext::build(mesh_ref);
                 if (topo.numRegions() > 1) {
@@ -4359,6 +4616,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 form_chars.required_data |= k->getRequiredData();
                 form_chars.max_time_derivative_order =
                     std::max(form_chars.max_time_derivative_order, k->maxTemporalDerivativeOrder());
+                form_chars.has_explicit_time_dependency =
+                    form_chars.has_explicit_time_dependency || k->hasExplicitTimeDependency();
                 form_chars.has_field_requirements = form_chars.has_field_requirements || !k->fieldRequirements().empty();
                 form_chars.has_parameter_specs = form_chars.has_parameter_specs || !k->parameterSpecs().empty();
             };
@@ -4508,6 +4767,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 assembly::hasFlag(required, assembly::RequiredData::SolutionHessians) ||
                 assembly::hasFlag(required, assembly::RequiredData::SolutionLaplacians) ||
                 assembly::hasFlag(required, assembly::RequiredData::MaterialState) ||
+                kernel_to_wrap->hasExplicitTimeDependency() ||
                 kernel_to_wrap->maxTemporalDerivativeOrder() > 0) {
                 continue;
             }
@@ -4837,6 +5097,83 @@ void FESystem::buildAssemblyPlans()
         const auto& def = operator_registry_.get(tag);
         auto& plan = assembly_plan_by_op_[tag];
 
+        auto common_participant_scope =
+            [&](const FieldRecord& test_field,
+                const FieldRecord& trial_field,
+                std::string_view context) -> std::string {
+            const auto* test_participant = fieldMeshParticipant(test_field.id);
+            const auto* trial_participant = fieldMeshParticipant(trial_field.id);
+            if (test_participant != nullptr && trial_participant != nullptr) {
+                FE_THROW_IF(test_participant->name != trial_participant->name,
+                            InvalidArgumentException,
+                            "FESystem::buildAssemblyPlans: " + std::string(context) +
+                                " term couples fields on different mesh participants");
+                return test_participant->name;
+            }
+            if (test_participant != nullptr) {
+                return test_participant->name;
+            }
+            if (trial_participant != nullptr) {
+                return trial_participant->name;
+            }
+            return {};
+        };
+
+        auto merge_participant_scope =
+            [](std::string current,
+               std::string next,
+               std::string_view context) -> std::string {
+            if (next.empty()) {
+                return current;
+            }
+            FE_THROW_IF(!current.empty() && current != next,
+                        InvalidArgumentException,
+                        "FESystem::buildAssemblyPlans: " + std::string(context) +
+                            " term references fields on different mesh participants");
+            return next;
+        };
+
+        auto field_participant_scope =
+            [&](FieldId field) -> std::string {
+            if (field == INVALID_FIELD_ID || !field_registry_.has(field)) {
+                return {};
+            }
+            const auto* participant = fieldMeshParticipant(field);
+            if (participant == nullptr) {
+                return {};
+            }
+            return participant->name;
+        };
+
+        auto kernel_participant_scope =
+            [&](const assembly::AssemblyKernel& kernel,
+                std::string_view context) -> std::string {
+            std::string scope;
+            for (const auto& req : kernel.fieldRequirements()) {
+                scope = merge_participant_scope(
+                    std::move(scope),
+                    field_participant_scope(req.field),
+                    context);
+            }
+            return scope;
+        };
+
+        auto validate_boundary_scope =
+            [&](int marker, std::string_view participant_name) {
+            if (participant_name.empty()) {
+                return;
+            }
+            meshAccess().forEachBoundaryFace(marker, [&](GlobalIndex, GlobalIndex cell_id) {
+                const auto* owner = meshParticipantForCell(cell_id);
+                FE_THROW_IF(owner == nullptr || owner->name != participant_name,
+                            InvalidArgumentException,
+                            "FESystem::buildAssemblyPlans: boundary marker " +
+                                std::to_string(marker) +
+                                " does not belong to mesh participant '" +
+                                std::string(participant_name) + "'");
+            });
+        };
+
         plan.cell_terms.reserve(def.cells.size());
         for (const auto& term : def.cells) {
             FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: cell kernel");
@@ -4886,11 +5223,24 @@ void FESystem::buildAssemblyPlans()
                 bool any_active = false;
                 bool matrix_capable = false;
                 bool vector_capable = false;
+                std::string participant_scope;
                 for (std::size_t bi = 0; bi < monolithic->numBlocks(); ++bi) {
                     const auto& bs = monolithic->blockSpec(bi);
                     if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) {
                         continue;
                     }
+                    const auto& b_test_field = field_registry_.get(bs.test_field);
+                    const auto& b_trial_field = field_registry_.get(bs.trial_field);
+                    const auto block_scope =
+                        common_participant_scope(b_test_field, b_trial_field, "monolithic cell");
+                    participant_scope = merge_participant_scope(
+                        std::move(participant_scope),
+                        block_scope,
+                        "monolithic cell");
+                    participant_scope = merge_participant_scope(
+                        std::move(participant_scope),
+                        kernel_participant_scope(*bs.fallback_kernel, "monolithic cell"),
+                        "monolithic cell");
                     any_active = true;
                     matrix_capable = matrix_capable || bs.want_matrix;
                     vector_capable = vector_capable || bs.want_vector;
@@ -4910,6 +5260,7 @@ void FESystem::buildAssemblyPlans()
                     first_bs.col_dof_map,
                     first_bs.row_dof_offset,
                     first_bs.col_dof_offset,
+                    participant_scope,
                     assembly::SemanticKernelKind::MonolithicCell,
                     matrix_capable,
                     vector_capable});
@@ -4951,11 +5302,24 @@ void FESystem::buildAssemblyPlans()
                 bool any_active = false;
                 bool matrix_capable = false;
                 bool vector_capable = false;
+                std::string participant_scope;
                 for (std::size_t bi = 0; bi < mixed_block->numBlocks(); ++bi) {
                     const auto& bs = mixed_block->blockSpec(bi);
                     if (!bs.fallback_kernel || !bs.fallback_kernel->hasCell()) {
                         continue;
                     }
+                    const auto& b_test_field = field_registry_.get(bs.test_field);
+                    const auto& b_trial_field = field_registry_.get(bs.trial_field);
+                    const auto block_scope =
+                        common_participant_scope(b_test_field, b_trial_field, "mixed-block cell");
+                    participant_scope = merge_participant_scope(
+                        std::move(participant_scope),
+                        block_scope,
+                        "mixed-block cell");
+                    participant_scope = merge_participant_scope(
+                        std::move(participant_scope),
+                        kernel_participant_scope(*bs.fallback_kernel, "mixed-block cell"),
+                        "mixed-block cell");
                     any_active = true;
                     matrix_capable = matrix_capable || bs.want_matrix;
                     vector_capable = vector_capable || bs.want_vector;
@@ -4975,6 +5339,7 @@ void FESystem::buildAssemblyPlans()
                     first_bs.col_dof_map,
                     first_bs.row_dof_offset,
                     first_bs.col_dof_offset,
+                    participant_scope,
                     assembly::SemanticKernelKind::MixedBlockSet,
                     matrix_capable,
                     vector_capable});
@@ -4988,6 +5353,12 @@ void FESystem::buildAssemblyPlans()
 
             const auto test_idx = static_cast<std::size_t>(test_field.id);
             const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            auto participant_scope =
+                common_participant_scope(test_field, trial_field, "cell");
+            participant_scope = merge_participant_scope(
+                std::move(participant_scope),
+                kernel_participant_scope(*term.kernel, "cell"),
+                "cell");
             FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
                         InvalidStateException,
                         "FESystem::buildAssemblyPlans: invalid cell test field");
@@ -5005,6 +5376,7 @@ void FESystem::buildAssemblyPlans()
                 &field_dof_handlers_[trial_idx].getDofMap(),
                 field_dof_offsets_[test_idx],
                 field_dof_offsets_[trial_idx],
+                participant_scope,
                 term.kernel->semanticKernelKind(),
                 !term.kernel->isVectorOnly(),
                 !term.kernel->isMatrixOnly()});
@@ -5020,6 +5392,13 @@ void FESystem::buildAssemblyPlans()
 
             const auto test_idx = static_cast<std::size_t>(test_field.id);
             const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            auto participant_scope =
+                common_participant_scope(test_field, trial_field, "boundary");
+            participant_scope = merge_participant_scope(
+                std::move(participant_scope),
+                kernel_participant_scope(*term.kernel, "boundary"),
+                "boundary");
+            validate_boundary_scope(term.marker, participant_scope);
             FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
                         InvalidStateException,
                         "FESystem::buildAssemblyPlans: invalid boundary test field");
@@ -5038,6 +5417,7 @@ void FESystem::buildAssemblyPlans()
                 &field_dof_handlers_[trial_idx].getDofMap(),
                 field_dof_offsets_[test_idx],
                 field_dof_offsets_[trial_idx],
+                participant_scope,
                 !term.kernel->isVectorOnly(),
                 !term.kernel->isMatrixOnly()});
         }

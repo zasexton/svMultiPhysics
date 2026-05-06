@@ -15,6 +15,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 
+#include <algorithm>
 #include <set>
 
 using namespace svmp::FE;
@@ -159,6 +160,112 @@ TEST(FormContributionLowerer, StabilizedPressure) {
 
     ASSERT_EQ(contributions.size(), 1u);
     EXPECT_EQ(contributions[0].role, ContributionRole::StabilizationBlock);
+}
+
+TEST(FormContributionLowerer, CarriesRuntimeScaleMetadata) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    ScalarCoefficient k_func = [](Real, Real, Real) { return Real(4.0); };
+    auto alpha = FormExpr::parameter("alpha");
+    auto k = FormExpr::coefficient("k", k_func);
+    auto residual =
+        ((alpha * k / FormExpr::cellDiameter()) * inner(u, v)).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    const auto& d = contributions[0];
+    ASSERT_EQ(d.parameter_usages.size(), 1u);
+    EXPECT_EQ(d.parameter_usages[0].name, "alpha");
+    ASSERT_EQ(d.coefficient_usages.size(), 1u);
+    EXPECT_EQ(d.coefficient_usages[0].name, "k");
+    ASSERT_FALSE(d.scale_usages.empty());
+    EXPECT_TRUE(d.scaling.has_value());
+
+    const auto scale_it = std::find_if(
+        d.scale_usages.begin(), d.scale_usages.end(),
+        [](const FormScaleUsage& usage) {
+            return usage.h_power == -1 &&
+                   std::find(usage.parameter_names.begin(),
+                             usage.parameter_names.end(),
+                             "alpha") != usage.parameter_names.end() &&
+                   std::find(usage.coefficient_names.begin(),
+                             usage.coefficient_names.end(),
+                             "k") != usage.coefficient_names.end();
+        });
+    ASSERT_NE(scale_it, d.scale_usages.end());
+    EXPECT_TRUE(scale_it->exact_for_analysis);
+}
+
+TEST(FormContributionLowerer, NestedCellDiameterStabilizedPressure) {
+    auto space = scalarH1();
+    auto p = FormExpr::stateField(0, *space, "p");
+    auto q = FormExpr::testFunction(*space, "q");
+    auto h = FormExpr::constant(0.5) * FormExpr::cellDiameter();
+    auto tau = FormExpr::constant(1e-3) * (h / FormExpr::constant(2.0));
+    auto residual = (tau * inner(grad(p), grad(q))).dx();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.has_stabilization_terms = true;
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions[0].role, ContributionRole::StabilizationBlock);
+}
+
+TEST(FormContributionLowerer, MixedPairReceivesStabilizationSurrogateFlag) {
+    auto vel_space = vectorH1();
+    auto pres_space = scalarH1();
+
+    auto u = FormExpr::stateField(1, *vel_space, "u");
+    auto p = FormExpr::stateField(2, *pres_space, "p");
+    auto v = FormExpr::testFunction(*vel_space, "v");
+    auto q = FormExpr::testFunction(*pres_space, "q");
+
+    auto momentum = (inner(grad(u), grad(v)) + FormExpr::constant(-1.0) * p * div(v)).dx();
+    auto h = FormExpr::constant(0.5) * FormExpr::cellDiameter();
+    auto pressure_stabilization =
+        (FormExpr::constant(1e-3) * h * inner(grad(p), grad(q))).dx();
+    auto continuity = (q * div(u)).dx() + pressure_stabilization;
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {1, 2};
+    rec.residual_expr = (momentum + continuity).nodeShared();
+    rec.has_stabilization_terms = true;
+    rec.is_mixed = true;
+    rec.block_residual_exprs.push_back({{1, 1}, momentum.nodeShared()});
+    rec.block_residual_exprs.push_back({{2, 2}, continuity.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    bool found_stabilized_pairing = false;
+    for (const auto& contribution : contributions) {
+        for (const auto& pairing : contribution.pairings) {
+            const bool involves_mixed_pair =
+                ((pairing.row_var.field_id == FieldId{1} &&
+                  pairing.col_var.field_id == FieldId{2}) ||
+                 (pairing.row_var.field_id == FieldId{2} &&
+                  pairing.col_var.field_id == FieldId{1}));
+            if (involves_mixed_pair && pairing.has_stabilizing_surrogate) {
+                found_stabilized_pairing = true;
+            }
+        }
+    }
+
+    EXPECT_TRUE(found_stabilized_pairing);
 }
 
 // ============================================================================

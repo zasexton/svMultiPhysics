@@ -12,6 +12,7 @@
 #include "Core/FEException.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -54,6 +55,8 @@ struct FieldSpec {
     int components{1};
     FieldScope scope{FieldScope::VolumeCell};
     int interface_marker{-1};
+    std::optional<std::string> participant_name{};
+    std::optional<int> participant_domain_id{};
     FieldSourceKind source_kind{FieldSourceKind::Unknown};
     DerivedFieldMetadata derived{};
 };
@@ -65,6 +68,8 @@ struct FieldRecord {
     int components{1};
     FieldScope scope{FieldScope::VolumeCell};
     int interface_marker{-1};
+    std::optional<std::string> participant_name{};
+    std::optional<int> participant_domain_id{};
     FieldSourceKind source_kind{FieldSourceKind::Unknown};
     DerivedFieldMetadata derived{};
 

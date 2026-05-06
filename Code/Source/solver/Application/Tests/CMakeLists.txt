@@ -10,7 +10,9 @@ enable_testing()
 add_executable(test_application
   Unit/test_EquationTranslator.cpp
   Unit/test_LegacyParameterStubs.cpp
+  Unit/test_MeshCollection.cpp
   Unit/test_MeshTranslator.cpp
+  ../Core/MeshCollection.cpp
   ../Translators/EquationTranslator.cpp
   ../Translators/MeshTranslator.cpp
   ../../Parameters.cpp

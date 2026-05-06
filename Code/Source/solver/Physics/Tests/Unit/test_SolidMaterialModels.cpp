@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Materials/Solid/LinearElasticStress.h"
+#include "Physics/Materials/Solid/IsochoricNeoHookeanPK1.h"
 #include "Physics/Materials/Solid/NeoHookeanPK1.h"
 
 #include "FE/Forms/Dual.h"
@@ -147,7 +148,78 @@ TEST(NeoHookeanPK1, DerivativeMatchesFiniteDifferenceForSingleEntry)
     EXPECT_NEAR(ad, fd, std::max(1e-9, 2e-5 * std::abs(fd)));
 }
 
+TEST(IsochoricNeoHookeanPK1, IdentityDeformationGivesZeroStress)
+{
+    materials::solid::IsochoricNeoHookeanPK1 model(/*mu=*/2.0);
+
+    FE::forms::Value<FE::Real> F;
+    F.kind = FE::forms::Value<FE::Real>::Kind::Matrix;
+    F.resizeMatrix(3, 3);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            F.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) = (i == j) ? 1.0 : 0.0;
+        }
+    }
+
+    const auto P = model.evaluate(F, /*dim=*/3);
+    ASSERT_EQ(P.kind, FE::forms::Value<FE::Real>::Kind::Matrix);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            EXPECT_NEAR(P.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), 0.0, 1e-14);
+        }
+    }
+}
+
+TEST(IsochoricNeoHookeanPK1, DerivativeMatchesFiniteDifferenceForSingleEntry)
+{
+    materials::solid::IsochoricNeoHookeanPK1 model(/*mu=*/2.0);
+
+    FE::forms::Value<FE::Real> F;
+    F.kind = FE::forms::Value<FE::Real>::Kind::Matrix;
+    F.resizeMatrix(3, 3);
+    F.matrixAt(0, 0) = 1.10;
+    F.matrixAt(0, 1) = 0.02;
+    F.matrixAt(0, 2) = -0.01;
+    F.matrixAt(1, 0) = 0.03;
+    F.matrixAt(1, 1) = 0.95;
+    F.matrixAt(1, 2) = 0.00;
+    F.matrixAt(2, 0) = 0.00;
+    F.matrixAt(2, 1) = -0.02;
+    F.matrixAt(2, 2) = 1.05;
+
+    const FE::Real eps = 1e-6;
+    auto Fp = F;
+    auto Fm = F;
+    Fp.matrixAt(0, 0) += eps;
+    Fm.matrixAt(0, 0) -= eps;
+
+    const FE::Real P00 = model.evaluate(F, /*dim=*/3).matrixAt(0, 0);
+    const FE::Real P00p = model.evaluate(Fp, /*dim=*/3).matrixAt(0, 0);
+    const FE::Real P00m = model.evaluate(Fm, /*dim=*/3).matrixAt(0, 0);
+    const FE::Real fd = (P00p - P00m) / (2.0 * eps);
+
+    FE::forms::DualWorkspace ws;
+    ws.reset(1);
+
+    FE::forms::Value<FE::forms::Dual> Fd;
+    Fd.kind = FE::forms::Value<FE::forms::Dual>::Kind::Matrix;
+    Fd.resizeMatrix(3, 3);
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            const FE::Real val = F.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j));
+            Fd.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)) =
+                FE::forms::makeDualConstant(val, ws.alloc());
+        }
+    }
+    Fd.matrixAt(0, 0).deriv[0] = 1.0;
+
+    const auto Pd = model.evaluate(Fd, /*dim=*/3, ws);
+    const FE::Real ad = Pd.matrixAt(0, 0).deriv[0];
+
+    EXPECT_NEAR(Pd.matrixAt(0, 0).value, P00, 1e-14);
+    EXPECT_NEAR(ad, fd, std::max(1e-9, 2e-5 * std::abs(fd)));
+}
+
 } // namespace test
 } // namespace Physics
 } // namespace svmp
-

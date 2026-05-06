@@ -16,6 +16,7 @@
 #include "Coupling/CouplingFormBuilder.h"
 #include "Coupling/PartitionedCouplingBuilder.h"
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -109,11 +110,194 @@ struct CouplingSidePairedPDERequest {
     std::vector<CouplingOptionalFieldRoleRequest> optional_fields;
     std::optional<CouplingContractInterfaceFieldRequest> interface_field;
     std::vector<CouplingPartitionedFieldChannelRequest> partitioned_channels;
+    std::vector<CouplingPayloadExtractionRequest> partitioned_payload_extractions;
     std::optional<CouplingPartitionedGroupRequest> partitioned_group;
     bool infer_partitioned_group{true};
     bool infer_partitioned_channel_shared_regions{true};
     bool infer_partitioned_channel_ports{true};
     CouplingMonolithicFormsCallback monolithic_forms;
+};
+
+class CouplingDefinitionBuilder;
+
+struct CouplingFieldRoleHandle {
+    CouplingFieldUse field;
+    CouplingValueDescriptor value;
+};
+
+class CouplingSidePairedPDEBuilder;
+
+class CouplingOptionalFieldRoleBuilder {
+public:
+    CouplingOptionalFieldRoleBuilder(CouplingSidePairedPDEBuilder& builder,
+                                     std::size_t role_index);
+
+    CouplingOptionalFieldRoleBuilder& diagnostic(
+        CouplingDiagnostic missing_field_diagnostic);
+    CouplingSidePairedPDEBuilder& requiredWhen(bool enabled);
+
+private:
+    CouplingSidePairedPDEBuilder* builder_{nullptr};
+    std::size_t role_index_{0};
+};
+
+class CouplingInterfaceFieldBuilder {
+public:
+    explicit CouplingInterfaceFieldBuilder(
+        CouplingSidePairedPDEBuilder& builder);
+
+    CouplingInterfaceFieldBuilder& enabled(bool enabled);
+    CouplingInterfaceFieldBuilder& name(std::string field_name);
+    CouplingInterfaceFieldBuilder& space(
+        std::shared_ptr<const spaces::FunctionSpace> space);
+    CouplingInterfaceFieldBuilder& components(int components);
+    CouplingInterfaceFieldBuilder& fieldNamespace(std::string field_namespace);
+    CouplingInterfaceFieldBuilder& systemParticipant(
+        std::optional<std::string> participant_name);
+    CouplingInterfaceFieldBuilder& systemParticipant(
+        std::string participant_name);
+    CouplingInterfaceFieldBuilder& sharedRegion(std::string shared_region_name);
+    CouplingInterfaceFieldBuilder& requirement(CouplingRequirement requirement);
+    CouplingInterfaceFieldBuilder& localEliminationPolicy(
+        CouplingLocalEliminationPolicy policy);
+
+private:
+    [[nodiscard]] CouplingContractInterfaceFieldRequest& request();
+
+    CouplingSidePairedPDEBuilder* builder_{nullptr};
+};
+
+class CouplingPartitionedExchangeAuthoringBuilder {
+public:
+    CouplingPartitionedExchangeAuthoringBuilder(
+        CouplingSidePairedPDEBuilder& builder,
+        std::size_t channel_index);
+
+    CouplingPartitionedExchangeAuthoringBuilder& from(
+        const CouplingFieldRoleHandle& producer_field);
+    CouplingPartitionedExchangeAuthoringBuilder& to(
+        const CouplingFieldRoleHandle& consumer_field);
+    CouplingPartitionedExchangeAuthoringBuilder& transfer(
+        CouplingTransferDeclaration declaration);
+    CouplingPartitionedExchangeAuthoringBuilder& strategy(
+        CouplingPartitionedStrategyDeclaration declaration);
+    CouplingPartitionedExchangeAuthoringBuilder& producerTemporal(
+        CouplingTemporalSlotDescriptor temporal);
+    CouplingPartitionedExchangeAuthoringBuilder& consumerTemporal(
+        CouplingTemporalSlotDescriptor temporal);
+    CouplingPartitionedExchangeAuthoringBuilder& producerPort(
+        std::string port_name);
+    CouplingPartitionedExchangeAuthoringBuilder& consumerPort(
+        std::string port_name);
+    CouplingPartitionedExchangeAuthoringBuilder& sharedRegion(
+        std::string shared_region_name);
+
+private:
+    [[nodiscard]] CouplingPartitionedFieldChannelRequest& channel();
+
+    CouplingSidePairedPDEBuilder* builder_{nullptr};
+    std::size_t channel_index_{0};
+};
+
+class CouplingPartitionedPayloadExtractionAuthoringBuilder {
+public:
+    CouplingPartitionedPayloadExtractionAuthoringBuilder(
+        CouplingSidePairedPDEBuilder& builder,
+        std::size_t extraction_index);
+
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& contribution(
+        std::string contribution_name);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& from(
+        const CouplingFieldRoleHandle& producer_field);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& to(
+        const CouplingFieldRoleHandle& consumer_field);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& preferred(
+        CouplingPayloadKind kind);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& fallback(
+        CouplingPayloadFallbackPolicy policy);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& transfer(
+        CouplingTransferDeclaration declaration);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& strategy(
+        CouplingPartitionedStrategyDeclaration declaration);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& producerTemporal(
+        CouplingTemporalSlotDescriptor temporal);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& consumerTemporal(
+        CouplingTemporalSlotDescriptor temporal);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& producerPort(
+        std::string port_name);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& consumerPort(
+        std::string port_name);
+    CouplingPartitionedPayloadExtractionAuthoringBuilder& sharedRegion(
+        std::string shared_region_name);
+
+private:
+    [[nodiscard]] CouplingPayloadExtractionRequest& request();
+
+    CouplingSidePairedPDEBuilder* builder_{nullptr};
+    std::size_t extraction_index_{0};
+};
+
+class CouplingSidePairedPDEBuilder {
+public:
+    CouplingSidePairedPDEBuilder(CouplingDefinitionBuilder& builder,
+                                 std::string relation_name);
+
+    CouplingSidePairedPDEBuilder& onInterface(std::string shared_region_name);
+    CouplingSidePairedPDEBuilder& between(std::string first_participant_name,
+                                          std::string second_participant_name);
+    CouplingSidePairedPDEBuilder& mode(CouplingMode mode);
+    CouplingSidePairedPDEBuilder& enforcement(
+        std::string enforcement_strategy);
+    CouplingSidePairedPDEBuilder& partitionedStrategies(
+        std::vector<CouplingPartitionedSolveStrategy> strategies);
+
+    [[nodiscard]] CouplingFieldRoleHandle scalarField(
+        std::string participant_name,
+        std::string field_name);
+    [[nodiscard]] CouplingFieldRoleHandle vectorField(
+        std::string participant_name,
+        std::string field_name,
+        int components);
+    CouplingSidePairedPDEBuilder& requiredScalarField(
+        std::string participant_name,
+        std::string field_name);
+    CouplingSidePairedPDEBuilder& requiredVectorField(
+        std::string participant_name,
+        std::string field_name,
+        int components);
+    [[nodiscard]] CouplingOptionalFieldRoleBuilder optionalField(
+        std::optional<std::string> participant_name,
+        std::optional<std::string> field_name,
+        CouplingValueDescriptor value);
+    [[nodiscard]] CouplingOptionalFieldRoleBuilder optionalVectorField(
+        std::optional<std::string> participant_name,
+        std::optional<std::string> field_name,
+        int components);
+    [[nodiscard]] CouplingInterfaceFieldBuilder interfaceField();
+    [[nodiscard]] CouplingPartitionedExchangeAuthoringBuilder
+    partitionedExchange(std::string channel_name);
+    [[nodiscard]] CouplingPartitionedPayloadExtractionAuthoringBuilder
+    partitionedPayloadFromForm(std::string exchange_name);
+
+    CouplingDefinitionBuilder& monolithicForms(
+        CouplingMonolithicFormsCallback callback);
+    CouplingDefinitionBuilder& install();
+
+private:
+    friend class CouplingOptionalFieldRoleBuilder;
+    friend class CouplingInterfaceFieldBuilder;
+    friend class CouplingPartitionedExchangeAuthoringBuilder;
+    friend class CouplingPartitionedPayloadExtractionAuthoringBuilder;
+
+    CouplingContractInterfaceFieldRequest& ensureInterfaceField();
+    CouplingPartitionedFieldChannelRequest& channel(std::size_t channel_index);
+    CouplingPayloadExtractionRequest& payloadExtraction(
+        std::size_t extraction_index);
+    CouplingOptionalFieldRoleRequest& optionalRole(std::size_t role_index);
+
+    CouplingDefinitionBuilder* builder_{nullptr};
+    CouplingSidePairedPDERequest request_;
+    bool installed_{false};
 };
 
 [[nodiscard]] CouplingSidePairedInterfaceRequest sidePairedInterface(
@@ -271,11 +455,15 @@ public:
         CouplingRegionRelationRequirement requirement);
     CouplingDefinitionBuilder& sidePairedInterface(
         CouplingSidePairedInterfaceRequest request);
+    [[nodiscard]] CouplingSidePairedPDEBuilder sidePairedPDE(
+        std::string relation_name);
     CouplingDefinitionBuilder& sidePairedPDECoupling(
         CouplingSidePairedPDERequest request);
     CouplingDefinitionBuilder& group(
         std::string name,
         std::vector<std::string> participant_names);
+    CouplingDefinitionBuilder& payloadExtraction(
+        CouplingPayloadExtractionRequest request);
     CouplingDefinitionBuilder& monolithic(
         MonolithicFormsCallback callback);
 
@@ -292,6 +480,7 @@ public:
 
     [[nodiscard]] bool hasMonolithicForms() const noexcept;
     [[nodiscard]] bool hasPartitionedExchanges() const noexcept;
+    [[nodiscard]] bool hasPayloadExtractions() const noexcept;
     [[nodiscard]] CouplingValidationResult optionValidation() const;
     [[nodiscard]] CouplingContractDeclaration compileDeclaration() const;
     [[nodiscard]] std::vector<CouplingFormContribution> buildMonolithicForms(
@@ -299,11 +488,14 @@ public:
         const CouplingFormBuilder& forms) const;
     [[nodiscard]] std::vector<CouplingExchangeDeclaration>
     buildPartitionedExchangeDeclarations() const;
+    [[nodiscard]] const std::vector<CouplingPayloadExtractionRequest>&
+    payloadExtractionRequests() const noexcept;
 
 private:
     CouplingContractDeclaration declaration_;
     PartitionedCouplingBuilder partitioned_;
     std::vector<MonolithicFormsCallback> monolithic_callbacks_;
+    std::vector<CouplingPayloadExtractionRequest> payload_extraction_requests_;
     CouplingValidationResult option_validation_;
 };
 

@@ -8,8 +8,10 @@
 #include "Coupling/DefinitionBackedCouplingContract.h"
 
 #include "Coupling/CouplingGraph.h"
+#include "Coupling/CouplingPayloadDetangler.h"
 
 #include <array>
+#include <iterator>
 #include <span>
 
 namespace svmp {
@@ -65,8 +67,29 @@ std::vector<CouplingExchangeDeclaration>
 DefinitionBackedCouplingContract::buildPartitionedExchangeDeclarations(
     const CouplingContext& ctx) const
 {
-    static_cast<void>(ctx);
-    return buildDefinition().buildPartitionedExchangeDeclarations();
+    const auto definition = buildDefinition();
+    auto declarations = definition.buildPartitionedExchangeDeclarations();
+    const auto& requests = definition.payloadExtractionRequests();
+    if (requests.empty()) {
+        return declarations;
+    }
+
+    const CouplingFormBuilder forms(ctx);
+    const auto contributions = definition.buildMonolithicForms(ctx, forms);
+    const CouplingPayloadDetangler detangler;
+    auto extracted = detangler.extract(ctx,
+                                       contributions,
+                                       requests,
+                                       definition.contractName());
+    CouplingValidationResult validation;
+    for (const auto& diagnostic : extracted.diagnostics) {
+        validation.add(diagnosticFromPayloadExtraction(diagnostic));
+    }
+    throwIfInvalid(validation);
+    declarations.insert(declarations.end(),
+                        std::make_move_iterator(extracted.exchanges.begin()),
+                        std::make_move_iterator(extracted.exchanges.end()));
+    return declarations;
 }
 
 std::string DefinitionBackedCouplingContract::contractInstanceName() const

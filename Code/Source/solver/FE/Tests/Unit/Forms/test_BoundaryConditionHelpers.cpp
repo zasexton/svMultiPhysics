@@ -90,6 +90,67 @@ TEST(FormsBoundaryConditions, ToScalarExpr_ConvertsCommonScalarValueTypes)
     EXPECT_EQ((*tc.node()->timeScalarCoefficient())(1.0, 2.0, 3.0, 4.0), 10.0);
 }
 
+TEST(FormsBoundaryConditions, ScalarValueConstantHelpersIdentifyConstantZeros)
+{
+    const svmp::FE::forms::bc::ScalarValue zero{svmp::FE::Real{0.0}};
+    const svmp::FE::forms::bc::ScalarValue nonzero{svmp::FE::Real{2.0}};
+    const svmp::FE::forms::bc::ScalarValue coefficient{
+        svmp::FE::forms::ScalarCoefficient(
+            [](svmp::FE::Real, svmp::FE::Real, svmp::FE::Real) { return 0.0; })};
+
+    EXPECT_TRUE(svmp::FE::forms::bc::isConstantScalarValue(zero));
+    EXPECT_TRUE(svmp::FE::forms::bc::isZeroConstantScalarValue(zero));
+    EXPECT_TRUE(svmp::FE::forms::bc::isConstantScalarValue(nonzero));
+    EXPECT_FALSE(svmp::FE::forms::bc::isZeroConstantScalarValue(nonzero));
+    EXPECT_FALSE(svmp::FE::forms::bc::isConstantScalarValue(coefficient));
+    EXPECT_FALSE(svmp::FE::forms::bc::isZeroConstantScalarValue(coefficient));
+}
+
+TEST(FormsBoundaryConditions, ToVectorExpr_GeneratesStableComponentNames)
+{
+    std::array<svmp::FE::forms::bc::ScalarValue, 3> values{
+        svmp::FE::Real{1.0},
+        svmp::FE::forms::ScalarCoefficient(
+            [](svmp::FE::Real, svmp::FE::Real, svmp::FE::Real) { return 2.0; }),
+        svmp::FE::Real{3.0}};
+
+    const auto indexed =
+        svmp::FE::forms::bc::toVectorExpr(values, 2, "uD", 7);
+    ASSERT_EQ(indexed.size(), 2u);
+    EXPECT_DOUBLE_EQ(*indexed[0].node()->constantValue(), 1.0);
+    EXPECT_EQ(indexed[1].toString(), "uD_7_1");
+
+    const auto component =
+        svmp::FE::forms::bc::toVectorExpr(
+            values, 2, "uD", 7, svmp::FE::forms::bc::ComponentValueNameStyle::Component);
+    ASSERT_EQ(component.size(), 2u);
+    EXPECT_EQ(component[1].toString(), "uD_7_c1");
+}
+
+TEST(FormsBoundaryConditions, ComponentEssentialBC_GeneratesSparseStrongConstraints)
+{
+    std::vector<std::pair<int, svmp::FE::forms::FormExpr>> components;
+    components.emplace_back(0, svmp::FE::forms::FormExpr::constant(1.0));
+    components.emplace_back(2, svmp::FE::forms::FormExpr::constant(3.0));
+
+    svmp::FE::forms::bc::ComponentEssentialBC bc(
+        /*boundary_marker=*/5, std::move(components), "u", "unit");
+
+    const auto strong = bc.getStrongConstraints(/*field_id=*/11);
+    ASSERT_EQ(strong.size(), 2u);
+    EXPECT_EQ(strong[0].field, 11);
+    EXPECT_EQ(strong[0].boundary_marker, 5);
+    EXPECT_EQ(strong[0].component, 0);
+    EXPECT_DOUBLE_EQ(*strong[0].value.node()->constantValue(), 1.0);
+    EXPECT_EQ(strong[1].component, 2);
+    EXPECT_DOUBLE_EQ(*strong[1].value.node()->constantValue(), 3.0);
+
+    const auto metadata = bc.analysisMetadata(/*field_id=*/11, nullptr);
+    ASSERT_EQ(metadata.size(), 2u);
+    EXPECT_EQ(metadata[0].component, 0);
+    EXPECT_EQ(metadata[1].component, 2);
+}
+
 TEST(FormsBoundaryConditions, ApplyNeumann_AddsBoundaryTermsWithMarkers)
 {
     auto space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);

@@ -36,7 +36,10 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Dofs/EntityDofMap.h"
+#include "Elements/ElementFactory.h"
+#include "Elements/ElementValidator.h"
 #include "Elements/ReferenceElement.h"
+#include "Geometry/MappingFactory.h"
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
@@ -49,6 +52,7 @@
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalyzer.h"
 #include "Analysis/FormExprScanner.h"
+#include "Analysis/SparseMatrixSummaryScanner.h"
 #include "Math/FiniteDifference.h"
 
 #include <algorithm>
@@ -59,8 +63,10 @@
 #include <limits>
 #include <numeric>
 #include <sstream>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 
 #if FE_HAS_MPI
@@ -68,6 +74,7 @@
 #endif
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Assembly/CompositeMeshAccess.h"
 #include "Assembly/MeshAccess.h"
 #include "Mesh/Adaptivity/Options.h"
 #include "Mesh/Core/MeshBase.h"
@@ -171,6 +178,2000 @@ template <typename T>
 #else
     return value;
 #endif
+}
+
+#if FE_HAS_MPI
+[[nodiscard]] bool mpiWorldActiveForAnalysis() noexcept
+{
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        return false;
+    }
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    return size > 1;
+}
+
+[[nodiscard]] std::uint64_t mpiSumUint64(std::uint64_t value) noexcept
+{
+    if (!mpiWorldActiveForAnalysis()) {
+        return value;
+    }
+    unsigned long long local = static_cast<unsigned long long>(value);
+    unsigned long long global = local;
+    MPI_Allreduce(&local, &global, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    return static_cast<std::uint64_t>(global);
+}
+
+[[nodiscard]] double mpiReduceDouble(double value, MPI_Op op) noexcept
+{
+    if (!mpiWorldActiveForAnalysis()) {
+        return value;
+    }
+    double global = value;
+    MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
+    return global;
+}
+#endif
+
+struct AnalysisFieldRange {
+    FieldId field_id{INVALID_FIELD_ID};
+    GlobalIndex begin{0};
+    GlobalIndex end{0};
+    LocalIndex components{1};
+    std::string name;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return field_id != INVALID_FIELD_ID && end > begin;
+    }
+
+    [[nodiscard]] bool contains(GlobalIndex dof) const noexcept {
+        return dof >= begin && dof < end;
+    }
+
+    [[nodiscard]] GlobalIndex size() const noexcept {
+        return end > begin ? end - begin : 0;
+    }
+};
+
+struct AnalysisSaddlePair {
+    AnalysisFieldRange primary;
+    AnalysisFieldRange multiplier;
+
+    [[nodiscard]] bool valid() const noexcept {
+        return primary.valid() && multiplier.valid() &&
+               primary.field_id != multiplier.field_id;
+    }
+};
+
+struct CouplingMatrixStats {
+    std::uint64_t active_multiplier_rows{0};
+    std::uint64_t active_primary_rows{0};
+    std::uint64_t multiplier_rows_with_primary_entries{0};
+    std::uint64_t primary_rows_with_multiplier_entries{0};
+    std::uint64_t primary_rows_with_diagonal{0};
+    std::uint64_t nonfinite_entries{0};
+    double multiplier_min_row_norm{std::numeric_limits<double>::infinity()};
+    double primary_min_row_norm{std::numeric_limits<double>::infinity()};
+    double multiplier_coupling_frob_sq{0.0};
+    double primary_coupling_frob_sq{0.0};
+    double primary_min_abs_diag{std::numeric_limits<double>::infinity()};
+    double primary_max_abs_diag{0.0};
+};
+
+[[nodiscard]] std::optional<AnalysisFieldRange>
+analysisFieldRangeById(const dofs::FieldDofMap& field_map, FieldId fid)
+{
+    if (fid == INVALID_FIELD_ID ||
+        static_cast<std::size_t>(fid) >= field_map.numFields()) {
+        return std::nullopt;
+    }
+    const auto idx = static_cast<std::size_t>(fid);
+    const auto range = field_map.getFieldDofRange(idx);
+    const auto& field = field_map.getField(idx);
+    return AnalysisFieldRange{fid,
+                              range.first,
+                              range.second,
+                              field.n_components,
+                              field.name};
+}
+
+[[nodiscard]] std::optional<AnalysisFieldRange>
+analysisFieldRangeByName(const dofs::FieldDofMap& field_map, std::string_view name)
+{
+    if (name.empty()) {
+        return std::nullopt;
+    }
+    const int idx = field_map.getFieldIndex(std::string(name));
+    if (idx < 0) {
+        return std::nullopt;
+    }
+    return analysisFieldRangeById(field_map, static_cast<FieldId>(idx));
+}
+
+[[nodiscard]] std::optional<FieldId> fieldIdFromVariable(
+    const analysis::VariableKey& variable,
+    const dofs::FieldDofMap& field_map) noexcept
+{
+    if (variable.kind != analysis::VariableKind::FieldComponent ||
+        variable.field_id == INVALID_FIELD_ID ||
+        static_cast<std::size_t>(variable.field_id) >= field_map.numFields()) {
+        return std::nullopt;
+    }
+    return variable.field_id;
+}
+
+[[nodiscard]] analysis::OperatorBlockId globalAnalysisBlock(
+    const OperatorTag& op,
+    const dofs::FieldDofMap& field_map)
+{
+    analysis::OperatorBlockId block;
+    block.operator_tag = op;
+    block.domain = analysis::DomainKind::Cell;
+    block.role = analysis::ContributionRole::DiagonalBlock;
+    for (std::size_t i = 0; i < field_map.numFields(); ++i) {
+        const auto variable = analysis::VariableKey::field(static_cast<FieldId>(i));
+        block.test_variables.push_back(variable);
+        block.trial_variables.push_back(variable);
+    }
+    return block;
+}
+
+[[nodiscard]] analysis::OperatorBlockId saddlePairBlock(
+    const OperatorTag& op,
+    const AnalysisSaddlePair& pair)
+{
+    analysis::OperatorBlockId block;
+    block.operator_tag = op;
+    block.domain = analysis::DomainKind::Cell;
+    block.role = analysis::ContributionRole::ConstraintBlock;
+    block.test_variables = {
+        analysis::VariableKey::field(pair.primary.field_id),
+        analysis::VariableKey::field(pair.multiplier.field_id),
+    };
+    block.trial_variables = block.test_variables;
+    return block;
+}
+
+[[nodiscard]] analysis::OperatorBlockId contributionBlock(
+    const analysis::ContributionDescriptor& contribution,
+    const OperatorTag& fallback_op)
+{
+    analysis::OperatorBlockId block;
+    block.test_variables = contribution.test_variables;
+    block.trial_variables = contribution.trial_variables;
+    block.domain = contribution.domain;
+    block.role = contribution.role;
+    block.contribution_id = contribution.contribution_id;
+    block.operator_tag = contribution.operator_tag.empty()
+        ? fallback_op
+        : contribution.operator_tag;
+    if (contribution.domain == analysis::DomainKind::Boundary) {
+        block.marker = contribution.boundary_marker;
+    } else if (contribution.domain == analysis::DomainKind::InterfaceFace) {
+        block.marker = contribution.interface_marker;
+    }
+    return block;
+}
+
+[[nodiscard]] std::optional<AnalysisSaddlePair>
+findAnalysisSaddlePairFromSolverOptions(const dofs::FieldDofMap& field_map,
+                                        const backends::SolverOptions* options)
+{
+    if (options == nullptr) {
+        return std::nullopt;
+    }
+
+    const auto primary_name =
+        options->resolveBlockNameForRole(backends::BlockRole::PrimaryField);
+    const auto constraint_name =
+        options->resolveBlockNameForRole(backends::BlockRole::ConstraintField);
+    auto primary = analysisFieldRangeByName(field_map, primary_name);
+    auto multiplier = analysisFieldRangeByName(field_map, constraint_name);
+    if (primary && multiplier) {
+        AnalysisSaddlePair pair{*primary, *multiplier};
+        if (pair.valid()) {
+            return pair;
+        }
+    }
+
+    if (options->block_layout && options->block_layout->hasSaddlePoint()) {
+        const auto* primary_block = options->block_layout->primaryFieldBlock();
+        const auto* constraint_block = options->block_layout->constraintFieldBlock();
+        primary = primary_block ? analysisFieldRangeByName(field_map, primary_block->name)
+                                : std::nullopt;
+        multiplier = constraint_block ? analysisFieldRangeByName(field_map, constraint_block->name)
+                                      : std::nullopt;
+        if (primary && multiplier) {
+            AnalysisSaddlePair pair{*primary, *multiplier};
+            if (pair.valid()) {
+                return pair;
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<AnalysisSaddlePair>
+findAnalysisSaddlePairFromContributions(
+    const dofs::FieldDofMap& field_map,
+    const std::vector<analysis::ContributionDescriptor>& contributions)
+{
+    const auto make_pair_from_fields = [&](FieldId a, FieldId b)
+        -> std::optional<AnalysisSaddlePair> {
+        auto ar = analysisFieldRangeById(field_map, a);
+        auto br = analysisFieldRangeById(field_map, b);
+        if (!ar || !br || ar->field_id == br->field_id) {
+            return std::nullopt;
+        }
+        if (ar->components > 1 && br->components == 1) {
+            return AnalysisSaddlePair{*ar, *br};
+        }
+        if (br->components > 1 && ar->components == 1) {
+            return AnalysisSaddlePair{*br, *ar};
+        }
+        return std::nullopt;
+    };
+
+    for (const auto& contribution : contributions) {
+        if (contribution.role != analysis::ContributionRole::ConstraintBlock &&
+            contribution.role != analysis::ContributionRole::OffDiagonalBlock &&
+            contribution.role != analysis::ContributionRole::StabilizationBlock) {
+            continue;
+        }
+        for (const auto& pairing : contribution.pairings) {
+            auto row = fieldIdFromVariable(pairing.row_var, field_map);
+            auto col = fieldIdFromVariable(pairing.col_var, field_map);
+            if (row && col) {
+                if (auto pair = make_pair_from_fields(*row, *col)) {
+                    return pair;
+                }
+            }
+        }
+        for (const auto& test : contribution.test_variables) {
+            auto test_fid = fieldIdFromVariable(test, field_map);
+            if (!test_fid) {
+                continue;
+            }
+            for (const auto& trial : contribution.trial_variables) {
+                auto trial_fid = fieldIdFromVariable(trial, field_map);
+                if (trial_fid) {
+                    if (auto pair = make_pair_from_fields(*test_fid, *trial_fid)) {
+                        return pair;
+                    }
+                }
+            }
+        }
+    }
+
+    std::optional<AnalysisFieldRange> first_vector;
+    std::optional<AnalysisFieldRange> first_scalar;
+    for (std::size_t i = 0; i < field_map.numFields(); ++i) {
+        auto range = analysisFieldRangeById(field_map, static_cast<FieldId>(i));
+        if (!range) {
+            continue;
+        }
+        if (!first_vector && range->components > 1) {
+            first_vector = *range;
+        } else if (!first_scalar && range->components == 1) {
+            first_scalar = *range;
+        }
+    }
+    if (first_vector && first_scalar) {
+        return AnalysisSaddlePair{*first_vector, *first_scalar};
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] CouplingMatrixStats scanCouplingStats(
+    const analysis::SparseRowScanSource& source,
+    const AnalysisSaddlePair& pair,
+    const std::unordered_set<GlobalIndex>& constrained_dofs,
+    Real tolerance)
+{
+    CouplingMatrixStats stats;
+    source.forEachLocalRow(
+        [&](analysis::GlobalDofId row,
+            const std::vector<analysis::SparseMatrixRowEntry>& entries,
+            int) {
+            const bool row_constrained =
+                constrained_dofs.find(row) != constrained_dofs.end();
+            const bool row_is_multiplier = pair.multiplier.contains(row);
+            const bool row_is_primary = pair.primary.contains(row);
+
+            double multiplier_row_sq = 0.0;
+            double primary_row_sq = 0.0;
+            bool has_primary_diagonal = false;
+
+            for (const auto& entry : entries) {
+                const auto value = static_cast<double>(entry.value);
+                if (!std::isfinite(value)) {
+                    ++stats.nonfinite_entries;
+                    continue;
+                }
+                if (row_is_multiplier && !row_constrained &&
+                    pair.primary.contains(entry.col)) {
+                    multiplier_row_sq += value * value;
+                }
+                if (row_is_primary && !row_constrained &&
+                    pair.multiplier.contains(entry.col)) {
+                    primary_row_sq += value * value;
+                }
+                if (row_is_primary && !row_constrained && entry.col == row) {
+                    const double abs_diag = std::abs(value);
+                    if (abs_diag > static_cast<double>(tolerance)) {
+                        has_primary_diagonal = true;
+                        stats.primary_min_abs_diag =
+                            std::min(stats.primary_min_abs_diag, abs_diag);
+                        stats.primary_max_abs_diag =
+                            std::max(stats.primary_max_abs_diag, abs_diag);
+                    }
+                }
+            }
+
+            if (row_is_multiplier && !row_constrained) {
+                ++stats.active_multiplier_rows;
+                if (multiplier_row_sq > static_cast<double>(tolerance) *
+                                            static_cast<double>(tolerance)) {
+                    ++stats.multiplier_rows_with_primary_entries;
+                    const double norm = std::sqrt(multiplier_row_sq);
+                    stats.multiplier_min_row_norm =
+                        std::min(stats.multiplier_min_row_norm, norm);
+                    stats.multiplier_coupling_frob_sq += multiplier_row_sq;
+                }
+            }
+
+            if (row_is_primary && !row_constrained) {
+                ++stats.active_primary_rows;
+                if (primary_row_sq > static_cast<double>(tolerance) *
+                                     static_cast<double>(tolerance)) {
+                    ++stats.primary_rows_with_multiplier_entries;
+                    const double norm = std::sqrt(primary_row_sq);
+                    stats.primary_min_row_norm =
+                        std::min(stats.primary_min_row_norm, norm);
+                    stats.primary_coupling_frob_sq += primary_row_sq;
+                }
+                if (has_primary_diagonal) {
+                    ++stats.primary_rows_with_diagonal;
+                }
+            }
+        });
+
+#if FE_HAS_MPI
+    stats.active_multiplier_rows = mpiSumUint64(stats.active_multiplier_rows);
+    stats.active_primary_rows = mpiSumUint64(stats.active_primary_rows);
+    stats.multiplier_rows_with_primary_entries =
+        mpiSumUint64(stats.multiplier_rows_with_primary_entries);
+    stats.primary_rows_with_multiplier_entries =
+        mpiSumUint64(stats.primary_rows_with_multiplier_entries);
+    stats.primary_rows_with_diagonal =
+        mpiSumUint64(stats.primary_rows_with_diagonal);
+    stats.nonfinite_entries = mpiSumUint64(stats.nonfinite_entries);
+    stats.multiplier_min_row_norm =
+        mpiReduceDouble(stats.multiplier_min_row_norm, MPI_MIN);
+    stats.primary_min_row_norm =
+        mpiReduceDouble(stats.primary_min_row_norm, MPI_MIN);
+    stats.multiplier_coupling_frob_sq =
+        mpiReduceDouble(stats.multiplier_coupling_frob_sq, MPI_SUM);
+    stats.primary_coupling_frob_sq =
+        mpiReduceDouble(stats.primary_coupling_frob_sq, MPI_SUM);
+    stats.primary_min_abs_diag =
+        mpiReduceDouble(stats.primary_min_abs_diag, MPI_MIN);
+    stats.primary_max_abs_diag =
+        mpiReduceDouble(stats.primary_max_abs_diag, MPI_MAX);
+#endif
+
+    if (!std::isfinite(stats.multiplier_min_row_norm)) {
+        stats.multiplier_min_row_norm = 0.0;
+    }
+    if (!std::isfinite(stats.primary_min_row_norm)) {
+        stats.primary_min_row_norm = 0.0;
+    }
+    if (!std::isfinite(stats.primary_min_abs_diag)) {
+        stats.primary_min_abs_diag = 0.0;
+    }
+    return stats;
+}
+
+template <typename T>
+void appendAnalysisVector(std::vector<T>& dst, const std::vector<T>& src)
+{
+    dst.insert(dst.end(), src.begin(), src.end());
+}
+
+void mergeAnalysisSummarySets(analysis::AnalysisSummarySet& dst,
+                              const analysis::AnalysisSummarySet& src)
+{
+    appendAnalysisVector(dst.coefficient_properties, src.coefficient_properties);
+    appendAnalysisVector(dst.discrete_matrices, src.discrete_matrices);
+    appendAnalysisVector(dst.reduced_matrices, src.reduced_matrices);
+    appendAnalysisVector(dst.schur_complements, src.schur_complements);
+    appendAnalysisVector(dst.local_stencils, src.local_stencils);
+    appendAnalysisVector(dst.mesh_geometry_quality, src.mesh_geometry_quality);
+    appendAnalysisVector(dst.flux_balances, src.flux_balances);
+    appendAnalysisVector(dst.temporal_stability, src.temporal_stability);
+    appendAnalysisVector(dst.boundary_symbols, src.boundary_symbols);
+    appendAnalysisVector(dst.inf_sup_estimates, src.inf_sup_estimates);
+    appendAnalysisVector(dst.inf_sup_pair_certifications,
+                         src.inf_sup_pair_certifications);
+    appendAnalysisVector(dst.energy_entropy, src.energy_entropy);
+    appendAnalysisVector(dst.invariant_domains, src.invariant_domains);
+    appendAnalysisVector(dst.equilibrium_preservation, src.equilibrium_preservation);
+    appendAnalysisVector(dst.moving_domain, src.moving_domain);
+    appendAnalysisVector(dst.transfer_operators, src.transfer_operators);
+    appendAnalysisVector(dst.adjoint_consistency, src.adjoint_consistency);
+    appendAnalysisVector(dst.parameter_scales, src.parameter_scales);
+    appendAnalysisVector(dst.stabilization_adequacy, src.stabilization_adequacy);
+    appendAnalysisVector(dst.initial_compatibility, src.initial_compatibility);
+    appendAnalysisVector(dst.dae_structure_evidence, src.dae_structure_evidence);
+    appendAnalysisVector(dst.compatible_complexes, src.compatible_complexes);
+    appendAnalysisVector(dst.nonlinear_tangents, src.nonlinear_tangents);
+    appendAnalysisVector(dst.spectral_structures, src.spectral_structures);
+    appendAnalysisVector(dst.error_estimators, src.error_estimators);
+    appendAnalysisVector(dst.quadrature_adequacy, src.quadrature_adequacy);
+    appendAnalysisVector(dst.coupled_system_stability,
+                         src.coupled_system_stability);
+    appendAnalysisVector(dst.minimum_residual_stability,
+                         src.minimum_residual_stability);
+}
+
+[[nodiscard]] std::string contributionIdentity(
+    const analysis::ContributionDescriptor& contribution,
+    std::string_view fallback)
+{
+    if (!contribution.contribution_id.empty()) {
+        return contribution.contribution_id;
+    }
+    if (!contribution.operator_tag.empty()) {
+        return contribution.operator_tag;
+    }
+    return std::string(fallback);
+}
+
+[[nodiscard]] std::vector<analysis::VariableKey> contributionVariables(
+    const analysis::ContributionDescriptor& contribution)
+{
+    std::vector<analysis::VariableKey> variables = contribution.test_variables;
+    for (const auto& variable : contribution.trial_variables) {
+        if (std::find(variables.begin(), variables.end(), variable) ==
+            variables.end()) {
+            variables.push_back(variable);
+        }
+    }
+    for (const auto& variable : contribution.related_variables) {
+        if (std::find(variables.begin(), variables.end(), variable) ==
+            variables.end()) {
+            variables.push_back(variable);
+        }
+    }
+    return variables;
+}
+
+[[nodiscard]] analysis::OperatorBlockId boundaryConditionBlock(
+    const analysis::BoundaryConditionDescriptor& bc,
+    const OperatorTag& fallback_op)
+{
+    analysis::OperatorBlockId block;
+    block.test_variables.push_back(bc.primary_variable);
+    block.trial_variables.push_back(bc.primary_variable);
+    block.domain = bc.domain;
+    block.role = analysis::ContributionRole::BoundaryConstraint;
+    block.operator_tag = bc.source.empty() ? fallback_op : bc.source;
+    block.contribution_id = bc.source;
+    if (bc.domain == analysis::DomainKind::InterfaceFace) {
+        block.marker = bc.interface_marker;
+    } else if (bc.domain == analysis::DomainKind::Boundary ||
+               bc.domain == analysis::DomainKind::CoupledBoundary) {
+        block.marker = bc.boundary_marker;
+    }
+    return block;
+}
+
+[[nodiscard]] analysis::TraceCapabilityFlags traceCoverageForBoundary(
+    analysis::TraceKind trace_kind) noexcept
+{
+    switch (trace_kind) {
+        case analysis::TraceKind::Value:
+            return analysis::TraceCapabilityFlags::Value;
+        case analysis::TraceKind::NormalComponent:
+            return analysis::TraceCapabilityFlags::NormalComponent;
+        case analysis::TraceKind::TangentialComponent:
+            return analysis::TraceCapabilityFlags::TangentialComponent;
+        case analysis::TraceKind::Flux:
+        case analysis::TraceKind::NormalFlux:
+            return analysis::TraceCapabilityFlags::NormalFlux;
+        case analysis::TraceKind::Mixed:
+            return analysis::TraceCapabilityFlags::Value |
+                   analysis::TraceCapabilityFlags::NormalFlux;
+        case analysis::TraceKind::AlgebraicRelation:
+            return analysis::TraceCapabilityFlags::None;
+    }
+    return analysis::TraceCapabilityFlags::None;
+}
+
+[[nodiscard]] bool isWeakBoundaryEnforcement(
+    analysis::EnforcementKind kind) noexcept
+{
+    return kind == analysis::EnforcementKind::WeakPenalty ||
+           kind == analysis::EnforcementKind::WeakNitsche ||
+           kind == analysis::EnforcementKind::WeakInequality;
+}
+
+[[nodiscard]] analysis::ParameterScaleRole parameterScaleRoleFor(
+    const analysis::ContributionDescriptor& contribution) noexcept
+{
+    if (contribution.domain == analysis::DomainKind::Boundary ||
+        contribution.domain == analysis::DomainKind::InterfaceFace ||
+        contribution.domain == analysis::DomainKind::CoupledBoundary ||
+        contribution.role == analysis::ContributionRole::BoundaryConstraint) {
+        return analysis::ParameterScaleRole::WeakBoundaryPenalty;
+    }
+    if (contribution.temporal && contribution.temporal->derivative_order > 0) {
+        return analysis::ParameterScaleRole::CflLike;
+    }
+    if (contribution.transport_character &&
+        *contribution.transport_character != analysis::TransportCharacter::None) {
+        return analysis::ParameterScaleRole::PecletLike;
+    }
+    if (contribution.scaling && contribution.scaling->dt_power != 0) {
+        return analysis::ParameterScaleRole::CflLike;
+    }
+    return analysis::ParameterScaleRole::Generic;
+}
+
+[[nodiscard]] int polynomialOrderForVariable(const FieldRegistry& registry,
+                                             const analysis::VariableKey& variable)
+{
+    if (variable.kind != analysis::VariableKind::FieldComponent ||
+        variable.field_id == INVALID_FIELD_ID) {
+        return -1;
+    }
+    for (const auto& record : registry.records()) {
+        if (record.id == variable.field_id && record.space) {
+            return record.space->polynomial_order();
+        }
+    }
+    return -1;
+}
+
+[[nodiscard]] int polynomialOrderForVariables(
+    const FieldRegistry& registry,
+    const std::vector<analysis::VariableKey>& variables)
+{
+    int order = -1;
+    for (const auto& variable : variables) {
+        order = std::max(order, polynomialOrderForVariable(registry, variable));
+    }
+    return order;
+}
+
+[[nodiscard]] analysis::ParameterScaleSummary makeParameterScaleSummary(
+    std::string id,
+    analysis::ParameterScaleRole role,
+    analysis::OperatorBlockId block,
+    std::vector<analysis::VariableKey> variables,
+    const analysis::ScalingDescriptor& scaling,
+    const FieldRegistry& registry)
+{
+    analysis::ParameterScaleSummary summary;
+    summary.nondimensional_parameter_id = std::move(id);
+    summary.role = role;
+    summary.block = std::move(block);
+    summary.variables = std::move(variables);
+    summary.contribution_id = summary.block.contribution_id;
+    summary.min_scale_value = static_cast<Real>(1.0);
+    summary.max_scale_value = static_cast<Real>(1.0);
+    summary.polynomial_order =
+        polynomialOrderForVariables(registry, summary.variables);
+    summary.scale_theorem_id = "ScalingDescriptor";
+    summary.mesh_quality_factor = static_cast<Real>(1.0);
+    summary.coefficient_contrast_factor =
+        scaling.coefficient_scaled ? static_cast<Real>(1.0) : static_cast<Real>(0.0);
+    summary.trace_inverse_metadata_present =
+        role == analysis::ParameterScaleRole::WeakBoundaryPenalty &&
+        scaling.h_power < 0;
+    if (summary.trace_inverse_metadata_present) {
+        summary.trace_inverse_constant = static_cast<Real>(1.0);
+    }
+    return summary;
+}
+
+[[nodiscard]] analysis::TensorRank tensorRankFor(
+    analysis::FormCoefficientRank rank) noexcept
+{
+    switch (rank) {
+        case analysis::FormCoefficientRank::Scalar:
+            return analysis::TensorRank::Scalar;
+        case analysis::FormCoefficientRank::Vector:
+            return analysis::TensorRank::Vector;
+        case analysis::FormCoefficientRank::Rank2Tensor:
+            return analysis::TensorRank::Rank2Tensor;
+        case analysis::FormCoefficientRank::Rank3Tensor:
+            return analysis::TensorRank::Rank3Tensor;
+        case analysis::FormCoefficientRank::Rank4Tensor:
+            return analysis::TensorRank::Rank4Tensor;
+        case analysis::FormCoefficientRank::Unknown:
+            return analysis::TensorRank::Unknown;
+    }
+    return analysis::TensorRank::Unknown;
+}
+
+[[nodiscard]] analysis::TensorRank tensorRankFromMetadataString(
+    const std::string& value) noexcept
+{
+    if (value == "scalar" || value == "Scalar") {
+        return analysis::TensorRank::Scalar;
+    }
+    if (value == "vector" || value == "Vector") {
+        return analysis::TensorRank::Vector;
+    }
+    if (value == "rank2" || value == "Rank2Tensor" || value == "tensor2") {
+        return analysis::TensorRank::Rank2Tensor;
+    }
+    if (value == "rank3" || value == "Rank3Tensor" || value == "tensor3") {
+        return analysis::TensorRank::Rank3Tensor;
+    }
+    if (value == "rank4" || value == "Rank4Tensor" || value == "tensor4") {
+        return analysis::TensorRank::Rank4Tensor;
+    }
+    return analysis::TensorRank::Unknown;
+}
+
+[[nodiscard]] analysis::SymmetryClass symmetryFromMetadataString(
+    const std::string& value) noexcept
+{
+    if (value == "symmetric" || value == "Symmetric") {
+        return analysis::SymmetryClass::Symmetric;
+    }
+    if (value == "skew" || value == "Skew") {
+        return analysis::SymmetryClass::Skew;
+    }
+    if (value == "nonsymmetric" || value == "Nonsymmetric") {
+        return analysis::SymmetryClass::Nonsymmetric;
+    }
+    if (value == "not_applicable" || value == "NotApplicable") {
+        return analysis::SymmetryClass::NotApplicable;
+    }
+    return analysis::SymmetryClass::Unknown;
+}
+
+[[nodiscard]] analysis::PositivityClass positivityFromMetadataString(
+    const std::string& value) noexcept
+{
+    if (value == "positive" || value == "Positive") {
+        return analysis::PositivityClass::Positive;
+    }
+    if (value == "nonnegative" || value == "Nonnegative") {
+        return analysis::PositivityClass::Nonnegative;
+    }
+    if (value == "negative" || value == "Negative") {
+        return analysis::PositivityClass::Negative;
+    }
+    if (value == "nonpositive" || value == "Nonpositive") {
+        return analysis::PositivityClass::Nonpositive;
+    }
+    if (value == "indefinite" || value == "Indefinite") {
+        return analysis::PositivityClass::Indefinite;
+    }
+    return analysis::PositivityClass::Unknown;
+}
+
+[[nodiscard]] analysis::PositivityClass positivityFromRange(Real min_value,
+                                                           Real max_value,
+                                                           Real tolerance) noexcept
+{
+    if (!std::isfinite(static_cast<double>(min_value)) ||
+        !std::isfinite(static_cast<double>(max_value))) {
+        return analysis::PositivityClass::Unknown;
+    }
+    if (min_value > tolerance) {
+        return analysis::PositivityClass::Positive;
+    }
+    if (min_value >= -tolerance) {
+        return analysis::PositivityClass::Nonnegative;
+    }
+    if (max_value < -tolerance) {
+        return analysis::PositivityClass::Negative;
+    }
+    if (max_value <= tolerance) {
+        return analysis::PositivityClass::Nonpositive;
+    }
+    return analysis::PositivityClass::Indefinite;
+}
+
+struct RuntimeCoefficientNode {
+    const forms::FormExprNode* node{nullptr};
+    std::string name;
+    analysis::FormCoefficientRank rank{analysis::FormCoefficientRank::Unknown};
+    bool time_dependent{false};
+    analysis::DomainKind domain{analysis::DomainKind::Cell};
+    int boundary_marker{-1};
+    int interface_marker{-1};
+};
+
+void collectRuntimeCoefficientNodes(
+    const forms::FormExprNode& node,
+    analysis::DomainKind domain,
+    int boundary_marker,
+    int interface_marker,
+    std::vector<RuntimeCoefficientNode>& out)
+{
+    using FT = forms::FormExprType;
+
+    auto child_domain = domain;
+    auto child_boundary_marker = boundary_marker;
+    auto child_interface_marker = interface_marker;
+    if (node.type() == FT::CellIntegral) {
+        child_domain = analysis::DomainKind::Cell;
+        child_boundary_marker = -1;
+        child_interface_marker = -1;
+    } else if (node.type() == FT::BoundaryIntegral) {
+        child_domain = analysis::DomainKind::Boundary;
+        child_boundary_marker = node.boundaryMarker().value_or(-1);
+        child_interface_marker = -1;
+    } else if (node.type() == FT::InteriorFaceIntegral) {
+        child_domain = analysis::DomainKind::InteriorFace;
+        child_boundary_marker = -1;
+        child_interface_marker = -1;
+    } else if (node.type() == FT::InterfaceIntegral) {
+        child_domain = analysis::DomainKind::InterfaceFace;
+        child_boundary_marker = -1;
+        child_interface_marker = node.interfaceMarker().value_or(-1);
+    }
+
+    if (node.type() == FT::Coefficient) {
+        RuntimeCoefficientNode entry;
+        entry.node = &node;
+        entry.name = node.toString();
+        if (node.scalarCoefficient() || node.timeScalarCoefficient()) {
+            entry.rank = analysis::FormCoefficientRank::Scalar;
+        } else if (node.vectorCoefficient()) {
+            entry.rank = analysis::FormCoefficientRank::Vector;
+        } else if (node.matrixCoefficient()) {
+            entry.rank = analysis::FormCoefficientRank::Rank2Tensor;
+        } else if (node.tensor3Coefficient()) {
+            entry.rank = analysis::FormCoefficientRank::Rank3Tensor;
+        } else if (node.tensor4Coefficient()) {
+            entry.rank = analysis::FormCoefficientRank::Rank4Tensor;
+        }
+        entry.time_dependent = node.timeScalarCoefficient() != nullptr;
+        entry.domain = domain;
+        entry.boundary_marker = boundary_marker;
+        entry.interface_marker = interface_marker;
+
+        const auto duplicate = std::find_if(
+            out.begin(), out.end(), [&](const RuntimeCoefficientNode& existing) {
+                return existing.node == entry.node ||
+                       (existing.name == entry.name &&
+                        existing.rank == entry.rank &&
+                        existing.domain == entry.domain &&
+                        existing.boundary_marker == entry.boundary_marker &&
+                        existing.interface_marker == entry.interface_marker);
+            });
+        if (duplicate == out.end()) {
+            out.push_back(entry);
+        }
+    }
+
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            collectRuntimeCoefficientNodes(*child,
+                                           child_domain,
+                                           child_boundary_marker,
+                                           child_interface_marker,
+                                           out);
+        }
+    }
+}
+
+[[nodiscard]] Real cellDiameterFromCoordinates(
+    const std::vector<std::array<Real, 3>>& coords) noexcept
+{
+    Real h_sq = Real{};
+    for (std::size_t i = 0; i < coords.size(); ++i) {
+        for (std::size_t j = i + 1; j < coords.size(); ++j) {
+            Real d_sq = Real{};
+            for (int k = 0; k < 3; ++k) {
+                const Real d = coords[i][k] - coords[j][k];
+                d_sq += d * d;
+            }
+            h_sq = std::max(h_sq, d_sq);
+        }
+    }
+    return std::sqrt(h_sq);
+}
+
+template <class Callback>
+void forEachOwnedQuadraturePoint(const assembly::IMeshAccess& mesh,
+                                 Callback&& callback)
+{
+    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+        try {
+            std::vector<std::array<Real, 3>> coords;
+            mesh.getCellCoordinates(cell_id, coords);
+            if (coords.empty()) {
+                return;
+            }
+
+            std::vector<math::Vector<Real, 3>> nodes;
+            nodes.reserve(coords.size());
+            for (const auto& coord : coords) {
+                nodes.emplace_back(math::Vector<Real, 3>{
+                    coord[0], coord[1], coord[2]});
+            }
+
+            elements::ElementRequest element_request;
+            element_request.element_type = mesh.getCellType(cell_id);
+            element_request.basis_type = BasisType::Lagrange;
+            element_request.field_type = FieldType::Scalar;
+            element_request.continuity = Continuity::C0;
+            const int geometry_order = mesh.getCellGeometryOrder(cell_id);
+            element_request.order = geometry_order;
+            auto element = elements::ElementFactory::create(element_request);
+            if (!element) {
+                return;
+            }
+
+            geometry::MappingRequest mapping_request;
+            mapping_request.element_type = element_request.element_type;
+            mapping_request.geometry_order = geometry_order;
+            mapping_request.use_affine = geometry_order <= 1;
+            auto mapping = geometry::MappingFactory::create(mapping_request, nodes);
+            if (!mapping) {
+                return;
+            }
+
+            const auto quadrature = element->quadrature();
+            if (!quadrature) {
+                return;
+            }
+            const Real h = cellDiameterFromCoordinates(coords);
+            for (const auto& qp : quadrature->points()) {
+                const auto x = mapping->map_to_physical(qp);
+                callback(std::array<Real, 3>{x[0], x[1], x[2]}, h);
+            }
+        } catch (const std::exception&) {
+            return;
+        }
+    });
+}
+
+struct MeshScaleStats {
+    bool available{false};
+    Real h_min{std::numeric_limits<Real>::infinity()};
+    Real h_max{Real{}};
+    std::uint64_t sample_count{0u};
+};
+
+[[nodiscard]] MeshScaleStats meshScaleStats(const assembly::IMeshAccess* mesh)
+{
+    MeshScaleStats stats;
+    if (mesh == nullptr) {
+        return stats;
+    }
+    mesh->forEachOwnedCell([&](GlobalIndex cell_id) {
+        try {
+            std::vector<std::array<Real, 3>> coords;
+            mesh->getCellCoordinates(cell_id, coords);
+            const Real h = cellDiameterFromCoordinates(coords);
+            if (std::isfinite(static_cast<double>(h)) && h > Real{}) {
+                stats.h_min = std::min(stats.h_min, h);
+                stats.h_max = std::max(stats.h_max, h);
+                ++stats.sample_count;
+            }
+        } catch (const std::exception&) {
+            return;
+        }
+    });
+#if FE_HAS_MPI
+    stats.sample_count = mpiSumUint64(stats.sample_count);
+    stats.h_min = static_cast<Real>(mpiReduceDouble(
+        static_cast<double>(stats.h_min), MPI_MIN));
+    stats.h_max = static_cast<Real>(mpiReduceDouble(
+        static_cast<double>(stats.h_max), MPI_MAX));
+#endif
+    stats.available = stats.sample_count > 0u &&
+                      std::isfinite(static_cast<double>(stats.h_min)) &&
+                      std::isfinite(static_cast<double>(stats.h_max)) &&
+                      stats.h_min > Real{};
+    if (!stats.available) {
+        stats.h_min = Real{};
+        stats.h_max = Real{};
+    }
+    return stats;
+}
+
+[[nodiscard]] std::array<double, 3> symmetricEigenvalues3x3(
+    std::array<std::array<Real, 3>, 3> input) noexcept
+{
+    std::array<std::array<double, 3>, 3> a{};
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            a[i][j] = static_cast<double>(input[i][j]);
+        }
+    }
+
+    for (int iter = 0; iter < 32; ++iter) {
+        int p = 0;
+        int q = 1;
+        double max_offdiag = std::abs(a[p][q]);
+        for (int i = 0; i < 3; ++i) {
+            for (int j = i + 1; j < 3; ++j) {
+                const double value = std::abs(a[i][j]);
+                if (value > max_offdiag) {
+                    max_offdiag = value;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+        if (max_offdiag < 1.0e-14) {
+            break;
+        }
+
+        const double app = a[p][p];
+        const double aqq = a[q][q];
+        const double apq = a[p][q];
+        const double tau = (aqq - app) / (2.0 * apq);
+        const double t = (tau >= 0.0 ? 1.0 : -1.0) /
+                         (std::abs(tau) + std::sqrt(1.0 + tau * tau));
+        const double c = 1.0 / std::sqrt(1.0 + t * t);
+        const double s = t * c;
+
+        a[p][p] = app - t * apq;
+        a[q][q] = aqq + t * apq;
+        a[p][q] = 0.0;
+        a[q][p] = 0.0;
+        for (int k = 0; k < 3; ++k) {
+            if (k == p || k == q) {
+                continue;
+            }
+            const double akp = a[k][p];
+            const double akq = a[k][q];
+            a[k][p] = c * akp - s * akq;
+            a[p][k] = a[k][p];
+            a[k][q] = s * akp + c * akq;
+            a[q][k] = a[k][q];
+        }
+    }
+
+    std::array<double, 3> values{a[0][0], a[1][1], a[2][2]};
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+struct CoefficientSampleStats {
+    std::uint64_t sample_count{0u};
+    std::uint64_t nonfinite_count{0u};
+    std::uint64_t symmetry_violation_count{0u};
+    Real min_value{std::numeric_limits<Real>::infinity()};
+    Real max_value{-std::numeric_limits<Real>::infinity()};
+    Real min_abs_positive{std::numeric_limits<Real>::infinity()};
+    Real max_abs{Real{}};
+};
+
+void updateCoefficientRange(CoefficientSampleStats& stats, Real value)
+{
+    if (!std::isfinite(static_cast<double>(value))) {
+        ++stats.nonfinite_count;
+        return;
+    }
+    ++stats.sample_count;
+    stats.min_value = std::min(stats.min_value, value);
+    stats.max_value = std::max(stats.max_value, value);
+    const Real abs_value = std::abs(value);
+    stats.max_abs = std::max(stats.max_abs, abs_value);
+    if (abs_value > Real{}) {
+        stats.min_abs_positive = std::min(stats.min_abs_positive, abs_value);
+    }
+}
+
+[[nodiscard]] Real vectorNorm3(const std::array<Real, 3>& v) noexcept
+{
+    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+template <std::size_t N>
+[[nodiscard]] Real arrayNorm(const std::array<Real, N>& v) noexcept
+{
+    Real sum = Real{};
+    for (Real entry : v) {
+        sum += entry * entry;
+    }
+    return std::sqrt(sum);
+}
+
+[[nodiscard]] Real matrixFrobeniusNorm(
+    const std::array<std::array<Real, 3>, 3>& matrix) noexcept
+{
+    Real sum = Real{};
+    for (const auto& row : matrix) {
+        for (Real entry : row) {
+            sum += entry * entry;
+        }
+    }
+    return std::sqrt(sum);
+}
+
+[[nodiscard]] bool matrixIsSymmetric(
+    const std::array<std::array<Real, 3>, 3>& matrix,
+    Real tolerance) noexcept
+{
+    for (int i = 0; i < 3; ++i) {
+        for (int j = i + 1; j < 3; ++j) {
+            if (std::abs(matrix[i][j] - matrix[j][i]) > tolerance) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] CoefficientSampleStats sampleCoefficientNode(
+    const RuntimeCoefficientNode& coefficient,
+    const assembly::IMeshAccess* mesh,
+    const SystemStateView* state)
+{
+    CoefficientSampleStats stats;
+    if (coefficient.node == nullptr || mesh == nullptr) {
+        return stats;
+    }
+
+    const Real time = state != nullptr ? state->time : Real{};
+    forEachOwnedQuadraturePoint(*mesh, [&](const std::array<Real, 3>& x, Real) {
+        const auto* node = coefficient.node;
+        if (const auto* f = node->scalarCoefficient()) {
+            updateCoefficientRange(stats, (*f)(x[0], x[1], x[2]));
+        } else if (const auto* f = node->timeScalarCoefficient()) {
+            updateCoefficientRange(stats, (*f)(x[0], x[1], x[2], time));
+        } else if (const auto* f = node->vectorCoefficient()) {
+            updateCoefficientRange(stats, vectorNorm3((*f)(x[0], x[1], x[2])));
+        } else if (const auto* f = node->matrixCoefficient()) {
+            const auto matrix = (*f)(x[0], x[1], x[2]);
+            if (matrixIsSymmetric(matrix, static_cast<Real>(1.0e-10))) {
+                const auto eig = symmetricEigenvalues3x3(matrix);
+                updateCoefficientRange(stats, static_cast<Real>(eig[0]));
+                stats.max_value =
+                    std::max(stats.max_value, static_cast<Real>(eig[2]));
+                stats.max_abs =
+                    std::max(stats.max_abs,
+                             static_cast<Real>(std::max(std::abs(eig[0]),
+                                                        std::abs(eig[2]))));
+                if (std::abs(eig[0]) > 0.0) {
+                    stats.min_abs_positive =
+                        std::min(stats.min_abs_positive,
+                                 static_cast<Real>(std::abs(eig[0])));
+                }
+            } else {
+                ++stats.symmetry_violation_count;
+                updateCoefficientRange(stats, matrixFrobeniusNorm(matrix));
+            }
+        } else if (const auto* f = node->tensor3Coefficient()) {
+            updateCoefficientRange(stats, arrayNorm((*f)(x[0], x[1], x[2])));
+        } else if (const auto* f = node->tensor4Coefficient()) {
+            updateCoefficientRange(stats, arrayNorm((*f)(x[0], x[1], x[2])));
+        }
+    });
+
+#if FE_HAS_MPI
+    stats.sample_count = mpiSumUint64(stats.sample_count);
+    stats.nonfinite_count = mpiSumUint64(stats.nonfinite_count);
+    stats.symmetry_violation_count =
+        mpiSumUint64(stats.symmetry_violation_count);
+    stats.min_value = static_cast<Real>(mpiReduceDouble(
+        static_cast<double>(stats.min_value), MPI_MIN));
+    stats.max_value = static_cast<Real>(mpiReduceDouble(
+        static_cast<double>(stats.max_value), MPI_MAX));
+    stats.min_abs_positive = static_cast<Real>(mpiReduceDouble(
+        static_cast<double>(stats.min_abs_positive), MPI_MIN));
+    stats.max_abs = static_cast<Real>(mpiReduceDouble(
+        static_cast<double>(stats.max_abs), MPI_MAX));
+#endif
+
+    if (!std::isfinite(static_cast<double>(stats.min_value))) {
+        stats.min_value = Real{};
+    }
+    if (!std::isfinite(static_cast<double>(stats.max_value))) {
+        stats.max_value = Real{};
+    }
+    if (!std::isfinite(static_cast<double>(stats.min_abs_positive))) {
+        stats.min_abs_positive = Real{};
+    }
+    return stats;
+}
+
+[[nodiscard]] analysis::CoefficientPropertySummary
+makeCoefficientSummaryFromRuntimeNode(
+    const RuntimeCoefficientNode& coefficient,
+    const analysis::ContributionDescriptor& contribution,
+    const OperatorTag& fallback_op,
+    const assembly::IMeshAccess* mesh,
+    const SystemStateView* state)
+{
+    constexpr Real tolerance = static_cast<Real>(1.0e-12);
+
+    analysis::CoefficientPropertySummary summary;
+    summary.coefficient = coefficient.name;
+    summary.block = contributionBlock(contribution, fallback_op);
+    summary.variables = contributionVariables(contribution);
+    summary.contribution_id = contributionIdentity(contribution, fallback_op);
+    summary.tensor_rank = tensorRankFor(coefficient.rank);
+    summary.domain = coefficient.domain;
+    summary.time_dependent = coefficient.time_dependent;
+    summary.positivity_tolerance = tolerance;
+    summary.tolerance_metadata_present = true;
+    summary.coverage_scope = "owned-cell quadrature runtime sampling";
+    summary.producer_certificate_id = "FE::Forms::DAGRuntimeCoefficientSampler";
+
+    if (coefficient.rank == analysis::FormCoefficientRank::Scalar) {
+        summary.symmetry = analysis::SymmetryClass::NotApplicable;
+    } else if (coefficient.rank == analysis::FormCoefficientRank::Rank2Tensor) {
+        summary.symmetry = analysis::SymmetryClass::Symmetric;
+    } else {
+        summary.symmetry = analysis::SymmetryClass::Unknown;
+    }
+
+    const auto stats = sampleCoefficientNode(coefficient, mesh, state);
+    if (stats.sample_count > 0u) {
+        summary.min_eigenvalue = stats.min_value;
+        summary.max_eigenvalue = stats.max_value;
+        summary.coefficient_region_coverage_complete = true;
+        summary.quadrature_point_coverage_complete = true;
+        summary.state_sample_coverage_complete = true;
+        if (coefficient.rank == analysis::FormCoefficientRank::Rank2Tensor &&
+            stats.symmetry_violation_count > 0u) {
+            summary.symmetry = analysis::SymmetryClass::Nonsymmetric;
+            summary.positivity = analysis::PositivityClass::Unknown;
+            summary.lower_bound_valid_for_all_samples = false;
+        } else if (coefficient.rank == analysis::FormCoefficientRank::Scalar ||
+                   coefficient.rank == analysis::FormCoefficientRank::Rank2Tensor) {
+            summary.positivity =
+                positivityFromRange(stats.min_value, stats.max_value, tolerance);
+            summary.lower_bound_valid_for_all_samples =
+                stats.nonfinite_count == 0u &&
+                summary.positivity != analysis::PositivityClass::Unknown;
+        } else {
+            summary.positivity = analysis::PositivityClass::Unknown;
+            summary.lower_bound_valid_for_all_samples = false;
+        }
+        if (stats.min_abs_positive > Real{}) {
+            summary.anisotropy_ratio = stats.max_abs / stats.min_abs_positive;
+            summary.contrast_ratio = summary.anisotropy_ratio;
+        }
+    } else {
+        summary.positivity = analysis::PositivityClass::Unknown;
+        summary.lower_bound_valid_for_all_samples = false;
+    }
+
+    return summary;
+}
+
+[[nodiscard]] analysis::CoefficientPropertySummary
+makeCoefficientSummaryFromConstitutiveLaw(
+    const analysis::ConstitutiveLawMetadata& law,
+    const OperatorTag& fallback_op)
+{
+    constexpr Real tolerance = static_cast<Real>(1.0e-12);
+
+    analysis::CoefficientPropertySummary summary;
+    summary.coefficient = law.name.empty() ? "constitutive_law" : law.name;
+    summary.block.operator_tag = law.source_operator_tag.empty()
+        ? fallback_op
+        : law.source_operator_tag;
+    summary.block.domain = analysis::DomainKind::Cell;
+    summary.block.role = analysis::ContributionRole::DiagonalBlock;
+    if (law.primary_field != INVALID_FIELD_ID) {
+        const auto variable = analysis::VariableKey::field(law.primary_field);
+        summary.variables.push_back(variable);
+        summary.block.test_variables.push_back(variable);
+        summary.block.trial_variables.push_back(variable);
+    }
+    summary.contribution_id = summary.block.operator_tag + ":constitutive:" +
+                              summary.coefficient;
+    summary.tensor_rank = law.tensor_rank.empty()
+        ? analysis::TensorRank::Scalar
+        : tensorRankFromMetadataString(law.tensor_rank);
+    summary.symmetry = law.symmetry_class.empty()
+        ? (summary.tensor_rank == analysis::TensorRank::Scalar
+               ? analysis::SymmetryClass::NotApplicable
+               : analysis::SymmetryClass::Unknown)
+        : symmetryFromMetadataString(law.symmetry_class);
+    summary.positivity = law.positivity_class.empty()
+        ? analysis::PositivityClass::Unknown
+        : positivityFromMetadataString(law.positivity_class);
+    summary.domain = analysis::DomainKind::Cell;
+    summary.state_dependent = law.state_dependent;
+    summary.time_dependent = law.time_dependent;
+    summary.positivity_tolerance = law.positivity_tolerance_present
+        ? law.positivity_tolerance
+        : tolerance;
+    summary.tolerance_metadata_present =
+        law.positivity_tolerance_present || law.constant_value_available;
+    summary.robustness_theorem_id = law.robustness_theorem_id;
+    summary.robustness_norm_id = law.robustness_norm_id;
+    summary.robustness_parameter_range_scope =
+        law.robustness_parameter_range_scope;
+    summary.robustness_mesh_family_scope = law.robustness_mesh_family_scope;
+    summary.robustness_uniform_constant_present =
+        law.robustness_uniform_constant_present;
+    summary.robustness_uniform_constant = law.robustness_uniform_constant;
+    summary.robustness_certificate_present =
+        !law.robustness_theorem_id.empty();
+    summary.robustness_norm_metadata_present =
+        !law.robustness_norm_id.empty();
+    summary.robustness_parameter_range_metadata_present =
+        !law.robustness_parameter_range_scope.empty();
+    summary.robustness_mesh_family_metadata_present =
+        !law.robustness_mesh_family_scope.empty();
+    summary.coverage_scope = law.constant_value_available
+        ? "constant constitutive metadata"
+        : "constitutive metadata";
+    summary.producer_certificate_id = "FE::ConstitutiveLawMetadata";
+
+    if (law.constant_value_available) {
+        summary.min_eigenvalue = law.constant_value;
+        summary.max_eigenvalue = law.constant_value;
+        summary.positivity =
+            positivityFromRange(law.constant_value,
+                                law.constant_value,
+                                summary.positivity_tolerance);
+        summary.coefficient_region_coverage_complete = true;
+        summary.quadrature_point_coverage_complete = true;
+        summary.state_sample_coverage_complete = true;
+        summary.lower_bound_valid_for_all_samples =
+            summary.positivity != analysis::PositivityClass::Unknown;
+        const Real abs_value = std::abs(law.constant_value);
+        summary.anisotropy_ratio = abs_value > Real{} ? static_cast<Real>(1) : Real{};
+        summary.contrast_ratio = summary.anisotropy_ratio;
+        summary.tolerance_metadata_present = true;
+    }
+
+    return summary;
+}
+
+[[nodiscard]] analysis::CoefficientPropertySummary
+makeCoefficientSummaryFromParameterUsage(
+    const analysis::FormParameterUsage& usage,
+    const analysis::ContributionDescriptor& contribution,
+    const OperatorTag& fallback_op,
+    const ParameterRegistry& parameter_registry,
+    const SystemStateView* state)
+{
+    constexpr Real tolerance = static_cast<Real>(1.0e-12);
+
+    std::string key = usage.name;
+    if (key.empty() && usage.slot.has_value()) {
+        if (auto slot_key = parameter_registry.keyForSlot(*usage.slot)) {
+            key = std::string(*slot_key);
+        }
+    }
+
+    analysis::CoefficientPropertySummary summary;
+    summary.coefficient = key.empty()
+        ? "parameter_slot:" + std::to_string(usage.slot.value_or(0u))
+        : "parameter:" + key;
+    summary.block = contributionBlock(contribution, fallback_op);
+    summary.variables = contributionVariables(contribution);
+    summary.contribution_id = contributionIdentity(contribution, fallback_op);
+    summary.tensor_rank = analysis::TensorRank::Scalar;
+    summary.symmetry = analysis::SymmetryClass::NotApplicable;
+    summary.domain = usage.domain;
+    summary.positivity_tolerance = tolerance;
+    summary.tolerance_metadata_present = true;
+    summary.coverage_scope = "runtime parameter value";
+    summary.producer_certificate_id = "FE::ParameterRegistryRuntimeMetadata";
+
+    std::optional<Real> value;
+    if (state != nullptr && !key.empty()) {
+        auto getter = parameter_registry.makeRealGetter(*state);
+        value = getter(key);
+    }
+    if (value.has_value()) {
+        summary.min_eigenvalue = *value;
+        summary.max_eigenvalue = *value;
+        summary.positivity = positivityFromRange(*value, *value, tolerance);
+        summary.coefficient_region_coverage_complete = true;
+        summary.quadrature_point_coverage_complete = true;
+        summary.state_sample_coverage_complete = true;
+        summary.lower_bound_valid_for_all_samples =
+            summary.positivity != analysis::PositivityClass::Unknown;
+        summary.anisotropy_ratio = std::abs(*value) > Real{}
+            ? static_cast<Real>(1)
+            : Real{};
+        summary.contrast_ratio = summary.anisotropy_ratio;
+    } else {
+        summary.positivity = analysis::PositivityClass::Unknown;
+        summary.lower_bound_valid_for_all_samples = false;
+    }
+
+    if (!key.empty()) {
+        if (const auto* spec = parameter_registry.find(key)) {
+            summary.robustness_theorem_id = spec->theorem_id;
+            summary.robustness_parameter_range_scope =
+                spec->admissible_range_scope;
+            summary.robustness_certificate_present =
+                !spec->theorem_id.empty();
+            summary.robustness_parameter_range_metadata_present =
+                spec->lower_bound.has_value() ||
+                spec->upper_bound.has_value() ||
+                !spec->admissible_range_scope.empty();
+            if (spec->lower_bound.has_value() &&
+                value.has_value() &&
+                *value >= *spec->lower_bound - tolerance) {
+                summary.lower_bound_valid_for_all_samples = true;
+            }
+        }
+    }
+
+    return summary;
+}
+
+void addCoefficientSummaryIfAbsent(
+    std::vector<analysis::CoefficientPropertySummary>& summaries,
+    analysis::CoefficientPropertySummary summary)
+{
+    const auto duplicate = std::find_if(
+        summaries.begin(), summaries.end(),
+        [&](const analysis::CoefficientPropertySummary& existing) {
+            return existing.coefficient == summary.coefficient &&
+                   existing.contribution_id == summary.contribution_id &&
+                   existing.block.operator_tag == summary.block.operator_tag;
+        });
+    if (duplicate == summaries.end()) {
+        summaries.push_back(std::move(summary));
+    }
+}
+
+[[nodiscard]] analysis::CoefficientPropertySummary
+makeImplicitFormCoefficientSummary(
+    const std::vector<analysis::ContributionDescriptor>& contributions,
+    const std::vector<analysis::FormulationRecord>& formulations,
+    const OperatorTag& op)
+{
+    analysis::CoefficientPropertySummary summary;
+    summary.coefficient = op.empty()
+        ? "implicit_form_coefficients"
+        : "implicit_form_coefficients:" + op;
+    summary.block.operator_tag = op;
+    summary.block.domain = analysis::DomainKind::Cell;
+    summary.block.role = analysis::ContributionRole::DiagonalBlock;
+    summary.domain = analysis::DomainKind::Cell;
+    summary.tensor_rank = analysis::TensorRank::Unknown;
+    summary.symmetry = analysis::SymmetryClass::Unknown;
+    summary.positivity = analysis::PositivityClass::Unknown;
+    summary.positivity_tolerance = static_cast<Real>(1.0e-12);
+    summary.coverage_scope =
+        "implicit form coefficients; no explicit coefficient or constitutive metadata recovered from DAG";
+    summary.producer_certificate_id = "FE::ImplicitFormCoefficientMetadata";
+
+    auto append_variable = [](std::vector<analysis::VariableKey>& variables,
+                              const analysis::VariableKey& variable) {
+        if (std::find(variables.begin(), variables.end(), variable) ==
+            variables.end()) {
+            variables.push_back(variable);
+        }
+    };
+
+    for (const auto& contribution : contributions) {
+        if (!op.empty() &&
+            !contribution.operator_tag.empty() &&
+            contribution.operator_tag != op) {
+            continue;
+        }
+        for (const auto& variable : contributionVariables(contribution)) {
+            append_variable(summary.variables, variable);
+        }
+        if (contribution.domain != analysis::DomainKind::Cell) {
+            continue;
+        }
+        for (const auto& variable : contribution.test_variables) {
+            append_variable(summary.block.test_variables, variable);
+        }
+        for (const auto& variable : contribution.trial_variables) {
+            append_variable(summary.block.trial_variables, variable);
+        }
+    }
+
+    for (const auto& formulation : formulations) {
+        if (!op.empty() &&
+            !formulation.operator_tag.empty() &&
+            formulation.operator_tag != op) {
+            continue;
+        }
+        for (const auto& variable : formulation.active_variables) {
+            append_variable(summary.variables, variable);
+        }
+    }
+
+    if (summary.block.test_variables.empty()) {
+        summary.block.test_variables = summary.variables;
+    }
+    if (summary.block.trial_variables.empty()) {
+        summary.block.trial_variables = summary.variables;
+    }
+
+    return summary;
+}
+
+[[nodiscard]] std::vector<analysis::CoefficientPropertySummary>
+buildRuntimeCoefficientSummaries(
+    const std::vector<analysis::ContributionDescriptor>& contributions,
+    const std::vector<analysis::FormulationRecord>& formulations,
+    const OperatorTag& op,
+    const ParameterRegistry& parameter_registry,
+    const assembly::IMeshAccess* mesh,
+    const SystemStateView* state)
+{
+    std::vector<analysis::CoefficientPropertySummary> out;
+
+    for (const auto& contribution : contributions) {
+        std::vector<RuntimeCoefficientNode> coefficients;
+        if (contribution.source_expression) {
+            collectRuntimeCoefficientNodes(*contribution.source_expression,
+                                           analysis::DomainKind::Cell,
+                                           -1,
+                                           -1,
+                                           coefficients);
+        }
+        for (const auto& coefficient : coefficients) {
+            addCoefficientSummaryIfAbsent(
+                out,
+                makeCoefficientSummaryFromRuntimeNode(coefficient,
+                                                      contribution,
+                                                      op,
+                                                      mesh,
+                                                      state));
+        }
+        if (contribution.source_expression) {
+            auto scan = analysis::scanFormExpr(*contribution.source_expression);
+            for (auto& law : scan.constitutive_laws) {
+                if (law.source_operator_tag.empty()) {
+                    law.source_operator_tag =
+                        contribution.operator_tag.empty()
+                            ? op
+                            : contribution.operator_tag;
+                }
+                auto summary = makeCoefficientSummaryFromConstitutiveLaw(law, op);
+                summary.block = contributionBlock(contribution, op);
+                summary.variables = contributionVariables(contribution);
+                summary.domain = contribution.domain;
+                summary.block.domain = contribution.domain;
+                summary.contribution_id =
+                    contributionIdentity(contribution, op) +
+                    ":constitutive:" + summary.coefficient;
+                addCoefficientSummaryIfAbsent(out, std::move(summary));
+            }
+        }
+        for (const auto& usage : contribution.parameter_usages) {
+            addCoefficientSummaryIfAbsent(
+                out,
+                makeCoefficientSummaryFromParameterUsage(usage,
+                                                         contribution,
+                                                         op,
+                                                         parameter_registry,
+                                                         state));
+        }
+    }
+
+    for (const auto& formulation : formulations) {
+        for (const auto& law : formulation.constitutive_laws) {
+            addCoefficientSummaryIfAbsent(
+                out, makeCoefficientSummaryFromConstitutiveLaw(law, op));
+        }
+    }
+
+    if (out.empty() && (!contributions.empty() || !formulations.empty())) {
+        addCoefficientSummaryIfAbsent(
+            out,
+            makeImplicitFormCoefficientSummary(contributions, formulations, op));
+    }
+
+    return out;
+}
+
+[[nodiscard]] bool invariantDomainValueViolates(
+    Real value,
+    const analysis::InvariantDomainDescriptor& descriptor) noexcept
+{
+    if (!std::isfinite(static_cast<double>(value))) {
+        return true;
+    }
+    const Real tolerance = descriptor.bound_tolerance > Real{}
+        ? descriptor.bound_tolerance
+        : static_cast<Real>(0);
+    if (descriptor.lower_bound.has_value() &&
+        value < *descriptor.lower_bound - tolerance) {
+        return true;
+    }
+    if (descriptor.upper_bound.has_value() &&
+        value > *descriptor.upper_bound + tolerance) {
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] std::uint64_t countInvariantDomainDofViolations(
+    const analysis::InvariantDomainDescriptor& descriptor,
+    const dofs::FieldDofMap& field_map,
+    const SystemStateView* state)
+{
+    if (descriptor.sampled_field == INVALID_FIELD_ID || state == nullptr) {
+        return 0u;
+    }
+    const auto field_index = static_cast<std::size_t>(descriptor.sampled_field);
+    if (!field_map.isFinalized() || field_index >= field_map.numFields()) {
+        return 0u;
+    }
+
+    std::unique_ptr<assembly::GlobalSystemView> vector_view;
+    if (state->u_vector != nullptr) {
+        auto* mutable_vector = const_cast<backends::GenericVector*>(state->u_vector);
+        vector_view = mutable_vector->createAssemblyView();
+    }
+
+    const auto read_value = [&](GlobalIndex dof, Real& value) -> bool {
+        if (dof >= 0 && static_cast<std::size_t>(dof) < state->u.size()) {
+            value = state->u[static_cast<std::size_t>(dof)];
+            return true;
+        }
+        if (vector_view) {
+            value = vector_view->getVectorEntry(dof);
+            return true;
+        }
+        return false;
+    };
+
+    std::uint64_t violations = 0u;
+    const auto check_dof = [&](GlobalIndex dof) {
+        Real value{};
+        if (read_value(dof, value) &&
+            invariantDomainValueViolates(value, descriptor)) {
+            ++violations;
+        }
+    };
+
+    if (descriptor.sampled_component >= 0) {
+        try {
+            const auto dofs = field_map.getComponentDofs(
+                field_index,
+                static_cast<LocalIndex>(descriptor.sampled_component));
+            for (const auto dof : dofs) {
+                check_dof(dof);
+            }
+        } catch (...) {
+            return 0u;
+        }
+    } else {
+        try {
+            const auto [begin, end] = field_map.getFieldDofRange(field_index);
+            for (GlobalIndex dof = begin; dof < end; ++dof) {
+                check_dof(dof);
+            }
+        } catch (...) {
+            return 0u;
+        }
+    }
+
+    return violations;
+}
+
+[[nodiscard]] analysis::InvariantDomainSummary makeInvariantDomainSummary(
+    const analysis::InvariantDomainDescriptor& descriptor,
+    const dofs::FieldDofMap& field_map,
+    const SystemStateView* state)
+{
+    analysis::InvariantDomainSummary summary;
+    summary.invariant_set_id = descriptor.invariant_set_id;
+    summary.variables = descriptor.variables;
+    if (descriptor.lower_bound.has_value()) {
+        summary.lower_bound = *descriptor.lower_bound;
+        summary.lower_bound_active = true;
+    }
+    if (descriptor.upper_bound.has_value()) {
+        summary.upper_bound = *descriptor.upper_bound;
+        summary.upper_bound_active = true;
+    }
+    if (descriptor.cfl_estimate.has_value()) {
+        summary.cfl_estimate = *descriptor.cfl_estimate;
+        summary.cfl_estimate_present = true;
+    }
+    if (descriptor.accepted_cfl_bound.has_value()) {
+        summary.accepted_cfl_bound = *descriptor.accepted_cfl_bound;
+        summary.accepted_cfl_bound_present = true;
+    }
+    if (descriptor.wave_speed_bound.has_value()) {
+        summary.wave_speed_bound = *descriptor.wave_speed_bound;
+        summary.wave_speed_bound_present = true;
+    }
+    summary.time_step_scope = descriptor.time_step_scope;
+    summary.mesh_size_scope = descriptor.mesh_size_scope;
+    summary.limiter_evidence_present = descriptor.limiter_evidence_present;
+    summary.cfl_condition_satisfied = descriptor.cfl_condition_satisfied;
+    summary.ssp_time_discretization_evidence_present =
+        descriptor.ssp_time_discretization_evidence_present;
+    summary.source_admissibility_evidence_present =
+        descriptor.source_admissibility_evidence_present;
+    summary.low_order_invariant_domain_evidence_present =
+        descriptor.low_order_invariant_domain_evidence_present;
+    summary.convex_limiting_evidence_present =
+        descriptor.convex_limiting_evidence_present;
+    summary.spatial_monotonicity_evidence_present =
+        descriptor.spatial_monotonicity_evidence_present;
+    summary.mass_positivity_evidence_present =
+        descriptor.mass_positivity_evidence_present;
+    summary.post_step_violation_count =
+        countInvariantDomainDofViolations(descriptor, field_map, state);
+    summary.invariant_domain_theorem_id = descriptor.theorem_id;
+    return summary;
+}
+
+void applyRangeFactor(Real& min_value,
+                      Real& max_value,
+                      Real factor_min,
+                      Real factor_max)
+{
+    if (!std::isfinite(static_cast<double>(factor_min)) ||
+        !std::isfinite(static_cast<double>(factor_max))) {
+        return;
+    }
+    if (factor_min > factor_max) {
+        std::swap(factor_min, factor_max);
+    }
+    min_value *= factor_min;
+    max_value *= factor_max;
+}
+
+void applyPowerRange(Real& min_value,
+                     Real& max_value,
+                     Real base_min,
+                     Real base_max,
+                     int power)
+{
+    if (power == 0 ||
+        base_min <= Real{} ||
+        base_max <= Real{} ||
+        !std::isfinite(static_cast<double>(base_min)) ||
+        !std::isfinite(static_cast<double>(base_max))) {
+        return;
+    }
+    const Real a = std::pow(base_min, power);
+    const Real b = std::pow(base_max, power);
+    applyRangeFactor(min_value, max_value, std::min(a, b), std::max(a, b));
+}
+
+[[nodiscard]] std::optional<Real> realParameterValue(
+    const ParameterRegistry& registry,
+    const SystemStateView* state,
+    std::string_view key)
+{
+    if (state == nullptr || key.empty()) {
+        return std::nullopt;
+    }
+    auto getter = registry.makeRealGetter(*state);
+    return getter(key);
+}
+
+[[nodiscard]] analysis::ParameterScaleSummary makeRuntimeParameterScaleSummary(
+    std::string id,
+    analysis::ParameterScaleRole role,
+    analysis::OperatorBlockId block,
+    std::vector<analysis::VariableKey> variables,
+    const analysis::FormScaleUsage& usage,
+    const FieldRegistry& field_registry,
+    const ParameterRegistry& parameter_registry,
+    const std::unordered_map<std::string, std::pair<Real, Real>>&
+        coefficient_abs_ranges,
+    const assembly::IMeshAccess* mesh,
+    const SystemStateView* state)
+{
+    analysis::ParameterScaleSummary summary;
+    summary.nondimensional_parameter_id = std::move(id);
+    summary.role = role;
+    summary.block = std::move(block);
+    summary.variables = std::move(variables);
+    summary.contribution_id = summary.block.contribution_id;
+    summary.min_scale_value = static_cast<Real>(1);
+    summary.max_scale_value = static_cast<Real>(1);
+    summary.polynomial_order =
+        polynomialOrderForVariables(field_registry, summary.variables);
+    summary.scale_theorem_id = usage.exact_for_analysis
+        ? "FormExprDAG::RuntimeScale"
+        : "FormExprDAG::SampledRuntimeScale";
+    summary.mesh_quality_factor = static_cast<Real>(1);
+    summary.coefficient_contrast_factor = usage.coefficient_names.empty()
+        ? static_cast<Real>(0)
+        : static_cast<Real>(1);
+
+    const auto h_stats = meshScaleStats(mesh);
+    if (h_stats.available) {
+        applyPowerRange(summary.min_scale_value,
+                        summary.max_scale_value,
+                        h_stats.h_min,
+                        h_stats.h_max,
+                        usage.h_power);
+    }
+
+    const Real dt = state != nullptr
+        ? std::abs(state->effective_dt > Real{} ? state->effective_dt : state->dt)
+        : Real{};
+    if (dt > Real{}) {
+        applyPowerRange(summary.min_scale_value,
+                        summary.max_scale_value,
+                        dt,
+                        dt,
+                        usage.dt_power);
+    }
+
+    for (const auto& name : usage.parameter_names) {
+        if (const auto value = realParameterValue(parameter_registry, state, name)) {
+            const Real abs_value = std::abs(*value);
+            applyRangeFactor(summary.min_scale_value,
+                             summary.max_scale_value,
+                             abs_value,
+                             abs_value);
+        }
+        if (const auto* spec = parameter_registry.find(name)) {
+            if (spec->lower_bound.has_value() &&
+                !summary.required_lower_bound_present) {
+                summary.required_lower_bound = *spec->lower_bound;
+                summary.required_lower_bound_present = true;
+            }
+            if (!spec->theorem_id.empty()) {
+                summary.scale_theorem_id = spec->theorem_id;
+            }
+        }
+    }
+    for (auto slot : usage.parameter_slots) {
+        if (auto key = parameter_registry.keyForSlot(slot)) {
+            if (const auto value =
+                    realParameterValue(parameter_registry, state, *key)) {
+                const Real abs_value = std::abs(*value);
+                applyRangeFactor(summary.min_scale_value,
+                                 summary.max_scale_value,
+                                 abs_value,
+                                 abs_value);
+            }
+        }
+    }
+
+    Real coefficient_contrast = static_cast<Real>(1);
+    for (const auto& name : usage.coefficient_names) {
+        const auto it = coefficient_abs_ranges.find(name);
+        if (it == coefficient_abs_ranges.end()) {
+            continue;
+        }
+        applyRangeFactor(summary.min_scale_value,
+                         summary.max_scale_value,
+                         it->second.first,
+                         it->second.second);
+        if (it->second.first > Real{}) {
+            coefficient_contrast =
+                std::max(coefficient_contrast,
+                         it->second.second / it->second.first);
+        }
+    }
+    if (!usage.coefficient_names.empty()) {
+        summary.coefficient_contrast_factor = coefficient_contrast;
+    }
+
+    summary.trace_inverse_metadata_present =
+        role == analysis::ParameterScaleRole::WeakBoundaryPenalty &&
+        usage.h_power < 0;
+    if (summary.trace_inverse_metadata_present) {
+        summary.trace_inverse_constant = static_cast<Real>(1);
+    }
+    return summary;
+}
+
+[[nodiscard]] std::optional<analysis::MeshGeometryQualitySummary>
+buildMeshGeometryQualitySummary(const assembly::IMeshAccess& mesh)
+{
+    constexpr Real quality_threshold = static_cast<Real>(100.0);
+
+    std::uint64_t local_valid = 0u;
+    std::uint64_t local_inverted = 0u;
+    std::uint64_t local_poor = 0u;
+    Real local_min_jacobian = std::numeric_limits<Real>::infinity();
+    Real local_max_jacobian = -std::numeric_limits<Real>::infinity();
+    Real local_max_condition = Real{};
+    std::vector<analysis::ElementId> local_worst;
+
+    const auto remember_worst = [&](GlobalIndex cell_id) {
+        if (local_worst.size() < analysis::kDefaultWorstSampleLimit) {
+            local_worst.push_back(static_cast<analysis::ElementId>(cell_id));
+        }
+    };
+
+    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+        try {
+            std::vector<std::array<Real, 3>> coords;
+            mesh.getCellCoordinates(cell_id, coords);
+            if (coords.empty()) {
+                ++local_poor;
+                remember_worst(cell_id);
+                return;
+            }
+
+            std::vector<math::Vector<Real, 3>> nodes;
+            nodes.reserve(coords.size());
+            for (const auto& coord : coords) {
+                nodes.emplace_back(math::Vector<Real, 3>{
+                    coord[0], coord[1], coord[2]});
+            }
+
+            const auto cell_type = mesh.getCellType(cell_id);
+            const int geometry_order = mesh.getCellGeometryOrder(cell_id);
+
+            elements::ElementRequest element_request;
+            element_request.element_type = cell_type;
+            element_request.basis_type = BasisType::Lagrange;
+            element_request.field_type = FieldType::Scalar;
+            element_request.continuity = Continuity::C0;
+            element_request.order = geometry_order;
+            auto element = elements::ElementFactory::create(element_request);
+            if (!element) {
+                ++local_poor;
+                remember_worst(cell_id);
+                return;
+            }
+
+            geometry::MappingRequest mapping_request;
+            mapping_request.element_type = cell_type;
+            mapping_request.geometry_order = geometry_order;
+            mapping_request.use_affine = geometry_order <= 1;
+            auto mapping = geometry::MappingFactory::create(mapping_request, nodes);
+            if (!mapping) {
+                ++local_poor;
+                remember_worst(cell_id);
+                return;
+            }
+
+            const auto quality =
+                elements::ElementValidator::validate(*element, *mapping);
+            Real cell_max_detJ = quality.min_detJ;
+            if (auto quadrature = element->quadrature()) {
+                for (const auto& point : quadrature->points()) {
+                    const Real detJ = mapping->jacobian_determinant(point);
+                    if (std::isfinite(static_cast<double>(detJ))) {
+                        cell_max_detJ = std::max(cell_max_detJ, detJ);
+                    }
+                }
+            }
+            const bool jacobian_finite =
+                std::isfinite(static_cast<double>(quality.min_detJ));
+            const bool condition_finite =
+                std::isfinite(static_cast<double>(quality.max_condition_number));
+            if (!jacobian_finite) {
+                ++local_inverted;
+                remember_worst(cell_id);
+                return;
+            }
+
+            ++local_valid;
+            local_min_jacobian =
+                std::min(local_min_jacobian, quality.min_detJ);
+            local_max_jacobian =
+                std::max(local_max_jacobian, cell_max_detJ);
+            if (condition_finite) {
+                local_max_condition =
+                    std::max(local_max_condition,
+                             quality.max_condition_number);
+            }
+            if (!quality.positive_jacobian || quality.min_detJ <= Real{}) {
+                ++local_inverted;
+                remember_worst(cell_id);
+            } else if (condition_finite &&
+                       quality.max_condition_number > quality_threshold) {
+                ++local_poor;
+                remember_worst(cell_id);
+            }
+        } catch (const std::exception&) {
+            ++local_poor;
+            remember_worst(cell_id);
+        }
+    });
+
+    std::uint64_t global_valid = local_valid;
+    std::uint64_t global_inverted = local_inverted;
+    std::uint64_t global_poor = local_poor;
+    Real global_min_jacobian = local_min_jacobian;
+    Real global_max_jacobian = local_max_jacobian;
+    Real global_max_condition = local_max_condition;
+
+#if FE_HAS_MPI
+    global_valid = mpiSumUint64(global_valid);
+    global_inverted = mpiSumUint64(global_inverted);
+    global_poor = mpiSumUint64(global_poor);
+    global_min_jacobian =
+        static_cast<Real>(mpiReduceDouble(static_cast<double>(global_min_jacobian),
+                                          MPI_MIN));
+    global_max_jacobian =
+        static_cast<Real>(mpiReduceDouble(static_cast<double>(global_max_jacobian),
+                                          MPI_MAX));
+    global_max_condition =
+        static_cast<Real>(mpiReduceDouble(static_cast<double>(global_max_condition),
+                                          MPI_MAX));
+#endif
+
+    if (global_valid == 0u ||
+        !std::isfinite(static_cast<double>(global_min_jacobian)) ||
+        !std::isfinite(static_cast<double>(global_max_jacobian))) {
+        return std::nullopt;
+    }
+
+    analysis::MeshGeometryQualitySummary summary;
+    summary.mesh_revision =
+        mesh.revisionTrackingAvailable() ? mesh.geometryRevision() : 0u;
+    summary.domain = analysis::DomainKind::Cell;
+    summary.min_jacobian = global_min_jacobian;
+    summary.max_jacobian = global_max_jacobian;
+    summary.max_aspect_ratio = global_max_condition;
+    summary.aspect_ratio_warning_threshold = quality_threshold;
+    summary.inverted_element_count = global_inverted;
+    summary.poor_quality_element_count = global_poor;
+    summary.mesh_family_scope_present = mesh.revisionTrackingAvailable();
+    if (summary.mesh_family_scope_present) {
+        summary.mesh_family_scope =
+            "geometry_revision=" + std::to_string(summary.mesh_revision);
+    }
+    summary.worst_elements = std::move(local_worst);
+    return summary;
+}
+
+[[nodiscard]] bool hasTemporalMetadata(
+    const std::vector<analysis::ContributionDescriptor>& contributions,
+    const std::vector<analysis::VariableDescriptor>& variables)
+{
+    for (const auto& contribution : contributions) {
+        if (contribution.temporal &&
+            contribution.temporal->kind != analysis::TemporalContributionKind::None) {
+            return true;
+        }
+    }
+    for (const auto& variable : variables) {
+        if (variable.temporal_state_kind != analysis::TemporalStateKind::Unknown) {
+            return true;
+        }
+        if (variable.max_time_derivative_order > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] std::vector<analysis::VariableKey> variablesFromDescriptors(
+    const std::vector<analysis::VariableDescriptor>& descriptors)
+{
+    std::vector<analysis::VariableKey> variables;
+    for (const auto& descriptor : descriptors) {
+        if (std::find(variables.begin(), variables.end(), descriptor.key) ==
+            variables.end()) {
+            variables.push_back(descriptor.key);
+        }
+    }
+    return variables;
+}
+
+[[nodiscard]] bool contributionIsNonlocalCoupling(
+    const analysis::ContributionDescriptor& contribution) noexcept
+{
+    if (contribution.domain == analysis::DomainKind::InterfaceFace ||
+        contribution.domain == analysis::DomainKind::CoupledBoundary ||
+        contribution.domain == analysis::DomainKind::Global ||
+        contribution.domain == analysis::DomainKind::AuxiliaryCoupling) {
+        return true;
+    }
+    if (contribution.role == analysis::ContributionRole::GlobalCoupling ||
+        contribution.role == analysis::ContributionRole::FieldToAuxiliary ||
+        contribution.role == analysis::ContributionRole::AuxiliaryToField ||
+        contribution.role == analysis::ContributionRole::AuxiliaryToAuxiliary ||
+        contribution.role == analysis::ContributionRole::AuxiliarySelf) {
+        return true;
+    }
+    return contribution.balance &&
+           contribution.balance->role == analysis::BalanceRole::ExchangeLike;
 }
 
 [[nodiscard]] bool hasExplicitRoleName(const backends::SolverOptions& options,
@@ -1314,8 +3315,116 @@ private:
     return q_u;
 }
 
+namespace {
+
+MeshParticipantInfo completeParticipantInfo(MeshParticipantInfo info,
+                                            const assembly::IMeshAccess& access)
+{
+    if (info.name.empty()) {
+        info.name = "mesh";
+    }
+    if (info.num_cells == 0) {
+        info.num_cells = access.numCells();
+    }
+    if (info.num_vertices == 0) {
+        info.num_vertices = access.numVertices();
+    }
+    if (info.num_boundary_faces == 0) {
+        info.num_boundary_faces = access.numBoundaryFaces();
+    }
+    if (info.num_interior_faces == 0) {
+        info.num_interior_faces = access.numInteriorFaces();
+    }
+    return info;
+}
+
+std::vector<MeshParticipantInfo> singleParticipantInfo(
+    MeshParticipantInfo info,
+    const assembly::IMeshAccess& access)
+{
+    return {completeParticipantInfo(std::move(info), access)};
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+std::vector<MeshParticipantInfo> participantInfoFromComposite(
+    const assembly::CompositeMeshAccess& access)
+{
+    std::vector<MeshParticipantInfo> participants;
+    participants.reserve(access.numParticipants());
+    for (std::size_t i = 0; i < access.numParticipants(); ++i) {
+        MeshParticipantInfo info;
+        info.name = access.participantName(i);
+        info.domain_id = access.participantDomainId(i);
+
+        bool saw_cell = false;
+        for (GlobalIndex c = 0; c < access.numCells(); ++c) {
+            const auto location = access.cellLocation(c);
+            if (location.participant_index != i) {
+                continue;
+            }
+            if (!saw_cell) {
+                info.cell_offset = c;
+                saw_cell = true;
+            }
+            ++info.num_cells;
+        }
+
+        bool saw_vertex = false;
+        for (GlobalIndex v = 0; v < access.numVertices(); ++v) {
+            const auto location = access.vertexLocation(v);
+            if (location.participant_index != i) {
+                continue;
+            }
+            if (!saw_vertex) {
+                info.vertex_offset = v;
+                saw_vertex = true;
+            }
+            ++info.num_vertices;
+        }
+
+        bool saw_boundary = false;
+        for (GlobalIndex f = 0; f < access.numBoundaryFaces(); ++f) {
+            const auto location = access.boundaryFaceLocation(f);
+            if (location.participant_index != i) {
+                continue;
+            }
+            if (!saw_boundary) {
+                info.boundary_face_offset = f;
+                saw_boundary = true;
+            }
+            ++info.num_boundary_faces;
+        }
+
+        bool saw_interior = false;
+        for (GlobalIndex f = 0; f < access.numInteriorFaces(); ++f) {
+            const auto location = access.interiorFaceLocation(f);
+            if (location.participant_index != i) {
+                continue;
+            }
+            if (!saw_interior) {
+                info.interior_face_offset = f;
+                saw_interior = true;
+            }
+            ++info.num_interior_faces;
+        }
+
+        participants.push_back(std::move(info));
+    }
+    return participants;
+}
+#endif
+
+} // namespace
+
 FESystem::FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access)
-    : mesh_access_(std::move(mesh_access))
+    : FESystem(std::move(mesh_access), {})
+{
+}
+
+FESystem::FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access,
+                   std::vector<MeshParticipantInfo> participants)
+    : mesh_access_(std::move(mesh_access)),
+      mesh_participants_(std::move(participants))
 {
     // mesh_access_ may be null for auxiliary-only use (no FE field assembly).
     // Full FE operations (setup, assembly) require non-null mesh.
@@ -1361,6 +3470,15 @@ FESystem::captureConstraintRevisionSnapshot() const noexcept
         snapshot.mesh_field_layout = local_mesh.field_layout_revision();
         snapshot.labels = local_mesh.label_revision();
         snapshot.active_configuration = local_mesh.active_configuration_epoch();
+    } else if (mesh_access_ && mesh_access_->revisionTrackingAvailable()) {
+        snapshot.geometry = mesh_access_->geometryRevision();
+        snapshot.reference_rebase = 0;
+        snapshot.topology = mesh_access_->topologyRevision();
+        snapshot.ownership = mesh_access_->ownershipRevision();
+        snapshot.numbering = mesh_access_->numberingRevision();
+        snapshot.mesh_field_layout = mesh_access_->fieldLayoutRevision();
+        snapshot.labels = mesh_access_->labelRevision();
+        snapshot.active_configuration = mesh_access_->activeConfigurationEpoch();
     }
 #endif
     return snapshot;
@@ -1486,6 +3604,18 @@ OperatorRevisionSnapshot FESystem::operatorRevisionSnapshot() const noexcept
         snapshot.mesh.field_layout = local_mesh.field_layout_revision();
         snapshot.mesh.labels = local_mesh.label_revision();
         snapshot.mesh.active_configuration = local_mesh.active_configuration_epoch();
+    } else if (mesh_access_ && mesh_access_->revisionTrackingAvailable()) {
+        snapshot.mesh.valid = true;
+        snapshot.mesh.geometry = mesh_access_->geometryRevision();
+        snapshot.mesh.reference_geometry = mesh_access_->geometryRevision();
+        snapshot.mesh.current_geometry = mesh_access_->geometryRevision();
+        snapshot.mesh.reference_rebase = 0;
+        snapshot.mesh.topology = mesh_access_->topologyRevision();
+        snapshot.mesh.ownership = mesh_access_->ownershipRevision();
+        snapshot.mesh.numbering = mesh_access_->numberingRevision();
+        snapshot.mesh.field_layout = mesh_access_->fieldLayoutRevision();
+        snapshot.mesh.labels = mesh_access_->labelRevision();
+        snapshot.mesh.active_configuration = mesh_access_->activeConfigurationEpoch();
     }
 #else
     snapshot.geometry_state = GeometryTransactionState::Committed;
@@ -1505,13 +3635,45 @@ OperatorInvalidationDecision FESystem::operatorInvalidationDecision(
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 FESystem::FESystem(std::shared_ptr<const svmp::Mesh> mesh, svmp::Configuration coord_cfg)
+    : FESystem(std::move(mesh), MeshParticipantInfo{.name = "mesh"}, coord_cfg)
+{
+}
+
+FESystem::FESystem(std::shared_ptr<const svmp::Mesh> mesh,
+                   MeshParticipantInfo participant,
+                   svmp::Configuration coord_cfg)
     : mesh_(std::move(mesh)), coord_cfg_(coord_cfg)
 {
     FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::mesh");
     mesh_access_ = std::make_shared<assembly::MeshAccess>(*mesh_, coord_cfg_);
     search_access_ = std::make_shared<MeshSearchAccess>(*mesh_, coord_cfg_);
     FE_CHECK_NOT_NULL(mesh_access_.get(), "FESystem::mesh_access");
+    mesh_participants_ = singleParticipantInfo(std::move(participant), *mesh_access_);
     operator_backends_ = std::make_unique<OperatorBackends>();
+}
+
+FESystem::FESystem(std::shared_ptr<assembly::CompositeMeshAccess> mesh_access)
+    : FESystem(std::static_pointer_cast<const assembly::CompositeMeshAccess>(mesh_access))
+{
+}
+
+FESystem::FESystem(std::shared_ptr<const assembly::CompositeMeshAccess> mesh_access)
+    : FESystem(std::static_pointer_cast<const assembly::IMeshAccess>(mesh_access),
+               mesh_access ? participantInfoFromComposite(*mesh_access)
+                           : std::vector<MeshParticipantInfo>{})
+{
+    FE_CHECK_NOT_NULL(mesh_access.get(), "FESystem::CompositeMeshAccess");
+}
+
+const svmp::Mesh& FESystem::singleMesh(std::string_view api_name) const
+{
+    if (mesh_) {
+        return *mesh_;
+    }
+    FE_THROW(InvalidStateException,
+             std::string(api_name) +
+                 ": requires a FESystem constructed from a single svmp::Mesh; "
+                 "composite mesh systems expose participant metadata and meshAccess() instead");
 }
 
 void FESystem::setInterfaceMesh(InterfaceId marker, std::shared_ptr<const svmp::InterfaceMesh> mesh)
@@ -1540,9 +3702,9 @@ void FESystem::setInterfaceMeshFromFaceSet(InterfaceId marker,
                                            const std::string& face_set_name,
                                            bool compute_orientation)
 {
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::setInterfaceMeshFromFaceSet: mesh");
+    const auto& mesh = singleMesh("FESystem::setInterfaceMeshFromFaceSet");
     auto iface = std::make_shared<svmp::InterfaceMesh>(
-        svmp::InterfaceMesh::build_from_face_set(mesh_->base(), face_set_name, compute_orientation));
+        svmp::InterfaceMesh::build_from_face_set(mesh.base(), face_set_name, compute_orientation));
     setInterfaceMesh(marker, std::move(iface));
 }
 
@@ -1550,9 +3712,9 @@ void FESystem::setInterfaceMeshFromBoundaryLabel(InterfaceId marker,
                                                  int boundary_label,
                                                  bool compute_orientation)
 {
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::setInterfaceMeshFromBoundaryLabel: mesh");
+    const auto& mesh = singleMesh("FESystem::setInterfaceMeshFromBoundaryLabel");
     auto iface = std::make_shared<svmp::InterfaceMesh>(
-        svmp::InterfaceMesh::build_from_boundary_label(mesh_->base(),
+        svmp::InterfaceMesh::build_from_boundary_label(mesh.base(),
                                                        static_cast<svmp::label_t>(boundary_label),
                                                        compute_orientation));
     setInterfaceMesh(marker, std::move(iface));
@@ -1655,6 +3817,496 @@ void FESystem::addContribution(analysis::ContributionDescriptor desc) {
 void FESystem::addVariableDescriptor(analysis::VariableDescriptor desc) {
     variable_descriptors_.push_back(std::move(desc));
     invalidateAnalysisCache();
+}
+
+void FESystem::addInvariantDomainDescriptor(analysis::InvariantDomainDescriptor desc) {
+    invariant_domain_descriptors_.push_back(std::move(desc));
+    invalidateAnalysisCache();
+}
+
+void FESystem::setAnalysisSolverOptions(backends::SolverOptions options) {
+    analysis_solver_options_.emplace(std::move(options));
+    invalidateAnalysisCache();
+}
+
+void FESystem::clearAnalysisSolverOptions() {
+    analysis_solver_options_.reset();
+    invalidateAnalysisCache();
+}
+
+void FESystem::addAnalysisSummaries(analysis::AnalysisSummarySet summaries) {
+    if (summaries.empty()) {
+        return;
+    }
+    if (!registered_analysis_summaries_) {
+        registered_analysis_summaries_.emplace();
+    }
+    mergeAnalysisSummarySets(*registered_analysis_summaries_, summaries);
+    if (!analysis_summaries_) {
+        analysis_summaries_.emplace();
+    }
+    mergeAnalysisSummarySets(*analysis_summaries_, summaries);
+    invalidateAnalysisCache();
+}
+
+void FESystem::clearAnalysisSummaries() {
+    registered_analysis_summaries_.reset();
+    analysis_summaries_.reset();
+    assembled_tangent_analysis_summary_attempted_ = false;
+    invalidateAnalysisCache();
+}
+
+bool FESystem::updateAnalysisSummariesFromAssembledOperator(
+    const backends::GenericMatrix& matrix,
+    const OperatorTag& op,
+    const SystemStateView* state)
+{
+    if (assembled_tangent_analysis_summary_attempted_) {
+        return false;
+    }
+
+    assembled_tangent_analysis_summary_attempted_ = true;
+    analysis_summaries_.reset();
+    if (registered_analysis_summaries_) {
+        analysis_summaries_.emplace(*registered_analysis_summaries_);
+    }
+
+    auto source = analysis::makeSparseRowScanSource(matrix);
+    if (!source) {
+        invalidateAnalysisCache();
+        return false;
+    }
+
+    const auto baseline_report = runProblemAnalysis();
+    const auto& plan = baseline_report.request_plan;
+    if (plan.empty()) {
+        invalidateAnalysisCache();
+        return false;
+    }
+
+    analysis::AnalysisSummarySet summaries;
+    if (registered_analysis_summaries_) {
+        mergeAnalysisSummarySets(summaries, *registered_analysis_summaries_);
+    }
+    const auto registered_summary_count = summaries.totalSummaryCount();
+
+    analysis::SparseMatrixScanOptions scan_options;
+    scan_options.sign_tolerance = static_cast<Real>(1.0e-14);
+    scan_options.row_sum_tolerance = static_cast<Real>(1.0e-10);
+    scan_options.symmetry_tolerance = static_cast<Real>(1.0e-10);
+#if FE_HAS_MPI
+    if (source->isDistributed()) {
+        scan_options.mpi_comm = MPI_COMM_WORLD;
+    }
+#endif
+
+    const auto global_block = globalAnalysisBlock(op, field_map_);
+    if (plan.has(analysis::AnalysisSummaryKind::DiscreteMatrix)) {
+        summaries.discrete_matrices.push_back(
+            analysis::scanSparseMatrixSummary(*source, global_block, scan_options).summary);
+    }
+
+    const auto constrained = affine_constraints_.getConstrainedDofs();
+    std::unordered_set<GlobalIndex> constrained_lookup(constrained.begin(), constrained.end());
+    if (plan.has(analysis::AnalysisSummaryKind::ReducedMatrix) &&
+        matrix.numRows() == matrix.numCols()) {
+        auto reduction = analysis::ConstraintReductionMask::fromConstrainedDofs(
+            matrix.numRows(),
+            constrained,
+            analysis::ConstraintReductionKind::StrongDirichletElimination,
+            /*affine_terms_accounted_for=*/false,
+            /*reduction_exact_for_analysis=*/true);
+        summaries.reduced_matrices.push_back(
+            analysis::scanReducedFreeFreeSummary(*source,
+                                                 reduction,
+                                                 global_block,
+                                                 scan_options));
+    }
+
+    std::optional<AnalysisSaddlePair> saddle_pair =
+        findAnalysisSaddlePairFromSolverOptions(field_map_,
+                                                analysis_solver_options_
+                                                    ? &*analysis_solver_options_
+                                                    : nullptr);
+    if (!saddle_pair) {
+        saddle_pair = findAnalysisSaddlePairFromContributions(field_map_, contributions_);
+    }
+
+    std::optional<CouplingMatrixStats> coupling_stats;
+    if (saddle_pair && saddle_pair->valid() &&
+        (plan.has(analysis::AnalysisSummaryKind::InfSupEstimate) ||
+         plan.has(analysis::AnalysisSummaryKind::SchurComplement))) {
+        coupling_stats = scanCouplingStats(*source,
+                                           *saddle_pair,
+                                           constrained_lookup,
+                                           static_cast<Real>(1.0e-12));
+    }
+
+    if (saddle_pair && coupling_stats &&
+        plan.has(analysis::AnalysisSummaryKind::InfSupEstimate)) {
+        const auto block = saddlePairBlock(op, *saddle_pair);
+        const bool multiplier_rows_covered =
+            coupling_stats->active_multiplier_rows > 0u &&
+            coupling_stats->multiplier_rows_with_primary_entries ==
+                coupling_stats->active_multiplier_rows;
+        const double estimate = multiplier_rows_covered
+            ? coupling_stats->multiplier_min_row_norm
+            : 0.0;
+
+        analysis::InfSupEstimateSummary summary;
+        summary.block = block;
+        summary.primal_variable =
+            analysis::VariableKey::field(saddle_pair->primary.field_id);
+        summary.multiplier_variable =
+            analysis::VariableKey::field(saddle_pair->multiplier.field_id);
+        summary.estimate_value = static_cast<Real>(estimate);
+        summary.estimate_tolerance = static_cast<Real>(1.0e-12);
+        summary.uniform_lower_bound = static_cast<Real>(estimate);
+        summary.test_rows =
+            static_cast<GlobalIndex>(coupling_stats->active_multiplier_rows);
+        summary.test_cols = saddle_pair->primary.size();
+        summary.estimate_scope = "assembled coupling row-norm coverage";
+        summary.nullspace_handling = constrained_lookup.empty()
+            ? analysis::NullspaceHandlingClass::Unknown
+            : analysis::NullspaceHandlingClass::AnchoredByConstraints;
+        summary.estimator_metadata_present = true;
+        summary.norm_metadata_present = false;
+        summary.mesh_refinement_evidence_present = false;
+        summary.uniform_lower_bound_evidence_present = false;
+        summary.uniform_lower_bound_value_present = false;
+        summaries.inf_sup_estimates.push_back(std::move(summary));
+    }
+
+    if (saddle_pair && coupling_stats &&
+        plan.has(analysis::AnalysisSummaryKind::SchurComplement)) {
+        analysis::SchurComplementSummary summary;
+        summary.schur_id = op + ":assembled-saddle-blocks";
+        summary.block = saddlePairBlock(op, *saddle_pair);
+        summary.variables = summary.block.test_variables;
+        summary.schur_available =
+            coupling_stats->active_multiplier_rows > 0u &&
+            coupling_stats->multiplier_rows_with_primary_entries > 0u &&
+            coupling_stats->active_primary_rows > 0u;
+        summary.reduction_exact_for_analysis = false;
+        summary.primal_block_invertible_evidence_present =
+            coupling_stats->active_primary_rows > 0u &&
+            coupling_stats->primary_rows_with_diagonal ==
+                coupling_stats->active_primary_rows &&
+            coupling_stats->primary_min_abs_diag > 0.0;
+        summary.inf_sup_evidence_present =
+            coupling_stats->active_multiplier_rows > 0u &&
+            coupling_stats->multiplier_rows_with_primary_entries ==
+                coupling_stats->active_multiplier_rows &&
+            coupling_stats->multiplier_min_row_norm > 0.0;
+        summary.nullspace_handling = constrained_lookup.empty()
+            ? analysis::NullspaceHandlingClass::Unknown
+            : analysis::NullspaceHandlingClass::AnchoredByConstraints;
+        summary.nullspace_handling_evidence_present =
+            summary.nullspace_handling != analysis::NullspaceHandlingClass::Unknown;
+        summary.schur_definiteness_evidence_present = false;
+        summary.schur_positivity = analysis::PositivityClass::Unknown;
+        if (coupling_stats->primary_min_abs_diag > 0.0 &&
+            coupling_stats->primary_max_abs_diag >=
+                coupling_stats->primary_min_abs_diag) {
+            summary.condition_estimate_present = true;
+            summary.condition_estimate =
+                static_cast<Real>(coupling_stats->primary_max_abs_diag /
+                                  coupling_stats->primary_min_abs_diag);
+        }
+        if (analysis_solver_options_) {
+            summary.inexact_solve_tolerance_present = true;
+            summary.inexact_solve_tolerance = analysis_solver_options_->rel_tol;
+        }
+        summaries.schur_complements.push_back(std::move(summary));
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::StabilizationAdequacy)) {
+        for (const auto& contribution : contributions_) {
+            if (contribution.role != analysis::ContributionRole::StabilizationBlock) {
+                continue;
+            }
+            analysis::StabilizationAdequacySummary summary;
+            summary.stabilization_id = contribution.contribution_id.empty()
+                ? contribution.operator_tag
+                : contribution.contribution_id;
+            if (summary.stabilization_id.empty()) {
+                summary.stabilization_id = op + ":stabilization";
+            }
+            summary.method_family = "assembled-stabilization-contribution";
+            summary.block = contributionBlock(contribution, op);
+            summary.variables = !contribution.related_variables.empty()
+                ? contribution.related_variables
+                : contribution.test_variables;
+            summary.residual_consistency_evidence_present =
+                contribution.consistency_kind.has_value() &&
+                *contribution.consistency_kind != analysis::ConsistencyKind::Unknown;
+            summary.method_scope_metadata_present = true;
+            if (contribution.scaling.has_value()) {
+                summary.parameter_formula_metadata_present = true;
+                summary.scaling_law_metadata_present = true;
+                summary.stabilization_theorem_id =
+                    "ContributionDescriptor::ScalingDescriptor";
+            }
+            if (contribution.transport_character.has_value()) {
+                summary.regime_metadata_present = true;
+            }
+            if (contribution.temporal.has_value() &&
+                contribution.temporal->derivative_order > 0) {
+                summary.cfl_scope = "ContributionDescriptor::TemporalDescriptor";
+            }
+            summary.violation_count = 0u;
+            summaries.stabilization_adequacy.push_back(std::move(summary));
+        }
+    }
+
+    const bool matrix_summaries_generated =
+        !summaries.discrete_matrices.empty() ||
+        !summaries.reduced_matrices.empty();
+    if (mesh_access_ &&
+        (plan.has(analysis::AnalysisSummaryKind::MeshGeometryQuality) ||
+         matrix_summaries_generated)) {
+        if (auto summary = buildMeshGeometryQualitySummary(*mesh_access_)) {
+            summaries.mesh_geometry_quality.push_back(std::move(*summary));
+        }
+    }
+
+    std::vector<analysis::CoefficientPropertySummary>
+        runtime_coefficient_summaries;
+    if (plan.has(analysis::AnalysisSummaryKind::CoefficientProperties) ||
+        plan.has(analysis::AnalysisSummaryKind::ParameterScale)) {
+        runtime_coefficient_summaries = buildRuntimeCoefficientSummaries(
+            contributions_,
+            formulation_records_,
+            op,
+            parameter_registry_,
+            mesh_access_.get(),
+            state);
+    }
+    if (plan.has(analysis::AnalysisSummaryKind::CoefficientProperties)) {
+        for (auto& summary : runtime_coefficient_summaries) {
+            addCoefficientSummaryIfAbsent(summaries.coefficient_properties,
+                                          summary);
+        }
+    }
+
+    std::unordered_map<std::string, std::pair<Real, Real>>
+        coefficient_abs_ranges;
+    for (const auto& summary : summaries.coefficient_properties) {
+        const Real min_abs = std::min(std::abs(summary.min_eigenvalue),
+                                      std::abs(summary.max_eigenvalue));
+        const Real max_abs = std::max(std::abs(summary.min_eigenvalue),
+                                      std::abs(summary.max_eigenvalue));
+        if (!summary.coefficient.empty() &&
+            std::isfinite(static_cast<double>(min_abs)) &&
+            std::isfinite(static_cast<double>(max_abs))) {
+            auto& range = coefficient_abs_ranges[summary.coefficient];
+            if (range.first == Real{} || min_abs < range.first) {
+                range.first = min_abs;
+            }
+            range.second = std::max(range.second, max_abs);
+        }
+    }
+    for (const auto& summary : runtime_coefficient_summaries) {
+        const Real min_abs = std::min(std::abs(summary.min_eigenvalue),
+                                      std::abs(summary.max_eigenvalue));
+        const Real max_abs = std::max(std::abs(summary.min_eigenvalue),
+                                      std::abs(summary.max_eigenvalue));
+        if (!summary.coefficient.empty() &&
+            std::isfinite(static_cast<double>(min_abs)) &&
+            std::isfinite(static_cast<double>(max_abs))) {
+            auto& range = coefficient_abs_ranges[summary.coefficient];
+            if (range.first == Real{} || min_abs < range.first) {
+                range.first = min_abs;
+            }
+            range.second = std::max(range.second, max_abs);
+        }
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::ParameterScale)) {
+        for (const auto& contribution : contributions_) {
+            if (contribution.scale_usages.empty() &&
+                !contribution.scaling.has_value()) {
+                continue;
+            }
+            auto variables = contributionVariables(contribution);
+            auto block = contributionBlock(contribution, op);
+            if (!contribution.scale_usages.empty()) {
+                int scale_index = 0;
+                for (const auto& scale : contribution.scale_usages) {
+                    auto scale_block = block;
+                    auto scale_variables = variables;
+                    auto id = contributionIdentity(contribution, op) +
+                              ":scale:" + std::to_string(scale_index++);
+                    summaries.parameter_scales.push_back(
+                        makeRuntimeParameterScaleSummary(
+                            std::move(id),
+                            parameterScaleRoleFor(contribution),
+                            std::move(scale_block),
+                            std::move(scale_variables),
+                            scale,
+                            field_registry_,
+                            parameter_registry_,
+                            coefficient_abs_ranges,
+                            mesh_access_.get(),
+                            state));
+                }
+            } else {
+                auto id = contributionIdentity(contribution, op) + ":scale";
+                summaries.parameter_scales.push_back(
+                    makeParameterScaleSummary(std::move(id),
+                                              parameterScaleRoleFor(contribution),
+                                              std::move(block),
+                                              std::move(variables),
+                                              *contribution.scaling,
+                                              field_registry_));
+            }
+        }
+
+        for (const auto& bc : bc_descriptors_) {
+            if (!bc.scaling.has_value()) {
+                continue;
+            }
+            std::vector<analysis::VariableKey> variables{bc.primary_variable};
+            for (const auto& variable : bc.related_variables) {
+                if (std::find(variables.begin(), variables.end(), variable) ==
+                    variables.end()) {
+                    variables.push_back(variable);
+                }
+            }
+            auto block = boundaryConditionBlock(bc, op);
+            auto id = (bc.source.empty() ? op : bc.source) + ":scale";
+            const auto role = isWeakBoundaryEnforcement(bc.enforcement_kind)
+                ? analysis::ParameterScaleRole::WeakBoundaryPenalty
+                : analysis::ParameterScaleRole::Generic;
+            summaries.parameter_scales.push_back(
+                makeParameterScaleSummary(std::move(id),
+                                          role,
+                                          std::move(block),
+                                          std::move(variables),
+                                          *bc.scaling,
+                                          field_registry_));
+        }
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::InvariantDomain)) {
+        for (const auto& descriptor : invariant_domain_descriptors_) {
+            summaries.invariant_domains.push_back(
+                makeInvariantDomainSummary(descriptor, field_map_, state));
+        }
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::BoundarySymbol)) {
+        for (const auto& bc : bc_descriptors_) {
+            if (bc.domain != analysis::DomainKind::Boundary &&
+                bc.domain != analysis::DomainKind::InterfaceFace &&
+                bc.domain != analysis::DomainKind::CoupledBoundary) {
+                continue;
+            }
+            analysis::BoundarySymbolSummary summary;
+            summary.block = boundaryConditionBlock(bc, op);
+            const bool flux_like =
+                bc.trace_kind == analysis::TraceKind::Flux ||
+                bc.trace_kind == analysis::TraceKind::NormalFlux ||
+                bc.trace_kind == analysis::TraceKind::Mixed;
+            summary.principal_operator_order = flux_like ? 1 : 0;
+            summary.boundary_operator_order = flux_like ? 1 : 0;
+            summary.trace_coverage = traceCoverageForBoundary(bc.trace_kind);
+            summary.evidence_scope = bc.source.empty()
+                ? ("marker=" + std::to_string(summary.block.marker))
+                : bc.source;
+            summary.boundary_condition_count = 1u;
+            summary.required_boundary_condition_count = 1u;
+            summary.missing_symbol_count =
+                summary.trace_coverage == analysis::TraceCapabilityFlags::None
+                    ? 1u
+                    : 0u;
+            summary.component_coverage_complete = true;
+            summary.dof_coverage_complete = true;
+            summaries.boundary_symbols.push_back(std::move(summary));
+        }
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::TemporalStability) &&
+        hasTemporalMetadata(contributions_, variable_descriptors_)) {
+        analysis::TemporalStabilitySummary summary;
+        summary.time_scheme = "FE temporal metadata";
+        summary.block = global_block;
+        summary.variables = variablesFromDescriptors(variable_descriptors_);
+        if (summary.variables.empty()) {
+            summary.variables = global_block.test_variables;
+        }
+        summary.operator_scope_id = op;
+        summary.operator_scope_metadata_present = !op.empty();
+        summaries.temporal_stability.push_back(std::move(summary));
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::DAEStructureEvidence) &&
+        hasTemporalMetadata(contributions_, variable_descriptors_)) {
+        analysis::DAEStructureEvidenceSummary summary;
+        summary.system_id = op.empty() ? "assembled-system" : op;
+        summary.variables = variablesFromDescriptors(variable_descriptors_);
+        if (summary.variables.empty()) {
+            summary.variables = global_block.test_variables;
+        }
+        summary.dae_index_scope = "FE temporal descriptors";
+        summaries.dae_structure_evidence.push_back(std::move(summary));
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::InitialCompatibility)) {
+        const bool has_constraint_scope =
+            constraint_summary_ && !constraint_summary_->constrained_sets.empty();
+        const bool has_boundary_scope = !bc_descriptors_.empty();
+        if (has_constraint_scope || has_boundary_scope) {
+            analysis::InitialCompatibilitySummary summary;
+            summary.compatibility_scope = "FE constraint and boundary metadata";
+            summary.algebraic_constraint_metadata_present = has_constraint_scope;
+            summary.boundary_constraint_metadata_present = has_boundary_scope;
+            summary.checked_constraint_family_count = has_constraint_scope
+                ? static_cast<std::uint64_t>(
+                      constraint_summary_->constrained_sets.size())
+                : 0u;
+            summary.checked_boundary_condition_count =
+                static_cast<std::uint64_t>(bc_descriptors_.size());
+            summaries.initial_compatibility.push_back(std::move(summary));
+        }
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::CoupledSystemStability)) {
+        std::vector<analysis::VariableKey> variables;
+        bool has_nonlocal_coupling = false;
+        for (const auto& contribution : contributions_) {
+            if (!contributionIsNonlocalCoupling(contribution)) {
+                continue;
+            }
+            has_nonlocal_coupling = true;
+            for (const auto& variable : contributionVariables(contribution)) {
+                if (std::find(variables.begin(), variables.end(), variable) ==
+                    variables.end()) {
+                    variables.push_back(variable);
+                }
+            }
+        }
+        if (has_nonlocal_coupling) {
+            analysis::CoupledSystemStabilitySummary summary;
+            summary.coupling_group = op.empty() ? "nonlocal-fe-coupling" : op;
+            summary.variables = std::move(variables);
+            summary.monolithic_coupling = true;
+            summary.coupling_operator_scope_id = summary.coupling_group;
+            summary.coupling_operator_scope_metadata_present = true;
+            summaries.coupled_system_stability.push_back(std::move(summary));
+        }
+    }
+
+    if (!summaries.empty()) {
+        analysis_summaries_.emplace(std::move(summaries));
+    }
+    invalidateAnalysisCache();
+    if (analysis_summaries_) {
+        analysis_report_cache_ = runProblemAnalysis();
+        analysis_report_version_ = analysis_inputs_version_;
+        return analysis_summaries_->totalSummaryCount() > registered_summary_count;
+    }
+    return false;
 }
 
 void FESystem::buildTopologyContext() {
@@ -1911,6 +4563,14 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
     // Populate constraint summary if available.
     if (constraint_summary_) {
         ctx.setConstraintSummary(*constraint_summary_);
+    }
+
+    if (analysis_solver_options_) {
+        ctx.setSolverOptions(*analysis_solver_options_);
+    }
+
+    if (analysis_summaries_) {
+        ctx.setAnalysisSummaries(*analysis_summaries_);
     }
 
     auto analyzer = analysis::ProblemAnalyzer::createDefault();
@@ -2413,15 +5073,15 @@ std::size_t FESystem::bindStandardMeshMotionFieldsByName()
 
 void FESystem::beginMeshCoordinateTransaction()
 {
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::beginMeshCoordinateTransaction: mesh");
+    const auto& mesh = singleMesh("FESystem::beginMeshCoordinateTransaction");
     FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
                 "FESystem::beginMeshCoordinateTransaction: transaction already active");
     svmp::motion::MotionCoordinateBackup backup;
-    svmp::motion::save_coordinates(*mesh_, backup);
+    svmp::motion::save_coordinates(mesh, backup);
     mesh_coordinate_backup_ = std::move(backup);
     mesh_motion_field_backup_.clear();
 
-    const auto& local_mesh = mesh_->local_mesh();
+    const auto& local_mesh = mesh.local_mesh();
     for (const auto role : svmp::motion::standard_motion_field_roles()) {
         const std::string field_name(svmp::motion::standard_motion_field_name(role));
         const auto handle =
@@ -2460,7 +5120,7 @@ MeshCoordinateUpdateResult FESystem::updateCurrentCoordinatesFromMeshDisplacemen
     const MeshCoordinateUpdateOptions& options)
 {
     requireSetup();
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::updateCurrentCoordinatesFromMeshDisplacement: mesh");
+    const auto& mesh_ref = singleMesh("FESystem::updateCurrentCoordinatesFromMeshDisplacement");
 
     const auto displacement_field = meshMotionField(MeshMotionFieldRole::Displacement);
     FE_THROW_IF(!displacement_field.has_value(), InvalidStateException,
@@ -2472,7 +5132,7 @@ MeshCoordinateUpdateResult FESystem::updateCurrentCoordinatesFromMeshDisplacemen
         beginMeshCoordinateTransaction();
     }
 
-    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& mesh = const_cast<svmp::Mesh&>(mesh_ref);
     auto& local_mesh = mesh.local_mesh();
     const int dim = mesh.dim();
     FE_THROW_IF(dim <= 0, InvalidStateException,
@@ -2566,11 +5226,11 @@ void FESystem::commitMeshCoordinateTransaction()
 
 void FESystem::rollbackMeshCoordinateTransaction()
 {
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::rollbackMeshCoordinateTransaction: mesh");
+    const auto& mesh_ref = singleMesh("FESystem::rollbackMeshCoordinateTransaction");
     if (!mesh_coordinate_backup_.has_value()) {
         return;
     }
-    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& mesh = const_cast<svmp::Mesh&>(mesh_ref);
     svmp::motion::restore_coordinates(mesh, *mesh_coordinate_backup_);
     auto& local_mesh = mesh.local_mesh();
     for (const auto& field_backup : mesh_motion_field_backup_) {
@@ -2626,12 +5286,12 @@ void FESystem::rollbackMeshCoordinateTransaction()
 
 void FESystem::rebaseMeshReferenceToCurrent(const svmp::ReferenceRebaseOptions& options)
 {
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::rebaseMeshReferenceToCurrent: mesh");
+    const auto& mesh_ref = singleMesh("FESystem::rebaseMeshReferenceToCurrent");
     FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
                 "FESystem::rebaseMeshReferenceToCurrent: cannot rebase during an active "
                 "mesh coordinate transaction");
 
-    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& mesh = const_cast<svmp::Mesh&>(mesh_ref);
     mesh.rebase_reference_to_current(options);
     if (mesh.has_current_coords()) {
         mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
@@ -2652,12 +5312,12 @@ void FESystem::rebaseMeshReferenceCoordinates(
     std::vector<svmp::real_t> Xref,
     const svmp::ReferenceRebaseOptions& options)
 {
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::rebaseMeshReferenceCoordinates: mesh");
+    const auto& mesh_ref = singleMesh("FESystem::rebaseMeshReferenceCoordinates");
     FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
                 "FESystem::rebaseMeshReferenceCoordinates: cannot rebase during an active "
                 "mesh coordinate transaction");
 
-    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& mesh = const_cast<svmp::Mesh&>(mesh_ref);
     mesh.rebase_reference_coordinates(std::move(Xref), options);
     if (mesh.has_current_coords()) {
         mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
@@ -2694,12 +5354,12 @@ bool FESystem::rebaseGeometricNonlinearityReference(
 std::size_t FESystem::resetBoundMeshMotionField(MeshMotionFieldRole role, Real value)
 {
     requireSetup();
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::resetBoundMeshMotionField: mesh");
+    const auto& mesh_ref = singleMesh("FESystem::resetBoundMeshMotionField");
     if (!meshMotionField(role).has_value()) {
         return 0;
     }
 
-    auto& mesh = const_cast<svmp::Mesh&>(*mesh_);
+    auto& mesh = const_cast<svmp::Mesh&>(mesh_ref);
     auto& local_mesh = mesh.local_mesh();
     const auto mesh_role = toMeshMotionRole(role);
     const auto mesh_name = svmp::motion::standard_motion_field_name(mesh_role);
@@ -2787,10 +5447,10 @@ struct MeshMotionSyncEntry {
 std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
 {
     requireSetup();
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: mesh");
+    const auto& mesh = singleMesh("FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers");
 
     std::size_t values_written = 0;
-    auto& local_mesh = mesh_->local_mesh();
+    auto& local_mesh = mesh.local_mesh();
 
     for (const auto role : kFEMeshMotionRoles) {
         const FieldId field = meshMotionRoleValue(mesh_motion_fields_, role);
@@ -2819,7 +5479,7 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
         svmp::motion::validate_motion_field(local_mesh,
                                             mesh_field,
                                             mesh_role,
-                                            mesh_->dim());
+                                            mesh.dim());
 
         const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
         FE_CHECK_NOT_NULL(values,
@@ -2844,7 +5504,7 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
         auto& buffer = prescribed_field_buffers_[field_idx];
         buffer.coefficients.assign(n_dofs, Real(0));
 
-        const auto n_vertices = static_cast<GlobalIndex>(mesh_->n_vertices());
+        const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
         FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
                     "FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers: FE field '" + rec.name +
                         "' does not cover every mesh vertex");
@@ -2874,10 +5534,10 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
 std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) const
 {
     requireSetup();
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::syncBoundMeshMotionFieldsToState: mesh");
+    const auto& mesh = singleMesh("FESystem::syncBoundMeshMotionFieldsToState");
 
     std::size_t values_written = 0;
-    auto& local_mesh = mesh_->local_mesh();
+    auto& local_mesh = mesh.local_mesh();
 
     std::vector<MeshMotionSyncEntry> entries;
     entries.reserve(kFEMeshMotionRoles.size());
@@ -2910,7 +5570,7 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) co
         svmp::motion::validate_motion_field(local_mesh,
                                             mesh_field,
                                             entry.mesh_role,
-                                            mesh_->dim());
+                                            mesh.dim());
 
         const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
         FE_CHECK_NOT_NULL(values,
@@ -2929,7 +5589,7 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) co
                         rec.name + "'");
 
         const GlobalIndex offset = field_dof_offsets_[field_idx];
-        const auto n_vertices = static_cast<GlobalIndex>(mesh_->n_vertices());
+        const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
         FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
                     "FESystem::syncBoundMeshMotionFieldsToState: FE field '" + rec.name +
                         "' does not cover every mesh vertex");
@@ -2957,10 +5617,10 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) co
 std::size_t FESystem::syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const
 {
     requireSetup();
-    FE_CHECK_NOT_NULL(mesh_.get(), "FESystem::syncBoundMeshMotionFieldsToState: mesh");
+    const auto& mesh = singleMesh("FESystem::syncBoundMeshMotionFieldsToState");
 
     std::size_t values_written = 0;
-    auto& local_mesh = mesh_->local_mesh();
+    auto& local_mesh = mesh.local_mesh();
     std::vector<GlobalIndex> dofs;
     std::vector<Real> values_out;
 
@@ -2991,7 +5651,7 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(assembly::GlobalSystemVie
         svmp::motion::validate_motion_field(local_mesh,
                                             mesh_field,
                                             mesh_role,
-                                            mesh_->dim());
+                                            mesh.dim());
         const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
         FE_CHECK_NOT_NULL(values,
                           "FESystem::syncBoundMeshMotionFieldsToState: mesh field data");
@@ -3009,7 +5669,7 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToState(assembly::GlobalSystemVie
                         rec.name + "'");
 
         const GlobalIndex offset = field_dof_offsets_[field_idx];
-        const auto n_vertices = static_cast<GlobalIndex>(mesh_->n_vertices());
+        const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
         dofs.clear();
         values_out.clear();
         dofs.reserve(static_cast<std::size_t>(n_vertices) * components);
@@ -3762,6 +6422,79 @@ const assembly::IMeshAccess& FESystem::meshAccess() const
     return *mesh_access_;
 }
 
+std::span<const MeshParticipantInfo> FESystem::meshParticipants() const noexcept
+{
+    return mesh_participants_;
+}
+
+const MeshParticipantInfo* FESystem::meshParticipantByName(std::string_view name) const noexcept
+{
+    for (const auto& participant : mesh_participants_) {
+        if (participant.name == name) {
+            return &participant;
+        }
+    }
+    return nullptr;
+}
+
+const MeshParticipantInfo* FESystem::meshParticipantByDomain(int domain_id) const noexcept
+{
+    for (const auto& participant : mesh_participants_) {
+        if (participant.domain_id.has_value() && *participant.domain_id == domain_id) {
+            return &participant;
+        }
+    }
+    return nullptr;
+}
+
+const MeshParticipantInfo* FESystem::meshParticipantForCell(GlobalIndex cell_id) const noexcept
+{
+    if (cell_id < 0) {
+        return nullptr;
+    }
+    for (const auto& participant : mesh_participants_) {
+        const auto begin = participant.cell_offset;
+        const auto end = begin + participant.num_cells;
+        if (cell_id >= begin && cell_id < end) {
+            return &participant;
+        }
+    }
+    return nullptr;
+}
+
+const MeshParticipantInfo* FESystem::fieldMeshParticipant(FieldId field) const
+{
+    const auto& rec = field_registry_.get(field);
+    if (rec.participant_name.has_value()) {
+        const auto* participant = meshParticipantByName(*rec.participant_name);
+        FE_THROW_IF(participant == nullptr, InvalidArgumentException,
+                    "FESystem::fieldMeshParticipant: field '" + rec.name +
+                        "' references unknown mesh participant '" +
+                        *rec.participant_name + "'");
+        return participant;
+    }
+    if (rec.participant_domain_id.has_value()) {
+        const auto* participant = meshParticipantByDomain(*rec.participant_domain_id);
+        FE_THROW_IF(participant == nullptr, InvalidArgumentException,
+                    "FESystem::fieldMeshParticipant: field '" + rec.name +
+                        "' references unknown mesh participant domain " +
+                        std::to_string(*rec.participant_domain_id));
+        return participant;
+    }
+    return nullptr;
+}
+
+bool FESystem::fieldActiveOnCell(FieldId field, GlobalIndex cell_id) const
+{
+    const auto* participant = fieldMeshParticipant(field);
+    if (participant == nullptr) {
+        return true;
+    }
+    const auto begin = participant->cell_offset;
+    const auto end = begin + participant->num_cells;
+    return cell_id >= begin && cell_id < end;
+}
+
 std::string FESystem::assemblerName() const
 {
     if (!assembler_) {
@@ -3980,6 +6713,46 @@ int FESystem::temporalOrder() const noexcept
         }
     }
     return max_order;
+}
+
+bool FESystem::hasExplicitTimeDependency() const noexcept
+{
+    for (const auto& tag : operator_registry_.list()) {
+        const auto& def = operator_registry_.get(tag);
+        for (const auto& term : def.cells) {
+            if (term.kernel && term.kernel->hasExplicitTimeDependency()) return true;
+        }
+        for (const auto& term : def.boundary) {
+            if (term.kernel && term.kernel->hasExplicitTimeDependency()) return true;
+        }
+        for (const auto& term : def.interior) {
+            if (term.kernel && term.kernel->hasExplicitTimeDependency()) return true;
+        }
+        for (const auto& term : def.interface_faces) {
+            if (term.kernel && term.kernel->hasExplicitTimeDependency()) return true;
+        }
+    }
+    return false;
+}
+
+bool FESystem::hasTimeDependentConstraints() const noexcept
+{
+    for (const auto& c : constraint_defs_) {
+        if (c && c->isTimeDependent()) {
+            return true;
+        }
+    }
+    for (const auto& c : system_constraint_defs_) {
+        if (c && c->isTimeDependent()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FESystem::requiresTimeAdvancement() const noexcept
+{
+    return temporalOrder() > 0 || hasExplicitTimeDependency() || hasTimeDependentConstraints();
 }
 
 namespace {
@@ -7701,14 +10474,14 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                         if (!ownsBorderedAuxRow(row_dof)) {
                             continue;
                         }
-                        const auto ai = static_cast<std::size_t>(
+                        const auto aux_i = static_cast<std::size_t>(
                             row_dof - static_cast<GlobalIndex>(n_field_dofs));
-                        if (ai >= na) continue;
+                        if (aux_i >= na) continue;
                         for (int c = 0; c < dim; ++c) {
-                            const auto aj = static_cast<std::size_t>(
+                            const auto aux_j = static_cast<std::size_t>(
                                 aux_dofs[static_cast<std::size_t>(c)] - static_cast<GlobalIndex>(n_field_dofs));
-                            if (aj >= na) continue;
-                            bordered_coupling_.dF_dxdot[ai * na + aj] +=
+                            if (aux_j >= na) continue;
+                            bordered_coupling_.dF_dxdot[aux_i * na + aux_j] +=
                                 entity_dFdxdot[static_cast<std::size_t>(r * dim + c)];
                             if (std::abs(entity_dFdxdot[static_cast<std::size_t>(r * dim + c)]) >
                                 Real(1e-30)) {

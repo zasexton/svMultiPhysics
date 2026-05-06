@@ -34,6 +34,7 @@
 #include "cgrad.h"
 #include "distributed_mpi_ops.h"
 #include "gmres.h"
+#include "norm.h"
 #include "ns_solver.h"
 #include "precond.h"
 
@@ -210,6 +211,7 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
   }
   auto& R = *R_ptr;
   traceLocalArrayStats(lhs, "input_rhs", dof, R);
+  ls.RI.convergence_ref_norm = norm::fsi_ls_normv(dof, lhs.mynNo, lhs.commu, R);
 
   // Apply preconditioner.
   //
@@ -227,6 +229,13 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
   tp_precond = TP() - tp0;
   traceLocalArrayStats(lhs, "after_precond", dof, R);
 
+  const Array<double>* row_scaling = nullptr;
+  if (prec == PreconditionerType::PREC_FSILS) {
+    row_scaling = &Wc;
+  } else if (prec == PreconditionerType::PREC_RCS) {
+    row_scaling = &Wr;
+  }
+
   // Solve for 'R'.
   //
   tp0 = TP();
@@ -239,13 +248,22 @@ void fsils_solve(FSILS_lhsType& lhs, FSILS_lsType& ls, const int dof, Array<doub
       if (dof == 1) {
         auto Valv = Val.row(0);
         auto Rv = R.row(0);
+        const Vector<double>* row_scaling_v_ptr = nullptr;
+        Vector<double> row_scaling_v;
+        if (row_scaling != nullptr) {
+          row_scaling_v.resize(row_scaling->ncols());
+          for (int a = 0; a < row_scaling->ncols(); ++a) {
+            row_scaling_v(a) = (*row_scaling)(0, a);
+          }
+          row_scaling_v_ptr = &row_scaling_v;
+        }
         gmres::gmres_s(fe_fsi_linear_solver::distributed_solver_bundles::make_scalar_linear_system(lhs, Valv),
-                       ls.RI, Rv);
+                       ls.RI, Rv, row_scaling_v_ptr);
         Val.set_row(0,Valv);
         R.set_row(0,Rv);
       } else {
         gmres::gmres_v(fe_fsi_linear_solver::distributed_solver_bundles::make_vector_linear_system(lhs, dof, Val),
-                       ls.RI, R);
+                       ls.RI, R, row_scaling);
       }
     break;
 

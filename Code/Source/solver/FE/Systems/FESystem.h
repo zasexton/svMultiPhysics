@@ -41,6 +41,7 @@
 #include "Constraints/GaugeRegistry.h"
 
 #include "Analysis/ProblemAnalysisTypes.h"
+#include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/FormulationRecord.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/TopologyAnalysisContext.h"
@@ -96,10 +97,14 @@ struct MatrixFreeOptions;
 class IMatrixFreeKernel;
 class MatrixFreeOperator;
 class FunctionalKernel;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+class CompositeMeshAccess;
+#endif
 }
 
 namespace backends {
 struct DofPermutation;
+class GenericMatrix;
 } // namespace backends
 
 namespace systems {
@@ -242,9 +247,24 @@ struct GeometryTransactionCallback {
     std::function<void(const GeometryTransactionDiagnostics&)> callback;
 };
 
+struct MeshParticipantInfo {
+    std::string name{};
+    std::optional<int> domain_id{};
+    GlobalIndex cell_offset{0};
+    GlobalIndex num_cells{0};
+    GlobalIndex vertex_offset{0};
+    GlobalIndex num_vertices{0};
+    GlobalIndex boundary_face_offset{0};
+    GlobalIndex num_boundary_faces{0};
+    GlobalIndex interior_face_offset{0};
+    GlobalIndex num_interior_faces{0};
+};
+
 class FESystem {
 public:
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
+    FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access,
+             std::vector<MeshParticipantInfo> participants);
     ~FESystem();
 
     FESystem(FESystem&&) noexcept;
@@ -256,6 +276,11 @@ public:
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     explicit FESystem(std::shared_ptr<const svmp::Mesh> mesh,
                       svmp::Configuration coord_cfg = svmp::Configuration::Reference);
+    FESystem(std::shared_ptr<const svmp::Mesh> mesh,
+             MeshParticipantInfo participant,
+             svmp::Configuration coord_cfg = svmp::Configuration::Reference);
+    explicit FESystem(std::shared_ptr<assembly::CompositeMeshAccess> mesh_access);
+    explicit FESystem(std::shared_ptr<const assembly::CompositeMeshAccess> mesh_access);
 #endif
 
     // ---- Definition phase ----
@@ -1097,6 +1122,15 @@ public:
 
 	    // ---- Accessors ----
 	    [[nodiscard]] const assembly::IMeshAccess& meshAccess() const;
+	    [[nodiscard]] std::span<const MeshParticipantInfo> meshParticipants() const noexcept;
+	    [[nodiscard]] bool hasMeshParticipants() const noexcept { return !mesh_participants_.empty(); }
+	    [[nodiscard]] bool hasSingleMeshParticipant() const noexcept { return mesh_participants_.size() == 1u; }
+	    [[nodiscard]] bool hasCompositeMeshAccess() const noexcept { return mesh_participants_.size() > 1u; }
+	    [[nodiscard]] const MeshParticipantInfo* meshParticipantByName(std::string_view name) const noexcept;
+	    [[nodiscard]] const MeshParticipantInfo* meshParticipantByDomain(int domain_id) const noexcept;
+	    [[nodiscard]] const MeshParticipantInfo* meshParticipantForCell(GlobalIndex cell_id) const noexcept;
+	    [[nodiscard]] const MeshParticipantInfo* fieldMeshParticipant(FieldId field) const;
+	    [[nodiscard]] bool fieldActiveOnCell(FieldId field, GlobalIndex cell_id) const;
 	    [[nodiscard]] std::string assemblerName() const;
 	    [[nodiscard]] std::string assemblerSelectionReport() const;
 	    [[nodiscard]] const ISearchAccess* searchAccess() const noexcept { return search_access_.get(); }
@@ -1150,6 +1184,8 @@ public:
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 	    [[nodiscard]] const svmp::Mesh* mesh() const noexcept { return mesh_.get(); }
+	    [[nodiscard]] bool hasSingleNativeMesh() const noexcept { return mesh_ != nullptr; }
+	    [[nodiscard]] const svmp::Mesh& singleMesh(std::string_view api_name = "FESystem") const;
 	    [[nodiscard]] svmp::Configuration coordinateConfiguration() const noexcept { return coord_cfg_; }
 
 	    FieldId addMeshDisplacementUnknown(std::string name,
@@ -1223,6 +1259,9 @@ public:
 
 		    [[nodiscard]] bool isSetup() const noexcept { return is_setup_; }
 		    [[nodiscard]] int temporalOrder() const noexcept;
+		    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept;
+		    [[nodiscard]] bool hasTimeDependentConstraints() const noexcept;
+		    [[nodiscard]] bool requiresTimeAdvancement() const noexcept;
 		    [[nodiscard]] bool isTransient() const noexcept { return temporalOrder() > 0; }
 		    [[nodiscard]] std::vector<FieldId> timeDerivativeFields(const OperatorTag& op) const;
 		    [[nodiscard]] std::vector<FieldId> timeDerivativeFields() const;
@@ -1249,6 +1288,18 @@ public:
     void addBoundaryConditionDescriptor(analysis::BoundaryConditionDescriptor desc);
     void addContribution(analysis::ContributionDescriptor desc);
     void addVariableDescriptor(analysis::VariableDescriptor desc);
+    void addInvariantDomainDescriptor(analysis::InvariantDomainDescriptor desc);
+    void setAnalysisSolverOptions(backends::SolverOptions options);
+    void clearAnalysisSolverOptions();
+    void addAnalysisSummaries(analysis::AnalysisSummarySet summaries);
+    [[nodiscard]] bool updateAnalysisSummariesFromAssembledOperator(
+        const backends::GenericMatrix& matrix,
+        const OperatorTag& op,
+        const SystemStateView* state = nullptr);
+    void clearAnalysisSummaries();
+    [[nodiscard]] const analysis::AnalysisSummarySet* latestAnalysisSummaries() const noexcept {
+        return analysis_summaries_ ? &*analysis_summaries_ : nullptr;
+    }
 
     [[nodiscard]] const std::vector<analysis::FormulationRecord>& formulationRecords() const noexcept {
         return formulation_records_;
@@ -1358,6 +1409,7 @@ private:
         const dofs::DofMap* col_dof_map{nullptr};
         GlobalIndex row_dof_offset{0};
         GlobalIndex col_dof_offset{0};
+        std::string participant_scope{};
         assembly::SemanticKernelKind semantic_kind{assembly::SemanticKernelKind::SingleForm};
         bool matrix_capable{false};
         bool vector_capable{false};
@@ -1386,6 +1438,7 @@ private:
         const dofs::DofMap* col_dof_map{nullptr};
         GlobalIndex row_dof_offset{0};
         GlobalIndex col_dof_offset{0};
+        std::string participant_scope{};
         bool matrix_capable{false};
         bool vector_capable{false};
     };
@@ -1450,6 +1503,7 @@ private:
 
     std::shared_ptr<const assembly::IMeshAccess> mesh_access_;
     std::shared_ptr<const ISearchAccess> search_access_{};
+    std::vector<MeshParticipantInfo> mesh_participants_{};
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 	    std::shared_ptr<const svmp::Mesh> mesh_{};
@@ -1811,11 +1865,16 @@ private:
     std::size_t contributions_def_count_{0}; ///< Watermark for definition-phase contributions
     std::vector<analysis::BoundaryConditionDescriptor> bc_descriptors_;
     std::vector<analysis::VariableDescriptor> variable_descriptors_;
+    std::vector<analysis::InvariantDomainDescriptor> invariant_domain_descriptors_;
 
     std::optional<analysis::TopologyAnalysisContext> topology_context_;
     std::optional<analysis::InterfaceTopologyContext> interface_topology_context_;
     std::optional<AuxiliaryRegionLookupCache> auxiliary_region_lookup_cache_;
     std::optional<analysis::ConstraintAnalysisSummary> constraint_summary_;
+    std::optional<backends::SolverOptions> analysis_solver_options_;
+    std::optional<analysis::AnalysisSummarySet> registered_analysis_summaries_;
+    std::optional<analysis::AnalysisSummarySet> analysis_summaries_;
+    bool assembled_tangent_analysis_summary_attempted_{false};
     mutable std::optional<analysis::ProblemAnalysisReport> analysis_report_cache_;
     mutable std::uint64_t analysis_inputs_version_{0};
     mutable std::uint64_t analysis_report_version_{std::numeric_limits<std::uint64_t>::max()};

@@ -504,6 +504,10 @@ class FSILS_subLsType
     /// Final norm of residual      (OUT)
     double fNorm;  
 
+    /// Original RHS norm to use for convergence targets when the linear
+    /// system has been row-scaled before entering the Krylov solver.
+    double convergence_ref_norm{-1.0};
+
     /// Res. rduction in last itr.  (OUT)
     double dB;     
 

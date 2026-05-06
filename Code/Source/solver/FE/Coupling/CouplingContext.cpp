@@ -9,6 +9,7 @@
 
 #include "Coupling/SharedRegionRegistry.h"
 #include "Core/FEException.h"
+#include "Systems/FESystem.h"
 
 #include <algorithm>
 #include <utility>
@@ -103,6 +104,55 @@ const CouplingRegionRef* findRegion(const std::vector<CouplingRegionRef>& region
                                             region.region_name == region_name;
                                  });
     return it == regions.end() ? nullptr : &*it;
+}
+
+bool sameConstitutiveLawRef(const CouplingConstitutiveLawRef& lhs,
+                            const CouplingConstitutiveLawRef& rhs) noexcept
+{
+    return lhs.participant_name == rhs.participant_name &&
+           lhs.system_name == rhs.system_name &&
+           lhs.system == rhs.system &&
+           lhs.law.name == rhs.law.name &&
+           lhs.law.role == rhs.law.role &&
+           lhs.law.primary_field == rhs.law.primary_field &&
+           lhs.law.source_operator_tag == rhs.law.source_operator_tag;
+}
+
+void addConstitutiveLawIfAbsent(
+    std::vector<CouplingConstitutiveLawRef>& laws,
+    CouplingConstitutiveLawRef law)
+{
+    const auto duplicate = std::any_of(
+        laws.begin(),
+        laws.end(),
+        [&](const CouplingConstitutiveLawRef& existing) {
+            return sameConstitutiveLawRef(existing, law);
+        });
+    if (!duplicate) {
+        laws.push_back(std::move(law));
+    }
+}
+
+void importParticipantConstitutiveLaws(
+    const CouplingParticipantRef& participant,
+    std::vector<CouplingConstitutiveLawRef>& laws)
+{
+    if (!participant.import_formulation_metadata ||
+        participant.system == nullptr) {
+        return;
+    }
+    for (const auto& formulation : participant.system->formulationRecords()) {
+        for (const auto& law : formulation.constitutive_laws) {
+            addConstitutiveLawIfAbsent(
+                laws,
+                CouplingConstitutiveLawRef{
+                    .participant_name = participant.participant_name,
+                    .system_name = participant.system_name,
+                    .system = participant.system,
+                    .law = law,
+                });
+        }
+    }
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -474,6 +524,12 @@ const CouplingDriverOwnedTransferDescriptor* CouplingContext::driverOwnedTransfe
     return it == driver_owned_transfers_.end() ? nullptr : &*it;
 }
 
+const std::vector<CouplingConstitutiveLawRef>&
+CouplingContext::constitutiveLaws() const noexcept
+{
+    return constitutive_laws_;
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 const svmp::search::InterfaceSearchRegistry* CouplingContext::interfaceSearchRegistry(
     std::string_view registry_name) const noexcept
@@ -594,6 +650,7 @@ CouplingContext::slidingInterfaceMaps() const noexcept
 
 CouplingContextBuilder& CouplingContextBuilder::addParticipant(CouplingParticipantRef participant)
 {
+    importParticipantConstitutiveLaws(participant, context_.constitutive_laws_);
     context_.participants_.push_back(std::move(participant));
     return *this;
 }
@@ -627,6 +684,13 @@ CouplingContextBuilder& CouplingContextBuilder::addDriverOwnedTransfer(
     CouplingDriverOwnedTransferDescriptor descriptor)
 {
     context_.driver_owned_transfers_.push_back(std::move(descriptor));
+    return *this;
+}
+
+CouplingContextBuilder& CouplingContextBuilder::addConstitutiveLaw(
+    CouplingConstitutiveLawRef law)
+{
+    addConstitutiveLawIfAbsent(context_.constitutive_laws_, std::move(law));
     return *this;
 }
 

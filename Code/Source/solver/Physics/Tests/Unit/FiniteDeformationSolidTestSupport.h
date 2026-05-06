@@ -71,7 +71,7 @@ struct FiniteDeformationSolidTerms {
     const auto nanson =
         forms::finite_deformation::nansonMeasureVector(deformation_gradient,
                                                        forms::FormExpr::normal());
-    return -(pressure * forms::inner(nanson, test_displacement)).ds(boundary_marker);
+    return (pressure * forms::inner(nanson, test_displacement)).ds(boundary_marker);
 }
 
 [[nodiscard]] inline forms::FormExpr initialStressGeometricStiffnessResidual(

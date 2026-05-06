@@ -35,6 +35,11 @@ struct NodePressureConstraintInput {
   std::string values_file_path{};
 };
 
+struct OutputRequestInput {
+  std::string type{};
+  ParameterMap params{};
+};
+
 struct EquationModuleInput {
   std::string equation_type{};
 
@@ -50,6 +55,8 @@ struct EquationModuleInput {
   std::vector<DomainInput> domains{};
 
   std::vector<BoundaryConditionInput> boundary_conditions{};
+
+  std::vector<OutputRequestInput> outputs{};
 
   std::optional<NodePressureConstraintInput> node_pressure_constraints{};
 };

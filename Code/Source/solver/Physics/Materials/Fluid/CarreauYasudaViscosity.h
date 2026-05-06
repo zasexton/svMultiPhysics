@@ -15,6 +15,8 @@
 
 #include "FE/Constitutive/ModelCRTP.h"
 
+#include <cstddef>
+#include <optional>
 #include <stdexcept>
 
 namespace svmp {
@@ -33,6 +35,22 @@ public:
                            FE::Real lambda,
                            FE::Real n,
                            FE::Real a);
+
+    [[nodiscard]] std::optional<FE::analysis::ConstitutiveLawMetadata>
+    constitutiveLawMetadata(std::size_t output_index) const override
+    {
+        if (output_index != 0u) {
+            throw std::invalid_argument(
+                "CarreauYasudaViscosity::constitutiveLawMetadata: output_index out of range");
+        }
+        return FE::analysis::ConstitutiveLawMetadata{
+            .name = "dynamic_viscosity",
+            .role = FE::analysis::ConstitutiveLawRole::DynamicViscosity,
+            .input_measure =
+                FE::analysis::ConstitutiveLawInputMeasure::
+                    SymmetricGradientSecondInvariant,
+        };
+    }
 
     template <class Scalar, class Workspace>
     [[nodiscard]] FE::forms::Value<Scalar> evaluateImpl(const FE::forms::Value<Scalar>& input,
@@ -83,4 +101,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_PHYSICS_MATERIALS_FLUID_CARREAU_YASUDA_VISCOSITY_H
-

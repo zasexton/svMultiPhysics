@@ -168,12 +168,14 @@ set(PHYSICS_PUBLIC_HEADERS
     Core/EquationModuleRegistry.h
     Core/ParameterSchema.h
     Core/PhysicsModule.h
+    Core/TemporalValues.h
 )
 
 set(PHYSICS_SOURCES
     Physics.cpp
     Core/EquationModuleRegistry.cpp
     Core/ParameterSchema.cpp
+    Core/TemporalValues.cpp
 )
 
 #------------------------------------------------------------------------------
@@ -311,6 +313,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_PoissonSquareSteady.cpp
         Tests/Unit/test_FluidViscosityModels.cpp
         Tests/Unit/test_SolidMaterialModels.cpp
+        Tests/Unit/test_UstructModule.cpp
         Tests/Unit/test_FormIntegrationJacobian.cpp
         Tests/Unit/test_NavierStokesPressureGauge.cpp
         Tests/Unit/test_NavierStokesLegacyBCs.cpp

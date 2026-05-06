@@ -122,6 +122,7 @@ public:
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override { return ir_.maxTimeDerivativeOrder(); }
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override { return ir_.hasExplicitTimeDependency(); }
     [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return matrix_state_independent_; }
 
     /// Linear forms (FormKind::Linear) produce only a vector contribution.
@@ -227,6 +228,7 @@ public:
     void resolveParameterSlots(
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override;
     [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return matrix_state_independent_; }
 
     [[nodiscard]] bool hasCell() const noexcept override;
@@ -324,6 +326,9 @@ public:
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override {
         return residual_ir_.maxTimeDerivativeOrder();
     }
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override {
+        return residual_ir_.hasExplicitTimeDependency();
+    }
 
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
@@ -406,6 +411,9 @@ public:
         const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override {
         return residual_ir_.maxTimeDerivativeOrder();
+    }
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override {
+        return residual_ir_.hasExplicitTimeDependency();
     }
 
     [[nodiscard]] bool hasCell() const noexcept override;
@@ -496,6 +504,7 @@ public:
     [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
     [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override;
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override;
 
     [[nodiscard]] bool hasCell() const noexcept override;
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;

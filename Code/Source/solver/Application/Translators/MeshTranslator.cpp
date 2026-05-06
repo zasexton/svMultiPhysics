@@ -107,6 +107,11 @@ svmp::index_t match_face_vertex_to_volume(
     svmp::index_t face_vertex,
     bool use_face_gids)
 {
+  const auto coordinate_match = coordinate_locator.find(face_mesh.X_ref(), face_mesh.dim(), face_vertex);
+  if (coordinate_match != svmp::INVALID_INDEX) {
+    return coordinate_match;
+  }
+
   if (use_face_gids) {
     const auto& gids = face_mesh.vertex_gids();
     const auto i = static_cast<std::size_t>(face_vertex);
@@ -118,7 +123,7 @@ svmp::index_t match_face_vertex_to_volume(
     }
   }
 
-  return coordinate_locator.find(face_mesh.X_ref(), face_mesh.dim(), face_vertex);
+  return svmp::INVALID_INDEX;
 }
 
 svmp::CellShape boundary_shape_for_vertices(int dim, std::size_t n_vertices)
@@ -358,8 +363,19 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
   }
 
   const svmp::search::VertexCoordinateLocator coordinate_locator(mesh.base());
+  const bool use_volume_gids = has_nonlocal_vertex_gids(mesh.base());
 
-  if (mesh.n_faces() == 0u) {
+  const bool rebuild_boundary_faces_from_add_face_files =
+      (mesh.n_faces() == 0u) || (mesh.world_size() > 1);
+
+  if (rebuild_boundary_faces_from_add_face_files) {
+    if (mesh.n_faces() != 0u && application::core::oopTraceEnabled()) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] MeshTranslator: replacing pre-existing local face topology"
+          << " with boundary-only topology from <Add_face> files for MPI-consistent boundary labels."
+          << std::endl;
+    }
+
     const auto vertex_cells = build_owned_vertex_cell_adjacency(mesh);
 
     std::vector<svmp::CellShape> boundary_shapes;
@@ -403,7 +419,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       face_opts.kv["edge_topology"] = "false";
 
       svmp::MeshBase face_mesh = svmp::MeshBase::load(face_opts);
-      const bool use_face_gids = has_nonlocal_vertex_gids(face_mesh);
+      const bool use_face_gids = use_volume_gids && has_nonlocal_vertex_gids(face_mesh);
 
       const auto label = next_label++;
       application::core::oopCout() << "[svMultiPhysics::Application]   Face '" << face_name << "': format='"

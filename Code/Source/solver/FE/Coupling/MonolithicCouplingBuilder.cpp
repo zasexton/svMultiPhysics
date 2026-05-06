@@ -1158,6 +1158,9 @@ void copyContextRegistrations(const CouplingContext& context,
     for (const auto& transfer : context.driverOwnedTransfers()) {
         builder.addDriverOwnedTransfer(transfer);
     }
+    for (const auto& law : context.constitutiveLaws()) {
+        builder.addConstitutiveLaw(law);
+    }
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     for (const auto& registry : context.interfaceSearchRegistries()) {
         builder.addInterfaceSearchRegistry(registry);

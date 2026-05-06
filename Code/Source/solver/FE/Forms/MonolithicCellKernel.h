@@ -88,6 +88,7 @@ public:
         return assembly::SemanticKernelKind::MonolithicCell;
     }
     [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override;
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override;
     [[nodiscard]] bool isMatrixOnly() const noexcept override;
     [[nodiscard]] bool isVectorOnly() const noexcept override;
 

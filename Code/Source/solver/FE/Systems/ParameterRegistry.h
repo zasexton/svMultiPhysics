@@ -62,6 +62,11 @@ public:
     [[nodiscard]] std::optional<std::uint32_t> slotOf(std::string_view key) const;
 
     /**
+     * @brief Return the real-parameter key assigned to a slot, if present.
+     */
+    [[nodiscard]] std::optional<std::string_view> keyForSlot(std::uint32_t slot) const;
+
+    /**
      * @brief Evaluate all Real-valued parameter slots for the provided state.
      *
      * Missing values are satisfied by defaults in the registry. If a required

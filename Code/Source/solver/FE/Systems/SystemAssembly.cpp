@@ -57,6 +57,165 @@ namespace systems {
 
 namespace {
 
+class ParticipantFilteredMeshAccess final : public assembly::IMeshAccess {
+public:
+    ParticipantFilteredMeshAccess(const assembly::IMeshAccess& base,
+                                  const MeshParticipantInfo& participant)
+        : base_(base), participant_(participant)
+    {
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return base_.numCells(); }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override
+    {
+        GlobalIndex count = 0;
+        forEachOwnedCell([&](GlobalIndex) { ++count; });
+        return count;
+    }
+    [[nodiscard]] GlobalIndex numVertices() const override { return base_.numVertices(); }
+    [[nodiscard]] GlobalIndex numOwnedVertices() const override { return base_.numOwnedVertices(); }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return base_.numBoundaryFaces(); }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return base_.numInteriorFaces(); }
+    [[nodiscard]] int dimension() const override { return base_.dimension(); }
+    [[nodiscard]] bool revisionTrackingAvailable() const override
+    {
+        return base_.revisionTrackingAvailable();
+    }
+    [[nodiscard]] std::uint64_t geometryRevision() const override
+    {
+        return base_.geometryRevision();
+    }
+    [[nodiscard]] std::uint64_t topologyRevision() const override
+    {
+        return base_.topologyRevision();
+    }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override
+    {
+        return base_.ownershipRevision();
+    }
+    [[nodiscard]] std::uint64_t numberingRevision() const override
+    {
+        return base_.numberingRevision();
+    }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override
+    {
+        return base_.fieldLayoutRevision();
+    }
+    [[nodiscard]] std::uint64_t labelRevision() const override
+    {
+        return base_.labelRevision();
+    }
+    [[nodiscard]] std::uint64_t activeConfigurationEpoch() const override
+    {
+        return base_.activeConfigurationEpoch();
+    }
+    [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override
+    {
+        return base_.coordinateConfigurationKey();
+    }
+    [[nodiscard]] bool cellIdsAreDense() const override { return base_.cellIdsAreDense(); }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
+    {
+        return containsCell(cell_id) && base_.isOwnedCell(cell_id);
+    }
+    [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override
+    {
+        return base_.getCellType(cell_id);
+    }
+    [[nodiscard]] int getCellGeometryOrder(GlobalIndex cell_id) const override
+    {
+        return base_.getCellGeometryOrder(cell_id);
+    }
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override
+    {
+        return base_.getCellDomainId(cell_id);
+    }
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        base_.getCellNodes(cell_id, nodes);
+    }
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return base_.getNodeCoordinates(node_id);
+    }
+    void getCellCoordinates(GlobalIndex cell_id,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        base_.getCellCoordinates(cell_id, coords);
+    }
+    [[nodiscard]] bool supportsCoordinateFrame(assembly::CoordinateFrame frame) const override
+    {
+        return base_.supportsCoordinateFrame(frame);
+    }
+    void getCellCoordinates(GlobalIndex cell_id,
+                            assembly::CoordinateFrame frame,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        base_.getCellCoordinates(cell_id, frame, coords);
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id,
+                                               GlobalIndex cell_id) const override
+    {
+        return base_.getLocalFaceIndex(face_id, cell_id);
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex face_id) const override
+    {
+        return base_.getBoundaryFaceMarker(face_id);
+    }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex face_id) const override
+    {
+        return base_.getInteriorFaceCells(face_id);
+    }
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        for (GlobalIndex cell = participant_.cell_offset;
+             cell < participant_.cell_offset + participant_.num_cells;
+             ++cell) {
+            callback(cell);
+        }
+    }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        base_.forEachOwnedCell([&](GlobalIndex cell_id) {
+            if (containsCell(cell_id)) {
+                callback(cell_id);
+            }
+        });
+    }
+    void forEachBoundaryFace(
+        int marker,
+        std::function<void(GlobalIndex, GlobalIndex)> callback) const override
+    {
+        base_.forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            if (containsCell(cell_id)) {
+                callback(face_id, cell_id);
+            }
+        });
+    }
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const override
+    {
+        base_.forEachInteriorFace(
+            [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+                if (containsCell(cell_minus) && containsCell(cell_plus)) {
+                    callback(face_id, cell_minus, cell_plus);
+                }
+            });
+    }
+
+private:
+    [[nodiscard]] bool containsCell(GlobalIndex cell_id) const noexcept
+    {
+        return cell_id >= participant_.cell_offset &&
+               cell_id < participant_.cell_offset + participant_.num_cells;
+    }
+
+    const assembly::IMeshAccess& base_;
+    const MeshParticipantInfo& participant_;
+};
+
 #if FE_HAS_MPI
 constexpr std::uint64_t kBorderedConsistencyHashSeed = 1469598103934665603ULL;
 
@@ -958,6 +1117,7 @@ assembly::AssemblyResult assembleOperator(
     ao0 = AO_TP();
     {
         std::vector<assembly::FusedCellTerm> fused_terms;
+        std::unordered_map<std::string, std::vector<assembly::FusedCellTerm>> scoped_fused_terms;
         fused_terms.reserve(plan.cell_terms.size());
 
         for (const auto& term : plan.cell_terms) {
@@ -989,22 +1149,47 @@ assembly::AssemblyResult assembleOperator(
             ft.vector_view = want_vector ? vector_out : nullptr;
             ft.assemble_matrix = want_matrix;
             ft.assemble_vector = want_vector;
-            fused_terms.push_back(ft);
+            if (term.participant_scope.empty()) {
+                fused_terms.push_back(ft);
+            } else {
+                scoped_fused_terms[term.participant_scope].push_back(ft);
+            }
         }
 
-        if (!fused_terms.empty()) {
+        auto assemble_fused_group =
+            [&](const assembly::IMeshAccess& active_mesh,
+                std::span<const assembly::FusedCellTerm> terms) {
+            if (terms.empty()) {
+                return;
+            }
             const auto fused_t0 = std::chrono::steady_clock::now();
-            auto r = assembler.assembleCellsFused(mesh, fused_terms);
+            auto r = assembler.assembleCellsFused(active_mesh, terms);
             mergeAssemblyResult(total, r);
 
             if (oopTraceEnabled()) {
                 const auto fused_t1 = std::chrono::steady_clock::now();
                 std::ostringstream oss;
                 oss << "assembleOperator: op='" << request.op << "' fused cell terms ("
-                    << fused_terms.size() << " terms) time="
+                    << terms.size() << " terms) time="
                     << std::chrono::duration<double>(fused_t1 - fused_t0).count();
                 traceLog(oss.str());
             }
+        };
+
+        if (!fused_terms.empty()) {
+            assemble_fused_group(
+                mesh,
+                std::span<const assembly::FusedCellTerm>(fused_terms.data(), fused_terms.size()));
+        }
+
+        for (const auto& [participant_name, terms] : scoped_fused_terms) {
+            const auto* participant = system.meshParticipantByName(participant_name);
+            FE_THROW_IF(participant == nullptr, InvalidStateException,
+                        "assembleOperator: missing mesh participant '" + participant_name + "'");
+            ParticipantFilteredMeshAccess participant_mesh(mesh, *participant);
+            assemble_fused_group(
+                participant_mesh,
+                std::span<const assembly::FusedCellTerm>(terms.data(), terms.size()));
         }
     }
     ao_cell_time += AO_TP() - ao0;
@@ -1034,8 +1219,20 @@ assembly::AssemblyResult assembleOperator(
             }
             const auto term_t0 = std::chrono::steady_clock::now();
 
+            std::unique_ptr<ParticipantFilteredMeshAccess> scoped_mesh;
+            const assembly::IMeshAccess* active_mesh = &mesh;
+            if (!term.participant_scope.empty()) {
+                const auto* participant = system.meshParticipantByName(term.participant_scope);
+                FE_THROW_IF(participant == nullptr, InvalidStateException,
+                            "assembleOperator: missing mesh participant '" +
+                                term.participant_scope + "'");
+                scoped_mesh =
+                    std::make_unique<ParticipantFilteredMeshAccess>(mesh, *participant);
+                active_mesh = scoped_mesh.get();
+            }
+
             auto r = assembler.assembleBoundaryFaces(
-                mesh, term.marker, *term.test_space, *term.trial_space, *term.kernel,
+                *active_mesh, term.marker, *term.test_space, *term.trial_space, *term.kernel,
                 want_matrix ? matrix_out : nullptr,
                 want_vector ? vector_out : nullptr);
             mergeAssemblyResult(total, r);
@@ -1484,25 +1681,25 @@ assembly::AssemblyResult assembleOperator(
                                 if (inner_mat) inner_mat->addMatrixEntry(r, c, v, mode);
                             } else if (r >= nf && c >= nf) {
                                 // Aux×Aux → D block
-                                const auto ai = static_cast<std::size_t>(r - nf);
-                                const auto aj = static_cast<std::size_t>(c - nf);
+                                const auto aux_row = static_cast<std::size_t>(r - nf);
+                                const auto aux_col = static_cast<std::size_t>(c - nf);
                                 const auto na = static_cast<std::size_t>(bc->n_aux);
-                                if (ai < na && aj < na && ownsAuxRow(ai)) {
-                                    bc->D[ai * na + aj] += v;
-                                    markAuxRowContribution(ai);
+                                if (aux_row < na && aux_col < na && ownsAuxRow(aux_row)) {
+                                    bc->D[aux_row * na + aux_col] += v;
+                                    markAuxRowContribution(aux_row);
                                 }
                             } else if (r < nf && c >= nf) {
                                 // PDE×Aux → B block (col-major: B[r + nf*aux_col])
-                                const auto aj = static_cast<std::size_t>(c - nf);
-                                if (aj < static_cast<std::size_t>(bc->n_aux))
-                                    bc->B[static_cast<std::size_t>(r) + bc->n_field_dofs * aj] += v;
+                                const auto aux_col = static_cast<std::size_t>(c - nf);
+                                if (aux_col < static_cast<std::size_t>(bc->n_aux))
+                                    bc->B[static_cast<std::size_t>(r) + bc->n_field_dofs * aux_col] += v;
                             } else {
                                 // Aux×PDE → C^T block (row-major: Ct[aux_row * nf + col])
-                                const auto ai = static_cast<std::size_t>(r - nf);
-                                if (ai < static_cast<std::size_t>(bc->n_aux) &&
-                                    ownsAuxRow(ai)) {
-                                    bc->Ct[ai * bc->n_field_dofs + static_cast<std::size_t>(c)] += v;
-                                    markAuxRowContribution(ai);
+                                const auto aux_row = static_cast<std::size_t>(r - nf);
+                                if (aux_row < static_cast<std::size_t>(bc->n_aux) &&
+                                    ownsAuxRow(aux_row)) {
+                                    bc->Ct[aux_row * bc->n_field_dofs + static_cast<std::size_t>(c)] += v;
+                                    markAuxRowContribution(aux_row);
                                 }
                             }
                         }
@@ -1523,12 +1720,12 @@ assembly::AssemblyResult assembleOperator(
                         if (dofs[i] < nf) {
                             if (inner_vec) inner_vec->addVectorEntry(dofs[i], vals[i], mode);
                         } else {
-                            const auto ai = static_cast<std::size_t>(dofs[i] - nf);
-                            if (ai < static_cast<std::size_t>(bc->n_aux) &&
-                                ownsAuxRow(ai)) {
-                                bc->g[ai] += vals[i];
+                            const auto aux_row = static_cast<std::size_t>(dofs[i] - nf);
+                            if (aux_row < static_cast<std::size_t>(bc->n_aux) &&
+                                ownsAuxRow(aux_row)) {
+                                bc->g[aux_row] += vals[i];
                                 if (std::abs(vals[i]) > Real(1e-30)) {
-                                    markAuxRowContribution(ai);
+                                    markAuxRowContribution(aux_row);
                                 }
                             }
                         }

@@ -778,7 +778,10 @@ void registerDerivedFunctionalFields(assembly::FunctionalAssembler& assembler,
         binding.space = rec.space.get();
         binding.dof_map = &dh.getDofMap();
         binding.dof_offset = system.fieldDofOffset(field);
-        binding.field_global_size = dh.getNumDofs();
+        // Derived-result assemblers are configured with the primary field-local
+        // DofMap, so secondary fields should gather from their own field-local
+        // map plus monolithic offset instead of scanning the primary cell DOFs.
+        binding.field_global_size = 0;
         binding.field_type = rec.space->field_type();
         binding.value_dimension = rec.components;
         binding.n_components = rec.components;

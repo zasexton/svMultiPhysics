@@ -306,6 +306,29 @@ inline void expectOperatorJacobianMatchesCentralFD(FE::systems::FESystem& system
     return unitTestDataDir() / "Cube" / "mesh" / "mesh-complete.mesh.vtu";
 }
 
+[[nodiscard]] inline std::filesystem::path elasticPipeDataDir()
+{
+    return unitTestDataDir() / "ElasticPipe";
+}
+
+[[nodiscard]] inline std::filesystem::path elasticPipeParticipantMeshVtuPath(
+    std::string_view variant,
+    std::string_view participant)
+{
+    return elasticPipeDataDir() / std::string(variant) /
+           std::string(participant) / "mesh" / "mesh-complete.mesh.vtu";
+}
+
+[[nodiscard]] inline std::filesystem::path elasticPipeParticipantSurfaceVtpPath(
+    std::string_view variant,
+    std::string_view participant,
+    std::string_view surface_name)
+{
+    return elasticPipeDataDir() / std::string(variant) /
+           std::string(participant) / "mesh" / "mesh-surfaces" /
+           (std::string(surface_name) + ".vtp");
+}
+
 [[nodiscard]] inline std::filesystem::path squareMeshSurfacesDir()
 {
     return unitTestDataDir() / "Square" / "mesh" / "mesh-surfaces";

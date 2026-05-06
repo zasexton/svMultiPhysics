@@ -322,19 +322,8 @@ std::string DofMap::validationError() const {
         }
     }
 
-    // Ensure each cell has a non-empty DOF range. This catches out-of-order
-    // incremental builds that overwrite offsets and silently drop cell DOFs.
-    if (n_cells_ > 0 && cell_dof_offsets_.size() >= static_cast<std::size_t>(n_cells_) + 1) {
-        for (GlobalIndex c = 0; c < n_cells_; ++c) {
-            const auto i = static_cast<std::size_t>(c);
-            if (cell_dof_offsets_[i + 1] <= cell_dof_offsets_[i]) {
-                return "Cell " + std::to_string(c) + " has empty DOF range (offsets[" +
-                       std::to_string(c) + "]=" + std::to_string(cell_dof_offsets_[i]) +
-                       ", offsets[" + std::to_string(c + 1) + "]=" +
-                       std::to_string(cell_dof_offsets_[i + 1]) + ")";
-            }
-        }
-    }
+    // Empty ranges are valid for sparse field coverage, for example when a
+    // field is scoped to one participant of a composite mesh.
 
     // Check final offset matches DOF array size
     if (!cell_dof_offsets_.empty()) {

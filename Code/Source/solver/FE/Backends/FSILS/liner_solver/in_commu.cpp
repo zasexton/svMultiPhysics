@@ -60,6 +60,11 @@ constexpr int kFsilsVectorCommTagBase = 1200;
   return kFsilsVectorCommTagBase + ((dof > 0) ? dof : 0);
 }
 
+enum class ReverseScatterReduction {
+  Sum,
+  Max
+};
+
 [[nodiscard]] bool has_owned_halo_plan(const FSILS_lhsType& lhs) noexcept
 {
   return lhs.owned_row_operator &&
@@ -255,7 +260,10 @@ void fsils_syncv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
   }
 }
 
-void fsils_reverse_scatterv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+void fsils_reverse_scatterv_owned_halo(const FSILS_lhsType& lhs,
+                                       int dof,
+                                       Array<double>& R,
+                                       ReverseScatterReduction reduction)
 {
   const int n_neighbors = static_cast<int>(lhs.owned_halo_neighbor_ranks.size());
   if (n_neighbors == 0) {
@@ -332,8 +340,13 @@ void fsils_reverse_scatterv_owned_halo(const FSILS_lhsType& lhs, int dof, Array<
     for (std::size_t j = 0; j < owned_nodes.size(); ++j) {
       const auto node = owned_nodes[j];
       for (int l = 0; l < dof; ++l) {
-        R(l, node) +=
+        const double received =
             recv_buffer[recv_offset + j * static_cast<std::size_t>(dof) + static_cast<std::size_t>(l)];
+        if (reduction == ReverseScatterReduction::Max) {
+          R(l, node) = std::max(R(l, node), received);
+        } else {
+          R(l, node) += received;
+        }
       }
     }
     recv_offset += owned_nodes.size() * static_cast<std::size_t>(dof);
@@ -448,19 +461,27 @@ void fsils_apply_shared_dirichlet_face_mask(const FSILS_lhsType& lhs,
   }
 }
 
-static void fsils_reverse_scatterv_impl(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+static void fsils_reverse_scatterv_impl(const FSILS_lhsType& lhs,
+                                        int dof,
+                                        Array<double>& R,
+                                        ReverseScatterReduction reduction)
 {
   if (lhs.commu.nTasks == 1) {
     return;
   }
 
   require_owned_halo_plan(lhs, "FSILS reverse scatter");
-  fsils_reverse_scatterv_owned_halo(lhs, dof, R);
+  fsils_reverse_scatterv_owned_halo(lhs, dof, R, reduction);
 }
 
 void fsils_reverse_scatterv_contribution_buffer(const FSILS_lhsType& lhs, int dof, Array<double>& R)
 {
-  fsils_reverse_scatterv_impl(lhs, dof, R);
+  fsils_reverse_scatterv_impl(lhs, dof, R, ReverseScatterReduction::Sum);
+}
+
+void fsils_reverse_scatterv_max_buffer(const FSILS_lhsType& lhs, int dof, Array<double>& R)
+{
+  fsils_reverse_scatterv_impl(lhs, dof, R, ReverseScatterReduction::Max);
 }
 
 static void fsils_syncv_impl(const FSILS_lhsType& lhs, int dof, Array<double>& R)

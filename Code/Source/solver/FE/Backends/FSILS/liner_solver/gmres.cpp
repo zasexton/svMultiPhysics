@@ -220,6 +220,75 @@ bool backsolve_hessenberg(const Array<double>& h,
   }
 }
 
+[[nodiscard]] double unscale_residual_value(const double value, const double row_scale) noexcept
+{
+  constexpr double min_scale = 1e-300;
+  return (std::isfinite(row_scale) && std::abs(row_scale) > min_scale)
+      ? value / row_scale
+      : value;
+}
+
+[[nodiscard]] double convergence_reference_norm(const fe_fsi_linear_solver::FSILS_subLsType& ls,
+                                                const double fallback_norm) noexcept
+{
+  return (std::isfinite(ls.convergence_ref_norm) && ls.convergence_ref_norm >= 0.0)
+      ? ls.convergence_ref_norm
+      : fallback_norm;
+}
+
+[[nodiscard]] double convergence_target(const fe_fsi_linear_solver::FSILS_subLsType& ls,
+                                        const double reference_norm) noexcept
+{
+  return std::max(ls.absTol, ls.relTol * std::max(reference_norm, 0.0));
+}
+
+[[nodiscard]] double original_residual_norm_s(const fsils_int mynNo,
+                                             fe_fsi_linear_solver::FSILS_commuType& commu,
+                                             const Vector<double>& residual,
+                                             const Vector<double>* row_scaling)
+{
+  if (row_scaling == nullptr || row_scaling->size() < mynNo) {
+    return norm::fsi_ls_norms(mynNo, commu, residual);
+  }
+
+  double local_sq = 0.0;
+  for (fsils_int a = 0; a < mynNo; ++a) {
+    const double value = unscale_residual_value(residual(a), (*row_scaling)(a));
+    local_sq += value * value;
+  }
+
+  double global_sq = local_sq;
+  const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+  collectives.allreduce_sum(local_sq, global_sq);
+  return std::sqrt(global_sq);
+}
+
+[[nodiscard]] double original_residual_norm_v(const int dof,
+                                             const fsils_int mynNo,
+                                             fe_fsi_linear_solver::FSILS_commuType& commu,
+                                             const Array<double>& residual,
+                                             const Array<double>* row_scaling)
+{
+  if (row_scaling == nullptr ||
+      row_scaling->nrows() < dof ||
+      row_scaling->ncols() < mynNo) {
+    return norm::fsi_ls_normv(dof, mynNo, commu, residual);
+  }
+
+  double local_sq = 0.0;
+  for (fsils_int a = 0; a < mynNo; ++a) {
+    for (int i = 0; i < dof; ++i) {
+      const double value = unscale_residual_value(residual(i, a), (*row_scaling)(i, a));
+      local_sq += value * value;
+    }
+  }
+
+  double global_sq = local_sq;
+  const fe_fsi_linear_solver::CollectiveOps collectives(commu);
+  collectives.allreduce_sum(local_sq, global_sq);
+  return std::sqrt(global_sq);
+}
+
 struct GmresEnhancements {
   enum class RecycleUpdateMode { each_restart, once_per_solve, off };
   enum class ReorthMode { selective, off };
@@ -243,11 +312,16 @@ struct GmresEnhancements {
   // Default to the historical fast path. Selective reorthogonalization remains
   // available as an explicit opt-in when a problem genuinely needs it.
   ReorthMode reorth_mode = ReorthMode::off;
+  bool reorth_mode_explicit = false;
   bool verbose = false;
   bool profile = false;
   bool use_basis_panel = false;
   int basis_panel_min_sD = 16;
   int basis_panel_max_mb = 1024;
+  // Experimental adaptive restart/stagnation controls. Disabled by default
+  // because the scaled GMRES residual can stagnate while the original true
+  // residual still needs additional Krylov work.
+  bool experimental_adaptive_controls = false;
 };
 
 [[nodiscard]] const GmresEnhancements& gmres_enhancements()
@@ -260,6 +334,12 @@ struct GmresEnhancements {
     c.use_basis_panel = parse_bool_env("SVMP_FSILS_GMRES_BASIS_PANEL", false);
     c.basis_panel_min_sD = std::max(0, parse_int_env("SVMP_FSILS_GMRES_BASIS_PANEL_MIN_SD", 16));
     c.basis_panel_max_mb = std::max(0, parse_int_env("SVMP_FSILS_GMRES_BASIS_PANEL_MAX_MB", 1024));
+    c.experimental_adaptive_controls =
+        parse_bool_env("SVMP_FSILS_GMRES_EXPERIMENTAL_ADAPTIVE", false) ||
+        parse_bool_env("SVMP_FSILS_GMRES_ADAPTIVE", false);
+    if (std::getenv("SVMP_FSILS_GMRES_NO_ADAPTIVE") != nullptr) {
+      c.experimental_adaptive_controls = false;
+    }
 
     const char* update = std::getenv("SVMP_FSILS_GMRES_RECYCLE_UPDATE");
     if (update) {
@@ -308,6 +388,7 @@ struct GmresEnhancements {
 
     const char* reorth_env = std::getenv("SVMP_FSILS_GMRES_REORTH");
     if (reorth_env) {
+      c.reorth_mode_explicit = true;
       std::string v = to_lower(std::string(reorth_env));
       if (v == "on" || v == "yes" || v == "true" || v == "1" ||
           v == "selective" || v == "auto") {
@@ -2114,7 +2195,8 @@ void gmres(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSILS
 // Reproduces the Fortran 'GMRESS' subroutine.
 //
 void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinearSystem& system,
-             fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R)
+             fe_fsi_linear_solver::FSILS_subLsType& ls, Vector<double>& R,
+             const Vector<double>* row_scaling)
 {
   using namespace fe_fsi_linear_solver;
   auto& lhs = *system.lhs;
@@ -2139,16 +2221,22 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
   const double callD_before = ls.callD;
   const auto collective_before = lhs.commu.collective_stats;
 
-  double eps = norm::fsi_ls_norms(mynNo, lhs.commu, R);
-  ls.iNorm = eps;
-  ls.fNorm = eps;
-  eps = std::max(ls.absTol, ls.relTol*eps);
+  const double scaled_initial_norm = norm::fsi_ls_norms(mynNo, lhs.commu, R);
+  const double original_initial_norm = original_residual_norm_s(mynNo, lhs.commu, R, row_scaling);
+  ls.iNorm = convergence_reference_norm(ls, original_initial_norm);
+  ls.fNorm = original_initial_norm;
+  double eps = convergence_target(ls, ls.iNorm);
+  const double scaled_eps = std::max(
+      std::numeric_limits<double>::epsilon() * std::max(scaled_initial_norm, 1.0),
+      ls.relTol * std::max(scaled_initial_norm, 0.0));
   ls.itr = 0;
   int last_i = 0;
   int restart_cycles = 0;
   X = 0.0;
 
-  if (ls.iNorm <= ls.absTol) {
+  if (ls.fNorm <= eps) {
+    R = X;
+    ls.suc = true;
     ls.callD = std::numeric_limits<double>::epsilon();
     ls.dB = 0.0;
     ls.stats.record_call(ls.itr - itr_before,
@@ -2186,12 +2274,18 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
     omp_la::omp_axpby_s(nNo, u_col_curr, R, -1.0, u_col_curr);
 
     err[0] = norm::fsi_ls_norms(mynNo, lhs.commu, u_col_curr);
+    ls.fNorm = original_residual_norm_s(mynNo, lhs.commu, u_col_curr, row_scaling);
+    if (ls.fNorm <= eps) {
+      ls.suc = true;
+      break;
+    }
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
-      ls.suc = true; break;
+      break;
     }
 
     omp_la::omp_mul_s(nNo, 1.0 / err[0], u_col_curr);
 
+    bool scaled_residual_met_target = false;
     for (int i = 0; i < ls.sD; i++) {
       ls.itr++;
       last_i = i;
@@ -2249,7 +2343,8 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
       // Happy Breakdown Check
       bool breakdown = false;
-      const double breakdown_tol = std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2;
+      const double breakdown_tol =
+          std::numeric_limits<double>::epsilon() * std::max(scaled_initial_norm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
         omp_la::omp_mul_s(nNo, 1.0/h(i+1,i), u_col_next);
       } else {
@@ -2259,8 +2354,8 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
       apply_givens_rotation(h, c, s, err, i);
 
-      if (std::abs(err(i+1)) < eps) {
-        ls.suc = true;
+      if (std::abs(err(i+1)) < scaled_eps) {
+        scaled_residual_met_target = true;
         break;
       }
       if (breakdown) {
@@ -2270,7 +2365,7 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     if (last_i >= ls.sD) last_i = ls.sD - 1;
 
-    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, ls.iNorm, eps, y);
+    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, scaled_initial_norm, scaled_eps, y);
     if (!backsolve_ok) {
       ls.suc = false;
       ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
@@ -2281,6 +2376,9 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
 
     ls.fNorm = std::abs(err(last_i+1));
     if (ls.suc) break;
+    if (scaled_residual_met_target && l + 1 >= ls.mItr) {
+      break;
+    }
 
     // Stagnation detection (see gmres_v for rationale).
     if (allow_heuristic_early_stop && prev_fNorm > 0.0 && ls.fNorm >= stagnation_ratio * prev_fNorm) {
@@ -2292,6 +2390,17 @@ void gmres_s(const fe_fsi_linear_solver::distributed_solver_bundles::ScalarLinea
     if (allow_heuristic_early_stop && stagnation_count >= max_stagnation_restarts) {
       break;
     }
+  }
+
+  if (!ls.suc) {
+    auto residual = u.rcol(0);
+    halo.sync_owned_to_ghost_scalar(X);
+    A.apply(
+        dso::ghost_synced_input(X),
+        dso::owned_only_output(residual));
+    omp_la::omp_axpby_s(nNo, residual, R, -1.0, residual);
+    ls.fNorm = original_residual_norm_s(mynNo, lhs.commu, residual, row_scaling);
+    ls.suc = (ls.fNorm <= eps);
   }
 
   halo.sync_owned_to_ghost_scalar(X);
@@ -2320,7 +2429,8 @@ void gmres_s(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::FSI
 // Reproduces the Fortran 'GMRESV' subroutine.
 //
 void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinearSystem& system,
-             fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R)
+             fe_fsi_linear_solver::FSILS_subLsType& ls, Array<double>& R,
+             const Array<double>* row_scaling)
 {
   using namespace fe_fsi_linear_solver;
   auto& lhs = *system.lhs;
@@ -2361,13 +2471,17 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   // ===========================
 
   tp0 = TP();
-  double eps = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
+  const double scaled_initial_norm = norm::fsi_ls_normv(dof, mynNo, lhs.commu, R);
   tp_norm += TP() - tp0;
   ++tp_norm_calls;
 
-  ls.iNorm = eps;
-  ls.fNorm = eps;
-  eps = std::max(ls.absTol, ls.relTol*eps);
+  const double original_initial_norm = original_residual_norm_v(dof, mynNo, lhs.commu, R, row_scaling);
+  ls.iNorm = convergence_reference_norm(ls, original_initial_norm);
+  ls.fNorm = original_initial_norm;
+  double eps = convergence_target(ls, ls.iNorm);
+  const double scaled_eps = std::max(
+      std::numeric_limits<double>::epsilon() * std::max(scaled_initial_norm, 1.0),
+      ls.relTol * std::max(scaled_initial_norm, 0.0));
   ls.itr = 0;
   int last_i = 0;
   int restart_cycles = 0;
@@ -2375,7 +2489,9 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
 
   bc_pre(lhs, ls, dof, mynNo, nNo);
 
-  if (ls.iNorm <= ls.absTol) {
+  if (ls.fNorm <= eps) {
+    R = X;
+    ls.suc = true;
     ls.callD = std::numeric_limits<double>::epsilon();
     ls.dB = 0.0;
     ls.stats.record_call(ls.itr - itr_before,
@@ -2442,7 +2558,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     }
 
     // Drop near-zero vectors (relative to the initial residual norm).
-    const double drop_tol = std::sqrt(std::numeric_limits<double>::epsilon()) * std::max(ls.iNorm, 1.0);
+    const double drop_tol =
+        std::sqrt(std::numeric_limits<double>::epsilon()) * std::max(scaled_initial_norm, 1.0);
     int kept = 0;
 
     for (int j = 0; j < k_in; ++j) {
@@ -2786,22 +2903,26 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
   int stagnation_count = 0;
   constexpr int max_stagnation_restarts = 5;
   constexpr double stagnation_ratio = 0.95;
-  const bool allow_heuristic_early_stop = !ls.exact_convergence;
+  const bool allow_heuristic_early_stop =
+      !ls.exact_convergence && enh.experimental_adaptive_controls;
+  const bool use_selective_reorth =
+      enh.reorth_mode == GmresEnhancements::ReorthMode::selective ||
+      (!enh.reorth_mode_explicit && lhs.commu.nTasks > 1 && row_scaling != nullptr);
 
-  // Adaptive early restart: within each restart cycle, the cost of
+  // Experimental adaptive early restart: within each restart cycle, the cost of
   // iteration i is O(i) for the GS orthogonalization (fused dot products
   // + vector updates against the entire Krylov basis).  If convergence
   // stalls at iteration k, continuing to sD wastes O((sD²-k²)/2) work.
   // Detect intra-restart stagnation: if the residual hasn't improved by
   // at least (1 - inner_stag_ratio) for inner_stag_window consecutive
-  // iterations, break and restart.  Use env var to control.
+  // iterations, break and restart.  Opt in with
+  // SVMP_FSILS_GMRES_EXPERIMENTAL_ADAPTIVE=1.
   constexpr int inner_stag_window = 15;    // consecutive slow-progress iters
   constexpr double inner_stag_ratio = 0.9999; // require 0.01% improvement per iter
   // Only activate adaptive restart for restart dimensions larger than this
   // (small sD doesn't benefit and can lose convergence).
   constexpr int adaptive_min_sD = 50;
-  const bool use_adaptive_restart = allow_heuristic_early_stop && (ls.sD >= adaptive_min_sD) &&
-      !std::getenv("SVMP_FSILS_GMRES_NO_ADAPTIVE");
+  const bool use_adaptive_restart = allow_heuristic_early_stop && (ls.sD >= adaptive_min_sD);
 
   for (int l = 0; l < ls.mItr; l++) {
     restart_cycles++;
@@ -2880,8 +3001,17 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     tp_norm += TP() - tp0;
     ++tp_norm_calls;
 
+    tp0 = TP();
+    ls.fNorm = original_residual_norm_v(dof, mynNo, lhs.commu, u_slice, row_scaling);
+    tp_norm += TP() - tp0;
+    ++tp_norm_calls;
+    if (ls.fNorm <= eps) {
+      ls.suc = true;
+      break;
+    }
+
     if (std::abs(err[0]) <= std::numeric_limits<double>::epsilon()) {
-      ls.suc = true; break;
+      break;
     }
 
     update_recycle_scores_from_gamma(err[0]);
@@ -2907,6 +3037,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     // Adaptive early restart: track intra-restart convergence
     int inner_stag_count = 0;
     double prev_inner_err = std::abs(err[0]);
+    bool scaled_residual_met_target = false;
 
     for (int i = 0; i < ls.sD; i++) {
       ls.itr++;
@@ -3048,7 +3179,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       // tt_sq < proj_sq_norm means ||v_new|| < (1/sqrt(2))||v|| — loss of orthogonality.
       bool do_reorth = false;
       if (!ls.disable_reorth &&
-          enh.reorth_mode != GmresEnhancements::ReorthMode::off &&
+          use_selective_reorth &&
           std::isfinite(new_norm_sq)) {
         if (enh.use_mgs_dgks) {
           const double ratio2 = enh.mgs_dgks_ratio * enh.mgs_dgks_ratio;
@@ -3114,13 +3245,14 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
                      l,
                      i,
                      new_norm,
-                     std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2);
+                     std::numeric_limits<double>::epsilon() * std::max(scaled_initial_norm, 1.0) * 1e2);
         std::fflush(stderr);
       }
 
       // Happy Breakdown Protection
       bool breakdown = false;
-      const double breakdown_tol = std::numeric_limits<double>::epsilon() * std::max(ls.iNorm, 1.0) * 1e2;
+      const double breakdown_tol =
+          std::numeric_limits<double>::epsilon() * std::max(scaled_initial_norm, 1.0) * 1e2;
       if (h(i+1,i) > breakdown_tol) {
         tp0 = TP();
         omp_la::omp_mul_v(dof, nNo, 1.0/h(i+1,i), u_slice_next);
@@ -3149,8 +3281,8 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
       tp_givens += TP() - tp0;
       ++tp_givens_calls;
 
-      if (std::abs(err(i+1)) < eps) {
-        ls.suc = true;
+      if (std::abs(err(i+1)) < scaled_eps) {
+        scaled_residual_met_target = true;
         break;
       }
       if (breakdown) {
@@ -3179,7 +3311,7 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     if (last_i >= ls.sD) last_i = ls.sD - 1;
 
     tp0 = TP();
-    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, ls.iNorm, eps, y);
+    const bool backsolve_ok = backsolve_hessenberg(h, err, last_i, scaled_initial_norm, scaled_eps, y);
     if (!backsolve_ok) {
       ls.suc = false;
       ls.fNorm = std::max(std::abs(err(last_i+1)), eps);
@@ -3226,6 +3358,9 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     }
 
     if (ls.suc) break;
+    if (scaled_residual_met_target && l + 1 >= ls.mItr) {
+      break;
+    }
 
     // Stagnation detection: if residual hasn't improved by at least
     // (1 - stagnation_ratio) for max_stagnation_restarts consecutive
@@ -3239,6 +3374,21 @@ void gmres_v(const fe_fsi_linear_solver::distributed_solver_bundles::VectorLinea
     if (allow_heuristic_early_stop && stagnation_count >= max_stagnation_restarts) {
       break;
     }
+  }
+
+  if (!ls.suc) {
+    auto residual = u.rslice(0);
+    halo.sync_owned_to_ghost_vector(dof, X);
+    A.apply(
+        dso::ghost_synced_input(dof, X),
+        dso::owned_only_output(dof, residual));
+    add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_ADD, dof, X, residual);
+    if (has_coupled_bc) {
+      add_bc_mul::add_bc_mul(lhs, BcopType::BCOP_TYPE_PRE, dof, residual, residual);
+    }
+    omp_la::omp_axpby_v(dof, nNo, residual, R, -1.0, residual);
+    ls.fNorm = original_residual_norm_v(dof, mynNo, lhs.commu, residual, row_scaling);
+    ls.suc = (ls.fNorm <= eps);
   }
 
   halo.sync_owned_to_ghost_vector(dof, X);

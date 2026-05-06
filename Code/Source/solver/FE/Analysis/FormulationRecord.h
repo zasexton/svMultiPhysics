@@ -24,6 +24,8 @@
  */
 
 #include "Core/Types.h"
+#include "Analysis/ConstitutiveLawMetadata.h"
+#include "Analysis/FormRuntimeMetadata.h"
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include <memory>
@@ -106,6 +108,18 @@ struct FormulationRecord {
 
     /// Auxiliary output dependencies (from AuxiliaryOutputSymbol terminals)
     std::vector<VariableKey> auxiliary_output_dependencies;
+
+    /// Constitutive laws intentionally used while authoring this residual.
+    std::vector<ConstitutiveLawMetadata> constitutive_laws;
+
+    /// Runtime parameters discovered in the residual DAG.
+    std::vector<FormParameterUsage> parameter_usages;
+
+    /// Callback coefficients discovered in the residual DAG.
+    std::vector<FormCoefficientUsage> coefficient_usages;
+
+    /// Recognized scale factors discovered in the residual DAG.
+    std::vector<FormScaleUsage> scale_usages;
 
     /// Resolved auxiliary-output consumers keyed by stable output id.
     std::vector<AuxiliaryOutputConsumerRecord> auxiliary_output_consumers;

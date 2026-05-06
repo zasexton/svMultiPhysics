@@ -77,6 +77,30 @@ void ParameterRegistry::mergeInto(params::Spec& dst, const params::Spec& src)
     if (dst.doc.empty() && !src.doc.empty()) {
         dst.doc = src.doc;
     }
+
+    if (src.lower_bound.has_value()) {
+        dst.lower_bound = dst.lower_bound.has_value()
+            ? std::max(*dst.lower_bound, *src.lower_bound)
+            : src.lower_bound;
+    }
+    if (src.upper_bound.has_value()) {
+        dst.upper_bound = dst.upper_bound.has_value()
+            ? std::min(*dst.upper_bound, *src.upper_bound)
+            : src.upper_bound;
+    }
+    if (dst.units.empty() && !src.units.empty()) {
+        dst.units = src.units;
+    }
+    if (dst.scale_role.empty() && !src.scale_role.empty()) {
+        dst.scale_role = src.scale_role;
+    }
+    if (dst.theorem_id.empty() && !src.theorem_id.empty()) {
+        dst.theorem_id = src.theorem_id;
+    }
+    if (dst.admissible_range_scope.empty() &&
+        !src.admissible_range_scope.empty()) {
+        dst.admissible_range_scope = src.admissible_range_scope;
+    }
 }
 
 void ParameterRegistry::add(params::Spec spec, std::string source)
@@ -231,6 +255,18 @@ std::optional<std::uint32_t> ParameterRegistry::slotOf(std::string_view key) con
     const auto it = key_to_slot_.find(std::string(key));
     if (it == key_to_slot_.end()) return std::nullopt;
     return it->second;
+}
+
+std::optional<std::string_view>
+ParameterRegistry::keyForSlot(std::uint32_t slot) const
+{
+    if (!slot_cache_valid_) {
+        rebuildSlotCache();
+    }
+    if (static_cast<std::size_t>(slot) >= slot_keys_.size()) {
+        return std::nullopt;
+    }
+    return std::string_view(slot_keys_[slot]);
 }
 
 std::vector<Real> ParameterRegistry::evaluateRealSlots(const SystemStateView& state) const

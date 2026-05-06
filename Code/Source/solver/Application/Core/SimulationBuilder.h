@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "Application/Core/MeshCollection.h"
 #include "Mesh/Mesh.h"
 
 class Parameters;
@@ -34,6 +35,7 @@ namespace application {
 namespace core {
 
 struct SimulationComponents {
+  MeshCollection mesh_collection{};
   std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{};
   std::shared_ptr<svmp::Mesh> primary_mesh{};
   std::string primary_mesh_name{};

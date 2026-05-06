@@ -222,6 +222,11 @@ TEST(NewtonSolver, ValidatesOptions)
     }
     {
         NewtonOptions o;
+        o.min_iterations = -1;
+        EXPECT_THROW((void)NewtonSolver{o}, svmp::FE::InvalidArgumentException);
+    }
+    {
+        NewtonOptions o;
         o.abs_tolerance = -1.0;
         EXPECT_THROW((void)NewtonSolver{o}, svmp::FE::InvalidArgumentException);
     }

@@ -58,6 +58,7 @@ struct NewtonOptions {
     bool accept_inexact_linear_solutions{false};
 
     int max_iterations{25};
+    int min_iterations{0};
     double abs_tolerance{1e-10};
     double rel_tolerance{1e-8};
     double step_tolerance{0.0};

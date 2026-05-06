@@ -14,6 +14,7 @@
  */
 
 #include "Core/Types.h"
+#include "Analysis/ConstitutiveLawMetadata.h"
 #include "Coupling/CouplingTypes.h"
 #include "Coupling/TransferPlan.h"
 #include "Systems/FieldRegistry.h"
@@ -41,6 +42,7 @@ struct CouplingParticipantRef {
     std::string participant_name;
     std::string system_name;
     const systems::FESystem* system{nullptr};
+    bool import_formulation_metadata{false};
 
     [[nodiscard]] bool valid() const noexcept;
 };
@@ -92,6 +94,13 @@ struct CouplingExternalBufferRegistration {
     CouplingExternalBufferDescriptor descriptor;
 };
 
+struct CouplingConstitutiveLawRef {
+    std::string participant_name;
+    std::string system_name;
+    const systems::FESystem* system{nullptr};
+    analysis::ConstitutiveLawMetadata law{};
+};
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 struct CouplingInterfaceSearchRegistryRegistration {
     std::string registry_name;
@@ -140,6 +149,8 @@ public:
         std::string_view external_buffer_key) const noexcept;
     [[nodiscard]] const CouplingDriverOwnedTransferDescriptor* driverOwnedTransfer(
         std::string_view transfer_name) const noexcept;
+    [[nodiscard]] const std::vector<CouplingConstitutiveLawRef>&
+    constitutiveLaws() const noexcept;
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     [[nodiscard]] const svmp::search::InterfaceSearchRegistry* interfaceSearchRegistry(
         std::string_view registry_name) const noexcept;
@@ -173,6 +184,7 @@ private:
     std::vector<SharedRegionRef> shared_regions_{};
     std::vector<CouplingExternalBufferRegistration> external_buffers_{};
     std::vector<CouplingDriverOwnedTransferDescriptor> driver_owned_transfers_{};
+    std::vector<CouplingConstitutiveLawRef> constitutive_laws_{};
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     std::vector<CouplingInterfaceSearchRegistryRegistration> interface_search_registries_{};
     std::vector<CouplingSlidingInterfaceMapRegistration> sliding_interface_maps_{};
@@ -189,6 +201,8 @@ public:
         CouplingExternalBufferRegistration registration);
     CouplingContextBuilder& addDriverOwnedTransfer(
         CouplingDriverOwnedTransferDescriptor descriptor);
+    CouplingContextBuilder& addConstitutiveLaw(
+        CouplingConstitutiveLawRef law);
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     CouplingContextBuilder& addInterfaceSearchRegistry(
         CouplingInterfaceSearchRegistryRegistration registration);
