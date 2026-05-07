@@ -2561,6 +2561,10 @@ CoupledResidualKernels installFormulation(
         rec.parameter_usages = scan.parameter_usages;
         rec.coefficient_usages = scan.coefficient_usages;
         rec.scale_usages = scan.scale_usages;
+        rec.expression_domain_constraints =
+            std::move(scan.expression_domain_constraints);
+        rec.invariant_domain_descriptors =
+            std::move(scan.invariant_domain_descriptors);
         for (auto& law : scan.constitutive_laws) {
             analysis::addConstitutiveLawIfAbsent(rec.constitutive_laws,
                                                  std::move(law));

@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/FormAnalysisBridge.h"
+#include "Analysis/FormExprScanner.h"
 
 #include <algorithm>
 #include <functional>
@@ -415,13 +416,17 @@ void appendFeatureGates(FormContributionAnalysisMetadata& metadata)
                                     const VariableKey& row,
                                     const VariableKey& dependency,
                                     DomainKind domain,
-                                    bool matrix_block)
+                                    bool matrix_block,
+                                    DependencyKind dependency_kind,
+                                    const std::string& dependency_name)
 {
     return std::any_of(deps.begin(), deps.end(), [&](const auto& dep) {
         return dep.residual_row == row &&
                dep.dependency == dependency &&
                dep.domain == domain &&
-               dep.contributes_matrix_block == matrix_block;
+               dep.contributes_matrix_block == matrix_block &&
+               dep.dependency_kind == dependency_kind &&
+               dep.dependency_name == dependency_name;
     });
 }
 
@@ -454,29 +459,148 @@ void appendFeatureGates(FormContributionAnalysisMetadata& metadata)
     return DomainKind::Cell;
 }
 
+[[nodiscard]] DependencyKind dependencyKindForVariable(
+    const VariableKey& dependency) noexcept
+{
+    switch (dependency.kind) {
+        case VariableKind::FieldComponent:
+            return DependencyKind::FieldUnknown;
+        case VariableKind::BoundaryFunctional:
+            return DependencyKind::BoundaryFunctional;
+        case VariableKind::AuxiliaryState:
+            return DependencyKind::AuxiliaryState;
+        case VariableKind::AuxiliaryInput:
+            return DependencyKind::AuxiliaryInput;
+        case VariableKind::AuxiliaryOutput:
+            return DependencyKind::AuxiliaryOutput;
+        case VariableKind::GlobalScalar:
+            return DependencyKind::FieldUnknown;
+    }
+    return DependencyKind::FieldUnknown;
+}
+
+[[nodiscard]] std::string dependencyNameForVariable(
+    const VariableKey& dependency)
+{
+    if (dependency.kind == VariableKind::FieldComponent) {
+        return "field:" + std::to_string(dependency.field_id);
+    }
+    return dependency.name;
+}
+
+[[nodiscard]] DependencyKind dependencyKindForTerminal(
+    FormTerminalKind kind) noexcept
+{
+    switch (kind) {
+        case FormTerminalKind::TrialField:
+        case FormTerminalKind::StateField:
+        case FormTerminalKind::DiscreteField:
+            return DependencyKind::TrialFunction;
+        case FormTerminalKind::TestField:
+            return DependencyKind::TestFunction;
+        case FormTerminalKind::ParameterSymbol:
+        case FormTerminalKind::ParameterRef:
+            return DependencyKind::Parameter;
+        case FormTerminalKind::Coefficient:
+            return DependencyKind::Coefficient;
+        case FormTerminalKind::BoundaryFunctionalSymbol:
+        case FormTerminalKind::BoundaryIntegralSymbol:
+        case FormTerminalKind::BoundaryIntegralRef:
+            return DependencyKind::BoundaryFunctional;
+        case FormTerminalKind::AuxiliaryStateSymbol:
+        case FormTerminalKind::AuxiliaryStateRef:
+            return DependencyKind::AuxiliaryState;
+        case FormTerminalKind::AuxiliaryInputSymbol:
+        case FormTerminalKind::AuxiliaryInputRef:
+            return DependencyKind::AuxiliaryInput;
+        case FormTerminalKind::AuxiliaryOutputSymbol:
+        case FormTerminalKind::AuxiliaryOutputRef:
+            return DependencyKind::AuxiliaryOutput;
+        case FormTerminalKind::TimeStep:
+        case FormTerminalKind::EffectiveTimeStep:
+            return DependencyKind::TimeStep;
+        case FormTerminalKind::CellDiameter:
+        case FormTerminalKind::CellVolume:
+        case FormTerminalKind::FacetArea:
+        case FormTerminalKind::CellDomainId:
+            return DependencyKind::MeshMetric;
+        case FormTerminalKind::Coordinate:
+        case FormTerminalKind::ReferenceCoordinate:
+        case FormTerminalKind::CurrentCoordinate:
+        case FormTerminalKind::PreviousCoordinate:
+        case FormTerminalKind::ReferencePhysicalCoordinate:
+        case FormTerminalKind::MeshDisplacement:
+        case FormTerminalKind::MeshVelocity:
+        case FormTerminalKind::MeshAcceleration:
+        case FormTerminalKind::PreviousMeshVelocity:
+        case FormTerminalKind::PredictedMeshVelocity:
+        case FormTerminalKind::CurrentJacobian:
+        case FormTerminalKind::ReferenceJacobian:
+        case FormTerminalKind::CurrentJacobianDeterminant:
+        case FormTerminalKind::ReferenceJacobianDeterminant:
+        case FormTerminalKind::CurrentNormal:
+        case FormTerminalKind::ReferenceNormal:
+        case FormTerminalKind::CurrentMeasure:
+        case FormTerminalKind::ReferenceMeasure:
+        case FormTerminalKind::SurfaceJacobian:
+        case FormTerminalKind::GeometryTrialVectorVariation:
+        case FormTerminalKind::GeometryTrialJacobianVariation:
+        case FormTerminalKind::MeshVelocityVariation:
+        case FormTerminalKind::CurrentMeasureVariation:
+        case FormTerminalKind::CurrentNormalVariation:
+        case FormTerminalKind::SurfaceJacobianVariation:
+        case FormTerminalKind::FrameTransform:
+            return DependencyKind::GeometryMap;
+        default:
+            return DependencyKind::FieldUnknown;
+    }
+}
+
 void appendInstalledDependency(FormContributionAnalysisMetadata& metadata,
                                const VariableKey& row,
                                const VariableKey& dependency,
                                DomainKind domain,
                                bool contributes_matrix_block,
                                bool contributes_vector,
-                               std::string provider)
+                               std::string provider,
+                               DependencyKind dependency_kind =
+                                   DependencyKind::FieldUnknown,
+                               std::string dependency_name = {},
+                               int marker = -1,
+                               std::string contribution_id = {},
+                               bool affects_coefficient = false,
+                               bool affects_geometry = false)
 {
+    if (dependency_kind == DependencyKind::FieldUnknown) {
+        dependency_kind = dependencyKindForVariable(dependency);
+    }
+    if (dependency_name.empty()) {
+        dependency_name = dependencyNameForVariable(dependency);
+    }
     if (dependencyExists(metadata.installed_dependencies,
                          row,
                          dependency,
                          domain,
-                         contributes_matrix_block)) {
+                         contributes_matrix_block,
+                         dependency_kind,
+                         dependency_name)) {
         return;
     }
-    metadata.installed_dependencies.push_back(
-        FormInstalledDependencyMetadata{
-            row,
-            dependency,
-            domain,
-            contributes_matrix_block,
-            contributes_vector,
-            std::move(provider)});
+    FormInstalledDependencyMetadata dependency_metadata;
+    dependency_metadata.residual_row = row;
+    dependency_metadata.dependency = dependency;
+    dependency_metadata.domain = domain;
+    dependency_metadata.contributes_matrix_block = contributes_matrix_block;
+    dependency_metadata.contributes_vector = contributes_vector;
+    dependency_metadata.provider = std::move(provider);
+    dependency_metadata.dependency_kind = dependency_kind;
+    dependency_metadata.dependency_name = std::move(dependency_name);
+    dependency_metadata.row_variable = row;
+    dependency_metadata.marker = marker;
+    dependency_metadata.contribution_id = std::move(contribution_id);
+    dependency_metadata.affects_coefficient = affects_coefficient;
+    dependency_metadata.affects_geometry = affects_geometry;
+    metadata.installed_dependencies.push_back(std::move(dependency_metadata));
 }
 
 [[nodiscard]] std::vector<VariableKey> dependencyRows(
@@ -714,18 +838,31 @@ FormContributionAnalysisMetadata buildFormAnalysisMetadata(
             *formulation.residual_expr, terminal_options, formulation.operator_tag);
     }
 
+    FormExprScanResult residual_scan;
+    const bool residual_scan_available = formulation.residual_expr != nullptr;
+    if (residual_scan_available) {
+        residual_scan = scanFormExpr(*formulation.residual_expr);
+    }
+
     const auto dependency_rows = dependencyRows(formulation, contributions);
 
     for (const auto& contribution : contributions) {
         for (const auto& row : contribution.test_variables) {
             for (const auto& dependency : contribution.trial_variables) {
+                const int marker = contribution.boundary_marker >= 0
+                    ? contribution.boundary_marker
+                    : contribution.interface_marker;
                 appendInstalledDependency(metadata,
                                           row,
                                           dependency,
                                           contribution.domain,
                                           true,
                                           true,
-                                          contribution.origin);
+                                          contribution.origin,
+                                          DependencyKind::TrialFunction,
+                                          {},
+                                          marker,
+                                          contribution.contribution_id);
                 if (!blockExists(metadata.installed_blocks,
                                  row,
                                  dependency,
@@ -774,6 +911,67 @@ FormContributionAnalysisMetadata buildFormAnalysisMetadata(
                         DomainKind::AuxiliaryCoupling,
                         "FormulationRecord::auxiliary_output_dependencies");
 
+    const auto& parameter_usages = formulation.parameter_usages.empty() &&
+            residual_scan_available
+        ? residual_scan.parameter_usages
+        : formulation.parameter_usages;
+    for (const auto& parameter : parameter_usages) {
+        const std::string name = !parameter.name.empty()
+            ? parameter.name
+            : (parameter.slot ? "slot:" + std::to_string(*parameter.slot)
+                              : std::string{"unnamed-parameter"});
+        const int marker = parameter.boundary_marker >= 0
+            ? parameter.boundary_marker
+            : parameter.interface_marker;
+        for (const auto& row : dependency_rows) {
+            appendInstalledDependency(metadata,
+                                      row,
+                                      VariableKey::named(
+                                          VariableKind::GlobalScalar,
+                                          "parameter:" + name),
+                                      DomainKind::ParameterDependency,
+                                      false,
+                                      true,
+                                      "FormulationRecord::parameter_usages",
+                                      DependencyKind::Parameter,
+                                      name,
+                                      marker,
+                                      {},
+                                      true,
+                                      false);
+        }
+    }
+
+    const auto& coefficient_usages = formulation.coefficient_usages.empty() &&
+            residual_scan_available
+        ? residual_scan.coefficient_usages
+        : formulation.coefficient_usages;
+    for (const auto& coefficient : coefficient_usages) {
+        const std::string name = !coefficient.name.empty()
+            ? coefficient.name
+            : std::string{"unnamed-coefficient"};
+        const int marker = coefficient.boundary_marker >= 0
+            ? coefficient.boundary_marker
+            : coefficient.interface_marker;
+        for (const auto& row : dependency_rows) {
+            appendInstalledDependency(metadata,
+                                      row,
+                                      VariableKey::named(
+                                          VariableKind::GlobalScalar,
+                                          "coefficient:" + name),
+                                      DomainKind::CoefficientDependency,
+                                      false,
+                                      true,
+                                      "FormulationRecord::coefficient_usages",
+                                      DependencyKind::Coefficient,
+                                      name,
+                                      marker,
+                                      {},
+                                      true,
+                                      false);
+        }
+    }
+
     for (const auto& terminal : metadata.terminals) {
         if (isFieldTerminal(terminal.kind) || !terminal.graph_variable.has_value()) {
             continue;
@@ -785,7 +983,16 @@ FormContributionAnalysisMetadata buildFormAnalysisMetadata(
                                       terminal.domain,
                                       false,
                                       true,
-                                      "Forms terminal metadata");
+                                      "Forms terminal metadata",
+                                      dependencyKindForTerminal(terminal.kind),
+                                      terminal.symbol_name,
+                                      terminal.boundary_marker >= 0
+                                          ? terminal.boundary_marker
+                                          : terminal.interface_marker,
+                                      {},
+                                      terminal.kind == FormTerminalKind::Coefficient,
+                                      dependencyKindForTerminal(terminal.kind) ==
+                                          DependencyKind::GeometryMap);
         }
     }
 

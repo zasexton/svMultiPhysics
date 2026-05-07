@@ -22,6 +22,10 @@ TEST(ContributionDescriptor, ToString_ContributionRole) {
     EXPECT_STREQ(toString(ContributionRole::StabilizationBlock), "StabilizationBlock");
     EXPECT_STREQ(toString(ContributionRole::BoundaryConstraint), "BoundaryConstraint");
     EXPECT_STREQ(toString(ContributionRole::GlobalCoupling), "GlobalCoupling");
+    EXPECT_STREQ(toString(ContributionRole::FieldToAuxiliary), "FieldToAuxiliary");
+    EXPECT_STREQ(toString(ContributionRole::AuxiliaryToField), "AuxiliaryToField");
+    EXPECT_STREQ(toString(ContributionRole::AuxiliaryToAuxiliary), "AuxiliaryToAuxiliary");
+    EXPECT_STREQ(toString(ContributionRole::AuxiliarySelf), "AuxiliarySelf");
 }
 
 TEST(ContributionDescriptor, ToString_NullspaceFamily) {
@@ -184,6 +188,8 @@ TEST(ContributionDescriptor, Phase22_ToString_NewEnums) {
     EXPECT_STREQ(toString(AdjointConsistencyKind::No), "No");
 
     EXPECT_STREQ(toString(TemporalContributionKind::MassLike), "MassLike");
+    EXPECT_STREQ(toString(TemporalContributionKind::TimeIndependentResidual), "TimeIndependentResidual");
+    EXPECT_STREQ(toString(TemporalContributionKind::PureAlgebraicConstraint), "PureAlgebraicConstraint");
     EXPECT_STREQ(toString(TemporalContributionKind::PureConstraint), "PureConstraint");
 
     EXPECT_STREQ(toString(BalanceRole::Accumulation), "Accumulation");

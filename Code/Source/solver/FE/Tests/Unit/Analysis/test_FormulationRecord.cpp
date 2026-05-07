@@ -16,6 +16,7 @@
 #include "Analysis/ProblemAnalysisTypes.h"
 
 #include "Forms/ConstitutiveModel.h"
+#include "Forms/FiniteDeformationForms.h"
 #include "Forms/FormExpr.h"
 #include "Forms/AffineAnalysis.h"
 #include "Spaces/H1Space.h"
@@ -133,6 +134,108 @@ TEST(FormExprScanner, ActiveDomains_DefaultIsCell) {
 
     ASSERT_FALSE(domains.empty());
     EXPECT_EQ(domains[0], DomainKind::Cell);
+}
+
+TEST(FormExprScanner, EmitsExpressionDomainConstraintForPositiveAffineDenominatorRoot) {
+    auto space = scalarH1();
+    auto p = FormExpr::stateField(1, *space, "p");
+    auto q = FormExpr::testFunction(*space, "q");
+    auto K = FormExpr::constant(10.0);
+    auto expr = (q / (K - p)).dx();
+
+    auto result = scanFormExpr(*expr.node());
+
+    EXPECT_TRUE(result.invariant_domain_descriptors.empty());
+    auto it = std::find_if(
+        result.expression_domain_constraints.begin(),
+        result.expression_domain_constraints.end(),
+        [](const ExpressionDomainConstraint& descriptor) {
+            return descriptor.kind ==
+                       ExpressionDomainConstraintKind::NonzeroDenominator &&
+                   descriptor.variables ==
+                       std::vector<VariableKey>{VariableKey::field(1)} &&
+                   descriptor.has_excluded_value;
+        });
+    ASSERT_NE(it, result.expression_domain_constraints.end());
+    EXPECT_EQ(it->variables, std::vector<VariableKey>{VariableKey::field(1)});
+    EXPECT_DOUBLE_EQ(static_cast<double>(it->excluded_value), 10.0);
+    EXPECT_FALSE(it->lower_bound.has_value());
+    EXPECT_FALSE(it->upper_bound.has_value());
+    EXPECT_EQ(it->evidence_level, EvidenceLevel::DAGPatternHint);
+}
+
+TEST(FormExprScanner, EmitsExpressionDomainConstraintForNegativeAffineDenominatorRoot) {
+    auto space = scalarH1();
+    auto p = FormExpr::stateField(2, *space, "p");
+    auto q = FormExpr::testFunction(*space, "q");
+    auto K = FormExpr::constant(25.0);
+    auto expr = (q / (K + p)).dx();
+
+    auto result = scanFormExpr(*expr.node());
+
+    EXPECT_TRUE(result.invariant_domain_descriptors.empty());
+    auto it = std::find_if(
+        result.expression_domain_constraints.begin(),
+        result.expression_domain_constraints.end(),
+        [](const ExpressionDomainConstraint& descriptor) {
+            return descriptor.kind ==
+                       ExpressionDomainConstraintKind::NonzeroDenominator &&
+                   descriptor.variables ==
+                       std::vector<VariableKey>{VariableKey::field(2)} &&
+                   descriptor.has_excluded_value;
+        });
+    ASSERT_NE(it, result.expression_domain_constraints.end());
+    EXPECT_DOUBLE_EQ(static_cast<double>(it->excluded_value), -25.0);
+    EXPECT_FALSE(it->lower_bound.has_value());
+    EXPECT_FALSE(it->upper_bound.has_value());
+}
+
+TEST(FormExprScanner, InfersExpressionDomainConstraintFromRegularizedSqrt) {
+    auto space = scalarH1();
+    auto p = FormExpr::stateField(3, *space, "p");
+    auto q = FormExpr::testFunction(*space, "q");
+    auto K = FormExpr::constant(7.0);
+    auto expr = (q * sqrt(p * p + K * K)).dx();
+
+    auto result = scanFormExpr(*expr.node());
+
+    EXPECT_TRUE(result.invariant_domain_descriptors.empty());
+    auto it = std::find_if(
+        result.expression_domain_constraints.begin(),
+        result.expression_domain_constraints.end(),
+        [](const ExpressionDomainConstraint& descriptor) {
+            return descriptor.kind ==
+                       ExpressionDomainConstraintKind::NonnegativeRadicand &&
+                   descriptor.variables ==
+                       std::vector<VariableKey>{VariableKey::field(3)};
+        });
+    ASSERT_NE(it, result.expression_domain_constraints.end());
+    EXPECT_EQ(it->variables, std::vector<VariableKey>{VariableKey::field(3)});
+    ASSERT_TRUE(it->lower_bound.has_value());
+    EXPECT_DOUBLE_EQ(static_cast<double>(*it->lower_bound), 0.0);
+}
+
+TEST(FormExprScanner, InfersJacobianLikeExpressionDomainConstraint) {
+    auto space = vectorH1(3);
+    auto u = FormExpr::stateField(4, *space, "u");
+    auto F = finite_deformation::deformationGradient(u, 3);
+    auto expr = det(F);
+
+    auto result = scanFormExpr(*expr.node());
+
+    EXPECT_TRUE(result.invariant_domain_descriptors.empty());
+    auto it = std::find_if(
+        result.expression_domain_constraints.begin(),
+        result.expression_domain_constraints.end(),
+        [](const ExpressionDomainConstraint& descriptor) {
+            return descriptor.kind ==
+                   ExpressionDomainConstraintKind::PositiveJacobianLikeDeterminant;
+        });
+    ASSERT_NE(it, result.expression_domain_constraints.end());
+    ASSERT_TRUE(it->lower_bound.has_value());
+    EXPECT_DOUBLE_EQ(static_cast<double>(*it->lower_bound), 0.0);
+    ASSERT_EQ(it->variables.size(), 1u);
+    EXPECT_EQ(it->variables[0], VariableKey::field(4));
 }
 
 TEST(FormExprScanner, ScanResultConvenience) {

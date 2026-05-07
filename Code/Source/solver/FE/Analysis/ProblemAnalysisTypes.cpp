@@ -121,6 +121,9 @@ const char* toString(DomainKind k) noexcept {
         case DomainKind::Global:          return "Global";
         case DomainKind::CoupledBoundary: return "CoupledBoundary";
         case DomainKind::AuxiliaryCoupling: return "AuxiliaryCoupling";
+        case DomainKind::ParameterDependency: return "ParameterDependency";
+        case DomainKind::CoefficientDependency: return "CoefficientDependency";
+        case DomainKind::Unknown: return "Unknown";
     }
     return "Unknown";
 }
@@ -143,6 +146,8 @@ const char* toString(ConservationClass c) noexcept {
     switch (c) {
         case ConservationClass::LocalClosureExpected:  return "LocalClosureExpected";
         case ConservationClass::GlobalClosureExpected:  return "GlobalClosureExpected";
+        case ConservationClass::PotentialExchangeBalance:
+            return "PotentialExchangeBalance";
         case ConservationClass::ExchangeBalanced:       return "ExchangeBalanced";
         case ConservationClass::ClosureBroken:          return "ClosureBroken";
         case ConservationClass::Unknown:                return "Unknown";
@@ -274,8 +279,62 @@ const char* toString(SpaceFamily f) noexcept {
         case SpaceFamily::HDiv:    return "HDiv";
         case SpaceFamily::HCurl:   return "HCurl";
         case SpaceFamily::L2:      return "L2";
+        case SpaceFamily::Trace:   return "Trace";
+        case SpaceFamily::DG:      return "DG";
         case SpaceFamily::Custom:  return "Custom";
         case SpaceFamily::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+const char* toString(ElementFamily f) noexcept {
+    switch (f) {
+        case ElementFamily::Lagrange: return "Lagrange";
+        case ElementFamily::BubbleEnrichedLagrange: return "BubbleEnrichedLagrange";
+        case ElementFamily::RaviartThomas: return "RaviartThomas";
+        case ElementFamily::BDM: return "BDM";
+        case ElementFamily::Nedelec: return "Nedelec";
+        case ElementFamily::DG: return "DG";
+        case ElementFamily::Trace: return "Trace";
+        case ElementFamily::Mortar: return "Mortar";
+        case ElementFamily::Custom: return "Custom";
+        case ElementFamily::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+const char* toString(SpaceContinuityClass c) noexcept {
+    switch (c) {
+        case SpaceContinuityClass::Continuous: return "Continuous";
+        case SpaceContinuityClass::Discontinuous: return "Discontinuous";
+        case SpaceContinuityClass::NormalContinuous: return "NormalContinuous";
+        case SpaceContinuityClass::TangentialContinuous: return "TangentialContinuous";
+        case SpaceContinuityClass::TraceOnly: return "TraceOnly";
+        case SpaceContinuityClass::Custom: return "Custom";
+        case SpaceContinuityClass::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+const char* toString(MappingTransform t) noexcept {
+    switch (t) {
+        case MappingTransform::Identity: return "Identity";
+        case MappingTransform::CovariantPiola: return "CovariantPiola";
+        case MappingTransform::ContravariantPiola: return "ContravariantPiola";
+        case MappingTransform::TracePullback: return "TracePullback";
+        case MappingTransform::Unknown: return "Unknown";
+    }
+    return "Unknown";
+}
+
+const char* toString(ReferenceCellFamily f) noexcept {
+    switch (f) {
+        case ReferenceCellFamily::Simplex: return "Simplex";
+        case ReferenceCellFamily::TensorProduct: return "TensorProduct";
+        case ReferenceCellFamily::Wedge: return "Wedge";
+        case ReferenceCellFamily::Pyramid: return "Pyramid";
+        case ReferenceCellFamily::Mixed: return "Mixed";
+        case ReferenceCellFamily::Unknown: return "Unknown";
     }
     return "Unknown";
 }
@@ -698,6 +757,7 @@ void traceMatrixSummary(std::ostream& out,
         << " cols=" << summary.cols
         << " positive_offdiag=" << summary.positive_offdiag_count
         << " row_sum_violations=" << summary.row_sum_violation_count
+        << " invalid_entries=" << summary.invalid_entry_count
         << " nonfinite_entries=" << summary.nonfinite_entry_count
         << " nonfinite_row_sums=" << summary.nonfinite_row_sum_count
         << " min_row_sum=" << std::setprecision(17) << summary.min_row_sum
@@ -803,6 +863,36 @@ void ProblemAnalysisReport::print(std::ostream& out) const {
         out << "\n";
     }
 
+    if (!run_logs.empty()) {
+        out << "  --- Analyzer Run Logs ---\n";
+        for (const auto& log : run_logs) {
+            out << "    [" << log.analyzer << "]";
+            if (!log.summary_id.empty()) {
+                out << " id=" << log.summary_id;
+            }
+            if (!log.status.empty()) {
+                out << " status=" << log.status;
+            }
+            out << " attempted=" << log.attempted_count
+                << " certified=" << log.certified_count
+                << " incomplete=" << log.incomplete_count
+                << " blocked=" << log.blocked_count
+                << " unsupported=" << log.unsupported_count
+                << " skipped=" << log.skipped_count;
+            if (!log.message.empty()) {
+                out << "  " << log.message;
+            }
+            out << "\n";
+            for (const auto& detail : log.detail_lines) {
+                out << "      - " << detail << "\n";
+            }
+            for (const auto& diagnostic : log.diagnostics) {
+                out << "      diagnostic: " << diagnostic << "\n";
+            }
+        }
+        out << "\n";
+    }
+
     if (!request_plan.empty()) {
         out << "  --- Requested Numeric Summaries ---\n";
         for (const auto& request : request_plan.summary_requests) {
@@ -892,6 +982,26 @@ void ProblemAnalysisReport::printApplicationLog(std::ostream& out) const {
             << "\n";
     }
 
+    for (const auto& log : run_logs) {
+        out << "[FE/Analysis] RunLog analyzer=" << log.analyzer;
+        if (!log.summary_id.empty()) {
+            out << " id=" << log.summary_id;
+        }
+        if (!log.status.empty()) {
+            out << " status=" << log.status;
+        }
+        out << " attempted=" << log.attempted_count
+            << " certified=" << log.certified_count
+            << " incomplete=" << log.incomplete_count
+            << " blocked=" << log.blocked_count
+            << " unsupported=" << log.unsupported_count
+            << " skipped=" << log.skipped_count;
+        if (!log.message.empty()) {
+            out << " message=" << log.message;
+        }
+        out << "\n";
+    }
+
     bool emitted_claim = false;
     for (const auto& claim : claims) {
         if (!shouldEmitClaim(claim)) {
@@ -937,7 +1047,40 @@ void ProblemAnalysisReport::printTraceLog(
 {
     out << "[FE/Analysis][trace] claim_count=" << claims.size()
         << " issue_count=" << issues.size()
-        << " requested_summary_count=" << request_plan.size() << "\n";
+        << " requested_summary_count=" << request_plan.size()
+        << " run_log_count=" << run_logs.size() << "\n";
+
+    for (std::size_t i = 0; i < run_logs.size(); ++i) {
+        const auto& log = run_logs[i];
+        out << "[FE/Analysis][trace] run_log index=" << i
+            << " analyzer=" << log.analyzer;
+        if (!log.summary_id.empty()) {
+            out << " id=" << log.summary_id;
+        }
+        if (!log.status.empty()) {
+            out << " status=" << log.status;
+        }
+        out << " attempted=" << log.attempted_count
+            << " certified=" << log.certified_count
+            << " incomplete=" << log.incomplete_count
+            << " blocked=" << log.blocked_count
+            << " unsupported=" << log.unsupported_count
+            << " skipped=" << log.skipped_count;
+        if (!log.message.empty()) {
+            out << " message=" << log.message;
+        }
+        out << "\n";
+        for (std::size_t j = 0; j < log.detail_lines.size(); ++j) {
+            out << "[FE/Analysis][trace] run_log_detail log=" << i
+                << " entry=" << j
+                << " description=" << log.detail_lines[j] << "\n";
+        }
+        for (std::size_t j = 0; j < log.diagnostics.size(); ++j) {
+            out << "[FE/Analysis][trace] run_log_diagnostic log=" << i
+                << " entry=" << j
+                << " description=" << log.diagnostics[j] << "\n";
+        }
+    }
 
     for (std::size_t i = 0; i < claims.size(); ++i) {
         const auto& claim = claims[i];
@@ -990,6 +1133,23 @@ void ProblemAnalysisReport::printTraceLog(
                            summary.free_free_matrix);
     }
 
+    for (const auto& summary : summaries->nullspace_degeneracies) {
+        out << "[FE/Analysis][trace] NullspaceDegeneracy rank_summary"
+            << " id=" << summary.degeneracy_id
+            << " block=" << blockLabel(summary.block)
+            << " rank=" << summary.estimated_rank
+            << " nullity=" << summary.nullity
+            << " near_zero_pivots=" << summary.near_zero_pivot_count
+            << " free_dofs=" << summary.free_dof_count
+            << " constrained_dofs=" << summary.constrained_dof_count
+            << " tolerance=" << std::setprecision(17)
+            << summary.rank_tolerance
+            << " class=" << static_cast<int>(summary.degeneracy_class)
+            << " handling=" << static_cast<int>(summary.nullspace_handling)
+            << " reason=" << summary.reason
+            << "\n";
+    }
+
     for (const auto& summary : summaries->inf_sup_estimates) {
         out << "[FE/Analysis][trace] InfSupEstimate coupling_summary"
             << " block=" << blockLabel(summary.block)
@@ -1024,7 +1184,41 @@ void ProblemAnalysisReport::printTraceLog(
             out << " condition_estimate="
                 << std::setprecision(17) << summary.condition_estimate;
         }
+        out << " preconditioner=" << summary.preconditioner_type
+            << " probe_available="
+            << (summary.preconditioned_probe_available ? "true" : "false")
+            << " contraction_present="
+            << (summary.preconditioned_residual_contraction_present
+                    ? "true"
+                    : "false")
+            << " condition_risk="
+            << static_cast<int>(summary.condition_risk_class);
         out << "\n";
+    }
+
+    for (const auto& summary : summaries->robustness_trends) {
+        out << "[FE/Analysis][trace] RobustnessTrend metric_summary"
+            << " metric=" << summary.metric_name
+            << " block=" << blockLabel(summary.block)
+            << " samples=" << summary.sample_count
+            << " min=" << std::setprecision(17) << summary.min_value
+            << " max=" << summary.max_value
+            << " slope=" << summary.slope_estimate
+            << " trend=" << static_cast<int>(summary.trend_class)
+            << " uniform_lower_bound="
+            << (summary.explicit_uniform_lower_bound_present ? "true" : "false")
+            << " comparable_scope="
+            << (summary.comparable_parameter_scope ? "true" : "false")
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->applicability) {
+        out << "[FE/Analysis][trace] Applicability theorem_summary"
+            << " family=" << static_cast<int>(summary.theorem_family)
+            << " applicability=" << static_cast<int>(summary.applicability)
+            << " block=" << blockLabel(summary.block)
+            << " reason=" << summary.reason
+            << "\n";
     }
 
     for (const auto& summary : summaries->stabilization_adequacy) {
@@ -1085,6 +1279,30 @@ void ProblemAnalysisReport::printTraceLog(
             << " coverage_scope=" << summary.coverage_scope
             << " quadrature_coverage="
             << (summary.quadrature_point_coverage_complete ? "true" : "false")
+            << " local_spectrum_samples="
+            << summary.local_spectrum_sample_count
+            << " local_spectrum_complete="
+            << (summary.local_spectrum_coverage_complete ? "true" : "false")
+            << " local_min=" << summary.local_symmetric_part_min_eigenvalue
+            << " local_max=" << summary.local_symmetric_part_max_eigenvalue
+            << "\n";
+    }
+
+    for (const auto& summary : summaries->numerical_error_budgets) {
+        out << "[FE/Analysis][trace] NumericalErrorBudget tolerance_summary"
+            << " id=" << summary.budget_id
+            << " block=" << blockLabel(summary.block)
+            << " residual_present="
+            << (summary.residual_norm_present ? "true" : "false")
+            << " matrix_norm=" << std::setprecision(17)
+            << summary.matrix_norm_estimate
+            << " condition=" << summary.condition_estimate
+            << " linear_tol=" << summary.linear_tolerance
+            << " verification_tol=" << summary.verification_tolerance
+            << " recommended_tol="
+            << summary.recommended_verification_tolerance
+            << " adequacy=" << static_cast<int>(summary.adequacy_class)
+            << " reason=" << summary.reason
             << "\n";
     }
 

@@ -139,6 +139,21 @@ struct FormTerminalMetadata {
     std::optional<forms::GeometryConfiguration> frame_to;
 };
 
+enum class DependencyKind : std::uint8_t {
+    FieldUnknown,
+    TestFunction,
+    TrialFunction,
+    Coefficient,
+    Parameter,
+    BoundaryFunctional,
+    AuxiliaryState,
+    AuxiliaryInput,
+    AuxiliaryOutput,
+    GeometryMap,
+    TimeStep,
+    MeshMetric,
+};
+
 struct FormInstalledDependencyMetadata {
     VariableKey residual_row;
     VariableKey dependency;
@@ -146,6 +161,13 @@ struct FormInstalledDependencyMetadata {
     bool contributes_matrix_block{false};
     bool contributes_vector{true};
     std::string provider;
+    DependencyKind dependency_kind{DependencyKind::FieldUnknown};
+    std::string dependency_name;
+    VariableKey row_variable;
+    int marker{-1};
+    std::string contribution_id;
+    bool affects_coefficient{false};
+    bool affects_geometry{false};
 };
 
 struct FormInstalledBlockMetadata {

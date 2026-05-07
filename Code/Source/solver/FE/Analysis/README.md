@@ -180,6 +180,8 @@ Every unknown is represented by a `VariableKey` with a `VariableKind`:
 
 - `FieldComponent`
 - `AuxiliaryState`
+- `AuxiliaryInput`
+- `AuxiliaryOutput`
 - `BoundaryFunctional`
 - `GlobalScalar`
 
@@ -212,6 +214,8 @@ Current `space_family` values include:
 - `HDiv`
 - `HCurl`
 - `L2`
+- `Trace`
+- `DG`
 - `Custom`
 - `Unknown`
 
@@ -247,6 +251,33 @@ The subsystem currently produces claims in these categories:
 - `DifferentialAlgebraicStructure`
 - `SpaceCompatibility`
 - `OperatorTransportCharacter`
+- `DiscreteMaximumPrinciple`
+- `ZMatrixStructure`
+- `MMatrixStructure`
+- `MatrixMonotonicityRisk`
+- `CompatibleComplexStructure`
+- `EnergyStability`
+- `EntropyStability`
+- `TemporalStability`
+- `WeakBoundaryCoercivity`
+- `MeshGeometryValidity`
+- `CoefficientPositivity`
+- `NonlinearTangentStructure`
+- `LockingRisk`
+- `SpectralCorrectness`
+- `ErrorEstimatorEligibility`
+- `SolverCompatibility`
+- `QuadratureAdequacy`
+- `BoundaryComplementingCondition`
+- `IndefiniteOperatorResolution`
+- `MinimumResidualStability`
+- `InvariantDomainPreservation`
+- `EquilibriumPreservation`
+- `GeometricConservation`
+- `TransferOperatorCompatibility`
+- `AdjointConsistency`
+- `ParameterRobustness`
+- `InitialDataCompatibility`
 
 These are intentionally generic. For example:
 
@@ -306,27 +337,46 @@ The subsystem is careful to scope claims narrowly when only part of the structur
 7. `CompatibilityAnalyzer`
 8. `TopologyScopeAnalyzer`
 9. `InterfaceValidationAnalyzer`
-10. `InfSupAnalyzer`
-11. `TransportCharacterAnalyzer`
-12. `ConservationAnalyzer`
-13. `DAEStructureAnalyzer`
-14. `SpaceCompatibilityAnalyzer`
-15. `DiscreteMonotonicityAnalyzer`
-16. `MeshGeometryAnalyzer`
-17. `TemporalStabilityAnalyzer`
-18. `EnergyEntropyLawAnalyzer`
-19. `CoefficientConstitutiveAnalyzer`
-20. `NonlinearTangentAnalyzer`
-21. `LockingRiskAnalyzer`
-22. `SpectralSpuriousModeAnalyzer`
-23. `ErrorEstimatorAnalyzer`
-24. `QuadratureAdequacyAnalyzer`
-25. `PreservationStructureAnalyzer`
-26. `CoupledSystemStabilityAnalyzer`
-27. `SolverCompatibilityAnalyzer`
-28. `NumericSummaryPlanner`
+10. `NullspaceDegeneracyAnalyzer`
+11. `InfSupAnalyzer`
+12. `TransportCharacterAnalyzer`
+13. `ConservationAnalyzer`
+14. `DAEStructureAnalyzer`
+15. `SpaceCompatibilityAnalyzer`
+16. `OperatorApplicabilityAnalyzer`
+17. `DiscreteMonotonicityAnalyzer`
+18. `MeshGeometryAnalyzer`
+19. `TemporalStabilityAnalyzer`
+20. `EnergyEntropyLawAnalyzer`
+21. `CoefficientConstitutiveAnalyzer`
+22. `NonlinearTangentAnalyzer`
+23. `LockingRiskAnalyzer`
+24. `SpectralSpuriousModeAnalyzer`
+25. `ErrorEstimatorAnalyzer`
+26. `QuadratureAdequacyAnalyzer`
+27. `MinimumResidualStabilityAnalyzer`
+28. `PreservationStructureAnalyzer`
+29. `CoupledSystemStabilityAnalyzer`
+30. `RobustnessTrendAnalyzer`
+31. `SchurQualityAnalyzer`
+32. `ToleranceAdequacyAnalyzer`
+33. `SolverCompatibilityAnalyzer`
+34. `NumericSummaryPlanner`
+35. `FortinCertificationAnalyzer`
 
-The order matters because some later passes consume earlier claims.
+The order matters because some later passes consume earlier claims. The default
+pipeline is staged:
+
+- Stage 1: structural analyzers (`CouplingGraphAnalyzer` through `OperatorApplicabilityAnalyzer`)
+- Stage 2: analyzers that consume already-provided numeric summaries (`DiscreteMonotonicityAnalyzer` through `ToleranceAdequacyAnalyzer`)
+- Stage 3: solver compatibility (`SolverCompatibilityAnalyzer`)
+- Stage 4: numeric summary request planning (`NumericSummaryPlanner`)
+- Stage 5: request-plan-driven stable-pair/Fortin certification (`FortinCertificationAnalyzer`)
+
+`NumericSummaryPlanner` only records scoped requests. It does not materialize
+external numeric summaries; summary-backed certification that depends on newly
+computed numeric evidence requires a later analysis pass after those summaries
+are attached to the context.
 
 ## Analyzer Family Matrix
 
@@ -906,8 +956,9 @@ Current examples:
   SSP/source-admissibility metadata, monotone low-order evidence, convex
   limiting or spatial monotonicity evidence, mass-positivity evidence, and a
   theorem identifier
-- inf-sup certification needs theorem, mesh/domain/boundary scope, positive beta
-  lower-bound evidence, and Fortin-norm evidence when a Fortin operator is used
+- inf-sup certification needs theorem, mesh/domain/boundary scope, positive or
+  symbolic theorem-scoped beta lower-bound evidence, and Fortin-norm evidence
+  when a Fortin operator is used
 - spectral correctness needs compact/self-adjoint evidence plus scoped operator
   or gap convergence, or theorem-scoped discrete-compactness /
   compatible-complex provenance with bounded projection, finite projection
@@ -955,7 +1006,9 @@ For a new developer, the best order is:
 5. `FormulationRecord.h`
 6. `FormContributionLowerer.*`
 7. `ProblemAnalyzer.*`
-8. individual analyzer passes
+8. `../Docs/FORTIN_OPERATOR_AUTOGENERATION.md` for theorem-backed mixed-pair
+   certification
+9. individual analyzer passes
 
 ## Summary
 

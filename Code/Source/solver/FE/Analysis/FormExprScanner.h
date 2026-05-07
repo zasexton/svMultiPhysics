@@ -36,7 +36,7 @@ namespace analysis {
  */
 struct FormExprScanResult {
     bool has_time_derivative{false};
-    bool has_cell_diameter{false};          ///< CellDiameter present (stabilization)
+    bool has_cell_diameter{false};          ///< CellDiameter present (mesh-scale hint)
     bool has_jump{false};                   ///< Jump operator (DG)
     bool has_average{false};                ///< Average operator (DG)
     bool has_cell_integral{false};
@@ -73,6 +73,12 @@ struct FormExprScanResult {
 
     /// Recognized multiplicative h/dt/parameter/coefficient scale factors.
     std::vector<FormScaleUsage> scale_usages;
+
+    /// Primitive-DAG admissibility domains inferred from exact algebraic structure.
+    std::vector<ExpressionDomainConstraint> expression_domain_constraints;
+
+    /// Scheme-level invariant-domain metadata from explicit producers only.
+    std::vector<InvariantDomainDescriptor> invariant_domain_descriptors;
 
     /// Convenience
     [[nodiscard]] bool has_stabilization() const noexcept { return has_cell_diameter; }

@@ -63,8 +63,9 @@ TEST(Phase24, InfSup_StructurallySupported) {
     EXPECT_EQ(*infsup[0]->inf_sup_class, InfSupClass::StructurallySupported);
 }
 
-TEST(Phase24, InfSup_LikelyViolated_EqualOrder) {
-    // Equal order P1/P1 without stabilization → likely violated
+TEST(Phase24, InfSup_EqualOrderRequiresEvidence) {
+    // Equal order P1/P1 without stabilization is not a certification-grade
+    // failure without theorem or scoped numeric evidence.
     auto analyzer = ProblemAnalyzer::createDefault();
     ProblemAnalysisContext ctx;
 
@@ -94,14 +95,18 @@ TEST(Phase24, InfSup_LikelyViolated_EqualOrder) {
     auto infsup = report.claimsOfKind(PropertyKind::InfSupCondition);
     ASSERT_GE(infsup.size(), 1u);
     EXPECT_TRUE(infsup[0]->inf_sup_class.has_value());
-    EXPECT_EQ(*infsup[0]->inf_sup_class, InfSupClass::LikelyViolated);
+    EXPECT_EQ(infsup[0]->status, PropertyStatus::Unknown);
+    EXPECT_EQ(*infsup[0]->inf_sup_class, InfSupClass::Required);
+    ASSERT_TRUE(infsup[0]->certification_class.has_value());
+    EXPECT_EQ(*infsup[0]->certification_class,
+              CertificationClass::NotCertified);
 }
 
 // ============================================================================
 // ConservationStructure
 // ============================================================================
 
-TEST(Phase24, Conservation_ExchangeBalanced) {
+TEST(Phase24, Conservation_PotentialExchangeBalance) {
     auto analyzer = ProblemAnalyzer::createDefault();
     ProblemAnalysisContext ctx;
 
@@ -123,7 +128,11 @@ TEST(Phase24, Conservation_ExchangeBalanced) {
     auto cons = report.claimsOfKind(PropertyKind::ConservationStructure);
     ASSERT_GE(cons.size(), 1u);
     EXPECT_TRUE(cons[0]->conservation_class.has_value());
-    EXPECT_EQ(*cons[0]->conservation_class, ConservationClass::ExchangeBalanced);
+    EXPECT_EQ(*cons[0]->conservation_class,
+              ConservationClass::PotentialExchangeBalance);
+    ASSERT_TRUE(cons[0]->certification_class.has_value());
+    EXPECT_EQ(*cons[0]->certification_class,
+              CertificationClass::NotCertified);
 }
 
 TEST(Phase24, Conservation_NoBalanceMetadata_NoOp) {
@@ -163,6 +172,32 @@ TEST(Phase24, DAE_PureODELike) {
     auto dae = report.claimsOfKind(PropertyKind::DifferentialAlgebraicStructure);
     ASSERT_GE(dae.size(), 1u);
     EXPECT_TRUE(dae[0]->dae_class.has_value());
+    EXPECT_EQ(*dae[0]->dae_class, DAEClass::PureODELike);
+}
+
+TEST(Phase24, DAE_TimeIndependentResidualDoesNotCreateAlgebraicVariable) {
+    auto analyzer = ProblemAnalyzer::createDefault();
+    ProblemAnalysisContext ctx;
+
+    auto mass_cd = ContributionDescriptor::massLike(
+        VariableKey::field(0), "equations", "test");
+    ctx.addContribution(std::move(mass_cd));
+
+    ContributionDescriptor stiffness_cd;
+    stiffness_cd.operator_tag = "equations";
+    stiffness_cd.origin = "test";
+    stiffness_cd.role = ContributionRole::DiagonalBlock;
+    stiffness_cd.test_variables = {VariableKey::field(0)};
+    stiffness_cd.trial_variables = {VariableKey::field(0)};
+    stiffness_cd.temporal = TemporalDescriptor{
+        0, TemporalContributionKind::TimeIndependentResidual};
+    ctx.addContribution(std::move(stiffness_cd));
+
+    auto report = analyzer.analyze(ctx);
+
+    auto dae = report.claimsOfKind(PropertyKind::DifferentialAlgebraicStructure);
+    ASSERT_GE(dae.size(), 1u);
+    ASSERT_TRUE(dae[0]->dae_class.has_value());
     EXPECT_EQ(*dae[0]->dae_class, DAEClass::PureODELike);
 }
 
@@ -351,6 +386,14 @@ TEST(Phase24, Consistency_Nitsche_ConsistentPerturbation) {
     BoundaryConditionDescriptor desc;
     desc.primary_variable = VariableKey::field(0);
     desc.enforcement_kind = EnforcementKind::WeakNitsche;
+    desc.is_homogeneous = true;
+    NitscheMetadata nitsche;
+    nitsche.primal_consistency_terms_present = true;
+    nitsche.adjoint_consistency_terms_present = true;
+    nitsche.penalty_positive = true;
+    nitsche.penalty_scaling_verified = true;
+    nitsche.penalty_trace_bound_verified = true;
+    desc.nitsche = nitsche;
 
     auto contribs = lowerBCDescriptor(desc);
     ASSERT_GE(contribs.size(), 1u);

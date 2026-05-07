@@ -287,18 +287,27 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
 
         const FieldDescriptor* momentum_fd = nullptr;
         const FieldDescriptor* constraint_fd = nullptr;
+        if (sc->variables.size() >= 2u &&
+            sc->variables[0].kind == VariableKind::FieldComponent &&
+            sc->variables[1].kind == VariableKind::FieldComponent) {
+            momentum_fd = context.fieldDescriptor(sc->variables[0].field_id);
+            constraint_fd = context.fieldDescriptor(sc->variables[1].field_id);
+        }
 
-        for (const auto& vk : sc->variables) {
-            if (vk.kind != VariableKind::FieldComponent) continue;
-            const auto* fd = context.fieldDescriptor(vk.field_id);
-            if (!fd) continue;
+        if (!momentum_fd || !constraint_fd) {
+            for (const auto& vk : sc->variables) {
+                if (vk.kind != VariableKind::FieldComponent) continue;
+                const auto* fd = context.fieldDescriptor(vk.field_id);
+                if (!fd) continue;
 
-            // Heuristic: higher value_dimension is momentum, lower is constraint
-            if (!momentum_fd || fd->value_dimension > momentum_fd->value_dimension) {
-                constraint_fd = momentum_fd;
-                momentum_fd = fd;
-            } else if (!constraint_fd) {
-                constraint_fd = fd;
+                // Fallback only for legacy claims that do not encode pair order.
+                if (!momentum_fd ||
+                    fd->value_dimension > momentum_fd->value_dimension) {
+                    constraint_fd = momentum_fd;
+                    momentum_fd = fd;
+                } else if (!constraint_fd) {
+                    constraint_fd = fd;
+                }
             }
         }
 
@@ -316,6 +325,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.kind = PropertyKind::SpaceCompatibility;
             claim.variables = sc->variables;
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
+            claim.domain = sc->domain;
+            claim.tested_block_id = sc->tested_block_id;
+            claim.estimate_scope = sc->estimate_scope;
             const bool taylor_hood_like =
                 momentum_fd->polynomial_order > constraint_fd->polynomial_order;
             const bool certified_infsup =
@@ -387,6 +399,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.kind = PropertyKind::SpaceCompatibility;
             claim.variables = sc->variables;
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
+            claim.domain = sc->domain;
+            claim.tested_block_id = sc->tested_block_id;
+            claim.estimate_scope = sc->estimate_scope;
             const bool certified_infsup =
                 hasCertifiedInfSupEvidence(report, sc->variables);
             const bool certified_complex =
@@ -428,6 +443,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.kind = PropertyKind::SpaceCompatibility;
             claim.variables = sc->variables;
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
+            claim.domain = sc->domain;
+            claim.tested_block_id = sc->tested_block_id;
+            claim.estimate_scope = sc->estimate_scope;
             const bool certified_infsup =
                 hasCertifiedInfSupEvidence(report, sc->variables);
             const bool certified_complex =
@@ -471,6 +489,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         claim.confidence = AnalysisConfidence::Low;
         claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
         claim.variables = sc->variables;
+        claim.domain = sc->domain;
+        claim.tested_block_id = sc->tested_block_id;
+        claim.estimate_scope = sc->estimate_scope;
         claim.description =
             "Mixed system space pair compatibility unknown: " +
             std::string(toString(momentum_fd->space_family)) + "/" +

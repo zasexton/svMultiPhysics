@@ -50,6 +50,41 @@ public:
              ProblemAnalysisReport& report) const override;
 };
 
+class NullspaceDegeneracyAnalyzer : public AnalyzerPass {
+public:
+    [[nodiscard]] std::string name() const override;
+    void run(const ProblemAnalysisContext& context,
+             ProblemAnalysisReport& report) const override;
+};
+
+class OperatorApplicabilityAnalyzer : public AnalyzerPass {
+public:
+    [[nodiscard]] std::string name() const override;
+    void run(const ProblemAnalysisContext& context,
+             ProblemAnalysisReport& report) const override;
+};
+
+class RobustnessTrendAnalyzer : public AnalyzerPass {
+public:
+    [[nodiscard]] std::string name() const override;
+    void run(const ProblemAnalysisContext& context,
+             ProblemAnalysisReport& report) const override;
+};
+
+class SchurQualityAnalyzer : public AnalyzerPass {
+public:
+    [[nodiscard]] std::string name() const override;
+    void run(const ProblemAnalysisContext& context,
+             ProblemAnalysisReport& report) const override;
+};
+
+class ToleranceAdequacyAnalyzer : public AnalyzerPass {
+public:
+    [[nodiscard]] std::string name() const override;
+    void run(const ProblemAnalysisContext& context,
+             ProblemAnalysisReport& report) const override;
+};
+
 class LockingRiskAnalyzer : public AnalyzerPass {
 public:
     [[nodiscard]] std::string name() const override;

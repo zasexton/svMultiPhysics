@@ -110,6 +110,16 @@ public:
         d.anchors_rigid_body_translation = true;
         d.anchors_rigid_body_rotation = false;
         d.source = "ScalarNitscheBC on marker " + std::to_string(boundary_marker_);
+        analysis::NitscheMetadata nitsche;
+        nitsche.variant = symmetric_
+            ? analysis::NitscheVariant::Symmetric
+            : analysis::NitscheVariant::Nonsymmetric;
+        nitsche.primal_consistency_terms_present = true;
+        nitsche.adjoint_consistency_terms_present = symmetric_;
+        nitsche.rhs_consistency_terms_present = true;
+        nitsche.penalty_positive = penalty_gamma_ > Real(0.0);
+        nitsche.penalty_scaling_verified = scale_with_p_;
+        d.nitsche = nitsche;
         return {d};
     }
 
@@ -219,6 +229,16 @@ public:
         d.anchors_rigid_body_translation = true;
         d.anchors_rigid_body_rotation = false;
         d.source = "TraceNitscheBC on marker " + std::to_string(boundary_marker_);
+        analysis::NitscheMetadata nitsche;
+        nitsche.variant = symmetric_
+            ? analysis::NitscheVariant::Symmetric
+            : analysis::NitscheVariant::Nonsymmetric;
+        nitsche.primal_consistency_terms_present = true;
+        nitsche.adjoint_consistency_terms_present = symmetric_;
+        nitsche.rhs_consistency_terms_present = true;
+        nitsche.penalty_positive = penalty_gamma_ > Real(0.0);
+        nitsche.penalty_scaling_verified = scale_with_p_;
+        d.nitsche = nitsche;
         return {d};
     }
 
@@ -335,6 +355,16 @@ public:
         d.anchors_rigid_body_translation = true;
         d.anchors_rigid_body_rotation = false;
         d.source = "InterfaceTraceNitscheBC on interface " + std::to_string(interface_marker_);
+        analysis::NitscheMetadata nitsche;
+        nitsche.variant = symmetric_
+            ? analysis::NitscheVariant::Symmetric
+            : analysis::NitscheVariant::Nonsymmetric;
+        nitsche.primal_consistency_terms_present = true;
+        nitsche.adjoint_consistency_terms_present = symmetric_;
+        nitsche.rhs_consistency_terms_present = true;
+        nitsche.penalty_positive = penalty_gamma_ > Real(0.0);
+        nitsche.penalty_scaling_verified = scale_with_p_;
+        d.nitsche = nitsche;
         return {d};
     }
 

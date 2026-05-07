@@ -169,7 +169,7 @@ void emitFluxBalanceSummaryClaims(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.conservation_class = summary.interface_pair_count > 0u
-                ? ConservationClass::ExchangeBalanced
+                ? ConservationClass::PotentialExchangeBalance
                 : ConservationClass::GlobalClosureExpected;
         } else {
             claim.status = PropertyStatus::Unknown;
@@ -365,15 +365,17 @@ void ConservationAnalyzer::run(const ProblemAnalysisContext& context,
             claim.kind = PropertyKind::ConservationStructure;
             claim.status = PropertyStatus::Likely;
             claim.confidence = AnalysisConfidence::Medium;
-            claim.conservation_class = ConservationClass::ExchangeBalanced;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.conservation_class = ConservationClass::PotentialExchangeBalance;
             claim.variables = involved_vars;
             claim.description =
-                "Exchange balanced for balance group '" + group_name +
+                "Potential exchange balance for balance group '" + group_name +
                 "': " + std::to_string(positive_count) + " positive and " +
-                std::to_string(negative_count) + " negative contributions";
+                std::to_string(negative_count) + " negative contributions; "
+                "closure requires flux/source residual metadata";
             claim.claim_origin = "ConservationAnalyzer";
             claim.addEvidence("ConservationAnalyzer",
-                "Both positive and negative signed contributions present",
+                "Both positive and negative signed contributions present, but residual closure was not certified",
                 AnalysisConfidence::Medium);
             report.claims.push_back(std::move(claim));
             continue;
@@ -388,12 +390,13 @@ void ConservationAnalyzer::run(const ProblemAnalysisContext& context,
             entries.size() >= 2) {
             PropertyClaim claim;
             claim.kind = PropertyKind::ConservationStructure;
-            claim.status = PropertyStatus::Likely;
+            claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Low;
-            claim.conservation_class = ConservationClass::ClosureBroken;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.conservation_class = ConservationClass::Unknown;
             claim.variables = involved_vars;
             claim.description =
-                "Conservation closure potentially broken for balance group '" +
+                "Conservation closure unresolved for balance group '" +
                 group_name + "': boundary flux contributions present but no"
                 " matching local closure structure";
             claim.claim_origin = "ConservationAnalyzer";

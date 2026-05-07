@@ -35,6 +35,7 @@
 
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/DofPermutation.h"
+#include "Backends/Utils/BackendOptions.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ElementFactory.h"
 #include "Elements/ElementValidator.h"
@@ -260,6 +261,17 @@ struct CouplingMatrixStats {
     double primary_max_abs_diag{0.0};
 };
 
+struct SparseRankEstimate {
+    std::uint64_t row_count{0};
+    std::uint64_t estimated_rank{0};
+    std::uint64_t nullity{0};
+    std::uint64_t near_zero_row_count{0};
+    std::uint64_t near_zero_pivot_count{0};
+    Real matrix_norm_estimate{};
+    Real tolerance{};
+    bool complete{false};
+};
+
 [[nodiscard]] std::optional<AnalysisFieldRange>
 analysisFieldRangeById(const dofs::FieldDofMap& field_map, FieldId fid)
 {
@@ -300,6 +312,183 @@ analysisFieldRangeByName(const dofs::FieldDofMap& field_map, std::string_view na
         return std::nullopt;
     }
     return variable.field_id;
+}
+
+[[nodiscard]] std::vector<analysis::VariableKey> blockVariables(
+    const analysis::OperatorBlockId& block)
+{
+    std::vector<analysis::VariableKey> variables;
+    const auto append = [&](const analysis::VariableKey& variable) {
+        if (std::find(variables.begin(), variables.end(), variable) ==
+            variables.end()) {
+            variables.push_back(variable);
+        }
+    };
+    for (const auto& variable : block.test_variables) {
+        append(variable);
+    }
+    for (const auto& variable : block.trial_variables) {
+        append(variable);
+    }
+    return variables;
+}
+
+[[nodiscard]] analysis::ReferenceCellFamily referenceCellFamilyFor(ElementType element) noexcept
+{
+    switch (element) {
+        case ElementType::Line2:
+        case ElementType::Line3:
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return analysis::ReferenceCellFamily::Simplex;
+        case ElementType::Quad4:
+        case ElementType::Quad8:
+        case ElementType::Quad9:
+        case ElementType::Hex8:
+        case ElementType::Hex20:
+        case ElementType::Hex27:
+            return analysis::ReferenceCellFamily::TensorProduct;
+        case ElementType::Wedge6:
+        case ElementType::Wedge15:
+        case ElementType::Wedge18:
+            return analysis::ReferenceCellFamily::Wedge;
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid13:
+        case ElementType::Pyramid14:
+            return analysis::ReferenceCellFamily::Pyramid;
+        default:
+            return analysis::ReferenceCellFamily::Unknown;
+    }
+}
+
+[[nodiscard]] analysis::SpaceContinuityClass
+continuityClassFor(Continuity continuity, spaces::SpaceType space_type) noexcept
+{
+    if (space_type == spaces::SpaceType::Trace ||
+        space_type == spaces::SpaceType::Mortar) {
+        return analysis::SpaceContinuityClass::TraceOnly;
+    }
+
+    switch (continuity) {
+        case Continuity::C0:
+        case Continuity::C1:
+            return analysis::SpaceContinuityClass::Continuous;
+        case Continuity::L2:
+            return analysis::SpaceContinuityClass::Discontinuous;
+        case Continuity::H_div:
+            return analysis::SpaceContinuityClass::NormalContinuous;
+        case Continuity::H_curl:
+            return analysis::SpaceContinuityClass::TangentialContinuous;
+        case Continuity::Custom:
+            return analysis::SpaceContinuityClass::Custom;
+    }
+    return analysis::SpaceContinuityClass::Unknown;
+}
+
+[[nodiscard]] analysis::MappingTransform
+mappingTransformFor(Continuity continuity, spaces::SpaceType space_type) noexcept
+{
+    if (space_type == spaces::SpaceType::Trace ||
+        space_type == spaces::SpaceType::Mortar) {
+        return analysis::MappingTransform::TracePullback;
+    }
+    if (continuity == Continuity::H_div) {
+        return analysis::MappingTransform::ContravariantPiola;
+    }
+    if (continuity == Continuity::H_curl) {
+        return analysis::MappingTransform::CovariantPiola;
+    }
+    if (continuity == Continuity::C0 ||
+        continuity == Continuity::C1 ||
+        continuity == Continuity::L2) {
+        return analysis::MappingTransform::Identity;
+    }
+    return analysis::MappingTransform::Unknown;
+}
+
+[[nodiscard]] analysis::SpaceFamily
+spaceFamilyFor(Continuity continuity, spaces::SpaceType space_type) noexcept
+{
+    if (space_type == spaces::SpaceType::Trace ||
+        space_type == spaces::SpaceType::Mortar) {
+        return analysis::SpaceFamily::Trace;
+    }
+    if (space_type == spaces::SpaceType::L2) {
+        return analysis::SpaceFamily::L2;
+    }
+
+    switch (continuity) {
+        case Continuity::C0:
+        case Continuity::C1:
+            return analysis::SpaceFamily::H1;
+        case Continuity::H_div:
+            return analysis::SpaceFamily::HDiv;
+        case Continuity::H_curl:
+            return analysis::SpaceFamily::HCurl;
+        case Continuity::L2:
+            return analysis::SpaceFamily::L2;
+        case Continuity::Custom:
+            return analysis::SpaceFamily::Custom;
+    }
+    return analysis::SpaceFamily::Unknown;
+}
+
+[[nodiscard]] analysis::ElementFamily
+elementFamilyFor(const spaces::FunctionSpace& space) noexcept
+{
+    const auto space_type = space.space_type();
+    if (space_type == spaces::SpaceType::Trace) {
+        return analysis::ElementFamily::Trace;
+    }
+    if (space_type == spaces::SpaceType::Mortar) {
+        return analysis::ElementFamily::Mortar;
+    }
+    if (space_type == spaces::SpaceType::GenericBasis ||
+        space_type == spaces::SpaceType::Composite ||
+        space_type == spaces::SpaceType::Mixed ||
+        space_type == spaces::SpaceType::Adaptive) {
+        return analysis::ElementFamily::Custom;
+    }
+    if (space_type == spaces::SpaceType::L2) {
+        return analysis::ElementFamily::DG;
+    }
+
+    switch (space.element().basis().basis_type()) {
+        case BasisType::Lagrange: return analysis::ElementFamily::Lagrange;
+        case BasisType::RaviartThomas: return analysis::ElementFamily::RaviartThomas;
+        case BasisType::BDM: return analysis::ElementFamily::BDM;
+        case BasisType::Nedelec: return analysis::ElementFamily::Nedelec;
+        case BasisType::Bubble: return analysis::ElementFamily::BubbleEnrichedLagrange;
+        case BasisType::Custom: return analysis::ElementFamily::Custom;
+        default: return analysis::ElementFamily::Custom;
+    }
+}
+
+void applyBoundaryScopeMetadata(analysis::FieldDescriptor& fd,
+                                const std::vector<analysis::BoundaryConditionDescriptor>& bcs)
+{
+    for (const auto& bc : bcs) {
+        if (bc.primary_variable.kind != analysis::VariableKind::FieldComponent ||
+            bc.primary_variable.field_id != fd.field_id) {
+            continue;
+        }
+        fd.boundary_condition_scope_metadata_present = true;
+        if (bc.enforcement_kind == analysis::EnforcementKind::Strong &&
+            (bc.trace_kind == analysis::TraceKind::Value ||
+             bc.trace_kind == analysis::TraceKind::AlgebraicRelation)) {
+            fd.strong_dirichlet_boundary_present = true;
+        }
+        if (bc.trace_kind == analysis::TraceKind::NormalComponent ||
+            bc.trace_kind == analysis::TraceKind::NormalFlux ||
+            bc.trace_kind == analysis::TraceKind::Flux) {
+            fd.normal_trace_boundary_scope_present = true;
+        }
+        if (bc.anchors_constant_mode) {
+            fd.gauge_fixing_metadata_present = true;
+        }
+    }
 }
 
 [[nodiscard]] analysis::OperatorBlockId globalAnalysisBlock(
@@ -575,6 +764,216 @@ findAnalysisSaddlePairFromContributions(
     return stats;
 }
 
+[[nodiscard]] SparseRankEstimate estimateSparseRankFromRows(
+    const analysis::SparseRowScanSource& source,
+    const std::unordered_set<GlobalIndex>& constrained_dofs)
+{
+    SparseRankEstimate estimate;
+    source.forEachLocalRow(
+        [&](analysis::GlobalDofId row,
+            const std::vector<analysis::SparseMatrixRowEntry>& entries,
+            int) {
+            if (constrained_dofs.find(row) != constrained_dofs.end()) {
+                return;
+            }
+            Real row_norm{};
+            for (const auto& entry : entries) {
+                if (constrained_dofs.find(entry.col) != constrained_dofs.end()) {
+                    continue;
+                }
+                if (std::isfinite(static_cast<double>(entry.value))) {
+                    row_norm += std::abs(entry.value);
+                }
+            }
+            estimate.matrix_norm_estimate =
+                std::max(estimate.matrix_norm_estimate, row_norm);
+            ++estimate.row_count;
+        });
+
+    const Real scale = std::max(estimate.matrix_norm_estimate, Real{1});
+    const Real n_scale =
+        std::sqrt(static_cast<Real>(std::max<std::uint64_t>(estimate.row_count, 1u)));
+    estimate.tolerance = std::max(static_cast<Real>(1.0e-14) * scale,
+                                  std::numeric_limits<Real>::epsilon() *
+                                      scale * n_scale * static_cast<Real>(64));
+
+    source.forEachLocalRow(
+        [&](analysis::GlobalDofId row,
+            const std::vector<analysis::SparseMatrixRowEntry>& entries,
+            int) {
+            if (constrained_dofs.find(row) != constrained_dofs.end()) {
+                return;
+            }
+            Real row_norm{};
+            Real diagonal_abs{};
+            bool diagonal_seen = false;
+            for (const auto& entry : entries) {
+                if (constrained_dofs.find(entry.col) != constrained_dofs.end()) {
+                    continue;
+                }
+                if (!std::isfinite(static_cast<double>(entry.value))) {
+                    continue;
+                }
+                row_norm += std::abs(entry.value);
+                if (entry.col == row) {
+                    diagonal_abs += std::abs(entry.value);
+                    diagonal_seen = true;
+                }
+            }
+            if (row_norm <= estimate.tolerance) {
+                ++estimate.near_zero_row_count;
+            }
+            if (!diagonal_seen || diagonal_abs <= estimate.tolerance) {
+                ++estimate.near_zero_pivot_count;
+            }
+        });
+
+    estimate.estimated_rank =
+        estimate.row_count >= estimate.near_zero_row_count
+            ? estimate.row_count - estimate.near_zero_row_count
+            : 0u;
+    estimate.nullity =
+        estimate.row_count >= estimate.estimated_rank
+            ? estimate.row_count - estimate.estimated_rank
+            : 0u;
+    estimate.complete = source.hasCompleteGlobalRows() || !source.isDistributed();
+
+#if FE_HAS_MPI
+    if (source.isDistributed()) {
+        estimate.row_count = mpiSumUint64(estimate.row_count);
+        estimate.estimated_rank = mpiSumUint64(estimate.estimated_rank);
+        estimate.nullity = mpiSumUint64(estimate.nullity);
+        estimate.near_zero_row_count = mpiSumUint64(estimate.near_zero_row_count);
+        estimate.near_zero_pivot_count =
+            mpiSumUint64(estimate.near_zero_pivot_count);
+        estimate.matrix_norm_estimate =
+            static_cast<Real>(mpiReduceDouble(estimate.matrix_norm_estimate,
+                                              MPI_MAX));
+        estimate.tolerance =
+            static_cast<Real>(mpiReduceDouble(estimate.tolerance, MPI_MAX));
+    }
+#endif
+    return estimate;
+}
+
+[[nodiscard]] bool hasClaimFromAnalyzer(const analysis::ProblemAnalysisReport& report,
+                                        analysis::PropertyKind kind,
+                                        std::string_view analyzer)
+{
+    return std::any_of(report.claims.begin(), report.claims.end(),
+                       [&](const analysis::PropertyClaim& claim) {
+                           return claim.kind == kind &&
+                                  claim.claim_origin == analyzer;
+                       });
+}
+
+[[nodiscard]] bool hasRigidKernelClaim(
+    const analysis::ProblemAnalysisReport& report)
+{
+    return std::any_of(report.claims.begin(), report.claims.end(),
+                       [](const analysis::PropertyClaim& claim) {
+                           return claim.kind == analysis::PropertyKind::Nullspace &&
+                                  claim.nullspace_family &&
+                                  *claim.nullspace_family ==
+                                      analysis::NullspaceFamily::KernelOfSymGrad;
+                       });
+}
+
+[[nodiscard]] std::vector<analysis::VariableKey> nullspaceClaimVariables(
+    const analysis::ProblemAnalysisReport& report,
+    const std::vector<analysis::VariableKey>& fallback)
+{
+    std::vector<analysis::VariableKey> variables;
+    for (const auto& claim : report.claims) {
+        if (claim.kind != analysis::PropertyKind::Nullspace &&
+            claim.kind != analysis::PropertyKind::UnderConstraint) {
+            continue;
+        }
+        for (const auto& variable : claim.variables) {
+            if (std::find(variables.begin(), variables.end(), variable) ==
+                variables.end()) {
+                variables.push_back(variable);
+            }
+        }
+    }
+    return variables.empty() ? fallback : variables;
+}
+
+[[nodiscard]] analysis::NullspaceDegeneracySummary
+makeNullspaceDegeneracySummary(
+    const OperatorTag& op,
+    const analysis::OperatorBlockId& block,
+    const SparseRankEstimate& rank,
+    std::uint64_t constrained_dofs,
+    const std::vector<analysis::VariableKey>& affected_variables,
+    const analysis::ProblemAnalysisReport& baseline_report,
+    bool saddle_pair_present)
+{
+    analysis::NullspaceDegeneracySummary summary;
+    summary.degeneracy_id = op.empty() ? "assembled-nullspace" : op + ":nullspace";
+    summary.block = block;
+    summary.affected_variables = affected_variables;
+    summary.estimated_rank = rank.estimated_rank;
+    summary.nullity = rank.nullity;
+    summary.near_zero_pivot_count = rank.near_zero_pivot_count;
+    summary.near_zero_row_count = rank.near_zero_row_count;
+    summary.constrained_dof_count = constrained_dofs;
+    summary.free_dof_count = rank.row_count;
+    summary.matrix_norm_estimate = rank.matrix_norm_estimate;
+    summary.rank_tolerance = rank.tolerance;
+    summary.rank_estimate_present = rank.complete || rank.row_count > 0u;
+    summary.constraint_mask_present = true;
+    summary.saddle_pair_present = saddle_pair_present;
+    summary.kernel_claim_evidence_present =
+        hasClaimFromAnalyzer(baseline_report,
+                             analysis::PropertyKind::Nullspace,
+                             "KernelAnalyzer");
+    summary.constraint_rank_evidence_present =
+        hasClaimFromAnalyzer(baseline_report,
+                             analysis::PropertyKind::UnderConstraint,
+                             "ConstraintRankAnalyzer") ||
+        hasClaimFromAnalyzer(baseline_report,
+                             analysis::PropertyKind::InitialDataCompatibility,
+                             "ConstraintRankAnalyzer");
+
+    if (rank.nullity == 0u && constrained_dofs > 0u &&
+        summary.kernel_claim_evidence_present) {
+        summary.degeneracy_class = analysis::DegeneracyClass::ProjectedKernel;
+        summary.nullspace_handling = analysis::NullspaceHandlingClass::ProjectedOut;
+        summary.reason =
+            "Kernel evidence is present, but the reduced free-free operator has no detected null rows";
+    } else if (rank.nullity > 0u && hasRigidKernelClaim(baseline_report)) {
+        summary.degeneracy_class =
+            analysis::DegeneracyClass::DegenerateDiagnostic;
+        summary.nullspace_handling =
+            constrained_dofs > 0u
+                ? analysis::NullspaceHandlingClass::Retained
+                : analysis::NullspaceHandlingClass::Uncontrolled;
+        summary.reason =
+            "Rigid-body/symmetric-gradient kernel remains in the assembled diagnostic operator";
+    } else if (rank.nullity > 0u && constrained_dofs == 0u &&
+               summary.kernel_claim_evidence_present) {
+        summary.degeneracy_class =
+            analysis::DegeneracyClass::GaugeLikeNullspace;
+        summary.nullspace_handling = analysis::NullspaceHandlingClass::Uncontrolled;
+        summary.reason =
+            "Kernel evidence is present and no strong constraint mask anchors the reduced operator";
+    } else if (rank.nullity > 0u) {
+        summary.degeneracy_class = analysis::DegeneracyClass::UnanchoredKernel;
+        summary.nullspace_handling = analysis::NullspaceHandlingClass::Uncontrolled;
+        summary.reason =
+            "Near-zero reduced rows or pivots indicate an unanchored numerical kernel";
+    } else {
+        summary.degeneracy_class = analysis::DegeneracyClass::Unknown;
+        summary.nullspace_handling =
+            constrained_dofs > 0u
+                ? analysis::NullspaceHandlingClass::AnchoredByConstraints
+                : analysis::NullspaceHandlingClass::Unknown;
+        summary.reason = "No reduced nullity was detected by sparse row diagnostics";
+    }
+    return summary;
+}
+
 template <typename T>
 void appendAnalysisVector(std::vector<T>& dst, const std::vector<T>& src)
 {
@@ -588,6 +987,12 @@ void mergeAnalysisSummarySets(analysis::AnalysisSummarySet& dst,
     appendAnalysisVector(dst.discrete_matrices, src.discrete_matrices);
     appendAnalysisVector(dst.reduced_matrices, src.reduced_matrices);
     appendAnalysisVector(dst.schur_complements, src.schur_complements);
+    appendAnalysisVector(dst.nullspace_degeneracies,
+                         src.nullspace_degeneracies);
+    appendAnalysisVector(dst.robustness_trends, src.robustness_trends);
+    appendAnalysisVector(dst.applicability, src.applicability);
+    appendAnalysisVector(dst.numerical_error_budgets,
+                         src.numerical_error_budgets);
     appendAnalysisVector(dst.local_stencils, src.local_stencils);
     appendAnalysisVector(dst.mesh_geometry_quality, src.mesh_geometry_quality);
     appendAnalysisVector(dst.flux_balances, src.flux_balances);
@@ -647,6 +1052,321 @@ void mergeAnalysisSummarySets(analysis::AnalysisSummarySet& dst,
         }
     }
     return variables;
+}
+
+[[nodiscard]] bool hasConstraintBlockStructure(
+    const std::vector<analysis::ContributionDescriptor>& contributions)
+{
+    return std::any_of(
+        contributions.begin(),
+        contributions.end(),
+        [](const analysis::ContributionDescriptor& contribution) {
+            return contribution.role == analysis::ContributionRole::ConstraintBlock ||
+                   (contribution.role == analysis::ContributionRole::OffDiagonalBlock &&
+                    !contribution.pairings.empty());
+        });
+}
+
+[[nodiscard]] bool hasSecondOrderScalarDiffusionShape(
+    const dofs::FieldDofMap& field_map,
+    const std::vector<analysis::ContributionDescriptor>& contributions)
+{
+    if (field_map.numFields() != 1u) {
+        return false;
+    }
+    const auto& field = field_map.getField(0);
+    if (field.n_components != 1) {
+        return false;
+    }
+    return std::any_of(
+        contributions.begin(),
+        contributions.end(),
+        [](const analysis::ContributionDescriptor& contribution) {
+            return contribution.role == analysis::ContributionRole::DiagonalBlock &&
+                   contribution.domain == analysis::DomainKind::Cell &&
+                   analysis::hasFlag(contribution.traits,
+                                     analysis::OperatorTraitFlags::HasSecondOrder) &&
+                   !analysis::hasFlag(contribution.traits,
+                                      analysis::OperatorTraitFlags::HasFirstOrder);
+        });
+}
+
+void appendApplicabilitySummary(
+    analysis::AnalysisSummarySet& summaries,
+    analysis::TheoremFamily family,
+    analysis::ApplicabilityClass applicability,
+    const analysis::OperatorBlockId& block,
+    std::vector<analysis::VariableKey> variables,
+    std::string reason,
+    bool field_descriptor_evidence,
+    bool contribution_trait_evidence,
+    bool block_structure_evidence)
+{
+    analysis::ApplicabilitySummary summary;
+    summary.theorem_family = family;
+    summary.applicability = applicability;
+    summary.block = block;
+    summary.variables = std::move(variables);
+    summary.reason = std::move(reason);
+    summary.inferred_from_field_descriptors = field_descriptor_evidence;
+    summary.inferred_from_contribution_traits = contribution_trait_evidence;
+    summary.inferred_from_block_structure = block_structure_evidence;
+    summaries.applicability.push_back(std::move(summary));
+}
+
+void appendAutomaticApplicabilitySummaries(
+    analysis::AnalysisSummarySet& summaries,
+    const analysis::OperatorBlockId& global_block,
+    const dofs::FieldDofMap& field_map,
+    const std::vector<analysis::ContributionDescriptor>& contributions,
+    bool saddle_pair_present)
+{
+    const auto variables = blockVariables(global_block);
+    const bool mixed_or_constraint =
+        saddle_pair_present || hasConstraintBlockStructure(contributions);
+    const bool scalar_diffusion =
+        hasSecondOrderScalarDiffusionShape(field_map, contributions);
+
+    const auto scalar_applicability =
+        mixed_or_constraint
+            ? analysis::ApplicabilityClass::NotApplicable
+            : (scalar_diffusion ? analysis::ApplicabilityClass::Applicable
+                                : analysis::ApplicabilityClass::Unknown);
+    const std::string scalar_reason =
+        mixed_or_constraint
+            ? "mixed saddle-point or constraint-block structure is not a scalar nodal diffusion theorem scope"
+            : (scalar_diffusion
+                   ? "single scalar field with second-order diagonal cell contribution"
+                   : "scalar nodal diffusion prerequisites are incomplete");
+
+    appendApplicabilitySummary(summaries,
+                               analysis::TheoremFamily::ScalarDMP,
+                               scalar_applicability,
+                               global_block,
+                               variables,
+                               scalar_reason,
+                               true,
+                               true,
+                               mixed_or_constraint);
+    appendApplicabilitySummary(summaries,
+                               analysis::TheoremFamily::MMatrix,
+                               scalar_applicability,
+                               global_block,
+                               variables,
+                               scalar_reason,
+                               true,
+                               true,
+                               mixed_or_constraint);
+    appendApplicabilitySummary(summaries,
+                               analysis::TheoremFamily::InvariantDomain,
+                               scalar_applicability,
+                               global_block,
+                               variables,
+                               mixed_or_constraint
+                                   ? "mixed block structure requires a problem-specific invariant set, not a scalar invariant-domain gate"
+                                   : scalar_reason,
+                               true,
+                               true,
+                               mixed_or_constraint);
+
+    const auto mixed_applicability =
+        saddle_pair_present ? analysis::ApplicabilityClass::Applicable
+                            : analysis::ApplicabilityClass::NotApplicable;
+    const std::string mixed_reason =
+        saddle_pair_present
+            ? "saddle-point block structure was inferred from solver options or contributions"
+            : "no saddle-point pair was inferred from generic block metadata";
+    appendApplicabilitySummary(summaries,
+                               analysis::TheoremFamily::InfSup,
+                               mixed_applicability,
+                               global_block,
+                               variables,
+                               mixed_reason,
+                               false,
+                               true,
+                               true);
+    appendApplicabilitySummary(summaries,
+                               analysis::TheoremFamily::Fortin,
+                               mixed_applicability,
+                               global_block,
+                               variables,
+                               mixed_reason,
+                               false,
+                               true,
+                               true);
+    appendApplicabilitySummary(summaries,
+                               analysis::TheoremFamily::Schur,
+                               mixed_applicability,
+                               global_block,
+                               variables,
+                               mixed_reason,
+                               false,
+                               true,
+                               true);
+}
+
+[[nodiscard]] std::string runIdFor(const OperatorTag& op, GlobalIndex dofs)
+{
+    std::ostringstream os;
+    os << (op.empty() ? "assembled-operator" : op)
+       << ":dofs=" << dofs;
+    return os.str();
+}
+
+void appendSingleRunTrend(analysis::AnalysisSummarySet& summaries,
+                          std::string metric_name,
+                          const analysis::OperatorBlockId& block,
+                          std::vector<analysis::VariableKey> variables,
+                          Real value,
+                          const OperatorTag& op,
+                          GlobalIndex dofs,
+                          bool explicit_uniform_bound = false)
+{
+    if (!std::isfinite(static_cast<double>(value))) {
+        return;
+    }
+    analysis::RobustnessTrendSummary trend;
+    trend.metric_name = std::move(metric_name);
+    trend.block = block;
+    trend.variables = std::move(variables);
+    trend.sample_count = 1u;
+    trend.run_ids.push_back(runIdFor(op, dofs));
+    trend.dof_counts.push_back(dofs);
+    trend.case_name = op.empty() ? "assembled-operator" : op;
+    trend.mesh_revision = "current";
+    trend.global_dof_count = dofs;
+    trend.operator_tag = op;
+    trend.parameter_hash = "unregistered";
+    trend.min_value = value;
+    trend.max_value = value;
+    trend.explicit_uniform_lower_bound_present = explicit_uniform_bound;
+    trend.explicit_uniform_lower_bound = explicit_uniform_bound ? value : Real{};
+    trend.trend_class = analysis::RobustnessTrendClass::InsufficientSamples;
+    summaries.robustness_trends.push_back(std::move(trend));
+}
+
+void appendAutomaticRobustnessTrends(analysis::AnalysisSummarySet& summaries,
+                                     const OperatorTag& op,
+                                     GlobalIndex dofs)
+{
+    for (const auto& summary : summaries.inf_sup_estimates) {
+        appendSingleRunTrend(summaries,
+                             "inf_sup_estimate",
+                             summary.block,
+                             {summary.primal_variable,
+                              summary.multiplier_variable},
+                             summary.estimate_value,
+                             op,
+                             dofs,
+                             summary.uniform_lower_bound_value_present);
+    }
+    for (const auto& summary : summaries.schur_complements) {
+        if (summary.condition_estimate_present) {
+            appendSingleRunTrend(summaries,
+                                 "schur_condition",
+                                 summary.block,
+                                 summary.variables,
+                                 summary.condition_estimate,
+                                 op,
+                                 dofs);
+        }
+    }
+    for (const auto& summary : summaries.discrete_matrices) {
+        if (summary.condition_estimate) {
+            appendSingleRunTrend(summaries,
+                                 "matrix_condition",
+                                 summary.block,
+                                 blockVariables(summary.block),
+                                 *summary.condition_estimate,
+                                 op,
+                                 dofs);
+        } else if (summary.max_abs_entry > Real{}) {
+            appendSingleRunTrend(summaries,
+                                 "matrix_norm",
+                                 summary.block,
+                                 blockVariables(summary.block),
+                                 summary.max_abs_entry,
+                                 op,
+                                 dofs);
+        }
+    }
+    for (const auto& summary : summaries.stabilization_adequacy) {
+        if (summary.stabilization_parameter_bounds_present) {
+            appendSingleRunTrend(summaries,
+                                 "stabilization_parameter_min",
+                                 summary.block,
+                                 summary.variables,
+                                 summary.minimum_stabilization_parameter,
+                                 op,
+                                 dofs);
+        }
+    }
+}
+
+[[nodiscard]] analysis::NumericalErrorBudgetSummary
+makeNumericalErrorBudgetSummary(
+    const OperatorTag& op,
+    const analysis::OperatorBlockId& block,
+    const std::vector<analysis::VariableKey>& variables,
+    const analysis::DiscreteMatrixSummary* matrix,
+    const backends::SolverOptions* options)
+{
+    analysis::NumericalErrorBudgetSummary budget;
+    budget.budget_id = op.empty() ? "assembled-error-budget" : op + ":error-budget";
+    budget.block = block;
+    budget.variables = variables;
+    const Real eps = std::numeric_limits<Real>::epsilon();
+    budget.matrix_norm_estimate =
+        matrix ? std::max(matrix->max_abs_entry, Real{1}) : Real{1};
+    budget.matrix_norm_present = matrix != nullptr;
+    if (matrix && matrix->condition_estimate &&
+        std::isfinite(static_cast<double>(*matrix->condition_estimate))) {
+        budget.condition_estimate = *matrix->condition_estimate;
+        budget.condition_estimate_present = true;
+    } else if (matrix && matrix->coercivity_lower_bound &&
+               *matrix->coercivity_lower_bound > Real{}) {
+        budget.condition_estimate =
+            budget.matrix_norm_estimate / *matrix->coercivity_lower_bound;
+        budget.condition_estimate_present = true;
+    } else {
+        budget.condition_estimate = Real{1};
+        budget.condition_estimate_present = false;
+    }
+    if (options != nullptr) {
+        budget.linear_tolerance = options->rel_tol;
+        budget.linear_tolerance_present = true;
+        budget.verification_tolerance = options->abs_tol;
+        budget.verification_tolerance_present = options->abs_tol > Real{};
+    }
+    const Real cond = std::max(budget.condition_estimate, Real{1});
+    budget.machine_epsilon_amplification = eps * cond;
+    budget.expected_absolute_floor =
+        static_cast<Real>(100) * eps * cond * budget.matrix_norm_estimate;
+    budget.expected_relative_floor = static_cast<Real>(100) * eps * cond;
+    budget.recommended_verification_tolerance =
+        std::max({budget.expected_absolute_floor,
+                  budget.linear_tolerance_present
+                      ? budget.linear_tolerance * budget.matrix_norm_estimate
+                      : Real{},
+                  Real{1.0e-14}});
+    budget.recommended_tolerance_present = true;
+    if (budget.verification_tolerance_present &&
+        budget.verification_tolerance <
+            static_cast<Real>(0.1) * budget.recommended_verification_tolerance) {
+        budget.adequacy_class =
+            analysis::ToleranceAdequacyClass::TooStrictForConditioning;
+        budget.reason =
+            "declared verification tolerance is below the conditioning-derived numerical floor";
+    } else if (budget.verification_tolerance_present) {
+        budget.adequacy_class = analysis::ToleranceAdequacyClass::Reasonable;
+        budget.reason =
+            "declared verification tolerance is consistent with the conditioning-derived numerical floor";
+    } else {
+        budget.adequacy_class = analysis::ToleranceAdequacyClass::Inconclusive;
+        budget.reason =
+            "no fixed verification tolerance was supplied for comparison";
+    }
+    return budget;
 }
 
 [[nodiscard]] analysis::OperatorBlockId boundaryConditionBlock(
@@ -1317,6 +2037,13 @@ makeCoefficientSummaryFromRuntimeNode(
     if (stats.sample_count > 0u) {
         summary.min_eigenvalue = stats.min_value;
         summary.max_eigenvalue = stats.max_value;
+        summary.local_symmetric_part_min_eigenvalue = stats.min_value;
+        summary.local_symmetric_part_max_eigenvalue = stats.max_value;
+        summary.local_skew_or_nonsymmetric_norm =
+            static_cast<Real>(stats.symmetry_violation_count);
+        summary.local_spectrum_sample_count = stats.sample_count;
+        summary.local_spectrum_nonfinite_count = stats.nonfinite_count;
+        summary.local_spectrum_coverage_present = true;
         summary.coefficient_region_coverage_complete = true;
         summary.quadrature_point_coverage_complete = true;
         summary.state_sample_coverage_complete = true;
@@ -1339,6 +2066,15 @@ makeCoefficientSummaryFromRuntimeNode(
         if (stats.min_abs_positive > Real{}) {
             summary.anisotropy_ratio = stats.max_abs / stats.min_abs_positive;
             summary.contrast_ratio = summary.anisotropy_ratio;
+        }
+        summary.local_spectrum_coverage_complete =
+            summary.coefficient_region_coverage_complete &&
+            stats.nonfinite_count == 0u;
+        summary.local_spectrum_quadrature_coverage_complete =
+            summary.quadrature_point_coverage_complete;
+        if (stats.nonfinite_count > 0u) {
+            summary.worst_local_spectrum_sample.note =
+                "nonfinite runtime coefficient sample";
         }
     } else {
         summary.positivity = analysis::PositivityClass::Unknown;
@@ -1413,6 +2149,12 @@ makeCoefficientSummaryFromConstitutiveLaw(
     if (law.constant_value_available) {
         summary.min_eigenvalue = law.constant_value;
         summary.max_eigenvalue = law.constant_value;
+        summary.local_symmetric_part_min_eigenvalue = law.constant_value;
+        summary.local_symmetric_part_max_eigenvalue = law.constant_value;
+        summary.local_spectrum_sample_count = 1u;
+        summary.local_spectrum_coverage_present = true;
+        summary.local_spectrum_coverage_complete = true;
+        summary.local_spectrum_quadrature_coverage_complete = true;
         summary.positivity =
             positivityFromRange(law.constant_value,
                                 law.constant_value,
@@ -1471,6 +2213,12 @@ makeCoefficientSummaryFromParameterUsage(
     if (value.has_value()) {
         summary.min_eigenvalue = *value;
         summary.max_eigenvalue = *value;
+        summary.local_symmetric_part_min_eigenvalue = *value;
+        summary.local_symmetric_part_max_eigenvalue = *value;
+        summary.local_spectrum_sample_count = 1u;
+        summary.local_spectrum_coverage_present = true;
+        summary.local_spectrum_coverage_complete = true;
+        summary.local_spectrum_quadrature_coverage_complete = true;
         summary.positivity = positivityFromRange(*value, *value, tolerance);
         summary.coefficient_region_coverage_complete = true;
         summary.quadrature_point_coverage_complete = true;
@@ -1521,6 +2269,40 @@ void addCoefficientSummaryIfAbsent(
         });
     if (duplicate == summaries.end()) {
         summaries.push_back(std::move(summary));
+    }
+}
+
+void applyGlobalSpectrumFallback(
+    std::vector<analysis::CoefficientPropertySummary>& coefficient_summaries,
+    const analysis::DiscreteMatrixSummary* matrix)
+{
+    if (matrix == nullptr) {
+        return;
+    }
+    const Real lower = matrix->min_eigenvalue_estimate.value_or(
+        matrix->coercivity_lower_bound.value_or(Real{}));
+    const Real upper = std::max(matrix->max_abs_entry, std::abs(lower));
+    for (auto& summary : coefficient_summaries) {
+        if (summary.local_spectrum_coverage_present) {
+            continue;
+        }
+        if (!summary.block.operator_tag.empty() &&
+            !matrix->block.operator_tag.empty() &&
+            summary.block.operator_tag != matrix->block.operator_tag) {
+            continue;
+        }
+        summary.local_symmetric_part_min_eigenvalue = lower;
+        summary.local_symmetric_part_max_eigenvalue = upper;
+        summary.local_skew_or_nonsymmetric_norm =
+            matrix->nonsymmetry_indicator.value_or(Real{});
+        summary.local_spectrum_sample_count = matrix->scanned_row_count;
+        summary.local_spectrum_nonfinite_count = matrix->nonfinite_entry_count;
+        summary.local_spectrum_coverage_present = matrix->scanned_row_count > 0u;
+        summary.local_spectrum_coverage_complete = matrix->sign_evidence_complete;
+        summary.local_spectrum_quadrature_coverage_complete = false;
+        summary.local_spectrum_fallback_global = true;
+        summary.worst_local_spectrum_sample.note =
+            "fallback global assembled symmetric-part estimate";
     }
 }
 
@@ -1689,8 +2471,19 @@ buildRuntimeCoefficientSummaries(
         value > *descriptor.upper_bound + tolerance) {
         return true;
     }
+    if (descriptor.excluded_value.has_value() &&
+        std::abs(static_cast<double>(value - *descriptor.excluded_value)) <=
+            static_cast<double>(tolerance)) {
+        return true;
+    }
     return false;
 }
+
+void appendInvariantDomainSummaryIfAbsent(
+    analysis::AnalysisSummarySet& summaries,
+    const analysis::InvariantDomainDescriptor& descriptor,
+    const dofs::FieldDofMap& field_map,
+    const SystemStateView* state);
 
 [[nodiscard]] std::uint64_t countInvariantDomainDofViolations(
     const analysis::InvariantDomainDescriptor& descriptor,
@@ -1773,6 +2566,10 @@ buildRuntimeCoefficientSummaries(
         summary.upper_bound = *descriptor.upper_bound;
         summary.upper_bound_active = true;
     }
+    if (descriptor.excluded_value.has_value()) {
+        summary.excluded_value = *descriptor.excluded_value;
+        summary.excluded_value_active = true;
+    }
     if (descriptor.cfl_estimate.has_value()) {
         summary.cfl_estimate = *descriptor.cfl_estimate;
         summary.cfl_estimate_present = true;
@@ -1805,6 +2602,42 @@ buildRuntimeCoefficientSummaries(
         countInvariantDomainDofViolations(descriptor, field_map, state);
     summary.invariant_domain_theorem_id = descriptor.theorem_id;
     return summary;
+}
+
+void appendInvariantDomainSummaryIfAbsent(
+    analysis::AnalysisSummarySet& summaries,
+    const analysis::InvariantDomainDescriptor& descriptor,
+    const dofs::FieldDofMap& field_map,
+    const SystemStateView* state)
+{
+    auto duplicate = std::any_of(
+        summaries.invariant_domains.begin(),
+        summaries.invariant_domains.end(),
+        [&](const analysis::InvariantDomainSummary& existing) {
+            if (existing.invariant_set_id != descriptor.invariant_set_id ||
+                existing.variables != descriptor.variables) {
+                return false;
+            }
+            const bool lower_same =
+                existing.lower_bound_active == descriptor.lower_bound.has_value() &&
+                (!existing.lower_bound_active ||
+                 existing.lower_bound == *descriptor.lower_bound);
+            const bool upper_same =
+                existing.upper_bound_active == descriptor.upper_bound.has_value() &&
+                (!existing.upper_bound_active ||
+                 existing.upper_bound == *descriptor.upper_bound);
+            const bool exclusion_same =
+                existing.excluded_value_active ==
+                    descriptor.excluded_value.has_value() &&
+                (!existing.excluded_value_active ||
+                 existing.excluded_value == *descriptor.excluded_value);
+            return lower_same && upper_same && exclusion_same;
+        });
+    if (duplicate) {
+        return;
+    }
+    summaries.invariant_domains.push_back(
+        makeInvariantDomainSummary(descriptor, field_map, state));
 }
 
 void applyRangeFactor(Real& min_value,
@@ -3932,6 +4765,36 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
         saddle_pair = findAnalysisSaddlePairFromContributions(field_map_, contributions_);
     }
 
+    if (matrix.numRows() == matrix.numCols() &&
+        (plan.has(analysis::AnalysisSummaryKind::NullspaceDegeneracy) ||
+         plan.has(analysis::AnalysisSummaryKind::ReducedMatrix) ||
+         plan.has(analysis::AnalysisSummaryKind::InfSupEstimate))) {
+        const auto rank = estimateSparseRankFromRows(*source, constrained_lookup);
+        summaries.nullspace_degeneracies.push_back(
+            makeNullspaceDegeneracySummary(
+                op,
+                global_block,
+                rank,
+                static_cast<std::uint64_t>(constrained.size()),
+                nullspaceClaimVariables(baseline_report,
+                                        blockVariables(global_block)),
+                baseline_report,
+                saddle_pair && saddle_pair->valid()));
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::Applicability) ||
+        plan.has(analysis::AnalysisSummaryKind::DiscreteMatrix) ||
+        plan.has(analysis::AnalysisSummaryKind::InvariantDomain) ||
+        plan.has(analysis::AnalysisSummaryKind::InfSupEstimate) ||
+        plan.has(analysis::AnalysisSummaryKind::SchurComplement)) {
+        appendAutomaticApplicabilitySummaries(
+            summaries,
+            global_block,
+            field_map_,
+            contributions_,
+            saddle_pair && saddle_pair->valid());
+    }
+
     std::optional<CouplingMatrixStats> coupling_stats;
     if (saddle_pair && saddle_pair->valid() &&
         (plan.has(analysis::AnalysisSummaryKind::InfSupEstimate) ||
@@ -4016,6 +4879,35 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
         if (analysis_solver_options_) {
             summary.inexact_solve_tolerance_present = true;
             summary.inexact_solve_tolerance = analysis_solver_options_->rel_tol;
+            summary.block_solve_tolerance_present = true;
+            summary.block_solve_tolerance =
+                analysis_solver_options_->fsils_blockschur_cg_rel_tol
+                    .value_or(analysis_solver_options_->rel_tol);
+            summary.approximate_schur_type = "assembled diagonal primary-block proxy";
+            summary.preconditioner_type =
+                std::string(backends::preconditionerToString(
+                    analysis_solver_options_->preconditioner));
+            if (analysis_solver_options_->method ==
+                backends::SolverMethod::BlockSchur) {
+                summary.preconditioner_type =
+                    "BlockSchur/" + summary.preconditioner_type;
+            }
+        }
+        if (summary.preconditioned_residual_contraction_present &&
+            summary.preconditioned_residual_contraction <=
+                std::max(summary.block_solve_tolerance, Real{1.0e-12})) {
+            summary.condition_risk_class =
+                analysis::SchurQualityClass::PreconditionedRobust;
+        } else if (summary.condition_estimate_present &&
+                   !summary.preconditioned_probe_available) {
+            summary.condition_risk_class =
+                analysis::SchurQualityClass::RawConditionOnly;
+        } else if (!summary.schur_available) {
+            summary.condition_risk_class =
+                analysis::SchurQualityClass::Unavailable;
+        } else {
+            summary.condition_risk_class =
+                analysis::SchurQualityClass::InsufficientEvidence;
         }
         summaries.schur_complements.push_back(std::move(summary));
     }
@@ -4087,6 +4979,11 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
             addCoefficientSummaryIfAbsent(summaries.coefficient_properties,
                                           summary);
         }
+        const auto* matrix_fallback = summaries.discrete_matrices.empty()
+            ? nullptr
+            : &summaries.discrete_matrices.front();
+        applyGlobalSpectrumFallback(summaries.coefficient_properties,
+                                    matrix_fallback);
     }
 
     std::unordered_map<std::string, std::pair<Real, Real>>
@@ -4190,8 +5087,14 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
 
     if (plan.has(analysis::AnalysisSummaryKind::InvariantDomain)) {
         for (const auto& descriptor : invariant_domain_descriptors_) {
-            summaries.invariant_domains.push_back(
-                makeInvariantDomainSummary(descriptor, field_map_, state));
+            appendInvariantDomainSummaryIfAbsent(
+                summaries, descriptor, field_map_, state);
+        }
+        for (const auto& record : formulation_records_) {
+            for (const auto& descriptor : record.invariant_domain_descriptors) {
+                appendInvariantDomainSummaryIfAbsent(
+                    summaries, descriptor, field_map_, state);
+            }
         }
     }
 
@@ -4295,6 +5198,27 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
             summary.coupling_operator_scope_metadata_present = true;
             summaries.coupled_system_stability.push_back(std::move(summary));
         }
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::RobustnessTrend) ||
+        plan.has(analysis::AnalysisSummaryKind::InfSupEstimate) ||
+        plan.has(analysis::AnalysisSummaryKind::SchurComplement) ||
+        plan.has(analysis::AnalysisSummaryKind::StabilizationAdequacy)) {
+        appendAutomaticRobustnessTrends(summaries, op, matrix.numRows());
+    }
+
+    if (plan.has(analysis::AnalysisSummaryKind::NumericalErrorBudget) ||
+        (analysis_solver_options_ && matrix_summaries_generated)) {
+        const auto* matrix_summary = summaries.discrete_matrices.empty()
+            ? nullptr
+            : &summaries.discrete_matrices.front();
+        summaries.numerical_error_budgets.push_back(
+            makeNumericalErrorBudgetSummary(
+                op,
+                global_block,
+                blockVariables(global_block),
+                matrix_summary,
+                analysis_solver_options_ ? &*analysis_solver_options_ : nullptr));
     }
 
     if (!summaries.empty()) {
@@ -4480,6 +5404,39 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
             fd.polynomial_order = fr.space->polynomial_order();
             fd.topological_dimension = fr.space->topological_dimension();
             fd.continuity = fr.space->continuity();
+            fd.component_polynomial_orders.assign(
+                static_cast<std::size_t>(std::max(1, fd.value_dimension)),
+                fd.polynomial_order);
+            fd.space_family = spaceFamilyFor(fd.continuity, fr.space->space_type());
+            fd.element_family = elementFamilyFor(*fr.space);
+            fd.continuity_class =
+                continuityClassFor(fd.continuity, fr.space->space_type());
+            fd.mapping_transform =
+                mappingTransformFor(fd.continuity, fr.space->space_type());
+            fd.reference_cell_family =
+                referenceCellFamilyFor(fr.space->element_type());
+            if (fd.reference_cell_family != analysis::ReferenceCellFamily::Unknown) {
+                fd.mesh_family_scope = analysis::toString(fd.reference_cell_family);
+            }
+            fd.conformity.exact_sequence_member =
+                fd.continuity == Continuity::H_div ||
+                fd.continuity == Continuity::H_curl;
+            fd.conformity.facet_orientation_consistent =
+                fd.continuity == Continuity::H_div ||
+                fd.continuity == Continuity::H_curl;
+            fd.conformity.entity_dof_association_known =
+                fd.element_family != analysis::ElementFamily::Unknown &&
+                fd.element_family != analysis::ElementFamily::Custom;
+            fd.conformity.commuting_projection_metadata_present =
+                fd.conformity.exact_sequence_member &&
+                (fd.element_family == analysis::ElementFamily::RaviartThomas ||
+                 fd.element_family == analysis::ElementFamily::BDM ||
+                 fd.element_family == analysis::ElementFamily::Nedelec);
+            if (fd.element_family ==
+                analysis::ElementFamily::BubbleEnrichedLagrange) {
+                fd.enrichment.bubble_degree = fd.polynomial_order;
+                fd.enrichment.visible_to_analysis = true;
+            }
 
             // Derive component_extractable from the function space continuity.
             // H(div) and H(curl) spaces use vector-valued basis functions where
@@ -4494,32 +5451,28 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
             switch (fd.continuity) {
                 case Continuity::C0:
                 case Continuity::C1:
-                    fd.space_family = analysis::SpaceFamily::H1;
                     fd.trace_capabilities = analysis::TraceCapabilityFlags::Value
                                           | analysis::TraceCapabilityFlags::NormalFlux;
                     break;
                 case Continuity::H_div:
-                    fd.space_family = analysis::SpaceFamily::HDiv;
                     fd.trace_capabilities = analysis::TraceCapabilityFlags::NormalComponent
                                           | analysis::TraceCapabilityFlags::NormalFlux;
                     fd.has_exact_sequence_structure = true;
                     fd.supports_local_balance_closure = true;
                     break;
                 case Continuity::H_curl:
-                    fd.space_family = analysis::SpaceFamily::HCurl;
                     fd.trace_capabilities = analysis::TraceCapabilityFlags::TangentialComponent;
                     fd.has_exact_sequence_structure = true;
                     break;
                 case Continuity::L2:
-                    fd.space_family = analysis::SpaceFamily::L2;
                     fd.trace_capabilities = analysis::TraceCapabilityFlags::Jump
                                           | analysis::TraceCapabilityFlags::Average;
                     break;
                 default:
-                    fd.space_family = analysis::SpaceFamily::Custom;
                     break;
             }
         }
+        applyBoundaryScopeMetadata(fd, bc_descriptors_);
         // Post-setup refinement: use the actual FieldDofMap layout descriptor
         // which is authoritative (handles edge cases like custom spaces).
         if (is_setup_ && fr.id < field_map_.numFields()) {

@@ -27,24 +27,33 @@ const BasisCacheEntry& BasisCache::get_or_compute(
         hessians
     };
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(key);
-    if (it != cache_.end()) {
-        return *(it->second);
+    // Warm path: shared (reader) lock allows concurrent cache hits.
+    {
+        std::shared_lock<std::shared_mutex> read_lock(mutex_);
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            return *(it->second);
+        }
     }
 
+    // Compute outside the lock so other readers can proceed.
     auto entry = std::make_shared<BasisCacheEntry>(compute(basis, quad, gradients, hessians));
-    cache_.emplace(key, entry);
-    return *entry;
+
+    // Cold path: exclusive (writer) lock. Re-check in case another thread
+    // populated the same key while we were computing — discard our entry
+    // in favor of the one already in the cache for stable identity.
+    std::unique_lock<std::shared_mutex> write_lock(mutex_);
+    auto [it, inserted] = cache_.emplace(key, entry);
+    return *(it->second);
 }
 
 void BasisCache::clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     cache_.clear();
 }
 
 std::size_t BasisCache::size() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return cache_.size();
 }
 

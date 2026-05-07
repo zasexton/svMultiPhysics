@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -93,7 +94,7 @@ private:
                             bool gradients,
                             bool hessians) const;
 
-    mutable std::mutex mutex_;
+    mutable std::shared_mutex mutex_;
     std::unordered_map<BasisCacheKey, std::shared_ptr<BasisCacheEntry>, BasisCacheKeyHash> cache_;
 };
 

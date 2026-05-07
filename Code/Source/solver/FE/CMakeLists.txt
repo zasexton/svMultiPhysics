@@ -594,6 +594,7 @@ set(FE_ANALYSIS_HEADERS
     Analysis/SolverCompatibilityAnalyzer.h
     Analysis/NumericSummaryPlanner.h
     Analysis/SparseMatrixSummaryScanner.h
+    Analysis/FortinOperatorAutogeneration.h
     Analysis/ContributionDescriptor.h
     Analysis/FormContributionLowerer.h
     Analysis/BoundaryConditionDescriptor.h
@@ -632,6 +633,7 @@ set(FE_ANALYSIS_SOURCES
     Analysis/SolverCompatibilityAnalyzer.cpp
     Analysis/NumericSummaryPlanner.cpp
     Analysis/SparseMatrixSummaryScanner.cpp
+    Analysis/FortinOperatorAutogeneration.cpp
     Analysis/ContributionDescriptor.cpp
     Analysis/FormContributionLowerer.cpp
 )
@@ -2217,6 +2219,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Analysis/test_Phase6ExtendedAnalyzers.cpp
         Tests/Unit/Analysis/test_Phase7MathematicalIntegration.cpp
         Tests/Unit/Analysis/test_AnalysisEvidenceContracts.cpp
+        Tests/Unit/Analysis/test_FortinOperatorAutogeneration.cpp
         Tests/Unit/Analysis/test_main.cpp
     )
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Analysis/test_main.cpp)

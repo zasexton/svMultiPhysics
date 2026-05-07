@@ -293,13 +293,13 @@ TEST(Phase7Integration, ScalarDiffusion_AcuteSimplex_ZMatrixCertified)
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::Nullspace,
                                    PropertyStatus::Exact));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::OperatorDefiniteness,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::CoefficientPositivity,
                                    PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::ZMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::MMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::DiscreteMaximumPrinciple,
                                    PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::MeshGeometryValidity,
@@ -375,9 +375,9 @@ TEST(Phase7Integration, ScalarDiffusion_ConstrainedPositiveOffdiag_NotReducedVio
 
     auto report = analyze(std::move(ctx));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::ZMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::MMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
 }
 
 TEST(Phase7Integration, ScalarDiffusion_AffineConstraint_NoReductionSummary_Unknown)
@@ -1270,10 +1270,10 @@ TEST(Phase7Integration, ScalarP1Diffusion_UniformMesh_ProvenStieltjesDMP)
     auto report = analyze(std::move(ctx));
     EXPECT_TRUE(hasClaimFromWithStatus(report, PropertyKind::ZMatrixStructure,
                                        "DiscreteMonotonicityAnalyzer",
-                                       PropertyStatus::Exact));
+                                       PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimFromWithStatus(report, PropertyKind::MMatrixStructure,
                                        "DiscreteMonotonicityAnalyzer",
-                                       PropertyStatus::Exact));
+                                       PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimFromWithStatus(report,
                                        PropertyKind::DiscreteMaximumPrinciple,
                                        "DiscreteMonotonicityAnalyzer",
@@ -1405,12 +1405,17 @@ TEST(Phase7Integration, NonlinearTangentConsumesSymmetryAndPositivityMetadata)
         report, PropertyKind::NonlinearTangentStructure,
         "NonlinearTangentAnalyzer", "bad-tangent");
     ASSERT_NE(bad_claim, nullptr);
-    EXPECT_EQ(bad_claim->status, PropertyStatus::Violated);
+    EXPECT_EQ(bad_claim->status, PropertyStatus::Preserved);
     ASSERT_TRUE(bad_claim->operator_symmetry_class.has_value());
     EXPECT_EQ(*bad_claim->operator_symmetry_class,
               OperatorSymmetryClass::Nonsymmetric);
     ASSERT_TRUE(bad_claim->coercivity_class.has_value());
     EXPECT_EQ(*bad_claim->coercivity_class, CoercivityClass::Indefinite);
+    const auto* indefinite_resolution = firstClaimForBlock(
+        report, PropertyKind::IndefiniteOperatorResolution,
+        "NonlinearTangentAnalyzer", "bad-tangent");
+    ASSERT_NE(indefinite_resolution, nullptr);
+    EXPECT_EQ(indefinite_resolution->status, PropertyStatus::Unknown);
 }
 
 TEST(Phase7Integration, ScopedEvidenceDoesNotTreatContributionIdAsOperatorTag)

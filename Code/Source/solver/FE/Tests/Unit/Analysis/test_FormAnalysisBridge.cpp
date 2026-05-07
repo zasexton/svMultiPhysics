@@ -368,7 +368,10 @@ TEST(FormAnalysisBridge, AdaptsContributionDescriptorsToInstalledBlocks)
     const auto a = FormExpr::stateField(1, *space, "a");
     const auto b = FormExpr::testFunction(0, *space, "b");
     const auto residual =
-        ((a + FormExpr::boundaryIntegralRef(4)) * b).dI(11);
+        ((a + FormExpr::boundaryIntegralRef(4) +
+          FormExpr::parameter("alpha") +
+          FormExpr::coefficient("kappa",
+                                [](Real, Real, Real) { return Real{2}; })) * b).dI(11);
 
     FormulationRecord formulation;
     formulation.operator_tag = "equations";
@@ -481,6 +484,29 @@ TEST(FormAnalysisBridge, AdaptsContributionDescriptorsToInstalledBlocks)
                                       DomainKind::Global,
                                       false),
               nullptr);
+    const auto* parameter_dep =
+        findInstalledDependency(metadata.installed_dependencies,
+                                row,
+                                VariableKey::named(VariableKind::GlobalScalar,
+                                                   "parameter:alpha"),
+                                DomainKind::ParameterDependency,
+                                false);
+    ASSERT_NE(parameter_dep, nullptr);
+    EXPECT_EQ(parameter_dep->dependency_kind, DependencyKind::Parameter);
+    EXPECT_EQ(parameter_dep->dependency_name, "alpha");
+    EXPECT_TRUE(parameter_dep->affects_coefficient);
+
+    const auto* coefficient_dep =
+        findInstalledDependency(metadata.installed_dependencies,
+                                row,
+                                VariableKey::named(VariableKind::GlobalScalar,
+                                                   "coefficient:kappa"),
+                                DomainKind::CoefficientDependency,
+                                false);
+    ASSERT_NE(coefficient_dep, nullptr);
+    EXPECT_EQ(coefficient_dep->dependency_kind, DependencyKind::Coefficient);
+    EXPECT_EQ(coefficient_dep->dependency_name, "kappa");
+    EXPECT_TRUE(coefficient_dep->affects_coefficient);
 
     EXPECT_TRUE(bridgeFeatureAvailable(metadata,
                                        FormBridgeFeature::InstalledBlocks));

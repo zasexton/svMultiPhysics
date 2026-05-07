@@ -110,6 +110,43 @@ variablesForBlock(const OperatorBlockId& block)
            !block.trial_variables.empty();
 }
 
+[[nodiscard]] inline bool contributionIdScopeMatches(
+    const OperatorBlockId& evidence_block,
+    const OperatorBlockId& target_block,
+    bool require_coverage)
+{
+    if (evidence_block.contribution_id.empty() ||
+        target_block.contribution_id.empty() ||
+        evidence_block.contribution_id != target_block.contribution_id) {
+        return false;
+    }
+
+    if (evidence_block.domain != target_block.domain) {
+        return false;
+    }
+
+    if (evidence_block.marker >= 0 || target_block.marker >= 0) {
+        if (evidence_block.marker != target_block.marker) {
+            return false;
+        }
+    }
+
+    if (!evidence_block.operator_tag.empty() &&
+        !target_block.operator_tag.empty() &&
+        evidence_block.operator_tag != target_block.operator_tag) {
+        return false;
+    }
+
+    const auto evidence_vars = variablesForBlock(evidence_block);
+    const auto target_vars = variablesForBlock(target_block);
+    if (require_coverage) {
+        return variableSetCoversAll(evidence_vars, target_vars);
+    }
+    return target_vars.empty() ||
+           evidence_vars.empty() ||
+           variableSetsIntersect(evidence_vars, target_vars);
+}
+
 [[nodiscard]] inline bool blockEvidenceMatches(
     const OperatorBlockId& evidence_block,
     const OperatorBlockId& target_block)
@@ -119,11 +156,7 @@ variablesForBlock(const OperatorBlockId& block)
     }
 
     if (!evidence_block.contribution_id.empty()) {
-        if (target_block.contribution_id.empty() ||
-            evidence_block.contribution_id != target_block.contribution_id) {
-            return false;
-        }
-        return true;
+        return contributionIdScopeMatches(evidence_block, target_block, false);
     }
 
     if (!evidence_block.operator_tag.empty()) {
@@ -164,8 +197,7 @@ variablesForBlock(const OperatorBlockId& block)
     }
 
     if (!evidence_block.contribution_id.empty()) {
-        return !target_block.contribution_id.empty() &&
-               evidence_block.contribution_id == target_block.contribution_id;
+        return contributionIdScopeMatches(evidence_block, target_block, true);
     }
 
     if (!target_block.contribution_id.empty()) {

@@ -34,6 +34,32 @@ enum class FormCoefficientRank : std::uint8_t {
     Unknown,
 };
 
+enum class EvidenceLevel : std::uint8_t {
+    DAGPatternHint,
+    DescriptorMetadata,
+    ScopedNumericSummary,
+    TheoremRegistryMatch,
+    CertifiedClaim,
+};
+
+enum class ExpressionDomainConstraintKind : std::uint8_t {
+    NonzeroDenominator,
+    NonnegativeRadicand,
+    PositiveJacobianLikeDeterminant,
+    InvertibleMatrixExpression,
+    BoundedLogArgument,
+    BoundedPowerBase,
+    UserDeclaredAdmissibilityCondition,
+};
+
+enum class InvariantSetKind : std::uint8_t {
+    Unknown,
+    Interval,
+    PositivityCone,
+    ConvexSet,
+    UserDeclared,
+};
+
 struct FormParameterUsage {
     std::string name;
     std::optional<std::uint32_t> slot;
@@ -65,12 +91,29 @@ struct FormScaleUsage {
     bool exact_for_analysis{false};
 };
 
+struct ExpressionDomainConstraint {
+    ExpressionDomainConstraintKind kind{
+        ExpressionDomainConstraintKind::UserDeclaredAdmissibilityCondition};
+    std::vector<VariableKey> variables;
+    std::optional<Real> lower_bound;
+    std::optional<Real> upper_bound;
+    bool has_excluded_value{false};
+    Real excluded_value{};
+    std::string expression_id;
+    DomainKind domain{DomainKind::Cell};
+    int boundary_marker{-1};
+    int interface_marker{-1};
+    EvidenceLevel evidence_level{EvidenceLevel::DAGPatternHint};
+};
+
 struct InvariantDomainDescriptor {
+    InvariantSetKind invariant_set{InvariantSetKind::Unknown};
     std::string invariant_set_id;
     std::vector<VariableKey> variables;
     DomainKind domain{DomainKind::Cell};
     std::optional<Real> lower_bound;
     std::optional<Real> upper_bound;
+    std::optional<Real> excluded_value;
     std::optional<Real> cfl_estimate;
     std::optional<Real> accepted_cfl_bound;
     std::optional<Real> wave_speed_bound;

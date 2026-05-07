@@ -7,6 +7,7 @@
 
 #include "Analysis/NumericSummaryPlanner.h"
 
+#include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/ContributionDescriptor.h"
@@ -215,6 +216,378 @@ AnalysisSummaryRequest& ensureRequest(AnalysisRequestPlan& plan,
     return plan.summary_requests.back();
 }
 
+OperatorBlockId requestedBlock(DomainKind domain,
+                               const std::vector<VariableKey>& variables,
+                               const std::string& block_id,
+                               const std::string& contribution_id) {
+    OperatorBlockId block;
+    block.domain = domain;
+    block.operator_tag = block_id;
+    block.contribution_id = contribution_id;
+    block.test_variables = variables;
+    return block;
+}
+
+std::vector<std::string> requestedContributionIds(
+    const std::string& contribution_id) {
+    if (contribution_id.empty()) {
+        return {};
+    }
+    return {contribution_id};
+}
+
+bool scopedBlockCoversRequest(const OperatorBlockId& evidence_block,
+                              const std::vector<VariableKey>& evidence_variables,
+                              const std::string& evidence_contribution_id,
+                              const OperatorBlockId& target_block,
+                              const std::vector<std::string>& target_contribution_ids) {
+    if (target_block.operator_tag.empty() &&
+        !evidence_block.operator_tag.empty() &&
+        evidence_block.contribution_id.empty() &&
+        evidence_contribution_id.empty()) {
+        return false;
+    }
+    if (target_contribution_ids.empty() &&
+        (!evidence_block.contribution_id.empty() ||
+         !evidence_contribution_id.empty())) {
+        return false;
+    }
+    return strictScopedEvidenceMatches(evidence_block,
+                                       evidence_variables,
+                                       evidence_contribution_id,
+                                       target_block,
+                                       target_contribution_ids);
+}
+
+bool matrixSummaryCoversRequest(const DiscreteMatrixSummary& summary,
+                                const OperatorBlockId& target_block,
+                                const std::vector<std::string>& target_contribution_ids) {
+    if (!target_block.contribution_id.empty() &&
+        summary.block.contribution_id != target_block.contribution_id &&
+        std::find(summary.contribution_ids.begin(),
+                  summary.contribution_ids.end(),
+                  target_block.contribution_id) ==
+            summary.contribution_ids.end()) {
+        return false;
+    }
+    return scopedBlockCoversRequest(summary.block,
+                                    variablesForBlock(summary.block),
+                                    summary.block.contribution_id,
+                                    target_block,
+                                    target_contribution_ids);
+}
+
+bool variablesCoverRequest(const std::vector<VariableKey>& evidence,
+                           DomainKind evidence_domain,
+                           const OperatorBlockId& target_block) {
+    if (evidence_domain != target_block.domain) {
+        return false;
+    }
+    return variableSetCoversAll(evidence, variablesForBlock(target_block));
+}
+
+bool summaryAlreadyAvailable(const ProblemAnalysisContext& context,
+                             AnalysisSummaryKind kind,
+                             DomainKind domain,
+                             const std::vector<VariableKey>& variables,
+                             const std::string& block_id,
+                             const std::string& contribution_id,
+                             const std::string& scope_id) {
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) {
+        return false;
+    }
+    const auto target_block =
+        requestedBlock(domain, variables, block_id, contribution_id);
+    const auto target_contribution_ids =
+        requestedContributionIds(contribution_id);
+    auto block_covers = [&](const OperatorBlockId& block,
+                            const std::vector<VariableKey>& evidence_variables,
+                            const std::string& evidence_contribution = {}) {
+        return scopedBlockCoversRequest(block,
+                                        evidence_variables,
+                                        evidence_contribution,
+                                        target_block,
+                                        target_contribution_ids);
+    };
+    switch (kind) {
+        case AnalysisSummaryKind::CoefficientProperties:
+            return std::any_of(
+                summaries->coefficient_properties.begin(),
+                summaries->coefficient_properties.end(),
+                [&](const CoefficientPropertySummary& summary) {
+                    return coefficientSummaryCovers(
+                        summary, target_block, target_contribution_ids);
+                });
+        case AnalysisSummaryKind::DiscreteMatrix:
+            return std::any_of(
+                summaries->discrete_matrices.begin(),
+                summaries->discrete_matrices.end(),
+                [&](const DiscreteMatrixSummary& summary) {
+                    return matrixSummaryCoversRequest(summary,
+                                                      target_block,
+                                                      target_contribution_ids);
+                });
+        case AnalysisSummaryKind::ReducedMatrix:
+            return std::any_of(
+                summaries->reduced_matrices.begin(),
+                summaries->reduced_matrices.end(),
+                [&](const ReducedMatrixSummary& summary) {
+                    return matrixSummaryCoversRequest(summary.free_free_matrix,
+                                                      target_block,
+                                                      target_contribution_ids);
+                });
+        case AnalysisSummaryKind::LocalStencil:
+            return std::any_of(
+                summaries->local_stencils.begin(),
+                summaries->local_stencils.end(),
+                [&](const LocalStencilSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::FluxBalance:
+            return std::any_of(
+                summaries->flux_balances.begin(),
+                summaries->flux_balances.end(),
+                [&](const FluxBalanceSummary& summary) {
+                    return block_covers(summary.block, {});
+                });
+        case AnalysisSummaryKind::TemporalStability:
+            return std::any_of(
+                summaries->temporal_stability.begin(),
+                summaries->temporal_stability.end(),
+                [&](const TemporalStabilitySummary& summary) {
+                    return block_covers(summary.block,
+                                        summary.variables,
+                                        summary.contribution_id);
+                });
+        case AnalysisSummaryKind::InfSupEstimate:
+            return std::any_of(
+                summaries->inf_sup_estimates.begin(),
+                summaries->inf_sup_estimates.end(),
+                [&](const InfSupEstimateSummary& summary) {
+                    std::vector<VariableKey> pair{
+                        summary.primal_variable,
+                        summary.multiplier_variable};
+                    const bool scope_ok =
+                        scope_id.empty() ||
+                        summary.estimate_scope.empty() ||
+                        summary.estimate_scope == scope_id;
+                    return scope_ok && block_covers(summary.block, pair);
+                });
+        case AnalysisSummaryKind::InfSupPairCertification:
+            return std::any_of(
+                summaries->inf_sup_pair_certifications.begin(),
+                summaries->inf_sup_pair_certifications.end(),
+                [&](const InfSupPairCertificationSummary& summary) {
+                    std::vector<VariableKey> pair{
+                        summary.primal_variable,
+                        summary.multiplier_variable};
+                    return block_covers(summary.block, pair);
+                });
+        case AnalysisSummaryKind::ParameterScale:
+            return std::any_of(
+                summaries->parameter_scales.begin(),
+                summaries->parameter_scales.end(),
+                [&](const ParameterScaleSummary& summary) {
+                    return block_covers(summary.block,
+                                        summary.variables,
+                                        summary.contribution_id);
+                });
+        case AnalysisSummaryKind::StabilizationAdequacy:
+            return std::any_of(
+                summaries->stabilization_adequacy.begin(),
+                summaries->stabilization_adequacy.end(),
+                [&](const StabilizationAdequacySummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::SchurComplement:
+            return std::any_of(
+                summaries->schur_complements.begin(),
+                summaries->schur_complements.end(),
+                [&](const SchurComplementSummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::NullspaceDegeneracy:
+            return std::any_of(
+                summaries->nullspace_degeneracies.begin(),
+                summaries->nullspace_degeneracies.end(),
+                [&](const NullspaceDegeneracySummary& summary) {
+                    return block_covers(summary.block,
+                                        summary.affected_variables);
+                });
+        case AnalysisSummaryKind::RobustnessTrend:
+            return std::any_of(
+                summaries->robustness_trends.begin(),
+                summaries->robustness_trends.end(),
+                [&](const RobustnessTrendSummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::Applicability:
+            return std::any_of(
+                summaries->applicability.begin(),
+                summaries->applicability.end(),
+                [&](const ApplicabilitySummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::NumericalErrorBudget:
+            return std::any_of(
+                summaries->numerical_error_budgets.begin(),
+                summaries->numerical_error_budgets.end(),
+                [&](const NumericalErrorBudgetSummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::DAEStructureEvidence:
+            return std::any_of(
+                summaries->dae_structure_evidence.begin(),
+                summaries->dae_structure_evidence.end(),
+                [&](const DAEStructureEvidenceSummary& summary) {
+                    return variablesCoverRequest(summary.variables,
+                                                 domain,
+                                                 target_block);
+                });
+        case AnalysisSummaryKind::CompatibleComplex:
+            return std::any_of(
+                summaries->compatible_complexes.begin(),
+                summaries->compatible_complexes.end(),
+                [&](const CompatibleComplexSummary& summary) {
+                    return variablesCoverRequest(summary.variables,
+                                                 domain,
+                                                 target_block);
+                });
+        case AnalysisSummaryKind::NonlinearTangent:
+            return std::any_of(
+                summaries->nonlinear_tangents.begin(),
+                summaries->nonlinear_tangents.end(),
+                [&](const NonlinearTangentSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::SpectralStructure:
+            return std::any_of(
+                summaries->spectral_structures.begin(),
+                summaries->spectral_structures.end(),
+                [&](const SpectralStructureSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::ErrorEstimator:
+            return std::any_of(
+                summaries->error_estimators.begin(),
+                summaries->error_estimators.end(),
+                [&](const ErrorEstimatorSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::QuadratureAdequacy:
+            return std::any_of(
+                summaries->quadrature_adequacy.begin(),
+                summaries->quadrature_adequacy.end(),
+                [&](const QuadratureAdequacySummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::MinimumResidualStability:
+            return std::any_of(
+                summaries->minimum_residual_stability.begin(),
+                summaries->minimum_residual_stability.end(),
+                [&](const MinimumResidualStabilitySummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::InitialCompatibility:
+            return std::any_of(
+                summaries->initial_compatibility.begin(),
+                summaries->initial_compatibility.end(),
+                [&](const InitialCompatibilitySummary& summary) {
+                    return scope_id.empty() ||
+                           summary.compatibility_scope == scope_id ||
+                           summary.invariant_set_id == scope_id;
+                });
+        case AnalysisSummaryKind::BoundarySymbol:
+            return std::any_of(
+                summaries->boundary_symbols.begin(),
+                summaries->boundary_symbols.end(),
+                [&](const BoundarySymbolSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::MeshGeometryQuality:
+            return std::any_of(
+                summaries->mesh_geometry_quality.begin(),
+                summaries->mesh_geometry_quality.end(),
+                [&](const MeshGeometryQualitySummary& summary) {
+                    return summary.domain == domain;
+                });
+        case AnalysisSummaryKind::EnergyEntropyBalance:
+            return scope_id.empty()
+                ? !summaries->energy_entropy.empty()
+                : std::any_of(summaries->energy_entropy.begin(),
+                              summaries->energy_entropy.end(),
+                              [&](const EnergyEntropySummary& summary) {
+                                  return summary.energy_entropy_id == scope_id ||
+                                         summary.energy_functional_id == scope_id;
+                              });
+        case AnalysisSummaryKind::InvariantDomain:
+            return std::any_of(
+                summaries->invariant_domains.begin(),
+                summaries->invariant_domains.end(),
+                [&](const InvariantDomainSummary& summary) {
+                    const bool scope_ok =
+                        scope_id.empty() ||
+                        summary.invariant_set_id == scope_id;
+                    return scope_ok &&
+                           variablesCoverRequest(summary.variables,
+                                                 domain,
+                                                 target_block);
+                });
+        case AnalysisSummaryKind::EquilibriumPreservation:
+            return scope_id.empty()
+                ? !summaries->equilibrium_preservation.empty()
+                : std::any_of(
+                      summaries->equilibrium_preservation.begin(),
+                      summaries->equilibrium_preservation.end(),
+                      [&](const EquilibriumPreservationSummary& summary) {
+                          return summary.equilibrium_id == scope_id ||
+                                 summary.equilibrium_family_id == scope_id;
+                      });
+        case AnalysisSummaryKind::MovingDomain:
+            return !summaries->moving_domain.empty();
+        case AnalysisSummaryKind::TransferOperator:
+            return scope_id.empty()
+                ? !summaries->transfer_operators.empty()
+                : std::any_of(summaries->transfer_operators.begin(),
+                              summaries->transfer_operators.end(),
+                              [&](const TransferOperatorSummary& summary) {
+                                  return summary.interface_pair_id == scope_id ||
+                                         summary.projection_space_id == scope_id;
+                              });
+        case AnalysisSummaryKind::AdjointConsistency:
+            return std::any_of(
+                summaries->adjoint_consistency.begin(),
+                summaries->adjoint_consistency.end(),
+                [&](const AdjointConsistencySummary& summary) {
+                    return contribution_id.empty()
+                        ? (scope_id.empty() ||
+                           summary.goal_functional_id == scope_id)
+                        : summary.contribution_id == contribution_id;
+                });
+        case AnalysisSummaryKind::CoupledSystemStability:
+            return std::any_of(
+                summaries->coupled_system_stability.begin(),
+                summaries->coupled_system_stability.end(),
+                [&](const CoupledSystemStabilitySummary& summary) {
+                    const bool scope_ok =
+                        scope_id.empty() ||
+                        summary.coupling_group == scope_id;
+                    return scope_ok &&
+                           variablesCoverRequest(summary.variables,
+                                                 domain,
+                                                 target_block);
+                });
+    }
+    return false;
+}
+
 void addRequest(AnalysisRequestPlan& plan,
                 const ProblemAnalysisContext& context,
                 AnalysisSummaryKind kind,
@@ -230,7 +603,15 @@ void addRequest(AnalysisRequestPlan& plan,
                                   optionalString(claim.tested_block_id),
                                   std::string{},
                                   claimScopeId(claim));
-    request.already_available = request.already_available || context.hasSummaryKind(kind);
+    request.already_available =
+        request.already_available ||
+        summaryAlreadyAvailable(context,
+                                kind,
+                                domain,
+                                variables,
+                                request.block_id,
+                                request.contribution_id,
+                                request.scope_id);
     request.confidence = strongerConfidence(request.confidence, claim.confidence);
     appendVariables(request.variables, variables);
     appendUnique(request.source_claim_indices, source_claim_index);
@@ -256,7 +637,15 @@ void addContextRequest(AnalysisRequestPlan& plan,
                                   block_id,
                                   contribution_id,
                                   scope_id);
-    request.already_available = request.already_available || context.hasSummaryKind(kind);
+    request.already_available =
+        request.already_available ||
+        summaryAlreadyAvailable(context,
+                                kind,
+                                domain,
+                                variables,
+                                block_id,
+                                contribution_id,
+                                scope_id);
     request.confidence = strongerConfidence(request.confidence, confidence);
     appendVariables(request.variables, variables);
     appendUnique(request.source_analyzers, std::string("ProblemAnalysisContext"));
@@ -319,6 +708,22 @@ std::string NumericSummaryPlanner::name() const {
 
 void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                                 ProblemAnalysisReport& report) const {
+    for (const auto& record : context.formulationRecords()) {
+        for (const auto& descriptor : record.invariant_domain_descriptors) {
+            addContextRequest(
+                report.request_plan,
+                context,
+                AnalysisSummaryKind::InvariantDomain,
+                descriptor.domain,
+                descriptor.variables,
+                "FormulationRecord carries primitive-DAG invariant-domain metadata; request bound and post-step violation summaries",
+                AnalysisConfidence::Medium,
+                record.operator_tag,
+                {},
+                descriptor.invariant_set_id);
+        }
+    }
+
     for (std::size_t i = 0; i < report.claims.size(); ++i) {
         const auto& claim = report.claims[i];
         if (!claimIsUsableSymbolicEvidence(claim)) {
@@ -342,6 +747,12 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::MeshGeometryQuality,
                        claim.domain, claim.variables, i, claim,
                        source + " classified an elliptic operator; request native mesh geometry quality evidence");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::Applicability,
+                       claim.domain, claim.variables, i, claim,
+                       source + " classified an operator block; request theorem-family applicability gates for DMP, M-matrix, inf-sup, and Schur checks");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NumericalErrorBudget,
+                       claim.domain, claim.variables, i, claim,
+                       source + " classified an operator block; request conditioning-derived numerical error budget and verification tolerance recommendation");
 
             if (isScalarFieldClaim(context, claim)) {
                 addRequest(report.request_plan, context, AnalysisSummaryKind::LocalStencil,
@@ -356,6 +767,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected a nullspace; request reduced operator and nullspace-handling evidence");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NullspaceDegeneracy,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected a nullspace; request sparse rank/nullity and constraint-mode degeneracy classification");
         }
 
         if (claim.kind == PropertyKind::MixedSaddlePoint ||
@@ -377,6 +791,15 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request block matrix diagnostics and Schur-ready evidence");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NullspaceDegeneracy,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected saddle-point structure; request nullspace degeneracy and constraint-mode classification");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::Applicability,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected saddle-point structure; request theorem-family applicability gates");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::RobustnessTrend,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected saddle-point structure; request cross-run trend records for inf-sup, Schur, and conditioning metrics");
         }
 
         if (claim.kind == PropertyKind::InfSupCondition ||
@@ -392,6 +815,12 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted an inf-sup claim; request reduced saddle-point block evidence");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NullspaceDegeneracy,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted an inf-sup claim; request degeneracy evidence before classifying near-zero estimates as violations");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::RobustnessTrend,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted an inf-sup claim; request multi-run robustness trend evidence");
         }
 
         if (claim.kind == PropertyKind::OperatorTransportCharacter ||
@@ -421,6 +850,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::DiscreteMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " detected stabilization; request retained matrix diagnostics for consistency and conditioning");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::RobustnessTrend,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected stabilization; request cross-run stabilization parameter and conditioning trend evidence");
         }
 
         if (claim.kind == PropertyKind::ConservationStructure ||
@@ -518,6 +950,15 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                        source + " emitted energy/entropy law evidence; request finite balance/production/tolerance, theorem, functional/norm, coercivity, norm-equivalence, dissipation, entropy-variable, entropy-flux, convexity, and boundary/source accounting summaries");
         }
 
+        if (claim.kind == PropertyKind::DiscreteMaximumPrinciple ||
+            claim.kind == PropertyKind::MMatrixStructure ||
+            claim.kind == PropertyKind::ZMatrixStructure ||
+            claim.kind == PropertyKind::MatrixMonotonicityRisk) {
+            addRequest(report.request_plan, context, AnalysisSummaryKind::Applicability,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted monotonicity/DMP evidence; request scalar-DMP and M-matrix theorem applicability gates");
+        }
+
         if (claim.kind == PropertyKind::CoefficientPositivity ||
             claim.kind == PropertyKind::ParameterRobustness) {
             addRequest(report.request_plan, context, AnalysisSummaryKind::CoefficientProperties,
@@ -526,6 +967,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::ParameterScale,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted parameter robustness evidence; request nondimensional parameter-scale summaries");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::RobustnessTrend,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted parameter robustness evidence; request comparable run trend evidence before certification");
         }
 
         if (claim.kind == PropertyKind::NonlinearTangentStructure) {
@@ -586,6 +1030,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InvariantDomain,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted invariant-domain evidence; request bound, limiter, quantitative CFL/wave-speed, theorem, and post-step violation summaries");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::Applicability,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted invariant-domain evidence; request operator applicability gate before theorem classification");
         }
 
         if (claim.kind == PropertyKind::EquilibriumPreservation) {

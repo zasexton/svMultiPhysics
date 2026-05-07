@@ -76,6 +76,28 @@ struct FieldDescriptor {
     bool has_exact_sequence_structure{false};   ///< HDiv/HCurl in a de Rham sequence
     bool supports_local_balance_closure{false}; ///< Spaces with conservative trace (HDiv)
 
+    // Fortin/stable-pair certification metadata.  These fields are populated
+    // from FE space construction where possible and remain Unknown/false for
+    // custom spaces so theorem matching fails closed.
+    ElementFamily element_family{ElementFamily::Unknown};
+    SpaceContinuityClass continuity_class{SpaceContinuityClass::Unknown};
+    MappingTransform mapping_transform{MappingTransform::Unknown};
+    ReferenceCellFamily reference_cell_family{ReferenceCellFamily::Unknown};
+    std::vector<int> component_polynomial_orders;
+    SpaceEnrichmentMetadata enrichment;
+    SpaceConformityMetadata conformity;
+
+    bool shape_regular_mesh_assumed{false};
+    std::string mesh_family_scope;
+    bool domain_assumptions_present{false};
+    bool lipschitz_domain_assumed{false};
+    bool contractible_domain_assumed{false};
+    bool boundary_condition_scope_metadata_present{false};
+    bool strong_dirichlet_boundary_present{false};
+    bool normal_trace_boundary_scope_present{false};
+    bool mean_zero_constraint_present{false};
+    bool gauge_fixing_metadata_present{false};
+
     // Optional kernel metadata.  Analyzer passes may also certify structured
     // nullspaces from operator IR, but generic multipliers should not be
     // treated as gauges without explicit metadata or such certification.

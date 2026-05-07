@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Analysis/ContributionDescriptor.h"
@@ -236,6 +237,41 @@ TEST(NumericSummaryPlanner, CellFormulationRequestsCoefficientPropertiesUpFront)
                                       "before matrix-based operator classification"));
 }
 
+TEST(NumericSummaryPlanner, FormulationInvariantDomainsRequestBoundSummaries) {
+    ProblemAnalysisContext ctx;
+    FormulationRecord record;
+    record.operator_tag = "equations";
+    record.active_fields = {1};
+    record.active_variables = {VariableKey::field(1)};
+    record.active_domains = {DomainKind::Cell};
+
+    InvariantDomainDescriptor descriptor;
+    descriptor.invariant_set_id = "primitive:field:1:less-than:10";
+    descriptor.variables.push_back(VariableKey::field(1));
+    descriptor.sampled_field = 1;
+    descriptor.upper_bound = Real{10};
+    descriptor.source_admissibility_evidence_present = true;
+    record.invariant_domain_descriptors.push_back(std::move(descriptor));
+
+    ctx.addFormulationRecord(record);
+
+    ProblemAnalysisReport report;
+    NumericSummaryPlanner planner;
+    planner.run(ctx, report);
+
+    const auto requests =
+        report.request_plan.requestsOfKind(AnalysisSummaryKind::InvariantDomain);
+    ASSERT_EQ(requests.size(), 1u);
+    ASSERT_NE(requests.front(), nullptr);
+    EXPECT_EQ(requests.front()->block_id, "equations");
+    EXPECT_EQ(requests.front()->scope_id, "primitive:field:1:less-than:10");
+    EXPECT_EQ(requests.front()->variables, std::vector<VariableKey>{VariableKey::field(1)});
+    EXPECT_TRUE(report.request_plan.hasSourceAnalyzer("ProblemAnalysisContext"));
+    EXPECT_TRUE(requestReasonsContain(report.request_plan,
+                                      AnalysisSummaryKind::InvariantDomain,
+                                      "primitive-DAG invariant-domain metadata"));
+}
+
 TEST(NumericSummaryPlanner, DGAndInterfaceFormsTriggerPenaltyAndFluxRequests) {
     auto analyzer = ProblemAnalyzer::createDefault();
     ProblemAnalysisContext ctx;
@@ -277,12 +313,20 @@ TEST(NumericSummaryPlanner, DGAndInterfaceFormsTriggerPenaltyAndFluxRequests) {
 TEST(NumericSummaryPlanner, RequestPlanTracksReasonsSourcesAndAvailability) {
     ProblemAnalysisContext ctx;
     AnalysisSummarySet summaries;
-    summaries.discrete_matrices.push_back(DiscreteMatrixSummary{});
+    auto var = VariableKey::field(0);
+    DiscreteMatrixSummary matrix;
+    matrix.block.domain = DomainKind::Cell;
+    matrix.block.operator_tag = "matching-block";
+    matrix.block.test_variables = {var};
+    matrix.block.trial_variables = {var};
+    summaries.discrete_matrices.push_back(matrix);
     ctx.setAnalysisSummaries(std::move(summaries));
 
     ProblemAnalysisReport report;
     auto claim = claimFrom("OperatorClassAnalyzer", PropertyKind::OperatorDefiniteness);
     claim.claim_origin.clear();
+    claim.variables = {var};
+    claim.tested_block_id = "matching-block";
     report.claims.push_back(std::move(claim));
 
     NumericSummaryPlanner planner;
@@ -302,6 +346,56 @@ TEST(NumericSummaryPlanner, RequestPlanTracksReasonsSourcesAndAvailability) {
     const auto output = oss.str();
     EXPECT_NE(output.find("--- Requested Numeric Summaries ---"), std::string::npos);
     EXPECT_NE(output.find("DiscreteMatrix"), std::string::npos);
+}
+
+TEST(NumericSummaryPlanner, RequestPlanDoesNotUseWrongScopedSummaryAsAvailable) {
+    ProblemAnalysisContext ctx;
+    AnalysisSummarySet summaries;
+    DiscreteMatrixSummary matrix;
+    matrix.block.domain = DomainKind::Cell;
+    matrix.block.operator_tag = "other-block";
+    matrix.block.test_variables = {VariableKey::field(2)};
+    matrix.block.trial_variables = {VariableKey::field(2)};
+    summaries.discrete_matrices.push_back(matrix);
+    ctx.setAnalysisSummaries(std::move(summaries));
+
+    ProblemAnalysisReport report;
+    auto claim = claimFrom("OperatorClassAnalyzer", PropertyKind::OperatorDefiniteness);
+    claim.variables = {VariableKey::field(0)};
+    claim.tested_block_id = "target-block";
+    report.claims.push_back(std::move(claim));
+
+    NumericSummaryPlanner planner;
+    planner.run(ctx, report);
+
+    const auto* request = firstRequest(report.request_plan,
+                                       AnalysisSummaryKind::DiscreteMatrix);
+    ASSERT_NE(request, nullptr);
+    EXPECT_FALSE(request->already_available);
+}
+
+TEST(AnalysisSummaryMatching, ContributionIdRequiresCompatibleScope) {
+    OperatorBlockId evidence;
+    evidence.contribution_id = "contrib-1";
+    evidence.operator_tag = "cell-op";
+    evidence.domain = DomainKind::Cell;
+    evidence.marker = 4;
+    evidence.test_variables = {VariableKey::field(0)};
+    evidence.trial_variables = {VariableKey::field(0)};
+
+    OperatorBlockId target = evidence;
+    EXPECT_TRUE(blockEvidenceMatches(evidence, target));
+    EXPECT_TRUE(blockEvidenceCovers(evidence, target));
+
+    target.domain = DomainKind::Boundary;
+    EXPECT_FALSE(blockEvidenceMatches(evidence, target));
+    EXPECT_FALSE(blockEvidenceCovers(evidence, target));
+
+    target = evidence;
+    target.test_variables = {VariableKey::field(1)};
+    target.trial_variables = {VariableKey::field(1)};
+    EXPECT_FALSE(blockEvidenceMatches(evidence, target));
+    EXPECT_FALSE(blockEvidenceCovers(evidence, target));
 }
 
 TEST(NumericSummaryPlanner, RequestPlanKeepsInfSupScopesDistinct) {

@@ -619,6 +619,33 @@ TEST(CouplingGraphAnalyzer, CoupledRecord_EmitsCoupledStructure) {
     EXPECT_TRUE(hasCouplingClaim(report, field, global, DomainKind::Global));
 }
 
+TEST(CouplingGraphAnalyzer, SameVariablesDifferentScopesRemainDistinct) {
+    CouplingGraphAnalyzer pass;
+    ProblemAnalysisContext ctx;
+    const auto a = VariableKey::field(0);
+    const auto b = VariableKey::field(1);
+
+    auto cell = ContributionDescriptor::constraintBlock(
+        a, b, "cell-coupling", "test");
+    cell.domain = DomainKind::Cell;
+    cell.ensureStableContributionId();
+    ctx.addContribution(std::move(cell));
+
+    auto boundary = ContributionDescriptor::constraintBlock(
+        a, b, "boundary-coupling", "test");
+    boundary.domain = DomainKind::Boundary;
+    boundary.boundary_marker = 7;
+    boundary.ensureStableContributionId();
+    ctx.addContribution(std::move(boundary));
+
+    ProblemAnalysisReport report;
+    pass.run(ctx, report);
+
+    EXPECT_TRUE(hasCouplingClaim(report, a, b, DomainKind::Cell));
+    EXPECT_TRUE(hasCouplingClaim(report, a, b, DomainKind::Boundary));
+    EXPECT_EQ(report.countByKind(PropertyKind::CoupledSystemStructure), 2u);
+}
+
 TEST(CouplingGraphAnalyzer, NoCouplings_NoClaims) {
     CouplingGraphAnalyzer pass;
     ProblemAnalysisContext ctx;

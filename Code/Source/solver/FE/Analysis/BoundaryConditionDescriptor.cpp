@@ -8,6 +8,8 @@
 #include "Analysis/BoundaryConditionDescriptor.h"
 #include "Constraints/GaugeRegistry.h"
 
+#include <utility>
+
 namespace svmp {
 namespace FE {
 namespace analysis {
@@ -43,6 +45,17 @@ const char* toString(InequalitySense k) noexcept {
         case InequalitySense::LessEqual:       return "LessEqual";
         case InequalitySense::GreaterEqual:    return "GreaterEqual";
         case InequalitySense::Complementarity: return "Complementarity";
+    }
+    return "Unknown";
+}
+
+const char* toString(NitscheVariant k) noexcept {
+    switch (k) {
+        case NitscheVariant::Unknown:      return "Unknown";
+        case NitscheVariant::Symmetric:    return "Symmetric";
+        case NitscheVariant::Nonsymmetric: return "Nonsymmetric";
+        case NitscheVariant::Skew:         return "Skew";
+        case NitscheVariant::Incomplete:   return "Incomplete";
     }
     return "Unknown";
 }
@@ -99,6 +112,10 @@ descriptorToVerdict(const BoundaryConditionDescriptor& desc,
 std::vector<ContributionDescriptor>
 lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
     std::vector<ContributionDescriptor> result;
+    auto pushContribution = [&](ContributionDescriptor contrib) {
+        contrib.ensureStableContributionId();
+        result.push_back(std::move(contrib));
+    };
 
     ContributionDescriptor d;
     d.operator_tag = "bc";
@@ -124,7 +141,7 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
             d.traits = OperatorTraitFlags::NullspaceLifting;
             d.nullspace_effect = NullspaceEffect::ExactlyRemoves;
             d.consistency_kind = ConsistencyKind::ExactContinuum;
-            result.push_back(d);
+            pushContribution(d);
             break;
 
         case EnforcementKind::WeakPenalty:
@@ -138,24 +155,47 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
                 d.nullspace_effect = NullspaceEffect::Preserves;
             }
             d.consistency_kind = ConsistencyKind::ExactContinuum;
-            result.push_back(d);
+            pushContribution(d);
             break;
 
         case EnforcementKind::WeakNitsche:
             // Nitsche → BoundaryConstraint + HasSecondOrder + NullspaceLifting
+            d.operator_tag = "bc:nitsche:consistency";
             d.role = ContributionRole::BoundaryConstraint;
             d.traits = OperatorTraitFlags::HasSecondOrder | OperatorTraitFlags::NullspaceLifting;
             d.nullspace_effect = NullspaceEffect::WeaklyLifts;
-            d.consistency_kind = ConsistencyKind::ConsistentPerturbation;
-            d.adjoint_consistency = desc.is_homogeneous
-                ? AdjointConsistencyKind::Yes : AdjointConsistencyKind::Unknown;
-            result.push_back(d);
+            if (desc.nitsche) {
+                const bool rhs_consistency_ok =
+                    desc.is_homogeneous ||
+                    desc.nitsche->rhs_consistency_terms_present;
+                d.consistency_kind =
+                    (desc.nitsche->primal_consistency_terms_present &&
+                     rhs_consistency_ok)
+                    ? ConsistencyKind::ConsistentPerturbation
+                    : ConsistencyKind::Unknown;
+                d.adjoint_consistency =
+                    desc.nitsche->adjoint_consistency_terms_present
+                        ? AdjointConsistencyKind::Yes
+                        : AdjointConsistencyKind::No;
+            } else {
+                d.consistency_kind = ConsistencyKind::Unknown;
+                d.adjoint_consistency = AdjointConsistencyKind::Unknown;
+            }
+            pushContribution(d);
             // Also a stabilization penalty component
             {
                 ContributionDescriptor stab = d;
+                stab.contribution_id.clear();
+                stab.operator_tag = "bc:nitsche:penalty";
                 stab.role = ContributionRole::StabilizationBlock;
                 stab.traits = OperatorTraitFlags::HasMass;
-                result.push_back(std::move(stab));
+                stab.consistency_kind = desc.nitsche &&
+                    desc.nitsche->penalty_positive &&
+                    desc.nitsche->penalty_scaling_verified &&
+                    desc.nitsche->penalty_trace_bound_verified
+                        ? ConsistencyKind::ConsistentPerturbation
+                        : ConsistencyKind::Unknown;
+                pushContribution(std::move(stab));
             }
             break;
 
@@ -165,7 +205,7 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
             d.traits = OperatorTraitFlags::HasMass | OperatorTraitFlags::NullspaceLifting;
             d.nullspace_effect = NullspaceEffect::WeaklyLifts;
             d.consistency_kind = ConsistencyKind::ConsistentPerturbation;
-            result.push_back(d);
+            pushContribution(d);
             break;
 
         case EnforcementKind::WeakConsistent:
@@ -183,7 +223,7 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
                 d.balance = BalanceDescriptor{
                     desc.pairing_group, BalanceRole::FluxLike, 1, false};
             }
-            result.push_back(d);
+            pushContribution(d);
             break;
 
         case EnforcementKind::AffineRelation:
@@ -191,7 +231,7 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
             d.role = ContributionRole::ConstraintBlock;
             d.traits = OperatorTraitFlags::NullspacePreserving;
             d.nullspace_effect = NullspaceEffect::Preserves;
-            result.push_back(d);
+            pushContribution(d);
             break;
     }
 
@@ -211,7 +251,7 @@ lowerBCDescriptor(const BoundaryConditionDescriptor& desc) {
         }
         gc.trial_variables = desc.related_variables;
         gc.related_variables = desc.related_variables;
-        result.push_back(std::move(gc));
+        pushContribution(std::move(gc));
     }
 
     return result;

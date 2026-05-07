@@ -290,6 +290,58 @@ TEST(FormContributionLowerer, BoundaryMarkerCarried) {
     ASSERT_EQ(contributions.size(), 1u);
     EXPECT_EQ(contributions[0].boundary_marker, 5);
     EXPECT_EQ(contributions[0].domain, DomainKind::Boundary);
+    ASSERT_EQ(contributions[0].domain_scopes.size(), 1u);
+    EXPECT_EQ(contributions[0].domain_scopes[0].domain, DomainKind::Boundary);
+    EXPECT_EQ(contributions[0].domain_scopes[0].marker, 5);
+}
+
+TEST(FormContributionLowerer, BoundaryIntegralWithoutMarkerIsBoundary) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = (u * v).ds();
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions[0].domain, DomainKind::Boundary);
+    EXPECT_EQ(contributions[0].boundary_marker, -1);
+    ASSERT_EQ(contributions[0].domain_scopes.size(), 1u);
+    EXPECT_EQ(contributions[0].domain_scopes[0].domain, DomainKind::Boundary);
+    EXPECT_EQ(contributions[0].domain_scopes[0].marker, -1);
+}
+
+TEST(FormContributionLowerer, MixedCellBoundaryExpressionStoresDomainScopes) {
+    auto space = scalarH1();
+    auto u = FormExpr::stateField(0, *space, "u");
+    auto v = FormExpr::testFunction(*space, "v");
+    auto residual = inner(grad(u), grad(v)).dx() + (u * v).ds(7);
+
+    FormulationRecord rec;
+    rec.operator_tag = "equations";
+    rec.active_fields = {0};
+    rec.residual_expr = residual.nodeShared();
+    rec.block_residual_exprs.push_back({{0, 0}, residual.nodeShared()});
+
+    auto contributions = lowerFormulation(rec);
+
+    ASSERT_EQ(contributions.size(), 1u);
+    const auto& scopes = contributions[0].domain_scopes;
+    EXPECT_NE(std::find_if(scopes.begin(), scopes.end(), [](const auto& scope) {
+                  return scope.domain == DomainKind::Cell;
+              }),
+              scopes.end());
+    EXPECT_NE(std::find_if(scopes.begin(), scopes.end(), [](const auto& scope) {
+                  return scope.domain == DomainKind::Boundary &&
+                         scope.marker == 7;
+              }),
+              scopes.end());
 }
 
 // ============================================================================
@@ -564,6 +616,9 @@ TEST(FormContributionLowerer, SingleFieldSourceOnlyEmitsSourceContribution) {
 
     // Should emit a source-like contribution (empty trial_variables)
     ASSERT_EQ(contributions.size(), 1u);
+    EXPECT_EQ(contributions[0].role, ContributionRole::SourceVector);
+    EXPECT_TRUE(hasFlag(contributions[0].traits, OperatorTraitFlags::SourceLike));
+    EXPECT_FALSE(hasFlag(contributions[0].traits, OperatorTraitFlags::HasMass));
     EXPECT_TRUE(contributions[0].trial_variables.empty())
         << "Source-only contribution should have no trial variables";
     EXPECT_NE(contributions[0].origin.find("source"), std::string::npos)
@@ -611,6 +666,9 @@ TEST(FormContributionLowerer, PureSourceRowEmitsContribution) {
         }
         if (is_pressure_test && c.trial_variables.empty()) {
             found_source = true;
+            EXPECT_EQ(c.role, ContributionRole::SourceVector);
+            EXPECT_TRUE(hasFlag(c.traits, OperatorTraitFlags::SourceLike));
+            EXPECT_FALSE(hasFlag(c.traits, OperatorTraitFlags::HasMass));
             EXPECT_NE(c.origin.find("source"), std::string::npos)
                 << "Pure-source contribution should have 'source' in origin";
             EXPECT_TRUE(c.source_block_key.has_value());

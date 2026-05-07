@@ -120,7 +120,6 @@ public:
     void scanSource(const SparseRowScanSource& source)
     {
         updateBackendKind(source.backendKind());
-        source_complete_ = source_complete_ || source.hasCompleteGlobalRows();
         ++log_.visited_partitions;
 
         source.forEachLocalRow(
@@ -140,12 +139,29 @@ public:
         summary_.scanned_row_count = log_.visited_rows;
         summary_.scanned_entry_count = log_.visited_entries;
         summary_.sign_evidence_complete =
-            complete_rows && summary_.nonfinite_entry_count == 0u;
+            complete_rows &&
+            summary_.invalid_entry_count == 0u &&
+            summary_.nonfinite_entry_count == 0u;
         summary_.row_sum_evidence_complete =
             complete_rows && has_row_sum_ &&
+            summary_.invalid_entry_count == 0u &&
             summary_.nonfinite_row_sum_count == 0u;
 
         finishSymmetry();
+
+        if (has_gershgorin_bounds_) {
+            summary_.gershgorin_lower_bound = gershgorin_lower_bound_;
+            summary_.gershgorin_upper_bound = gershgorin_upper_bound_;
+            if (summary_.symmetry_evidence_complete &&
+                summary_.numerically_symmetric) {
+                const Real denom = std::abs(gershgorin_lower_bound_);
+                const Real upper = std::max(std::abs(gershgorin_upper_bound_),
+                                            summary_.max_abs_entry);
+                if (denom > std::max(options_.sign_tolerance, Real{})) {
+                    summary_.condition_estimate = upper / denom;
+                }
+            }
+        }
 
         if (!has_row_sum_) {
             summary_.min_row_sum = 0.0;
@@ -271,18 +287,78 @@ private:
         log_.max_row_entries = std::max(log_.max_row_entries, entries.size());
         markRowSeen(row);
 
-        Real row_sum = 0.0;
+        if (row < 0 || row >= summary_.rows) {
+            ++summary_.invalid_entry_count;
+            ++summary_.nonfinite_row_sum_count;
+            summary_.addWorstEntry(MatrixEntrySample{
+                row,
+                INVALID_GLOBAL_INDEX,
+                std::numeric_limits<Real>::quiet_NaN(),
+                owning_rank,
+                sample_index_++,
+                "invalid row index"});
+            return;
+        }
+
+        std::unordered_map<GlobalDofId, Real> aggregated_entries;
+        aggregated_entries.reserve(entries.size());
         bool row_has_nonfinite = false;
+        bool row_has_invalid = false;
         for (const auto& entry : entries) {
-            if (numeric::finite(entry.value)) {
-                row_sum += entry.value;
-            } else {
+            if (entry.col < 0 || entry.col >= summary_.cols) {
+                ++summary_.invalid_entry_count;
+                row_has_invalid = true;
+                summary_.addWorstEntry(MatrixEntrySample{
+                    row,
+                    entry.col,
+                    entry.value,
+                    owning_rank,
+                    sample_index_++,
+                    "invalid column index"});
+                continue;
+            }
+            if (!numeric::finite(entry.value)) {
+                ++summary_.nonfinite_entry_count;
                 row_has_nonfinite = true;
+                summary_.addWorstEntry(MatrixEntrySample{row,
+                                                         entry.col,
+                                                         entry.value,
+                                                         owning_rank,
+                                                         sample_index_++,
+                                                         "nonfinite entry"});
+                continue;
+            }
+            aggregated_entries[entry.col] += entry.value;
+        }
+
+        std::vector<SparseMatrixRowEntry> row_entries;
+        row_entries.reserve(aggregated_entries.size());
+        for (const auto& item : aggregated_entries) {
+            row_entries.push_back(SparseMatrixRowEntry{item.first, item.second});
+        }
+        std::sort(row_entries.begin(),
+                  row_entries.end(),
+                  [](const SparseMatrixRowEntry& a,
+                     const SparseMatrixRowEntry& b) {
+                      return a.col < b.col;
+                  });
+
+        Real row_sum = 0.0;
+        Real diagonal_value = 0.0;
+        Real offdiag_abs_sum = 0.0;
+        bool diagonal_seen = false;
+        for (const auto& entry : row_entries) {
+            row_sum += entry.value;
+            if (entry.col == row) {
+                diagonal_value += entry.value;
+                diagonal_seen = true;
+            } else {
+                offdiag_abs_sum += std::abs(entry.value);
             }
             classifyEntry(row, entry, owning_rank);
         }
 
-        if (row_has_nonfinite) {
+        if (row_has_nonfinite || row_has_invalid) {
             ++summary_.nonfinite_row_sum_count;
             summary_.addWorstEntry(MatrixEntrySample{
                 row,
@@ -290,8 +366,25 @@ private:
                 std::numeric_limits<Real>::quiet_NaN(),
                 owning_rank,
                 sample_index_++,
-                "nonfinite row sum"});
+                row_has_invalid ? "invalid row sum scope"
+                                : "nonfinite row sum"});
             return;
+        }
+
+        if (summary_.square && row >= 0 && row < summary_.rows) {
+            const Real center = diagonal_seen ? diagonal_value : Real{};
+            const Real lower = center - offdiag_abs_sum;
+            const Real upper = center + offdiag_abs_sum;
+            if (!has_gershgorin_bounds_) {
+                gershgorin_lower_bound_ = lower;
+                gershgorin_upper_bound_ = upper;
+                has_gershgorin_bounds_ = true;
+            } else {
+                gershgorin_lower_bound_ =
+                    std::min(gershgorin_lower_bound_, lower);
+                gershgorin_upper_bound_ =
+                    std::max(gershgorin_upper_bound_, upper);
+            }
         }
 
         if (!has_row_sum_) {
@@ -316,7 +409,7 @@ private:
 
     [[nodiscard]] bool rowEvidenceComplete() const noexcept
     {
-        if (source_complete_) {
+        if (summary_.rows == 0) {
             return true;
         }
         if (!row_seen_.empty() && summary_.rows >= 0) {
@@ -335,7 +428,10 @@ private:
         }
 
         const bool complete_rows = rowEvidenceComplete();
-        if (!complete_rows || log_.symmetry_storage_truncated) {
+        if (!complete_rows ||
+            summary_.invalid_entry_count > 0u ||
+            summary_.nonfinite_entry_count > 0u ||
+            log_.symmetry_storage_truncated) {
             summary_.structurally_symmetric = false;
             summary_.numerically_symmetric = false;
             summary_.symmetry_evidence_complete = false;
@@ -379,8 +475,10 @@ private:
     std::vector<unsigned char> row_seen_{};
     std::uint64_t row_seen_count_{0};
     std::uint64_t sample_index_{0};
+    Real gershgorin_lower_bound_{};
+    Real gershgorin_upper_bound_{};
     bool has_row_sum_{false};
-    bool source_complete_{false};
+    bool has_gershgorin_bounds_{false};
 };
 
 class FreeFreeRowScanSource final : public SparseRowScanSource {
@@ -462,6 +560,8 @@ public:
 
     void forEachLocalRow(const SparseMatrixRowVisitor& visitor) const override
     {
+        static_assert(backends::EigenMatrix::SparseMat::IsRowMajor,
+                      "Eigen sparse summary scanning requires row-major storage");
         std::vector<SparseMatrixRowEntry> entries;
         const auto& mat = matrix_.eigen();
         for (int outer = 0; outer < mat.outerSize(); ++outer) {
@@ -997,6 +1097,7 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         merged.negative_offdiag_count += part.negative_offdiag_count;
         merged.near_zero_offdiag_count += part.near_zero_offdiag_count;
         merged.row_sum_violation_count += part.row_sum_violation_count;
+        merged.invalid_entry_count += part.invalid_entry_count;
         merged.nonfinite_entry_count += part.nonfinite_entry_count;
         merged.nonfinite_row_sum_count += part.nonfinite_row_sum_count;
         merged.scanned_row_count += part.scanned_row_count;
@@ -1013,6 +1114,20 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         for (const auto& sample : part.worst_entries) {
             merged.addWorstEntry(sample);
         }
+        if (part.gershgorin_lower_bound) {
+            merged.gershgorin_lower_bound =
+                merged.gershgorin_lower_bound
+                    ? std::min(*merged.gershgorin_lower_bound,
+                               *part.gershgorin_lower_bound)
+                    : part.gershgorin_lower_bound;
+        }
+        if (part.gershgorin_upper_bound) {
+            merged.gershgorin_upper_bound =
+                merged.gershgorin_upper_bound
+                    ? std::max(*merged.gershgorin_upper_bound,
+                               *part.gershgorin_upper_bound)
+                    : part.gershgorin_upper_bound;
+        }
     }
 
     if (merged.expected_row_count == 0u && merged.rows > 0) {
@@ -1022,9 +1137,12 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         merged.expected_row_count > 0u &&
         merged.scanned_row_count >= merged.expected_row_count;
     merged.sign_evidence_complete =
-        complete_rows && merged.nonfinite_entry_count == 0u;
+        complete_rows &&
+        merged.invalid_entry_count == 0u &&
+        merged.nonfinite_entry_count == 0u;
     merged.row_sum_evidence_complete =
         complete_rows && have_row_sum &&
+        merged.invalid_entry_count == 0u &&
         merged.nonfinite_row_sum_count == 0u;
 
     return merged;
@@ -1171,6 +1289,7 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     sum_u64(summary.negative_offdiag_count);
     sum_u64(summary.near_zero_offdiag_count);
     sum_u64(summary.row_sum_violation_count);
+    sum_u64(summary.invalid_entry_count);
     sum_u64(summary.nonfinite_entry_count);
     sum_u64(summary.nonfinite_row_sum_count);
     sum_u64(summary.scanned_row_count);
@@ -1185,6 +1304,25 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     max_real(summary.max_positive_offdiag);
     max_real(summary.max_symmetry_error);
     max_real(summary.max_abs_row_sum);
+
+    int has_gersh_lower = summary.gershgorin_lower_bound ? 1 : 0;
+    int has_gersh_upper = summary.gershgorin_upper_bound ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &has_gersh_lower, 1, MPI_INT, MPI_MAX, comm);
+    MPI_Allreduce(MPI_IN_PLACE, &has_gersh_upper, 1, MPI_INT, MPI_MAX, comm);
+    Real gersh_lower = summary.gershgorin_lower_bound
+                           ? *summary.gershgorin_lower_bound
+                           : std::numeric_limits<Real>::infinity();
+    Real gersh_upper = summary.gershgorin_upper_bound
+                           ? *summary.gershgorin_upper_bound
+                           : -std::numeric_limits<Real>::infinity();
+    min_real(gersh_lower);
+    max_real(gersh_upper);
+    if (has_gersh_lower != 0) {
+        summary.gershgorin_lower_bound = gersh_lower;
+    }
+    if (has_gersh_upper != 0) {
+        summary.gershgorin_upper_bound = gersh_upper;
+    }
 
     auto row_count = log.visited_rows;
     sum_u64(row_count);
@@ -1246,9 +1384,12 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
         summary.scanned_row_count >= summary.expected_row_count &&
         !log.row_coverage_storage_truncated;
     summary.sign_evidence_complete =
-        complete_rows && summary.nonfinite_entry_count == 0u;
+        complete_rows &&
+        summary.invalid_entry_count == 0u &&
+        summary.nonfinite_entry_count == 0u;
     summary.row_sum_evidence_complete =
         complete_rows && row_count > 0u &&
+        summary.invalid_entry_count == 0u &&
         summary.nonfinite_row_sum_count == 0u;
     summary.symmetry_evidence_complete = false;
     summary.structurally_symmetric = false;

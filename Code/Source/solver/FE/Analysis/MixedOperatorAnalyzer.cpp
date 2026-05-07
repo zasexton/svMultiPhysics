@@ -1044,23 +1044,47 @@ std::string MixedOperatorAnalyzer::name() const {
 void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                                 ProblemAnalysisReport& report) const
 {
-    // Dedup for MixedSaddlePoint claims: track emitted (momentum, constraint)
-    // field pairs so neither path re-emits a claim the other already produced.
-    // Keyed by pair (not just constraint field) so the same constraint field
-    // can appear in multiple mixed structures with different momentum partners.
-    struct FieldPair {
-        FieldId momentum, constraint;
-        bool operator==(const FieldPair& o) const {
-            return momentum == o.momentum && constraint == o.constraint;
+    // Dedup for MixedSaddlePoint claims must include scope.  The same pair of
+    // variables can appear in distinct cell, boundary, interface, auxiliary,
+    // or contribution-local saddle systems.
+    struct MixedPairScopeKey {
+        VariableKey momentum;
+        VariableKey constraint;
+        DomainKind domain{DomainKind::Cell};
+        int marker{-1};
+        std::string operator_tag;
+        std::string pairing_group;
+        std::string contribution_id;
+        bool operator==(const MixedPairScopeKey& o) const {
+            return momentum == o.momentum &&
+                   constraint == o.constraint &&
+                   domain == o.domain &&
+                   marker == o.marker &&
+                   operator_tag == o.operator_tag &&
+                   pairing_group == o.pairing_group &&
+                   contribution_id == o.contribution_id;
         }
     };
-    struct FieldPairHash {
-        std::size_t operator()(const FieldPair& p) const {
-            return std::hash<FieldId>{}(p.momentum) ^
-                   (std::hash<FieldId>{}(p.constraint) * 2654435761u);
+    struct MixedPairScopeKeyHash {
+        std::size_t operator()(const MixedPairScopeKey& key) const {
+            std::size_t seed = VariableKeyHash{}(key.momentum);
+            seed ^= VariableKeyHash{}(key.constraint) + 0x9e3779b97f4a7c15ULL +
+                    (seed << 6U) + (seed >> 2U);
+            seed ^= std::hash<int>{}(static_cast<int>(key.domain)) +
+                    0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+            seed ^= std::hash<int>{}(key.marker) + 0x9e3779b97f4a7c15ULL +
+                    (seed << 6U) + (seed >> 2U);
+            seed ^= std::hash<std::string>{}(key.operator_tag) +
+                    0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+            seed ^= std::hash<std::string>{}(key.pairing_group) +
+                    0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+            seed ^= std::hash<std::string>{}(key.contribution_id) +
+                    0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+            return seed;
         }
     };
-    std::unordered_set<FieldPair, FieldPairHash> emitted_mixed_pairs;
+    std::unordered_set<MixedPairScopeKey, MixedPairScopeKeyHash>
+        emitted_mixed_pairs;
 
     // Nullspace claims are field-intrinsic (constant nullspace) — one per
     // constraint field regardless of how many momentum partners it has.
@@ -1200,8 +1224,17 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
             // Build per-constraint coupling map: which momentum vars does
             // each constraint var actually couple with via
             // ConstraintBlock/OffDiagonalBlock contributions?
+            struct MixedPairCandidate {
+                VariableKey momentum;
+                VariableKey constraint;
+                DomainKind domain{DomainKind::Cell};
+                int marker{-1};
+                std::string operator_tag;
+                std::string pairing_group;
+                std::string contribution_id;
+            };
             std::unordered_map<VariableKey,
-                std::unordered_set<VariableKey, VariableKeyHash>,
+                std::vector<MixedPairCandidate>,
                 VariableKeyHash> constraint_to_momentum;
 
             for (const auto* contrib : comp_group) {
@@ -1209,13 +1242,40 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     contrib->role != ContributionRole::OffDiagonalBlock) {
                     continue;
                 }
+                auto pairingGroupFor = [&](const VariableKey& row,
+                                           const VariableKey& col) {
+                    for (const auto& pairing : contrib->pairings) {
+                        if ((pairing.row_var == row && pairing.col_var == col) ||
+                            (pairing.row_var == col && pairing.col_var == row)) {
+                            return pairing.pairing_group;
+                        }
+                    }
+                    return std::string{};
+                };
+                auto appendCandidate = [&](const VariableKey& constraint,
+                                           const VariableKey& momentum,
+                                           const VariableKey& row,
+                                           const VariableKey& col) {
+                    MixedPairCandidate candidate;
+                    candidate.momentum = momentum;
+                    candidate.constraint = constraint;
+                    candidate.domain = contrib->domain;
+                    candidate.marker = contrib->interface_marker >= 0
+                        ? contrib->interface_marker
+                        : contrib->boundary_marker;
+                    candidate.operator_tag = contrib->operator_tag;
+                    candidate.pairing_group = pairingGroupFor(row, col);
+                    candidate.contribution_id = contrib->contribution_id;
+                    constraint_to_momentum[constraint].push_back(
+                        std::move(candidate));
+                };
                 // Check all (test, trial) pairs for momentum↔constraint links
                 for (const auto& tv : contrib->test_variables) {
                     for (const auto& trv : contrib->trial_variables) {
                         if (constraint_set.count(tv) && momentum_set.count(trv))
-                            constraint_to_momentum[tv].insert(trv);
+                            appendCandidate(tv, trv, tv, trv);
                         if (constraint_set.count(trv) && momentum_set.count(tv))
-                            constraint_to_momentum[trv].insert(tv);
+                            appendCandidate(trv, tv, tv, trv);
                     }
                 }
             }
@@ -1225,45 +1285,76 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
             // pair-based coverage check is precisely scoped.
             for (const auto& cv : constraint_set) {
                 FieldId constraint_fid = cv.field_id;
+                std::vector<VariableKey> nullspace_partners;
 
                 // Determine this constraint's momentum partners
                 auto coup_it = constraint_to_momentum.find(cv);
-                const auto& partners =
-                    (coup_it != constraint_to_momentum.end() &&
-                     !coup_it->second.empty())
-                        ? coup_it->second
-                        : momentum_set;  // defensive fallback
-
-                for (const auto& mv : partners) {
-                    // Pair-level dedup
-                    if (mv.kind == VariableKind::FieldComponent &&
-                        cv.kind == VariableKind::FieldComponent &&
-                        mv.field_id != INVALID_FIELD_ID &&
-                        constraint_fid != INVALID_FIELD_ID) {
-                        FieldPair fp{mv.field_id, constraint_fid};
-                        if (emitted_mixed_pairs.count(fp)) continue;
-                        emitted_mixed_pairs.insert(fp);
-                    }
-
+                if (coup_it == constraint_to_momentum.end() ||
+                    coup_it->second.empty()) {
                     PropertyClaim claim;
                     claim.kind = PropertyKind::MixedSaddlePoint;
                     claim.status = PropertyStatus::Exact;
                     claim.confidence = AnalysisConfidence::High;
                     claim.domain = DomainKind::Cell;
-                    claim.variables.push_back(mv);
                     claim.variables.push_back(cv);
-
+                    claim.claim_origin = "MixedOperatorAnalyzer";
                     claim.description =
-                        "Saddle-point structure: variable " +
+                        "Saddle-point structure requires inf-sup evidence for constraint/multiplier variable " +
                         (cv.kind == VariableKind::FieldComponent
                             ? ("field " + std::to_string(constraint_fid))
                             : cv.name) +
-                        " (constraint/multiplier, no diagonal elliptic"
-                        " block)";
+                        ", but no unique primal partner was identified";
                     claim.addEvidence("MixedOperatorAnalyzer",
-                        "Constraint variable has no contribution with "
-                        "DiagonalBlock + HasSecondOrder traits");
+                        "Constraint variable has no contribution with DiagonalBlock + HasSecondOrder traits; pair-level scope was not unique");
                     report.claims.push_back(std::move(claim));
+                } else {
+                    for (const auto& candidate : coup_it->second) {
+                        const auto& mv = candidate.momentum;
+                        appendUnique(nullspace_partners, mv);
+                        MixedPairScopeKey key;
+                        key.momentum = mv;
+                        key.constraint = cv;
+                        key.domain = candidate.domain;
+                        key.marker = candidate.marker;
+                        key.operator_tag = candidate.operator_tag;
+                        key.pairing_group = candidate.pairing_group;
+                        key.contribution_id = candidate.contribution_id;
+                        if (emitted_mixed_pairs.count(key)) continue;
+                        emitted_mixed_pairs.insert(std::move(key));
+
+                        PropertyClaim claim;
+                        claim.kind = PropertyKind::MixedSaddlePoint;
+                        claim.status = PropertyStatus::Exact;
+                        claim.confidence = AnalysisConfidence::High;
+                        claim.domain = candidate.domain;
+                        claim.variables.push_back(mv);
+                        claim.variables.push_back(cv);
+                        if (!candidate.operator_tag.empty()) {
+                            claim.tested_block_id = candidate.operator_tag;
+                        }
+                        if (!candidate.pairing_group.empty()) {
+                            claim.estimate_scope = candidate.pairing_group;
+                        } else if (!candidate.contribution_id.empty()) {
+                            claim.estimate_scope = candidate.contribution_id;
+                        }
+                        claim.claim_origin = "MixedOperatorAnalyzer";
+
+                        claim.description =
+                            "Saddle-point structure: variable " +
+                            (cv.kind == VariableKind::FieldComponent
+                                ? ("field " + std::to_string(constraint_fid))
+                                : cv.name) +
+                            " (constraint/multiplier, no diagonal elliptic"
+                            " block)";
+                        claim.addEvidence("MixedOperatorAnalyzer",
+                            "Constraint variable has no contribution with "
+                            "DiagonalBlock + HasSecondOrder traits; pair scope domain=" +
+                                std::string(toString(candidate.domain)) +
+                                ", marker=" + std::to_string(candidate.marker) +
+                                ", operator_tag='" + candidate.operator_tag +
+                                "', contribution_id='" + candidate.contribution_id + "'");
+                        report.claims.push_back(std::move(claim));
+                    }
                 }
 
                 // Nullspace claim: one per constraint field.  Explicit
@@ -1278,7 +1369,12 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     const auto inferred = metadata.present
                         ? InferredPressureNullspace{}
                         : inferPressureConstantNullspace(
-                              context, cv, partners, comp_group);
+                              context,
+                              cv,
+                              std::unordered_set<VariableKey, VariableKeyHash>(
+                                  nullspace_partners.begin(),
+                                  nullspace_partners.end()),
+                              comp_group);
                     if (metadata.present || inferred.certified) {
                         PropertyClaim ns_claim;
                         ns_claim.kind = PropertyKind::Nullspace;

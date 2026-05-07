@@ -152,71 +152,81 @@ struct NormalizedLagrangeRequest {
     int order;
 };
 
+// Non-owning view of the per-axis 1D Lagrange basis evaluations
+// (values, first derivative, second derivative), each of length `size`.
 struct AxisBasisEvaluations {
-    std::vector<Real> values;
-    std::vector<Real> first;
-    std::vector<Real> second;
+    const Real* values;
+    const Real* first;
+    const Real* second;
+    std::size_t size;
 };
 
 AxisBasisEvaluations constant_axis_basis() {
-    return AxisBasisEvaluations{{Real(1)}, {Real(0)}, {Real(0)}};
+    static const Real kOne[1]  = {Real(1)};
+    static const Real kZero[1] = {Real(0)};
+    return AxisBasisEvaluations{kOne, kZero, kZero, 1};
 }
 
-AxisBasisEvaluations evaluate_1d_basis(const std::vector<Real>& nodes_1d, Real xi) {
-    AxisBasisEvaluations basis;
-    basis.values.assign(nodes_1d.size(), Real(0));
-    basis.first.assign(nodes_1d.size(), Real(0));
-    basis.second.assign(nodes_1d.size(), Real(0));
+// Output-pointer 1D Lagrange-basis evaluator. Writes nodes_1d.size() entries
+// to each output buffer (values, first, second) without allocating.
+void evaluate_1d_basis_to(const std::vector<Real>& nodes_1d, Real xi,
+                          Real* values, Real* first, Real* second) {
+    const std::size_t n = nodes_1d.size();
 
-    if (nodes_1d.size() == 1) {
-        basis.values[0] = Real(1);
-        return basis;
+    if (n == 1) {
+        values[0] = Real(1);
+        first[0]  = Real(0);
+        second[0] = Real(0);
+        return;
     }
 
-    for (std::size_t i = 0; i < nodes_1d.size(); ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
         Real value = Real(1);
-        for (std::size_t j = 0; j < nodes_1d.size(); ++j) {
+        for (std::size_t j = 0; j < n; ++j) {
             if (i == j) {
                 continue;
             }
             value *= (xi - nodes_1d[j]) / (nodes_1d[i] - nodes_1d[j]);
         }
-        basis.values[i] = value;
+        values[i] = value;
 
-        Real first = Real(0);
-        for (std::size_t m = 0; m < nodes_1d.size(); ++m) {
+        Real fst = Real(0);
+        for (std::size_t m = 0; m < n; ++m) {
             if (m == i) {
                 continue;
             }
             Real prod = Real(1);
-            for (std::size_t j = 0; j < nodes_1d.size(); ++j) {
+            for (std::size_t j = 0; j < n; ++j) {
                 if (j == i || j == m) {
                     continue;
                 }
                 prod *= (xi - nodes_1d[j]) / (nodes_1d[i] - nodes_1d[j]);
             }
             prod /= (nodes_1d[i] - nodes_1d[m]);
-            first += prod;
+            fst += prod;
         }
-        basis.first[i] = first;
+        first[i] = fst;
     }
 
-    if (nodes_1d.size() <= 2) {
-        return basis;
+    if (n <= 2) {
+        for (std::size_t i = 0; i < n; ++i) {
+            second[i] = Real(0);
+        }
+        return;
     }
 
-    for (std::size_t i = 0; i < nodes_1d.size(); ++i) {
-        Real second = Real(0);
-        for (std::size_t m1 = 0; m1 < nodes_1d.size(); ++m1) {
+    for (std::size_t i = 0; i < n; ++i) {
+        Real snd = Real(0);
+        for (std::size_t m1 = 0; m1 < n; ++m1) {
             if (m1 == i) {
                 continue;
             }
-            for (std::size_t m2 = m1 + 1; m2 < nodes_1d.size(); ++m2) {
+            for (std::size_t m2 = m1 + 1; m2 < n; ++m2) {
                 if (m2 == i) {
                     continue;
                 }
                 Real prod = Real(1);
-                for (std::size_t j = 0; j < nodes_1d.size(); ++j) {
+                for (std::size_t j = 0; j < n; ++j) {
                     if (j == i || j == m1 || j == m2) {
                         continue;
                     }
@@ -224,13 +234,52 @@ AxisBasisEvaluations evaluate_1d_basis(const std::vector<Real>& nodes_1d, Real x
                 }
                 prod /= (nodes_1d[i] - nodes_1d[m1]);
                 prod /= (nodes_1d[i] - nodes_1d[m2]);
-                second += prod;
+                snd += prod;
             }
         }
-        basis.second[i] = Real(2) * second;
+        second[i] = Real(2) * snd;
     }
+}
 
-    return basis;
+// Per-axis storage (values, first derivative, second derivative). Backed by
+// thread_local std::vector that grows lazily; subsequent calls reuse capacity
+// with no reallocation.
+struct AxisScratch {
+    std::vector<Real> values;
+    std::vector<Real> first;
+    std::vector<Real> second;
+
+    void reserveFor(std::size_t n) {
+        if (values.size() < n) values.resize(n);
+        if (first.size() < n) first.resize(n);
+        if (second.size() < n) second.resize(n);
+    }
+};
+
+// Caller-provided scratch buffers used by tensor-product evaluation. Three
+// independent axes plus reusable simplex/wedge intermediates.
+struct LagrangeEvaluateScratch {
+    AxisScratch axis_x;
+    AxisScratch axis_y;
+    AxisScratch axis_z;
+
+    std::vector<Real> tri_values;
+    std::vector<Gradient> tri_gradients;
+    std::vector<Hessian> tri_hessians;
+};
+
+LagrangeEvaluateScratch& evaluate_scratch() {
+    thread_local LagrangeEvaluateScratch s;
+    return s;
+}
+
+// Fill axis scratch and return a non-owning view of the result.
+AxisBasisEvaluations fill_axis_scratch(AxisScratch& s,
+                                       const std::vector<Real>& nodes_1d, Real xi) {
+    const std::size_t n = nodes_1d.size();
+    s.reserveFor(n);
+    evaluate_1d_basis_to(nodes_1d, xi, s.values.data(), s.first.data(), s.second.data());
+    return AxisBasisEvaluations{s.values.data(), s.first.data(), s.second.data(), n};
 }
 
 void evaluate_tensor_product_values(
@@ -239,7 +288,7 @@ void evaluate_tensor_product_values(
     const AxisBasisEvaluations& y_axis,
     const AxisBasisEvaluations& z_axis,
     std::vector<Real>& values) {
-    values.assign(tensor_indices.size(), Real(0));
+    values.resize(tensor_indices.size());
     for (std::size_t n = 0; n < tensor_indices.size(); ++n) {
         const auto& index = tensor_indices[n];
         values[n] = x_axis.values[index[0]] *
@@ -254,7 +303,7 @@ void evaluate_tensor_product_gradients(
     const AxisBasisEvaluations& y_axis,
     const AxisBasisEvaluations& z_axis,
     std::vector<Gradient>& gradients) {
-    gradients.assign(tensor_indices.size(), Gradient{});
+    gradients.resize(tensor_indices.size());
     for (std::size_t n = 0; n < tensor_indices.size(); ++n) {
         const auto& index = tensor_indices[n];
         gradients[n][0] = x_axis.first[index[0]] * y_axis.values[index[1]] * z_axis.values[index[2]];
@@ -269,7 +318,7 @@ void evaluate_tensor_product_hessians(
     const AxisBasisEvaluations& y_axis,
     const AxisBasisEvaluations& z_axis,
     std::vector<Hessian>& hessians) {
-    hessians.assign(tensor_indices.size(), Hessian{});
+    hessians.resize(tensor_indices.size());
     for (std::size_t n = 0; n < tensor_indices.size(); ++n) {
         const auto& index = tensor_indices[n];
         Hessian H{};
@@ -469,7 +518,7 @@ void LagrangeBasis::build_pyramid_nodes() {
 
 void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                     std::vector<Real>& values) const {
-    values.assign(size(), Real(0));
+    values.resize(size());
     const LagrangeTopology topology = lagrange_topology_traits(element_type_).topology;
     switch (topology) {
         case LagrangeTopology::Point:
@@ -478,28 +527,30 @@ void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         case LagrangeTopology::Line:
         case LagrangeTopology::Quadrilateral:
         case LagrangeTopology::Hexahedron: {
-            const AxisBasisEvaluations x_axis = evaluate_1d_basis(nodes_1d_, xi[0]);
+            LagrangeEvaluateScratch& scratch = evaluate_scratch();
+            const AxisBasisEvaluations x_axis = fill_axis_scratch(scratch.axis_x, nodes_1d_, xi[0]);
             AxisBasisEvaluations y_axis = constant_axis_basis();
             AxisBasisEvaluations z_axis = constant_axis_basis();
 
             if (topology != LagrangeTopology::Line) {
-                y_axis = evaluate_1d_basis(nodes_1d_, xi[1]);
+                y_axis = fill_axis_scratch(scratch.axis_y, nodes_1d_, xi[1]);
             }
             if (topology == LagrangeTopology::Hexahedron) {
-                z_axis = evaluate_1d_basis(nodes_1d_, xi[2]);
+                z_axis = fill_axis_scratch(scratch.axis_z, nodes_1d_, xi[2]);
             }
 
             evaluate_tensor_product_values(tensor_indices_, x_axis, y_axis, z_axis, values);
             return;
         }
         case LagrangeTopology::Wedge: {
-            const AxisBasisEvaluations z_axis = evaluate_1d_basis(nodes_1d_, xi[2]);
-            std::vector<Real> tri_values;
-            detail::evaluate_triangle_simplex_basis(simplex_exponents_, order_, xi, &tri_values, nullptr, nullptr);
+            LagrangeEvaluateScratch& scratch = evaluate_scratch();
+            const AxisBasisEvaluations z_axis = fill_axis_scratch(scratch.axis_z, nodes_1d_, xi[2]);
+            detail::evaluate_triangle_simplex_basis(simplex_exponents_, order_, xi,
+                                                    &scratch.tri_values, nullptr, nullptr);
 
             for (std::size_t n = 0; n < wedge_indices_.size(); ++n) {
                 const auto& index = wedge_indices_[n];
-                values[n] = tri_values[index[0]] * z_axis.values[index[1]];
+                values[n] = scratch.tri_values[index[0]] * z_axis.values[index[1]];
             }
             return;
         }
@@ -522,40 +573,43 @@ void LagrangeBasis::evaluate_values(const math::Vector<Real, 3>& xi,
 
 void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                                        std::vector<Gradient>& gradients) const {
-    gradients.assign(size(), Gradient{});
     const LagrangeTopology topology = lagrange_topology_traits(element_type_).topology;
     switch (topology) {
         case LagrangeTopology::Point:
+            gradients.resize(size());
+            gradients[0] = Gradient{};
             return;
         case LagrangeTopology::Line:
         case LagrangeTopology::Quadrilateral:
         case LagrangeTopology::Hexahedron: {
-            const AxisBasisEvaluations x_axis = evaluate_1d_basis(nodes_1d_, xi[0]);
+            LagrangeEvaluateScratch& scratch = evaluate_scratch();
+            const AxisBasisEvaluations x_axis = fill_axis_scratch(scratch.axis_x, nodes_1d_, xi[0]);
             AxisBasisEvaluations y_axis = constant_axis_basis();
             AxisBasisEvaluations z_axis = constant_axis_basis();
 
             if (topology != LagrangeTopology::Line) {
-                y_axis = evaluate_1d_basis(nodes_1d_, xi[1]);
+                y_axis = fill_axis_scratch(scratch.axis_y, nodes_1d_, xi[1]);
             }
             if (topology == LagrangeTopology::Hexahedron) {
-                z_axis = evaluate_1d_basis(nodes_1d_, xi[2]);
+                z_axis = fill_axis_scratch(scratch.axis_z, nodes_1d_, xi[2]);
             }
 
             evaluate_tensor_product_gradients(tensor_indices_, x_axis, y_axis, z_axis, gradients);
             return;
         }
         case LagrangeTopology::Wedge: {
-            const AxisBasisEvaluations z_axis = evaluate_1d_basis(nodes_1d_, xi[2]);
-            std::vector<Real> tri_values;
-            std::vector<Gradient> tri_gradients;
+            LagrangeEvaluateScratch& scratch = evaluate_scratch();
+            const AxisBasisEvaluations z_axis = fill_axis_scratch(scratch.axis_z, nodes_1d_, xi[2]);
             detail::evaluate_triangle_simplex_basis(
-                simplex_exponents_, order_, xi, &tri_values, &tri_gradients, nullptr);
+                simplex_exponents_, order_, xi,
+                &scratch.tri_values, &scratch.tri_gradients, nullptr);
 
+            gradients.resize(wedge_indices_.size());
             for (std::size_t n = 0; n < wedge_indices_.size(); ++n) {
                 const auto& index = wedge_indices_[n];
-                gradients[n][0] = tri_gradients[index[0]][0] * z_axis.values[index[1]];
-                gradients[n][1] = tri_gradients[index[0]][1] * z_axis.values[index[1]];
-                gradients[n][2] = tri_values[index[0]] * z_axis.first[index[1]];
+                gradients[n][0] = scratch.tri_gradients[index[0]][0] * z_axis.values[index[1]];
+                gradients[n][1] = scratch.tri_gradients[index[0]][1] * z_axis.values[index[1]];
+                gradients[n][2] = scratch.tri_values[index[0]] * z_axis.first[index[1]];
             }
             return;
         }
@@ -578,23 +632,25 @@ void LagrangeBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
 
 void LagrangeBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
                                       std::vector<Hessian>& hessians) const {
-    hessians.assign(size(), Hessian{});
     const LagrangeTopology topology = lagrange_topology_traits(element_type_).topology;
     switch (topology) {
         case LagrangeTopology::Point:
+            hessians.resize(size());
+            hessians[0] = Hessian{};
             return;
         case LagrangeTopology::Line:
         case LagrangeTopology::Quadrilateral:
         case LagrangeTopology::Hexahedron: {
-            const AxisBasisEvaluations x_axis = evaluate_1d_basis(nodes_1d_, xi[0]);
+            LagrangeEvaluateScratch& scratch = evaluate_scratch();
+            const AxisBasisEvaluations x_axis = fill_axis_scratch(scratch.axis_x, nodes_1d_, xi[0]);
             AxisBasisEvaluations y_axis = constant_axis_basis();
             AxisBasisEvaluations z_axis = constant_axis_basis();
 
             if (topology != LagrangeTopology::Line) {
-                y_axis = evaluate_1d_basis(nodes_1d_, xi[1]);
+                y_axis = fill_axis_scratch(scratch.axis_y, nodes_1d_, xi[1]);
             }
             if (topology == LagrangeTopology::Hexahedron) {
-                z_axis = evaluate_1d_basis(nodes_1d_, xi[2]);
+                z_axis = fill_axis_scratch(scratch.axis_z, nodes_1d_, xi[2]);
             }
 
             evaluate_tensor_product_hessians(tensor_indices_, x_axis, y_axis, z_axis, hessians);
@@ -607,26 +663,26 @@ void LagrangeBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
             detail::evaluate_tetrahedron_simplex_basis(simplex_exponents_, order_, xi, nullptr, nullptr, &hessians);
             return;
         case LagrangeTopology::Wedge: {
-            const AxisBasisEvaluations z_axis = evaluate_1d_basis(nodes_1d_, xi[2]);
-            std::vector<Real> tri_values;
-            std::vector<Gradient> tri_gradients;
-            std::vector<Hessian> tri_hessians;
+            LagrangeEvaluateScratch& scratch = evaluate_scratch();
+            const AxisBasisEvaluations z_axis = fill_axis_scratch(scratch.axis_z, nodes_1d_, xi[2]);
             detail::evaluate_triangle_simplex_basis(
-                simplex_exponents_, order_, xi, &tri_values, &tri_gradients, &tri_hessians);
+                simplex_exponents_, order_, xi,
+                &scratch.tri_values, &scratch.tri_gradients, &scratch.tri_hessians);
 
+            hessians.resize(wedge_indices_.size());
             for (std::size_t n = 0; n < wedge_indices_.size(); ++n) {
                 const auto& index = wedge_indices_[n];
                 Hessian H{};
-                H(0, 0) = tri_hessians[index[0]](0, 0) * z_axis.values[index[1]];
-                H(1, 1) = tri_hessians[index[0]](1, 1) * z_axis.values[index[1]];
-                H(0, 1) = tri_hessians[index[0]](0, 1) * z_axis.values[index[1]];
+                H(0, 0) = scratch.tri_hessians[index[0]](0, 0) * z_axis.values[index[1]];
+                H(1, 1) = scratch.tri_hessians[index[0]](1, 1) * z_axis.values[index[1]];
+                H(0, 1) = scratch.tri_hessians[index[0]](0, 1) * z_axis.values[index[1]];
                 H(1, 0) = H(0, 1);
 
-                H(2, 2) = tri_values[index[0]] * z_axis.second[index[1]];
+                H(2, 2) = scratch.tri_values[index[0]] * z_axis.second[index[1]];
 
-                H(0, 2) = tri_gradients[index[0]][0] * z_axis.first[index[1]];
+                H(0, 2) = scratch.tri_gradients[index[0]][0] * z_axis.first[index[1]];
                 H(2, 0) = H(0, 2);
-                H(1, 2) = tri_gradients[index[0]][1] * z_axis.first[index[1]];
+                H(1, 2) = scratch.tri_gradients[index[0]][1] * z_axis.first[index[1]];
                 H(2, 1) = H(1, 2);
 
                 hessians[n] = H;

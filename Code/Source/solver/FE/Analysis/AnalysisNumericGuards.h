@@ -36,7 +36,8 @@ namespace numeric {
         constexpr std::uint32_t exponent_mask = 0x7f800000U;
         return (bits & exponent_mask) != exponent_mask;
     } else {
-        return std::isfinite(static_cast<double>(value));
+        using std::isfinite;
+        return isfinite(value);
     }
 }
 

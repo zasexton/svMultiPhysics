@@ -270,8 +270,7 @@ std::optional<CoercivityClass> coercivityFrom(PositivityClass positivity)
 bool tangentPositivityViolation(PositivityClass positivity) noexcept
 {
     return positivity == PositivityClass::Negative ||
-           positivity == PositivityClass::Nonpositive ||
-           positivity == PositivityClass::Indefinite;
+           positivity == PositivityClass::Nonpositive;
 }
 
 PropertyStatus coefficientStatus(PositivityClass positivity) noexcept
@@ -288,6 +287,49 @@ PropertyStatus coefficientStatus(PositivityClass positivity) noexcept
             return PropertyStatus::Unknown;
     }
     return PropertyStatus::Unknown;
+}
+
+PositivityClass positivityFromRange(Real min_value,
+                                    Real max_value,
+                                    Real tolerance) noexcept
+{
+    if (!numeric::finiteOrdered(min_value, max_value)) {
+        return PositivityClass::Unknown;
+    }
+    const Real tol = tolerance > Real{} ? tolerance : Real{1.0e-12};
+    if (min_value > tol) {
+        return PositivityClass::Positive;
+    }
+    if (min_value >= -tol && max_value >= -tol) {
+        return PositivityClass::Nonnegative;
+    }
+    if (max_value < -tol) {
+        return PositivityClass::Negative;
+    }
+    if (max_value <= tol && min_value <= tol) {
+        return PositivityClass::Nonpositive;
+    }
+    return PositivityClass::Indefinite;
+}
+
+bool localSpectrumComplete(const CoefficientPropertySummary& summary) noexcept
+{
+    return summary.local_spectrum_coverage_present &&
+           summary.local_spectrum_coverage_complete &&
+           summary.local_spectrum_quadrature_coverage_complete &&
+           summary.local_spectrum_nonfinite_count == 0u &&
+           numeric::finiteOrdered(summary.local_symmetric_part_min_eigenvalue,
+                                  summary.local_symmetric_part_max_eigenvalue);
+}
+
+bool localSpectrumComplete(const NonlinearTangentSummary& summary) noexcept
+{
+    return summary.local_spectrum_coverage_present &&
+           summary.local_spectrum_coverage_complete &&
+           summary.local_spectrum_quadrature_coverage_complete &&
+           summary.local_spectrum_nonfinite_count == 0u &&
+           numeric::finiteOrdered(summary.local_symmetric_part_min_eigenvalue,
+                                  summary.local_symmetric_part_max_eigenvalue);
 }
 
 bool coefficientCoverageComplete(const CoefficientPropertySummary& summary) noexcept
@@ -369,6 +411,14 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             summary.nonnormal_growth_bound_present &&
             summary.nonnormal_growth_bound_finite &&
             finiteNonnegative(summary.nonnormal_growth_bound);
+        const bool logarithmic_norm_bound_valid =
+            summary.logarithmic_norm_bound_present &&
+            summary.logarithmic_norm_bound_finite &&
+            numeric::finite(summary.logarithmic_norm_bound) &&
+            (!summary.accepted_logarithmic_norm_bound_present ||
+             (numeric::finite(summary.accepted_logarithmic_norm_bound) &&
+              summary.logarithmic_norm_bound <=
+                  summary.accepted_logarithmic_norm_bound + tol));
         const bool accepted_growth_bound_valid =
             summary.accepted_nonnormal_growth_bound_present &&
             finiteNonnegative(summary.accepted_nonnormal_growth_bound) &&
@@ -395,16 +445,18 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             summary.stability_region_evidence_present &&
             theorem_scoped &&
             (operator_stability_region_scope ||
-             (summary.energy_norm_contractivity_evidence_present &&
-              summary.contractivity_norm_metadata_present &&
-              norm_scope_complete) ||
-             (summary.logarithmic_norm_bound_present &&
-              norm_scope_complete));
+            (summary.energy_norm_contractivity_evidence_present &&
+             summary.contractivity_norm_metadata_present &&
+             norm_scope_complete) ||
+            (summary.logarithmic_norm_bound_present &&
+             logarithmic_norm_bound_valid &&
+             norm_scope_complete));
         const bool norm_certificate =
             (summary.energy_norm_contractivity_evidence_present &&
              summary.contractivity_norm_metadata_present &&
              norm_scope_complete) ||
             (summary.logarithmic_norm_bound_present &&
+             logarithmic_norm_bound_valid &&
              norm_scope_complete &&
              (summary.numerical_range_coverage_present || theorem_scoped)) ||
             (summary.invariant_domain_evidence_present &&
@@ -429,6 +481,10 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             (stability_region_certificate ||
              norm_certificate ||
              nonnormal_certificate);
+        const bool nonmodal_certificate =
+            norm_certificate || nonnormal_certificate ||
+            (ssp && ssp_certificate);
+        const bool requires_amplification = !nonmodal_certificate;
 
         PropertyClaim claim;
         claim.kind = PropertyKind::TemporalStability;
@@ -457,13 +513,15 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
                 "Time-integration stability class lacks certification metadata";
-        } else if (!summary.amplification_radius_present) {
+        } else if (requires_amplification &&
+                   !summary.amplification_radius_present) {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
             claim.description =
-                "Time-integration stability lacks amplification-radius evidence";
-        } else if (!amplification_numeric_valid) {
+                "Time-integration stability lacks amplification-radius or non-modal theorem/norm evidence";
+        } else if (summary.amplification_radius_present &&
+                   !amplification_numeric_valid) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
@@ -508,7 +566,7 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.certification_class = CertificationClass::Violated;
             claim.description =
                 "Conditional time-integration stability violated by CFL estimate";
-        } else if (!amplification_bounded) {
+        } else if (requires_amplification && !amplification_bounded) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
@@ -560,6 +618,16 @@ void TemporalStabilityAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.operator_normality_evidence_present ? "true" : "false") +
             ", energy_contractivity=" +
             std::string(summary.energy_norm_contractivity_evidence_present ? "true" : "false") +
+            ", logarithmic_norm=" +
+            std::string(summary.logarithmic_norm_bound_present ? "true" : "false") +
+            ", logarithmic_norm_value=" +
+            std::to_string(summary.logarithmic_norm_bound) +
+            ", accepted_logarithmic_norm_present=" +
+            std::string(summary.accepted_logarithmic_norm_bound_present ? "true" : "false") +
+            ", accepted_logarithmic_norm_value=" +
+            std::to_string(summary.accepted_logarithmic_norm_bound) +
+            ", logarithmic_norm_valid=" +
+            std::string(logarithmic_norm_bound_valid ? "true" : "false") +
             ", contractivity_norm=" +
             std::string(summary.contractivity_norm_metadata_present ? "true" : "false") +
             ", stability_norm_metadata=" +
@@ -696,11 +764,22 @@ void CoefficientConstitutiveAnalyzer::run(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->coefficient_properties) {
-        const auto status = coefficientStatus(summary.positivity);
+        const bool local_spectrum_certifies_current_state =
+            localSpectrumComplete(summary);
+        const auto effective_positivity =
+            local_spectrum_certifies_current_state
+                ? positivityFromRange(
+                      summary.local_symmetric_part_min_eigenvalue,
+                      summary.local_symmetric_part_max_eigenvalue,
+                      summary.positivity_tolerance)
+                : summary.positivity;
+        const auto status = coefficientStatus(effective_positivity);
         const bool positive_or_nonnegative =
-            summary.positivity == PositivityClass::Positive ||
-            summary.positivity == PositivityClass::Nonnegative;
-        const bool coverage_complete = coefficientCoverageComplete(summary);
+            effective_positivity == PositivityClass::Positive ||
+            effective_positivity == PositivityClass::Nonnegative;
+        const bool coverage_complete =
+            coefficientCoverageComplete(summary) ||
+            local_spectrum_certifies_current_state;
         const bool contradicted_bound =
             positive_or_nonnegative &&
             coefficientDeclaredBoundContradictsPositivity(summary);
@@ -745,9 +824,17 @@ void CoefficientConstitutiveAnalyzer::run(const ProblemAnalysisContext& context,
             ", max_eigenvalue=" +
             std::to_string(summary.max_eigenvalue) +
             ", positivity=" +
-            std::to_string(static_cast<int>(summary.positivity)) +
+            std::to_string(static_cast<int>(effective_positivity)) +
             ", coverage_complete=" +
-            std::string(coverage_complete ? "true" : "false"),
+            std::string(coverage_complete ? "true" : "false") +
+            ", local_spectrum=" +
+            std::string(local_spectrum_certifies_current_state ? "true" : "false") +
+            ", local_min=" +
+            std::to_string(summary.local_symmetric_part_min_eigenvalue) +
+            ", local_max=" +
+            std::to_string(summary.local_symmetric_part_max_eigenvalue) +
+            ", local_samples=" +
+            std::to_string(summary.local_spectrum_sample_count),
             positivity.confidence);
         report.claims.push_back(std::move(positivity));
 
@@ -837,6 +924,15 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->nonlinear_tangents) {
+        const bool local_spectrum_certifies_current_state =
+            localSpectrumComplete(summary);
+        const auto effective_tangent_positivity =
+            local_spectrum_certifies_current_state
+                ? positivityFromRange(
+                      summary.local_symmetric_part_min_eigenvalue,
+                      summary.local_symmetric_part_max_eigenvalue,
+                      summary.finite_difference_tolerance)
+                : summary.tangent_positivity;
         const bool tolerance_declared =
             numeric::finiteDeclaredTolerance(
                 summary.finite_difference_tolerance);
@@ -855,12 +951,14 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
         const bool action_violation =
             action_numeric_valid &&
             summary.finite_difference_action_error > tol;
+        const bool indefinite_tangent =
+            effective_tangent_positivity == PositivityClass::Indefinite;
         const bool inconsistent =
             summary.tangent_consistency == TangentConsistencyClass::Frozen ||
             summary.tangent_consistency == TangentConsistencyClass::Inconsistent ||
             action_violation ||
             summary.newton_stagnation_count > 0u ||
-            tangentPositivityViolation(summary.tangent_positivity);
+            tangentPositivityViolation(effective_tangent_positivity);
 
         PropertyClaim claim;
         claim.kind = PropertyKind::NonlinearTangentStructure;
@@ -871,10 +969,10 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
             : summary.block.operator_tag;
         claim.operator_symmetry_class =
             operatorSymmetryFrom(summary.tangent_symmetry);
-        claim.coercivity_class = coercivityFrom(summary.tangent_positivity);
+        claim.coercivity_class = coercivityFrom(effective_tangent_positivity);
         claim.claim_origin = "NonlinearTangentAnalyzer";
 
-        if (tangentPositivityViolation(summary.tangent_positivity)) {
+        if (tangentPositivityViolation(effective_tangent_positivity)) {
             claim.status = PropertyStatus::Violated;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
@@ -939,7 +1037,15 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
             ", tangent_symmetry=" +
             symmetryName(summary.tangent_symmetry) +
             ", tangent_positivity=" +
-            positivityName(summary.tangent_positivity) +
+            positivityName(effective_tangent_positivity) +
+            ", local_spectrum=" +
+            std::string(local_spectrum_certifies_current_state ? "true" : "false") +
+            ", local_min=" +
+            std::to_string(summary.local_symmetric_part_min_eigenvalue) +
+            ", local_max=" +
+            std::to_string(summary.local_symmetric_part_max_eigenvalue) +
+            ", local_samples=" +
+            std::to_string(summary.local_spectrum_sample_count) +
             ", jacobian_nonsingularity=" +
             std::string(summary.jacobian_nonsingularity_evidence_present ? "true" : "false") +
             ", residual_decrease=" +
@@ -956,6 +1062,681 @@ void NonlinearTangentAnalyzer::run(const ProblemAnalysisContext& context,
                 "Nonlinear tangent summary '" + summary.residual_id +
                 "' has invalid finite-difference action tolerance or residual");
         }
+        report.claims.push_back(std::move(claim));
+
+        if (indefinite_tangent) {
+            PropertyClaim resolution_claim;
+            resolution_claim.kind = PropertyKind::IndefiniteOperatorResolution;
+            resolution_claim.status = PropertyStatus::Unknown;
+            resolution_claim.confidence = AnalysisConfidence::Medium;
+            resolution_claim.certification_class = CertificationClass::NotCertified;
+            resolution_claim.variables = blockVariables(summary.block);
+            resolution_claim.domain = summary.block.domain;
+            resolution_claim.tested_block_id = summary.block.operator_tag.empty()
+                ? summary.residual_id
+                : summary.block.operator_tag;
+            resolution_claim.estimate_scope = summary.residual_id;
+            resolution_claim.coercivity_class = CoercivityClass::Indefinite;
+            resolution_claim.claim_origin = "NonlinearTangentAnalyzer";
+            resolution_claim.description =
+                "Indefinite nonlinear tangent requires an indefinite-system resolution route rather than a positivity violation";
+            resolution_claim.addEvidence("NonlinearTangentAnalyzer",
+                "Tangent symmetric-part metadata is indefinite; certification is delegated to Schur, minimum-residual, Krylov, or equivalent indefinite solver evidence",
+                AnalysisConfidence::Medium);
+            report.claims.push_back(std::move(resolution_claim));
+        }
+    }
+}
+
+std::string NullspaceDegeneracyAnalyzer::name() const
+{
+    return "NullspaceDegeneracyAnalyzer";
+}
+
+void NullspaceDegeneracyAnalyzer::run(const ProblemAnalysisContext& context,
+                                      ProblemAnalysisReport& report) const
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) return;
+
+    AnalyzerRunLogSummary log;
+    log.analyzer = "NullspaceDegeneracyAnalyzer";
+    log.summary_id = "assembled-nullspace-degeneracy";
+    log.status = summaries->nullspace_degeneracies.empty()
+        ? "unavailable"
+        : "evaluated";
+    log.attempted_count =
+        static_cast<std::uint64_t>(summaries->nullspace_degeneracies.size());
+
+    for (const auto& summary : summaries->nullspace_degeneracies) {
+        const bool degenerate =
+            summary.degeneracy_class == DegeneracyClass::DegenerateDiagnostic ||
+            summary.degeneracy_class == DegeneracyClass::GaugeLikeNullspace ||
+            summary.degeneracy_class == DegeneracyClass::UnanchoredKernel ||
+            summary.degeneracy_class == DegeneracyClass::ProjectedKernel;
+        if (degenerate) {
+            ++log.incomplete_count;
+        }
+        log.detail_lines.push_back(
+            "id='" + summary.degeneracy_id +
+            "' nullity=" + std::to_string(summary.nullity) +
+            " near_zero_pivots=" +
+            std::to_string(summary.near_zero_pivot_count) +
+            " constrained_dofs=" +
+            std::to_string(summary.constrained_dof_count) +
+            " class=" +
+            std::to_string(static_cast<int>(summary.degeneracy_class)) +
+            " reason='" + summary.reason + "'");
+
+        if (!degenerate) {
+            continue;
+        }
+
+        PropertyClaim claim;
+        claim.kind = PropertyKind::InfSupCondition;
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.domain = summary.block.domain;
+        claim.variables = summary.affected_variables.empty()
+            ? blockVariables(summary.block)
+            : summary.affected_variables;
+        claim.inf_sup_class = InfSupClass::Unknown;
+        claim.applicability_class = ApplicabilityClass::NotApplicable;
+        claim.certification_class = CertificationClass::NotCertified;
+        claim.nullspace_handling_class = summary.nullspace_handling;
+        claim.tested_block_id = summary.block.operator_tag;
+        claim.estimate_scope = summary.degeneracy_id;
+        claim.claim_origin = "NullspaceDegeneracyAnalyzer";
+        claim.description =
+            "Inf-sup and solver-stability diagnostics are out of scope for this degenerate reduced operator: " +
+            summary.reason;
+        claim.addEvidence("NullspaceDegeneracyAnalyzer",
+            "NullspaceDegeneracySummary rank=" +
+            std::to_string(summary.estimated_rank) +
+            ", nullity=" + std::to_string(summary.nullity) +
+            ", near_zero_rows=" +
+            std::to_string(summary.near_zero_row_count) +
+            ", near_zero_pivots=" +
+            std::to_string(summary.near_zero_pivot_count) +
+            ", free_dofs=" + std::to_string(summary.free_dof_count) +
+            ", constrained_dofs=" +
+            std::to_string(summary.constrained_dof_count) +
+            ", tolerance=" + std::to_string(summary.rank_tolerance) +
+            ", class=" +
+            std::to_string(static_cast<int>(summary.degeneracy_class)),
+            AnalysisConfidence::Medium);
+        report.claims.push_back(std::move(claim));
+    }
+
+    if (log.attempted_count > 0u) {
+        report.run_logs.push_back(std::move(log));
+    }
+}
+
+std::string OperatorApplicabilityAnalyzer::name() const
+{
+    return "OperatorApplicabilityAnalyzer";
+}
+
+void OperatorApplicabilityAnalyzer::run(const ProblemAnalysisContext& context,
+                                        ProblemAnalysisReport& report) const
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) return;
+
+    for (const auto& summary : summaries->applicability) {
+        PropertyKind kind = PropertyKind::MatrixMonotonicityRisk;
+        if (summary.theorem_family == TheoremFamily::ScalarDMP) {
+            kind = PropertyKind::DiscreteMaximumPrinciple;
+        } else if (summary.theorem_family == TheoremFamily::MMatrix) {
+            kind = PropertyKind::MMatrixStructure;
+        } else if (summary.theorem_family == TheoremFamily::InvariantDomain) {
+            kind = PropertyKind::InvariantDomainPreservation;
+        } else if (summary.theorem_family == TheoremFamily::InfSup ||
+                   summary.theorem_family == TheoremFamily::Fortin) {
+            kind = PropertyKind::InfSupCondition;
+        } else if (summary.theorem_family == TheoremFamily::Schur) {
+            kind = PropertyKind::IndefiniteOperatorResolution;
+        } else if (summary.theorem_family == TheoremFamily::TemporalCFL) {
+            kind = PropertyKind::TemporalStability;
+        } else if (summary.theorem_family == TheoremFamily::EnergyEntropy) {
+            kind = PropertyKind::EnergyStability;
+        }
+
+        PropertyClaim claim;
+        claim.kind = kind;
+        claim.status = summary.applicability == ApplicabilityClass::NotApplicable
+            ? PropertyStatus::Unknown
+            : (summary.applicability == ApplicabilityClass::Applicable
+                ? PropertyStatus::Likely
+                : PropertyStatus::Unknown);
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.domain = summary.block.domain;
+        claim.variables = summary.variables.empty()
+            ? blockVariables(summary.block)
+            : summary.variables;
+        claim.applicability_class = summary.applicability;
+        claim.certification_class =
+            summary.applicability == ApplicabilityClass::NotApplicable
+                ? CertificationClass::Unknown
+                : CertificationClass::NotCertified;
+        claim.tested_block_id = summary.block.operator_tag;
+        claim.claim_origin = "OperatorApplicabilityAnalyzer";
+        claim.description =
+            summary.applicability == ApplicabilityClass::NotApplicable
+                ? "Theorem family is structurally not applicable to this operator"
+                : (summary.applicability == ApplicabilityClass::Applicable
+                    ? "Theorem family is structurally applicable, pending numeric evidence"
+                    : "Theorem-family applicability is unknown");
+        claim.addEvidence("OperatorApplicabilityAnalyzer",
+            "ApplicabilitySummary family=" +
+            std::to_string(static_cast<int>(summary.theorem_family)) +
+            ", applicability=" +
+            std::to_string(static_cast<int>(summary.applicability)) +
+            ", field_descriptors=" +
+            std::string(summary.inferred_from_field_descriptors ? "true" : "false") +
+            ", contribution_traits=" +
+            std::string(summary.inferred_from_contribution_traits ? "true" : "false") +
+            ", block_structure=" +
+            std::string(summary.inferred_from_block_structure ? "true" : "false") +
+            ", reason='" + summary.reason + "'",
+            AnalysisConfidence::Medium);
+        report.claims.push_back(std::move(claim));
+    }
+}
+
+std::string robustnessTrendGroupKey(const RobustnessTrendSummary& summary)
+{
+    return summary.metric_name + "|" +
+           (summary.operator_tag.empty() ? summary.block.operator_tag
+                                         : summary.operator_tag) +
+           "|" + summary.case_name;
+}
+
+bool robustnessMetricDeterioratesWhenIncreasing(
+    const std::string& metric_name)
+{
+    return metric_name.find("condition") != std::string::npos ||
+           metric_name.find("norm") != std::string::npos;
+}
+
+RobustnessTrendClass classifyAggregatedTrend(const std::string& metric_name,
+                                             Real first_value,
+                                             Real last_value)
+{
+    if (!numeric::finite(first_value) || !numeric::finite(last_value)) {
+        return RobustnessTrendClass::Unknown;
+    }
+    const Real delta = last_value - first_value;
+    const Real scale = std::max({Real{1}, std::abs(first_value),
+                                 std::abs(last_value)});
+    if (std::abs(delta) <= Real{1.0e-12} * scale) {
+        return RobustnessTrendClass::Stable;
+    }
+    const bool increasing_is_bad =
+        robustnessMetricDeterioratesWhenIncreasing(metric_name);
+    if (increasing_is_bad) {
+        return delta > Real{} ? RobustnessTrendClass::Deteriorating
+                              : RobustnessTrendClass::Improving;
+    }
+    return delta > Real{} ? RobustnessTrendClass::Improving
+                          : RobustnessTrendClass::Deteriorating;
+}
+
+std::vector<RobustnessTrendSummary> aggregateRobustnessTrendRecords(
+    const std::vector<RobustnessTrendSummary>& input)
+{
+    std::vector<RobustnessTrendSummary> output;
+    std::vector<bool> used(input.size(), false);
+
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        if (used[i]) {
+            continue;
+        }
+        if (input[i].sample_count > 1u) {
+            output.push_back(input[i]);
+            used[i] = true;
+            continue;
+        }
+
+        const auto key = robustnessTrendGroupKey(input[i]);
+        std::vector<std::size_t> group;
+        for (std::size_t j = i; j < input.size(); ++j) {
+            if (!used[j] &&
+                input[j].sample_count <= 1u &&
+                robustnessTrendGroupKey(input[j]) == key) {
+                group.push_back(j);
+                used[j] = true;
+            }
+        }
+        if (group.size() <= 1u) {
+            output.push_back(input[i]);
+            continue;
+        }
+        std::sort(group.begin(),
+                  group.end(),
+                  [&](std::size_t lhs, std::size_t rhs) {
+                      const auto& a = input[lhs];
+                      const auto& b = input[rhs];
+                      if (!a.dof_counts.empty() && !b.dof_counts.empty() &&
+                          a.dof_counts.front() != b.dof_counts.front()) {
+                          return a.dof_counts.front() < b.dof_counts.front();
+                      }
+                      if (!a.mesh_sizes.empty() && !b.mesh_sizes.empty() &&
+                          a.mesh_sizes.front() != b.mesh_sizes.front()) {
+                          return a.mesh_sizes.front() > b.mesh_sizes.front();
+                      }
+                      if (!a.run_ids.empty() && !b.run_ids.empty() &&
+                          a.run_ids.front() != b.run_ids.front()) {
+                          return a.run_ids.front() < b.run_ids.front();
+                      }
+                      return lhs < rhs;
+                  });
+
+        RobustnessTrendSummary aggregate = input[group.front()];
+        aggregate.sample_count = 0u;
+        aggregate.run_ids.clear();
+        aggregate.dof_counts.clear();
+        aggregate.mesh_sizes.clear();
+        aggregate.min_value = std::numeric_limits<Real>::infinity();
+        aggregate.max_value = -std::numeric_limits<Real>::infinity();
+        aggregate.explicit_uniform_lower_bound_present = true;
+        aggregate.explicit_uniform_lower_bound =
+            std::numeric_limits<Real>::infinity();
+        aggregate.explicit_uniform_upper_bound_present = true;
+        aggregate.explicit_uniform_upper_bound =
+            -std::numeric_limits<Real>::infinity();
+        aggregate.pass_threshold_present = false;
+        aggregate.comparable_parameter_scope = true;
+
+        const Real first_value = input[group.front()].min_value;
+        const Real last_value = input[group.back()].max_value;
+        const auto& first_hash = input[group.front()].parameter_hash;
+        for (const auto idx : group) {
+            const auto& sample = input[idx];
+            aggregate.sample_count +=
+                std::max<std::uint64_t>(sample.sample_count, 1u);
+            aggregate.run_ids.insert(aggregate.run_ids.end(),
+                                     sample.run_ids.begin(),
+                                     sample.run_ids.end());
+            aggregate.dof_counts.insert(aggregate.dof_counts.end(),
+                                        sample.dof_counts.begin(),
+                                        sample.dof_counts.end());
+            aggregate.mesh_sizes.insert(aggregate.mesh_sizes.end(),
+                                        sample.mesh_sizes.begin(),
+                                        sample.mesh_sizes.end());
+            aggregate.min_value = std::min(aggregate.min_value,
+                                           sample.min_value);
+            aggregate.max_value = std::max(aggregate.max_value,
+                                           sample.max_value);
+            if (sample.parameter_hash != first_hash) {
+                aggregate.comparable_parameter_scope = false;
+            }
+            if (sample.pass_threshold_present) {
+                aggregate.pass_threshold_present = true;
+                aggregate.pass_threshold =
+                    std::max(aggregate.pass_threshold,
+                             sample.pass_threshold);
+            }
+            if (sample.explicit_uniform_lower_bound_present &&
+                numeric::finite(sample.explicit_uniform_lower_bound)) {
+                aggregate.explicit_uniform_lower_bound =
+                    std::min(aggregate.explicit_uniform_lower_bound,
+                             sample.explicit_uniform_lower_bound);
+            } else {
+                aggregate.explicit_uniform_lower_bound_present = false;
+            }
+            if (sample.explicit_uniform_upper_bound_present &&
+                numeric::finite(sample.explicit_uniform_upper_bound)) {
+                aggregate.explicit_uniform_upper_bound =
+                    std::max(aggregate.explicit_uniform_upper_bound,
+                             sample.explicit_uniform_upper_bound);
+            } else {
+                aggregate.explicit_uniform_upper_bound_present = false;
+            }
+        }
+        if (!aggregate.explicit_uniform_lower_bound_present) {
+            aggregate.explicit_uniform_lower_bound = Real{};
+        }
+        if (!aggregate.explicit_uniform_upper_bound_present) {
+            aggregate.explicit_uniform_upper_bound = Real{};
+        }
+
+        Real denominator = static_cast<Real>(group.size() - 1u);
+        if (!aggregate.dof_counts.empty() &&
+            aggregate.dof_counts.front() != aggregate.dof_counts.back()) {
+            denominator = static_cast<Real>(
+                aggregate.dof_counts.back()) -
+                static_cast<Real>(aggregate.dof_counts.front());
+        }
+        aggregate.slope_estimate =
+            denominator != Real{} ? (last_value - first_value) / denominator
+                                  : Real{};
+        aggregate.trend_class =
+            aggregate.comparable_parameter_scope
+                ? classifyAggregatedTrend(aggregate.metric_name,
+                                          first_value,
+                                          last_value)
+                : RobustnessTrendClass::Incomparable;
+        output.push_back(std::move(aggregate));
+    }
+
+    return output;
+}
+
+std::string RobustnessTrendAnalyzer::name() const
+{
+    return "RobustnessTrendAnalyzer";
+}
+
+void RobustnessTrendAnalyzer::run(const ProblemAnalysisContext& context,
+                                  ProblemAnalysisReport& report) const
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) return;
+    const auto trends =
+        aggregateRobustnessTrendRecords(summaries->robustness_trends);
+
+    AnalyzerRunLogSummary log;
+    log.analyzer = "RobustnessTrendAnalyzer";
+    log.summary_id = "robustness-trends";
+    log.status = trends.empty() ? "unavailable" : "evaluated";
+    log.attempted_count =
+        static_cast<std::uint64_t>(trends.size());
+
+    for (const auto& summary : trends) {
+        const bool enough_samples = summary.sample_count >= 2u;
+        const bool increasing_is_bad =
+            robustnessMetricDeterioratesWhenIncreasing(summary.metric_name);
+        const bool lower_bound_certified =
+            !increasing_is_bad &&
+            summary.explicit_uniform_lower_bound_present &&
+            finitePositive(summary.explicit_uniform_lower_bound) &&
+            (!summary.pass_threshold_present ||
+             summary.explicit_uniform_lower_bound >= summary.pass_threshold);
+        const bool upper_bound_certified =
+            increasing_is_bad &&
+            summary.explicit_uniform_upper_bound_present &&
+            finitePositive(summary.explicit_uniform_upper_bound) &&
+            (!summary.pass_threshold_present ||
+             summary.explicit_uniform_upper_bound <= summary.pass_threshold);
+        const bool certified =
+            enough_samples &&
+            summary.comparable_parameter_scope &&
+            (lower_bound_certified || upper_bound_certified);
+        const bool deteriorating =
+            summary.trend_class == RobustnessTrendClass::Deteriorating;
+        const bool incomparable =
+            !summary.comparable_parameter_scope ||
+            summary.trend_class == RobustnessTrendClass::Incomparable;
+
+        if (certified) {
+            ++log.certified_count;
+        } else if (!enough_samples || incomparable) {
+            ++log.incomplete_count;
+        }
+        log.detail_lines.push_back(
+            "metric='" + summary.metric_name +
+            "' samples=" + std::to_string(summary.sample_count) +
+            " trend=" + std::to_string(static_cast<int>(summary.trend_class)) +
+            " min=" + std::to_string(summary.min_value) +
+            " max=" + std::to_string(summary.max_value));
+
+        PropertyClaim claim;
+        claim.kind = summary.metric_name.find("inf_sup") != std::string::npos
+            ? PropertyKind::InfSupCondition
+            : PropertyKind::ParameterRobustness;
+        claim.variables = summary.variables.empty()
+            ? blockVariables(summary.block)
+            : summary.variables;
+        claim.domain = summary.block.domain;
+        claim.tested_block_id = summary.block.operator_tag;
+        claim.estimate_scope = summary.metric_name;
+        claim.claim_origin = "RobustnessTrendAnalyzer";
+
+        if (certified) {
+            claim.status = PropertyStatus::Preserved;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Certified;
+            claim.description =
+                increasing_is_bad
+                    ? "Cross-run trend has comparable samples and an explicit uniform upper-bound certificate"
+                    : "Cross-run trend has comparable samples and an explicit uniform lower-bound certificate";
+        } else if (deteriorating && enough_samples) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Cross-run trend deteriorates; this is robustness evidence, not a single-run theorem failure";
+        } else {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                enough_samples
+                    ? "Cross-run trend evidence is available but lacks comparable scope or an explicit uniform lower bound"
+                    : "Robustness is not certified from a single run";
+        }
+
+        claim.addEvidence("RobustnessTrendAnalyzer",
+            "RobustnessTrendSummary metric='" + summary.metric_name +
+            "', samples=" + std::to_string(summary.sample_count) +
+            ", run_ids=" + std::to_string(summary.run_ids.size()) +
+            ", min=" + std::to_string(summary.min_value) +
+            ", max=" + std::to_string(summary.max_value) +
+            ", slope=" + std::to_string(summary.slope_estimate) +
+            ", comparable_scope=" +
+            std::string(summary.comparable_parameter_scope ? "true" : "false") +
+            ", uniform_lower_bound=" +
+            std::string(summary.explicit_uniform_lower_bound_present ? "true" : "false") +
+            ", uniform_upper_bound=" +
+            std::string(summary.explicit_uniform_upper_bound_present ? "true" : "false") +
+            ", upper_bound=" +
+            std::to_string(summary.explicit_uniform_upper_bound),
+            claim.confidence);
+        report.claims.push_back(std::move(claim));
+    }
+
+    if (log.attempted_count > 0u) {
+        report.run_logs.push_back(std::move(log));
+    }
+}
+
+std::string SchurQualityAnalyzer::name() const
+{
+    return "SchurQualityAnalyzer";
+}
+
+namespace {
+
+bool schurNullspaceHandlingAcceptable(NullspaceHandlingClass handling) noexcept
+{
+    return handling == NullspaceHandlingClass::NotApplicable ||
+           handling == NullspaceHandlingClass::AnchoredByConstraints ||
+           handling == NullspaceHandlingClass::ProjectedOut;
+}
+
+bool schurQualityCertificationComplete(
+    const SchurComplementSummary& summary) noexcept
+{
+    const bool spectral_bounds_valid =
+        summary.spectral_equivalence_bounds_present &&
+        numeric::finitePositiveOrdered(
+            summary.spectral_equivalence_lower_bound,
+            summary.spectral_equivalence_upper_bound);
+    const bool preconditioner_bounds_valid =
+        summary.preconditioner_equivalence_bounds_present &&
+        numeric::finitePositiveOrdered(
+            summary.preconditioner_equivalence_lower_bound,
+            summary.preconditioner_equivalence_upper_bound);
+    return summary.schur_available &&
+           summary.reduction_exact_for_analysis &&
+           summary.inf_sup_evidence_present &&
+           summary.nullspace_handling_evidence_present &&
+           schurNullspaceHandlingAcceptable(summary.nullspace_handling) &&
+           spectral_bounds_valid &&
+           preconditioner_bounds_valid;
+}
+
+} // namespace
+
+void SchurQualityAnalyzer::run(const ProblemAnalysisContext& context,
+                               ProblemAnalysisReport& report) const
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) return;
+
+    for (const auto& summary : summaries->schur_complements) {
+        const bool robust_certified =
+            summary.condition_risk_class ==
+                SchurQualityClass::PreconditionedRobust &&
+            schurQualityCertificationComplete(summary);
+        PropertyClaim claim;
+        claim.kind = PropertyKind::IndefiniteOperatorResolution;
+        claim.variables = summary.variables.empty()
+            ? blockVariables(summary.block)
+            : summary.variables;
+        claim.domain = summary.block.domain;
+        claim.tested_block_id = summary.block.operator_tag.empty()
+            ? summary.schur_id
+            : summary.block.operator_tag;
+        claim.estimate_scope = summary.schur_id;
+        claim.claim_origin = "SchurQualityAnalyzer";
+        claim.nullspace_handling_class = summary.nullspace_handling;
+
+        if (!summary.schur_available) {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::Unknown;
+            claim.reduced_definiteness_class = CertificationClass::Unknown;
+            claim.description = "Schur complement evidence is unavailable";
+        } else if (robust_certified) {
+            claim.status = PropertyStatus::Preserved;
+            claim.confidence = AnalysisConfidence::High;
+            claim.certification_class = CertificationClass::Certified;
+            claim.reduced_definiteness_class = CertificationClass::Certified;
+            claim.description =
+                "Configured Schur/preconditioner evidence has finite equivalence bounds, exact reduction, inf-sup scope, and acceptable nullspace handling";
+        } else if (summary.condition_risk_class ==
+                   SchurQualityClass::PreconditionedRobust) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.reduced_definiteness_class = CertificationClass::NotCertified;
+            claim.description =
+                "Schur quality is classified as preconditioned robust, but certification requires finite spectral/preconditioner equivalence bounds, exact reduction, inf-sup evidence, and nullspace scope";
+        } else if (summary.condition_risk_class ==
+                   SchurQualityClass::PreconditionedRisk) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.reduced_definiteness_class = CertificationClass::NotCertified;
+            claim.description =
+                "Configured Schur/preconditioner evidence indicates solver-quality risk";
+        } else if (summary.condition_risk_class ==
+                   SchurQualityClass::RawConditionOnly) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.reduced_definiteness_class = CertificationClass::NotCertified;
+            claim.description =
+                "Only raw Schur conditioning evidence is available; solver-quality risk depends on preconditioned evidence";
+        } else {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.reduced_definiteness_class = CertificationClass::NotCertified;
+            claim.description =
+                "Schur complement exists but preconditioned quality evidence is insufficient";
+        }
+
+        claim.addEvidence("SchurQualityAnalyzer",
+            "SchurComplementSummary id='" + summary.schur_id +
+            "', available=" +
+            std::string(summary.schur_available ? "true" : "false") +
+            ", raw_condition_present=" +
+            std::string(summary.condition_estimate_present ? "true" : "false") +
+            ", raw_condition=" + std::to_string(summary.condition_estimate) +
+            ", preconditioner='" + summary.preconditioner_type + "'" +
+            ", probe_available=" +
+            std::string(summary.preconditioned_probe_available ? "true" : "false") +
+            ", contraction_present=" +
+            std::string(summary.preconditioned_residual_contraction_present ? "true" : "false") +
+            ", contraction=" +
+            std::to_string(summary.preconditioned_residual_contraction) +
+            ", block_tol=" + std::to_string(summary.block_solve_tolerance) +
+            ", risk_class=" +
+            std::to_string(static_cast<int>(summary.condition_risk_class)),
+            claim.confidence);
+        report.claims.push_back(std::move(claim));
+    }
+}
+
+std::string ToleranceAdequacyAnalyzer::name() const
+{
+    return "ToleranceAdequacyAnalyzer";
+}
+
+void ToleranceAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
+                                    ProblemAnalysisReport& report) const
+{
+    const auto* summaries = context.analysisSummaries();
+    if (!summaries) return;
+
+    for (const auto& summary : summaries->numerical_error_budgets) {
+        PropertyClaim claim;
+        claim.kind = PropertyKind::SolverCompatibility;
+        claim.variables = summary.variables.empty()
+            ? blockVariables(summary.block)
+            : summary.variables;
+        claim.domain = summary.block.domain;
+        claim.tested_block_id = summary.block.operator_tag;
+        claim.estimate_scope = summary.budget_id;
+        claim.claim_origin = "ToleranceAdequacyAnalyzer";
+
+        if (summary.adequacy_class ==
+            ToleranceAdequacyClass::TooStrictForConditioning) {
+            claim.status = PropertyStatus::Likely;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Fixed verification tolerance appears too strict for the observed conditioning-derived numerical floor";
+        } else if (summary.adequacy_class ==
+                   ToleranceAdequacyClass::Reasonable) {
+            claim.status = PropertyStatus::Preserved;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Fixed verification tolerance is consistent with the observed conditioning-derived numerical floor";
+        } else {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::Unknown;
+            claim.description =
+                "Numerical error budget is inconclusive";
+        }
+
+        claim.addEvidence("ToleranceAdequacyAnalyzer",
+            "NumericalErrorBudgetSummary id='" + summary.budget_id +
+            "', residual_present=" +
+            std::string(summary.residual_norm_present ? "true" : "false") +
+            ", residual=" + std::to_string(summary.residual_norm) +
+            ", matrix_norm=" +
+            std::to_string(summary.matrix_norm_estimate) +
+            ", condition=" + std::to_string(summary.condition_estimate) +
+            ", linear_tol=" + std::to_string(summary.linear_tolerance) +
+            ", verification_tol=" +
+            std::to_string(summary.verification_tolerance) +
+            ", expected_abs_floor=" +
+            std::to_string(summary.expected_absolute_floor) +
+            ", expected_rel_floor=" +
+            std::to_string(summary.expected_relative_floor) +
+            ", recommended_tol=" +
+            std::to_string(summary.recommended_verification_tolerance) +
+            ", adequacy=" +
+            std::to_string(static_cast<int>(summary.adequacy_class)) +
+            ", reason='" + summary.reason + "'",
+            claim.confidence);
         report.claims.push_back(std::move(claim));
     }
 }
@@ -1389,10 +2170,20 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->quadrature_adequacy) {
-        const Real tol = effectiveTolerance(summary.aliasing_tolerance);
+        const bool aliasing_metric_declared =
+            summary.aliasing_indicator_present ||
+            summary.aliasing_tolerance_present;
+        const bool aliasing_indicator_valid =
+            !summary.aliasing_indicator_present ||
+            numeric::finiteNonnegative(summary.aliasing_indicator);
+        const bool aliasing_tolerance_valid =
+            !summary.aliasing_tolerance_present ||
+            numeric::finiteDeclaredTolerance(summary.aliasing_tolerance);
         const bool aliasing_numeric_valid =
-            numeric::finiteNonnegative(summary.aliasing_indicator) &&
-            finiteNonnegative(summary.aliasing_tolerance);
+            aliasing_indicator_valid && aliasing_tolerance_valid;
+        const Real tol = summary.aliasing_tolerance_present
+            ? effectiveTolerance(summary.aliasing_tolerance)
+            : effectiveTolerance(Real{});
         const bool degree_known =
             summary.integrand_polynomial_degree >= 0 &&
             summary.quadrature_exact_degree >= 0;
@@ -1412,9 +2203,28 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
             (!summary.curved_or_nonlinear_mapping ||
              summary.overintegration_metadata_present ||
              summary.nonlinear_aliasing_control_present);
+        const bool aliasing_required =
+            summary.curved_or_nonlinear_mapping ||
+            summary.reduced_integration_declared ||
+            summary.nonlinear_aliasing_control_required;
+        const bool aliasing_invalid =
+            aliasing_metric_declared && !aliasing_numeric_valid;
+        const bool aliasing_failed =
+            aliasing_metric_declared &&
+            aliasing_numeric_valid &&
+            summary.aliasing_indicator_present &&
+            summary.aliasing_tolerance_present &&
+            summary.aliasing_indicator > tol;
+        const bool aliasing_missing =
+            aliasing_required && !aliasing_metric_declared;
+        const bool aliasing_incomplete =
+            aliasing_required &&
+            aliasing_metric_declared &&
+            (!summary.aliasing_indicator_present ||
+             !summary.aliasing_tolerance_present);
         const bool aliasing_violation =
-            !aliasing_numeric_valid ||
-            summary.aliasing_indicator > tol ||
+            aliasing_invalid ||
+            aliasing_failed ||
             summary.underintegrated_entry_count > 0u ||
             summary.zero_energy_mode_count > 0u;
         const bool reduced_with_control =
@@ -1436,6 +2246,12 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
             claim.certification_class = CertificationClass::Violated;
             claim.description =
                 "Quadrature summary violates exactness or aliasing requirements";
+        } else if (aliasing_missing || aliasing_incomplete) {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.description =
+                "Quadrature exactness or aliasing control requires scoped aliasing metric evidence";
         } else if ((degree_exact && polynomial_exactness_scope_complete) ||
                    (summary.nonlinear_aliasing_control_present &&
                     !aliasing_violation) ||
@@ -1495,6 +2311,12 @@ void QuadratureAdequacyAnalyzer::run(const ProblemAnalysisContext& context,
             std::to_string(summary.underintegrated_entry_count) +
             ", zero_energy_modes=" +
             std::to_string(summary.zero_energy_mode_count) +
+            ", aliasing_required=" +
+            std::string(aliasing_required ? "true" : "false") +
+            ", aliasing_indicator_present=" +
+            std::string(summary.aliasing_indicator_present ? "true" : "false") +
+            ", aliasing_tolerance_present=" +
+            std::string(summary.aliasing_tolerance_present ? "true" : "false") +
             ", aliasing_indicator=" +
             std::to_string(summary.aliasing_indicator),
             claim.confidence);
@@ -1741,6 +2563,38 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->invariant_domains) {
+        const auto applicability_it = std::find_if(
+            summaries->applicability.begin(),
+            summaries->applicability.end(),
+            [&](const ApplicabilitySummary& applicability) {
+                return applicability.theorem_family ==
+                           TheoremFamily::InvariantDomain &&
+                       applicability.applicability ==
+                           ApplicabilityClass::NotApplicable &&
+                       (localVariableSetsIntersect(applicability.variables,
+                                                   summary.variables) ||
+                        summary.variables.empty());
+            });
+        if (applicability_it != summaries->applicability.end()) {
+            PropertyClaim claim;
+            claim.kind = PropertyKind::InvariantDomainPreservation;
+            claim.variables = summary.variables;
+            claim.invariant_set_id = summary.invariant_set_id;
+            claim.claim_origin = "PreservationStructureAnalyzer";
+            claim.applicability_class = ApplicabilityClass::NotApplicable;
+            claim.certification_class = CertificationClass::Unknown;
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.description =
+                "Invariant-domain theorem is not structurally applicable to this operator scope";
+            claim.addEvidence("PreservationStructureAnalyzer",
+                "ApplicabilitySummary reason='" +
+                applicability_it->reason + "'",
+                AnalysisConfidence::Medium);
+            report.claims.push_back(std::move(claim));
+            continue;
+        }
+
         const bool bounds_declared =
             summary.lower_bound_active || summary.upper_bound_active;
         const bool lower_bound_valid =
@@ -1846,6 +2700,10 @@ void PreservationStructureAnalyzer::run(const ProblemAnalysisContext& context,
             std::string(summary.upper_bound_active ? "true" : "false") +
             ", upper_bound=" +
             std::to_string(summary.upper_bound) +
+            ", excluded_active=" +
+            std::string(summary.excluded_value_active ? "true" : "false") +
+            ", excluded_value=" +
+            std::to_string(summary.excluded_value) +
             ", bounds_valid=" +
             std::string(bounds_valid ? "true" : "false") +
             ", limiter=" +

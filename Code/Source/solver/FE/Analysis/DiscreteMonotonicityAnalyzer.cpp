@@ -185,6 +185,71 @@ bool hasTransportContamination(const ProblemAnalysisContext& context,
     return false;
 }
 
+bool invariantDomainEvidenceCoversMatrix(
+    const InvariantDomainSummary& summary,
+    const DiscreteMatrixSummary& matrix)
+{
+    return variableSetsIntersect(summary.variables, variablesForBlock(matrix.block));
+}
+
+bool stabilizationEvidenceCoversMatrix(
+    const StabilizationAdequacySummary& summary,
+    const DiscreteMatrixSummary& matrix)
+{
+    return blockEvidenceMatches(summary.block, matrix.block) ||
+           variableSetsIntersect(summary.variables, variablesForBlock(matrix.block));
+}
+
+bool hasTransportCompatibleSchemeEvidence(const AnalysisSummarySet* summaries,
+                                          const DiscreteMatrixSummary& matrix)
+{
+    if (!summaries) {
+        return false;
+    }
+
+    for (const auto& invariant : summaries->invariant_domains) {
+        if (!invariantDomainEvidenceCoversMatrix(invariant, matrix)) {
+            continue;
+        }
+        const bool theorem_present =
+            !invariant.invariant_domain_theorem_id.empty();
+        const bool scheme_evidence_present =
+            invariant.limiter_evidence_present ||
+            invariant.low_order_invariant_domain_evidence_present ||
+            invariant.convex_limiting_evidence_present ||
+            invariant.spatial_monotonicity_evidence_present;
+        const bool cfl_ok =
+            !invariant.cfl_estimate_present ||
+            invariant.cfl_condition_satisfied;
+        if (theorem_present &&
+            scheme_evidence_present &&
+            invariant.source_admissibility_evidence_present &&
+            cfl_ok &&
+            invariant.post_step_violation_count == 0u) {
+            return true;
+        }
+    }
+
+    for (const auto& stabilization : summaries->stabilization_adequacy) {
+        if (!stabilizationEvidenceCoversMatrix(stabilization, matrix)) {
+            continue;
+        }
+        const bool cfl_ok =
+            !stabilization.cfl_estimate_present ||
+            stabilization.cfl_condition_satisfied;
+        if (!stabilization.stabilization_theorem_id.empty() &&
+            stabilization.method_scope_metadata_present &&
+            stabilization.stability_norm_metadata_present &&
+            stabilization.stabilization_parameter_bounds_present &&
+            cfl_ok &&
+            stabilization.violation_count == 0u) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool hasScopedPositiveCoefficientEvidence(const AnalysisSummarySet* summaries,
                                           const DiscreteMatrixSummary& matrix)
 {
@@ -219,7 +284,7 @@ struct DmpGateEvidence {
     bool positive_coefficient{false};
     bool mesh_operator_applicability{false};
     bool rhs_sign_compatible{false};
-    bool no_transport_contamination{false};
+    bool transport_compatible{false};
 };
 
 DmpGateEvidence collectDmpGates(const ProblemAnalysisContext& context,
@@ -235,8 +300,9 @@ DmpGateEvidence collectDmpGates(const ProblemAnalysisContext& context,
                                             matrix);
     gates.mesh_operator_applicability = matrix.dmp_applicability_evidence;
     gates.rhs_sign_compatible = matrix.dmp_rhs_sign_evidence;
-    gates.no_transport_contamination =
-        !hasTransportContamination(context, matrix);
+    gates.transport_compatible =
+        !hasTransportContamination(context, matrix) ||
+        hasTransportCompatibleSchemeEvidence(context.analysisSummaries(), matrix);
     return gates;
 }
 
@@ -247,7 +313,7 @@ bool dmpGatesSatisfied(const DmpGateEvidence& gates) noexcept
            gates.positive_coefficient &&
            gates.mesh_operator_applicability &&
            gates.rhs_sign_compatible &&
-           gates.no_transport_contamination;
+           gates.transport_compatible;
 }
 
 std::string missingDmpGateDescription(const DmpGateEvidence& gates)
@@ -263,8 +329,8 @@ std::string missingDmpGateDescription(const DmpGateEvidence& gates)
                   "mesh/operator DMP applicability evidence");
     appendMissing(missing, gates.rhs_sign_compatible,
                   "source/reaction/RHS sign compatibility evidence");
-    appendMissing(missing, gates.no_transport_contamination,
-                  "absence of transport contamination");
+    appendMissing(missing, gates.transport_compatible,
+                  "transport-compatible theorem/stabilization/limiter evidence or absence of transport terms");
     return joinMissing(missing);
 }
 
@@ -282,7 +348,7 @@ struct MatrixSignVerdict {
     bool sign_evidence_complete{false};
     bool row_sum_evidence_complete{false};
     bool z_matrix{false};
-    bool m_matrix{false};
+    bool sign_pattern_prerequisites_satisfied{false};
     bool positive_offdiag_violation{false};
     bool diagonal_violation{false};
     bool row_sum_violation{false};
@@ -340,7 +406,7 @@ MMatrixTheoremEvidence mMatrixTheoremEvidence(
         matrix.inverse_positivity_metadata_present;
     const bool irreducible_dd_route =
         theorem_id_present &&
-        verdict.m_matrix &&
+        verdict.sign_pattern_prerequisites_satisfied &&
         matrix.irreducible_diagonal_dominance_evidence &&
         matrix.diagonal_dominance_evidence_complete &&
         matrix.irreducibility_evidence_present;
@@ -420,6 +486,7 @@ MatrixSignVerdict classifyMatrix(const DiscreteMatrixSummary& matrix)
         numeric::finiteNonnegative(matrix.row_sum_tolerance);
     const bool sign_numeric_valid =
         tolerance_evidence_valid &&
+        matrix.invalid_entry_count == 0u &&
         matrix.nonfinite_entry_count == 0u &&
         numeric::finiteNonnegative(matrix.max_positive_offdiag);
     const bool row_sum_numeric_valid =
@@ -454,11 +521,12 @@ MatrixSignVerdict classifyMatrix(const DiscreteMatrixSummary& matrix)
          matrix.min_row_sum < -tol);
 
     verdict.z_matrix = !verdict.positive_offdiag_violation;
-    verdict.m_matrix = verdict.z_matrix &&
-                       verdict.row_sum_evidence_complete &&
-                       !verdict.diagonal_violation &&
-                       !verdict.row_sum_violation &&
-                       matrix.diagonal_count > 0u;
+    verdict.sign_pattern_prerequisites_satisfied =
+        verdict.z_matrix &&
+        verdict.row_sum_evidence_complete &&
+        !verdict.diagonal_violation &&
+        !verdict.row_sum_violation &&
+        matrix.diagonal_count > 0u;
     return verdict;
 }
 
@@ -468,6 +536,26 @@ std::string matrixLabel(const DiscreteMatrixSummary& matrix)
         return "'" + matrix.block.operator_tag + "'";
     }
     return "matrix block";
+}
+
+const ApplicabilitySummary* findApplicabilitySummary(
+    const AnalysisSummarySet* summaries,
+    TheoremFamily family,
+    const DiscreteMatrixSummary& matrix)
+{
+    if (!summaries) {
+        return nullptr;
+    }
+    for (const auto& summary : summaries->applicability) {
+        if (summary.theorem_family != family) {
+            continue;
+        }
+        if (blockEvidenceMatches(summary.block, matrix.block) ||
+            variableSetsIntersect(summary.variables, variablesForBlock(matrix.block))) {
+            return &summary;
+        }
+    }
+    return nullptr;
 }
 
 void addMatrixClaim(ProblemAnalysisReport& report,
@@ -514,11 +602,43 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
                    bool reduction_exact)
 {
     const auto verdict = classifyMatrix(matrix);
+    const std::string reduction_prefix = reduced ? "Reduced free-free " : "";
+    const std::string label = matrixLabel(matrix);
+    const auto* dmp_applicability =
+        findApplicabilitySummary(context.analysisSummaries(),
+                                 TheoremFamily::ScalarDMP,
+                                 matrix);
+    const auto* mmatrix_applicability =
+        findApplicabilitySummary(context.analysisSummaries(),
+                                 TheoremFamily::MMatrix,
+                                 matrix);
+    if ((dmp_applicability &&
+         dmp_applicability->applicability == ApplicabilityClass::NotApplicable) ||
+        (mmatrix_applicability &&
+         mmatrix_applicability->applicability == ApplicabilityClass::NotApplicable)) {
+        const std::string reason =
+            dmp_applicability &&
+                    dmp_applicability->applicability ==
+                        ApplicabilityClass::NotApplicable
+                ? dmp_applicability->reason
+                : mmatrix_applicability->reason;
+        addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
+            PropertyStatus::Unknown, CertificationClass::Unknown,
+            MatrixSignStructureClass::Unknown,
+            reduction_prefix + "M-matrix theorem is not applicable for " + label,
+            reason,
+            ApplicabilityClass::NotApplicable);
+        addMatrixClaim(report, matrix, PropertyKind::DiscreteMaximumPrinciple,
+            PropertyStatus::Unknown, CertificationClass::Unknown,
+            MatrixSignStructureClass::Unknown,
+            reduction_prefix + "DMP theorem is not applicable for " + label,
+            reason,
+            ApplicabilityClass::NotApplicable);
+        return;
+    }
     const auto gates = collectDmpGates(context, matrix);
     const bool dmp_applicable = dmpGatesSatisfied(gates);
     const bool nodal_scalar_applicable = gates.nodal_scalar_space;
-    const std::string reduction_prefix = reduced ? "Reduced free-free " : "";
-    const std::string label = matrixLabel(matrix);
 
     if (!verdict.analyzable) {
         addMatrixClaim(report, matrix, PropertyKind::ZMatrixStructure,
@@ -535,7 +655,9 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
             std::to_string(matrix.scanned_row_count) +
             ", expected_rows=" + std::to_string(matrix.expected_row_count) +
             ", nonfinite_entries=" +
-            std::to_string(matrix.nonfinite_entry_count);
+            std::to_string(matrix.nonfinite_entry_count) +
+            ", invalid_entries=" +
+            std::to_string(matrix.invalid_entry_count);
         addMatrixClaim(report, matrix, PropertyKind::ZMatrixStructure,
             PropertyStatus::Unknown, CertificationClass::Unknown,
             MatrixSignStructureClass::Unknown,
@@ -558,7 +680,7 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
 
     if (verdict.z_matrix) {
         addMatrixClaim(report, matrix, PropertyKind::ZMatrixStructure,
-            PropertyStatus::Exact, CertificationClass::Certified,
+            PropertyStatus::Preserved, CertificationClass::Certified,
             MatrixSignStructureClass::ZMatrix,
             reduction_prefix + "off-diagonal sign structure is a Z-matrix for " + label,
             "No positive off-diagonal entries exceeded the sign tolerance");
@@ -584,7 +706,9 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
             std::to_string(matrix.scanned_row_count) +
             ", expected_rows=" + std::to_string(matrix.expected_row_count) +
             ", nonfinite_row_sums=" +
-            std::to_string(matrix.nonfinite_row_sum_count);
+            std::to_string(matrix.nonfinite_row_sum_count) +
+            ", invalid_entries=" +
+            std::to_string(matrix.invalid_entry_count);
         addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
             PropertyStatus::Unknown, CertificationClass::Unknown,
             MatrixSignStructureClass::Unknown,
@@ -620,12 +744,12 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
 
     if (m_matrix_certified) {
         addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
-            PropertyStatus::Exact, CertificationClass::Certified,
+            PropertyStatus::Preserved, CertificationClass::Certified,
             MatrixSignStructureClass::MMatrixCertified,
             reduction_prefix + "matrix is M-matrix eligible for " + label,
             theorem_evidence.certified_prerequisites + " via " +
                 m_matrix_theorem + " were certified");
-    } else if (verdict.m_matrix) {
+    } else if (verdict.sign_pattern_prerequisites_satisfied) {
         addMatrixClaim(report, matrix, PropertyKind::MMatrixStructure,
             PropertyStatus::Unknown, CertificationClass::Unknown,
             MatrixSignStructureClass::MMatrixNotCertified,
@@ -647,7 +771,7 @@ void analyzeMatrix(const ProblemAnalysisContext& context,
             PropertyStatus::Preserved, CertificationClass::Certified,
             MatrixSignStructureClass::MMatrixCertified,
             reduction_prefix + "scalar operator has DMP-compatible M-matrix evidence for " + label,
-            "Nodal scalar space, diffusion/coefficient/source gates, transport exclusion, and certified M-matrix evidence support DMP applicability");
+            "Nodal scalar space, diffusion/coefficient/source gates, transport-compatible theorem/stabilization/limiter evidence or no transport terms, and certified M-matrix evidence support DMP applicability");
     } else if (nodal_scalar_applicable && verdict.positive_offdiag_violation) {
         addMatrixClaim(report, matrix, PropertyKind::DiscreteMaximumPrinciple,
             PropertyStatus::Violated, CertificationClass::Violated,

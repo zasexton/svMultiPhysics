@@ -16,7 +16,7 @@
  * per-form structural summaries:
  *   - per-field FieldOperatorSummary (gradient, sym_grad, absolute, stabilization, ...)
  *   - per-block FormBlockSummary (mass-like, stiffness-like, ...)
- *   - aggregate FormStructureSummary (saddle-point, stabilization, couplings)
+ *   - aggregate FormStructureSummary (stabilization and observed couplings)
  *
  * KernelAnalyzer consumes FieldOperatorSummary to emit nullspace PropertyClaims.
  *
@@ -145,7 +145,7 @@ struct FormStructureSummary {
  *   FormStructureAnalyzer analyzer;
  *   auto summary = analyzer.analyze(residual, {field_u, field_p});
  *   // summary.per_field[0] describes how field_u appears
- *   // summary.has_saddle_point_structure tells if mixed indefinite
+ *   // summary.mixed_couplings contains only observed test/trial co-occurrences
  * @endcode
  */
 class FormStructureAnalyzer {

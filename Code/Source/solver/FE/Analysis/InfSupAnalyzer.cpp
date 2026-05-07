@@ -69,6 +69,52 @@ bool numericScopeMatchesPair(const InfSupEstimateSummary& summary)
            containsVariable(variables, summary.multiplier_variable);
 }
 
+bool variableSetsIntersect(const std::vector<VariableKey>& a,
+                           const std::vector<VariableKey>& b)
+{
+    for (const auto& variable : a) {
+        if (containsVariable(b, variable)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool degeneracyClassIsOutOfScope(DegeneracyClass c) noexcept
+{
+    return c == DegeneracyClass::DegenerateDiagnostic ||
+           c == DegeneracyClass::GaugeLikeNullspace ||
+           c == DegeneracyClass::UnanchoredKernel ||
+           c == DegeneracyClass::ProjectedKernel;
+}
+
+const NullspaceDegeneracySummary* matchingDegeneracy(
+    const AnalysisSummarySet* summaries,
+    const InfSupEstimateSummary& estimate)
+{
+    if (!summaries) {
+        return nullptr;
+    }
+    std::vector<VariableKey> estimate_variables{
+        estimate.primal_variable,
+        estimate.multiplier_variable,
+    };
+    const auto block_variables = blockVariables(estimate.block);
+    for (const auto& summary : summaries->nullspace_degeneracies) {
+        if (!degeneracyClassIsOutOfScope(summary.degeneracy_class)) {
+            continue;
+        }
+        const auto degeneracy_variables = summary.affected_variables.empty()
+            ? blockVariables(summary.block)
+            : summary.affected_variables;
+        if (variableSetsIntersect(degeneracy_variables, estimate_variables) ||
+            variableSetsIntersect(degeneracy_variables, block_variables)) {
+            return &summary;
+        }
+    }
+    return nullptr;
+}
+
 bool numericMetadataComplete(const InfSupEstimateSummary& summary)
 {
     const bool uniform_lower_bound_valid =
@@ -84,6 +130,21 @@ bool numericMetadataComplete(const InfSupEstimateSummary& summary)
            summary.mesh_family_scope_present &&
            summary.boundary_condition_scope_present &&
            !summary.inf_sup_theorem_id.empty() &&
+           summary.test_rows > 0 &&
+           summary.test_cols > 0 &&
+           !summary.estimate_scope.empty() &&
+           numericScopeMatchesPair(summary) &&
+           nullspaceHandlingAcceptable(summary.nullspace_handling);
+}
+
+bool numericFailureScopeValid(const InfSupEstimateSummary& summary)
+{
+    return numeric::finite(summary.estimate_value) &&
+           numeric::finiteDeclaredTolerance(summary.estimate_tolerance) &&
+           summary.estimator_metadata_present &&
+           summary.norm_metadata_present &&
+           summary.mesh_family_scope_present &&
+           summary.boundary_condition_scope_present &&
            summary.test_rows > 0 &&
            summary.test_cols > 0 &&
            !summary.estimate_scope.empty() &&
@@ -145,12 +206,14 @@ bool certifiedPairMetadataComplete(const ProblemAnalysisContext& context,
         summary.known_stable_pair ||
         summary.fortin_operator_evidence_present;
     const bool beta_bound_valid =
-        summary.beta_lower_bound_present &&
-        numeric::finitePositive(summary.beta_lower_bound);
+        (summary.beta_lower_bound_present &&
+         numeric::finitePositive(summary.beta_lower_bound)) ||
+        summary.beta_lower_bound_symbolic_present;
     const bool fortin_norm_ok =
         !summary.fortin_operator_evidence_present ||
         (summary.fortin_operator_norm_bound_present &&
-         numeric::finitePositive(summary.fortin_operator_norm_bound));
+         numeric::finitePositive(summary.fortin_operator_norm_bound)) ||
+        summary.fortin_operator_norm_bound_symbolic_present;
     return scope_matches &&
            stable_pair_or_fortin &&
            !summary.pair_family.empty() &&
@@ -182,7 +245,8 @@ bool hasCertifiedInfSupForPair(const ProblemAnalysisReport& report,
 }
 
 void emitNumericInfSupClaim(ProblemAnalysisReport& report,
-                            const InfSupEstimateSummary& summary)
+                            const InfSupEstimateSummary& summary,
+                            const AnalysisSummarySet* summaries)
 {
     const Real tol = effectiveTolerance(summary);
     const bool tolerance_declared =
@@ -192,7 +256,11 @@ void emitNumericInfSupClaim(ProblemAnalysisReport& report,
         tolerance_declared && estimate_finite && summary.estimate_value > tol;
     const bool nonpositive_estimate =
         estimate_finite && summary.estimate_value <= Real{};
+    const bool estimate_at_or_below_tolerance =
+        tolerance_declared && estimate_finite && summary.estimate_value <= tol;
     const bool metadata_complete = numericMetadataComplete(summary);
+    const bool failure_scope_valid = numericFailureScopeValid(summary);
+    const auto* degeneracy = matchingDegeneracy(summaries, summary);
 
     PropertyClaim claim;
     claim.kind = PropertyKind::InfSupCondition;
@@ -205,13 +273,28 @@ void emitNumericInfSupClaim(ProblemAnalysisReport& report,
     claim.estimate_scope = summary.estimate_scope;
     claim.claim_origin = "InfSupAnalyzer";
 
-    if (nonpositive_estimate) {
+    if (nonpositive_estimate && degeneracy != nullptr) {
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.inf_sup_class = InfSupClass::Unknown;
+        claim.applicability_class = ApplicabilityClass::NotApplicable;
+        claim.certification_class = CertificationClass::NotCertified;
+        claim.description =
+            "Numeric inf-sup estimate is nonpositive, but the reduced operator was classified as a degenerate diagnostic scope";
+    } else if (estimate_at_or_below_tolerance && failure_scope_valid) {
         claim.status = PropertyStatus::Violated;
         claim.confidence = AnalysisConfidence::High;
         claim.inf_sup_class = InfSupClass::LikelyViolated;
         claim.certification_class = CertificationClass::Violated;
         claim.description =
-            "Numeric inf-sup estimate is nonpositive for the mixed pair";
+            "Scoped numeric inf-sup estimate fails the declared tolerance for the mixed pair";
+    } else if (estimate_at_or_below_tolerance || nonpositive_estimate) {
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Medium;
+        claim.inf_sup_class = InfSupClass::Unknown;
+        claim.certification_class = CertificationClass::NotCertified;
+        claim.description =
+            "Numeric inf-sup estimate is at or below the tolerance, but estimator, norm, pair, mesh, boundary, or kernel metadata is incomplete";
     } else if (positive_above_tolerance && metadata_complete) {
         claim.status = PropertyStatus::Preserved;
         claim.confidence = AnalysisConfidence::High;
@@ -261,7 +344,14 @@ void emitNumericInfSupClaim(ProblemAnalysisReport& report,
         ", boundary_scope=" +
         std::string(summary.boundary_condition_scope_present ? "true" : "false") +
         ", metadata_complete=" +
-        std::string(metadata_complete ? "true" : "false"),
+        std::string(metadata_complete ? "true" : "false") +
+        ", failure_scope_valid=" +
+        std::string(failure_scope_valid ? "true" : "false") +
+        ", degeneracy_scope=" +
+        std::string(degeneracy != nullptr ? "true" : "false") +
+        (degeneracy != nullptr
+             ? ", degeneracy_reason='" + degeneracy->reason + "'"
+             : ""),
         claim.confidence);
     report.claims.push_back(std::move(claim));
 }
@@ -312,9 +402,13 @@ void emitCertifiedPairInfSupClaim(const ProblemAnalysisContext& context,
         std::string(summary.boundary_condition_scope_present ? "true" : "false") +
         ", beta_lower_bound=" +
         std::to_string(summary.beta_lower_bound) +
+        ", beta_symbolic=" +
+        std::string(summary.beta_lower_bound_symbolic_present ? "true" : "false") +
         ", theorem='" + summary.inf_sup_theorem_id + "'" +
         ", fortin_norm_bound=" +
         std::to_string(summary.fortin_operator_norm_bound) +
+        ", fortin_norm_symbolic=" +
+        std::string(summary.fortin_operator_norm_bound_symbolic_present ? "true" : "false") +
         ", matching_field_metadata=" +
         std::string(fieldMetadataMatchesSummary(context, summary) ? "true" : "false"),
         claim.confidence);
@@ -330,7 +424,7 @@ void emitNumericSummaryHooks(const ProblemAnalysisContext& context,
     }
 
     for (const auto& summary : summaries->inf_sup_estimates) {
-        emitNumericInfSupClaim(report, summary);
+        emitNumericInfSupClaim(report, summary, summaries);
     }
     for (const auto& summary : summaries->inf_sup_pair_certifications) {
         emitCertifiedPairInfSupClaim(context, report, summary);
@@ -490,19 +584,20 @@ void InfSupAnalyzer::run(const ProblemAnalysisContext& context,
         } else {
             PropertyClaim claim;
             claim.kind = PropertyKind::InfSupCondition;
-            claim.status = PropertyStatus::Likely;
+            claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
-            claim.inf_sup_class = InfSupClass::LikelyViolated;
+            claim.inf_sup_class = InfSupClass::Required;
+            claim.certification_class = CertificationClass::NotCertified;
             claim.variables.push_back(pi.row_var);
             claim.variables.push_back(pi.col_var);
             claim.description =
-                "Inf-sup condition likely violated: same-order or unknown"
-                " space pair without stabilization for pairing group '" +
+                "Inf-sup evidence is required: same-order or unknown"
+                " space pair without stabilization metadata is not a certification-grade failure for pairing group '" +
                 pi.pairing_group + "'";
             claim.claim_origin = "InfSupAnalyzer";
             claim.addEvidence("InfSupAnalyzer",
                 "No stabilization surrogate and space pair does not have"
-                " different polynomial orders",
+                " different polynomial orders; no theorem or scoped numeric failure evidence was supplied",
                 AnalysisConfidence::Medium);
             report.claims.push_back(std::move(claim));
         }
@@ -537,6 +632,10 @@ void InfSupAnalyzer::run(const ProblemAnalysisContext& context,
         claim.confidence = AnalysisConfidence::Medium;
         claim.inf_sup_class = InfSupClass::Required;
         claim.variables = sc->variables;
+        claim.domain = sc->domain;
+        claim.tested_block_id = sc->tested_block_id;
+        claim.estimate_scope = sc->estimate_scope;
+        claim.certification_class = CertificationClass::NotCertified;
         claim.description =
             "Inf-sup condition required for mixed saddle-point system"
             " (inferred from MixedSaddlePoint claim, no pairing metadata)";

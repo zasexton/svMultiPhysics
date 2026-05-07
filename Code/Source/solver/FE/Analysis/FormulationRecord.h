@@ -121,6 +121,12 @@ struct FormulationRecord {
     /// Recognized scale factors discovered in the residual DAG.
     std::vector<FormScaleUsage> scale_usages;
 
+    /// Expression well-definedness constraints inferred from primitive DAG structure.
+    std::vector<ExpressionDomainConstraint> expression_domain_constraints;
+
+    /// Scheme-level invariant-domain metadata from explicit/theorem producers.
+    std::vector<InvariantDomainDescriptor> invariant_domain_descriptors;
+
     /// Resolved auxiliary-output consumers keyed by stable output id.
     std::vector<AuxiliaryOutputConsumerRecord> auxiliary_output_consumers;
 

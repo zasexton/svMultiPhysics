@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -78,6 +79,7 @@ void expectSameScalarSummary(const DiscreteMatrixSummary& a,
     EXPECT_EQ(a.negative_offdiag_count, b.negative_offdiag_count);
     EXPECT_EQ(a.near_zero_offdiag_count, b.near_zero_offdiag_count);
     EXPECT_EQ(a.row_sum_violation_count, b.row_sum_violation_count);
+    EXPECT_EQ(a.invalid_entry_count, b.invalid_entry_count);
     EXPECT_EQ(a.nonfinite_entry_count, b.nonfinite_entry_count);
     EXPECT_EQ(a.nonfinite_row_sum_count, b.nonfinite_row_sum_count);
     EXPECT_EQ(a.scanned_row_count, b.scanned_row_count);
@@ -116,6 +118,9 @@ TEST(Phase5SparseMatrixSummaryScanner, BackendNeutralCsrScanBuildsMatrixSignSumm
     EXPECT_EQ(summary.scanned_row_count, 3u);
     EXPECT_EQ(summary.expected_row_count, 3u);
     EXPECT_EQ(summary.scanned_entry_count, 7u);
+    EXPECT_TRUE(summary.gershgorin_lower_bound.has_value());
+    EXPECT_FALSE(summary.min_eigenvalue_estimate.has_value());
+    EXPECT_FALSE(summary.coercivity_lower_bound.has_value());
     EXPECT_DOUBLE_EQ(summary.min_row_sum, 0.0);
     EXPECT_DOUBLE_EQ(summary.max_row_sum, 1.0);
     EXPECT_DOUBLE_EQ(summary.max_abs_row_sum, 1.0);
@@ -127,6 +132,85 @@ TEST(Phase5SparseMatrixSummaryScanner, BackendNeutralCsrScanBuildsMatrixSignSumm
     EXPECT_EQ(result.log.retained_symmetry_entries, 7u);
     EXPECT_NE(result.log.message.find("dense_matrix_materialized=false"),
               std::string::npos);
+}
+
+TEST(Phase5SparseMatrixSummaryScanner, DuplicateEntriesAreSummedBeforeSignClassification)
+{
+    const std::vector<std::vector<SparseMatrixRowEntry>> rows{
+        {{0, 2.0}, {1, 1.0}, {1, -2.0}},
+        {{0, -1.0}, {1, 2.0}},
+    };
+
+    SparseMatrixScanOptions options;
+    options.sign_tolerance = 1.0e-12;
+    options.row_sum_tolerance = 1.0e-12;
+    options.symmetry_tolerance = 1.0e-12;
+
+    const auto result = scanSparseMatrixSummary(
+        CsrSparseRowScanSource::fromRows(2, 2, rows), {}, options);
+    const auto& summary = result.summary;
+
+    EXPECT_TRUE(summary.sign_evidence_complete);
+    EXPECT_EQ(summary.scanned_entry_count, 5u);
+    EXPECT_EQ(summary.offdiag_count, 2u);
+    EXPECT_EQ(summary.positive_offdiag_count, 0u);
+    EXPECT_EQ(summary.negative_offdiag_count, 2u);
+    EXPECT_DOUBLE_EQ(summary.max_positive_offdiag, 0.0);
+}
+
+TEST(Phase5SparseMatrixSummaryScanner, InvalidColumnInvalidatesCertificationEvidence)
+{
+    const std::vector<std::vector<SparseMatrixRowEntry>> rows{
+        {{0, 2.0}, {3, -1.0}},
+        {{0, -1.0}, {1, 2.0}},
+    };
+
+    SparseMatrixScanOptions options;
+    options.sign_tolerance = 1.0e-12;
+    options.row_sum_tolerance = 1.0e-12;
+    options.symmetry_tolerance = 1.0e-12;
+
+    const auto result = scanSparseMatrixSummary(
+        CsrSparseRowScanSource::fromRows(2, 2, rows), {}, options);
+    const auto& summary = result.summary;
+
+    EXPECT_EQ(summary.invalid_entry_count, 1u);
+    EXPECT_FALSE(summary.sign_evidence_complete);
+    EXPECT_FALSE(summary.row_sum_evidence_complete);
+    EXPECT_FALSE(summary.symmetry_evidence_complete);
+    ASSERT_FALSE(summary.worst_entries.empty());
+    EXPECT_NE(std::find_if(summary.worst_entries.begin(),
+                           summary.worst_entries.end(),
+                           [](const MatrixEntrySample& sample) {
+                               return sample.note == "invalid column index";
+                           }),
+              summary.worst_entries.end());
+}
+
+TEST(Phase5SparseMatrixSummaryScanner, IncompleteRowsDoNotCertifyEvenIfSourceClaimsComplete)
+{
+    const std::vector<std::vector<SparseMatrixRowEntry>> rows{
+        {{0, 2.0}},
+        {{1, 2.0}},
+    };
+
+    SparseMatrixScanOptions options;
+    options.sign_tolerance = 1.0e-12;
+    options.row_sum_tolerance = 1.0e-12;
+    options.symmetry_tolerance = 1.0e-12;
+
+    const auto result = scanSparseMatrixSummary(
+        CsrSparseRowScanSource::fromRows(
+            3, 3, rows, backends::BackendKind::Eigen, 0,
+            /*complete_global_rows=*/true),
+        {},
+        options);
+
+    EXPECT_EQ(result.summary.scanned_row_count, 2u);
+    EXPECT_EQ(result.summary.expected_row_count, 3u);
+    EXPECT_FALSE(result.summary.sign_evidence_complete);
+    EXPECT_FALSE(result.summary.row_sum_evidence_complete);
+    EXPECT_FALSE(result.summary.symmetry_evidence_complete);
 }
 
 TEST(Phase5SparseMatrixSummaryScanner, SignSummariesRecordBackendKindForAllBackends)

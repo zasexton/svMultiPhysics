@@ -51,6 +51,14 @@ TEST(BoundaryConditionDescriptor, ToString_InequalitySense) {
     EXPECT_STREQ(toString(InequalitySense::Complementarity), "Complementarity");
 }
 
+TEST(BoundaryConditionDescriptor, ToString_NitscheVariant) {
+    EXPECT_STREQ(toString(NitscheVariant::Unknown), "Unknown");
+    EXPECT_STREQ(toString(NitscheVariant::Symmetric), "Symmetric");
+    EXPECT_STREQ(toString(NitscheVariant::Nonsymmetric), "Nonsymmetric");
+    EXPECT_STREQ(toString(NitscheVariant::Skew), "Skew");
+    EXPECT_STREQ(toString(NitscheVariant::Incomplete), "Incomplete");
+}
+
 // ============================================================================
 // EssentialBC descriptor
 // ============================================================================
@@ -251,6 +259,12 @@ TEST(BoundaryConditionDescriptor, NitscheBC_WeakNitscheAnchorsAll) {
     EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakNitsche);
     EXPECT_TRUE(d.anchors_constant_mode);
     EXPECT_TRUE(d.anchors_rigid_body_translation);
+    ASSERT_TRUE(d.nitsche.has_value());
+    EXPECT_EQ(d.nitsche->variant, NitscheVariant::Symmetric);
+    EXPECT_TRUE(d.nitsche->primal_consistency_terms_present);
+    EXPECT_TRUE(d.nitsche->adjoint_consistency_terms_present);
+    EXPECT_TRUE(d.nitsche->rhs_consistency_terms_present);
+    EXPECT_TRUE(d.nitsche->penalty_positive);
 }
 
 TEST(BoundaryConditionDescriptor, TraceNitscheBC_WeakNitscheNormalComponentAnchorsAll) {
@@ -268,6 +282,9 @@ TEST(BoundaryConditionDescriptor, TraceNitscheBC_WeakNitscheNormalComponentAncho
     EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakNitsche);
     EXPECT_TRUE(d.anchors_constant_mode);
     EXPECT_TRUE(d.anchors_rigid_body_translation);
+    ASSERT_TRUE(d.nitsche.has_value());
+    EXPECT_EQ(d.nitsche->variant, NitscheVariant::Symmetric);
+    EXPECT_TRUE(d.nitsche->primal_consistency_terms_present);
 }
 
 TEST(BoundaryConditionDescriptor, InterfaceTraceNitscheBC_WeakNitscheNormalComponentOnInterface) {
@@ -287,6 +304,9 @@ TEST(BoundaryConditionDescriptor, InterfaceTraceNitscheBC_WeakNitscheNormalCompo
     EXPECT_EQ(d.enforcement_kind, EnforcementKind::WeakNitsche);
     EXPECT_TRUE(d.anchors_constant_mode);
     EXPECT_TRUE(d.anchors_rigid_body_translation);
+    ASSERT_TRUE(d.nitsche.has_value());
+    EXPECT_EQ(d.nitsche->variant, NitscheVariant::Symmetric);
+    EXPECT_TRUE(d.nitsche->primal_consistency_terms_present);
 }
 
 // ============================================================================
@@ -519,6 +539,44 @@ TEST(BoundaryConditionDescriptor, LowerNitsche) {
     EXPECT_TRUE(hasFlag(contribs[0].traits, OperatorTraitFlags::NullspaceLifting));
     EXPECT_EQ(contribs[1].role, ContributionRole::StabilizationBlock);
     EXPECT_TRUE(hasFlag(contribs[1].traits, OperatorTraitFlags::HasMass));
+    EXPECT_EQ(contribs[0].operator_tag, "bc:nitsche:consistency");
+    EXPECT_EQ(contribs[1].operator_tag, "bc:nitsche:penalty");
+    EXPECT_FALSE(contribs[0].contribution_id.empty());
+    EXPECT_FALSE(contribs[1].contribution_id.empty());
+    EXPECT_NE(contribs[0].contribution_id, contribs[1].contribution_id);
+    ASSERT_TRUE(contribs[0].consistency_kind.has_value());
+    EXPECT_EQ(*contribs[0].consistency_kind, ConsistencyKind::Unknown);
+    ASSERT_TRUE(contribs[0].adjoint_consistency.has_value());
+    EXPECT_EQ(*contribs[0].adjoint_consistency,
+              AdjointConsistencyKind::Unknown);
+}
+
+TEST(BoundaryConditionDescriptor, LowerNitsche_UsesExplicitConsistencyMetadata) {
+    BoundaryConditionDescriptor desc;
+    desc.primary_variable = VariableKey::field(0);
+    desc.enforcement_kind = EnforcementKind::WeakNitsche;
+    desc.is_homogeneous = false;
+    NitscheMetadata nitsche;
+    nitsche.variant = NitscheVariant::Symmetric;
+    nitsche.primal_consistency_terms_present = true;
+    nitsche.adjoint_consistency_terms_present = true;
+    nitsche.rhs_consistency_terms_present = true;
+    nitsche.penalty_positive = true;
+    nitsche.penalty_scaling_verified = true;
+    nitsche.penalty_trace_bound_verified = true;
+    desc.nitsche = nitsche;
+
+    auto contribs = lowerBCDescriptor(desc);
+    ASSERT_EQ(contribs.size(), 2u);
+    ASSERT_TRUE(contribs[0].consistency_kind.has_value());
+    EXPECT_EQ(*contribs[0].consistency_kind,
+              ConsistencyKind::ConsistentPerturbation);
+    ASSERT_TRUE(contribs[0].adjoint_consistency.has_value());
+    EXPECT_EQ(*contribs[0].adjoint_consistency,
+              AdjointConsistencyKind::Yes);
+    ASSERT_TRUE(contribs[1].consistency_kind.has_value());
+    EXPECT_EQ(*contribs[1].consistency_kind,
+              ConsistencyKind::ConsistentPerturbation);
 }
 
 TEST(BoundaryConditionDescriptor, LowerWeakInequality) {

@@ -92,16 +92,16 @@ TEST(FormStructureAnalyzer, ScalarPoissonRobin_HasAbsoluteValue) {
 // Stokes: mixed velocity-pressure
 // ============================================================================
 
-TEST(FormStructureAnalyzer, Stokes_MixedSaddlePoint) {
+TEST(FormStructureAnalyzer, ObservedMixedCouplingsDoNotCertifySaddlePoint) {
     auto scalar_space = scalarH1();
     auto vector_space = vectorH1();
     const FieldId p_field = 0;
     const FieldId u_field = 1;
 
     auto p = FormExpr::stateField(p_field, *scalar_space, "p");
-    auto q = FormExpr::testFunction(*scalar_space, "q");
+    auto q = FormExpr::testFunction(p_field, *scalar_space, "q");
     auto u = FormExpr::stateField(u_field, *vector_space, "u");
-    auto v = FormExpr::testFunction(*vector_space, "v");
+    auto v = FormExpr::testFunction(u_field, *vector_space, "v");
 
     auto residual = inner(grad(u), grad(v)).dx()
                   - (p * div(v)).dx()
@@ -129,9 +129,9 @@ TEST(FormStructureAnalyzer, Stokes_MixedSaddlePoint) {
     // Mixed couplings
     ASSERT_EQ(summary.mixed_couplings.size(), 2u);
 
-    // Saddle-point: velocity only through annihilating ops, no stabilization
-    // → the system has saddle-point structure
-    EXPECT_TRUE(summary.has_saddle_point_structure);
+    // Syntax-level field co-occurrence is not enough to certify saddle-point
+    // structure; that requires block/role/numeric/theorem metadata.
+    EXPECT_FALSE(summary.has_saddle_point_structure);
 }
 
 // ============================================================================
@@ -145,9 +145,9 @@ TEST(FormStructureAnalyzer, StabilizedStokes_SaddlePointWithStabilization) {
     const FieldId u_field = 1;
 
     auto p = FormExpr::stateField(p_field, *scalar_space, "p");
-    auto q = FormExpr::testFunction(*scalar_space, "q");
+    auto q = FormExpr::testFunction(p_field, *scalar_space, "q");
     auto u = FormExpr::stateField(u_field, *vector_space, "u");
-    auto v = FormExpr::testFunction(*vector_space, "v");
+    auto v = FormExpr::testFunction(u_field, *vector_space, "v");
     auto h = FormExpr::cellDiameter();
 
     // Stokes + PSPG: h·∫grad(p)·grad(q) dx

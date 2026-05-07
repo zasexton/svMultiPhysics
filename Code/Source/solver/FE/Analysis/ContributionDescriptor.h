@@ -53,6 +53,11 @@ enum class ContributionRole : std::uint8_t {
     ConstraintBlock,     ///< Lagrange multiplier / constraint coupling (e.g., p*div(v))
     StabilizationBlock,  ///< Stabilization term (e.g., PSPG, GLS, penalty)
     BoundaryConstraint,  ///< Boundary condition contribution (Dirichlet, Robin, Nitsche)
+    InterfaceCoupling,   ///< Interface-local coupling not known to be a constraint
+    SourceVector,        ///< Residual vector/source term with no trial dependency
+    ExternalForcing,     ///< Externally supplied forcing contribution
+    InitialCondition,    ///< Initial-condition contribution, not an operator block
+    DiagnosticOnly,      ///< Analysis/diagnostic metadata, not assembled as an operator
     GlobalCoupling,      ///< Non-local coupling (coupled boundary, global kernel)
     FieldToAuxiliary,    ///< FE field → auxiliary block coupling
     AuxiliaryToField,    ///< Auxiliary block → FE field coupling
@@ -74,6 +79,11 @@ enum class OperatorTraitFlags : std::uint32_t {
     HasSecondOrder          = 1u << 6,   ///< Contains second-order (diffusion-like) terms
     NullspacePreserving     = 1u << 7,   ///< Preserves nullspace modes (e.g., periodic BC)
     NullspaceLifting        = 1u << 8,   ///< Lifts/anchors nullspace modes (e.g., Dirichlet BC)
+    SourceLike              = 1u << 9,   ///< Residual-vector forcing/source-like term
+    BoundaryFluxLike        = 1u << 10,  ///< Boundary flux-like vector contribution
+    ConstraintLike          = 1u << 11,  ///< Explicit constraint-like metadata
+    StabilizationLike       = 1u << 12,  ///< Explicit stabilization-method metadata
+    MeshScaleDependentHint  = 1u << 13,  ///< Mesh-scale dependence; not proof of stabilization
 };
 
 inline constexpr OperatorTraitFlags operator|(OperatorTraitFlags a, OperatorTraitFlags b) noexcept {
@@ -143,11 +153,25 @@ enum class AdjointConsistencyKind : std::uint8_t {
  * @brief Temporal character of a contribution
  */
 enum class TemporalContributionKind : std::uint8_t {
-    None,                    ///< No temporal dependence (steady-state term)
+    Unknown,
+    TimeIndependentResidual, ///< Stiffness/reaction/source term in a residual
     MassLike,                ///< Mass matrix (d/dt u · v)
     DampedMassLike,          ///< Damped mass (α d/dt u · v with α time-dependent)
-    PureConstraint,          ///< Algebraic constraint (no time derivative)
+    PureAlgebraicConstraint, ///< g(u,z,t)=0 algebraic constraint block
+    LagrangeMultiplierConstraint, ///< Multiplier-enforced algebraic constraint
+    PreviousTimeState,       ///< History/previous-time-state contribution
+    TimeIntegratorResidual,  ///< Fully discrete time-integrator residual
+    None,                    ///< Deprecated: no time derivative; not algebraic evidence
+    PureConstraint,          ///< Deprecated: algebraic constraint
+};
+
+enum class TimeIntegrationRole : std::uint8_t {
     Unknown,
+    CurrentState,
+    DifferentiatedState,
+    HistoryState,
+    TimeStepParameter,
+    FullyDiscreteResidual,
 };
 
 /**
@@ -197,12 +221,27 @@ struct ScalingDescriptor {
     bool coefficient_scaled{false}; ///< Scaled by a material coefficient
 };
 
+struct ContributionDomainScope {
+    DomainKind domain{DomainKind::Cell};
+    int marker{-1};
+    std::string subexpression_id;
+};
+
 /**
  * @brief Temporal structure of a contribution
  */
 struct TemporalDescriptor {
     int derivative_order{0};     ///< 0=steady, 1=first-order in time, 2=second-order
-    TemporalContributionKind kind{TemporalContributionKind::None};
+    TemporalContributionKind kind{TemporalContributionKind::Unknown};
+    std::vector<VariableKey> differentiated_variables;
+    std::vector<VariableKey> history_variables;
+    TimeIntegrationRole time_role{TimeIntegrationRole::Unknown};
+    std::string timestep_scope_id;
+
+    TemporalDescriptor() = default;
+    TemporalDescriptor(int order, TemporalContributionKind temporal_kind)
+        : derivative_order(order), kind(temporal_kind)
+    {}
 };
 
 /**
@@ -265,6 +304,7 @@ struct ContributionDescriptor {
     int boundary_marker{-1};
     InterfaceScope interface_scope{InterfaceScope::SpecificMarker};
     int interface_marker{-1};       ///< Only meaningful when scope == SpecificMarker
+    std::vector<ContributionDomainScope> domain_scopes;
 
     std::vector<VariableKey> test_variables;
     std::vector<VariableKey> trial_variables;

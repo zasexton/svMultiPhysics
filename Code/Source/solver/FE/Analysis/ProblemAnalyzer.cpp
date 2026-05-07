@@ -25,6 +25,7 @@
 #include "Analysis/AdvancedStabilityAnalyzers.h"
 #include "Analysis/SolverCompatibilityAnalyzer.h"
 #include "Analysis/NumericSummaryPlanner.h"
+#include "Analysis/FortinOperatorAutogeneration.h"
 
 namespace svmp {
 namespace FE {
@@ -66,26 +67,32 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     //   7. CompatibilityAnalyzer (reads KernelAnalyzer + ConstraintRankAnalyzer claims)
     //   8. TopologyScopeAnalyzer (reads all prior claims)
     //   9. InterfaceValidationAnalyzer
-    //  10. InfSupAnalyzer (reads MixedOperatorAnalyzer claims)
-    //  11. TransportCharacterAnalyzer (no dependencies beyond contributions)
-    //  12. ConservationAnalyzer (no dependencies beyond contributions)
-    //  13. DAEStructureAnalyzer (no dependencies beyond contributions)
-    //  14. SpaceCompatibilityAnalyzer (reads MixedSaddlePoint claims + field descriptors)
-    //  15. DiscreteMonotonicityAnalyzer (reads matrix/stencil summaries)
-    //  16. MeshGeometryAnalyzer (reads mesh quality summaries)
-    //  17. TemporalStabilityAnalyzer (reads temporal summaries)
-    //  18. EnergyEntropyLawAnalyzer (reads balance-law summaries)
-    //  19. CoefficientConstitutiveAnalyzer (reads coefficient summaries)
-    //  20. NonlinearTangentAnalyzer (reads tangent summaries)
-    //  21. LockingRiskAnalyzer (reads constraint/inf-sup/space evidence)
-    //  22. SpectralSpuriousModeAnalyzer (reads spectral summaries)
-    //  23. ErrorEstimatorAnalyzer (reads estimator summaries)
-    //  24. QuadratureAdequacyAnalyzer (reads quadrature summaries)
-    //  25. MinimumResidualStabilityAnalyzer (reads PG/DPG/min-res summaries)
-    //  26. PreservationStructureAnalyzer (reads preservation/transfer summaries)
-    //  27. CoupledSystemStabilityAnalyzer (reads coupling/DAE evidence)
-    //  28. SolverCompatibilityAnalyzer (reads claims + configured solver)
-    //  29. NumericSummaryPlanner (reads symbolic claims + context metadata)
+    //  10. NullspaceDegeneracyAnalyzer (reads reduced nullspace summaries)
+    //  11. InfSupAnalyzer (reads MixedOperatorAnalyzer claims)
+    //  12. TransportCharacterAnalyzer (no dependencies beyond contributions)
+    //  13. ConservationAnalyzer (no dependencies beyond contributions)
+    //  14. DAEStructureAnalyzer (no dependencies beyond contributions)
+    //  15. SpaceCompatibilityAnalyzer (reads MixedSaddlePoint claims + field descriptors)
+    //  16. OperatorApplicabilityAnalyzer (reads applicability summaries)
+    //  17. DiscreteMonotonicityAnalyzer (reads matrix/stencil summaries)
+    //  18. MeshGeometryAnalyzer (reads mesh quality summaries)
+    //  19. TemporalStabilityAnalyzer (reads temporal summaries)
+    //  20. EnergyEntropyLawAnalyzer (reads balance-law summaries)
+    //  21. CoefficientConstitutiveAnalyzer (reads coefficient summaries)
+    //  22. NonlinearTangentAnalyzer (reads tangent summaries)
+    //  23. LockingRiskAnalyzer (reads constraint/inf-sup/space evidence)
+    //  24. SpectralSpuriousModeAnalyzer (reads spectral summaries)
+    //  25. ErrorEstimatorAnalyzer (reads estimator summaries)
+    //  26. QuadratureAdequacyAnalyzer (reads quadrature summaries)
+    //  27. MinimumResidualStabilityAnalyzer (reads PG/DPG/min-res summaries)
+    //  28. PreservationStructureAnalyzer (reads preservation/transfer summaries)
+    //  29. CoupledSystemStabilityAnalyzer (reads coupling/DAE evidence)
+    //  30. RobustnessTrendAnalyzer (reads cross-run metric summaries)
+    //  31. SchurQualityAnalyzer (reads preconditioned Schur summaries)
+    //  32. ToleranceAdequacyAnalyzer (reads numerical error budgets)
+    //  33. SolverCompatibilityAnalyzer (reads claims + configured solver)
+    //  34. NumericSummaryPlanner (reads symbolic claims + context metadata)
+    //  35. FortinCertificationAnalyzer (consumes InfSupPairCertification requests)
 
     analyzer.addPass(std::make_unique<CouplingGraphAnalyzer>());
     analyzer.addPass(std::make_unique<KernelAnalyzer>());
@@ -96,11 +103,13 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     analyzer.addPass(std::make_unique<CompatibilityAnalyzer>());
     analyzer.addPass(std::make_unique<TopologyScopeAnalyzer>());
     analyzer.addPass(std::make_unique<InterfaceValidationAnalyzer>());
+    analyzer.addPass(std::make_unique<NullspaceDegeneracyAnalyzer>());
     analyzer.addPass(std::make_unique<InfSupAnalyzer>());
     analyzer.addPass(std::make_unique<TransportCharacterAnalyzer>());
     analyzer.addPass(std::make_unique<ConservationAnalyzer>());
     analyzer.addPass(std::make_unique<DAEStructureAnalyzer>());
     analyzer.addPass(std::make_unique<SpaceCompatibilityAnalyzer>());
+    analyzer.addPass(std::make_unique<OperatorApplicabilityAnalyzer>());
     analyzer.addPass(std::make_unique<DiscreteMonotonicityAnalyzer>());
     analyzer.addPass(std::make_unique<MeshGeometryAnalyzer>());
     analyzer.addPass(std::make_unique<TemporalStabilityAnalyzer>());
@@ -114,8 +123,12 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     analyzer.addPass(std::make_unique<MinimumResidualStabilityAnalyzer>());
     analyzer.addPass(std::make_unique<PreservationStructureAnalyzer>());
     analyzer.addPass(std::make_unique<CoupledSystemStabilityAnalyzer>());
+    analyzer.addPass(std::make_unique<RobustnessTrendAnalyzer>());
+    analyzer.addPass(std::make_unique<SchurQualityAnalyzer>());
+    analyzer.addPass(std::make_unique<ToleranceAdequacyAnalyzer>());
     analyzer.addPass(std::make_unique<SolverCompatibilityAnalyzer>());
     analyzer.addPass(std::make_unique<NumericSummaryPlanner>());
+    analyzer.addPass(std::make_unique<FortinCertificationAnalyzer>());
 
     return analyzer;
 }

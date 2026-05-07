@@ -167,6 +167,416 @@ struct ScanContext {
     int interface_marker{-1};
 };
 
+struct AffineFieldExpression {
+    FieldId field{INVALID_FIELD_ID};
+    Real constant{0.0};
+    Real coefficient{0.0};
+};
+
+[[nodiscard]] bool sameExpressionDomainConstraint(
+    const ExpressionDomainConstraint& lhs,
+    const ExpressionDomainConstraint& rhs)
+{
+    return lhs.kind == rhs.kind &&
+           lhs.expression_id == rhs.expression_id &&
+           lhs.variables == rhs.variables &&
+           lhs.lower_bound == rhs.lower_bound &&
+           lhs.upper_bound == rhs.upper_bound &&
+           lhs.has_excluded_value == rhs.has_excluded_value &&
+           (!lhs.has_excluded_value ||
+            lhs.excluded_value == rhs.excluded_value);
+}
+
+void addExpressionDomainConstraintIfAbsent(
+    std::vector<ExpressionDomainConstraint>& constraints,
+    ExpressionDomainConstraint constraint)
+{
+    for (const auto& existing : constraints) {
+        if (sameExpressionDomainConstraint(existing, constraint)) {
+            return;
+        }
+    }
+    constraints.push_back(std::move(constraint));
+}
+
+[[nodiscard]] std::string realForId(Real value)
+{
+    std::ostringstream os;
+    os.precision(17);
+    os << static_cast<double>(value);
+    return os.str();
+}
+
+[[nodiscard]] bool isFieldTerminal(const forms::FormExprNode& node,
+                                   FieldId& field) noexcept
+{
+    using FT = forms::FormExprType;
+    switch (node.type()) {
+        case FT::StateField:
+        case FT::DiscreteField:
+        case FT::TrialFunction:
+            if (const auto fid = node.fieldId()) {
+                field = *fid;
+                return field != INVALID_FIELD_ID;
+            }
+            break;
+        default:
+            break;
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<Real> constantScalarValue(
+    const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+    if (const auto value = node.constantValue()) {
+        return *value;
+    }
+
+    const auto children = node.childrenShared();
+    switch (node.type()) {
+        case FT::Negate:
+            if (children.size() == 1u && children[0]) {
+                if (const auto value = constantScalarValue(*children[0])) {
+                    return -*value;
+                }
+            }
+            break;
+        case FT::Add:
+            if (children.size() == 2u && children[0] && children[1]) {
+                const auto lhs = constantScalarValue(*children[0]);
+                const auto rhs = constantScalarValue(*children[1]);
+                if (lhs && rhs) return *lhs + *rhs;
+            }
+            break;
+        case FT::Subtract:
+            if (children.size() == 2u && children[0] && children[1]) {
+                const auto lhs = constantScalarValue(*children[0]);
+                const auto rhs = constantScalarValue(*children[1]);
+                if (lhs && rhs) return *lhs - *rhs;
+            }
+            break;
+        case FT::Multiply:
+            if (children.size() == 2u && children[0] && children[1]) {
+                const auto lhs = constantScalarValue(*children[0]);
+                const auto rhs = constantScalarValue(*children[1]);
+                if (lhs && rhs) return *lhs * *rhs;
+            }
+            break;
+        case FT::Divide:
+            if (children.size() == 2u && children[0] && children[1]) {
+                const auto lhs = constantScalarValue(*children[0]);
+                const auto rhs = constantScalarValue(*children[1]);
+                if (lhs && rhs && std::abs(static_cast<double>(*rhs)) > 0.0) {
+                    return *lhs / *rhs;
+                }
+            }
+            break;
+        case FT::Sqrt:
+            if (children.size() == 1u && children[0]) {
+                const auto value = constantScalarValue(*children[0]);
+                if (value && *value >= Real{}) {
+                    return static_cast<Real>(
+                        std::sqrt(static_cast<double>(*value)));
+                }
+            }
+            break;
+        default:
+            break;
+    }
+
+    return std::nullopt;
+}
+
+[[nodiscard]] bool mergeAffineField(FieldId lhs,
+                                    FieldId rhs,
+                                    FieldId& merged) noexcept
+{
+    if (lhs == INVALID_FIELD_ID) {
+        merged = rhs;
+        return true;
+    }
+    if (rhs == INVALID_FIELD_ID || lhs == rhs) {
+        merged = lhs;
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] std::optional<AffineFieldExpression>
+affineFieldExpression(const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+
+    if (const auto value = node.constantValue()) {
+        return AffineFieldExpression{INVALID_FIELD_ID, *value, Real{}};
+    }
+
+    FieldId field = INVALID_FIELD_ID;
+    if (isFieldTerminal(node, field)) {
+        return AffineFieldExpression{field, Real{}, Real{1}};
+    }
+
+    const auto children = node.childrenShared();
+    switch (node.type()) {
+        case FT::Negate:
+            if (children.size() == 1u && children[0]) {
+                if (auto child = affineFieldExpression(*children[0])) {
+                    child->constant = -child->constant;
+                    child->coefficient = -child->coefficient;
+                    return child;
+                }
+            }
+            break;
+        case FT::Add:
+        case FT::Subtract:
+            if (children.size() == 2u && children[0] && children[1]) {
+                auto lhs = affineFieldExpression(*children[0]);
+                auto rhs = affineFieldExpression(*children[1]);
+                if (!lhs || !rhs) {
+                    return std::nullopt;
+                }
+                FieldId merged = INVALID_FIELD_ID;
+                if (!mergeAffineField(lhs->field, rhs->field, merged)) {
+                    return std::nullopt;
+                }
+                const Real sign = node.type() == FT::Subtract ? Real{-1} : Real{1};
+                return AffineFieldExpression{
+                    merged,
+                    lhs->constant + sign * rhs->constant,
+                    lhs->coefficient + sign * rhs->coefficient};
+            }
+            break;
+        case FT::Multiply:
+            if (children.size() == 2u && children[0] && children[1]) {
+                const auto lhs_const = constantScalarValue(*children[0]);
+                const auto rhs_const = constantScalarValue(*children[1]);
+                if (lhs_const) {
+                    if (auto rhs = affineFieldExpression(*children[1])) {
+                        rhs->constant *= *lhs_const;
+                        rhs->coefficient *= *lhs_const;
+                        return rhs;
+                    }
+                }
+                if (rhs_const) {
+                    if (auto lhs = affineFieldExpression(*children[0])) {
+                        lhs->constant *= *rhs_const;
+                        lhs->coefficient *= *rhs_const;
+                        return lhs;
+                    }
+                }
+            }
+            break;
+        case FT::Divide:
+            if (children.size() == 2u && children[0] && children[1]) {
+                const auto denominator = constantScalarValue(*children[1]);
+                if (denominator &&
+                    std::abs(static_cast<double>(*denominator)) > 0.0) {
+                    if (auto numerator = affineFieldExpression(*children[0])) {
+                        numerator->constant /= *denominator;
+                        numerator->coefficient /= *denominator;
+                        return numerator;
+                    }
+                }
+            }
+            break;
+        default:
+            break;
+    }
+
+    return std::nullopt;
+}
+
+void addAffineDenominatorConstraint(const forms::FormExprNode& denominator,
+                                    const ScanContext& context,
+                                    FormExprScanResult& result)
+{
+    const auto affine = affineFieldExpression(denominator);
+    if (!affine || affine->field == INVALID_FIELD_ID) {
+        return;
+    }
+    if (std::abs(static_cast<double>(affine->coefficient)) <= 1.0e-14) {
+        return;
+    }
+
+    const Real root = -affine->constant / affine->coefficient;
+    if (!std::isfinite(static_cast<double>(root)) ||
+        std::abs(static_cast<double>(root)) <= 1.0e-14) {
+        return;
+    }
+
+    ExpressionDomainConstraint constraint;
+    constraint.kind = ExpressionDomainConstraintKind::NonzeroDenominator;
+    constraint.variables.push_back(VariableKey::field(affine->field));
+    constraint.has_excluded_value = true;
+    constraint.excluded_value = root;
+    constraint.expression_id =
+        "expr-domain:field:" + std::to_string(affine->field) +
+        ":denominator-not-equal:" + realForId(root);
+    constraint.domain = context.domain;
+    constraint.boundary_marker = context.boundary_marker;
+    constraint.interface_marker = context.interface_marker;
+    addExpressionDomainConstraintIfAbsent(
+        result.expression_domain_constraints,
+        std::move(constraint));
+}
+
+[[nodiscard]] std::optional<FieldId> squaredFieldTerm(
+    const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+    const auto children = node.childrenShared();
+    if (node.type() == FT::Multiply && children.size() == 2u &&
+        children[0] && children[1]) {
+        FieldId lhs = INVALID_FIELD_ID;
+        FieldId rhs = INVALID_FIELD_ID;
+        if (isFieldTerminal(*children[0], lhs) &&
+            isFieldTerminal(*children[1], rhs) &&
+            lhs == rhs) {
+            return lhs;
+        }
+    }
+    if (node.type() == FT::Power && children.size() == 2u &&
+        children[0] && children[1]) {
+        FieldId base = INVALID_FIELD_ID;
+        const auto exponent = constantScalarValue(*children[1]);
+        if (isFieldTerminal(*children[0], base) && exponent &&
+            std::abs(static_cast<double>(*exponent - Real{2})) <= 1.0e-14) {
+            return base;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool positiveConstantSquareTerm(
+    const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+    const auto children = node.childrenShared();
+    if (node.type() == FT::Multiply && children.size() == 2u &&
+        children[0] && children[1]) {
+        const auto lhs = constantScalarValue(*children[0]);
+        const auto rhs = constantScalarValue(*children[1]);
+        return lhs && rhs && *lhs == *rhs && *lhs != Real{};
+    }
+    if (node.type() == FT::Power && children.size() == 2u &&
+        children[0] && children[1]) {
+        const auto base = constantScalarValue(*children[0]);
+        const auto exponent = constantScalarValue(*children[1]);
+        return base && exponent && *base != Real{} &&
+               std::abs(static_cast<double>(*exponent - Real{2})) <= 1.0e-14;
+    }
+    return false;
+}
+
+void addRegularizedSqrtConstraint(const forms::FormExprNode& sqrt_node,
+                                  const ScanContext& context,
+                                  FormExprScanResult& result)
+{
+    using FT = forms::FormExprType;
+    const auto sqrt_children = sqrt_node.childrenShared();
+    if (sqrt_children.size() != 1u || !sqrt_children[0]) {
+        return;
+    }
+    const auto& arg = *sqrt_children[0];
+    if (arg.type() != FT::Add) {
+        return;
+    }
+    const auto add_children = arg.childrenShared();
+    if (add_children.size() != 2u || !add_children[0] || !add_children[1]) {
+        return;
+    }
+
+    std::optional<FieldId> field;
+    if ((field = squaredFieldTerm(*add_children[0])) &&
+        positiveConstantSquareTerm(*add_children[1])) {
+        // matched below
+    } else if ((field = squaredFieldTerm(*add_children[1])) &&
+               positiveConstantSquareTerm(*add_children[0])) {
+        // matched below
+    } else {
+        return;
+    }
+
+    ExpressionDomainConstraint constraint;
+    constraint.kind = ExpressionDomainConstraintKind::NonnegativeRadicand;
+    constraint.variables.push_back(VariableKey::field(*field));
+    constraint.lower_bound = Real{};
+    constraint.expression_id =
+        "expr-domain:field:" + std::to_string(*field) +
+        ":regularized-square-root-radicand";
+    constraint.domain = context.domain;
+    constraint.boundary_marker = context.boundary_marker;
+    constraint.interface_marker = context.interface_marker;
+    addExpressionDomainConstraintIfAbsent(
+        result.expression_domain_constraints,
+        std::move(constraint));
+}
+
+[[nodiscard]] std::optional<FieldId> gradientField(
+    const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+    if (node.type() != FT::Gradient) {
+        return std::nullopt;
+    }
+    const auto children = node.childrenShared();
+    if (children.size() != 1u || !children[0]) {
+        return std::nullopt;
+    }
+    FieldId field = INVALID_FIELD_ID;
+    if (isFieldTerminal(*children[0], field)) {
+        return field;
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<FieldId> identityPlusGradientField(
+    const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+    if (node.type() != FT::Add) {
+        return std::nullopt;
+    }
+    const auto children = node.childrenShared();
+    if (children.size() != 2u || !children[0] || !children[1]) {
+        return std::nullopt;
+    }
+    if (children[0]->type() == FT::Identity) {
+        return gradientField(*children[1]);
+    }
+    if (children[1]->type() == FT::Identity) {
+        return gradientField(*children[0]);
+    }
+    return std::nullopt;
+}
+
+void addJacobianLikeExpressionConstraint(FieldId field,
+                                         const ScanContext& context,
+                                         FormExprScanResult& result)
+{
+    ExpressionDomainConstraint constraint;
+    constraint.kind =
+        ExpressionDomainConstraintKind::PositiveJacobianLikeDeterminant;
+    if (field != INVALID_FIELD_ID) {
+        constraint.variables.push_back(VariableKey::field(field));
+    } else {
+        constraint.variables.push_back(
+            VariableKey::named(VariableKind::GlobalScalar,
+                               "JacobianLikeDeterminant"));
+    }
+    constraint.lower_bound = Real{};
+    constraint.expression_id =
+        "expr-domain:jacobian-like-determinant-positive";
+    constraint.domain = context.domain;
+    constraint.boundary_marker = context.boundary_marker;
+    constraint.interface_marker = context.interface_marker;
+    addExpressionDomainConstraintIfAbsent(
+        result.expression_domain_constraints,
+        std::move(constraint));
+}
+
 [[nodiscard]] bool sameParameterUsage(const FormParameterUsage& lhs,
                                       const FormParameterUsage& rhs) noexcept
 {
@@ -650,6 +1060,47 @@ void scanNode(const forms::FormExprNode& node,
         case FT::Constitutive:
             scanConstitutiveNode(node, state);
             break;
+        case FT::Divide: {
+            const auto children = node.childrenShared();
+            if (children.size() == 2u && children[1]) {
+                addAffineDenominatorConstraint(*children[1], context, result);
+            }
+            break;
+        }
+        case FT::Sqrt:
+            addRegularizedSqrtConstraint(node, context, result);
+            break;
+        case FT::Determinant: {
+            const auto children = node.childrenShared();
+            if (children.size() == 1u && children[0]) {
+                if (const auto field = identityPlusGradientField(*children[0])) {
+                    addJacobianLikeExpressionConstraint(*field, context, result);
+                }
+            }
+            break;
+        }
+        case FT::Inverse: {
+            const auto children = node.childrenShared();
+            if (children.size() == 1u && children[0]) {
+                const auto field = identityPlusGradientField(*children[0]);
+                if (!field) {
+                    break;
+                }
+                ExpressionDomainConstraint constraint;
+                constraint.kind =
+                    ExpressionDomainConstraintKind::InvertibleMatrixExpression;
+                constraint.variables.push_back(VariableKey::field(*field));
+                constraint.expression_id =
+                    "expr-domain:identity-plus-gradient-invertible";
+                constraint.domain = context.domain;
+                constraint.boundary_marker = context.boundary_marker;
+                constraint.interface_marker = context.interface_marker;
+                addExpressionDomainConstraintIfAbsent(
+                    result.expression_domain_constraints,
+                    std::move(constraint));
+            }
+            break;
+        }
         case FT::ParameterSymbol:
         case FT::ParameterRef: {
             FormParameterUsage usage;
@@ -702,11 +1153,31 @@ std::vector<DomainKind> FormExprScanResult::activeDomains() const {
     if (has_boundary_integral) domains.push_back(DomainKind::Boundary);
     if (has_interior_face_integral) domains.push_back(DomainKind::InteriorFace);
     if (has_interface_integral) domains.push_back(DomainKind::InterfaceFace);
-    if (!boundary_functional_names.empty() || !auxiliary_state_names.empty()) {
-        // Presence of coupled-boundary symbols implies a coupled boundary domain
+    if (!boundary_functional_names.empty()) {
+        // Boundary functionals are legacy coupled-boundary dependencies.
         if (std::find(domains.begin(), domains.end(), DomainKind::CoupledBoundary)
             == domains.end()) {
             domains.push_back(DomainKind::CoupledBoundary);
+        }
+    }
+    if (!auxiliary_state_names.empty() ||
+        !auxiliary_input_names.empty() ||
+        !auxiliary_output_names.empty()) {
+        if (std::find(domains.begin(), domains.end(), DomainKind::AuxiliaryCoupling)
+            == domains.end()) {
+            domains.push_back(DomainKind::AuxiliaryCoupling);
+        }
+    }
+    if (!parameter_usages.empty()) {
+        if (std::find(domains.begin(), domains.end(), DomainKind::ParameterDependency)
+            == domains.end()) {
+            domains.push_back(DomainKind::ParameterDependency);
+        }
+    }
+    if (!coefficient_usages.empty()) {
+        if (std::find(domains.begin(), domains.end(), DomainKind::CoefficientDependency)
+            == domains.end()) {
+            domains.push_back(DomainKind::CoefficientDependency);
         }
     }
     // If nothing was detected (e.g., no explicit integral wrappers), default to Cell

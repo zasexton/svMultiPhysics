@@ -60,6 +60,53 @@ Real effectiveTolerance(const DAEStructureEvidenceSummary& summary) noexcept
         : Real{1.0e-10};
 }
 
+bool isMassLikeTemporal(TemporalContributionKind kind) noexcept
+{
+    return kind == TemporalContributionKind::MassLike ||
+           kind == TemporalContributionKind::DampedMassLike ||
+           kind == TemporalContributionKind::TimeIntegratorResidual;
+}
+
+bool isAlgebraicConstraintTemporal(TemporalContributionKind kind) noexcept
+{
+    return kind == TemporalContributionKind::PureAlgebraicConstraint ||
+           kind == TemporalContributionKind::LagrangeMultiplierConstraint ||
+           kind == TemporalContributionKind::PureConstraint;
+}
+
+bool massRankEvidencePresent(const DAEStructureEvidenceSummary& evidence) noexcept
+{
+    return evidence.mass_matrix_rank_metadata_present ||
+           evidence.differential_mass_rank_present;
+}
+
+bool algebraicRankEvidencePresent(const DAEStructureEvidenceSummary& evidence) noexcept
+{
+    return evidence.algebraic_jacobian_rank_metadata_present ||
+           evidence.algebraic_jacobian_rank_present;
+}
+
+bool hiddenConstraintEvidencePresent(
+    const DAEStructureEvidenceSummary& evidence) noexcept
+{
+    return evidence.hidden_constraint_metadata_present ||
+           evidence.hidden_constraint_scan_present;
+}
+
+bool hiddenConstraintsDetected(
+    const DAEStructureEvidenceSummary& evidence) noexcept
+{
+    return evidence.hidden_constraints_detected ||
+           evidence.hidden_constraint_count > 0u;
+}
+
+bool regularDescriptorPencilEvidencePresent(
+    const DAEStructureEvidenceSummary& evidence) noexcept
+{
+    return evidence.regular_descriptor_pencil_evidence_present ||
+           evidence.pencil_regular_evidence_present;
+}
+
 } // namespace
 
 std::string DAEStructureAnalyzer::name() const {
@@ -85,24 +132,35 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
     };
 
     std::unordered_map<VariableKey, VarTemporalInfo, VariableKeyHash> var_temporal;
+    std::vector<VariableKey> active_vars;
+    auto markActiveVariable = [&](const VariableKey& variable) -> VarTemporalInfo& {
+        if (!containsVariable(active_vars, variable)) {
+            active_vars.push_back(variable);
+        }
+        auto& info = var_temporal[variable];
+        info.key = variable;
+        return info;
+    };
 
     // Populate from contributions' TemporalDescriptor
     for (const auto& contrib : contributions) {
         for (const auto& tv : contrib.test_variables) {
-            auto& info = var_temporal[tv];
-            info.key = tv;
+            markActiveVariable(tv);
+        }
+        for (const auto& trv : contrib.trial_variables) {
+            markActiveVariable(trv);
+        }
+        for (const auto& tv : contrib.test_variables) {
+            auto& info = markActiveVariable(tv);
 
             if (contrib.temporal.has_value()) {
                 const auto& td = *contrib.temporal;
-                if (td.kind == TemporalContributionKind::MassLike ||
-                    td.kind == TemporalContributionKind::DampedMassLike) {
+                if (isMassLikeTemporal(td.kind)) {
                     info.has_mass_like = true;
                     if (td.derivative_order > info.max_derivative_order) {
                         info.max_derivative_order = td.derivative_order;
                     }
-                } else if (td.kind == TemporalContributionKind::PureConstraint) {
-                    info.has_algebraic = true;
-                } else if (td.kind == TemporalContributionKind::None) {
+                } else if (isAlgebraicConstraintTemporal(td.kind)) {
                     info.has_algebraic = true;
                 }
             }
@@ -115,6 +173,7 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
 
     // Enrich from variable descriptors
     for (const auto& vd : var_descs) {
+        markActiveVariable(vd.key);
         auto it = var_temporal.find(vd.key);
         if (it != var_temporal.end()) {
             if (vd.temporal_state_kind == TemporalStateKind::Dynamic) {
@@ -150,6 +209,22 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
         }
     }
 
+    for (const auto& fd : context.fieldDescriptors()) {
+        if (fd.field_id != INVALID_FIELD_ID) {
+            markActiveVariable(VariableKey::field(fd.field_id));
+        }
+    }
+    for (const auto& record : context.formulationRecords()) {
+        for (const auto& variable : record.active_variables) {
+            markActiveVariable(variable);
+        }
+        for (const auto field : record.active_fields) {
+            if (field != INVALID_FIELD_ID) {
+                markActiveVariable(VariableKey::field(field));
+            }
+        }
+    }
+
     // No temporal information at all => no-op
     if (var_temporal.empty()) return;
 
@@ -172,23 +247,29 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
     int algebraic_count = 0;
     bool has_higher_order_dynamic = false;  // derivative_order > 1
     bool algebraic_in_constraint = false;
+    int known_temporal_count = 0;
+    int unknown_temporal_count = 0;
 
     std::vector<VariableKey> all_vars;
-
     for (const auto& [key, info] : var_temporal) {
-        all_vars.push_back(key);
+        if (!containsVariable(all_vars, key)) {
+            all_vars.push_back(key);
+        }
 
         if (info.has_mass_like && !info.has_algebraic) {
+            ++known_temporal_count;
             ++dynamic_count;
             if (info.max_derivative_order > 1) {
                 has_higher_order_dynamic = true;
             }
         } else if (info.has_algebraic && !info.has_mass_like) {
+            ++known_temporal_count;
             ++algebraic_count;
             if (info.participates_in_constraint) {
                 algebraic_in_constraint = true;
             }
         } else if (info.has_mass_like && info.has_algebraic) {
+            ++known_temporal_count;
             ++dynamic_count;
             ++algebraic_count;
             if (info.participates_in_constraint) {
@@ -198,28 +279,55 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
                 has_higher_order_dynamic = true;
             }
         }
-        // else: neither mass_like nor algebraic => skip classification
+        else {
+            ++unknown_temporal_count;
+        }
     }
+    const bool complete_temporal_metadata =
+        !all_vars.empty() &&
+        unknown_temporal_count == 0 &&
+        known_temporal_count == static_cast<int>(all_vars.size());
 
     DAEClass dae_class = DAEClass::Unknown;
     PropertyStatus status = PropertyStatus::Unknown;
     AnalysisConfidence confidence = AnalysisConfidence::Medium;
     std::string description;
+    std::optional<CertificationClass> certification;
 
     if (dynamic_count > 0 && algebraic_count == 0) {
         dae_class = DAEClass::PureODELike;
-        status = PropertyStatus::Exact;
-        confidence = AnalysisConfidence::High;
+        status = complete_temporal_metadata ? PropertyStatus::Exact
+                                            : PropertyStatus::Likely;
+        confidence = complete_temporal_metadata ? AnalysisConfidence::High
+                                                : AnalysisConfidence::Medium;
+        if (!complete_temporal_metadata) {
+            certification = CertificationClass::NotCertified;
+        }
         description =
-            "All " + std::to_string(dynamic_count) +
-            " variable(s) have mass-like temporal contributions (pure ODE-like)";
+            complete_temporal_metadata
+                ? "All " + std::to_string(dynamic_count) +
+                      " active variable(s) have mass-like temporal contributions (pure ODE-like)"
+                : std::to_string(dynamic_count) +
+                      " variable(s) have mass-like temporal contributions, but " +
+                      std::to_string(unknown_temporal_count) +
+                      " active variable(s) lack temporal metadata";
     } else if (algebraic_count > 0 && dynamic_count == 0) {
         dae_class = DAEClass::AlgebraicSystem;
-        status = PropertyStatus::Exact;
-        confidence = AnalysisConfidence::High;
+        status = complete_temporal_metadata ? PropertyStatus::Exact
+                                            : PropertyStatus::Likely;
+        confidence = complete_temporal_metadata ? AnalysisConfidence::High
+                                                : AnalysisConfidence::Medium;
+        if (!complete_temporal_metadata) {
+            certification = CertificationClass::NotCertified;
+        }
         description =
-            "All " + std::to_string(algebraic_count) +
-            " variable(s) have no temporal contributions (algebraic system)";
+            complete_temporal_metadata
+                ? "All " + std::to_string(algebraic_count) +
+                      " active variable(s) have algebraic-constraint metadata"
+                : std::to_string(algebraic_count) +
+                      " variable(s) have algebraic-constraint metadata, but " +
+                      std::to_string(unknown_temporal_count) +
+                      " active variable(s) lack temporal metadata";
     } else if (dynamic_count > 0 && algebraic_count > 0) {
         // Mix of dynamic and algebraic
         if (algebraic_in_constraint && has_higher_order_dynamic) {
@@ -246,7 +354,6 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
 
     const auto* dae_evidence =
         findDAEEvidence(context.analysisSummaries(), all_vars);
-    std::optional<CertificationClass> certification;
     if (dynamic_count > 0 && algebraic_count > 0 && dae_evidence) {
         const Real tol = effectiveTolerance(*dae_evidence);
         const bool tolerance_declared =
@@ -261,10 +368,10 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             numeric_evidence_valid &&
             std::abs(dae_evidence->initial_constraint_residual) <= tol;
         const bool hidden_constraint_violation =
-            dae_evidence->hidden_constraint_metadata_present &&
-            dae_evidence->hidden_constraint_count > 0u;
+            hiddenConstraintEvidencePresent(*dae_evidence) &&
+            hiddenConstraintsDetected(*dae_evidence);
         const bool rank_violation =
-            dae_evidence->algebraic_jacobian_rank_metadata_present &&
+            algebraicRankEvidencePresent(*dae_evidence) &&
             !dae_evidence->algebraic_jacobian_full_rank;
         const bool semi_explicit_scope_complete =
             !dae_evidence->dae_index_theorem_id.empty() &&
@@ -273,11 +380,11 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             dae_evidence->smoothness_or_regular_operator_evidence_present;
         const bool semi_explicit_index1_evidence =
             dae_evidence->dae_form_class == DAEFormClass::SemiExplicit &&
-            dae_evidence->mass_matrix_rank_metadata_present &&
-            dae_evidence->algebraic_jacobian_rank_metadata_present &&
+            massRankEvidencePresent(*dae_evidence) &&
+            algebraicRankEvidencePresent(*dae_evidence) &&
             dae_evidence->algebraic_jacobian_full_rank &&
-            dae_evidence->hidden_constraint_metadata_present &&
-            dae_evidence->hidden_constraint_count == 0u &&
+            hiddenConstraintEvidencePresent(*dae_evidence) &&
+            !hiddenConstraintsDetected(*dae_evidence) &&
             consistent_initial_state;
         const bool index1_certified =
             semi_explicit_index1_evidence &&
@@ -286,14 +393,14 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             (dae_evidence->dae_form_class == DAEFormClass::DescriptorPencil ||
              dae_evidence->dae_form_class == DAEFormClass::FullyImplicit) &&
             dae_evidence->descriptor_pencil_metadata_present &&
-            dae_evidence->regular_descriptor_pencil_evidence_present &&
+            regularDescriptorPencilEvidencePresent(*dae_evidence) &&
             dae_evidence->strangeness_index_metadata_present &&
             dae_evidence->strangeness_index >= 0 &&
             dae_evidence->strangeness_index <= 1 &&
             dae_evidence->projector_index_metadata_present &&
             dae_evidence->projector_consistency_evidence_present &&
-            dae_evidence->hidden_constraint_metadata_present &&
-            dae_evidence->hidden_constraint_count == 0u &&
+            hiddenConstraintEvidencePresent(*dae_evidence) &&
+            !hiddenConstraintsDetected(*dae_evidence) &&
             consistent_initial_state &&
             !dae_evidence->dae_index_theorem_id.empty();
         const bool semi_explicit_metadata_missing =
@@ -327,7 +434,7 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             status = PropertyStatus::Likely;
             confidence = AnalysisConfidence::Medium;
             description =
-                "DAE evidence is compatible with semi-explicit index-1 form, but certification requires theorem, local validity scope, and smooth/regular operator metadata";
+            "DAE evidence is compatible with semi-explicit index-1 form, but certification requires theorem, local validity scope, and smooth/regular operator metadata";
         } else if (semi_explicit_metadata_missing) {
             certification = CertificationClass::NotCertified;
             status = PropertyStatus::Likely;
@@ -340,7 +447,7 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             status = PropertyStatus::Likely;
             confidence = AnalysisConfidence::Medium;
             description =
-                "DAE evidence is compatible with an index-1 interpretation, but consistent-initialization certification requires finite residual and tolerance evidence";
+            "DAE evidence is compatible with an index-1 interpretation, but consistent-initialization certification requires finite residual and tolerance evidence";
         } else {
             certification = CertificationClass::NotCertified;
         }
@@ -356,7 +463,10 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
     claim.description = std::move(description);
     claim.claim_origin = "DAEStructureAnalyzer";
     claim.addEvidence("DAEStructureAnalyzer",
-        "Classification from TemporalDescriptor and temporal_state_kind metadata",
+        "Classification from TemporalDescriptor and temporal_state_kind metadata; active_variables=" +
+            std::to_string(all_vars.size()) +
+            ", known_temporal=" + std::to_string(known_temporal_count) +
+            ", unknown_temporal=" + std::to_string(unknown_temporal_count),
         confidence);
     if (dae_evidence) {
         claim.addEvidence("DAEStructureAnalyzer",
@@ -364,8 +474,12 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             dae_evidence->system_id +
             "', mass_rank_metadata=" +
             std::string(dae_evidence->mass_matrix_rank_metadata_present ? "true" : "false") +
+            ", differential_mass_rank_present=" +
+            std::string(massRankEvidencePresent(*dae_evidence) ? "true" : "false") +
             ", algebraic_rank_metadata=" +
             std::string(dae_evidence->algebraic_jacobian_rank_metadata_present ? "true" : "false") +
+            ", algebraic_jacobian_rank_present=" +
+            std::string(algebraicRankEvidencePresent(*dae_evidence) ? "true" : "false") +
             ", algebraic_full_rank=" +
             std::string(dae_evidence->algebraic_jacobian_full_rank ? "true" : "false") +
             ", form_class=" +
@@ -373,7 +487,7 @@ void DAEStructureAnalyzer::run(const ProblemAnalysisContext& context,
             ", descriptor_pencil=" +
             std::string(dae_evidence->descriptor_pencil_metadata_present ? "true" : "false") +
             ", regular_descriptor_pencil=" +
-            std::string(dae_evidence->regular_descriptor_pencil_evidence_present ? "true" : "false") +
+            std::string(regularDescriptorPencilEvidencePresent(*dae_evidence) ? "true" : "false") +
             ", strangeness_index=" +
             std::to_string(dae_evidence->strangeness_index) +
             ", projector_index=" +

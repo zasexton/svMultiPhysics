@@ -70,6 +70,10 @@ enum class AnalysisSummaryKind : std::uint8_t {
     DAEStructureEvidence,
     SchurComplement,
     MinimumResidualStability,
+    NullspaceDegeneracy,
+    RobustnessTrend,
+    Applicability,
+    NumericalErrorBudget,
 };
 
 inline const char* toString(AnalysisSummaryKind kind) noexcept {
@@ -102,6 +106,10 @@ inline const char* toString(AnalysisSummaryKind kind) noexcept {
         case AnalysisSummaryKind::DAEStructureEvidence: return "DAEStructureEvidence";
         case AnalysisSummaryKind::SchurComplement: return "SchurComplement";
         case AnalysisSummaryKind::MinimumResidualStability: return "MinimumResidualStability";
+        case AnalysisSummaryKind::NullspaceDegeneracy: return "NullspaceDegeneracy";
+        case AnalysisSummaryKind::RobustnessTrend: return "RobustnessTrend";
+        case AnalysisSummaryKind::Applicability: return "Applicability";
+        case AnalysisSummaryKind::NumericalErrorBudget: return "NumericalErrorBudget";
     }
     return "Unknown";
 }
@@ -197,6 +205,49 @@ enum class ParameterScaleRole : std::uint8_t {
     Unknown,
 };
 
+enum class DegeneracyClass : std::uint8_t {
+    DegenerateDiagnostic,
+    GaugeLikeNullspace,
+    UnanchoredKernel,
+    ProjectedKernel,
+    Unknown,
+};
+
+enum class TheoremFamily : std::uint8_t {
+    ScalarDMP,
+    MMatrix,
+    InvariantDomain,
+    InfSup,
+    Fortin,
+    TemporalCFL,
+    EnergyEntropy,
+    Schur,
+};
+
+enum class RobustnessTrendClass : std::uint8_t {
+    Stable,
+    Improving,
+    Deteriorating,
+    Incomparable,
+    InsufficientSamples,
+    Unknown,
+};
+
+enum class SchurQualityClass : std::uint8_t {
+    Unavailable,
+    RawConditionOnly,
+    PreconditionedRobust,
+    PreconditionedRisk,
+    InsufficientEvidence,
+};
+
+enum class ToleranceAdequacyClass : std::uint8_t {
+    Reasonable,
+    TooStrictForConditioning,
+    Inconclusive,
+    InvalidEvidence,
+};
+
 struct OperatorBlockId {
     std::vector<VariableKey> test_variables;
     std::vector<VariableKey> trial_variables;
@@ -213,6 +264,15 @@ struct MatrixEntrySample {
     Real value{};
     int owning_rank{0};
     std::uint64_t sample_index{0};
+    std::string note;
+};
+
+struct LocalOperatorSpectrumSample {
+    ElementId element{INVALID_GLOBAL_INDEX};
+    int quadrature_point{-1};
+    int block_row{-1};
+    int block_col{-1};
+    Real value{};
     std::string note;
 };
 
@@ -274,6 +334,17 @@ struct CoefficientPropertySummary {
     bool state_sample_coverage_complete{false};
     bool lower_bound_valid_for_all_samples{false};
     bool tolerance_metadata_present{false};
+
+    Real local_symmetric_part_min_eigenvalue{};
+    Real local_symmetric_part_max_eigenvalue{};
+    Real local_skew_or_nonsymmetric_norm{};
+    std::uint64_t local_spectrum_sample_count{0};
+    std::uint64_t local_spectrum_nonfinite_count{0};
+    bool local_spectrum_coverage_present{false};
+    bool local_spectrum_coverage_complete{false};
+    bool local_spectrum_quadrature_coverage_complete{false};
+    bool local_spectrum_fallback_global{false};
+    LocalOperatorSpectrumSample worst_local_spectrum_sample;
 };
 
 struct DiscreteMatrixSummary {
@@ -306,6 +377,8 @@ struct DiscreteMatrixSummary {
     std::optional<Real> condition_estimate;
     std::optional<Real> min_eigenvalue_estimate;
     std::optional<Real> coercivity_lower_bound;
+    std::optional<Real> gershgorin_lower_bound;
+    std::optional<Real> gershgorin_upper_bound;
     std::optional<Real> nonnormality_indicator;
     std::optional<Real> nonsymmetry_indicator;
 
@@ -318,6 +391,7 @@ struct DiscreteMatrixSummary {
     std::uint64_t negative_offdiag_count{0};
     std::uint64_t near_zero_offdiag_count{0};
     std::uint64_t row_sum_violation_count{0};
+    std::uint64_t invalid_entry_count{0};
     std::uint64_t nonfinite_entry_count{0};
     std::uint64_t nonfinite_row_sum_count{0};
     std::uint64_t scanned_row_count{0};
@@ -356,6 +430,28 @@ struct ReducedMatrixSummary {
     bool reduction_exact_for_analysis{false};
 };
 
+struct NullspaceDegeneracySummary {
+    std::string degeneracy_id;
+    OperatorBlockId block;
+    std::vector<VariableKey> affected_variables;
+    std::uint64_t estimated_rank{0};
+    std::uint64_t nullity{0};
+    std::uint64_t near_zero_pivot_count{0};
+    std::uint64_t near_zero_row_count{0};
+    std::uint64_t constrained_dof_count{0};
+    std::uint64_t free_dof_count{0};
+    Real matrix_norm_estimate{};
+    Real rank_tolerance{};
+    NullspaceHandlingClass nullspace_handling{NullspaceHandlingClass::Unknown};
+    DegeneracyClass degeneracy_class{DegeneracyClass::Unknown};
+    bool rank_estimate_present{false};
+    bool constraint_mask_present{false};
+    bool saddle_pair_present{false};
+    bool kernel_claim_evidence_present{false};
+    bool constraint_rank_evidence_present{false};
+    std::string reason;
+};
+
 struct SchurComplementSummary {
     std::string schur_id;
     OperatorBlockId block;
@@ -378,6 +474,51 @@ struct SchurComplementSummary {
     Real condition_estimate{};
     bool inexact_solve_tolerance_present{false};
     Real inexact_solve_tolerance{};
+    std::string approximate_schur_type;
+    std::string preconditioner_type;
+    bool preconditioned_probe_available{false};
+    bool preconditioned_residual_contraction_present{false};
+    Real preconditioned_residual_contraction{};
+    bool block_solve_tolerance_present{false};
+    Real block_solve_tolerance{};
+    SchurQualityClass condition_risk_class{SchurQualityClass::InsufficientEvidence};
+};
+
+struct RobustnessTrendSummary {
+    std::string metric_name;
+    OperatorBlockId block;
+    std::vector<VariableKey> variables;
+    std::uint64_t sample_count{0};
+    std::vector<std::string> run_ids;
+    std::vector<GlobalIndex> dof_counts;
+    std::vector<Real> mesh_sizes;
+    std::string case_name;
+    std::string mesh_revision;
+    GlobalIndex global_dof_count{0};
+    std::string operator_tag;
+    std::string parameter_hash;
+    Real min_value{};
+    Real max_value{};
+    Real slope_estimate{};
+    Real pass_threshold{};
+    bool pass_threshold_present{false};
+    bool explicit_uniform_lower_bound_present{false};
+    Real explicit_uniform_lower_bound{};
+    bool explicit_uniform_upper_bound_present{false};
+    Real explicit_uniform_upper_bound{};
+    bool comparable_parameter_scope{true};
+    RobustnessTrendClass trend_class{RobustnessTrendClass::Unknown};
+};
+
+struct ApplicabilitySummary {
+    TheoremFamily theorem_family{TheoremFamily::ScalarDMP};
+    ApplicabilityClass applicability{ApplicabilityClass::Unknown};
+    OperatorBlockId block;
+    std::vector<VariableKey> variables;
+    std::string reason;
+    bool inferred_from_field_descriptors{false};
+    bool inferred_from_contribution_traits{false};
+    bool inferred_from_block_structure{false};
 };
 
 struct LocalStencilSummary {
@@ -462,6 +603,8 @@ struct TemporalStabilitySummary {
     Real high_frequency_dissipation{};
     Real nonnormal_growth_bound{};
     Real accepted_nonnormal_growth_bound{};
+    Real logarithmic_norm_bound{};
+    Real accepted_logarithmic_norm_bound{};
     Real time_horizon{};
     bool cfl_estimate_present{false};
     bool cfl_derivation_metadata_present{false};
@@ -482,6 +625,8 @@ struct TemporalStabilitySummary {
     bool nonnormal_operator_evidence_present{false};
     bool energy_norm_contractivity_evidence_present{false};
     bool logarithmic_norm_bound_present{false};
+    bool logarithmic_norm_bound_finite{false};
+    bool accepted_logarithmic_norm_bound_present{false};
     bool pseudospectral_bound_present{false};
     bool nonnormal_growth_bound_present{false};
     bool nonnormal_growth_bound_finite{false};
@@ -544,19 +689,35 @@ struct InfSupPairCertificationSummary {
     VariableKey multiplier_variable;
     std::string pair_family;
     std::string inf_sup_theorem_id;
+    std::string coupling_family;
+    std::string theorem_evidence_kind;
+    std::string projection_plan_id;
+    std::string projection_preserved_quantity;
+    std::string projection_target_norm;
+    std::string mesh_assumption_scope;
+    std::string domain_assumption_scope;
+    std::string boundary_nullspace_scope;
+    std::string global_constraint_handling;
     Real beta_lower_bound{};
     Real fortin_operator_norm_bound{};
     int primal_polynomial_order{-1};
     int multiplier_polynomial_order{-1};
     SpaceFamily primal_space_family{SpaceFamily::Unknown};
     SpaceFamily multiplier_space_family{SpaceFamily::Unknown};
+    ElementFamily primal_element_family{ElementFamily::Unknown};
+    ElementFamily multiplier_element_family{ElementFamily::Unknown};
+    ReferenceCellFamily reference_cell_family{ReferenceCellFamily::Unknown};
     bool known_stable_pair{false};
     bool fortin_operator_evidence_present{false};
     bool mesh_assumption_evidence_present{false};
     bool domain_assumption_evidence_present{false};
     bool boundary_condition_scope_present{false};
     bool beta_lower_bound_present{false};
+    bool beta_lower_bound_symbolic_present{false};
     bool fortin_operator_norm_bound_present{false};
+    bool fortin_operator_norm_bound_symbolic_present{false};
+    bool projection_plan_present{false};
+    std::vector<std::string> diagnostics;
 };
 
 struct EnergyEntropySummary {
@@ -605,6 +766,7 @@ struct InvariantDomainSummary {
     std::vector<VariableKey> variables;
     Real lower_bound{};
     Real upper_bound{};
+    Real excluded_value{};
     Real cfl_estimate{};
     Real accepted_cfl_bound{};
     Real wave_speed_bound{};
@@ -612,6 +774,7 @@ struct InvariantDomainSummary {
     std::string mesh_size_scope;
     bool lower_bound_active{false};
     bool upper_bound_active{false};
+    bool excluded_value_active{false};
     bool limiter_evidence_present{false};
     bool cfl_condition_satisfied{false};
     bool cfl_estimate_present{false};
@@ -756,6 +919,34 @@ struct StabilizationAdequacySummary {
     std::uint64_t violation_count{0};
 };
 
+struct NumericalErrorBudgetSummary {
+    std::string budget_id;
+    OperatorBlockId block;
+    std::vector<VariableKey> variables;
+    Real residual_norm{};
+    Real solution_or_update_norm{};
+    Real matrix_norm_estimate{};
+    Real condition_estimate{};
+    Real nonlinear_tolerance{};
+    Real linear_tolerance{};
+    Real verification_tolerance{};
+    Real machine_epsilon_amplification{};
+    Real expected_absolute_floor{};
+    Real expected_relative_floor{};
+    Real recommended_verification_tolerance{};
+    ToleranceAdequacyClass adequacy_class{ToleranceAdequacyClass::Inconclusive};
+    bool residual_norm_present{false};
+    bool solution_or_update_norm_present{false};
+    bool matrix_norm_present{false};
+    bool condition_estimate_present{false};
+    bool nonlinear_tolerance_present{false};
+    bool linear_tolerance_present{false};
+    bool verification_tolerance_present{false};
+    bool recommended_tolerance_present{false};
+    bool nonfinite_evidence_present{false};
+    std::string reason;
+};
+
 struct InitialCompatibilitySummary {
     Real initial_constraint_residual{};
     Real initial_boundary_residual{};
@@ -779,16 +970,31 @@ struct DAEStructureEvidenceSummary {
     std::string system_id;
     std::string dae_index_theorem_id;
     std::string dae_index_scope;
+    std::string evidence_scope_id;
+    std::string norm_id;
     std::vector<VariableKey> variables;
     DAEFormClass dae_form_class{DAEFormClass::Unknown};
     bool mass_matrix_rank_metadata_present{false};
+    bool differential_mass_rank_present{false};
+    std::size_t differential_block_rows{0};
+    std::size_t differential_block_cols{0};
+    std::size_t differential_mass_rank{0};
+    Real smallest_nonzero_singular_value{};
+    Real rank_tolerance{};
     bool algebraic_jacobian_rank_metadata_present{false};
+    bool algebraic_jacobian_rank_present{false};
+    std::size_t algebraic_jacobian_rows{0};
+    std::size_t algebraic_jacobian_cols{0};
+    std::size_t algebraic_jacobian_rank{0};
     bool algebraic_jacobian_full_rank{false};
     bool hidden_constraint_metadata_present{false};
+    bool hidden_constraint_scan_present{false};
+    bool hidden_constraints_detected{false};
     std::uint64_t hidden_constraint_count{0};
     bool consistent_initial_condition_evidence_present{false};
     bool descriptor_pencil_metadata_present{false};
     bool regular_descriptor_pencil_evidence_present{false};
+    bool pencil_regular_evidence_present{false};
     bool strangeness_index_metadata_present{false};
     int strangeness_index{-1};
     bool projector_index_metadata_present{false};
@@ -830,6 +1036,17 @@ struct NonlinearTangentSummary {
     bool residual_decrease_evidence_present{false};
     bool line_search_or_trust_region_evidence_present{false};
     bool monotonicity_or_convexity_evidence_present{false};
+
+    Real local_symmetric_part_min_eigenvalue{};
+    Real local_symmetric_part_max_eigenvalue{};
+    Real local_skew_or_nonsymmetric_norm{};
+    std::uint64_t local_spectrum_sample_count{0};
+    std::uint64_t local_spectrum_nonfinite_count{0};
+    bool local_spectrum_coverage_present{false};
+    bool local_spectrum_coverage_complete{false};
+    bool local_spectrum_quadrature_coverage_complete{false};
+    bool local_spectrum_fallback_global{false};
+    LocalOperatorSpectrumSample worst_local_spectrum_sample;
 };
 
 struct SpectralStructureSummary {
@@ -949,10 +1166,13 @@ struct QuadratureAdequacySummary {
     bool curved_or_nonlinear_mapping{false};
     bool overintegration_metadata_present{false};
     bool nonlinear_aliasing_control_present{false};
+    bool nonlinear_aliasing_control_required{false};
     bool reduced_integration_declared{false};
     bool hourglass_control_present{false};
     std::uint64_t underintegrated_entry_count{0};
     std::uint64_t zero_energy_mode_count{0};
+    bool aliasing_indicator_present{false};
+    bool aliasing_tolerance_present{false};
     Real aliasing_indicator{};
     Real aliasing_tolerance{};
 };
@@ -1006,6 +1226,10 @@ struct AnalysisSummarySet {
     std::vector<DiscreteMatrixSummary> discrete_matrices;
     std::vector<ReducedMatrixSummary> reduced_matrices;
     std::vector<SchurComplementSummary> schur_complements;
+    std::vector<NullspaceDegeneracySummary> nullspace_degeneracies;
+    std::vector<RobustnessTrendSummary> robustness_trends;
+    std::vector<ApplicabilitySummary> applicability;
+    std::vector<NumericalErrorBudgetSummary> numerical_error_budgets;
     std::vector<LocalStencilSummary> local_stencils;
     std::vector<MeshGeometryQualitySummary> mesh_geometry_quality;
     std::vector<FluxBalanceSummary> flux_balances;
@@ -1040,6 +1264,10 @@ struct AnalysisSummarySet {
              + discrete_matrices.size()
              + reduced_matrices.size()
              + schur_complements.size()
+             + nullspace_degeneracies.size()
+             + robustness_trends.size()
+             + applicability.size()
+             + numerical_error_budgets.size()
              + local_stencils.size()
              + mesh_geometry_quality.size()
              + flux_balances.size()
@@ -1072,6 +1300,13 @@ struct AnalysisSummarySet {
             case AnalysisSummaryKind::DiscreteMatrix: return !discrete_matrices.empty();
             case AnalysisSummaryKind::ReducedMatrix: return !reduced_matrices.empty();
             case AnalysisSummaryKind::SchurComplement: return !schur_complements.empty();
+            case AnalysisSummaryKind::NullspaceDegeneracy:
+                return !nullspace_degeneracies.empty();
+            case AnalysisSummaryKind::RobustnessTrend:
+                return !robustness_trends.empty();
+            case AnalysisSummaryKind::Applicability: return !applicability.empty();
+            case AnalysisSummaryKind::NumericalErrorBudget:
+                return !numerical_error_budgets.empty();
             case AnalysisSummaryKind::LocalStencil: return !local_stencils.empty();
             case AnalysisSummaryKind::MeshGeometryQuality: return !mesh_geometry_quality.empty();
             case AnalysisSummaryKind::FluxBalance: return !flux_balances.empty();

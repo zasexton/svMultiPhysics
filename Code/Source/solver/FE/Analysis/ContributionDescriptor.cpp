@@ -59,7 +59,17 @@ const char* toString(ContributionRole r) noexcept {
         case ContributionRole::ConstraintBlock:    return "ConstraintBlock";
         case ContributionRole::StabilizationBlock: return "StabilizationBlock";
         case ContributionRole::BoundaryConstraint: return "BoundaryConstraint";
+        case ContributionRole::InterfaceCoupling:  return "InterfaceCoupling";
+        case ContributionRole::SourceVector:       return "SourceVector";
+        case ContributionRole::ExternalForcing:    return "ExternalForcing";
+        case ContributionRole::InitialCondition:   return "InitialCondition";
+        case ContributionRole::DiagnosticOnly:     return "DiagnosticOnly";
         case ContributionRole::GlobalCoupling:     return "GlobalCoupling";
+        case ContributionRole::FieldToAuxiliary:   return "FieldToAuxiliary";
+        case ContributionRole::AuxiliaryToField:   return "AuxiliaryToField";
+        case ContributionRole::AuxiliaryToAuxiliary:
+            return "AuxiliaryToAuxiliary";
+        case ContributionRole::AuxiliarySelf:      return "AuxiliarySelf";
     }
     return "Unknown";
 }
@@ -177,11 +187,26 @@ const char* toString(AdjointConsistencyKind k) noexcept {
 
 const char* toString(TemporalContributionKind k) noexcept {
     switch (k) {
-        case TemporalContributionKind::None:           return "None";
-        case TemporalContributionKind::MassLike:       return "MassLike";
-        case TemporalContributionKind::DampedMassLike: return "DampedMassLike";
-        case TemporalContributionKind::PureConstraint: return "PureConstraint";
-        case TemporalContributionKind::Unknown:        return "Unknown";
+        case TemporalContributionKind::Unknown:
+            return "Unknown";
+        case TemporalContributionKind::TimeIndependentResidual:
+            return "TimeIndependentResidual";
+        case TemporalContributionKind::MassLike:
+            return "MassLike";
+        case TemporalContributionKind::DampedMassLike:
+            return "DampedMassLike";
+        case TemporalContributionKind::PureAlgebraicConstraint:
+            return "PureAlgebraicConstraint";
+        case TemporalContributionKind::LagrangeMultiplierConstraint:
+            return "LagrangeMultiplierConstraint";
+        case TemporalContributionKind::PreviousTimeState:
+            return "PreviousTimeState";
+        case TemporalContributionKind::TimeIntegratorResidual:
+            return "TimeIntegratorResidual";
+        case TemporalContributionKind::None:
+            return "None";
+        case TemporalContributionKind::PureConstraint:
+            return "PureConstraint";
     }
     return "Unknown";
 }

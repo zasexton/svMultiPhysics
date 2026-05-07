@@ -76,6 +76,36 @@ enum class InequalitySense : std::uint8_t {
 };
 
 /**
+ * @brief Nitsche formulation variant declared by the boundary-condition producer
+ */
+enum class NitscheVariant : std::uint8_t {
+    Unknown,
+    Symmetric,
+    Nonsymmetric,
+    Skew,
+    Incomplete,
+};
+
+/**
+ * @brief Explicit evidence for Nitsche consistency and penalty stability
+ *
+ * Homogeneity of the prescribed data does not imply primal consistency,
+ * adjoint consistency, or penalty stability. Producers should populate this
+ * metadata when a weak Nitsche condition is lowered to analysis
+ * contributions.
+ */
+struct NitscheMetadata {
+    NitscheVariant variant{NitscheVariant::Unknown};
+    bool primal_consistency_terms_present{false};
+    bool adjoint_consistency_terms_present{false};
+    bool rhs_consistency_terms_present{false};
+    bool penalty_positive{false};
+    bool penalty_scaling_verified{false};
+    bool penalty_trace_bound_verified{false};
+    std::string trace_inequality_certificate_id;
+};
+
+/**
  * @brief Rich mathematical descriptor for a boundary condition
  */
 struct BoundaryConditionDescriptor {
@@ -110,6 +140,7 @@ struct BoundaryConditionDescriptor {
     std::optional<BalanceDescriptor> balance;
     std::optional<PairingKind> relation_kind;
     std::optional<InequalitySense> inequality_sense;
+    std::optional<NitscheMetadata> nitsche;
     std::string pairing_group;
     bool state_dependent_activation{false};
 };
@@ -121,6 +152,7 @@ struct BoundaryConditionDescriptor {
 [[nodiscard]] const char* toString(TraceKind k) noexcept;
 [[nodiscard]] const char* toString(EnforcementKind k) noexcept;
 [[nodiscard]] const char* toString(InequalitySense k) noexcept;
+[[nodiscard]] const char* toString(NitscheVariant k) noexcept;
 
 // ============================================================================
 // Lower BC descriptor → ContributionDescriptor(s)

@@ -221,9 +221,19 @@ OperatorFacts collectFacts(const ProblemAnalysisContext& context,
     for (const auto& claim : report.claims) {
         switch (claim.kind) {
             case PropertyKind::MixedSaddlePoint:
-            case PropertyKind::InfSupCondition:
                 facts.has_mixed_or_indefinite_structure = true;
                 appendReason(facts, std::string(toString(claim.kind)) + " claim present");
+                break;
+            case PropertyKind::InfSupCondition:
+                if (claim.applicability_class &&
+                    *claim.applicability_class ==
+                        ApplicabilityClass::NotApplicable) {
+                    appendReason(facts,
+                        "inf-sup claim marked degenerate/out-of-scope");
+                    break;
+                }
+                facts.has_mixed_or_indefinite_structure = true;
+                appendReason(facts, "InfSupCondition claim present");
                 break;
             case PropertyKind::IndefiniteOperatorResolution:
                 facts.has_mixed_or_indefinite_structure = true;
@@ -355,6 +365,12 @@ void SolverCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         !facts.has_nonsymmetric_or_transport_structure &&
         !facts.has_spd_certification &&
         !facts.has_incomplete_spd_evidence) {
+        addSolverClaim(report, *options,
+            PropertyStatus::Unknown,
+            CertificationClass::NotCertified,
+            "Solver compatibility cannot be certified because active operator evidence is incomplete",
+            "Solver options are present, but no scoped SPD, symmetry, mixed/indefinite, or nonsymmetric operator evidence covers the active system",
+            AnalysisConfidence::Medium);
         return;
     }
 

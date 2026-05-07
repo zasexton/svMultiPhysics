@@ -189,7 +189,7 @@ void emitReducedDefinitenessClaim(ProblemAnalysisReport& report,
         claim.description =
             "Reduced free-free operator definiteness is unknown because exact reduction or symmetry evidence is missing";
     } else if (definiteness == DefinitenessEvidence::PositiveDefinite) {
-        claim.status = PropertyStatus::Exact;
+        claim.status = PropertyStatus::Preserved;
         claim.confidence = AnalysisConfidence::High;
         claim.coercivity_class = CoercivityClass::Coercive;
         claim.reduced_definiteness_class = CertificationClass::Certified;

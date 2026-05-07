@@ -162,9 +162,9 @@ TEST(Phase4CoreExtensions, ScalarDiffusionReceivesCoercivityDMPAndGeometryReport
     ASSERT_TRUE(hasClaimWithStatus(report, PropertyKind::CoefficientPositivity,
                                    PropertyStatus::Preserved));
     ASSERT_TRUE(hasClaimWithStatus(report, PropertyKind::ZMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     ASSERT_TRUE(hasClaimWithStatus(report, PropertyKind::MMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     ASSERT_TRUE(hasClaimWithStatus(report, PropertyKind::DiscreteMaximumPrinciple,
                                    PropertyStatus::Preserved));
     ASSERT_TRUE(hasClaimWithStatus(report, PropertyKind::MeshGeometryValidity,
@@ -210,9 +210,9 @@ TEST(Phase4CoreExtensions, DarcyLikeScalarDiffusionUsesGenericMonotonicityEviden
     EXPECT_EQ(dmp->status, PropertyStatus::Preserved);
     EXPECT_EQ(dmp->description.find("Darcy"), std::string::npos);
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::ZMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::MMatrixStructure,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Preserved));
 }
 
 TEST(Phase4CoreExtensions, PositiveOffDiagonalViolatesZMatrixAndDMP) {

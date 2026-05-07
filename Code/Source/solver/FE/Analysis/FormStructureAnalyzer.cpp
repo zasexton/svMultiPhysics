@@ -10,6 +10,7 @@
 #include "Forms/FormExpr.h"
 
 #include <algorithm>
+#include <optional>
 
 namespace svmp {
 namespace FE {
@@ -31,6 +32,103 @@ namespace {
     }
 
     return false;
+}
+
+struct FieldRoleSets {
+    std::vector<FieldId> test_fields;
+    std::vector<FieldId> trial_fields;
+};
+
+void appendFieldIfAbsent(std::vector<FieldId>& fields, FieldId field)
+{
+    if (field == INVALID_FIELD_ID) {
+        return;
+    }
+    if (std::find(fields.begin(), fields.end(), field) == fields.end()) {
+        fields.push_back(field);
+    }
+}
+
+void mergeFieldRoleSets(FieldRoleSets& dst, const FieldRoleSets& src)
+{
+    for (const auto field : src.test_fields) {
+        appendFieldIfAbsent(dst.test_fields, field);
+    }
+    for (const auto field : src.trial_fields) {
+        appendFieldIfAbsent(dst.trial_fields, field);
+    }
+}
+
+[[nodiscard]] FieldRoleSets collectFieldRoleSets(
+    const forms::FormExprNode& node)
+{
+    using FT = forms::FormExprType;
+
+    FieldRoleSets sets;
+    switch (node.type()) {
+        case FT::TestFunction:
+            if (const auto field = node.fieldId()) {
+                appendFieldIfAbsent(sets.test_fields, *field);
+            }
+            break;
+        case FT::DiscreteField:
+        case FT::StateField:
+        case FT::TrialFunction:
+            if (const auto field = node.fieldId()) {
+                appendFieldIfAbsent(sets.trial_fields, *field);
+            }
+            break;
+        default:
+            break;
+    }
+
+    for (const auto* child : node.children()) {
+        if (!child) continue;
+        mergeFieldRoleSets(sets, collectFieldRoleSets(*child));
+    }
+    return sets;
+}
+
+void appendCouplingIfAbsent(
+    std::vector<std::pair<FieldId, FieldId>>& couplings,
+    FieldId test_field,
+    FieldId trial_field)
+{
+    if (test_field == INVALID_FIELD_ID || trial_field == INVALID_FIELD_ID ||
+        test_field == trial_field) {
+        return;
+    }
+    const auto edge = std::make_pair(test_field, trial_field);
+    if (std::find(couplings.begin(), couplings.end(), edge) == couplings.end()) {
+        couplings.push_back(edge);
+    }
+}
+
+void collectObservedFieldCouplings(
+    const forms::FormExprNode& node,
+    std::vector<std::pair<FieldId, FieldId>>& couplings)
+{
+    using FT = forms::FormExprType;
+    const auto ty = node.type();
+
+    if (ty == FT::Multiply ||
+        ty == FT::InnerProduct ||
+        ty == FT::DoubleContraction ||
+        ty == FT::OuterProduct ||
+        ty == FT::CrossProduct) {
+        const auto sets = collectFieldRoleSets(node);
+        for (const auto test_field : sets.test_fields) {
+            for (const auto trial_field : sets.trial_fields) {
+                appendCouplingIfAbsent(couplings, test_field, trial_field);
+            }
+        }
+    }
+
+    for (const auto* child : node.children()) {
+        if (child) {
+            collectObservedFieldCouplings(*child, couplings);
+        }
+    }
 }
 
 } // namespace
@@ -69,23 +167,55 @@ FormStructureAnalyzer::analyze(const forms::FormExpr& residual,
             bool under_gradient{false};
             bool under_sym_part{false};
         };
+        struct TestFieldMetadata {
+            FieldId field{INVALID_FIELD_ID};
+            bool has_gradient{false};
+            bool has_sym_grad{false};
+            bool has_absolute_value{false};
+        };
 
         // Walk for TestFunction nodes and record their operator context
-        bool test_has_gradient = false;
-        bool test_has_sym_grad = false;
-        bool test_has_absolute_value = false;
+        bool unbound_test_has_gradient = false;
+        bool unbound_test_has_sym_grad = false;
+        bool unbound_test_has_absolute_value = false;
+        bool any_bound_test_function = false;
+        std::vector<TestFieldMetadata> test_metadata;
+
+        const auto metadataFor = [&](FieldId field) -> TestFieldMetadata& {
+            auto it = std::find_if(test_metadata.begin(), test_metadata.end(),
+                [&](const auto& meta) { return meta.field == field; });
+            if (it == test_metadata.end()) {
+                test_metadata.push_back(TestFieldMetadata{field});
+                return test_metadata.back();
+            }
+            return *it;
+        };
 
         const auto walkTest = [&](const auto& self, const forms::FormExprNode& node,
                                    const TestWalkState& state) -> void {
             using FT = forms::FormExprType;
             if (node.type() == FT::TestFunction) {
-                if (!state.under_gradient) {
-                    test_has_absolute_value = true;
-                }
-                if (state.under_gradient) {
-                    test_has_gradient = true;
-                    if (state.under_sym_part) {
-                        test_has_sym_grad = true;
+                if (const auto field = node.fieldId()) {
+                    any_bound_test_function = true;
+                    auto& meta = metadataFor(*field);
+                    if (!state.under_gradient) {
+                        meta.has_absolute_value = true;
+                    }
+                    if (state.under_gradient) {
+                        meta.has_gradient = true;
+                        if (state.under_sym_part) {
+                            meta.has_sym_grad = true;
+                        }
+                    }
+                } else {
+                    if (!state.under_gradient) {
+                        unbound_test_has_absolute_value = true;
+                    }
+                    if (state.under_gradient) {
+                        unbound_test_has_gradient = true;
+                        if (state.under_sym_part) {
+                            unbound_test_has_sym_grad = true;
+                        }
                     }
                 }
                 return;
@@ -117,15 +247,28 @@ FormStructureAnalyzer::analyze(const forms::FormExpr& residual,
 
         // Annotate each field summary with test-side info and self-adjoint check
         for (auto& fs : summary.per_field) {
-            fs.test_has_gradient = test_has_gradient;
-            fs.test_has_sym_grad = test_has_sym_grad;
-            fs.test_has_absolute_value = test_has_absolute_value;
+            const auto meta_it = std::find_if(test_metadata.begin(), test_metadata.end(),
+                [&](const auto& meta) { return meta.field == fs.field; });
+            const bool use_single_field_unbound_metadata =
+                !any_bound_test_function && fields.size() == 1u;
+
+            if (meta_it != test_metadata.end()) {
+                fs.test_has_gradient = meta_it->has_gradient;
+                fs.test_has_sym_grad = meta_it->has_sym_grad;
+                fs.test_has_absolute_value = meta_it->has_absolute_value;
+            } else if (use_single_field_unbound_metadata) {
+                fs.test_has_gradient = unbound_test_has_gradient;
+                fs.test_has_sym_grad = unbound_test_has_sym_grad;
+                fs.test_has_absolute_value = unbound_test_has_absolute_value;
+            }
 
             // Self-adjoint pattern: both test and trial under the same operator
-            if (fs.has_gradient && test_has_gradient && !fs.has_absolute_value && !test_has_absolute_value) {
+            if (fs.has_gradient && fs.test_has_gradient &&
+                !fs.has_absolute_value && !fs.test_has_absolute_value) {
                 fs.self_adjoint_pattern = true;
             }
-            if (fs.has_sym_grad && test_has_sym_grad && !fs.has_absolute_value && !test_has_absolute_value) {
+            if (fs.has_sym_grad && fs.test_has_sym_grad &&
+                !fs.has_absolute_value && !fs.test_has_absolute_value) {
                 fs.self_adjoint_pattern = true;
             }
         }
@@ -153,48 +296,13 @@ FormStructureAnalyzer::analyze(const forms::FormExpr& residual,
         }
     }
 
-    // Detect mixed couplings and saddle-point structure.
-    // For each pair of fields, check if they cross-couple (one appears with
-    // absolute terms relative to the other, while the other appears only
-    // through annihilating ops). This is the classic saddle-point pattern.
+    // Detect only observed mixed couplings. A field list alone is not evidence
+    // of matrix-block or residual-block coupling. This pass records pairs only
+    // when a field-bound test function and a trial/state field co-occur inside
+    // the same product/contraction subtree.
     if (fields.size() > 1) {
-        for (std::size_t i = 0; i < fields.size(); ++i) {
-            for (std::size_t j = 0; j < fields.size(); ++j) {
-                if (i == j) continue;
-                summary.mixed_couplings.emplace_back(fields[i], fields[j]);
-            }
-        }
-
-        // Saddle-point heuristic: if at least one field has only annihilating ops
-        // and another has absolute terms, the system likely has saddle-point structure.
-        // Refine: saddle-point requires an off-diagonal field that appears without
-        // stabilization on its diagonal block.
-        bool has_annihilating_only_field = false;
-        bool has_absolute_field = false;
-        for (const auto& fs : summary.per_field) {
-            if (fs.occurrence_count == 0) continue;
-            if (fs.only_through_annihilating_ops && !fs.has_absolute_value) {
-                has_annihilating_only_field = true;
-            }
-            if (fs.has_absolute_value) {
-                has_absolute_field = true;
-            }
-        }
-        // Classic saddle-point: one field (e.g. pressure) only through annihilating ops,
-        // another (e.g. velocity) has absolute terms or is coupled.
-        // More precisely, if we have N>1 fields and at least one field with only
-        // annihilating ops that is NOT stabilized, the off-diagonal blocks create
-        // saddle-point indefiniteness.
-        bool unstabilized_annihilating = false;
-        for (const auto& fs : summary.per_field) {
-            if (fs.occurrence_count == 0) continue;
-            if (fs.only_through_annihilating_ops && !fs.has_absolute_value
-                && !fs.has_stabilization) {
-                unstabilized_annihilating = true;
-                break;
-            }
-        }
-        summary.has_saddle_point_structure = unstabilized_annihilating && (has_absolute_field || has_annihilating_only_field);
+        collectObservedFieldCouplings(root, summary.mixed_couplings);
+        summary.has_saddle_point_structure = false;
     }
 
     return summary;

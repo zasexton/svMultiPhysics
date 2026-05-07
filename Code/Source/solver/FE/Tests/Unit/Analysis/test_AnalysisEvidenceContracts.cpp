@@ -17,6 +17,7 @@
 #include "Analysis/ConstraintRankAnalyzer.h"
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/CouplingGraphAnalyzer.h"
+#include "Analysis/DiscreteMonotonicityAnalyzer.h"
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalyzer.h"
 #include "Backends/Utils/BackendOptions.h"
@@ -1254,7 +1255,9 @@ TEST(AnalysisEvidenceContracts, GeometryQuadratureAndGclRejectInvalidScalars)
         "Strang-Fix exact polynomial quadrature condition";
     quadrature.aliasing_indicator =
         std::numeric_limits<Real>::quiet_NaN();
+    quadrature.aliasing_indicator_present = true;
     quadrature.aliasing_tolerance = 1.0e-8;
+    quadrature.aliasing_tolerance_present = true;
     summaries.quadrature_adequacy.push_back(quadrature);
 
     MovingDomainSummary moving;
@@ -1571,7 +1574,7 @@ TEST(AnalysisEvidenceContracts, DmpRequiresCoefficientCoverageForAllMatrixVariab
         report, PropertyKind::MMatrixStructure,
         "DiscreteMonotonicityAnalyzer", "coupled-diffusion");
     ASSERT_NE(m_matrix, nullptr);
-    EXPECT_EQ(m_matrix->status, PropertyStatus::Exact);
+    EXPECT_EQ(m_matrix->status, PropertyStatus::Preserved);
     ASSERT_TRUE(m_matrix->certification_class.has_value());
     EXPECT_EQ(*m_matrix->certification_class,
               CertificationClass::Certified);
@@ -1777,7 +1780,7 @@ TEST(AnalysisEvidenceContracts, StieltjesMMatrixRouteDoesNotRequireRowSumEvidenc
         report, PropertyKind::MMatrixStructure,
         "DiscreteMonotonicityAnalyzer", "stieltjes-without-row-sum");
     ASSERT_NE(m_matrix, nullptr);
-    EXPECT_EQ(m_matrix->status, PropertyStatus::Exact);
+    EXPECT_EQ(m_matrix->status, PropertyStatus::Preserved);
     ASSERT_TRUE(m_matrix->certification_class.has_value());
     EXPECT_EQ(*m_matrix->certification_class,
               CertificationClass::Certified);
@@ -1842,7 +1845,7 @@ TEST(AnalysisEvidenceContracts, MMatrixRoutesRequireRouteSpecificMetadata)
         report, PropertyKind::MMatrixStructure,
         "DiscreteMonotonicityAnalyzer", "inverse-certified");
     ASSERT_NE(inverse_certified_claim, nullptr);
-    EXPECT_EQ(inverse_certified_claim->status, PropertyStatus::Exact);
+    EXPECT_EQ(inverse_certified_claim->status, PropertyStatus::Preserved);
     ASSERT_TRUE(inverse_certified_claim->certification_class.has_value());
     EXPECT_EQ(*inverse_certified_claim->certification_class,
               CertificationClass::Certified);
@@ -1859,7 +1862,7 @@ TEST(AnalysisEvidenceContracts, MMatrixRoutesRequireRouteSpecificMetadata)
         report, PropertyKind::MMatrixStructure,
         "DiscreteMonotonicityAnalyzer", "dd-certified");
     ASSERT_NE(dd_certified_claim, nullptr);
-    EXPECT_EQ(dd_certified_claim->status, PropertyStatus::Exact);
+    EXPECT_EQ(dd_certified_claim->status, PropertyStatus::Preserved);
     ASSERT_TRUE(dd_certified_claim->certification_class.has_value());
     EXPECT_EQ(*dd_certified_claim->certification_class,
               CertificationClass::Certified);
@@ -4031,4 +4034,368 @@ TEST(AnalysisEvidenceContracts, MeshMappingValidityDoesNotImplyShapeRegularity)
     EXPECT_NE(claims[2]->evidence.front().description.find(
                   "shape_regular_constant"),
               std::string::npos);
+}
+
+TEST(AnalysisEvidenceContracts, DegenerateNullspaceMakesZeroInfSupDiagnosticOnly)
+{
+    const auto u = VariableKey::field(0);
+    const auto p = VariableKey::field(1);
+    OperatorBlockId block;
+    block.operator_tag = "rigid-diagnostic";
+    block.test_variables = {u, p};
+    block.trial_variables = {u, p};
+
+    AnalysisSummarySet summaries;
+    InfSupEstimateSummary estimate;
+    estimate.block = block;
+    estimate.primal_variable = u;
+    estimate.multiplier_variable = p;
+    estimate.estimate_value = 0.0;
+    estimate.estimate_tolerance = 1.0e-12;
+    estimate.test_rows = 6;
+    estimate.test_cols = 3;
+    estimate.estimate_scope = "free-free";
+    summaries.inf_sup_estimates.push_back(estimate);
+
+    NullspaceDegeneracySummary degeneracy;
+    degeneracy.degeneracy_id = "rigid-rotation";
+    degeneracy.block = block;
+    degeneracy.affected_variables = {u, p};
+    degeneracy.estimated_rank = 3;
+    degeneracy.nullity = 3;
+    degeneracy.near_zero_pivot_count = 3;
+    degeneracy.free_dof_count = 6;
+    degeneracy.rank_estimate_present = true;
+    degeneracy.degeneracy_class = DegeneracyClass::DegenerateDiagnostic;
+    degeneracy.reason = "rigid diagnostic mode";
+    summaries.nullspace_degeneracies.push_back(degeneracy);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    const auto report = analyze(std::move(ctx));
+
+    const auto* infsup = firstFrom(
+        report, PropertyKind::InfSupCondition, "InfSupAnalyzer");
+    ASSERT_NE(infsup, nullptr);
+    EXPECT_EQ(infsup->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(infsup->applicability_class.has_value());
+    EXPECT_EQ(*infsup->applicability_class,
+              ApplicabilityClass::NotApplicable);
+    ASSERT_TRUE(infsup->certification_class.has_value());
+    EXPECT_EQ(*infsup->certification_class,
+              CertificationClass::NotCertified);
+}
+
+TEST(AnalysisEvidenceContracts, ApplicabilityGateSuppressesMixedDmpFailureNoise)
+{
+    const auto u = VariableKey::field(0);
+    const auto p = VariableKey::field(1);
+
+    OperatorBlockId block;
+    block.operator_tag = "mixed-indefinite";
+    block.test_variables = {u, p};
+    block.trial_variables = {u, p};
+
+    DiscreteMatrixSummary matrix;
+    matrix.block = block;
+    matrix.square = true;
+    matrix.rows = 2;
+    matrix.cols = 2;
+    matrix.sign_evidence_complete = true;
+    matrix.row_sum_evidence_complete = true;
+    matrix.sign_tolerance = 1.0e-12;
+    matrix.row_sum_tolerance = 1.0e-12;
+    matrix.diagonal_count = 2;
+    matrix.offdiag_count = 2;
+    matrix.positive_offdiag_count = 1;
+    matrix.max_positive_offdiag = 0.5;
+    matrix.min_row_sum = 1.0;
+    matrix.max_row_sum = 2.0;
+    matrix.max_abs_row_sum = 2.0;
+    matrix.scanned_row_count = 2;
+    matrix.expected_row_count = 2;
+
+    ApplicabilitySummary dmp;
+    dmp.theorem_family = TheoremFamily::ScalarDMP;
+    dmp.applicability = ApplicabilityClass::NotApplicable;
+    dmp.block = block;
+    dmp.variables = {u, p};
+    dmp.reason = "mixed saddle block is not a scalar nodal diffusion operator";
+
+    ApplicabilitySummary mmatrix = dmp;
+    mmatrix.theorem_family = TheoremFamily::MMatrix;
+
+    AnalysisSummarySet summaries;
+    summaries.discrete_matrices.push_back(matrix);
+    summaries.applicability.push_back(dmp);
+    summaries.applicability.push_back(mmatrix);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+
+    ProblemAnalysisReport report;
+    OperatorApplicabilityAnalyzer applicability_analyzer;
+    applicability_analyzer.run(ctx, report);
+    DiscreteMonotonicityAnalyzer monotonicity_analyzer;
+    monotonicity_analyzer.run(ctx, report);
+
+    const auto* dmp_claim = firstForBlock(
+        report, PropertyKind::DiscreteMaximumPrinciple,
+        "DiscreteMonotonicityAnalyzer", "mixed-indefinite");
+    ASSERT_NE(dmp_claim, nullptr);
+    EXPECT_EQ(dmp_claim->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(dmp_claim->applicability_class.has_value());
+    EXPECT_EQ(*dmp_claim->applicability_class,
+              ApplicabilityClass::NotApplicable);
+    ASSERT_TRUE(dmp_claim->certification_class.has_value());
+    EXPECT_EQ(*dmp_claim->certification_class,
+              CertificationClass::Unknown);
+
+    const auto* mmatrix_claim = firstForBlock(
+        report, PropertyKind::MMatrixStructure,
+        "DiscreteMonotonicityAnalyzer", "mixed-indefinite");
+    ASSERT_NE(mmatrix_claim, nullptr);
+    ASSERT_TRUE(mmatrix_claim->applicability_class.has_value());
+    EXPECT_EQ(*mmatrix_claim->applicability_class,
+              ApplicabilityClass::NotApplicable);
+    EXPECT_TRUE(report.issues.empty());
+}
+
+TEST(AnalysisEvidenceContracts, RobustnessTrendSeparatesSamplesFromCertification)
+{
+    AnalysisSummarySet summaries;
+    RobustnessTrendSummary single;
+    single.metric_name = "inf_sup_beta";
+    single.block.operator_tag = "single-run";
+    single.sample_count = 1;
+    single.min_value = 0.04;
+    single.max_value = 0.04;
+    single.trend_class = RobustnessTrendClass::InsufficientSamples;
+    summaries.robustness_trends.push_back(single);
+
+    RobustnessTrendSummary certified = single;
+    certified.block.operator_tag = "uniform-run";
+    certified.sample_count = 3;
+    certified.min_value = 0.12;
+    certified.max_value = 0.18;
+    certified.pass_threshold_present = true;
+    certified.pass_threshold = 0.1;
+    certified.explicit_uniform_lower_bound_present = true;
+    certified.explicit_uniform_lower_bound = 0.12;
+    certified.trend_class = RobustnessTrendClass::Stable;
+    summaries.robustness_trends.push_back(certified);
+
+    RobustnessTrendSummary deteriorating = single;
+    deteriorating.metric_name = "schur_condition";
+    deteriorating.block.operator_tag = "raw-schur";
+    deteriorating.sample_count = 2;
+    deteriorating.min_value = 100.0;
+    deteriorating.max_value = 1000.0;
+    deteriorating.slope_estimate = 900.0;
+    deteriorating.trend_class = RobustnessTrendClass::Deteriorating;
+    summaries.robustness_trends.push_back(deteriorating);
+
+    RobustnessTrendSummary sweep_a = single;
+    sweep_a.block.operator_tag = "sweep-run";
+    sweep_a.operator_tag = "ustruct-sweep";
+    sweep_a.case_name = "rigid-cases";
+    sweep_a.min_value = 0.03;
+    sweep_a.max_value = 0.03;
+    sweep_a.run_ids = {"case-001"};
+    sweep_a.dof_counts = {100};
+    summaries.robustness_trends.push_back(sweep_a);
+
+    RobustnessTrendSummary sweep_b = sweep_a;
+    sweep_b.min_value = 0.05;
+    sweep_b.max_value = 0.05;
+    sweep_b.run_ids = {"case-002"};
+    sweep_b.dof_counts = {200};
+    summaries.robustness_trends.push_back(sweep_b);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    ProblemAnalysisReport report;
+    RobustnessTrendAnalyzer analyzer;
+    analyzer.run(ctx, report);
+
+    const auto infsup = claimsFrom(
+        report, PropertyKind::InfSupCondition, "RobustnessTrendAnalyzer");
+    ASSERT_EQ(infsup.size(), 3u);
+    EXPECT_EQ(infsup[0]->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(infsup[0]->certification_class.has_value());
+    EXPECT_EQ(*infsup[0]->certification_class,
+              CertificationClass::NotCertified);
+    EXPECT_EQ(infsup[1]->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(infsup[1]->certification_class.has_value());
+    EXPECT_EQ(*infsup[1]->certification_class,
+              CertificationClass::Certified);
+    EXPECT_EQ(infsup[2]->status, PropertyStatus::Unknown);
+    EXPECT_EQ(infsup[2]->tested_block_id.value_or(""), "sweep-run");
+
+    const auto* schur = firstForBlock(
+        report, PropertyKind::ParameterRobustness,
+        "RobustnessTrendAnalyzer", "raw-schur");
+    ASSERT_NE(schur, nullptr);
+    EXPECT_EQ(schur->status, PropertyStatus::Likely);
+    ASSERT_TRUE(schur->certification_class.has_value());
+    EXPECT_EQ(*schur->certification_class,
+              CertificationClass::NotCertified);
+}
+
+TEST(AnalysisEvidenceContracts, SchurQualityUsesPreconditionedEvidence)
+{
+    AnalysisSummarySet summaries;
+    SchurComplementSummary raw;
+    raw.schur_id = "raw-schur";
+    raw.block = scalarBlock("raw-schur");
+    raw.schur_available = true;
+    raw.condition_estimate_present = true;
+    raw.condition_estimate = 1571.0;
+    raw.condition_risk_class = SchurQualityClass::RawConditionOnly;
+    summaries.schur_complements.push_back(raw);
+
+    SchurComplementSummary robust = raw;
+    robust.schur_id = "preconditioned-schur";
+    robust.block = scalarBlock("preconditioned-schur");
+    robust.preconditioned_probe_available = true;
+    robust.preconditioned_residual_contraction_present = true;
+    robust.preconditioned_residual_contraction = 0.04;
+    robust.block_solve_tolerance_present = true;
+    robust.block_solve_tolerance = 1.0e-6;
+    robust.reduction_exact_for_analysis = true;
+    robust.inf_sup_evidence_present = true;
+    robust.nullspace_handling_evidence_present = true;
+    robust.nullspace_handling = NullspaceHandlingClass::AnchoredByConstraints;
+    robust.spectral_equivalence_bounds_present = true;
+    robust.spectral_equivalence_lower_bound = 0.5;
+    robust.spectral_equivalence_upper_bound = 2.0;
+    robust.preconditioner_equivalence_bounds_present = true;
+    robust.preconditioner_equivalence_lower_bound = 0.8;
+    robust.preconditioner_equivalence_upper_bound = 1.25;
+    robust.condition_risk_class = SchurQualityClass::PreconditionedRobust;
+    summaries.schur_complements.push_back(robust);
+
+    SchurComplementSummary incomplete_robust = raw;
+    incomplete_robust.schur_id = "incomplete-robust-schur";
+    incomplete_robust.block = scalarBlock("incomplete-robust-schur");
+    incomplete_robust.condition_risk_class = SchurQualityClass::PreconditionedRobust;
+    summaries.schur_complements.push_back(incomplete_robust);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    ProblemAnalysisReport report;
+    SchurQualityAnalyzer analyzer;
+    analyzer.run(ctx, report);
+
+    const auto* raw_claim = firstForBlock(
+        report, PropertyKind::IndefiniteOperatorResolution,
+        "SchurQualityAnalyzer", "raw-schur");
+    ASSERT_NE(raw_claim, nullptr);
+    EXPECT_EQ(raw_claim->status, PropertyStatus::Likely);
+    ASSERT_TRUE(raw_claim->certification_class.has_value());
+    EXPECT_EQ(*raw_claim->certification_class,
+              CertificationClass::NotCertified);
+
+    const auto* robust_claim = firstForBlock(
+        report, PropertyKind::IndefiniteOperatorResolution,
+        "SchurQualityAnalyzer", "preconditioned-schur");
+    ASSERT_NE(robust_claim, nullptr);
+    EXPECT_EQ(robust_claim->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(robust_claim->certification_class.has_value());
+    EXPECT_EQ(*robust_claim->certification_class,
+              CertificationClass::Certified);
+
+    const auto* incomplete_claim = firstForBlock(
+        report, PropertyKind::IndefiniteOperatorResolution,
+        "SchurQualityAnalyzer", "incomplete-robust-schur");
+    ASSERT_NE(incomplete_claim, nullptr);
+    EXPECT_EQ(incomplete_claim->status, PropertyStatus::Likely);
+    ASSERT_TRUE(incomplete_claim->certification_class.has_value());
+    EXPECT_EQ(*incomplete_claim->certification_class,
+              CertificationClass::NotCertified);
+}
+
+TEST(AnalysisEvidenceContracts, ToleranceBudgetExplainsOvertightVerification)
+{
+    AnalysisSummarySet summaries;
+    NumericalErrorBudgetSummary strict;
+    strict.budget_id = "uniaxial-exact-field";
+    strict.block = scalarBlock("uniaxial-exact-field");
+    strict.residual_norm_present = true;
+    strict.residual_norm = 2.3e-9;
+    strict.matrix_norm_present = true;
+    strict.matrix_norm_estimate = 1.0e5;
+    strict.condition_estimate_present = true;
+    strict.condition_estimate = 1.0e9;
+    strict.verification_tolerance_present = true;
+    strict.verification_tolerance = 1.0e-12;
+    strict.recommended_tolerance_present = true;
+    strict.recommended_verification_tolerance = 1.0e-8;
+    strict.expected_absolute_floor = 2.0e-9;
+    strict.adequacy_class =
+        ToleranceAdequacyClass::TooStrictForConditioning;
+    summaries.numerical_error_budgets.push_back(strict);
+
+    NumericalErrorBudgetSummary reasonable = strict;
+    reasonable.budget_id = "well-conditioned";
+    reasonable.block = scalarBlock("well-conditioned");
+    reasonable.verification_tolerance = 1.0e-8;
+    reasonable.recommended_verification_tolerance = 1.0e-10;
+    reasonable.adequacy_class = ToleranceAdequacyClass::Reasonable;
+    summaries.numerical_error_budgets.push_back(reasonable);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    ProblemAnalysisReport report;
+    ToleranceAdequacyAnalyzer analyzer;
+    analyzer.run(ctx, report);
+
+    const auto* strict_claim = firstForBlock(
+        report, PropertyKind::SolverCompatibility,
+        "ToleranceAdequacyAnalyzer", "uniaxial-exact-field");
+    ASSERT_NE(strict_claim, nullptr);
+    EXPECT_EQ(strict_claim->status, PropertyStatus::Likely);
+    ASSERT_TRUE(strict_claim->certification_class.has_value());
+    EXPECT_EQ(*strict_claim->certification_class,
+              CertificationClass::NotCertified);
+
+    const auto* reasonable_claim = firstForBlock(
+        report, PropertyKind::SolverCompatibility,
+        "ToleranceAdequacyAnalyzer", "well-conditioned");
+    ASSERT_NE(reasonable_claim, nullptr);
+    EXPECT_EQ(reasonable_claim->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(reasonable_claim->certification_class.has_value());
+    EXPECT_EQ(*reasonable_claim->certification_class,
+              CertificationClass::NotCertified);
+}
+
+TEST(AnalysisEvidenceContracts, LocalSpectrumSamplesCertifyCurrentCoefficientPositivity)
+{
+    AnalysisSummarySet summaries;
+    CoefficientPropertySummary sampled;
+    sampled.coefficient = "runtime-local";
+    sampled.block = scalarBlock("runtime-local");
+    sampled.positivity = PositivityClass::Unknown;
+    sampled.positivity_tolerance = 1.0e-12;
+    sampled.local_symmetric_part_min_eigenvalue = 0.25;
+    sampled.local_symmetric_part_max_eigenvalue = 4.0;
+    sampled.local_spectrum_sample_count = 8;
+    sampled.local_spectrum_nonfinite_count = 0;
+    sampled.local_spectrum_coverage_present = true;
+    sampled.local_spectrum_coverage_complete = true;
+    sampled.local_spectrum_quadrature_coverage_complete = true;
+    summaries.coefficient_properties.push_back(sampled);
+
+    ProblemAnalysisContext ctx;
+    ctx.setAnalysisSummaries(std::move(summaries));
+    ProblemAnalysisReport report;
+    CoefficientConstitutiveAnalyzer analyzer;
+    analyzer.run(ctx, report);
+
+    const auto* claim = firstForCoefficient(
+        report, "CoefficientConstitutiveAnalyzer", "runtime-local");
+    ASSERT_NE(claim, nullptr);
+    EXPECT_EQ(claim->status, PropertyStatus::Preserved);
+    ASSERT_TRUE(claim->certification_class.has_value());
+    EXPECT_EQ(*claim->certification_class, CertificationClass::Certified);
 }

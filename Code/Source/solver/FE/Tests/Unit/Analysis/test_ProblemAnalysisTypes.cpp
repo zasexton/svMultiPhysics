@@ -72,6 +72,9 @@ TEST(ProblemAnalysisTypes, ToString_DomainKind) {
     EXPECT_STREQ(toString(DomainKind::Global), "Global");
     EXPECT_STREQ(toString(DomainKind::CoupledBoundary), "CoupledBoundary");
     EXPECT_STREQ(toString(DomainKind::AuxiliaryCoupling), "AuxiliaryCoupling");
+    EXPECT_STREQ(toString(DomainKind::ParameterDependency), "ParameterDependency");
+    EXPECT_STREQ(toString(DomainKind::CoefficientDependency), "CoefficientDependency");
+    EXPECT_STREQ(toString(DomainKind::Unknown), "Unknown");
 }
 
 // ============================================================================
@@ -485,6 +488,46 @@ TEST(ProblemAnalysisReport, ApplicationLogSummarizesGenericDecisions) {
     EXPECT_NE(output.find("Issue severity=warning"), std::string::npos);
 }
 
+TEST(ProblemAnalysisReport, RunLogsAreSeparateRichSummaries) {
+    ProblemAnalysisReport report;
+
+    AnalyzerRunLogSummary log;
+    log.analyzer = "FortinCertificationAnalyzer";
+    log.summary_id = "FortinOperatorAutogeneration";
+    log.status = "partial";
+    log.message = "theorem matching completed";
+    log.attempted_count = 3;
+    log.certified_count = 1;
+    log.incomplete_count = 1;
+    log.unsupported_count = 1;
+    log.detail_lines.push_back(
+        "candidate field=1/field=2 status=Complete theorem=fortin:test");
+    log.diagnostics.push_back("unsupported trace projection was skipped");
+    report.run_logs.push_back(log);
+
+    std::ostringstream plain;
+    report.print(plain);
+    EXPECT_NE(plain.str().find("--- Analyzer Run Logs ---"),
+              std::string::npos);
+    EXPECT_NE(plain.str().find("candidate field=1/field=2"),
+              std::string::npos);
+
+    std::ostringstream app;
+    report.printApplicationLog(app);
+    EXPECT_NE(app.str().find("RunLog analyzer=FortinCertificationAnalyzer"),
+              std::string::npos);
+    EXPECT_NE(app.str().find("attempted=3 certified=1 incomplete=1"),
+              std::string::npos);
+
+    std::ostringstream trace;
+    report.printTraceLog(trace);
+    EXPECT_NE(trace.str().find("run_log_count=1"), std::string::npos);
+    EXPECT_NE(trace.str().find("run_log_detail log=0 entry=0"),
+              std::string::npos);
+    EXPECT_NE(trace.str().find("run_log_diagnostic log=0 entry=0"),
+              std::string::npos);
+}
+
 TEST(ProblemAnalysisReport, TraceLogIncludesBoundedSummaryEvidence) {
     ProblemAnalysisReport report;
     PropertyClaim claim;
@@ -846,9 +889,9 @@ public:
 
 TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     auto analyzer = ProblemAnalyzer::createDefault();
-    EXPECT_EQ(analyzer.numPasses(), 29u);
+    EXPECT_EQ(analyzer.numPasses(), 35u);
     auto names = analyzer.passNames();
-    ASSERT_EQ(names.size(), 29u);
+    ASSERT_EQ(names.size(), 35u);
     EXPECT_EQ(names[0], "CouplingGraphAnalyzer");
     EXPECT_EQ(names[1], "KernelAnalyzer");
     EXPECT_EQ(names[2], "MixedOperatorAnalyzer");
@@ -858,26 +901,32 @@ TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     EXPECT_EQ(names[6], "CompatibilityAnalyzer");
     EXPECT_EQ(names[7], "TopologyScopeAnalyzer");
     EXPECT_EQ(names[8], "InterfaceValidationAnalyzer");
-    EXPECT_EQ(names[9], "InfSupAnalyzer");
-    EXPECT_EQ(names[10], "TransportCharacterAnalyzer");
-    EXPECT_EQ(names[11], "ConservationAnalyzer");
-    EXPECT_EQ(names[12], "DAEStructureAnalyzer");
-    EXPECT_EQ(names[13], "SpaceCompatibilityAnalyzer");
-    EXPECT_EQ(names[14], "DiscreteMonotonicityAnalyzer");
-    EXPECT_EQ(names[15], "MeshGeometryAnalyzer");
-    EXPECT_EQ(names[16], "TemporalStabilityAnalyzer");
-    EXPECT_EQ(names[17], "EnergyEntropyLawAnalyzer");
-    EXPECT_EQ(names[18], "CoefficientConstitutiveAnalyzer");
-    EXPECT_EQ(names[19], "NonlinearTangentAnalyzer");
-    EXPECT_EQ(names[20], "LockingRiskAnalyzer");
-    EXPECT_EQ(names[21], "SpectralSpuriousModeAnalyzer");
-    EXPECT_EQ(names[22], "ErrorEstimatorAnalyzer");
-    EXPECT_EQ(names[23], "QuadratureAdequacyAnalyzer");
-    EXPECT_EQ(names[24], "MinimumResidualStabilityAnalyzer");
-    EXPECT_EQ(names[25], "PreservationStructureAnalyzer");
-    EXPECT_EQ(names[26], "CoupledSystemStabilityAnalyzer");
-    EXPECT_EQ(names[27], "SolverCompatibilityAnalyzer");
-    EXPECT_EQ(names[28], "NumericSummaryPlanner");
+    EXPECT_EQ(names[9], "NullspaceDegeneracyAnalyzer");
+    EXPECT_EQ(names[10], "InfSupAnalyzer");
+    EXPECT_EQ(names[11], "TransportCharacterAnalyzer");
+    EXPECT_EQ(names[12], "ConservationAnalyzer");
+    EXPECT_EQ(names[13], "DAEStructureAnalyzer");
+    EXPECT_EQ(names[14], "SpaceCompatibilityAnalyzer");
+    EXPECT_EQ(names[15], "OperatorApplicabilityAnalyzer");
+    EXPECT_EQ(names[16], "DiscreteMonotonicityAnalyzer");
+    EXPECT_EQ(names[17], "MeshGeometryAnalyzer");
+    EXPECT_EQ(names[18], "TemporalStabilityAnalyzer");
+    EXPECT_EQ(names[19], "EnergyEntropyLawAnalyzer");
+    EXPECT_EQ(names[20], "CoefficientConstitutiveAnalyzer");
+    EXPECT_EQ(names[21], "NonlinearTangentAnalyzer");
+    EXPECT_EQ(names[22], "LockingRiskAnalyzer");
+    EXPECT_EQ(names[23], "SpectralSpuriousModeAnalyzer");
+    EXPECT_EQ(names[24], "ErrorEstimatorAnalyzer");
+    EXPECT_EQ(names[25], "QuadratureAdequacyAnalyzer");
+    EXPECT_EQ(names[26], "MinimumResidualStabilityAnalyzer");
+    EXPECT_EQ(names[27], "PreservationStructureAnalyzer");
+    EXPECT_EQ(names[28], "CoupledSystemStabilityAnalyzer");
+    EXPECT_EQ(names[29], "RobustnessTrendAnalyzer");
+    EXPECT_EQ(names[30], "SchurQualityAnalyzer");
+    EXPECT_EQ(names[31], "ToleranceAdequacyAnalyzer");
+    EXPECT_EQ(names[32], "SolverCompatibilityAnalyzer");
+    EXPECT_EQ(names[33], "NumericSummaryPlanner");
+    EXPECT_EQ(names[34], "FortinCertificationAnalyzer");
 }
 
 // ============================================================================
@@ -900,6 +949,7 @@ TEST(ProblemAnalysisTypes, ToString_Phase21_ClassificationEnums) {
     EXPECT_STREQ(toString(InfSupClass::LikelyViolated), "LikelyViolated");
 
     EXPECT_STREQ(toString(ConservationClass::LocalClosureExpected), "LocalClosureExpected");
+    EXPECT_STREQ(toString(ConservationClass::PotentialExchangeBalance), "PotentialExchangeBalance");
     EXPECT_STREQ(toString(ConservationClass::ExchangeBalanced), "ExchangeBalanced");
     EXPECT_STREQ(toString(ConservationClass::ClosureBroken), "ClosureBroken");
 
@@ -1127,6 +1177,28 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     schur.preconditioner_equivalence_bounds_present = true;
     summaries.schur_complements.push_back(schur);
 
+    NullspaceDegeneracySummary degeneracy;
+    degeneracy.degeneracy_id = "rigid-diagnostic";
+    degeneracy.nullity = 3;
+    degeneracy.degeneracy_class = DegeneracyClass::DegenerateDiagnostic;
+    summaries.nullspace_degeneracies.push_back(degeneracy);
+
+    RobustnessTrendSummary trend;
+    trend.metric_name = "inf_sup_beta";
+    trend.sample_count = 2;
+    trend.trend_class = RobustnessTrendClass::Stable;
+    summaries.robustness_trends.push_back(trend);
+
+    ApplicabilitySummary applicability;
+    applicability.theorem_family = TheoremFamily::ScalarDMP;
+    applicability.applicability = ApplicabilityClass::NotApplicable;
+    summaries.applicability.push_back(applicability);
+
+    NumericalErrorBudgetSummary budget;
+    budget.budget_id = "exact-field-budget";
+    budget.adequacy_class = ToleranceAdequacyClass::Reasonable;
+    summaries.numerical_error_budgets.push_back(budget);
+
     LocalStencilSummary stencil;
     stencil.element = 7;
     stencil.positive_offdiag_count = 0;
@@ -1320,11 +1392,15 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     minres.normal_equation_conditioning_present = true;
     summaries.minimum_residual_stability.push_back(minres);
 
-    EXPECT_EQ(summaries.totalSummaryCount(), 28u);
+    EXPECT_EQ(summaries.totalSummaryCount(), 32u);
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CoefficientProperties));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::DiscreteMatrix));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ReducedMatrix));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::SchurComplement));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::NullspaceDegeneracy));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::RobustnessTrend));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::Applicability));
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::NumericalErrorBudget));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::LocalStencil));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::MeshGeometryQuality));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::FluxBalance));

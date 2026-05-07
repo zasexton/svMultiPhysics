@@ -11,6 +11,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
 
+#include <algorithm>
 #include <cmath>
 #include <map>
 #include <set>
@@ -192,6 +193,75 @@ void attachRuntimeMetadata(ContributionDescriptor& d,
     }
 }
 
+void appendDomainScope(ContributionDescriptor& d,
+                       DomainKind domain,
+                       int marker,
+                       std::string subexpression_id)
+{
+    const auto exists = std::any_of(
+        d.domain_scopes.begin(),
+        d.domain_scopes.end(),
+        [&](const ContributionDomainScope& scope) {
+            return scope.domain == domain &&
+                   scope.marker == marker &&
+                   scope.subexpression_id == subexpression_id;
+        });
+    if (!exists) {
+        d.domain_scopes.push_back(
+            ContributionDomainScope{domain, marker, std::move(subexpression_id)});
+    }
+}
+
+void attachDomainScopes(ContributionDescriptor& d,
+                        const FormExprScanResult& scan)
+{
+    if (scan.has_cell_integral) {
+        appendDomainScope(d, DomainKind::Cell, -1, "cell");
+    }
+    if (scan.has_boundary_integral) {
+        if (scan.boundary_markers.empty()) {
+            appendDomainScope(d, DomainKind::Boundary, -1, "boundary");
+        } else {
+            for (const int marker : scan.boundary_markers) {
+                appendDomainScope(d, DomainKind::Boundary, marker, "boundary");
+            }
+        }
+    }
+    if (scan.has_interior_face_integral) {
+        appendDomainScope(d, DomainKind::InteriorFace, -1, "interior-face");
+    }
+    if (scan.has_interface_integral) {
+        if (scan.interface_markers.empty()) {
+            appendDomainScope(d, DomainKind::InterfaceFace, -1, "interface");
+        } else {
+            for (const int marker : scan.interface_markers) {
+                appendDomainScope(d, DomainKind::InterfaceFace, marker, "interface");
+            }
+        }
+    }
+    if (d.domain_scopes.empty()) {
+        appendDomainScope(d, DomainKind::Cell, -1, "default-cell");
+    }
+
+    if (scan.has_interface_integral) {
+        d.domain = DomainKind::InterfaceFace;
+        d.interface_marker =
+            scan.interface_markers.empty() ? -1 : scan.interface_markers.front();
+        return;
+    }
+    if (scan.has_boundary_integral) {
+        d.domain = DomainKind::Boundary;
+        d.boundary_marker =
+            scan.boundary_markers.empty() ? -1 : scan.boundary_markers.front();
+        return;
+    }
+    if (scan.has_interior_face_integral) {
+        d.domain = DomainKind::InteriorFace;
+        return;
+    }
+    d.domain = DomainKind::Cell;
+}
+
 } // namespace
 
 std::vector<ContributionDescriptor>
@@ -208,7 +278,7 @@ lowerFormulation(const FormulationRecord& rec) {
     forms::FormExpr residual_expr(std::const_pointer_cast<forms::FormExprNode>(rec.residual_expr));
     const bool residual_has_boundary_terms =
         residual_expr.isValid() && residual_expr.node() &&
-        !scanFormExpr(*residual_expr.node()).boundary_markers.empty();
+        scanFormExpr(*residual_expr.node()).has_boundary_integral;
     std::map<FieldId, FieldOperatorSummary> field_summaries;
     if (residual_expr.isValid()) {
         auto full_summary = fsa.analyze(residual_expr, rec.active_fields);
@@ -262,11 +332,15 @@ lowerFormulation(const FormulationRecord& rec) {
                 d.operator_tag = rec.operator_tag;
                 d.test_variables = {VariableKey::field(test_fid)};
                 d.trial_variables = {};
-                d.role = ContributionRole::DiagonalBlock;
-                d.traits = OperatorTraitFlags::HasMass;
+                d.role = ContributionRole::SourceVector;
+                d.traits = OperatorTraitFlags::SourceLike;
                 d.confidence = AnalysisConfidence::Medium;
                 d.source_block_key = block_key;
                 d.source_expression = block_node;
+                d.temporal = TemporalDescriptor{
+                    0, TemporalContributionKind::TimeIndependentResidual};
+                d.balance = BalanceDescriptor{
+                    "", BalanceRole::SourceLike, 1, false};
 
                 {
                     std::string test_name;
@@ -282,11 +356,11 @@ lowerFormulation(const FormulationRecord& rec) {
                     }
                 }
 
-                // Scan for domain info
                 auto scan_src = scanFormExpr(*block_node);
-                if (!scan_src.boundary_markers.empty()) {
-                    d.boundary_marker = scan_src.boundary_markers[0];
-                    d.domain = DomainKind::Boundary;
+                attachDomainScopes(d, scan_src);
+                if (d.domain == DomainKind::Boundary ||
+                    d.domain == DomainKind::InterfaceFace) {
+                    d.traits = d.traits | OperatorTraitFlags::BoundaryFluxLike;
                 }
                 attachRuntimeMetadata(d, scan_src);
 
@@ -297,7 +371,7 @@ lowerFormulation(const FormulationRecord& rec) {
 
             // Scan for boundary/interface markers on the block node
             auto scan = scanFormExpr(*block_node);
-            const bool block_has_boundary_terms = !scan.boundary_markers.empty();
+            const bool block_has_boundary_terms = scan.has_boundary_integral;
 
             for (FieldId trial_fid : trial_fields_to_analyze) {
 
@@ -355,21 +429,11 @@ lowerFormulation(const FormulationRecord& rec) {
                 if (block_has_stabilization &&
                     !emit_separate_stabilization_surrogate) {
                     d.role = ContributionRole::StabilizationBlock;
-                } else if (fs.only_through_annihilating_ops && !fs.has_absolute_value) {
-                    d.role = ContributionRole::DiagonalBlock;
-                } else if (fs.has_absolute_value && !fs.has_gradient && !fs.has_sym_grad) {
-                    // No own gradient — constraint/multiplier (e.g., pressure pp block)
-                    d.role = ContributionRole::ConstraintBlock;
                 } else {
                     d.role = ContributionRole::DiagonalBlock;
                 }
             } else {
-                // Off-diagonal: check if this is a constraint coupling
-                if (fs.has_absolute_value && !fs.has_gradient) {
-                    d.role = ContributionRole::ConstraintBlock;
-                } else {
-                    d.role = ContributionRole::OffDiagonalBlock;
-                }
+                d.role = ContributionRole::OffDiagonalBlock;
             }
 
             // Set traits from FieldOperatorSummary
@@ -389,6 +453,12 @@ lowerFormulation(const FormulationRecord& rec) {
                 !fs.has_divergence && !fs.has_curl) {
                 flags = flags | OperatorTraitFlags::HasMass;
             }
+            if (scan.has_cell_diameter) {
+                flags = flags | OperatorTraitFlags::MeshScaleDependentHint;
+            }
+            if (d.role == ContributionRole::StabilizationBlock) {
+                flags = flags | OperatorTraitFlags::StabilizationLike;
+            }
             if (fs.only_through_sym_grad && !fs.has_plain_grad && fs.self_adjoint_pattern) {
                 flags = flags | OperatorTraitFlags::SymmetricLike;
             }
@@ -406,12 +476,11 @@ lowerFormulation(const FormulationRecord& rec) {
                 // Constraint blocks (diagonal or off-diagonal) are algebraic —
                 // mark as PureConstraint so DAEStructureAnalyzer sees constraint
                 // variables even when they only appear in off-diagonal blocks.
-                d.temporal = TemporalDescriptor{0, TemporalContributionKind::PureConstraint};
+                d.temporal = TemporalDescriptor{
+                    0, TemporalContributionKind::PureAlgebraicConstraint};
             } else if (is_diagonal) {
-                // Steady contribution (no time derivative): mark as algebraic/none
-                // so DAEStructureAnalyzer can distinguish steady PDE fields from
-                // dynamic ODE fields in coupled PDE-ODE systems.
-                d.temporal = TemporalDescriptor{0, TemporalContributionKind::None};
+                d.temporal = TemporalDescriptor{
+                    0, TemporalContributionKind::TimeIndependentResidual};
             }
 
             // Infer transport character from first-order operators
@@ -434,7 +503,8 @@ lowerFormulation(const FormulationRecord& rec) {
             // (p*div(v_test)) gets ConstraintPair since pressure enters
             // algebraically. InfSupAnalyzer accepts both kinds.
             if (d.role == ContributionRole::ConstraintBlock ||
-                (d.role == ContributionRole::OffDiagonalBlock && !is_diagonal)) {
+                d.role == ContributionRole::OffDiagonalBlock ||
+                d.role == ContributionRole::InterfaceCoupling) {
                 PairingDescriptor pd;
                 pd.row_var = VariableKey::field(test_fid);
                 pd.col_var = VariableKey::field(trial_fid);
@@ -459,14 +529,11 @@ lowerFormulation(const FormulationRecord& rec) {
                 d.pairings.push_back(std::move(pd));
             }
 
-            // Set boundary/interface markers from scan
-            if (!scan.boundary_markers.empty()) {
-                d.boundary_marker = scan.boundary_markers[0];
-                d.domain = DomainKind::Boundary;
-            }
-            if (!scan.interface_markers.empty()) {
-                d.interface_marker = scan.interface_markers[0];
-                d.domain = DomainKind::InterfaceFace;
+            attachDomainScopes(d, scan);
+            if (!is_diagonal &&
+                d.role == ContributionRole::OffDiagonalBlock &&
+                d.domain == DomainKind::InterfaceFace) {
+                d.role = ContributionRole::InterfaceCoupling;
             }
             attachRuntimeMetadata(d, scan);
 
@@ -488,12 +555,19 @@ lowerFormulation(const FormulationRecord& rec) {
                 stab.boundary_marker = contributions.back().boundary_marker;
                 stab.interface_scope = contributions.back().interface_scope;
                 stab.interface_marker = contributions.back().interface_marker;
+                stab.domain_scopes = contributions.back().domain_scopes;
                 stab.test_variables = contributions.back().test_variables;
                 stab.trial_variables = contributions.back().trial_variables;
                 stab.role = ContributionRole::StabilizationBlock;
-                stab.traits = OperatorTraitFlags::HasSecondOrder;
+                stab.traits = OperatorTraitFlags::HasSecondOrder |
+                              OperatorTraitFlags::StabilizationLike;
+                if (scan.has_cell_diameter) {
+                    stab.traits =
+                        stab.traits | OperatorTraitFlags::MeshScaleDependentHint;
+                }
                 stab.confidence = AnalysisConfidence::High;
-                stab.temporal = TemporalDescriptor{0, TemporalContributionKind::None};
+                stab.temporal = TemporalDescriptor{
+                    0, TemporalContributionKind::TimeIndependentResidual};
                 stab.consistency_kind = ConsistencyKind::ConsistentPerturbation;
                 stab.parameter_usages = contributions.back().parameter_usages;
                 stab.coefficient_usages = contributions.back().coefficient_usages;
@@ -554,6 +628,10 @@ lowerFormulation(const FormulationRecord& rec) {
                 !fs.has_divergence && !fs.has_curl) {
                 flags = flags | OperatorTraitFlags::HasMass;
             }
+            auto full_scan = scanFormExpr(*rec.residual_expr);
+            if (full_scan.has_cell_diameter) {
+                flags = flags | OperatorTraitFlags::MeshScaleDependentHint;
+            }
             d.traits = flags;
             d.confidence = AnalysisConfidence::High;
 
@@ -564,7 +642,8 @@ lowerFormulation(const FormulationRecord& rec) {
                     TemporalContributionKind::MassLike};
                 d.traits = d.traits | OperatorTraitFlags::HasMass;
             } else {
-                d.temporal = TemporalDescriptor{0, TemporalContributionKind::None};
+                d.temporal = TemporalDescriptor{
+                    0, TemporalContributionKind::TimeIndependentResidual};
             }
 
             // Transport character
@@ -578,9 +657,8 @@ lowerFormulation(const FormulationRecord& rec) {
             appendBoundaryInsensitiveNullspaceHint(
                 d, fid, fs, residual_expr, residual_has_boundary_terms, fsa);
 
-            if (rec.residual_expr) {
-                attachRuntimeMetadata(d, scanFormExpr(*rec.residual_expr));
-            }
+            attachDomainScopes(d, full_scan);
+            attachRuntimeMetadata(d, full_scan);
 
             d.ensureStableContributionId();
             contributions.push_back(std::move(d));

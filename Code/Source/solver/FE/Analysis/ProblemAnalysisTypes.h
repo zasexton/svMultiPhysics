@@ -155,6 +155,7 @@ enum class InfSupClass : std::uint8_t {
 enum class ConservationClass : std::uint8_t {
     LocalClosureExpected,    ///< Local conservation expected (e.g., HDiv flux)
     GlobalClosureExpected,   ///< Global balance expected (e.g., integral constraint)
+    PotentialExchangeBalance, ///< Opposite signed exchange descriptors exist, closure unverified
     ExchangeBalanced,        ///< Exchange between subdomains is balanced
     ClosureBroken,           ///< Conservation violated (e.g., non-conservative stabilization)
     Unknown,
@@ -286,8 +287,83 @@ enum class SpaceFamily : std::uint8_t {
     HDiv,                    ///< H(div)-conforming (Raviart-Thomas, BDM)
     HCurl,                   ///< H(curl)-conforming (Nedelec edge elements)
     L2,                      ///< L2 (discontinuous)
+    Trace,                   ///< Trace space on a boundary/interface
+    DG,                      ///< Discontinuous Galerkin trial/test space
     Custom,                  ///< User-defined / non-standard
     Unknown,
+};
+
+/**
+ * @brief Canonical finite-element basis/space family independent of Sobolev class
+ */
+enum class ElementFamily : std::uint8_t {
+    Lagrange,
+    BubbleEnrichedLagrange,
+    RaviartThomas,
+    BDM,
+    Nedelec,
+    DG,
+    Trace,
+    Mortar,
+    Custom,
+    Unknown,
+};
+
+/**
+ * @brief Interelement continuity visible to theorem matching
+ */
+enum class SpaceContinuityClass : std::uint8_t {
+    Continuous,
+    Discontinuous,
+    NormalContinuous,
+    TangentialContinuous,
+    TraceOnly,
+    Custom,
+    Unknown,
+};
+
+/**
+ * @brief Reference-to-physical transform used by the space
+ */
+enum class MappingTransform : std::uint8_t {
+    Identity,
+    CovariantPiola,
+    ContravariantPiola,
+    TracePullback,
+    Unknown,
+};
+
+/**
+ * @brief Supported reference-cell family for theorem assumptions
+ */
+enum class ReferenceCellFamily : std::uint8_t {
+    Simplex,
+    TensorProduct,
+    Wedge,
+    Pyramid,
+    Mixed,
+    Unknown,
+};
+
+/**
+ * @brief Enrichment metadata needed by stable-pair theorems such as MINI
+ */
+struct SpaceEnrichmentMetadata {
+    int bubble_degree{-1};
+    std::string macroelement_tag;
+    bool reduced_variant{false};
+    bool static_condensation{false};
+    bool visible_to_analysis{false};
+};
+
+/**
+ * @brief Conformity metadata needed by commuting-projection theorems
+ */
+struct SpaceConformityMetadata {
+    bool facet_orientation_consistent{false};
+    bool entity_dof_association_known{false};
+    bool exact_sequence_member{false};
+    bool commuting_projection_metadata_present{false};
 };
 
 /**
@@ -342,6 +418,9 @@ enum class DomainKind : std::uint8_t {
     Global,            ///< Global operator (no mesh locality)
     CoupledBoundary,   ///< Boundary with coupled PDE-ODE model (legacy)
     AuxiliaryCoupling, ///< Generalized auxiliary coupling (field↔aux, aux↔aux)
+    ParameterDependency, ///< Runtime parameter dependence with no mesh locality
+    CoefficientDependency, ///< Callback/coefficient dependence with no mesh locality
+    Unknown,
 };
 
 // ============================================================================
@@ -564,6 +643,28 @@ struct AnalysisIssue {
 };
 
 /**
+ * @brief Compact run-log summary emitted by analyzers with multi-step work.
+ *
+ * This is separate from property claims and issues: claims state mathematical
+ * conclusions, issues report user-visible problems, and run logs explain what
+ * an analyzer attempted, skipped, certified, or rejected.
+ */
+struct AnalyzerRunLogSummary {
+    std::string analyzer;
+    std::string summary_id;
+    std::string status;
+    std::string message;
+    std::uint64_t attempted_count{0};
+    std::uint64_t certified_count{0};
+    std::uint64_t incomplete_count{0};
+    std::uint64_t blocked_count{0};
+    std::uint64_t unsupported_count{0};
+    std::uint64_t skipped_count{0};
+    std::vector<std::string> detail_lines;
+    std::vector<std::string> diagnostics;
+};
+
+/**
  * @brief Request for one compact numeric/discrete summary needed by symbolic claims
  */
 struct AnalysisSummaryRequest {
@@ -609,6 +710,7 @@ struct AnalysisRequestPlan {
 struct ProblemAnalysisReport {
     std::vector<PropertyClaim> claims;
     std::vector<AnalysisIssue> issues;
+    std::vector<AnalyzerRunLogSummary> run_logs;
     AnalysisRequestPlan request_plan;
 
     // ---- Queries ----
@@ -699,6 +801,10 @@ struct ProblemAnalysisReport {
 [[nodiscard]] const char* toString(NullspaceHandlingClass c) noexcept;
 [[nodiscard]] const char* toString(TemporalStateKind k) noexcept;
 [[nodiscard]] const char* toString(SpaceFamily f) noexcept;
+[[nodiscard]] const char* toString(ElementFamily f) noexcept;
+[[nodiscard]] const char* toString(SpaceContinuityClass c) noexcept;
+[[nodiscard]] const char* toString(MappingTransform t) noexcept;
+[[nodiscard]] const char* toString(ReferenceCellFamily f) noexcept;
 
 } // namespace analysis
 } // namespace FE
