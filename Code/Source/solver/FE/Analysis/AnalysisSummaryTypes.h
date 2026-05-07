@@ -205,6 +205,23 @@ enum class ParameterScaleRole : std::uint8_t {
     Unknown,
 };
 
+enum class StabilizationFamily : std::uint8_t {
+    Unknown,
+    StreamlineUpwind,
+    GalerkinLeastSquares,
+    UpwindFlux,
+    Penalty,
+    Nitsche,
+    ContinuousInteriorPenalty,
+    LeastSquares,
+    Trace,
+    GhostPenalty,
+    Constraint,
+    MassLumping,
+    Limiter,
+    Other,
+};
+
 enum class DegeneracyClass : std::uint8_t {
     DegenerateDiagnostic,
     GaugeLikeNullspace,
@@ -334,6 +351,8 @@ struct CoefficientPropertySummary {
     bool state_sample_coverage_complete{false};
     bool lower_bound_valid_for_all_samples{false};
     bool tolerance_metadata_present{false};
+    DefinitenessInterpretation definiteness_interpretation{
+        DefinitenessInterpretation::Unknown};
 
     Real local_symmetric_part_min_eigenvalue{};
     Real local_symmetric_part_max_eigenvalue{};
@@ -361,8 +380,17 @@ struct DiscreteMatrixSummary {
     bool structurally_symmetric{false};
     bool numerically_symmetric{false};
     bool symmetry_evidence_complete{false};
+    bool structurally_hermitian{false};
+    bool numerically_hermitian{false};
+    bool hermitian_evidence_complete{false};
+    bool structurally_complex_symmetric{false};
+    bool numerically_complex_symmetric{false};
+    bool complex_symmetry_evidence_complete{false};
     bool sign_evidence_complete{false};
     bool row_sum_evidence_complete{false};
+    bool complex_values_present{false};
+    bool global_row_coverage_exact{false};
+    bool row_ownership_disjoint{false};
 
     Real sign_tolerance{};
     Real row_sum_tolerance{};
@@ -371,6 +399,9 @@ struct DiscreteMatrixSummary {
     Real max_abs_offdiag{};
     Real max_positive_offdiag{};
     Real max_symmetry_error{};
+    Real max_hermitian_error{};
+    Real max_complex_symmetry_error{};
+    Real max_abs_imag_entry{};
     Real min_row_sum{};
     Real max_row_sum{};
     Real max_abs_row_sum{};
@@ -380,9 +411,12 @@ struct DiscreteMatrixSummary {
     std::optional<Real> gershgorin_lower_bound;
     std::optional<Real> gershgorin_upper_bound;
     std::optional<Real> nonnormality_indicator;
+    std::optional<Real> nonnormality_tolerance;
     std::optional<Real> nonsymmetry_indicator;
+    std::string nonnormality_norm_id;
 
     std::uint64_t diagonal_count{0};
+    std::uint64_t missing_diagonal_count{0};
     std::uint64_t nonpositive_diagonal_count{0};
     std::uint64_t negative_diagonal_count{0};
     std::uint64_t near_zero_diagonal_count{0};
@@ -390,12 +424,20 @@ struct DiscreteMatrixSummary {
     std::uint64_t positive_offdiag_count{0};
     std::uint64_t negative_offdiag_count{0};
     std::uint64_t near_zero_offdiag_count{0};
+    std::uint64_t negative_row_sum_count{0};
+    std::uint64_t positive_row_sum_count{0};
+    std::uint64_t near_zero_row_sum_count{0};
+    /// Deprecated compatibility alias for negative_row_sum_count. The scanner
+    /// reports raw row-sum signs; theorem analyzers decide whether a sign is a
+    /// violation for the declared operator convention.
     std::uint64_t row_sum_violation_count{0};
     std::uint64_t invalid_entry_count{0};
     std::uint64_t nonfinite_entry_count{0};
     std::uint64_t nonfinite_row_sum_count{0};
     std::uint64_t scanned_row_count{0};
     std::uint64_t expected_row_count{0};
+    std::uint64_t duplicate_row_visit_count{0};
+    std::uint64_t missing_row_count{0};
     std::uint64_t scanned_entry_count{0};
 
     bool cholesky_factorization_succeeded{false};
@@ -410,6 +452,8 @@ struct DiscreteMatrixSummary {
     bool irreducibility_evidence_present{false};
     bool stieltjes_matrix_evidence{false};
     std::string m_matrix_theorem_id;
+    DefinitenessInterpretation definiteness_interpretation{
+        DefinitenessInterpretation::Unknown};
 
     std::size_t worst_entry_sample_limit{kDefaultWorstSampleLimit};
     std::vector<MatrixEntrySample> worst_entries;
@@ -464,6 +508,13 @@ struct SchurComplementSummary {
     NullspaceHandlingClass nullspace_handling{NullspaceHandlingClass::Unknown};
     bool schur_definiteness_evidence_present{false};
     PositivityClass schur_positivity{PositivityClass::Unknown};
+    bool schur_positive_on_quotient{false};
+    bool quotient_space_scope_present{false};
+    bool multiplier_gauge_projected{false};
+    bool nullspace_basis_matches{false};
+    Real schur_lower_bound_on_quotient{};
+    Real schur_upper_bound_on_quotient{};
+    std::string quotient_norm_id;
     bool spectral_equivalence_bounds_present{false};
     Real spectral_equivalence_lower_bound{};
     Real spectral_equivalence_upper_bound{};
@@ -539,6 +590,7 @@ struct LocalStencilSummary {
 
 struct MeshGeometryQualitySummary {
     MeshRevisionId mesh_revision{};
+    std::string geometry_mapping_revision;
     DomainKind domain{DomainKind::Cell};
     Real min_jacobian{};
     Real max_jacobian{};
@@ -556,8 +608,19 @@ struct MeshGeometryQualitySummary {
     std::uint64_t inverted_element_count{0};
     std::uint64_t poor_quality_element_count{0};
     std::uint64_t cut_cell_count{0};
+    bool jacobian_bounds_present{false};
+    bool jacobian_bounds_cover_all_active_cells{false};
+    bool jacobian_bounds_cover_high_order_interior{false};
+    bool jacobian_bounds_are_certified_bounds{false};
+    std::string jacobian_bound_method;
     bool shape_regular_evidence_present{false};
     bool mesh_family_scope_present{false};
+    bool cut_cell_mitigation_metadata_present{false};
+    bool ghost_penalty_present{false};
+    bool agglomeration_present{false};
+    bool cell_merging_present{false};
+    bool robust_cut_cell_quadrature_present{false};
+    bool cut_cell_conditioning_evidence_present{false};
     std::size_t worst_element_sample_limit{kDefaultWorstSampleLimit};
     std::vector<ElementId> worst_elements;
 };
@@ -646,6 +709,8 @@ struct BoundarySymbolSummary {
     Real complementing_margin{};
     std::uint64_t boundary_condition_count{0};
     std::uint64_t required_boundary_condition_count{0};
+    bool required_boundary_condition_count_present{false};
+    std::string zero_count_reason;
     std::uint64_t missing_symbol_count{0};
     std::uint64_t root_subspace_mismatch_count{0};
     bool principal_symbol_rank_evidence_present{false};
@@ -659,6 +724,8 @@ struct BoundarySymbolSummary {
     bool dof_coverage_complete{false};
     bool mixed_boundary_or_corner_scope_present{false};
     bool mixed_corner_edge_coverage_present{false};
+    WeakBoundaryEnforcementRoute weak_boundary_route{
+        WeakBoundaryEnforcementRoute::Unknown};
 };
 
 struct InfSupEstimateSummary {
@@ -866,6 +933,8 @@ struct AdjointConsistencySummary {
 struct ParameterScaleSummary {
     std::string nondimensional_parameter_id;
     ParameterScaleRole role{ParameterScaleRole::Unknown};
+    WeakBoundaryEnforcementRoute weak_boundary_route{
+        WeakBoundaryEnforcementRoute::Unknown};
     OperatorBlockId block;
     std::vector<VariableKey> variables;
     std::string contribution_id;
@@ -873,10 +942,14 @@ struct ParameterScaleSummary {
     Real max_scale_value{};
     Real required_lower_bound{};
     bool required_lower_bound_present{false};
+    Real accepted_upper_bound{};
+    bool accepted_upper_bound_present{false};
     int polynomial_order{-1};
     bool trace_inverse_metadata_present{false};
     Real trace_inverse_constant{};
     std::string scale_theorem_id;
+    std::string scale_norm_id;
+    std::string evidence_scope_id;
     Real mesh_quality_factor{1};
     Real coefficient_contrast_factor{1};
     Real layer_resolution_metric{};
@@ -886,10 +959,20 @@ struct ParameterScaleSummary {
 struct StabilizationAdequacySummary {
     std::string stabilization_id;
     std::string method_family;
+    StabilizationFamily family{StabilizationFamily::Unknown};
     std::string stabilization_theorem_id;
     std::string stability_norm_id;
     OperatorBlockId block;
     std::vector<VariableKey> variables;
+    bool requirement_metadata_present{false};
+    bool requires_peclet_evidence{false};
+    bool requires_cfl_evidence{false};
+    bool requires_trace_penalty_bound{false};
+    bool requires_inf_sup_surrogate{false};
+    bool requires_residual_consistency{true};
+    bool requires_adjoint_consistency{false};
+    bool requires_mass_lumping{false};
+    bool requires_limiter_bounds{false};
     bool parameter_formula_metadata_present{false};
     bool residual_consistency_evidence_present{false};
     bool regime_metadata_present{false};
@@ -916,6 +999,11 @@ struct StabilizationAdequacySummary {
     bool cfl_estimate_present{false};
     bool accepted_cfl_bound_present{false};
     bool adjoint_consistency_evidence_present{false};
+    bool trace_penalty_bound_present{false};
+    bool trace_penalty_bound_valid{false};
+    bool inf_sup_surrogate_evidence_present{false};
+    bool mass_lumping_evidence_present{false};
+    bool limiter_bounds_evidence_present{false};
     std::uint64_t violation_count{0};
 };
 

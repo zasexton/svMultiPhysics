@@ -197,11 +197,11 @@ TEST(Phase9, PureNeumannPoisson) {
 
     auto report = analyzer.analyze(ctx);
 
-    // Nullspace: ScalarConstant, Exact, High
+    // Nullspace: ScalarConstant descriptor/syntax evidence, high confidence but not certified.
     auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
     ASSERT_GE(nullspace.size(), 1u);
     EXPECT_EQ(nullspace[0]->field, FieldId{0});
-    EXPECT_EQ(nullspace[0]->status, PropertyStatus::Exact);
+    EXPECT_EQ(nullspace[0]->status, PropertyStatus::Likely);
     EXPECT_EQ(nullspace[0]->confidence, AnalysisConfidence::High);
 
     // UnderConstraint (no anchoring BC)
@@ -285,7 +285,7 @@ TEST(Phase9, FreeElasticity) {
     auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
     ASSERT_GE(nullspace.size(), 1u);
     EXPECT_NE(nullspace[0]->description.find("rigid"), std::string::npos);
-    EXPECT_EQ(nullspace[0]->status, PropertyStatus::Exact);
+    EXPECT_EQ(nullspace[0]->status, PropertyStatus::Likely);
 
     // Under-constrained (no BCs at all)
     EXPECT_GE(report.countByKind(PropertyKind::UnderConstraint), 1u);

@@ -55,7 +55,7 @@ namespace analysis {
  */
 struct FieldDescriptor {
     FieldId field_id{INVALID_FIELD_ID};
-    std::string name;                    ///< Human-readable field name (e.g. "velocity", "pressure")
+    std::string name;                    ///< Human-readable field name (e.g. "primary", "multiplier")
     FieldType field_type{FieldType::Scalar};
     int value_dimension{1};              ///< 1=scalar, 2/3=vector, 4/6/9=tensor
     int topological_dimension{0};        ///< Spatial dimension of the mesh
@@ -104,6 +104,7 @@ struct FieldDescriptor {
     bool declared_nullspace_metadata_present{false};
     NullspaceFamily declared_nullspace_family{NullspaceFamily::UserDefined};
     std::string declared_nullspace_scope;
+    std::vector<DeclaredNullspaceMetadata> declared_nullspaces;
 };
 
 /**

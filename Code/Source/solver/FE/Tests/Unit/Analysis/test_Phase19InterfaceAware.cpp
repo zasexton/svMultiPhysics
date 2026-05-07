@@ -90,6 +90,8 @@ TEST(Phase19, InterfaceNitsche_SharedNodeCells) {
     irec.interface_marker = 1;
     irec.minus_cell = 0;
     irec.plus_cell = 1;
+    irec.minus_local_face = 0;
+    irec.plus_local_face = 0;
     irec.is_two_sided = true;
     irec.has_orientation = true;
     itopo.faces.push_back(irec);
@@ -130,7 +132,10 @@ TEST(Phase19, InterfaceHandwrittenKernel) {
     irec.interface_marker = 3;
     irec.minus_cell = 0;
     irec.plus_cell = 1;
+    irec.minus_local_face = 0;
+    irec.plus_local_face = 0;
     irec.is_two_sided = true;
+    irec.has_orientation = true;
     itopo.faces.push_back(irec);
     itopo.marker_to_faces[3].push_back(0);
     ctx.setInterfaceTopologyContext(std::move(itopo));

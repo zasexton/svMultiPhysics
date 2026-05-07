@@ -22,6 +22,7 @@
 
 #include "Core/Types.h"
 
+#include <cstdint>
 #include <map>
 #include <set>
 #include <utility>
@@ -36,6 +37,15 @@ class IMeshAccess;
 
 namespace analysis {
 
+enum class TopologyConnectivityMode : std::uint8_t {
+    NodeConnected,
+    FacetConnected,
+    EdgeConnected,
+    DofGraphConnected,
+    OperatorGraphConnected,
+    InterfaceCoupledConnected,
+};
+
 /**
  * @brief A connected component of the mesh
  */
@@ -45,6 +55,12 @@ struct ConnectedComponent {
     int num_vertices{0};
     int num_cells{0};
     std::set<int> boundary_markers;
+};
+
+struct ConnectedComponentSet {
+    TopologyConnectivityMode mode{TopologyConnectivityMode::NodeConnected};
+    std::vector<ConnectedComponent> components;
+    bool exact_for_mode{true};
 };
 
 /**
@@ -78,6 +94,11 @@ public:
     /// Connected components of the mesh
     std::vector<ConnectedComponent> components;
 
+    /// Mode-specific connected-component sets. `components` is the default mode.
+    std::map<TopologyConnectivityMode, ConnectedComponentSet> component_sets;
+    TopologyConnectivityMode default_connectivity_mode{
+        TopologyConnectivityMode::NodeConnected};
+
     /// Boundary marker ↔ region mapping
     BoundaryRegionMapping boundary_mapping;
 
@@ -100,6 +121,10 @@ public:
     /// Get all region IDs touched by a boundary marker
     [[nodiscard]] std::vector<int> regionsForBoundaryMarker(int marker) const;
 
+    /// Get components for a requested topology mode, if built.
+    [[nodiscard]] const ConnectedComponentSet*
+    connectedComponents(TopologyConnectivityMode mode) const noexcept;
+
     // ---- Factory ----
 
     /**
@@ -112,7 +137,9 @@ public:
      * @param mesh  Mesh access interface
      * @return      Populated TopologyAnalysisContext
      */
-    [[nodiscard]] static TopologyAnalysisContext build(const assembly::IMeshAccess& mesh);
+    [[nodiscard]] static TopologyAnalysisContext
+    build(const assembly::IMeshAccess& mesh,
+          TopologyConnectivityMode mode = TopologyConnectivityMode::NodeConnected);
 
 private:
     /// Cell index → region ID lookup (built by build())

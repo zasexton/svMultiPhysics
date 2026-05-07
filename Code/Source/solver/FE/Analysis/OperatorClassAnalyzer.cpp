@@ -37,6 +37,28 @@ enum class DefinitenessEvidence {
     Unknown,
 };
 
+bool positiveDefinitenessRequired(
+    DefinitenessInterpretation interpretation) noexcept
+{
+    return interpretation ==
+               DefinitenessInterpretation::CoercivePositiveRequired ||
+           interpretation ==
+               DefinitenessInterpretation::DissipativeSignRequired ||
+           interpretation ==
+               DefinitenessInterpretation::SolverSPDRequired;
+}
+
+bool indefiniteRouteDeclared(
+    DefinitenessInterpretation interpretation,
+    ContributionRole role) noexcept
+{
+    return interpretation ==
+               DefinitenessInterpretation::IndefiniteAllowed ||
+           interpretation ==
+               DefinitenessInterpretation::SaddlePointExpected ||
+           role == ContributionRole::ConstraintBlock;
+}
+
 bool coefficientCoverageComplete(const CoefficientPropertySummary& summary) noexcept
 {
     const bool state_scope_ok =
@@ -99,6 +121,8 @@ void emitCoefficientClaim(ProblemAnalysisReport& report,
         : variablesForBlock(summary.block);
     claim.coefficient_id = summary.coefficient;
     claim.claim_origin = "OperatorClassAnalyzer";
+    claim.evidence_level = EvidenceLevel::ScopedNumericSummary;
+    claim.definiteness_interpretation = summary.definiteness_interpretation;
 
     switch (summary.positivity) {
         case PositivityClass::Positive:
@@ -126,11 +150,28 @@ void emitCoefficientClaim(ProblemAnalysisReport& report,
         case PositivityClass::Negative:
         case PositivityClass::Nonpositive:
         case PositivityClass::Indefinite:
-            claim.status = PropertyStatus::Violated;
-            claim.certification_class = CertificationClass::Violated;
-            claim.description =
-                "Coefficient '" + summary.coefficient +
-                "' violates elliptic positivity assumptions";
+            if (positiveDefinitenessRequired(
+                    summary.definiteness_interpretation)) {
+                claim.status = PropertyStatus::Violated;
+                claim.certification_class = CertificationClass::Violated;
+                claim.description =
+                    "Coefficient '" + summary.coefficient +
+                    "' contradicts the declared positive/coercive/SPD route";
+            } else if (indefiniteRouteDeclared(
+                           summary.definiteness_interpretation,
+                           summary.block.role)) {
+                claim.status = PropertyStatus::Preserved;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.description =
+                    "Coefficient '" + summary.coefficient +
+                    "' is signed or indefinite as allowed by the declared indefinite/saddle-point route";
+            } else {
+                claim.status = PropertyStatus::Unknown;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.description =
+                    "Coefficient '" + summary.coefficient +
+                    "' has signed or indefinite evidence, but no theorem or solver route declares whether that is admissible";
+            }
             break;
         case PositivityClass::Unknown:
             claim.status = PropertyStatus::Unknown;
@@ -154,7 +195,9 @@ void emitCoefficientClaim(ProblemAnalysisReport& report,
         ", lower_bound_all_samples=" +
         std::string(summary.lower_bound_valid_for_all_samples ? "true" : "false") +
         ", tolerance_metadata=" +
-        std::string(summary.tolerance_metadata_present ? "true" : "false"));
+        std::string(summary.tolerance_metadata_present ? "true" : "false") +
+        ", definiteness_interpretation=" +
+        std::string(toString(summary.definiteness_interpretation)));
     report.claims.push_back(std::move(claim));
 }
 
@@ -180,6 +223,7 @@ void emitReducedDefinitenessClaim(ProblemAnalysisReport& report,
     claim.variables = variablesForBlock(matrix.block);
     claim.tested_block_id = matrix.block.operator_tag;
     claim.claim_origin = "OperatorClassAnalyzer";
+    claim.evidence_level = EvidenceLevel::ScopedNumericSummary;
 
     if (!exact_reduction || !symmetric_evidence) {
         claim.status = PropertyStatus::Unknown;
@@ -203,12 +247,34 @@ void emitReducedDefinitenessClaim(ProblemAnalysisReport& report,
         claim.description =
             "Reduced free-free operator has semidefinite evidence but no positive coercivity lower bound";
     } else if (definiteness == DefinitenessEvidence::Indefinite) {
-        claim.status = PropertyStatus::Violated;
-        claim.confidence = AnalysisConfidence::High;
         claim.coercivity_class = CoercivityClass::Indefinite;
-        claim.reduced_definiteness_class = CertificationClass::Violated;
-        claim.description =
-            "Reduced free-free operator violates positive-definiteness evidence";
+        const auto interpretation = matrix.definiteness_interpretation;
+        claim.definiteness_interpretation = interpretation;
+        if (positiveDefinitenessRequired(interpretation)) {
+            claim.status = PropertyStatus::Violated;
+            claim.confidence = AnalysisConfidence::High;
+            claim.reduced_definiteness_class = CertificationClass::Violated;
+            claim.description =
+                "Reduced free-free operator is indefinite under a declared positive-definite/coercive solver route";
+        } else if (indefiniteRouteDeclared(interpretation, matrix.block.role)) {
+            claim.status = PropertyStatus::Preserved;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.reduced_definiteness_class =
+                CertificationClass::NotCertified;
+            if (interpretation == DefinitenessInterpretation::Unknown) {
+                claim.definiteness_interpretation =
+                    DefinitenessInterpretation::SaddlePointExpected;
+            }
+            claim.description =
+                "Reduced free-free operator is indefinite on a block route where indefiniteness is expected; solver compatibility still requires an indefinite route";
+        } else {
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.reduced_definiteness_class =
+                CertificationClass::NotCertified;
+            claim.description =
+                "Reduced free-free operator is indefinite, but no positive-definite or indefinite theorem/solver route is declared";
+        }
     } else {
         claim.status = PropertyStatus::Unknown;
         claim.confidence = AnalysisConfidence::Medium;
@@ -234,7 +300,9 @@ void emitReducedDefinitenessClaim(ProblemAnalysisReport& report,
              ? std::to_string(*matrix.coercivity_lower_bound)
              : std::string("unset")) +
         ", cholesky_success=" +
-        std::string(matrix.cholesky_factorization_succeeded ? "true" : "false"),
+        std::string(matrix.cholesky_factorization_succeeded ? "true" : "false") +
+        ", definiteness_interpretation=" +
+        std::string(toString(matrix.definiteness_interpretation)),
         claim.confidence);
     report.claims.push_back(std::move(claim));
 }
@@ -337,8 +405,7 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.variables.push_back(vk);
 
                 claim.description =
-                    "Bilinear form uses only gradient with no lower-order "
-                    "terms (Laplacian-like, self-adjoint)";
+                    "Diagonal block has only SymmetricLike descriptor metadata; numeric symmetry and theorem evidence are still required";
                 if (info.any_stabilization) {
                     claim.description +=
                         " (stabilization may break exact symmetry)";
@@ -347,8 +414,9 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.operator_symmetry_class = OperatorSymmetryClass::Symmetric;
                 claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer",
-                    "All DiagonalBlock contributions have SymmetricLike trait",
+                    "All DiagonalBlock contributions have SymmetricLike trait; descriptor metadata only",
                     claim.confidence);
+                claim.evidence_level = EvidenceLevel::DescriptorHint;
                 report.claims.push_back(std::move(claim));
             }
 
@@ -367,18 +435,19 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.variables.push_back(vk);
 
                 claim.description =
-                    "Bilinear form is positive semi-definite "
-                    "(gradient-based, no lower-order terms)";
+                    "Diagonal block has PositiveSemiDefiniteLike descriptor metadata with no first-order trait; coercivity is not certified";
                 if (info.any_stabilization) {
                     claim.description +=
                         " (stabilization may affect definiteness)";
                 }
                 claim.definiteness_class = OperatorTraitFlags::PositiveSemiDefiniteLike;
                 claim.coercivity_class = CoercivityClass::Semicoercive;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.evidence_level = EvidenceLevel::DescriptorHint;
                 claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer",
                     "All DiagonalBlock contributions have "
-                    "PositiveSemiDefiniteLike and no HasFirstOrder",
+                        "PositiveSemiDefiniteLike and no HasFirstOrder",
                     claim.confidence);
                 report.claims.push_back(std::move(claim));
             }
@@ -411,13 +480,11 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                     !fs.has_curl) {
                     is_symmetric = true;
                     symmetry_reason =
-                        "Bilinear form uses only gradient with no lower-order "
-                        "terms (Laplacian-like, self-adjoint)";
+                        "gradient-inner-product-like syntax with no detected lower-order syntax";
                 } else if (fs.only_through_sym_grad && !fs.has_plain_grad) {
                     is_symmetric = true;
                     symmetry_reason =
-                        "Bilinear form uses only sym(grad) with no lower-order "
-                        "terms (elasticity-like, self-adjoint)";
+                        "symmetric-gradient-inner-product-like syntax with no detected lower-order syntax";
                 }
             }
 
@@ -437,6 +504,8 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                         " (stabilization may break exact symmetry)";
                 }
                 claim.operator_symmetry_class = OperatorSymmetryClass::Symmetric;
+                claim.evidence_level = EvidenceLevel::SyntaxPattern;
+                claim.certification_class = CertificationClass::NotCertified;
                 claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer", symmetry_reason,
                     claim.confidence);
@@ -459,13 +528,14 @@ void OperatorClassAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.domain = DomainKind::Cell;
                 claim.variables.push_back(VariableKey::field(fid));
                 claim.description =
-                    "Bilinear form is positive semi-definite "
-                    "(gradient-based, no lower-order terms)";
+                    "Gradient/symmetric-gradient syntax suggests a semicoercive candidate; coefficient, boundary, kernel, and theorem evidence are required";
                 if (fs.has_stabilization) {
                     claim.description +=
                         " (stabilization may affect definiteness)";
                 }
                 claim.coercivity_class = CoercivityClass::Semicoercive;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.evidence_level = EvidenceLevel::SyntaxPattern;
                 claim.claim_origin = "OperatorClassAnalyzer";
                 claim.addEvidence("OperatorClassAnalyzer",
                     "only_through_annihilating_ops=true, has_absolute_value=false",

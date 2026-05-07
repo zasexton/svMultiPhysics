@@ -53,8 +53,29 @@ void addGeometryClaim(ProblemAnalysisReport& report,
 
 bool hasPositiveJacobianEvidence(const MeshGeometryQualitySummary& summary) noexcept
 {
+    if (!summary.jacobian_bounds_present) {
+        return false;
+    }
     return numeric::finitePositiveOrdered(summary.min_jacobian,
                                           summary.max_jacobian);
+}
+
+bool hasCertifiedJacobianCoverage(
+    const MeshGeometryQualitySummary& summary) noexcept
+{
+    return summary.jacobian_bounds_present &&
+           summary.jacobian_bounds_cover_all_active_cells &&
+           summary.jacobian_bounds_are_certified_bounds &&
+           summary.jacobian_bounds_cover_high_order_interior;
+}
+
+bool hasSampledPositiveJacobianEvidence(
+    const MeshGeometryQualitySummary& summary) noexcept
+{
+    return summary.jacobian_bounds_present &&
+           numeric::finitePositiveOrdered(summary.min_jacobian,
+                                          summary.max_jacobian) &&
+           !hasCertifiedJacobianCoverage(summary);
 }
 
 bool hasAspectRatioRisk(const MeshGeometryQualitySummary& summary) noexcept
@@ -65,9 +86,17 @@ bool hasAspectRatioRisk(const MeshGeometryQualitySummary& summary) noexcept
 
 bool hasJacobianViolation(const MeshGeometryQualitySummary& summary) noexcept
 {
-    return summary.inverted_element_count > 0u ||
-           !numeric::finiteOrdered(summary.min_jacobian,
-                                   summary.max_jacobian) ||
+    if (summary.inverted_element_count > 0u) {
+        return true;
+    }
+    if (!summary.jacobian_bounds_present) {
+        return false;
+    }
+    if (!numeric::finiteOrdered(summary.min_jacobian,
+                                summary.max_jacobian)) {
+        return hasCertifiedJacobianCoverage(summary);
+    }
+    return hasCertifiedJacobianCoverage(summary) &&
            summary.min_jacobian <= Real{};
 }
 
@@ -111,6 +140,16 @@ void addTopologyScopedGeometryClaims(const ProblemAnalysisContext& context,
     }
 }
 
+bool cutCellMitigationPresent(const MeshGeometryQualitySummary& summary) noexcept
+{
+    return summary.cut_cell_mitigation_metadata_present ||
+           summary.ghost_penalty_present ||
+           summary.agglomeration_present ||
+           summary.cell_merging_present ||
+           summary.robust_cut_cell_quadrature_present ||
+           summary.cut_cell_conditioning_evidence_present;
+}
+
 } // namespace
 
 std::string MeshGeometryAnalyzer::name() const {
@@ -130,25 +169,78 @@ void MeshGeometryAnalyzer::run(const ProblemAnalysisContext& context,
             addGeometryClaim(report, summary,
                 PropertyStatus::Violated,
                 CertificationClass::Violated,
-                "Mesh mapping validity violated: inverted or nonpositive-Jacobian elements were reported",
+                "MeshMappingOrientation violation: certified Jacobian bounds or explicit inverted-element counts report invalid mapping orientation/invertibility",
                 std::to_string(summary.inverted_element_count) +
                     " inverted elements; min_jacobian=" +
-                    std::to_string(summary.min_jacobian));
+                    std::to_string(summary.min_jacobian) +
+                    ", bound_method='" + summary.jacobian_bound_method + "'");
+            report.claims.back().evidence_level =
+                EvidenceLevel::CertifiedNumericTheorem;
             addGeometryIssue(report, summary,
                 "inverted or nonpositive-Jacobian elements invalidate coercivity and monotonicity evidence");
+        } else if (!summary.jacobian_bounds_present) {
+            addGeometryClaim(report, summary,
+                PropertyStatus::Unknown,
+                CertificationClass::Unknown,
+                "MeshMappingOrientation unknown: geometry summary lacks explicit Jacobian bound presence metadata",
+                "jacobian_bounds_present=false; request mesh geometry summary with coverage, method, mesh revision, and geometry mapping revision");
+            report.claims.back().evidence_level =
+                EvidenceLevel::ScopedNumericSummary;
         } else if (summary.poor_quality_element_count > 0u ||
-                   hasAspectRatioRisk(summary) ||
-                   summary.cut_cell_count > 0u) {
+                   hasAspectRatioRisk(summary)) {
             addGeometryClaim(report, summary,
                 PropertyStatus::Likely,
                 CertificationClass::NotCertified,
-                "Mesh geometry quality risk reported for active discretization",
+                "MeshShapeRegularity or interpolation-quality risk reported for active discretization",
                 std::to_string(summary.poor_quality_element_count) +
-                    " poor-quality elements, " +
-                    std::to_string(summary.cut_cell_count) +
-                    " cut cells, max_aspect_ratio=" +
+                    " poor-quality elements, max_aspect_ratio=" +
                     std::to_string(summary.max_aspect_ratio));
+            report.claims.back().evidence_level =
+                EvidenceLevel::ScopedNumericSummary;
             addTopologyScopedGeometryClaims(context, report, summary);
+        } else if (summary.cut_cell_count > 0u) {
+            const bool mitigated = cutCellMitigationPresent(summary);
+            addGeometryClaim(report, summary,
+                PropertyStatus::Likely,
+                CertificationClass::NotCertified,
+                mitigated
+                    ? "CutCellConditioningRisk is reported with mitigation metadata"
+                    : "CutCellConditioningRisk is reported without mitigation metadata",
+                std::to_string(summary.cut_cell_count) +
+                    " cut cells; ghost_penalty=" +
+                    std::string(summary.ghost_penalty_present ? "true" : "false") +
+                    ", agglomeration=" +
+                    std::string(summary.agglomeration_present ? "true" : "false") +
+                    ", cell_merging=" +
+                    std::string(summary.cell_merging_present ? "true" : "false") +
+                    ", robust_quadrature=" +
+                    std::string(summary.robust_cut_cell_quadrature_present ? "true" : "false") +
+                    ", conditioning_evidence=" +
+                    std::string(summary.cut_cell_conditioning_evidence_present ? "true" : "false"));
+            report.claims.back().evidence_level =
+                EvidenceLevel::ScopedNumericSummary;
+            if (!mitigated) {
+                addGeometryIssue(report, summary,
+                    "cut cells are present without ghost penalty, agglomeration, cell-merging, robust-quadrature, or conditioning mitigation metadata");
+            }
+            addTopologyScopedGeometryClaims(context, report, summary);
+        } else if (hasSampledPositiveJacobianEvidence(summary)) {
+            addGeometryClaim(report, summary,
+                PropertyStatus::Likely,
+                CertificationClass::NotCertified,
+                "MeshMappingOrientation likely valid from positive Jacobian evidence, but not certified over the full active mesh/high-order interior",
+                "min_jacobian=" + std::to_string(summary.min_jacobian) +
+                    ", max_jacobian=" +
+                    std::to_string(summary.max_jacobian) +
+                    ", cover_all_active_cells=" +
+                    std::string(summary.jacobian_bounds_cover_all_active_cells ? "true" : "false") +
+                    ", cover_high_order_interior=" +
+                    std::string(summary.jacobian_bounds_cover_high_order_interior ? "true" : "false") +
+                    ", certified_bounds=" +
+                    std::string(summary.jacobian_bounds_are_certified_bounds ? "true" : "false") +
+                    ", method='" + summary.jacobian_bound_method + "'");
+            report.claims.back().evidence_level =
+                EvidenceLevel::ScopedNumericSummary;
         } else if (hasPositiveJacobianEvidence(summary)) {
             const bool shape_evidence_valid =
                 summary.shape_regular_evidence_present &&
@@ -164,18 +256,23 @@ void MeshGeometryAnalyzer::run(const ProblemAnalysisContext& context,
                 PropertyStatus::Preserved,
                 CertificationClass::Certified,
                 shape_evidence_valid
-                    ? "Mesh mapping validity and reported shape-regularity evidence certified"
-                    : "Mesh mapping invertibility certified by positive Jacobian summary; FEM shape-regularity stability evidence is out of scope",
+                    ? "MeshMappingOrientation and MeshShapeRegularity evidence certified"
+                    : "MeshMappingOrientation and MeshMappingInvertibility certified; MeshShapeRegularity stability evidence is out of scope",
                 "min_jacobian=" + std::to_string(summary.min_jacobian) +
                     ", max_jacobian=" +
                     std::to_string(summary.max_jacobian) +
+                    ", bound_method='" + summary.jacobian_bound_method + "'" +
                     shape_text);
+            report.claims.back().evidence_level =
+                EvidenceLevel::CertifiedNumericTheorem;
         } else {
             addGeometryClaim(report, summary,
                 PropertyStatus::Unknown,
                 CertificationClass::Unknown,
                 "Mesh geometry validity summary is present but lacks decisive Jacobian evidence",
                 "No inverted elements were reported, but positive-Jacobian bounds are unavailable");
+            report.claims.back().evidence_level =
+                EvidenceLevel::ScopedNumericSummary;
         }
     }
 }

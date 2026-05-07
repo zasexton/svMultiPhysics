@@ -345,6 +345,14 @@ void addMinimumResidualConditioningBounds(
     summary.condition_bound_scope = "active enriched test-search space";
 }
 
+void markExactRowCoverage(DiscreteMatrixSummary& matrix)
+{
+    matrix.global_row_coverage_exact = true;
+    matrix.row_ownership_disjoint = true;
+    matrix.duplicate_row_visit_count = 0;
+    matrix.missing_row_count = 0;
+}
+
 DiscreteMatrixSummary certifiedSignPatternMatrix(std::string tag)
 {
     DiscreteMatrixSummary matrix;
@@ -364,6 +372,7 @@ DiscreteMatrixSummary certifiedSignPatternMatrix(std::string tag)
     matrix.max_abs_row_sum = 1.0;
     matrix.scanned_row_count = 2;
     matrix.expected_row_count = 2;
+    markExactRowCoverage(matrix);
     matrix.scanned_entry_count = 4;
     matrix.m_matrix_certification_evidence = true;
     return matrix;
@@ -1235,6 +1244,10 @@ TEST(AnalysisEvidenceContracts, GeometryQuadratureAndGclRejectInvalidScalars)
     AnalysisSummarySet summaries;
 
     MeshGeometryQualitySummary mesh;
+    mesh.jacobian_bounds_present = true;
+    mesh.jacobian_bounds_cover_all_active_cells = true;
+    mesh.jacobian_bounds_cover_high_order_interior = true;
+    mesh.jacobian_bounds_are_certified_bounds = true;
     mesh.min_jacobian = std::numeric_limits<Real>::quiet_NaN();
     mesh.max_jacobian = 1.0;
     summaries.mesh_geometry_quality.push_back(mesh);
@@ -1499,6 +1512,7 @@ TEST(AnalysisEvidenceContracts, DiscreteMatrixCertificationRequiresCompleteSignE
     matrix.row_sum_evidence_complete = true;
     matrix.scanned_row_count = 2;
     matrix.expected_row_count = 2;
+    markExactRowCoverage(matrix);
     matrix.scanned_entry_count = 4;
     certified_summaries.discrete_matrices.push_back(matrix);
     certified_ctx.setAnalysisSummaries(std::move(certified_summaries));
@@ -1553,6 +1567,7 @@ TEST(AnalysisEvidenceContracts, DmpRequiresCoefficientCoverageForAllMatrixVariab
     matrix.max_abs_row_sum = 1.0;
     matrix.scanned_row_count = 4;
     matrix.expected_row_count = 4;
+    markExactRowCoverage(matrix);
     matrix.scanned_entry_count = 16;
     matrix.structurally_symmetric = true;
     matrix.numerically_symmetric = true;
@@ -1625,6 +1640,7 @@ TEST(AnalysisEvidenceContracts, DiscreteMatrixNonfiniteEvidenceCannotCertifyDmp)
     matrix.max_abs_row_sum = 1.0;
     matrix.scanned_row_count = 2;
     matrix.expected_row_count = 2;
+    markExactRowCoverage(matrix);
     matrix.scanned_entry_count = 4;
     matrix.nonfinite_entry_count = 1;
     matrix.nonfinite_row_sum_count = 1;
@@ -1676,6 +1692,7 @@ TEST(AnalysisEvidenceContracts, GenericMMatrixBooleanNeedsTheoremSpecificEvidenc
     matrix.max_row_sum = 1.0;
     matrix.scanned_row_count = 2;
     matrix.expected_row_count = 2;
+    markExactRowCoverage(matrix);
     matrix.scanned_entry_count = 4;
     matrix.m_matrix_certification_evidence = true;
 
@@ -1755,6 +1772,7 @@ TEST(AnalysisEvidenceContracts, StieltjesMMatrixRouteDoesNotRequireRowSumEvidenc
     matrix.negative_offdiag_count = 2;
     matrix.scanned_row_count = 2;
     matrix.expected_row_count = 2;
+    markExactRowCoverage(matrix);
     matrix.scanned_entry_count = 4;
     matrix.structurally_symmetric = true;
     matrix.numerically_symmetric = true;
@@ -2108,7 +2126,7 @@ TEST(AnalysisEvidenceContracts, CompatibleComplexExactSequenceNeedsCommutingProj
         report, PropertyKind::CompatibleComplexStructure,
         "SpaceCompatibilityAnalyzer");
     ASSERT_NE(claim, nullptr);
-    EXPECT_EQ(claim->status, PropertyStatus::Likely);
+    EXPECT_EQ(claim->status, PropertyStatus::Unknown);
     ASSERT_TRUE(claim->certification_class.has_value());
     EXPECT_EQ(*claim->certification_class, CertificationClass::NotCertified);
 }
@@ -2768,7 +2786,7 @@ TEST(AnalysisEvidenceContracts, SchurComplementCertificationControlsBlockSchurSo
         partial_report, PropertyKind::SolverCompatibility,
         "SolverCompatibilityAnalyzer");
     ASSERT_NE(partial_solver, nullptr);
-    EXPECT_EQ(partial_solver->status, PropertyStatus::Likely);
+    EXPECT_EQ(partial_solver->status, PropertyStatus::Unknown);
     ASSERT_TRUE(partial_solver->certification_class.has_value());
     EXPECT_EQ(*partial_solver->certification_class,
               CertificationClass::NotCertified);
@@ -3996,6 +4014,11 @@ TEST(AnalysisEvidenceContracts, MeshMappingValidityDoesNotImplyShapeRegularity)
 {
     AnalysisSummarySet summaries;
     MeshGeometryQualitySummary mapping_only;
+    mapping_only.jacobian_bounds_present = true;
+    mapping_only.jacobian_bounds_cover_all_active_cells = true;
+    mapping_only.jacobian_bounds_cover_high_order_interior = true;
+    mapping_only.jacobian_bounds_are_certified_bounds = true;
+    mapping_only.jacobian_bound_method = "interval bound";
     mapping_only.min_jacobian = 0.25;
     mapping_only.max_jacobian = 2.0;
     summaries.mesh_geometry_quality.push_back(mapping_only);
@@ -4028,7 +4051,7 @@ TEST(AnalysisEvidenceContracts, MeshMappingValidityDoesNotImplyShapeRegularity)
                   "not certified"),
               std::string::npos);
     EXPECT_EQ(claims[2]->status, PropertyStatus::Preserved);
-    EXPECT_NE(claims[2]->description.find("shape-regularity evidence"),
+    EXPECT_NE(claims[2]->description.find("MeshShapeRegularity evidence"),
               std::string::npos);
     ASSERT_FALSE(claims[2]->evidence.empty());
     EXPECT_NE(claims[2]->evidence.front().description.find(

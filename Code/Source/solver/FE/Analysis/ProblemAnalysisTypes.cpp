@@ -100,6 +100,19 @@ const char* toString(IssueSeverity s) noexcept {
     return "UNKNOWN";
 }
 
+const char* toString(EvidenceLevel e) noexcept {
+    switch (e) {
+        case EvidenceLevel::SyntaxPattern: return "SyntaxPattern";
+        case EvidenceLevel::DescriptorHint: return "DescriptorHint";
+        case EvidenceLevel::StructuralMetadata: return "StructuralMetadata";
+        case EvidenceLevel::ScopedNumericSummary: return "ScopedNumericSummary";
+        case EvidenceLevel::TheoremRegistryMatch: return "TheoremRegistryMatch";
+        case EvidenceLevel::CertifiedNumericTheorem:
+            return "CertifiedNumericTheorem";
+    }
+    return "Unknown";
+}
+
 const char* toString(VariableKind k) noexcept {
     switch (k) {
         case VariableKind::FieldComponent:     return "FieldComponent";
@@ -190,9 +203,13 @@ const char* toString(TransportCharacterClass c) noexcept {
 
 const char* toString(ApplicabilityClass c) noexcept {
     switch (c) {
-        case ApplicabilityClass::Applicable:    return "Applicable";
+        case ApplicabilityClass::Applicable: return "Applicable";
         case ApplicabilityClass::NotApplicable: return "NotApplicable";
-        case ApplicabilityClass::Unknown:       return "Unknown";
+        case ApplicabilityClass::InsufficientMetadata:
+            return "InsufficientMetadata";
+        case ApplicabilityClass::ContradictedByMetadata:
+            return "ContradictedByMetadata";
+        case ApplicabilityClass::Unknown: return "Unknown";
     }
     return "Unknown";
 }
@@ -259,6 +276,78 @@ const char* toString(NullspaceHandlingClass c) noexcept {
         case NullspaceHandlingClass::Retained:              return "Retained";
         case NullspaceHandlingClass::Uncontrolled:          return "Uncontrolled";
         case NullspaceHandlingClass::Unknown:               return "Unknown";
+    }
+    return "Unknown";
+}
+
+const char* toString(WeakBoundaryEnforcementRoute r) noexcept {
+    switch (r) {
+        case WeakBoundaryEnforcementRoute::PenaltyCoercivity:
+            return "PenaltyCoercivity";
+        case WeakBoundaryEnforcementRoute::NitscheCoercivity:
+            return "NitscheCoercivity";
+        case WeakBoundaryEnforcementRoute::MortarInfSup:
+            return "MortarInfSup";
+        case WeakBoundaryEnforcementRoute::VariationalInequalityMonotonicity:
+            return "VariationalInequalityMonotonicity";
+        case WeakBoundaryEnforcementRoute::ActiveSetComplementarity:
+            return "ActiveSetComplementarity";
+        case WeakBoundaryEnforcementRoute::StabilizedTraceCoupling:
+            return "StabilizedTraceCoupling";
+        case WeakBoundaryEnforcementRoute::Unknown:
+            return "Unknown";
+    }
+    return "Unknown";
+}
+
+const char* toString(NullspaceEvidenceKind k) noexcept {
+    switch (k) {
+        case NullspaceEvidenceKind::DescriptorHint:
+            return "DescriptorHint";
+        case NullspaceEvidenceKind::SymbolicOperatorIdentity:
+            return "SymbolicOperatorIdentity";
+        case NullspaceEvidenceKind::MatrixRankEvidence:
+            return "MatrixRankEvidence";
+        case NullspaceEvidenceKind::TheoremBackedKernel:
+            return "TheoremBackedKernel";
+        case NullspaceEvidenceKind::ProducerCertifiedKernel:
+            return "ProducerCertifiedKernel";
+    }
+    return "Unknown";
+}
+
+const char* toString(KernelTreatment k) noexcept {
+    switch (k) {
+        case KernelTreatment::Unknown:
+            return "Unknown";
+        case KernelTreatment::Retained:
+            return "Retained";
+        case KernelTreatment::ProjectedOut:
+            return "ProjectedOut";
+        case KernelTreatment::FixedByConstraint:
+            return "FixedByConstraint";
+        case KernelTreatment::AnchoredByOperator:
+            return "AnchoredByOperator";
+    }
+    return "Unknown";
+}
+
+const char* toString(DefinitenessInterpretation i) noexcept {
+    switch (i) {
+        case DefinitenessInterpretation::CoercivePositiveRequired:
+            return "CoercivePositiveRequired";
+        case DefinitenessInterpretation::DissipativeSignRequired:
+            return "DissipativeSignRequired";
+        case DefinitenessInterpretation::SolverSPDRequired:
+            return "SolverSPDRequired";
+        case DefinitenessInterpretation::IndefiniteAllowed:
+            return "IndefiniteAllowed";
+        case DefinitenessInterpretation::SaddlePointExpected:
+            return "SaddlePointExpected";
+        case DefinitenessInterpretation::SignConventionDependent:
+            return "SignConventionDependent";
+        case DefinitenessInterpretation::Unknown:
+            return "Unknown";
     }
     return "Unknown";
 }
@@ -493,6 +582,7 @@ void appendStructuredFields(std::ostream& out, const PropertyClaim& claim)
     bool any = false;
 
     if (claim.inf_sup_class) appendStructuredField(out, any, "inf_sup", toString(*claim.inf_sup_class));
+    appendStructuredField(out, any, "evidence_level", toString(claim.evidence_level));
     if (claim.conservation_class) appendStructuredField(out, any, "conservation", toString(*claim.conservation_class));
     if (claim.dae_class) appendStructuredField(out, any, "dae", toString(*claim.dae_class));
     if (claim.space_compatibility_class) appendStructuredField(out, any, "space", toString(*claim.space_compatibility_class));
@@ -505,6 +595,9 @@ void appendStructuredFields(std::ostream& out, const PropertyClaim& claim)
     if (claim.coercivity_class) appendStructuredField(out, any, "coercivity", toString(*claim.coercivity_class));
     if (claim.reduced_definiteness_class) appendStructuredField(out, any, "reduced_definiteness", toString(*claim.reduced_definiteness_class));
     if (claim.nullspace_handling_class) appendStructuredField(out, any, "nullspace_handling", toString(*claim.nullspace_handling_class));
+    if (claim.weak_boundary_route) appendStructuredField(out, any, "weak_boundary_route", toString(*claim.weak_boundary_route));
+    if (claim.nullspace_evidence_kind) appendStructuredField(out, any, "nullspace_evidence", toString(*claim.nullspace_evidence_kind));
+    if (claim.definiteness_interpretation) appendStructuredField(out, any, "definiteness_route", toString(*claim.definiteness_interpretation));
 
     if (claim.inf_sup_estimate) appendStructuredField(out, any, "inf_sup_estimate", *claim.inf_sup_estimate);
     if (claim.peclet_number) appendStructuredField(out, any, "peclet", *claim.peclet_number);
@@ -629,6 +722,7 @@ void appendClaimScope(std::ostream& out, const PropertyClaim& claim)
 
 void appendClaimScalars(std::ostream& out, const PropertyClaim& claim)
 {
+    out << " evidence_level=" << toString(claim.evidence_level);
     if (claim.applicability_class) {
         out << " applicability=" << toString(*claim.applicability_class);
     }
@@ -637,6 +731,18 @@ void appendClaimScalars(std::ostream& out, const PropertyClaim& claim)
     }
     if (claim.matrix_sign_structure_class) {
         out << " matrix_sign=" << toString(*claim.matrix_sign_structure_class);
+    }
+    if (claim.weak_boundary_route) {
+        out << " weak_boundary_route="
+            << toString(*claim.weak_boundary_route);
+    }
+    if (claim.nullspace_evidence_kind) {
+        out << " nullspace_evidence="
+            << toString(*claim.nullspace_evidence_kind);
+    }
+    if (claim.definiteness_interpretation) {
+        out << " definiteness_route="
+            << toString(*claim.definiteness_interpretation);
     }
     if (claim.inf_sup_estimate) {
         out << " inf_sup=" << *claim.inf_sup_estimate;
@@ -756,7 +862,13 @@ void traceMatrixSummary(std::ostream& out,
         << " rows=" << summary.rows
         << " cols=" << summary.cols
         << " positive_offdiag=" << summary.positive_offdiag_count
+        << " missing_diagonal=" << summary.missing_diagonal_count
+        << " negative_row_sum=" << summary.negative_row_sum_count
+        << " positive_row_sum=" << summary.positive_row_sum_count
+        << " near_zero_row_sum=" << summary.near_zero_row_sum_count
         << " row_sum_violations=" << summary.row_sum_violation_count
+        << " duplicate_rows=" << summary.duplicate_row_visit_count
+        << " missing_rows=" << summary.missing_row_count
         << " invalid_entries=" << summary.invalid_entry_count
         << " nonfinite_entries=" << summary.nonfinite_entry_count
         << " nonfinite_row_sums=" << summary.nonfinite_row_sum_count
@@ -874,6 +986,10 @@ void ProblemAnalysisReport::print(std::ostream& out) const {
                 out << " status=" << log.status;
             }
             out << " attempted=" << log.attempted_count
+                << " claims_added=" << log.claims_added
+                << " issues_added=" << log.issues_added
+                << " requests_added=" << log.requests_added
+                << " runtime_us=" << log.runtime_microseconds
                 << " certified=" << log.certified_count
                 << " incomplete=" << log.incomplete_count
                 << " blocked=" << log.blocked_count
@@ -934,7 +1050,23 @@ void ProblemAnalysisReport::printApplicationLog(std::ostream& out) const {
         const bool applicable =
             claim.applicability_class &&
             *claim.applicability_class == ApplicabilityClass::Applicable;
-        return applicable || claim.status == PropertyStatus::Violated;
+        const bool warning_unknown =
+            claim.status == PropertyStatus::Unknown &&
+            claim.certification_class &&
+            *claim.certification_class == CertificationClass::NotCertified;
+        const bool preserved_certified =
+            claim.status == PropertyStatus::Preserved &&
+            claim.certification_class &&
+            *claim.certification_class == CertificationClass::Certified;
+        const bool request_relevant =
+            claim.certification_class &&
+            *claim.certification_class == CertificationClass::NotCertified;
+        return applicable ||
+               claim.status == PropertyStatus::Violated ||
+               claim.status == PropertyStatus::Likely ||
+               warning_unknown ||
+               preserved_certified ||
+               request_relevant;
     };
 
     std::vector<std::string> analyzers;
@@ -995,7 +1127,11 @@ void ProblemAnalysisReport::printApplicationLog(std::ostream& out) const {
             << " incomplete=" << log.incomplete_count
             << " blocked=" << log.blocked_count
             << " unsupported=" << log.unsupported_count
-            << " skipped=" << log.skipped_count;
+            << " skipped=" << log.skipped_count
+            << " claims_added=" << log.claims_added
+            << " issues_added=" << log.issues_added
+            << " requests_added=" << log.requests_added
+            << " runtime_us=" << log.runtime_microseconds;
         if (!log.message.empty()) {
             out << " message=" << log.message;
         }
@@ -1061,6 +1197,10 @@ void ProblemAnalysisReport::printTraceLog(
             out << " status=" << log.status;
         }
         out << " attempted=" << log.attempted_count
+            << " claims_added=" << log.claims_added
+            << " issues_added=" << log.issues_added
+            << " requests_added=" << log.requests_added
+            << " runtime_us=" << log.runtime_microseconds
             << " certified=" << log.certified_count
             << " incomplete=" << log.incomplete_count
             << " blocked=" << log.blocked_count
@@ -1178,6 +1318,12 @@ void ProblemAnalysisReport::printTraceLog(
             << (summary.inf_sup_evidence_present ? "true" : "false")
             << " nullspace_metadata="
             << (summary.nullspace_handling_evidence_present ? "true" : "false")
+            << " positivity=" << static_cast<int>(summary.schur_positivity)
+            << " positive_on_quotient="
+            << (summary.schur_positive_on_quotient ? "true" : "false")
+            << " quotient_scope="
+            << (summary.quotient_space_scope_present ? "true" : "false")
+            << " quotient_norm=" << summary.quotient_norm_id
             << " condition_estimate_present="
             << (summary.condition_estimate_present ? "true" : "false");
         if (summary.condition_estimate_present) {
@@ -1258,8 +1404,18 @@ void ProblemAnalysisReport::printTraceLog(
             << " min_jacobian=" << std::setprecision(17)
             << summary.min_jacobian
             << " max_jacobian=" << summary.max_jacobian
+            << " bounds_present="
+            << (summary.jacobian_bounds_present ? "true" : "false")
+            << " bounds_cover_all_active_cells="
+            << (summary.jacobian_bounds_cover_all_active_cells ? "true" : "false")
+            << " bounds_cover_high_order_interior="
+            << (summary.jacobian_bounds_cover_high_order_interior ? "true" : "false")
+            << " certified_bounds="
+            << (summary.jacobian_bounds_are_certified_bounds ? "true" : "false")
+            << " bound_method=" << summary.jacobian_bound_method
             << " inverted_elements=" << summary.inverted_element_count
             << " poor_quality_elements=" << summary.poor_quality_element_count
+            << " cut_cells=" << summary.cut_cell_count
             << "\n";
         for (ElementId element : summary.worst_elements) {
             out << "[FE/Analysis][trace] MeshGeometry worst_element id="
@@ -1315,6 +1471,8 @@ void ProblemAnalysisReport::printTraceLog(
             << " max=" << summary.max_scale_value
             << " required_lower_bound_present="
             << (summary.required_lower_bound_present ? "true" : "false")
+            << " weak_boundary_route="
+            << toString(summary.weak_boundary_route)
             << " theorem=" << summary.scale_theorem_id
             << "\n";
     }
@@ -1327,6 +1485,11 @@ void ProblemAnalysisReport::printTraceLog(
             << " bc_count=" << summary.boundary_condition_count
             << " required_bc_count="
             << summary.required_boundary_condition_count
+            << " required_bc_count_present="
+            << (summary.required_boundary_condition_count_present ? "true" : "false")
+            << " zero_count_reason=" << summary.zero_count_reason
+            << " weak_boundary_route="
+            << toString(summary.weak_boundary_route)
             << " missing_symbols=" << summary.missing_symbol_count
             << " component_coverage="
             << (summary.component_coverage_complete ? "true" : "false")
@@ -1404,14 +1567,20 @@ void ProblemAnalysisReport::printTraceLog(
 
 std::string ProblemAnalysisReport::summary() const {
     auto n_exact   = countByStatus(PropertyStatus::Exact);
+    auto n_preserved = countByStatus(PropertyStatus::Preserved);
     auto n_likely  = countByStatus(PropertyStatus::Likely);
     auto n_unknown = countByStatus(PropertyStatus::Unknown);
+    auto n_violated = countByStatus(PropertyStatus::Violated);
     auto n_errors  = countBySeverity(IssueSeverity::Error);
     auto n_warns   = countBySeverity(IssueSeverity::Warning);
 
     std::ostringstream oss;
     oss << claims.size() << " claims (";
-    oss << n_exact << " exact, " << n_likely << " likely, " << n_unknown << " unknown";
+    oss << n_exact << " exact, "
+        << n_preserved << " preserved, "
+        << n_likely << " likely, "
+        << n_unknown << " unknown, "
+        << n_violated << " violated";
     oss << "), " << issues.size() << " issues (";
     oss << n_warns << " warnings, " << n_errors << " errors)";
     if (!request_plan.empty()) {

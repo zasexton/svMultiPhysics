@@ -78,7 +78,20 @@ struct OperatorFacts {
     bool has_nonsymmetric_or_transport_structure{false};
     bool has_spd_certification{false};
     bool has_incomplete_spd_evidence{false};
+    bool has_positive_diagonal_certification{false};
+    bool has_uncertain_solver_route_evidence{false};
     bool has_indefinite_resolution_certification{false};
+    std::string reason;
+};
+
+struct SolverRouteEvidence {
+    bool operator_spd_certified{false};
+    bool preconditioner_symmetric_certified{false};
+    bool preconditioner_positive_certified{false};
+    bool flexible_krylov_required{false};
+    bool indefinite_route_certified{false};
+    bool left_right_preconditioning_metadata_present{false};
+    bool preconditioner_known_incompatible{false};
     std::string reason;
 };
 
@@ -99,6 +112,32 @@ bool nullspaceHandlingAcceptable(
     return *handling == NullspaceHandlingClass::NotApplicable ||
            *handling == NullspaceHandlingClass::AnchoredByConstraints ||
            *handling == NullspaceHandlingClass::ProjectedOut;
+}
+
+bool evidenceAtLeast(EvidenceLevel actual, EvidenceLevel required) noexcept
+{
+    return static_cast<std::uint8_t>(actual) >=
+           static_cast<std::uint8_t>(required);
+}
+
+bool claimHasHardCertification(const PropertyClaim& claim) noexcept
+{
+    return claim.certification_class &&
+           (*claim.certification_class == CertificationClass::Certified ||
+            *claim.certification_class == CertificationClass::Violated);
+}
+
+bool claimIsHardEvidence(const PropertyClaim& claim) noexcept
+{
+    const bool high_confidence_scoped =
+        claim.confidence == AnalysisConfidence::High &&
+        (claim.status == PropertyStatus::Preserved ||
+         claim.status == PropertyStatus::Exact ||
+         claim.status == PropertyStatus::Violated) &&
+        evidenceAtLeast(claim.evidence_level,
+                        EvidenceLevel::ScopedNumericSummary);
+
+    return claimHasHardCertification(claim) || high_confidence_scoped;
 }
 
 void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
@@ -208,8 +247,55 @@ bool hasSymmetricPositiveDiagonalEvidence(const DiscreteMatrixSummary& matrix)
            matrix.symmetry_evidence_complete &&
            matrix.structurally_symmetric &&
            matrix.numerically_symmetric &&
+           matrix.global_row_coverage_exact &&
+           matrix.diagonal_count == matrix.expected_row_count &&
+           matrix.missing_diagonal_count == 0u &&
            matrix.nonpositive_diagonal_count == 0u &&
            matrix.negative_diagonal_count == 0u;
+}
+
+SolverRouteEvidence collectPreconditionerRouteEvidence(
+    const backends::SolverOptions& options,
+    const OperatorFacts& facts)
+{
+    SolverRouteEvidence route;
+    route.operator_spd_certified = facts.has_spd_certification;
+    route.indefinite_route_certified =
+        facts.has_indefinite_resolution_certification;
+
+    switch (options.preconditioner) {
+        case backends::PreconditionerType::None:
+            route.preconditioner_symmetric_certified = true;
+            route.preconditioner_positive_certified = true;
+            route.left_right_preconditioning_metadata_present = true;
+            route.reason = "identity preconditioner is SPD for a certified SPD operator";
+            break;
+        case backends::PreconditionerType::Diagonal:
+            route.left_right_preconditioning_metadata_present = true;
+            if (facts.has_positive_diagonal_certification) {
+                route.preconditioner_symmetric_certified = true;
+                route.preconditioner_positive_certified = true;
+                route.reason =
+                    "diagonal preconditioner has scoped positive diagonal evidence";
+            } else {
+                route.reason =
+                    "diagonal preconditioner requires complete positive-diagonal evidence";
+            }
+            break;
+        case backends::PreconditionerType::ILU:
+            route.preconditioner_known_incompatible = true;
+            route.reason =
+                "ILU route is not declared symmetric positive definite for CG";
+            break;
+        case backends::PreconditionerType::AMG:
+        case backends::PreconditionerType::RowColumnScaling:
+        case backends::PreconditionerType::FieldSplit:
+            route.reason =
+                "preconditioner route lacks explicit symmetry, positivity, and left/right metadata for CG";
+            break;
+    }
+
+    return route;
 }
 
 OperatorFacts collectFacts(const ProblemAnalysisContext& context,
@@ -221,8 +307,16 @@ OperatorFacts collectFacts(const ProblemAnalysisContext& context,
     for (const auto& claim : report.claims) {
         switch (claim.kind) {
             case PropertyKind::MixedSaddlePoint:
-                facts.has_mixed_or_indefinite_structure = true;
-                appendReason(facts, std::string(toString(claim.kind)) + " claim present");
+                if (claimIsHardEvidence(claim) &&
+                    claimCoversActiveSystem(claim, active_variables)) {
+                    facts.has_mixed_or_indefinite_structure = true;
+                    appendReason(facts, std::string(toString(claim.kind)) +
+                        " hard scoped claim present");
+                } else {
+                    facts.has_uncertain_solver_route_evidence = true;
+                    appendReason(facts,
+                        "mixed/saddle-point claim is structural or not scoped to the active system");
+                }
                 break;
             case PropertyKind::InfSupCondition:
                 if (claim.applicability_class &&
@@ -232,12 +326,28 @@ OperatorFacts collectFacts(const ProblemAnalysisContext& context,
                         "inf-sup claim marked degenerate/out-of-scope");
                     break;
                 }
-                facts.has_mixed_or_indefinite_structure = true;
-                appendReason(facts, "InfSupCondition claim present");
+                if (claimIsHardEvidence(claim) &&
+                    claimCoversActiveSystem(claim, active_variables)) {
+                    facts.has_mixed_or_indefinite_structure = true;
+                    appendReason(facts,
+                        "InfSupCondition hard scoped claim present");
+                } else {
+                    facts.has_uncertain_solver_route_evidence = true;
+                    appendReason(facts,
+                        "inf-sup claim is not certification-grade solver-route evidence");
+                }
                 break;
             case PropertyKind::IndefiniteOperatorResolution:
-                facts.has_mixed_or_indefinite_structure = true;
-                appendReason(facts, "indefinite-resolution claim present");
+                if (claimIsHardEvidence(claim) &&
+                    claimCoversActiveSystem(claim, active_variables)) {
+                    facts.has_mixed_or_indefinite_structure = true;
+                    appendReason(facts,
+                        "indefinite-resolution hard scoped claim present");
+                } else {
+                    facts.has_uncertain_solver_route_evidence = true;
+                    appendReason(facts,
+                        "indefinite-resolution claim is not scoped hard evidence");
+                }
                 if (claim.status == PropertyStatus::Preserved &&
                     claim.reduced_definiteness_class &&
                     *claim.reduced_definiteness_class ==
@@ -251,23 +361,47 @@ OperatorFacts collectFacts(const ProblemAnalysisContext& context,
                 if (claim.transport_character_class &&
                     *claim.transport_character_class != TransportCharacterClass::DiffusionLike &&
                     *claim.transport_character_class != TransportCharacterClass::None) {
-                    facts.has_nonsymmetric_or_transport_structure = true;
-                    appendReason(facts, "first-order/transport character claim present");
+                    if (claimIsHardEvidence(claim) &&
+                        claimCoversActiveSystem(claim, active_variables)) {
+                        facts.has_nonsymmetric_or_transport_structure = true;
+                        appendReason(facts,
+                            "first-order/transport hard scoped claim present");
+                    } else {
+                        facts.has_uncertain_solver_route_evidence = true;
+                        appendReason(facts,
+                            "transport claim is diagnostic or lacks scoped numeric/theorem evidence");
+                    }
                 }
                 break;
             case PropertyKind::OperatorSymmetry:
                 if (claim.operator_symmetry_class &&
                     *claim.operator_symmetry_class == OperatorSymmetryClass::Nonsymmetric) {
-                    facts.has_nonsymmetric_or_transport_structure = true;
-                    appendReason(facts, "nonsymmetric operator claim present");
+                    if (claimIsHardEvidence(claim) &&
+                        claimCoversActiveSystem(claim, active_variables)) {
+                        facts.has_nonsymmetric_or_transport_structure = true;
+                        appendReason(facts,
+                            "nonsymmetric operator hard scoped claim present");
+                    } else {
+                        facts.has_uncertain_solver_route_evidence = true;
+                        appendReason(facts,
+                            "nonsymmetry claim is not certification-grade solver-route evidence");
+                    }
                 }
                 break;
             case PropertyKind::OperatorDefiniteness:
                 if (claim.coercivity_class &&
                     (*claim.coercivity_class == CoercivityClass::Indefinite ||
                      *claim.coercivity_class == CoercivityClass::NotCoercive)) {
-                    facts.has_mixed_or_indefinite_structure = true;
-                    appendReason(facts, "indefinite/not-coercive definiteness claim present");
+                    if (claimIsHardEvidence(claim) &&
+                        claimCoversActiveSystem(claim, active_variables)) {
+                        facts.has_mixed_or_indefinite_structure = true;
+                        appendReason(facts,
+                            "indefinite/not-coercive hard scoped claim present");
+                    } else {
+                        facts.has_uncertain_solver_route_evidence = true;
+                        appendReason(facts,
+                            "indefinite/not-coercive claim lacks hard scoped evidence");
+                    }
                 } else if (claim.coercivity_class &&
                     *claim.coercivity_class == CoercivityClass::Coercive &&
                     claim.reduced_definiteness_class &&
@@ -318,15 +452,32 @@ OperatorFacts collectFacts(const ProblemAnalysisContext& context,
     if (const auto* summaries = context.analysisSummaries()) {
         for (const auto& matrix : summaries->discrete_matrices) {
             if (!matrix.square) {
-                facts.has_mixed_or_indefinite_structure = true;
-                appendReason(facts, "nonsquare discrete matrix summary present");
+                if (matrixCoversActiveSystem(matrix, active_variables)) {
+                    facts.has_mixed_or_indefinite_structure = true;
+                    appendReason(facts,
+                        "nonsquare discrete matrix summary covers active system");
+                } else {
+                    facts.has_uncertain_solver_route_evidence = true;
+                    appendReason(facts,
+                        "local nonsquare matrix summary does not cover active system");
+                }
             }
             if (matrix.symmetry_evidence_complete &&
                 (!matrix.structurally_symmetric || !matrix.numerically_symmetric)) {
-                facts.has_nonsymmetric_or_transport_structure = true;
-                appendReason(facts, "matrix symmetry summary reports nonsymmetry");
+                if (matrixCoversActiveSystem(matrix, active_variables)) {
+                    facts.has_nonsymmetric_or_transport_structure = true;
+                    appendReason(facts,
+                        "matrix symmetry summary reports scoped nonsymmetry");
+                } else {
+                    facts.has_uncertain_solver_route_evidence = true;
+                    appendReason(facts,
+                        "local nonsymmetry matrix summary does not cover active system");
+                }
             }
             if (hasSymmetricPositiveDiagonalEvidence(matrix)) {
+                if (matrixCoversActiveSystem(matrix, active_variables)) {
+                    facts.has_positive_diagonal_certification = true;
+                }
                 if (hasPositiveDefinitenessEvidence(matrix)) {
                     if (matrixCoversActiveSystem(matrix, active_variables)) {
                         facts.has_spd_certification = true;
@@ -364,7 +515,8 @@ void SolverCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
     if (!facts.has_mixed_or_indefinite_structure &&
         !facts.has_nonsymmetric_or_transport_structure &&
         !facts.has_spd_certification &&
-        !facts.has_incomplete_spd_evidence) {
+        !facts.has_incomplete_spd_evidence &&
+        !facts.has_uncertain_solver_route_evidence) {
         addSolverClaim(report, *options,
             PropertyStatus::Unknown,
             CertificationClass::NotCertified,
@@ -375,6 +527,7 @@ void SolverCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
     }
 
     const auto method_name = std::string(backends::solverMethodToString(options->method));
+    const auto route = collectPreconditionerRouteEvidence(*options, facts);
 
     if (isSPDOnlyMethod(options->method) &&
         facts.has_mixed_or_indefinite_structure) {
@@ -403,27 +556,61 @@ void SolverCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         return;
     }
 
+    if (isSPDOnlyMethod(options->method) &&
+        facts.has_spd_certification &&
+        route.preconditioner_known_incompatible) {
+        addSolverClaim(report, *options,
+            PropertyStatus::Violated,
+            CertificationClass::Violated,
+            "Solver method '" + method_name +
+                "' has certified SPD operator evidence but the configured preconditioner route is not CG-compatible",
+            route.reason);
+        addSolverIssue(report, IssueSeverity::Error,
+            "CG preconditioner route is incompatible with SPD-only Krylov requirements: " +
+            route.reason);
+        return;
+    }
+
+    if (isSPDOnlyMethod(options->method) &&
+        facts.has_spd_certification &&
+        (!route.preconditioner_symmetric_certified ||
+         !route.preconditioner_positive_certified ||
+         !route.left_right_preconditioning_metadata_present)) {
+        addSolverClaim(report, *options,
+            PropertyStatus::Unknown,
+            CertificationClass::NotCertified,
+            "Solver method '" + method_name +
+                "' has certified SPD operator evidence but the CG preconditioner route is not certified",
+            facts.reason + "; " + route.reason,
+            AnalysisConfidence::Medium);
+        addSolverIssue(report, IssueSeverity::Warning,
+            "CG compatibility is not certified because preconditioner symmetry/positivity metadata is incomplete: " +
+            route.reason);
+        return;
+    }
+
     if (isSPDOnlyMethod(options->method) && facts.has_spd_certification) {
         addSolverClaim(report, *options,
             PropertyStatus::Preserved,
             CertificationClass::Certified,
             "Solver method '" + method_name +
-                "' is compatible with certified SPD structural evidence",
-            facts.reason);
+                "' is compatible with certified SPD operator and preconditioner-route evidence",
+            facts.reason + "; " + route.reason);
         return;
     }
 
     if (isSPDOnlyMethod(options->method) &&
-        facts.has_incomplete_spd_evidence) {
+        (facts.has_incomplete_spd_evidence ||
+         facts.has_uncertain_solver_route_evidence)) {
         addSolverClaim(report, *options,
             PropertyStatus::Unknown,
             CertificationClass::NotCertified,
             "Solver method '" + method_name +
-                "' requires SPD evidence that is incomplete in the current analysis",
+                "' requires hard scoped SPD, symmetry, definiteness, and preconditioner-route evidence that is incomplete in the current analysis",
             facts.reason,
             AnalysisConfidence::Medium);
         addSolverIssue(report, IssueSeverity::Warning,
-            "CG compatibility is not certified because analysis found only incomplete SPD evidence: " +
+            "CG compatibility is not certified because analysis found only incomplete or structural solver-route evidence: " +
             facts.reason);
         return;
     }
@@ -447,6 +634,31 @@ void SolverCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 facts.reason,
                 AnalysisConfidence::Medium);
         }
+        return;
+    }
+
+    if (isGeneralIndefiniteMethod(options->method) &&
+        facts.has_spd_certification) {
+        addSolverClaim(report, *options,
+            PropertyStatus::Likely,
+            CertificationClass::NotCertified,
+            "Solver method '" + method_name +
+                "' is admissible for a certified SPD system but is not the SPD-specialized route",
+            facts.reason + "; convergence and preconditioner quality are not certified for this general route",
+            AnalysisConfidence::Medium);
+        return;
+    }
+
+    if (isGeneralIndefiniteMethod(options->method) &&
+        (facts.has_incomplete_spd_evidence ||
+         facts.has_uncertain_solver_route_evidence)) {
+        addSolverClaim(report, *options,
+            PropertyStatus::Unknown,
+            CertificationClass::NotCertified,
+            "Solver method '" + method_name +
+                "' is a general route but operator/preconditioner compatibility is not certified from the available evidence",
+            facts.reason,
+            AnalysisConfidence::Medium);
     }
 }
 

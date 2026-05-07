@@ -250,7 +250,9 @@ TEST(NumericSummaryPlanner, FormulationInvariantDomainsRequestBoundSummaries) {
     descriptor.variables.push_back(VariableKey::field(1));
     descriptor.sampled_field = 1;
     descriptor.upper_bound = Real{10};
+    descriptor.limiter_evidence_present = true;
     descriptor.source_admissibility_evidence_present = true;
+    descriptor.theorem_id = "scheme-level invariant-domain theorem";
     record.invariant_domain_descriptors.push_back(std::move(descriptor));
 
     ctx.addFormulationRecord(record);
@@ -269,7 +271,7 @@ TEST(NumericSummaryPlanner, FormulationInvariantDomainsRequestBoundSummaries) {
     EXPECT_TRUE(report.request_plan.hasSourceAnalyzer("ProblemAnalysisContext"));
     EXPECT_TRUE(requestReasonsContain(report.request_plan,
                                       AnalysisSummaryKind::InvariantDomain,
-                                      "primitive-DAG invariant-domain metadata"));
+                                      "scheme-level invariant-domain metadata"));
 }
 
 TEST(NumericSummaryPlanner, DGAndInterfaceFormsTriggerPenaltyAndFluxRequests) {

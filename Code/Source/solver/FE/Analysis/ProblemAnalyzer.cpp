@@ -27,6 +27,9 @@
 #include "Analysis/NumericSummaryPlanner.h"
 #include "Analysis/FortinOperatorAutogeneration.h"
 
+#include <chrono>
+#include <exception>
+
 namespace svmp {
 namespace FE {
 namespace analysis {
@@ -49,7 +52,52 @@ std::vector<std::string> ProblemAnalyzer::passNames() const {
 ProblemAnalysisReport ProblemAnalyzer::analyze(const ProblemAnalysisContext& context) const {
     ProblemAnalysisReport report;
     for (const auto& pass : passes_) {
-        pass->run(context, report);
+        const auto claims_before = report.claims.size();
+        const auto issues_before = report.issues.size();
+        const auto requests_before = report.request_plan.summary_requests.size();
+        const auto start = std::chrono::steady_clock::now();
+
+        AnalyzerRunLogSummary log;
+        log.analyzer = pass->name();
+        log.pass_name = pass->name();
+        log.pass_version = "1";
+        log.attempted_count = 1u;
+
+        try {
+            pass->run(context, report);
+            log.status = "completed";
+        } catch (const std::exception& e) {
+            log.status = "failed";
+            log.message = e.what();
+            AnalysisIssue issue;
+            issue.severity = IssueSeverity::Error;
+            issue.message =
+                "Analysis pass '" + pass->name() +
+                "' failed: " + e.what();
+            report.issues.push_back(std::move(issue));
+        } catch (...) {
+            log.status = "failed";
+            log.message = "unknown exception";
+            AnalysisIssue issue;
+            issue.severity = IssueSeverity::Error;
+            issue.message =
+                "Analysis pass '" + pass->name() +
+                "' failed with an unknown exception";
+            report.issues.push_back(std::move(issue));
+        }
+
+        const auto stop = std::chrono::steady_clock::now();
+        log.runtime_microseconds =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    stop - start).count());
+        log.claims_added =
+            static_cast<std::uint64_t>(report.claims.size() - claims_before);
+        log.issues_added =
+            static_cast<std::uint64_t>(report.issues.size() - issues_before);
+        log.requests_added = static_cast<std::uint64_t>(
+            report.request_plan.summary_requests.size() - requests_before);
+        report.run_logs.push_back(std::move(log));
     }
     return report;
 }
@@ -90,9 +138,10 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     //  30. RobustnessTrendAnalyzer (reads cross-run metric summaries)
     //  31. SchurQualityAnalyzer (reads preconditioned Schur summaries)
     //  32. ToleranceAdequacyAnalyzer (reads numerical error budgets)
-    //  33. SolverCompatibilityAnalyzer (reads claims + configured solver)
-    //  34. NumericSummaryPlanner (reads symbolic claims + context metadata)
-    //  35. FortinCertificationAnalyzer (consumes InfSupPairCertification requests)
+    //  33. First NumericSummaryPlanner (seeds constructive/numeric requests)
+    //  34. FortinCertificationAnalyzer (consumes InfSupPairCertification requests)
+    //  35. SolverCompatibilityAnalyzer (reads claims + configured solver)
+    //  36. Final NumericSummaryPlanner (sees constructive/certification claims)
 
     analyzer.addPass(std::make_unique<CouplingGraphAnalyzer>());
     analyzer.addPass(std::make_unique<KernelAnalyzer>());
@@ -126,9 +175,10 @@ ProblemAnalyzer ProblemAnalyzer::createDefault() {
     analyzer.addPass(std::make_unique<RobustnessTrendAnalyzer>());
     analyzer.addPass(std::make_unique<SchurQualityAnalyzer>());
     analyzer.addPass(std::make_unique<ToleranceAdequacyAnalyzer>());
-    analyzer.addPass(std::make_unique<SolverCompatibilityAnalyzer>());
     analyzer.addPass(std::make_unique<NumericSummaryPlanner>());
     analyzer.addPass(std::make_unique<FortinCertificationAnalyzer>());
+    analyzer.addPass(std::make_unique<SolverCompatibilityAnalyzer>());
+    analyzer.addPass(std::make_unique<NumericSummaryPlanner>());
 
     return analyzer;
 }

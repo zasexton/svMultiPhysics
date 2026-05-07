@@ -889,9 +889,9 @@ public:
 
 TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     auto analyzer = ProblemAnalyzer::createDefault();
-    EXPECT_EQ(analyzer.numPasses(), 35u);
+    EXPECT_EQ(analyzer.numPasses(), 36u);
     auto names = analyzer.passNames();
-    ASSERT_EQ(names.size(), 35u);
+    ASSERT_EQ(names.size(), 36u);
     EXPECT_EQ(names[0], "CouplingGraphAnalyzer");
     EXPECT_EQ(names[1], "KernelAnalyzer");
     EXPECT_EQ(names[2], "MixedOperatorAnalyzer");
@@ -924,9 +924,10 @@ TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     EXPECT_EQ(names[29], "RobustnessTrendAnalyzer");
     EXPECT_EQ(names[30], "SchurQualityAnalyzer");
     EXPECT_EQ(names[31], "ToleranceAdequacyAnalyzer");
-    EXPECT_EQ(names[32], "SolverCompatibilityAnalyzer");
-    EXPECT_EQ(names[33], "NumericSummaryPlanner");
-    EXPECT_EQ(names[34], "FortinCertificationAnalyzer");
+    EXPECT_EQ(names[32], "NumericSummaryPlanner");
+    EXPECT_EQ(names[33], "FortinCertificationAnalyzer");
+    EXPECT_EQ(names[34], "SolverCompatibilityAnalyzer");
+    EXPECT_EQ(names[35], "NumericSummaryPlanner");
 }
 
 // ============================================================================

@@ -40,7 +40,11 @@ TEST(InterfaceValidation, PostSetup_MatchingMarker_NoIssues) {
     InterfaceFaceRecord rec;
     rec.interface_marker = 5;
     rec.minus_cell = 0;
+    rec.plus_cell = 1;
+    rec.minus_local_face = 0;
+    rec.plus_local_face = 0;
     rec.is_two_sided = true;
+    rec.has_orientation = true;
     itopo.faces.push_back(rec);
     itopo.marker_to_faces[5].push_back(0);
     ctx.setInterfaceTopologyContext(std::move(itopo));
@@ -113,6 +117,12 @@ TEST(InterfaceValidation, PostSetup_WildcardWithMesh_OK) {
     InterfaceTopologyContext itopo;
     InterfaceFaceRecord rec;
     rec.interface_marker = 1;
+    rec.minus_cell = 0;
+    rec.plus_cell = 1;
+    rec.minus_local_face = 0;
+    rec.plus_local_face = 0;
+    rec.is_two_sided = true;
+    rec.has_orientation = true;
     itopo.faces.push_back(rec);
     itopo.marker_to_faces[1].push_back(0);
     ctx.setInterfaceTopologyContext(std::move(itopo));

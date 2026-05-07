@@ -216,6 +216,48 @@ AnalysisSummaryRequest& ensureRequest(AnalysisRequestPlan& plan,
     return plan.summary_requests.back();
 }
 
+void populateRequestVariableRoles(AnalysisSummaryRequest& request,
+                                  AnalysisSummaryKind kind,
+                                  const std::vector<VariableKey>& variables)
+{
+    appendVariables(request.state_variables, variables);
+    switch (kind) {
+        case AnalysisSummaryKind::InfSupEstimate:
+        case AnalysisSummaryKind::InfSupPairCertification:
+        case AnalysisSummaryKind::SchurComplement:
+            if (!variables.empty()) {
+                appendUnique(request.test_variables, variables.front());
+                appendUnique(request.trial_variables, variables.front());
+            }
+            if (variables.size() >= 2u) {
+                appendUnique(request.multiplier_variables, variables[1]);
+            }
+            break;
+        case AnalysisSummaryKind::BoundarySymbol:
+        case AnalysisSummaryKind::FluxBalance:
+        case AnalysisSummaryKind::TransferOperator:
+            appendVariables(request.test_variables, variables);
+            appendVariables(request.trial_variables, variables);
+            break;
+        default:
+            appendVariables(request.state_variables, variables);
+            break;
+    }
+}
+
+bool invariantDescriptorHasSchemeLevelEvidence(
+    const InvariantDomainDescriptor& descriptor) noexcept
+{
+    return !descriptor.theorem_id.empty() ||
+           descriptor.limiter_evidence_present ||
+           descriptor.cfl_condition_satisfied ||
+           descriptor.ssp_time_discretization_evidence_present ||
+           descriptor.low_order_invariant_domain_evidence_present ||
+           descriptor.convex_limiting_evidence_present ||
+           descriptor.spatial_monotonicity_evidence_present ||
+           descriptor.mass_positivity_evidence_present;
+}
+
 OperatorBlockId requestedBlock(DomainKind domain,
                                const std::vector<VariableKey>& variables,
                                const std::string& block_id,
@@ -225,6 +267,7 @@ OperatorBlockId requestedBlock(DomainKind domain,
     block.operator_tag = block_id;
     block.contribution_id = contribution_id;
     block.test_variables = variables;
+    block.trial_variables = variables;
     return block;
 }
 
@@ -499,9 +542,19 @@ bool summaryAlreadyAvailable(const ProblemAnalysisContext& context,
                 summaries->initial_compatibility.begin(),
                 summaries->initial_compatibility.end(),
                 [&](const InitialCompatibilitySummary& summary) {
-                    return scope_id.empty() ||
-                           summary.compatibility_scope == scope_id ||
-                           summary.invariant_set_id == scope_id;
+                    const bool scope_ok =
+                        !scope_id.empty() &&
+                        (summary.compatibility_scope == scope_id ||
+                         summary.invariant_set_id == scope_id);
+                    if (!scope_ok) {
+                        return false;
+                    }
+                    if (variables.empty()) {
+                        return !summary.invariant_domain_variables.empty();
+                    }
+                    return variableSetCoversAll(
+                        summary.invariant_domain_variables,
+                        variables);
                 });
         case AnalysisSummaryKind::BoundarySymbol:
             return std::any_of(
@@ -516,17 +569,17 @@ bool summaryAlreadyAvailable(const ProblemAnalysisContext& context,
                 summaries->mesh_geometry_quality.begin(),
                 summaries->mesh_geometry_quality.end(),
                 [&](const MeshGeometryQualitySummary& summary) {
-                    return summary.domain == domain;
+                    return summary.domain == domain &&
+                           summary.jacobian_bounds_present;
                 });
         case AnalysisSummaryKind::EnergyEntropyBalance:
-            return scope_id.empty()
-                ? !summaries->energy_entropy.empty()
-                : std::any_of(summaries->energy_entropy.begin(),
-                              summaries->energy_entropy.end(),
-                              [&](const EnergyEntropySummary& summary) {
-                                  return summary.energy_entropy_id == scope_id ||
-                                         summary.energy_functional_id == scope_id;
-                              });
+            return !scope_id.empty() &&
+                   std::any_of(summaries->energy_entropy.begin(),
+                               summaries->energy_entropy.end(),
+                               [&](const EnergyEntropySummary& summary) {
+                                   return summary.energy_entropy_id == scope_id ||
+                                          summary.energy_functional_id == scope_id;
+                               });
         case AnalysisSummaryKind::InvariantDomain:
             return std::any_of(
                 summaries->invariant_domains.begin(),
@@ -541,26 +594,32 @@ bool summaryAlreadyAvailable(const ProblemAnalysisContext& context,
                                                  target_block);
                 });
         case AnalysisSummaryKind::EquilibriumPreservation:
-            return scope_id.empty()
-                ? !summaries->equilibrium_preservation.empty()
-                : std::any_of(
-                      summaries->equilibrium_preservation.begin(),
-                      summaries->equilibrium_preservation.end(),
-                      [&](const EquilibriumPreservationSummary& summary) {
-                          return summary.equilibrium_id == scope_id ||
-                                 summary.equilibrium_family_id == scope_id;
-                      });
+            return !scope_id.empty() &&
+                   std::any_of(
+                       summaries->equilibrium_preservation.begin(),
+                       summaries->equilibrium_preservation.end(),
+                       [&](const EquilibriumPreservationSummary& summary) {
+                           return summary.equilibrium_id == scope_id ||
+                                  summary.equilibrium_family_id == scope_id;
+                       });
         case AnalysisSummaryKind::MovingDomain:
-            return !summaries->moving_domain.empty();
+            return !scope_id.empty() &&
+                   std::any_of(
+                       summaries->moving_domain.begin(),
+                       summaries->moving_domain.end(),
+                       [&](const MovingDomainSummary& summary) {
+                           return summary.constant_state_scope == scope_id ||
+                                  summary.gcl_theorem_id == scope_id ||
+                                  summary.mesh_update_time_scheme == scope_id;
+                       });
         case AnalysisSummaryKind::TransferOperator:
-            return scope_id.empty()
-                ? !summaries->transfer_operators.empty()
-                : std::any_of(summaries->transfer_operators.begin(),
-                              summaries->transfer_operators.end(),
-                              [&](const TransferOperatorSummary& summary) {
-                                  return summary.interface_pair_id == scope_id ||
-                                         summary.projection_space_id == scope_id;
-                              });
+            return !scope_id.empty() &&
+                   std::any_of(summaries->transfer_operators.begin(),
+                               summaries->transfer_operators.end(),
+                               [&](const TransferOperatorSummary& summary) {
+                                   return summary.interface_pair_id == scope_id ||
+                                          summary.projection_space_id == scope_id;
+                               });
         case AnalysisSummaryKind::AdjointConsistency:
             return std::any_of(
                 summaries->adjoint_consistency.begin(),
@@ -614,6 +673,7 @@ void addRequest(AnalysisRequestPlan& plan,
                                 request.scope_id);
     request.confidence = strongerConfidence(request.confidence, claim.confidence);
     appendVariables(request.variables, variables);
+    populateRequestVariableRoles(request, kind, variables);
     appendUnique(request.source_claim_indices, source_claim_index);
     appendUnique(request.source_claim_kinds, claim.kind);
     appendUnique(request.source_analyzers, sourceAnalyzer(claim));
@@ -648,11 +708,12 @@ void addContextRequest(AnalysisRequestPlan& plan,
                                 scope_id);
     request.confidence = strongerConfidence(request.confidence, confidence);
     appendVariables(request.variables, variables);
+    populateRequestVariableRoles(request, kind, variables);
     appendUnique(request.source_analyzers, std::string("ProblemAnalysisContext"));
     appendUnique(request.reasons, reason);
 }
 
-bool claimIsUsableSymbolicEvidence(const PropertyClaim& claim) noexcept {
+bool claimShouldSeedSummaryRequests(const PropertyClaim& claim) noexcept {
     return claim.status == PropertyStatus::Exact ||
            claim.status == PropertyStatus::Likely ||
            claim.status == PropertyStatus::Preserved ||
@@ -662,8 +723,7 @@ bool claimIsUsableSymbolicEvidence(const PropertyClaim& claim) noexcept {
 
 bool isWeakPenaltyLike(EnforcementKind kind) noexcept {
     return kind == EnforcementKind::WeakPenalty ||
-           kind == EnforcementKind::WeakNitsche ||
-           kind == EnforcementKind::WeakInequality;
+           kind == EnforcementKind::WeakNitsche;
 }
 
 bool isNonlocalCouplingContribution(const ContributionDescriptor& contribution) noexcept {
@@ -710,13 +770,16 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                                 ProblemAnalysisReport& report) const {
     for (const auto& record : context.formulationRecords()) {
         for (const auto& descriptor : record.invariant_domain_descriptors) {
+            if (!invariantDescriptorHasSchemeLevelEvidence(descriptor)) {
+                continue;
+            }
             addContextRequest(
                 report.request_plan,
                 context,
                 AnalysisSummaryKind::InvariantDomain,
                 descriptor.domain,
                 descriptor.variables,
-                "FormulationRecord carries primitive-DAG invariant-domain metadata; request bound and post-step violation summaries",
+                "FormulationRecord carries scheme-level invariant-domain metadata; request limiter/CFL/theorem and post-step violation summaries",
                 AnalysisConfidence::Medium,
                 record.operator_tag,
                 {},
@@ -726,7 +789,7 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
 
     for (std::size_t i = 0; i < report.claims.size(); ++i) {
         const auto& claim = report.claims[i];
-        if (!claimIsUsableSymbolicEvidence(claim)) {
+        if (!claimShouldSeedSummaryRequests(claim)) {
             continue;
         }
 

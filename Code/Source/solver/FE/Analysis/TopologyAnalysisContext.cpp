@@ -85,41 +85,83 @@ std::vector<int> TopologyAnalysisContext::regionsForBoundaryMarker(int marker) c
     return it->second;
 }
 
+const ConnectedComponentSet*
+TopologyAnalysisContext::connectedComponents(TopologyConnectivityMode mode) const noexcept
+{
+    auto it = component_sets.find(mode);
+    if (it == component_sets.end()) {
+        return nullptr;
+    }
+    return &it->second;
+}
+
 // ============================================================================
 // Factory: build from IMeshAccess
 // ============================================================================
 
-TopologyAnalysisContext TopologyAnalysisContext::build(const assembly::IMeshAccess& mesh) {
+TopologyAnalysisContext
+TopologyAnalysisContext::build(const assembly::IMeshAccess& mesh,
+                               TopologyConnectivityMode mode) {
     TopologyAnalysisContext ctx;
+    ctx.default_connectivity_mode = mode;
 
     const auto n_cells = mesh.numCells();
     if (n_cells <= 0) return ctx;
 
-    // --- Step 1: Union cells that share a node.  This avoids materializing the
-    // full cell-cell adjacency graph, which is prohibitively expensive for large
-    // tetrahedral meshes.
+    // --- Step 1: Build the selected connectivity relation.  Node connectivity
+    // is the legacy/default H1-style relation.  Facet connectivity uses explicit
+    // interior-face adjacency.  Other operator/DOF graph modes need metadata that
+    // IMeshAccess does not expose, so keep cells separate and mark the component
+    // set as not exact for that requested mode.
     DisjointCellSet components(n_cells);
     std::unordered_map<GlobalIndex, GlobalIndex> first_cell_for_node;
-    first_cell_for_node.reserve(static_cast<std::size_t>(
-        std::min<GlobalIndex>(std::max<GlobalIndex>(n_cells / 2, 1), 2000000)));
     std::vector<GlobalIndex> cell_nodes_buf;
     GlobalIndex max_node_id = -1;
+    bool exact_for_mode = true;
 
-    for (GlobalIndex c = 0; c < n_cells; ++c) {
-        cell_nodes_buf.clear();
-        mesh.getCellNodes(c, cell_nodes_buf);
-        for (auto n : cell_nodes_buf) {
-            if (n < 0) {
-                continue;
+    if (mode == TopologyConnectivityMode::NodeConnected) {
+        first_cell_for_node.reserve(static_cast<std::size_t>(
+            std::min<GlobalIndex>(std::max<GlobalIndex>(n_cells / 2, 1), 2000000)));
+        for (GlobalIndex c = 0; c < n_cells; ++c) {
+            cell_nodes_buf.clear();
+            mesh.getCellNodes(c, cell_nodes_buf);
+            for (auto n : cell_nodes_buf) {
+                if (n < 0) {
+                    continue;
+                }
+                max_node_id = std::max(max_node_id, n);
+                auto [it, inserted] = first_cell_for_node.emplace(n, c);
+                if (!inserted) {
+                    components.unite(c, it->second);
+                }
             }
-            max_node_id = std::max(max_node_id, n);
-            auto [it, inserted] = first_cell_for_node.emplace(n, c);
-            if (!inserted) {
-                components.unite(c, it->second);
+        }
+        std::unordered_map<GlobalIndex, GlobalIndex>().swap(first_cell_for_node);
+    } else if (mode == TopologyConnectivityMode::FacetConnected) {
+        for (GlobalIndex c = 0; c < n_cells; ++c) {
+            cell_nodes_buf.clear();
+            mesh.getCellNodes(c, cell_nodes_buf);
+            for (auto n : cell_nodes_buf) {
+                max_node_id = std::max(max_node_id, n);
+            }
+        }
+        mesh.forEachInteriorFace(
+            [&](GlobalIndex /*face_id*/, GlobalIndex cell_a, GlobalIndex cell_b) {
+                if (cell_a >= 0 && cell_a < n_cells &&
+                    cell_b >= 0 && cell_b < n_cells) {
+                    components.unite(cell_a, cell_b);
+                }
+            });
+    } else {
+        exact_for_mode = false;
+        for (GlobalIndex c = 0; c < n_cells; ++c) {
+            cell_nodes_buf.clear();
+            mesh.getCellNodes(c, cell_nodes_buf);
+            for (auto n : cell_nodes_buf) {
+                max_node_id = std::max(max_node_id, n);
             }
         }
     }
-    std::unordered_map<GlobalIndex, GlobalIndex>().swap(first_cell_for_node);
 
     // --- Step 2: Assign compact region IDs and collect cells per component. ---
     ctx.cell_to_region_.assign(static_cast<std::size_t>(n_cells), -1);
@@ -231,6 +273,12 @@ TopologyAnalysisContext TopologyAnalysisContext::build(const assembly::IMeshAcce
 
     // Note: interface face detection was moved to InterfaceTopologyContext (Phase 14).
     // TopologyAnalysisContext is now for bulk connected components only.
+
+    ConnectedComponentSet set;
+    set.mode = mode;
+    set.components = ctx.components;
+    set.exact_for_mode = exact_for_mode;
+    ctx.component_sets[mode] = std::move(set);
 
     return ctx;
 }

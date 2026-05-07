@@ -47,6 +47,14 @@ const BasisCacheEntry& BasisCache::get_or_compute(
     return *(it->second);
 }
 
+const BasisCacheEntry& BasisCache::prewarm(
+    const BasisFunction& basis,
+    const quadrature::QuadratureRule& quad,
+    bool gradients,
+    bool hessians) {
+    return get_or_compute(basis, quad, gradients, hessians);
+}
+
 void BasisCache::clear() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     cache_.clear();
@@ -85,21 +93,35 @@ BasisCacheEntry BasisCache::compute(const BasisFunction& basis,
         scalar_values.resize(entry.num_dofs);
     }
 
-    for (std::size_t qp = 0; qp < points.size(); ++qp) {
-        if (vector_basis) {
+    if (vector_basis) {
+        for (std::size_t qp = 0; qp < points.size(); ++qp) {
             basis.evaluate_vector_values(points[qp], entry.vector_values[qp]);
-        } else {
-            basis.evaluate_values(points[qp], scalar_values);
-            for (std::size_t dof = 0; dof < entry.num_dofs; ++dof) {
-                entry.scalar_values[dof * entry.num_qpts + qp] = scalar_values[dof];
-            }
         }
+        return entry;
+    }
 
-        if (gradients && !vector_basis) {
-            basis.evaluate_gradients(points[qp], entry.gradients[qp]);
-        }
-        if (hessians && !vector_basis) {
-            basis.evaluate_hessians(points[qp], entry.hessians[qp]);
+    // E3: amortize per-call overhead by populating the SoA values buffer in
+    // a single call to the multi-QP entry method. Gradients/hessians remain
+    // per-QP because BasisCacheEntry stores them as nested vectors (AoS).
+    if (entry.num_dofs > 0 && entry.num_qpts > 0) {
+        basis.evaluate_at_quadrature_points(points,
+                                            entry.scalar_values.data(),
+                                            nullptr, nullptr);
+    }
+
+    for (std::size_t qp = 0; qp < points.size(); ++qp) {
+        // Fused evaluation when both gradients and hessians are requested —
+        // shares per-axis 1D evaluations across all three outputs (B4).
+        if (gradients && hessians) {
+            basis.evaluate_all(points[qp], scalar_values,
+                               entry.gradients[qp], entry.hessians[qp]);
+        } else {
+            if (gradients) {
+                basis.evaluate_gradients(points[qp], entry.gradients[qp]);
+            }
+            if (hessians) {
+                basis.evaluate_hessians(points[qp], entry.hessians[qp]);
+            }
         }
     }
 

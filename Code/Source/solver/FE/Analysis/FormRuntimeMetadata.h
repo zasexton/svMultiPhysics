@@ -34,14 +34,6 @@ enum class FormCoefficientRank : std::uint8_t {
     Unknown,
 };
 
-enum class EvidenceLevel : std::uint8_t {
-    DAGPatternHint,
-    DescriptorMetadata,
-    ScopedNumericSummary,
-    TheoremRegistryMatch,
-    CertifiedClaim,
-};
-
 enum class ExpressionDomainConstraintKind : std::uint8_t {
     NonzeroDenominator,
     NonnegativeRadicand,

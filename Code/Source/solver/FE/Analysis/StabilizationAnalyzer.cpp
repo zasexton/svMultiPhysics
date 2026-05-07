@@ -11,13 +11,116 @@
 #include "Analysis/ContributionDescriptor.h"
 #include "Analysis/FormStructureAnalyzer.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <string>
 
 namespace svmp {
 namespace FE {
 namespace analysis {
 
 namespace {
+
+struct EffectiveStabilizationRequirements {
+    bool requires_peclet_evidence{false};
+    bool requires_cfl_evidence{false};
+    bool requires_trace_penalty_bound{false};
+    bool requires_inf_sup_surrogate{false};
+    bool requires_residual_consistency{true};
+    bool requires_adjoint_consistency{false};
+    bool requires_mass_lumping{false};
+    bool requires_limiter_bounds{false};
+    bool requirement_metadata_present{false};
+};
+
+bool containsCaseInsensitive(const std::string& text, const char* token)
+{
+    auto lower_text = text;
+    auto lower_token = std::string(token);
+    for (auto& ch : lower_text) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    for (auto& ch : lower_token) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return lower_text.find(lower_token) != std::string::npos;
+}
+
+EffectiveStabilizationRequirements effectiveRequirements(
+    const StabilizationAdequacySummary& summary)
+{
+    EffectiveStabilizationRequirements req;
+    req.requires_peclet_evidence = summary.requires_peclet_evidence;
+    req.requires_cfl_evidence = summary.requires_cfl_evidence;
+    req.requires_trace_penalty_bound = summary.requires_trace_penalty_bound;
+    req.requires_inf_sup_surrogate = summary.requires_inf_sup_surrogate;
+    req.requires_residual_consistency = summary.requires_residual_consistency;
+    req.requires_adjoint_consistency = summary.requires_adjoint_consistency;
+    req.requires_mass_lumping = summary.requires_mass_lumping;
+    req.requires_limiter_bounds = summary.requires_limiter_bounds;
+    req.requirement_metadata_present =
+        summary.requirement_metadata_present ||
+        summary.requires_peclet_evidence ||
+        summary.requires_cfl_evidence ||
+        summary.requires_trace_penalty_bound ||
+        summary.requires_inf_sup_surrogate ||
+        summary.requires_adjoint_consistency ||
+        summary.requires_mass_lumping ||
+        summary.requires_limiter_bounds;
+
+    switch (summary.family) {
+        case StabilizationFamily::StreamlineUpwind:
+        case StabilizationFamily::GalerkinLeastSquares:
+        case StabilizationFamily::UpwindFlux:
+            req.requires_peclet_evidence = true;
+            req.requires_cfl_evidence = true;
+            req.requirement_metadata_present = true;
+            break;
+        case StabilizationFamily::Penalty:
+        case StabilizationFamily::Nitsche:
+        case StabilizationFamily::ContinuousInteriorPenalty:
+        case StabilizationFamily::Trace:
+        case StabilizationFamily::GhostPenalty:
+            req.requires_trace_penalty_bound = true;
+            req.requirement_metadata_present = true;
+            break;
+        case StabilizationFamily::Constraint:
+            req.requires_inf_sup_surrogate = true;
+            req.requirement_metadata_present = true;
+            break;
+        case StabilizationFamily::MassLumping:
+            req.requires_mass_lumping = true;
+            req.requirement_metadata_present = true;
+            break;
+        case StabilizationFamily::Limiter:
+            req.requires_limiter_bounds = true;
+            req.requirement_metadata_present = true;
+            break;
+        case StabilizationFamily::Unknown:
+            if (containsCaseInsensitive(summary.method_family, "supg") ||
+                containsCaseInsensitive(summary.method_family, "gls") ||
+                containsCaseInsensitive(summary.method_family, "upwind")) {
+                req.requires_peclet_evidence = true;
+                req.requires_cfl_evidence = true;
+                req.requirement_metadata_present = true;
+            } else if (containsCaseInsensitive(summary.method_family, "nitsche") ||
+                       containsCaseInsensitive(summary.method_family, "penalty") ||
+                       containsCaseInsensitive(summary.method_family, "cip") ||
+                       containsCaseInsensitive(summary.method_family, "ghost") ||
+                       containsCaseInsensitive(summary.method_family, "trace")) {
+                req.requires_trace_penalty_bound = true;
+                req.requirement_metadata_present = true;
+            }
+            break;
+        case StabilizationFamily::LeastSquares:
+        case StabilizationFamily::Other:
+            req.requirement_metadata_present = true;
+            break;
+    }
+
+    return req;
+}
 
 void emitAdequacyClaims(const ProblemAnalysisContext& context,
                         ProblemAnalysisReport& report)
@@ -26,6 +129,7 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
     if (!summaries) return;
 
     for (const auto& summary : summaries->stabilization_adequacy) {
+        const auto requirements = effectiveRequirements(summary);
         const bool theorem_scoped = !summary.stabilization_theorem_id.empty();
         const bool norm_scoped =
             summary.stability_norm_metadata_present &&
@@ -74,6 +178,7 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
              numeric::finiteNonnegative(summary.peclet_estimate) &&
              numeric::finiteNonnegative(summary.peclet_regime_lower_bound) &&
              numeric::finite(summary.peclet_regime_upper_bound) &&
+             requirements.requires_peclet_evidence &&
              (summary.peclet_estimate + Real{1.0e-14} <
                   summary.peclet_regime_lower_bound ||
               summary.peclet_estimate >
@@ -86,21 +191,35 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
              summary.accepted_cfl_bound_present &&
              numeric::finiteNonnegative(summary.cfl_estimate) &&
              numeric::finitePositive(summary.accepted_cfl_bound) &&
+             requirements.requires_cfl_evidence &&
              summary.cfl_estimate >
                  summary.accepted_cfl_bound + Real{1.0e-14});
         const bool metadata_complete =
             summary.parameter_formula_metadata_present &&
-            summary.residual_consistency_evidence_present &&
+            (!requirements.requires_residual_consistency ||
+             summary.residual_consistency_evidence_present) &&
             summary.regime_metadata_present &&
             summary.method_scope_metadata_present &&
+            requirements.requirement_metadata_present &&
             theorem_scoped &&
             norm_scoped &&
             parameter_bounds_valid &&
             summary.scaling_law_metadata_present &&
             consistency_order_valid &&
             summary.boundary_treatment_metadata_present &&
-            peclet_regime_valid &&
-            cfl_bound_valid;
+            (!requirements.requires_peclet_evidence || peclet_regime_valid) &&
+            (!requirements.requires_cfl_evidence || cfl_bound_valid) &&
+            (!requirements.requires_trace_penalty_bound ||
+             (summary.trace_penalty_bound_present &&
+              summary.trace_penalty_bound_valid)) &&
+            (!requirements.requires_inf_sup_surrogate ||
+             summary.inf_sup_surrogate_evidence_present) &&
+            (!requirements.requires_adjoint_consistency ||
+             summary.adjoint_consistency_evidence_present) &&
+            (!requirements.requires_mass_lumping ||
+             summary.mass_lumping_evidence_present) &&
+            (!requirements.requires_limiter_bounds ||
+             summary.limiter_bounds_evidence_present);
 
         PropertyClaim claim;
         claim.kind = PropertyKind::Stabilization;
@@ -119,24 +238,38 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Violated;
             claim.description =
-                "Stabilization adequacy summary reports violated parameter, consistency, Peclet, CFL, or regime checks";
+                "Stabilization adequacy summary reports violated parameter, consistency, or theorem-required regime checks";
         } else if (metadata_complete) {
             claim.status = PropertyStatus::Preserved;
             claim.confidence = AnalysisConfidence::High;
             claim.certification_class = CertificationClass::Certified;
+            claim.evidence_level = EvidenceLevel::CertifiedNumericTheorem;
             claim.description =
-                "Stabilization adequacy is certified by theorem-scoped parameter scaling, consistency, norm, Peclet, CFL, and boundary metadata";
+                "Stabilization adequacy is certified by theorem-scoped parameter scaling, consistency, norm, and family-specific requirement metadata";
         } else {
             claim.status = PropertyStatus::Unknown;
             claim.confidence = AnalysisConfidence::Medium;
             claim.certification_class = CertificationClass::NotCertified;
+            claim.evidence_level = EvidenceLevel::StructuralMetadata;
             claim.description =
-                "Stabilization adequacy is unknown because theorem, parameter-scaling, consistency, norm, quantitative Peclet/CFL, boundary, or regime metadata is incomplete";
+                "Stabilization adequacy is unknown because theorem, parameter-scaling, consistency, norm, boundary, regime, or family-specific requirement metadata is incomplete";
         }
 
         claim.addEvidence("StabilizationAnalyzer",
             "StabilizationAdequacySummary id='" + summary.stabilization_id +
             "', method='" + summary.method_family +
+            "', requirement_metadata=" +
+            std::string(requirements.requirement_metadata_present ? "true" : "false") +
+            ", requires_peclet=" +
+            std::string(requirements.requires_peclet_evidence ? "true" : "false") +
+            ", requires_cfl=" +
+            std::string(requirements.requires_cfl_evidence ? "true" : "false") +
+            ", requires_trace_penalty=" +
+            std::string(requirements.requires_trace_penalty_bound ? "true" : "false") +
+            ", requires_inf_sup_surrogate=" +
+            std::string(requirements.requires_inf_sup_surrogate ? "true" : "false") +
+            ", requires_adjoint_consistency=" +
+            std::string(requirements.requires_adjoint_consistency ? "true" : "false") +
             "', parameter_formula=" +
             std::string(summary.parameter_formula_metadata_present ? "true" : "false") +
             ", residual_consistency=" +
@@ -182,7 +315,11 @@ void emitAdequacyClaims(const ProblemAnalysisContext& context,
             std::string(summary.accepted_cfl_bound_present ? "true" : "false") +
             ", accepted_cfl_bound=" +
             std::to_string(summary.accepted_cfl_bound) +
-            ", cfl_scope='" + summary.cfl_scope + "'",
+            ", cfl_scope='" + summary.cfl_scope + "'" +
+            ", trace_penalty_bound=" +
+            std::string(summary.trace_penalty_bound_present ? "true" : "false") +
+            ", trace_penalty_valid=" +
+            std::string(summary.trace_penalty_bound_valid ? "true" : "false"),
             claim.confidence);
         report.claims.push_back(std::move(claim));
     }
@@ -201,17 +338,31 @@ void StabilizationAnalyzer::run(const ProblemAnalysisContext& context,
     // PRIMARY PATH: Consume ContributionDescriptors
     // =====================================================================
     const auto& contributions = context.contributions();
+    std::vector<std::string> covered_operator_tags;
     if (!contributions.empty()) {
         for (const auto& contrib : contributions) {
             if (contrib.role != ContributionRole::StabilizationBlock) continue;
 
             PropertyClaim claim;
             claim.kind = PropertyKind::Stabilization;
-            claim.status = PropertyStatus::Exact;
-            claim.confidence = contrib.confidence;
+            const bool mesh_scale_hint_only =
+                hasFlag(contrib.traits, OperatorTraitFlags::MeshScaleDependentHint) &&
+                !hasFlag(contrib.traits, OperatorTraitFlags::StabilizationLike);
+            claim.status = mesh_scale_hint_only
+                ? PropertyStatus::Likely
+                : PropertyStatus::Exact;
+            claim.confidence = mesh_scale_hint_only
+                ? AnalysisConfidence::Low
+                : contrib.confidence;
             claim.certification_class = CertificationClass::NotCertified;
+            claim.evidence_level = mesh_scale_hint_only
+                ? EvidenceLevel::DescriptorHint
+                : EvidenceLevel::StructuralMetadata;
             claim.domain = contrib.domain;
             claim.claim_origin = "StabilizationAnalyzer";
+            if (!contrib.operator_tag.empty()) {
+                covered_operator_tags.push_back(contrib.operator_tag);
+            }
 
             if (!contrib.test_variables.empty()) {
                 for (const auto& tv : contrib.test_variables) {
@@ -235,9 +386,6 @@ void StabilizationAnalyzer::run(const ProblemAnalysisContext& context,
 
             report.claims.push_back(std::move(claim));
         }
-
-        emitAdequacyClaims(context, report);
-        return;
     }
 
     // =====================================================================
@@ -252,6 +400,11 @@ void StabilizationAnalyzer::run(const ProblemAnalysisContext& context,
     FormStructureAnalyzer fsa;
 
     for (const auto& rec : records) {
+        if (std::find(covered_operator_tags.begin(),
+                      covered_operator_tags.end(),
+                      rec.operator_tag) != covered_operator_tags.end()) {
+            continue;
+        }
         // Check the record-level flag first
         bool record_has_stab = rec.has_stabilization_terms;
 
@@ -272,9 +425,14 @@ void StabilizationAnalyzer::run(const ProblemAnalysisContext& context,
 
         PropertyClaim claim;
         claim.kind = PropertyKind::Stabilization;
-        claim.status = PropertyStatus::Exact;
-        claim.confidence = AnalysisConfidence::High;
+        claim.status = PropertyStatus::Likely;
+        claim.confidence = record_has_stab
+            ? AnalysisConfidence::Medium
+            : AnalysisConfidence::Low;
         claim.certification_class = CertificationClass::NotCertified;
+        claim.evidence_level = record_has_stab
+            ? EvidenceLevel::DescriptorHint
+            : EvidenceLevel::SyntaxPattern;
         claim.domain = DomainKind::Cell;
         claim.claim_origin = "StabilizationAnalyzer";
 

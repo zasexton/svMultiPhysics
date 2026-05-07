@@ -22,8 +22,10 @@
 
 #include "Core/Types.h"
 
+#include <algorithm>
 #include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -72,11 +74,124 @@ public:
         return marker_to_faces.count(marker) > 0;
     }
 
+    [[nodiscard]] bool markerExists(int marker) const {
+        return hasMarker(marker);
+    }
+
+    [[nodiscard]] std::vector<const InterfaceFaceRecord*>
+    facesForMarker(int marker) const {
+        std::vector<const InterfaceFaceRecord*> result;
+        auto it = marker_to_faces.find(marker);
+        if (it == marker_to_faces.end()) {
+            return result;
+        }
+        result.reserve(it->second.size());
+        for (std::size_t index : it->second) {
+            if (index < faces.size()) {
+                result.push_back(&faces[index]);
+            }
+        }
+        return result;
+    }
+
     [[nodiscard]] std::size_t numFaces() const noexcept { return faces.size(); }
 
     [[nodiscard]] std::size_t numFacesForMarker(int marker) const {
         auto it = marker_to_faces.find(marker);
         return (it != marker_to_faces.end()) ? it->second.size() : 0u;
+    }
+
+    [[nodiscard]] bool markerHasTwoSidedFaces(int marker) const {
+        const auto marker_faces = facesForMarker(marker);
+        return !marker_faces.empty() &&
+               std::all_of(marker_faces.begin(), marker_faces.end(),
+                           [](const InterfaceFaceRecord* face) {
+                               return face &&
+                                      face->is_two_sided &&
+                                      face->minus_cell != INVALID_GLOBAL_INDEX &&
+                                      face->plus_cell != INVALID_GLOBAL_INDEX;
+                           });
+    }
+
+    [[nodiscard]] bool markerHasOrientation(int marker) const {
+        const auto marker_faces = facesForMarker(marker);
+        return !marker_faces.empty() &&
+               std::all_of(marker_faces.begin(), marker_faces.end(),
+                           [](const InterfaceFaceRecord* face) {
+                               return face && face->has_orientation;
+                           });
+    }
+
+    [[nodiscard]] bool markerHasConsistentRegions(int marker) const {
+        const auto marker_faces = facesForMarker(marker);
+        return !marker_faces.empty() &&
+               std::all_of(marker_faces.begin(), marker_faces.end(),
+                           [](const InterfaceFaceRecord* face) {
+                               return face &&
+                                      face->minus_region >= 0 &&
+                                      face->plus_region >= 0;
+                           });
+    }
+
+    [[nodiscard]] bool markerHasValidLocalFaceIndices(int marker) const {
+        const auto marker_faces = facesForMarker(marker);
+        return !marker_faces.empty() &&
+               std::all_of(marker_faces.begin(), marker_faces.end(),
+                           [](const InterfaceFaceRecord* face) {
+                               return face &&
+                                      face->minus_local_face >= 0 &&
+                                      (!face->is_two_sided ||
+                                       face->plus_local_face >= 0);
+                           });
+    }
+
+    [[nodiscard]] bool markerRecordsMatchKey(int marker) const {
+        const auto marker_faces = facesForMarker(marker);
+        return !marker_faces.empty() &&
+               std::all_of(marker_faces.begin(), marker_faces.end(),
+                           [marker](const InterfaceFaceRecord* face) {
+                               return face &&
+                                      face->interface_marker == marker;
+                           });
+    }
+
+    [[nodiscard]] std::vector<std::pair<GlobalIndex, int>>
+    duplicateInterfaceIncidence(int marker) const {
+        std::set<std::pair<GlobalIndex, int>> seen;
+        std::set<std::pair<GlobalIndex, int>> duplicate_set;
+        for (const auto* face : facesForMarker(marker)) {
+            if (!face) {
+                continue;
+            }
+            const std::pair<GlobalIndex, int> minus{
+                face->minus_cell, face->minus_local_face};
+            if (minus.first != INVALID_GLOBAL_INDEX && minus.second >= 0 &&
+                !seen.insert(minus).second) {
+                duplicate_set.insert(minus);
+            }
+            const std::pair<GlobalIndex, int> plus{
+                face->plus_cell, face->plus_local_face};
+            if (plus.first != INVALID_GLOBAL_INDEX && plus.second >= 0 &&
+                !seen.insert(plus).second) {
+                duplicate_set.insert(plus);
+            }
+        }
+        return {duplicate_set.begin(), duplicate_set.end()};
+    }
+
+    [[nodiscard]] bool markerHasNonmanifoldIncidence(int marker) const {
+        return !duplicateInterfaceIncidence(marker).empty();
+    }
+
+    [[nodiscard]] std::vector<int>
+    interfaceCoverageForReferencedMarkers(const std::set<int>& referenced_markers) const {
+        std::vector<int> uncovered;
+        for (int marker : referenced_markers) {
+            if (!markerExists(marker) || numFacesForMarker(marker) == 0u) {
+                uncovered.push_back(marker);
+            }
+        }
+        return uncovered;
     }
 
     /// True if any interface is registered

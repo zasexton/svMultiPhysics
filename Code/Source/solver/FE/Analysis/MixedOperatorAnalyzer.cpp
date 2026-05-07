@@ -43,10 +43,11 @@ std::vector<VariableKey> blockVariables(const OperatorBlockId& block)
     return variables;
 }
 
-struct DeclaredNullspaceMetadata {
+struct LocalDeclaredNullspaceMetadata {
     bool present{false};
     NullspaceFamily family{NullspaceFamily::UserDefined};
     AnalysisConfidence confidence{AnalysisConfidence::Medium};
+    NullspaceEvidenceKind evidence_kind{NullspaceEvidenceKind::DescriptorHint};
     std::string evidence;
 };
 
@@ -157,7 +158,9 @@ bool isZeroLikeExpression(const forms::FormExprNode& node)
                                });
 
         case FormExprType::Divide:
-            return children.front() && isZeroLikeExpression(*children.front());
+            // A zero numerator is not enough to prove a quotient is zero:
+            // the denominator may be zero on part of the expression domain.
+            return false;
 
         case FormExprType::AsVector:
         case FormExprType::AsTensor:
@@ -263,8 +266,8 @@ bool subtreeContainsTrialField(const forms::FormExprNode& node, FieldId field)
                        });
 }
 
-bool subtreeContainsNonPressureTrialField(const forms::FormExprNode& node,
-                                         FieldId pressure_field)
+bool subtreeContainsNonScalarMultiplierTrialField(const forms::FormExprNode& node,
+                                         FieldId multiplier_field)
 {
     if (isZeroLikeExpression(node)) {
         return false;
@@ -276,7 +279,7 @@ bool subtreeContainsNonPressureTrialField(const forms::FormExprNode& node,
         case FormExprType::StateField:
         case FormExprType::TrialFunction: {
             const auto fid = node.fieldId();
-            return fid.has_value() && *fid != pressure_field;
+            return fid.has_value() && *fid != multiplier_field;
         }
         default:
             break;
@@ -284,10 +287,10 @@ bool subtreeContainsNonPressureTrialField(const forms::FormExprNode& node,
 
     const auto children = node.children();
     return std::any_of(children.begin(), children.end(),
-                       [pressure_field](const forms::FormExprNode* child) {
+                       [multiplier_field](const forms::FormExprNode* child) {
                            return child &&
-                                  subtreeContainsNonPressureTrialField(
-                                      *child, pressure_field);
+                                  subtreeContainsNonScalarMultiplierTrialField(
+                                      *child, multiplier_field);
                        });
 }
 
@@ -379,32 +382,32 @@ bool subtreeContainsDivergenceOfTrialField(const forms::FormExprNode& node,
                        });
 }
 
-bool subtreeContainsAnyMomentumTestDivergence(
+bool subtreeContainsAnyPrimalVectorTestDivergence(
     const forms::FormExprNode& node,
-    const std::unordered_set<FieldId>& momentum_fields)
+    const std::unordered_set<FieldId>& primal_vector_fields)
 {
-    return std::any_of(momentum_fields.begin(), momentum_fields.end(),
-                       [&node](FieldId momentum_field) {
+    return std::any_of(primal_vector_fields.begin(), primal_vector_fields.end(),
+                       [&node](FieldId primal_vector_field) {
                            return subtreeContainsDivergenceOfTestField(
-                               node, momentum_field);
+                               node, primal_vector_field);
                        });
 }
 
-bool subtreeContainsAnyMomentumTrialDivergence(
+bool subtreeContainsAnyPrimalVectorTrialDivergence(
     const forms::FormExprNode& node,
-    const std::unordered_set<FieldId>& momentum_fields)
+    const std::unordered_set<FieldId>& primal_vector_fields)
 {
-    return std::any_of(momentum_fields.begin(), momentum_fields.end(),
-                       [&node](FieldId momentum_field) {
+    return std::any_of(primal_vector_fields.begin(), primal_vector_fields.end(),
+                       [&node](FieldId primal_vector_field) {
                            return subtreeContainsDivergenceOfTrialField(
-                               node, momentum_field);
+                               node, primal_vector_field);
                        });
 }
 
-bool subtreeIsCertifiedPressureMultiplierBlock(
+bool subtreeIsCertifiedScalarMultiplierBlock(
     const forms::FormExprNode& node,
-    FieldId pressure_field,
-    const std::unordered_set<FieldId>& momentum_fields)
+    FieldId multiplier_field,
+    const std::unordered_set<FieldId>& primal_vector_fields)
 {
     using forms::FormExprType;
     if (node.type() != FormExprType::Multiply &&
@@ -413,15 +416,15 @@ bool subtreeIsCertifiedPressureMultiplierBlock(
         return false;
     }
 
-    return subtreeContainsUndifferentiatedTrialField(node, pressure_field) &&
-           subtreeContainsAnyMomentumTestDivergence(node, momentum_fields) &&
-           !subtreeContainsNonPressureTrialField(node, pressure_field);
+    return subtreeContainsUndifferentiatedTrialField(node, multiplier_field) &&
+           subtreeContainsAnyPrimalVectorTestDivergence(node, primal_vector_fields) &&
+           !subtreeContainsNonScalarMultiplierTrialField(node, multiplier_field);
 }
 
-bool pressureTrialUseOutsideCertifiedGaugePattern(
+bool multiplierTrialUseOutsideCertifiedGaugePattern(
     const forms::FormExprNode& node,
-    FieldId pressure_field,
-    const std::unordered_set<FieldId>& momentum_fields,
+    FieldId multiplier_field,
+    const std::unordered_set<FieldId>& primal_vector_fields,
     TrialUseState state = {})
 {
     using forms::FormExprType;
@@ -431,11 +434,11 @@ bool pressureTrialUseOutsideCertifiedGaugePattern(
     }
     if (!state.under_annihilating_operator &&
         !state.under_time_derivative &&
-        subtreeIsCertifiedPressureMultiplierBlock(
-            node, pressure_field, momentum_fields)) {
+        subtreeIsCertifiedScalarMultiplierBlock(
+            node, multiplier_field, primal_vector_fields)) {
         return false;
     }
-    if (nodeIsTrialField(node, pressure_field)) {
+    if (nodeIsTrialField(node, multiplier_field)) {
         if (state.under_time_derivative) {
             return true;
         }
@@ -459,46 +462,46 @@ bool pressureTrialUseOutsideCertifiedGaugePattern(
 
     const auto children = node.children();
     return std::any_of(children.begin(), children.end(),
-                       [pressure_field, &momentum_fields, child_state](
+                       [multiplier_field, &primal_vector_fields, child_state](
                            const forms::FormExprNode* child) {
                            return child &&
-                                  pressureTrialUseOutsideCertifiedGaugePattern(
+                                  multiplierTrialUseOutsideCertifiedGaugePattern(
                                       *child,
-                                      pressure_field,
-                                      momentum_fields,
+                                      multiplier_field,
+                                      primal_vector_fields,
                                       child_state);
                        });
 }
 
-bool subtreeContainsCertifiedPressureMultiplierBlock(
+bool subtreeContainsCertifiedScalarMultiplierBlock(
     const forms::FormExprNode& node,
-    FieldId pressure_field,
-    const std::unordered_set<FieldId>& momentum_fields)
+    FieldId multiplier_field,
+    const std::unordered_set<FieldId>& primal_vector_fields)
 {
     if (isZeroLikeExpression(node)) {
         return false;
     }
-    if (subtreeIsCertifiedPressureMultiplierBlock(
-            node, pressure_field, momentum_fields)) {
+    if (subtreeIsCertifiedScalarMultiplierBlock(
+            node, multiplier_field, primal_vector_fields)) {
         return true;
     }
 
     const auto children = node.children();
     return std::any_of(children.begin(), children.end(),
-                       [pressure_field, &momentum_fields](
+                       [multiplier_field, &primal_vector_fields](
                            const forms::FormExprNode* child) {
                            return child &&
-                                  subtreeContainsCertifiedPressureMultiplierBlock(
+                                  subtreeContainsCertifiedScalarMultiplierBlock(
                                       *child,
-                                      pressure_field,
-                                      momentum_fields);
+                                      multiplier_field,
+                                      primal_vector_fields);
                        });
 }
 
-bool subtreeIsPressureContinuityBlock(
+bool subtreeIsScalarMultiplierContinuityBlock(
     const forms::FormExprNode& node,
-    FieldId pressure_field,
-    const std::unordered_set<FieldId>& momentum_fields)
+    FieldId multiplier_field,
+    const std::unordered_set<FieldId>& primal_vector_fields)
 {
     using forms::FormExprType;
     if (node.type() != FormExprType::Multiply &&
@@ -507,32 +510,32 @@ bool subtreeIsPressureContinuityBlock(
         return false;
     }
 
-    return subtreeContainsTestField(node, pressure_field) &&
-           subtreeContainsAnyMomentumTrialDivergence(node, momentum_fields);
+    return subtreeContainsTestField(node, multiplier_field) &&
+           subtreeContainsAnyPrimalVectorTrialDivergence(node, primal_vector_fields);
 }
 
-bool subtreeContainsPressureContinuityBlock(
+bool subtreeContainsScalarMultiplierContinuityBlock(
     const forms::FormExprNode& node,
-    FieldId pressure_field,
-    const std::unordered_set<FieldId>& momentum_fields)
+    FieldId multiplier_field,
+    const std::unordered_set<FieldId>& primal_vector_fields)
 {
     if (isZeroLikeExpression(node)) {
         return false;
     }
-    if (subtreeIsPressureContinuityBlock(
-            node, pressure_field, momentum_fields)) {
+    if (subtreeIsScalarMultiplierContinuityBlock(
+            node, multiplier_field, primal_vector_fields)) {
         return true;
     }
 
     const auto children = node.children();
     return std::any_of(children.begin(), children.end(),
-                       [pressure_field, &momentum_fields](
+                       [multiplier_field, &primal_vector_fields](
                            const forms::FormExprNode* child) {
                            return child &&
-                                  subtreeContainsPressureContinuityBlock(
+                                  subtreeContainsScalarMultiplierContinuityBlock(
                                       *child,
-                                      pressure_field,
-                                      momentum_fields);
+                                      multiplier_field,
+                                      primal_vector_fields);
                        });
 }
 
@@ -619,13 +622,13 @@ bool hasUndifferentiatedConstraintPair(const ContributionDescriptor& contributio
                        });
 }
 
-bool pressureTrialContributionIsAllowedForGaugeInference(
+bool multiplierTrialContributionIsAllowedForGaugeInference(
     const ContributionDescriptor& contribution,
-    FieldId pressure_field,
-    const std::unordered_set<FieldId>& certified_momentum_fields,
+    FieldId multiplier_field,
+    const std::unordered_set<FieldId>& certified_primal_vector_fields,
     FormStructureAnalyzer& fsa)
 {
-    if (!contributionHasTrialField(contribution, pressure_field)) {
+    if (!contributionHasTrialField(contribution, multiplier_field)) {
         return true;
     }
     if (staticallyZeroContribution(contribution)) {
@@ -633,11 +636,11 @@ bool pressureTrialContributionIsAllowedForGaugeInference(
     }
     if (contribution.source_expression &&
         !fieldHasNonzeroTrialOccurrence(*contribution.source_expression,
-                                        pressure_field)) {
+                                        multiplier_field)) {
         return true;
     }
 
-    if (contributionHasTestField(contribution, pressure_field)) {
+    if (contributionHasTestField(contribution, multiplier_field)) {
         if (!contribution.source_expression) {
             return !hasFlag(contribution.traits, OperatorTraitFlags::HasMass) &&
                    !hasFlag(contribution.traits, OperatorTraitFlags::HasFirstOrder) &&
@@ -645,7 +648,7 @@ bool pressureTrialContributionIsAllowedForGaugeInference(
         }
 
         const auto fs =
-            fsa.analyzeField(*contribution.source_expression, pressure_field);
+            fsa.analyzeField(*contribution.source_expression, multiplier_field);
         return fs.occurrence_count > 0 &&
                fs.only_through_annihilating_ops &&
                !fs.has_absolute_value &&
@@ -655,34 +658,34 @@ bool pressureTrialContributionIsAllowedForGaugeInference(
                !hasFlag(contribution.traits, OperatorTraitFlags::NullspaceLifting);
     }
 
-    const bool tests_certified_momentum =
-        std::any_of(certified_momentum_fields.begin(),
-                    certified_momentum_fields.end(),
-                    [&contribution](FieldId momentum_field) {
-                        return contributionHasTestField(contribution, momentum_field);
+    const bool tests_certified_primal_vector =
+        std::any_of(certified_primal_vector_fields.begin(),
+                    certified_primal_vector_fields.end(),
+                    [&contribution](FieldId primal_vector_field) {
+                        return contributionHasTestField(contribution, primal_vector_field);
                     });
-    if (tests_certified_momentum &&
+    if (tests_certified_primal_vector &&
         fieldSummaryHasUndifferentiatedTrialUse(
-            contribution, pressure_field, fsa)) {
+            contribution, multiplier_field, fsa)) {
         return true;
     }
 
     return fieldSummaryHasOnlyConstantAnnihilatingTrialUse(
-        contribution, pressure_field, fsa);
+        contribution, multiplier_field, fsa);
 }
 
-struct InferredPressureNullspace {
+struct InferredScalarMultiplierNullspace {
     bool certified{false};
     std::string evidence;
 };
 
-InferredPressureNullspace inferPressureConstantNullspace(
+InferredScalarMultiplierNullspace inferScalarMultiplierConstantNullspace(
     const ProblemAnalysisContext& context,
     const VariableKey& constraint_variable,
     const std::unordered_set<VariableKey, VariableKeyHash>& partners,
     const std::vector<const ContributionDescriptor*>& contributions)
 {
-    InferredPressureNullspace result;
+    InferredScalarMultiplierNullspace result;
 
     if (constraint_variable.kind != VariableKind::FieldComponent ||
         constraint_variable.field_id == INVALID_FIELD_ID ||
@@ -691,16 +694,16 @@ InferredPressureNullspace inferPressureConstantNullspace(
     }
 
     FormStructureAnalyzer fsa;
-    std::unordered_set<FieldId> certified_momentum_fields;
+    std::unordered_set<FieldId> certified_primal_vector_fields;
 
-    for (const auto& momentum_variable : partners) {
-        if (momentum_variable.kind != VariableKind::FieldComponent ||
-            momentum_variable.field_id == INVALID_FIELD_ID ||
-            !isVectorFieldDescriptor(context, momentum_variable.field_id)) {
+    for (const auto& primal_vector_variable : partners) {
+        if (primal_vector_variable.kind != VariableKind::FieldComponent ||
+            primal_vector_variable.field_id == INVALID_FIELD_ID ||
+            !isVectorFieldDescriptor(context, primal_vector_variable.field_id)) {
             continue;
         }
 
-        bool has_pressure_in_momentum_equation = false;
+        bool has_multiplier_in_primal_vector_equation = false;
         bool has_divergence_in_constraint_equation = false;
 
         for (const auto* contribution : contributions) {
@@ -712,43 +715,43 @@ InferredPressureNullspace inferPressureConstantNullspace(
             }
 
             if (contributionHasTestField(*contribution,
-                                         momentum_variable.field_id) &&
+                                         primal_vector_variable.field_id) &&
                 contributionHasTrialField(*contribution,
                                           constraint_variable.field_id) &&
                 hasUndifferentiatedConstraintPair(
                     *contribution,
-                    momentum_variable.field_id,
+                    primal_vector_variable.field_id,
                     constraint_variable.field_id) &&
                 fieldSummaryHasUndifferentiatedTrialUse(
                     *contribution,
                     constraint_variable.field_id,
                     fsa)) {
-                has_pressure_in_momentum_equation = true;
+                has_multiplier_in_primal_vector_equation = true;
             }
 
             if (contributionHasTestField(*contribution,
                                          constraint_variable.field_id) &&
                 contributionHasTrialField(*contribution,
-                                          momentum_variable.field_id) &&
+                                          primal_vector_variable.field_id) &&
                 hasPairing(*contribution,
                            constraint_variable.field_id,
-                           momentum_variable.field_id,
+                           primal_vector_variable.field_id,
                            PairingKind::FormalAdjointPair) &&
                 fieldSummaryHasDivergenceTrialUse(
                     *contribution,
-                    momentum_variable.field_id,
+                    primal_vector_variable.field_id,
                     fsa)) {
                 has_divergence_in_constraint_equation = true;
             }
         }
 
-        if (has_pressure_in_momentum_equation &&
+        if (has_multiplier_in_primal_vector_equation &&
             has_divergence_in_constraint_equation) {
-            certified_momentum_fields.insert(momentum_variable.field_id);
+            certified_primal_vector_fields.insert(primal_vector_variable.field_id);
         }
     }
 
-    if (certified_momentum_fields.empty()) {
+    if (certified_primal_vector_fields.empty()) {
         return result;
     }
 
@@ -756,10 +759,10 @@ InferredPressureNullspace inferPressureConstantNullspace(
         if (!contribution) {
             continue;
         }
-        if (!pressureTrialContributionIsAllowedForGaugeInference(
+        if (!multiplierTrialContributionIsAllowedForGaugeInference(
                 *contribution,
                 constraint_variable.field_id,
-                certified_momentum_fields,
+                certified_primal_vector_fields,
                 fsa)) {
             return result;
         }
@@ -767,60 +770,59 @@ InferredPressureNullspace inferPressureConstantNullspace(
 
     result.certified = true;
     result.evidence =
-        "Certified scalar-constant pressure gauge: scalar constraint field has "
-        "an undifferentiated multiplier block against a vector momentum "
+        "Structural scalar-constant multiplier-gauge candidate: scalar constraint field has "
+        "an undifferentiated multiplier block against a primal vector "
         "divergence test operator, the adjoint constraint equation contains "
-        "div(momentum), and all nonzero trial appearances of the scalar field "
+        "div(primal vector), and all nonzero trial appearances of the scalar field "
         "are either that multiplier block or constant-annihilating terms; no "
         "nonzero scalar mass/reaction/time/lifting block was found";
     return result;
 }
 
-InferredPressureNullspace inferPressureConstantNullspaceFromResidual(
+InferredScalarMultiplierNullspace inferScalarMultiplierConstantNullspaceFromResidual(
     const ProblemAnalysisContext& context,
     const forms::FormExprNode& residual,
-    FieldId pressure_field,
-    const std::vector<FieldId>& candidate_momentum_fields)
+    FieldId multiplier_field,
+    const std::vector<FieldId>& candidate_primal_vector_fields)
 {
-    InferredPressureNullspace result;
-    if (!isScalarFieldDescriptor(context, pressure_field)) {
+    InferredScalarMultiplierNullspace result;
+    if (!isScalarFieldDescriptor(context, multiplier_field)) {
         return result;
     }
 
-    std::unordered_set<FieldId> momentum_fields;
-    for (FieldId field : candidate_momentum_fields) {
+    std::unordered_set<FieldId> primal_vector_fields;
+    for (FieldId field : candidate_primal_vector_fields) {
         if (isVectorFieldDescriptor(context, field)) {
-            momentum_fields.insert(field);
+            primal_vector_fields.insert(field);
         }
     }
-    if (momentum_fields.empty()) {
+    if (primal_vector_fields.empty()) {
         return result;
     }
 
-    if (!subtreeContainsCertifiedPressureMultiplierBlock(
-            residual, pressure_field, momentum_fields)) {
+    if (!subtreeContainsCertifiedScalarMultiplierBlock(
+            residual, multiplier_field, primal_vector_fields)) {
         return result;
     }
-    if (!subtreeContainsPressureContinuityBlock(
-            residual, pressure_field, momentum_fields)) {
+    if (!subtreeContainsScalarMultiplierContinuityBlock(
+            residual, multiplier_field, primal_vector_fields)) {
         return result;
     }
-    if (pressureTrialUseOutsideCertifiedGaugePattern(
-            residual, pressure_field, momentum_fields)) {
+    if (multiplierTrialUseOutsideCertifiedGaugePattern(
+            residual, multiplier_field, primal_vector_fields)) {
         return result;
     }
 
     result.certified = true;
     result.evidence =
-        "Certified scalar-constant pressure gauge from residual structure: "
-        "the residual contains p*div(v)-type momentum coupling and q*div(u) "
-        "continuity coupling for a scalar constraint and vector momentum field; "
-        "all nonzero pressure trial occurrences are either in that multiplier "
+        "Structural scalar-constant multiplier-gauge candidate from residual structure: "
+        "the residual contains scalar-multiplier times primal-vector-divergence coupling and adjoint divergence coupling; "
+        "all nonzero multiplier trial occurrences are either in that multiplier "
         "coupling or under constant-annihilating differential operators";
     return result;
 }
 
-DeclaredNullspaceMetadata declaredNullspaceForField(
+LocalDeclaredNullspaceMetadata declaredNullspaceForField(
     const ProblemAnalysisContext& context,
     FieldId field,
     int component,
@@ -836,12 +838,13 @@ DeclaredNullspaceMetadata declaredNullspaceForField(
                     hint.component != component) {
                     continue;
                 }
-                DeclaredNullspaceMetadata metadata;
+                LocalDeclaredNullspaceMetadata metadata;
                 metadata.present = true;
                 metadata.family = hint.family;
                 metadata.confidence = hint.confidence;
+                metadata.evidence_kind = hint.evidence_kind;
                 metadata.evidence =
-                    "ContributionDescriptor declared multiplier nullspace family=" +
+        "ContributionDescriptor declared scalar-multiplier nullspace family=" +
                     std::string(toString(hint.family));
                 if (!hint.reason.empty()) {
                     metadata.evidence += ": " + hint.reason;
@@ -853,12 +856,15 @@ DeclaredNullspaceMetadata declaredNullspaceForField(
 
     const auto* descriptor = context.fieldDescriptor(field);
     if (descriptor && descriptor->declared_nullspace_metadata_present) {
-        DeclaredNullspaceMetadata metadata;
+        LocalDeclaredNullspaceMetadata metadata;
         metadata.present = true;
         metadata.family = descriptor->declared_nullspace_family;
         metadata.confidence = AnalysisConfidence::High;
+        metadata.evidence_kind = descriptor->declared_nullspaces.empty()
+            ? NullspaceEvidenceKind::DescriptorHint
+            : descriptor->declared_nullspaces.front().evidence_kind;
         metadata.evidence =
-            "FieldDescriptor declared multiplier nullspace family=" +
+            "FieldDescriptor declared scalar-multiplier nullspace family=" +
             std::string(toString(descriptor->declared_nullspace_family));
         if (!descriptor->declared_nullspace_scope.empty()) {
             metadata.evidence += ", scope='" +
@@ -922,8 +928,20 @@ bool nullspaceHandlingAcceptable(NullspaceHandlingClass handling) noexcept
 
 bool positiveSchurEvidence(PositivityClass positivity) noexcept
 {
-    return positivity == PositivityClass::Positive ||
-           positivity == PositivityClass::Nonnegative;
+    return positivity == PositivityClass::Positive;
+}
+
+bool quotientSchurEvidence(const SchurComplementSummary& summary) noexcept
+{
+    return summary.schur_positivity == PositivityClass::Nonnegative &&
+           summary.schur_positive_on_quotient &&
+           summary.quotient_space_scope_present &&
+           summary.multiplier_gauge_projected &&
+           summary.nullspace_basis_matches &&
+           !summary.quotient_norm_id.empty() &&
+           numeric::finitePositiveOrdered(
+               summary.schur_lower_bound_on_quotient,
+               summary.schur_upper_bound_on_quotient);
 }
 
 bool validPositiveOrderedBounds(Real lower, Real upper) noexcept
@@ -949,7 +967,8 @@ bool schurCertificationComplete(const SchurComplementSummary& summary) noexcept
            summary.nullspace_handling_evidence_present &&
            nullspaceHandlingAcceptable(summary.nullspace_handling) &&
            summary.schur_definiteness_evidence_present &&
-           positiveSchurEvidence(summary.schur_positivity) &&
+           (positiveSchurEvidence(summary.schur_positivity) ||
+            quotientSchurEvidence(summary)) &&
            spectral_bounds_valid &&
            preconditioner_bounds_valid;
 }
@@ -969,6 +988,7 @@ void emitSchurComplementClaim(ProblemAnalysisReport& report,
     claim.estimate_scope = summary.schur_id;
     claim.claim_origin = "MixedOperatorAnalyzer";
     claim.nullspace_handling_class = summary.nullspace_handling;
+    claim.evidence_level = EvidenceLevel::ScopedNumericSummary;
 
     const bool certified = schurCertificationComplete(summary);
     if (!summary.schur_available) {
@@ -981,8 +1001,9 @@ void emitSchurComplementClaim(ProblemAnalysisReport& report,
         claim.status = PropertyStatus::Preserved;
         claim.confidence = AnalysisConfidence::High;
         claim.reduced_definiteness_class = CertificationClass::Certified;
+        claim.evidence_level = EvidenceLevel::CertifiedNumericTheorem;
         claim.description =
-            "Schur complement resolution is certified by exact reduction, inf-sup, nullspace handling, and spectral/preconditioner equivalence evidence";
+            "Schur complement resolution is certified by exact reduction, inf-sup, quotient/nullspace handling where needed, and spectral/preconditioner equivalence evidence";
     } else {
         claim.status = PropertyStatus::Likely;
         claim.confidence = AnalysisConfidence::Medium;
@@ -1001,6 +1022,17 @@ void emitSchurComplementClaim(ProblemAnalysisReport& report,
         std::string(summary.primal_block_invertible_evidence_present ? "true" : "false") +
         ", inf_sup=" +
         std::string(summary.inf_sup_evidence_present ? "true" : "false") +
+        ", schur_positivity=" +
+        std::to_string(static_cast<int>(summary.schur_positivity)) +
+        ", positive_on_quotient=" +
+        std::string(summary.schur_positive_on_quotient ? "true" : "false") +
+        ", quotient_scope=" +
+        std::string(summary.quotient_space_scope_present ? "true" : "false") +
+        ", gauge_projected=" +
+        std::string(summary.multiplier_gauge_projected ? "true" : "false") +
+        ", nullspace_basis_matches=" +
+        std::string(summary.nullspace_basis_matches ? "true" : "false") +
+        ", quotient_norm='" + summary.quotient_norm_id + "'" +
         ", spectral_equivalence=" +
         std::string(summary.spectral_equivalence_bounds_present ? "true" : "false") +
         ", spectral_bounds=[" +
@@ -1048,7 +1080,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
     // variables can appear in distinct cell, boundary, interface, auxiliary,
     // or contribution-local saddle systems.
     struct MixedPairScopeKey {
-        VariableKey momentum;
+        VariableKey primal_vector;
         VariableKey constraint;
         DomainKind domain{DomainKind::Cell};
         int marker{-1};
@@ -1056,7 +1088,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
         std::string pairing_group;
         std::string contribution_id;
         bool operator==(const MixedPairScopeKey& o) const {
-            return momentum == o.momentum &&
+            return primal_vector == o.primal_vector &&
                    constraint == o.constraint &&
                    domain == o.domain &&
                    marker == o.marker &&
@@ -1067,7 +1099,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
     };
     struct MixedPairScopeKeyHash {
         std::size_t operator()(const MixedPairScopeKey& key) const {
-            std::size_t seed = VariableKeyHash{}(key.momentum);
+            std::size_t seed = VariableKeyHash{}(key.primal_vector);
             seed ^= VariableKeyHash{}(key.constraint) + 0x9e3779b97f4a7c15ULL +
                     (seed << 6U) + (seed >> 2U);
             seed ^= std::hash<int>{}(static_cast<int>(key.domain)) +
@@ -1087,7 +1119,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
         emitted_mixed_pairs;
 
     // Nullspace claims are field-intrinsic (constant nullspace) — one per
-    // constraint field regardless of how many momentum partners it has.
+    // constraint field regardless of how many primal-vector partners it has.
     std::unordered_set<FieldId> emitted_nullspace_fields;
 
     // =====================================================================
@@ -1102,7 +1134,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
     //     that don't share variables
     //
     // Within each component, constraint variables are paired only with
-    // the momentum variables they actually couple with via
+    // the primal-vector variables they actually couple with via
     // ConstraintBlock/OffDiagonalBlock contributions (Issue 2).
     // =====================================================================
     const auto& contributions = context.contributions();
@@ -1175,9 +1207,11 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
         // --- Phase 4: Analyze each component for saddle-point structure ---
         for (const auto& [comp_id, comp_group] : comp_contribs) {
             struct VarInfo {
-                bool has_coercive_diagonal = false;
+                bool has_primal_diagonal_candidate = false;
                 bool appears_in_constraint = false;
                 bool appears_in_offdiagonal = false;
+                bool has_constraint_pair_metadata = false;
+                bool has_formal_adjoint_pair_metadata = false;
             };
             std::unordered_map<VariableKey, VarInfo, VariableKeyHash> var_info;
 
@@ -1189,7 +1223,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     if (hasFlag(contrib->traits,
                                 OperatorTraitFlags::HasSecondOrder)) {
                         for (const auto& tv : contrib->test_variables) {
-                            var_info[tv].has_coercive_diagonal = true;
+                            var_info[tv].has_primal_diagonal_candidate = true;
                         }
                     }
                 } else if (contrib->role == ContributionRole::ConstraintBlock) {
@@ -1203,29 +1237,47 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     for (const auto& tv : contrib->trial_variables)
                         var_info[tv].appears_in_offdiagonal = true;
                 }
+                for (const auto& pairing : contrib->pairings) {
+                    auto& row_info = var_info[pairing.row_var];
+                    auto& col_info = var_info[pairing.col_var];
+                    if (pairing.kind == PairingKind::ConstraintPair ||
+                        pairing.kind == PairingKind::StabilizedConstraintPair) {
+                        row_info.has_constraint_pair_metadata = true;
+                        col_info.has_constraint_pair_metadata = true;
+                    }
+                    if (pairing.kind == PairingKind::FormalAdjointPair) {
+                        row_info.has_formal_adjoint_pair_metadata = true;
+                        col_info.has_formal_adjoint_pair_metadata = true;
+                    }
+                }
             }
 
-            // Identify momentum and constraint variables
-            std::unordered_set<VariableKey, VariableKeyHash> momentum_set;
+            // Identify primal-vector and constraint variables
+            std::unordered_set<VariableKey, VariableKeyHash> primal_vector_set;
             std::unordered_set<VariableKey, VariableKeyHash> constraint_set;
 
             for (const auto& [vk, info] : var_info) {
-                if (info.has_coercive_diagonal) {
-                    momentum_set.insert(vk);
+                if (info.has_primal_diagonal_candidate) {
+                    primal_vector_set.insert(vk);
                 }
-                if ((info.appears_in_constraint || info.appears_in_offdiagonal)
-                    && !info.has_coercive_diagonal) {
+                const bool explicit_constraint_metadata =
+                    info.appears_in_constraint ||
+                    info.has_constraint_pair_metadata ||
+                    (info.appears_in_offdiagonal &&
+                     info.has_formal_adjoint_pair_metadata);
+                if (explicit_constraint_metadata &&
+                    !info.has_primal_diagonal_candidate) {
                     constraint_set.insert(vk);
                 }
             }
 
-            if (momentum_set.empty() || constraint_set.empty()) continue;
+            if (primal_vector_set.empty() || constraint_set.empty()) continue;
 
-            // Build per-constraint coupling map: which momentum vars does
+            // Build per-constraint coupling map: which primal-vector vars does
             // each constraint var actually couple with via
             // ConstraintBlock/OffDiagonalBlock contributions?
             struct MixedPairCandidate {
-                VariableKey momentum;
+                VariableKey primal_vector;
                 VariableKey constraint;
                 DomainKind domain{DomainKind::Cell};
                 int marker{-1};
@@ -1235,7 +1287,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
             };
             std::unordered_map<VariableKey,
                 std::vector<MixedPairCandidate>,
-                VariableKeyHash> constraint_to_momentum;
+                VariableKeyHash> constraint_to_primal_vector;
 
             for (const auto* contrib : comp_group) {
                 if (contrib->role != ContributionRole::ConstraintBlock &&
@@ -1253,11 +1305,11 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     return std::string{};
                 };
                 auto appendCandidate = [&](const VariableKey& constraint,
-                                           const VariableKey& momentum,
+                                           const VariableKey& primal_vector,
                                            const VariableKey& row,
                                            const VariableKey& col) {
                     MixedPairCandidate candidate;
-                    candidate.momentum = momentum;
+                    candidate.primal_vector = primal_vector;
                     candidate.constraint = constraint;
                     candidate.domain = contrib->domain;
                     candidate.marker = contrib->interface_marker >= 0
@@ -1266,35 +1318,40 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     candidate.operator_tag = contrib->operator_tag;
                     candidate.pairing_group = pairingGroupFor(row, col);
                     candidate.contribution_id = contrib->contribution_id;
-                    constraint_to_momentum[constraint].push_back(
+                    constraint_to_primal_vector[constraint].push_back(
                         std::move(candidate));
                 };
-                // Check all (test, trial) pairs for momentum↔constraint links
+                // Check all (test, trial) pairs for primal-vector/constraint links
                 for (const auto& tv : contrib->test_variables) {
                     for (const auto& trv : contrib->trial_variables) {
-                        if (constraint_set.count(tv) && momentum_set.count(trv))
+                        if (constraint_set.count(tv) && primal_vector_set.count(trv))
                             appendCandidate(tv, trv, tv, trv);
-                        if (constraint_set.count(trv) && momentum_set.count(tv))
+                        if (constraint_set.count(trv) && primal_vector_set.count(tv))
                             appendCandidate(trv, tv, tv, trv);
                     }
                 }
             }
 
-            // Emit one MixedSaddlePoint claim per (momentum, constraint) pair.
+            // Emit one MixedSaddlePoint claim per (primal-vector, constraint) pair.
             // Each claim carries exactly two variables so InfSupAnalyzer's
             // pair-based coverage check is precisely scoped.
             for (const auto& cv : constraint_set) {
                 FieldId constraint_fid = cv.field_id;
                 std::vector<VariableKey> nullspace_partners;
 
-                // Determine this constraint's momentum partners
-                auto coup_it = constraint_to_momentum.find(cv);
-                if (coup_it == constraint_to_momentum.end() ||
+                // Determine this constraint's primal-vector partners
+                auto coup_it = constraint_to_primal_vector.find(cv);
+                if (coup_it == constraint_to_primal_vector.end() ||
                     coup_it->second.empty()) {
                     PropertyClaim claim;
                     claim.kind = PropertyKind::MixedSaddlePoint;
-                    claim.status = PropertyStatus::Exact;
-                    claim.confidence = AnalysisConfidence::High;
+                    claim.status = PropertyStatus::Unknown;
+                    claim.confidence = AnalysisConfidence::Medium;
+                    claim.certification_class =
+                        CertificationClass::NotCertified;
+                    claim.evidence_level = EvidenceLevel::StructuralMetadata;
+                    claim.definiteness_interpretation =
+                        DefinitenessInterpretation::SaddlePointExpected;
                     claim.domain = DomainKind::Cell;
                     claim.variables.push_back(cv);
                     claim.claim_origin = "MixedOperatorAnalyzer";
@@ -1305,14 +1362,14 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                             : cv.name) +
                         ", but no unique primal partner was identified";
                     claim.addEvidence("MixedOperatorAnalyzer",
-                        "Constraint variable has no contribution with DiagonalBlock + HasSecondOrder traits; pair-level scope was not unique");
+                        "Constraint/multiplier metadata is present, but pair-level primal block scope is not unique");
                     report.claims.push_back(std::move(claim));
                 } else {
                     for (const auto& candidate : coup_it->second) {
-                        const auto& mv = candidate.momentum;
+                        const auto& mv = candidate.primal_vector;
                         appendUnique(nullspace_partners, mv);
                         MixedPairScopeKey key;
-                        key.momentum = mv;
+                        key.primal_vector = mv;
                         key.constraint = cv;
                         key.domain = candidate.domain;
                         key.marker = candidate.marker;
@@ -1324,8 +1381,14 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
 
                         PropertyClaim claim;
                         claim.kind = PropertyKind::MixedSaddlePoint;
-                        claim.status = PropertyStatus::Exact;
-                        claim.confidence = AnalysisConfidence::High;
+                        claim.status = PropertyStatus::Likely;
+                        claim.confidence = AnalysisConfidence::Medium;
+                        claim.certification_class =
+                            CertificationClass::NotCertified;
+                        claim.evidence_level =
+                            EvidenceLevel::StructuralMetadata;
+                        claim.definiteness_interpretation =
+                            DefinitenessInterpretation::SaddlePointExpected;
                         claim.domain = candidate.domain;
                         claim.variables.push_back(mv);
                         claim.variables.push_back(cv);
@@ -1347,8 +1410,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                             " (constraint/multiplier, no diagonal elliptic"
                             " block)";
                         claim.addEvidence("MixedOperatorAnalyzer",
-                            "Constraint variable has no contribution with "
-                            "DiagonalBlock + HasSecondOrder traits; pair scope domain=" +
+                            "Constraint/multiplier metadata with paired structural primal-vector block; no scoped inf-sup/rank theorem evidence is attached. Pair scope domain=" +
                                 std::string(toString(candidate.domain)) +
                                 ", marker=" + std::to_string(candidate.marker) +
                                 ", operator_tag='" + candidate.operator_tag +
@@ -1359,7 +1421,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
 
                 // Nullspace claim: one per constraint field.  Explicit
                 // metadata remains authoritative, and otherwise the analyzer
-                // can certify the canonical pressure-gauge case from the
+                // can certify the canonical multiplier-gauge case from the
                 // block operator structure itself.
                 if (cv.kind == VariableKind::FieldComponent &&
                     constraint_fid != INVALID_FIELD_ID &&
@@ -1367,8 +1429,8 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     const auto metadata = declaredNullspaceForField(
                         context, constraint_fid, cv.component, &comp_group);
                     const auto inferred = metadata.present
-                        ? InferredPressureNullspace{}
-                        : inferPressureConstantNullspace(
+                        ? InferredScalarMultiplierNullspace{}
+                        : inferScalarMultiplierConstantNullspace(
                               context,
                               cv,
                               std::unordered_set<VariableKey, VariableKeyHash>(
@@ -1378,15 +1440,18 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     if (metadata.present || inferred.certified) {
                         PropertyClaim ns_claim;
                         ns_claim.kind = PropertyKind::Nullspace;
-                        ns_claim.status =
-                            metadata.present
-                                ? (metadata.confidence == AnalysisConfidence::High
-                                      ? PropertyStatus::Exact
-                                      : PropertyStatus::Likely)
-                                : PropertyStatus::Exact;
+                        ns_claim.status = PropertyStatus::Likely;
                         ns_claim.confidence = metadata.present
                             ? metadata.confidence
-                            : AnalysisConfidence::High;
+                            : AnalysisConfidence::Medium;
+                        ns_claim.certification_class =
+                            CertificationClass::NotCertified;
+                        ns_claim.evidence_level = metadata.present
+                            ? EvidenceLevel::DescriptorHint
+                            : EvidenceLevel::StructuralMetadata;
+                        ns_claim.nullspace_evidence_kind = metadata.present
+                            ? metadata.evidence_kind
+                            : NullspaceEvidenceKind::SymbolicOperatorIdentity;
                         ns_claim.field = constraint_fid;
                         ns_claim.component = cv.component;
                         ns_claim.domain = DomainKind::Cell;
@@ -1402,8 +1467,8 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                                    " nullspace metadata")
                                 : ("Scalar constraint field " +
                                    std::to_string(constraint_fid) +
-                                   " in saddle-point system has certified"
-                                   " pressure-gauge constant nullspace");
+                                   " in saddle-point system has structural"
+                                   " multiplier-gauge constant nullspace");
                         ns_claim.nullspace_family = metadata.present
                             ? metadata.family
                             : NullspaceFamily::ScalarConstant;
@@ -1425,7 +1490,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
     // Emits one MixedSaddlePoint claim per constraint field with a SINGLE
     // variable (the constraint). Without block expressions we can verify
     // that a field is a constraint (no gradient operator) but NOT which
-    // momentum field it couples with. Rather than fabricating pair
+    // primal-vector field it couples with. Rather than fabricating pair
     // structure that downstream passes (SpaceCompatibilityAnalyzer,
     // InfSupAnalyzer) would consume as verified, we emit only what's
     // known. Downstream passes handle single-variable claims:
@@ -1441,8 +1506,8 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
             if (!rec.residual_expr) continue;
             if (rec.active_fields.size() < 2) continue;
 
-            // Collect ALL momentum and constraint fields
-            std::vector<FieldId> momentum_fids;
+            // Collect ALL primal-vector and constraint fields
+            std::vector<FieldId> primal_vector_fids;
             std::vector<FieldId> constraint_fids;
 
             for (FieldId fid : rec.active_fields) {
@@ -1458,11 +1523,11 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
 
                 if (fs.value_dimension > 1 &&
                     (fs.has_gradient || fs.has_sym_grad)) {
-                    momentum_fids.push_back(fid);
+                    primal_vector_fids.push_back(fid);
                 }
             }
 
-            if (momentum_fids.empty() || constraint_fids.empty()) continue;
+            if (primal_vector_fids.empty() || constraint_fids.empty()) continue;
 
             // Emit one claim per constraint field (single variable, no
             // fabricated pair). The claim asserts: "this field is a
@@ -1473,8 +1538,12 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
 
                 PropertyClaim claim;
                 claim.kind = PropertyKind::MixedSaddlePoint;
-                claim.status = PropertyStatus::Exact;
-                claim.confidence = AnalysisConfidence::High;
+                claim.status = PropertyStatus::Likely;
+                claim.confidence = AnalysisConfidence::Low;
+                claim.certification_class = CertificationClass::NotCertified;
+                claim.evidence_level = EvidenceLevel::SyntaxPattern;
+                claim.definiteness_interpretation =
+                    DefinitenessInterpretation::SaddlePointExpected;
                 claim.domain = DomainKind::Cell;
                 claim.variables.push_back(VariableKey::field(cfid));
                 claim.claim_origin = "MixedOperatorAnalyzer";
@@ -1488,34 +1557,37 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.addEvidence("MixedOperatorAnalyzer",
                     "Constraint field " + std::to_string(cfid) +
                     " has no own gradient operator (no block structure"
-                    " available to verify specific momentum partner)");
+                    " available to verify specific primal-vector partner)");
                 report.claims.push_back(std::move(claim));
 
                 // Nullspace: one per constraint field.  Explicit metadata is
                 // accepted, and residual-only records can still certify the
-                // pressure gauge when the full residual exposes the p*div(v)
-                // and q*div(u) pattern with no nonzero pressure reaction.
+                // multiplier gauge when the full residual exposes the p*div(v)
+                // and q*div(u) pattern with no nonzero multiplier reaction.
                 if (!emitted_nullspace_fields.count(cfid)) {
                     const auto metadata = declaredNullspaceForField(
                         context, cfid, -1, nullptr);
                     const auto inferred = metadata.present
-                        ? InferredPressureNullspace{}
-                        : inferPressureConstantNullspaceFromResidual(
-                              context, *rec.residual_expr, cfid, momentum_fids);
+                        ? InferredScalarMultiplierNullspace{}
+                        : inferScalarMultiplierConstantNullspaceFromResidual(
+                              context, *rec.residual_expr, cfid, primal_vector_fids);
                     if (!metadata.present && !inferred.certified) {
                         continue;
                     }
                     PropertyClaim ns_claim;
                     ns_claim.kind = PropertyKind::Nullspace;
-                    ns_claim.status =
-                        metadata.present
-                            ? (metadata.confidence == AnalysisConfidence::High
-                                  ? PropertyStatus::Exact
-                                  : PropertyStatus::Likely)
-                            : PropertyStatus::Exact;
+                    ns_claim.status = PropertyStatus::Likely;
                     ns_claim.confidence = metadata.present
                         ? metadata.confidence
-                        : AnalysisConfidence::High;
+                        : AnalysisConfidence::Medium;
+                    ns_claim.certification_class =
+                        CertificationClass::NotCertified;
+                    ns_claim.evidence_level = metadata.present
+                        ? EvidenceLevel::DescriptorHint
+                        : EvidenceLevel::SyntaxPattern;
+                    ns_claim.nullspace_evidence_kind = metadata.present
+                        ? metadata.evidence_kind
+                        : NullspaceEvidenceKind::DescriptorHint;
                     ns_claim.field = cfid;
                     ns_claim.component = -1;
                     ns_claim.domain = DomainKind::Cell;
@@ -1529,7 +1601,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                             : ("Scalar constraint field " +
                                std::to_string(cfid) +
                                " in residual-defined saddle-point system has"
-                               " certified pressure-gauge constant nullspace");
+                               " structural multiplier-gauge constant nullspace");
                     ns_claim.nullspace_family = metadata.present
                         ? metadata.family
                         : NullspaceFamily::ScalarConstant;

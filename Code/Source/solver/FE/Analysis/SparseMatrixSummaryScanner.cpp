@@ -59,6 +59,46 @@ struct EntryKeyHash {
     }
 };
 
+struct NumericEntryValue {
+    Real real{};
+    Real imag{};
+
+    NumericEntryValue& operator+=(const NumericEntryValue& other) noexcept
+    {
+        real += other.real;
+        imag += other.imag;
+        return *this;
+    }
+};
+
+[[nodiscard]] NumericEntryValue asNumericValue(const SparseMatrixRowEntry& entry) noexcept
+{
+    return NumericEntryValue{entry.value, entry.imaginary_value};
+}
+
+[[nodiscard]] Real magnitude(const NumericEntryValue& value) noexcept
+{
+    return std::hypot(value.real, value.imag);
+}
+
+[[nodiscard]] bool hasImaginaryPart(const NumericEntryValue& value,
+                                    Real tolerance) noexcept
+{
+    return std::abs(value.imag) > tolerance;
+}
+
+[[nodiscard]] Real complexDifferenceMagnitude(const NumericEntryValue& a,
+                                              const NumericEntryValue& b) noexcept
+{
+    return std::hypot(a.real - b.real, a.imag - b.imag);
+}
+
+[[nodiscard]] Real hermitianDifferenceMagnitude(const NumericEntryValue& a,
+                                                const NumericEntryValue& transpose) noexcept
+{
+    return std::hypot(a.real - transpose.real, a.imag + transpose.imag);
+}
+
 [[nodiscard]] bool almostZero(Real value, Real tolerance) noexcept
 {
     return std::abs(value) <= tolerance;
@@ -132,18 +172,21 @@ public:
 
     [[nodiscard]] SparseMatrixSummaryResult finish()
     {
-        const bool complete_rows = rowEvidenceComplete();
         summary_.expected_row_count = summary_.rows > 0
             ? static_cast<std::uint64_t>(summary_.rows)
             : std::uint64_t{0};
+        finalizeRowCoverage();
+        const bool complete_rows = rowEvidenceComplete();
         summary_.scanned_row_count = log_.visited_rows;
         summary_.scanned_entry_count = log_.visited_entries;
         summary_.sign_evidence_complete =
             complete_rows &&
+            !summary_.complex_values_present &&
             summary_.invalid_entry_count == 0u &&
             summary_.nonfinite_entry_count == 0u;
         summary_.row_sum_evidence_complete =
             complete_rows && has_row_sum_ &&
+            !summary_.complex_values_present &&
             summary_.invalid_entry_count == 0u &&
             summary_.nonfinite_row_sum_count == 0u;
 
@@ -199,10 +242,38 @@ private:
         if (seen == 0U) {
             seen = 1U;
             ++row_seen_count_;
+        } else {
+            ++summary_.duplicate_row_visit_count;
         }
     }
 
-    void retainSymmetryEntry(GlobalDofId row, GlobalDofId col, Real value)
+    void finalizeRowCoverage()
+    {
+        summary_.row_ownership_disjoint =
+            summary_.duplicate_row_visit_count == 0u;
+        summary_.missing_row_count = 0u;
+        if (summary_.rows == 0) {
+            summary_.global_row_coverage_exact = true;
+            return;
+        }
+        if (row_seen_.empty() || log_.row_coverage_storage_truncated ||
+            summary_.rows < 0) {
+            summary_.global_row_coverage_exact = false;
+            return;
+        }
+        for (const auto seen : row_seen_) {
+            if (seen == 0U) {
+                ++summary_.missing_row_count;
+            }
+        }
+        summary_.global_row_coverage_exact =
+            summary_.missing_row_count == 0u &&
+            summary_.duplicate_row_visit_count == 0u;
+    }
+
+    void retainSymmetryEntry(GlobalDofId row,
+                             GlobalDofId col,
+                             NumericEntryValue value)
     {
         if (!options_.compute_symmetry || !summary_.square ||
             log_.symmetry_storage_truncated) {
@@ -223,54 +294,61 @@ private:
                        const SparseMatrixRowEntry& entry,
                        int owning_rank)
     {
-        const Real value = entry.value;
-        if (!numeric::finite(value)) {
+        const auto value = asNumericValue(entry);
+        if (!numeric::finite(value.real) || !numeric::finite(value.imag)) {
             ++summary_.nonfinite_entry_count;
             summary_.addWorstEntry(MatrixEntrySample{row,
                                                      entry.col,
-                                                     value,
+                                                     value.real,
                                                      owning_rank,
                                                      sample_index_++,
                                                      "nonfinite entry"});
             return;
         }
-        const Real abs_value = std::abs(value);
+        const bool complex_entry =
+            hasImaginaryPart(value, options_.sign_tolerance);
+        if (complex_entry) {
+            summary_.complex_values_present = true;
+            summary_.max_abs_imag_entry =
+                std::max(summary_.max_abs_imag_entry, std::abs(value.imag));
+        }
+        const Real abs_value = magnitude(value);
         summary_.max_abs_entry = std::max(summary_.max_abs_entry, abs_value);
         retainSymmetryEntry(row, entry.col, value);
 
         if (row == entry.col) {
             ++summary_.diagonal_count;
-            if (value <= options_.sign_tolerance) {
+            if (!complex_entry && value.real <= options_.sign_tolerance) {
                 ++summary_.nonpositive_diagonal_count;
                 summary_.addWorstEntry(MatrixEntrySample{row,
                                                          entry.col,
-                                                         value,
+                                                         value.real,
                                                          owning_rank,
                                                          sample_index_,
                                                          "nonpositive diagonal"});
             }
-            if (value < -options_.sign_tolerance) {
+            if (!complex_entry && value.real < -options_.sign_tolerance) {
                 ++summary_.negative_diagonal_count;
             }
-            if (almostZero(value, options_.sign_tolerance)) {
+            if (!complex_entry && almostZero(value.real, options_.sign_tolerance)) {
                 ++summary_.near_zero_diagonal_count;
             }
         } else {
             ++summary_.offdiag_count;
             summary_.max_abs_offdiag = std::max(summary_.max_abs_offdiag, abs_value);
-            if (value > options_.sign_tolerance) {
+            if (!complex_entry && value.real > options_.sign_tolerance) {
                 ++summary_.positive_offdiag_count;
                 summary_.max_positive_offdiag =
-                    std::max(summary_.max_positive_offdiag, value);
+                    std::max(summary_.max_positive_offdiag, value.real);
                 summary_.addWorstEntry(MatrixEntrySample{row,
                                                          entry.col,
-                                                         value,
+                                                         value.real,
                                                          owning_rank,
                                                          sample_index_,
                                                          "positive offdiagonal"});
-            } else if (value < -options_.sign_tolerance) {
+            } else if (!complex_entry && value.real < -options_.sign_tolerance) {
                 ++summary_.negative_offdiag_count;
-            } else {
+            } else if (!complex_entry) {
                 ++summary_.near_zero_offdiag_count;
             }
         }
@@ -300,10 +378,11 @@ private:
             return;
         }
 
-        std::unordered_map<GlobalDofId, Real> aggregated_entries;
+        std::unordered_map<GlobalDofId, NumericEntryValue> aggregated_entries;
         aggregated_entries.reserve(entries.size());
         bool row_has_nonfinite = false;
         bool row_has_invalid = false;
+        bool row_has_complex = false;
         for (const auto& entry : entries) {
             if (entry.col < 0 || entry.col >= summary_.cols) {
                 ++summary_.invalid_entry_count;
@@ -317,7 +396,8 @@ private:
                     "invalid column index"});
                 continue;
             }
-            if (!numeric::finite(entry.value)) {
+            if (!numeric::finite(entry.value) ||
+                !numeric::finite(entry.imaginary_value)) {
                 ++summary_.nonfinite_entry_count;
                 row_has_nonfinite = true;
                 summary_.addWorstEntry(MatrixEntrySample{row,
@@ -328,13 +408,18 @@ private:
                                                          "nonfinite entry"});
                 continue;
             }
-            aggregated_entries[entry.col] += entry.value;
+            const auto numeric_value = asNumericValue(entry);
+            row_has_complex =
+                row_has_complex ||
+                hasImaginaryPart(numeric_value, options_.sign_tolerance);
+            aggregated_entries[entry.col] += numeric_value;
         }
 
         std::vector<SparseMatrixRowEntry> row_entries;
         row_entries.reserve(aggregated_entries.size());
         for (const auto& item : aggregated_entries) {
-            row_entries.push_back(SparseMatrixRowEntry{item.first, item.second});
+            row_entries.push_back(SparseMatrixRowEntry{
+                item.first, item.second.real, item.second.imag});
         }
         std::sort(row_entries.begin(),
                   row_entries.end(),
@@ -353,9 +438,23 @@ private:
                 diagonal_value += entry.value;
                 diagonal_seen = true;
             } else {
-                offdiag_abs_sum += std::abs(entry.value);
+                offdiag_abs_sum +=
+                    magnitude(NumericEntryValue{entry.value,
+                                                entry.imaginary_value});
             }
             classifyEntry(row, entry, owning_rank);
+        }
+
+        if (summary_.square && !diagonal_seen) {
+            ++summary_.missing_diagonal_count;
+            ++summary_.nonpositive_diagonal_count;
+            ++summary_.near_zero_diagonal_count;
+            summary_.addWorstEntry(MatrixEntrySample{row,
+                                                     row,
+                                                     Real{},
+                                                     owning_rank,
+                                                     sample_index_++,
+                                                     "missing diagonal"});
         }
 
         if (row_has_nonfinite || row_has_invalid) {
@@ -396,7 +495,10 @@ private:
             summary_.max_row_sum = std::max(summary_.max_row_sum, row_sum);
         }
         summary_.max_abs_row_sum = std::max(summary_.max_abs_row_sum, std::abs(row_sum));
-        if (row_sum < -options_.row_sum_tolerance) {
+        if (row_has_complex || summary_.complex_values_present) {
+            summary_.complex_values_present = true;
+        } else if (row_sum < -options_.row_sum_tolerance) {
+            ++summary_.negative_row_sum_count;
             ++summary_.row_sum_violation_count;
             summary_.addWorstEntry(MatrixEntrySample{row,
                                                      row,
@@ -404,6 +506,10 @@ private:
                                                      owning_rank,
                                                      sample_index_++,
                                                      "negative row sum"});
+        } else if (row_sum > options_.row_sum_tolerance) {
+            ++summary_.positive_row_sum_count;
+        } else {
+            ++summary_.near_zero_row_sum_count;
         }
     }
 
@@ -412,10 +518,7 @@ private:
         if (summary_.rows == 0) {
             return true;
         }
-        if (!row_seen_.empty() && summary_.rows >= 0) {
-            return row_seen_count_ == static_cast<std::uint64_t>(summary_.rows);
-        }
-        return false;
+        return summary_.global_row_coverage_exact;
     }
 
     void finishSymmetry()
@@ -438,10 +541,18 @@ private:
             return;
         }
 
-        summary_.structurally_symmetric = true;
-        summary_.numerically_symmetric = true;
+        summary_.structurally_symmetric = !summary_.complex_values_present;
+        summary_.numerically_symmetric = !summary_.complex_values_present;
         summary_.symmetry_evidence_complete = true;
+        summary_.structurally_complex_symmetric = true;
+        summary_.numerically_complex_symmetric = true;
+        summary_.complex_symmetry_evidence_complete = true;
+        summary_.structurally_hermitian = true;
+        summary_.numerically_hermitian = true;
+        summary_.hermitian_evidence_complete = true;
         summary_.max_symmetry_error = 0.0;
+        summary_.max_complex_symmetry_error = 0.0;
+        summary_.max_hermitian_error = 0.0;
 
         for (const auto& item : symmetry_entries_) {
             const auto reverse_it =
@@ -449,15 +560,42 @@ private:
             if (reverse_it == symmetry_entries_.end()) {
                 summary_.structurally_symmetric = false;
                 summary_.numerically_symmetric = false;
+                summary_.structurally_complex_symmetric = false;
+                summary_.numerically_complex_symmetric = false;
+                summary_.structurally_hermitian = false;
+                summary_.numerically_hermitian = false;
                 summary_.max_symmetry_error =
-                    std::max(summary_.max_symmetry_error, std::abs(item.second));
+                    std::max(summary_.max_symmetry_error,
+                             magnitude(item.second));
+                summary_.max_complex_symmetry_error =
+                    std::max(summary_.max_complex_symmetry_error,
+                             magnitude(item.second));
+                summary_.max_hermitian_error =
+                    std::max(summary_.max_hermitian_error,
+                             magnitude(item.second));
                 continue;
             }
 
-            const Real error = std::abs(item.second - reverse_it->second);
+            const Real complex_symmetry_error =
+                complexDifferenceMagnitude(item.second, reverse_it->second);
+            const Real hermitian_error =
+                hermitianDifferenceMagnitude(item.second, reverse_it->second);
+            const Real error = std::abs(item.second.real - reverse_it->second.real);
             summary_.max_symmetry_error = std::max(summary_.max_symmetry_error, error);
-            if (error > options_.symmetry_tolerance) {
+            summary_.max_complex_symmetry_error =
+                std::max(summary_.max_complex_symmetry_error,
+                         complex_symmetry_error);
+            summary_.max_hermitian_error =
+                std::max(summary_.max_hermitian_error, hermitian_error);
+            if (error > options_.symmetry_tolerance ||
+                summary_.complex_values_present) {
                 summary_.numerically_symmetric = false;
+            }
+            if (complex_symmetry_error > options_.symmetry_tolerance) {
+                summary_.numerically_complex_symmetric = false;
+            }
+            if (hermitian_error > options_.symmetry_tolerance) {
+                summary_.numerically_hermitian = false;
             }
         }
 
@@ -466,12 +604,17 @@ private:
             : Real{1};
         summary_.nonsymmetry_indicator =
             std::abs(summary_.max_symmetry_error) / denom;
+        if (summary_.complex_values_present) {
+            summary_.symmetry_evidence_complete = false;
+            summary_.nonsymmetry_indicator =
+                summary_.max_hermitian_error / denom;
+        }
     }
 
     SparseMatrixScanOptions options_{};
     DiscreteMatrixSummary summary_{};
     SparseMatrixScanLog log_{};
-    std::unordered_map<EntryKey, Real, EntryKeyHash> symmetry_entries_{};
+    std::unordered_map<EntryKey, NumericEntryValue, EntryKeyHash> symmetry_entries_{};
     std::vector<unsigned char> row_seen_{};
     std::uint64_t row_seen_count_{0};
     std::uint64_t sample_index_{0};
@@ -741,9 +884,16 @@ public:
             entries.clear();
             entries.reserve(static_cast<std::size_t>(ncols));
             for (PetscInt i = 0; i < ncols; ++i) {
+#if defined(PETSC_USE_COMPLEX)
+                entries.push_back(SparseMatrixRowEntry{
+                    static_cast<GlobalDofId>(cols[i]),
+                    static_cast<Real>(PetscRealPart(values[i])),
+                    static_cast<Real>(PetscImaginaryPart(values[i]))});
+#else
                 entries.push_back(
                     SparseMatrixRowEntry{static_cast<GlobalDofId>(cols[i]),
                                          static_cast<Real>(PetscRealPart(values[i]))});
+#endif
             }
             visitor(static_cast<GlobalDofId>(row), entries, rank);
             MatRestoreRow(matrix_.petsc(), row, &ncols, &cols, &values);
@@ -1064,6 +1214,13 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
     merged.structurally_symmetric = true;
     merged.numerically_symmetric = true;
     merged.symmetry_evidence_complete = true;
+    merged.structurally_hermitian = true;
+    merged.numerically_hermitian = true;
+    merged.hermitian_evidence_complete = true;
+    merged.structurally_complex_symmetric = true;
+    merged.numerically_complex_symmetric = true;
+    merged.complex_symmetry_evidence_complete = true;
+    merged.row_ownership_disjoint = true;
     bool have_row_sum = false;
 
     for (const auto& part : parts) {
@@ -1076,6 +1233,13 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
             std::max(merged.max_positive_offdiag, part.max_positive_offdiag);
         merged.max_symmetry_error =
             std::max(merged.max_symmetry_error, part.max_symmetry_error);
+        merged.max_hermitian_error =
+            std::max(merged.max_hermitian_error, part.max_hermitian_error);
+        merged.max_complex_symmetry_error =
+            std::max(merged.max_complex_symmetry_error,
+                     part.max_complex_symmetry_error);
+        merged.max_abs_imag_entry =
+            std::max(merged.max_abs_imag_entry, part.max_abs_imag_entry);
         merged.max_abs_row_sum =
             std::max(merged.max_abs_row_sum, part.max_abs_row_sum);
 
@@ -1089,6 +1253,7 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         }
 
         merged.diagonal_count += part.diagonal_count;
+        merged.missing_diagonal_count += part.missing_diagonal_count;
         merged.nonpositive_diagonal_count += part.nonpositive_diagonal_count;
         merged.negative_diagonal_count += part.negative_diagonal_count;
         merged.near_zero_diagonal_count += part.near_zero_diagonal_count;
@@ -1096,20 +1261,46 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
         merged.positive_offdiag_count += part.positive_offdiag_count;
         merged.negative_offdiag_count += part.negative_offdiag_count;
         merged.near_zero_offdiag_count += part.near_zero_offdiag_count;
+        merged.negative_row_sum_count += part.negative_row_sum_count;
+        merged.positive_row_sum_count += part.positive_row_sum_count;
+        merged.near_zero_row_sum_count += part.near_zero_row_sum_count;
         merged.row_sum_violation_count += part.row_sum_violation_count;
         merged.invalid_entry_count += part.invalid_entry_count;
         merged.nonfinite_entry_count += part.nonfinite_entry_count;
         merged.nonfinite_row_sum_count += part.nonfinite_row_sum_count;
         merged.scanned_row_count += part.scanned_row_count;
         merged.scanned_entry_count += part.scanned_entry_count;
+        merged.duplicate_row_visit_count += part.duplicate_row_visit_count;
+        merged.missing_row_count += part.missing_row_count;
         merged.expected_row_count =
             std::max(merged.expected_row_count, part.expected_row_count);
+        merged.complex_values_present =
+            merged.complex_values_present || part.complex_values_present;
+        merged.global_row_coverage_exact =
+            merged.global_row_coverage_exact || part.global_row_coverage_exact;
+        merged.row_ownership_disjoint =
+            merged.row_ownership_disjoint && part.row_ownership_disjoint;
         merged.structurally_symmetric =
             merged.structurally_symmetric && part.structurally_symmetric;
         merged.numerically_symmetric =
             merged.numerically_symmetric && part.numerically_symmetric;
         merged.symmetry_evidence_complete =
             merged.symmetry_evidence_complete && part.symmetry_evidence_complete;
+        merged.structurally_hermitian =
+            merged.structurally_hermitian && part.structurally_hermitian;
+        merged.numerically_hermitian =
+            merged.numerically_hermitian && part.numerically_hermitian;
+        merged.hermitian_evidence_complete =
+            merged.hermitian_evidence_complete && part.hermitian_evidence_complete;
+        merged.structurally_complex_symmetric =
+            merged.structurally_complex_symmetric &&
+            part.structurally_complex_symmetric;
+        merged.numerically_complex_symmetric =
+            merged.numerically_complex_symmetric &&
+            part.numerically_complex_symmetric;
+        merged.complex_symmetry_evidence_complete =
+            merged.complex_symmetry_evidence_complete &&
+            part.complex_symmetry_evidence_complete;
 
         for (const auto& sample : part.worst_entries) {
             merged.addWorstEntry(sample);
@@ -1133,15 +1324,21 @@ mergeDiscreteMatrixSummaries(const std::vector<DiscreteMatrixSummary>& parts,
     if (merged.expected_row_count == 0u && merged.rows > 0) {
         merged.expected_row_count = static_cast<std::uint64_t>(merged.rows);
     }
-    const bool complete_rows =
-        merged.expected_row_count > 0u &&
-        merged.scanned_row_count >= merged.expected_row_count;
+    if (parts.size() != 1u) {
+        merged.global_row_coverage_exact = false;
+        merged.symmetry_evidence_complete = false;
+        merged.hermitian_evidence_complete = false;
+        merged.complex_symmetry_evidence_complete = false;
+    }
+    const bool complete_rows = merged.global_row_coverage_exact;
     merged.sign_evidence_complete =
         complete_rows &&
+        !merged.complex_values_present &&
         merged.invalid_entry_count == 0u &&
         merged.nonfinite_entry_count == 0u;
     merged.row_sum_evidence_complete =
         complete_rows && have_row_sum &&
+        !merged.complex_values_present &&
         merged.invalid_entry_count == 0u &&
         merged.nonfinite_row_sum_count == 0u;
 
@@ -1281,6 +1478,7 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     };
 
     sum_u64(summary.diagonal_count);
+    sum_u64(summary.missing_diagonal_count);
     sum_u64(summary.nonpositive_diagonal_count);
     sum_u64(summary.negative_diagonal_count);
     sum_u64(summary.near_zero_diagonal_count);
@@ -1288,12 +1486,17 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     sum_u64(summary.positive_offdiag_count);
     sum_u64(summary.negative_offdiag_count);
     sum_u64(summary.near_zero_offdiag_count);
+    sum_u64(summary.negative_row_sum_count);
+    sum_u64(summary.positive_row_sum_count);
+    sum_u64(summary.near_zero_row_sum_count);
     sum_u64(summary.row_sum_violation_count);
     sum_u64(summary.invalid_entry_count);
     sum_u64(summary.nonfinite_entry_count);
     sum_u64(summary.nonfinite_row_sum_count);
     sum_u64(summary.scanned_row_count);
     sum_u64(summary.scanned_entry_count);
+    sum_u64(summary.duplicate_row_visit_count);
+    sum_u64(summary.missing_row_count);
 
     auto expected_rows = static_cast<unsigned long long>(summary.expected_row_count);
     allReduceInPlace(expected_rows, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
@@ -1303,6 +1506,9 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     max_real(summary.max_abs_offdiag);
     max_real(summary.max_positive_offdiag);
     max_real(summary.max_symmetry_error);
+    max_real(summary.max_hermitian_error);
+    max_real(summary.max_complex_symmetry_error);
+    max_real(summary.max_abs_imag_entry);
     max_real(summary.max_abs_row_sum);
 
     int has_gersh_lower = summary.gershgorin_lower_bound ? 1 : 0;
@@ -1379,21 +1585,25 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
     int all_square = summary.square ? 1 : 0;
     MPI_Allreduce(MPI_IN_PLACE, &all_square, 1, MPI_INT, MPI_MIN, comm);
     summary.square = all_square != 0;
-    const bool complete_rows =
-        summary.expected_row_count > 0u &&
-        summary.scanned_row_count >= summary.expected_row_count &&
-        !log.row_coverage_storage_truncated;
-    summary.sign_evidence_complete =
-        complete_rows &&
-        summary.invalid_entry_count == 0u &&
-        summary.nonfinite_entry_count == 0u;
-    summary.row_sum_evidence_complete =
-        complete_rows && row_count > 0u &&
-        summary.invalid_entry_count == 0u &&
-        summary.nonfinite_row_sum_count == 0u;
+    int complex_values = summary.complex_values_present ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &complex_values, 1, MPI_INT, MPI_MAX, comm);
+    summary.complex_values_present = complex_values != 0;
+
+    // A count-only MPI reduction cannot prove exact global row coverage because
+    // duplicated rows and rows missing on all ranks can cancel in the count.
+    summary.global_row_coverage_exact = false;
+    summary.row_ownership_disjoint = summary.duplicate_row_visit_count == 0u;
+    summary.sign_evidence_complete = false;
+    summary.row_sum_evidence_complete = false;
     summary.symmetry_evidence_complete = false;
     summary.structurally_symmetric = false;
     summary.numerically_symmetric = false;
+    summary.hermitian_evidence_complete = false;
+    summary.structurally_hermitian = false;
+    summary.numerically_hermitian = false;
+    summary.complex_symmetry_evidence_complete = false;
+    summary.structurally_complex_symmetric = false;
+    summary.numerically_complex_symmetric = false;
     allGatherWorstSamples(summary, comm);
     log.mpi_reduced = true;
 }

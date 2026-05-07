@@ -63,6 +63,10 @@ DiscreteMatrixSummary certifiedScalarMatrix(VariableKey variable,
     matrix.offdiag_count = 4;
     matrix.scanned_row_count = 3;
     matrix.expected_row_count = 3;
+    matrix.global_row_coverage_exact = true;
+    matrix.row_ownership_disjoint = true;
+    matrix.duplicate_row_visit_count = 0;
+    matrix.missing_row_count = 0;
     matrix.scanned_entry_count = 7;
     matrix.negative_offdiag_count = 4;
     matrix.positive_offdiag_count = 0;
@@ -152,6 +156,11 @@ TEST(Phase4CoreExtensions, ScalarDiffusionReceivesCoercivityDMPAndGeometryReport
         certifiedReducedScalarMatrix(scalar, "generic_scalar_diffusion"));
 
     MeshGeometryQualitySummary mesh;
+    mesh.jacobian_bounds_present = true;
+    mesh.jacobian_bounds_cover_all_active_cells = true;
+    mesh.jacobian_bounds_cover_high_order_interior = true;
+    mesh.jacobian_bounds_are_certified_bounds = true;
+    mesh.jacobian_bound_method = "interval bound";
     mesh.min_jacobian = 0.2;
     mesh.max_jacobian = 1.5;
     summaries.mesh_geometry_quality.push_back(std::move(mesh));
@@ -349,8 +358,11 @@ TEST(Phase4CoreExtensions, SolverCompatibilityRejectsCGForMixedSystem) {
         firstClaimFrom(report, PropertyKind::SolverCompatibility,
                        "SolverCompatibilityAnalyzer");
     ASSERT_NE(solver_claim, nullptr);
-    EXPECT_EQ(solver_claim->status, PropertyStatus::Violated);
-    EXPECT_EQ(report.countBySeverity(IssueSeverity::Error), 1u);
+    EXPECT_EQ(solver_claim->status, PropertyStatus::Unknown);
+    ASSERT_TRUE(solver_claim->certification_class.has_value());
+    EXPECT_EQ(*solver_claim->certification_class,
+              CertificationClass::NotCertified);
+    EXPECT_EQ(report.countBySeverity(IssueSeverity::Error), 0u);
 }
 
 TEST(Phase4CoreExtensions, MeshGeometryWorstSamplesAreTopologyScoped) {
@@ -367,6 +379,7 @@ TEST(Phase4CoreExtensions, MeshGeometryWorstSamplesAreTopologyScoped) {
 
     AnalysisSummarySet summaries;
     MeshGeometryQualitySummary mesh;
+    mesh.jacobian_bounds_present = true;
     mesh.min_jacobian = 0.5;
     mesh.max_jacobian = 1.5;
     mesh.poor_quality_element_count = 1;

@@ -254,7 +254,7 @@ TEST(KernelAnalyzer, ScalarPoisson_DetectsNullspace) {
     auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
     ASSERT_EQ(nullspace.size(), 1u);
     EXPECT_EQ(nullspace[0]->field, FieldId{0});
-    EXPECT_EQ(nullspace[0]->status, PropertyStatus::Exact);
+    EXPECT_EQ(nullspace[0]->status, PropertyStatus::Likely);
     EXPECT_EQ(nullspace[0]->confidence, AnalysisConfidence::High);
 }
 
@@ -301,7 +301,7 @@ TEST(MixedOperatorAnalyzer, Stokes_DetectsSaddlePoint) {
 
     auto saddle = report.claimsOfKind(PropertyKind::MixedSaddlePoint);
     ASSERT_GE(saddle.size(), 1u);
-    EXPECT_EQ(saddle[0]->status, PropertyStatus::Exact);
+    EXPECT_EQ(saddle[0]->status, PropertyStatus::Likely);
 }
 
 TEST(MixedOperatorAnalyzer, SingleField_NoSaddlePoint) {
@@ -359,7 +359,7 @@ TEST(MixedOperatorAnalyzer, StokesContributionsInferPressureNullspaceWithoutMeta
     EXPECT_EQ(*nullspace[0]->nullspace_family, NullspaceFamily::ScalarConstant);
     EXPECT_EQ(nullspace[0]->claim_origin, "MixedOperatorAnalyzer");
     ASSERT_FALSE(nullspace[0]->evidence.empty());
-    EXPECT_NE(nullspace[0]->evidence.front().description.find("div(momentum)"),
+    EXPECT_NE(nullspace[0]->evidence.front().description.find("div(primal vector)"),
               std::string::npos);
 }
 
@@ -424,7 +424,10 @@ TEST(StabilizationAnalyzer, StabilizedPoisson_Detected) {
     auto stab = report.claimsOfKind(PropertyKind::Stabilization);
     EXPECT_GE(stab.size(), 1u);
     if (!stab.empty()) {
-        EXPECT_EQ(stab[0]->status, PropertyStatus::Exact);
+        EXPECT_EQ(stab[0]->status, PropertyStatus::Likely);
+        ASSERT_TRUE(stab[0]->certification_class.has_value());
+        EXPECT_EQ(*stab[0]->certification_class,
+                  CertificationClass::NotCertified);
     }
 }
 
@@ -702,6 +705,7 @@ TEST(TopologyScopeAnalyzer, DisconnectedMesh_UnanchoredRegion) {
     nc.status = PropertyStatus::Exact;
     nc.field = 0;
     nc.region = -1;  // global
+    nc.nullspace_family = NullspaceFamily::ScalarConstant;
     report.claims.push_back(nc);
 
     pass.run(ctx, report);

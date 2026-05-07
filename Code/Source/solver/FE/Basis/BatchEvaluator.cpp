@@ -48,15 +48,23 @@ BatchEvaluator::BatchEvaluator(const BasisFunction& basis,
     for (std::size_t q = 0; q < num_quad; ++q) {
         const auto& pt = quad.point(q);
 
-        // Evaluate values
-        basis.evaluate_values(pt, values_tmp);
+        // Use fused evaluator when both gradients and hessians are needed —
+        // shares per-axis 1D evaluations (B4).
+        if (compute_gradients && compute_hessians) {
+            basis.evaluate_all(pt, values_tmp, gradients_tmp, hessians_tmp);
+        } else {
+            basis.evaluate_values(pt, values_tmp);
+            if (compute_gradients) basis.evaluate_gradients(pt, gradients_tmp);
+            if (compute_hessians)  basis.evaluate_hessians(pt, hessians_tmp);
+        }
+
+        // Transpose values to SoA
         for (std::size_t i = 0; i < num_basis; ++i) {
             data_.values[i * num_quad + q] = values_tmp[i];
         }
 
-        // Evaluate gradients
+        // Transpose gradients
         if (compute_gradients) {
-            basis.evaluate_gradients(pt, gradients_tmp);
             for (std::size_t i = 0; i < num_basis; ++i) {
                 for (int d = 0; d < 3; ++d) {
                     data_.gradients[(i * 3 + static_cast<std::size_t>(d)) * num_quad + q] =
@@ -65,9 +73,8 @@ BatchEvaluator::BatchEvaluator(const BasisFunction& basis,
             }
         }
 
-        // Evaluate Hessians
+        // Transpose Hessians
         if (compute_hessians) {
-            basis.evaluate_hessians(pt, hessians_tmp);
             for (std::size_t i = 0; i < num_basis; ++i) {
                 for (int d1 = 0; d1 < 3; ++d1) {
                     for (int d2 = 0; d2 < 3; ++d2) {

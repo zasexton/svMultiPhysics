@@ -125,6 +125,25 @@ enum class AnalysisConfidence : std::uint8_t {
 };
 
 /**
+ * @brief Evidence strength behind a claim or runtime descriptor.
+ *
+ * The aliases preserve older FormRuntimeMetadata names while making the
+ * analysis-report hierarchy explicit.  Syntax/descriptor levels are hints;
+ * certification-grade outcomes require scoped numeric/theorem evidence.
+ */
+enum class EvidenceLevel : std::uint8_t {
+    SyntaxPattern = 0,
+    DAGPatternHint = SyntaxPattern,
+    DescriptorHint = 1,
+    DescriptorMetadata = DescriptorHint,
+    StructuralMetadata = 2,
+    ScopedNumericSummary = 3,
+    TheoremRegistryMatch = 4,
+    CertifiedNumericTheorem = 5,
+    CertifiedClaim = CertifiedNumericTheorem,
+};
+
+/**
  * @brief Severity of an analysis issue
  */
 enum class IssueSeverity : std::uint8_t {
@@ -200,6 +219,8 @@ enum class TransportCharacterClass : std::uint8_t {
 enum class ApplicabilityClass : std::uint8_t {
     Applicable,
     NotApplicable,
+    InsufficientMetadata,
+    ContradictedByMetadata,
     Unknown,
 };
 
@@ -254,6 +275,51 @@ enum class CoercivityClass : std::uint8_t {
     Semicoercive,
     Indefinite,
     NotCoercive,
+    Unknown,
+};
+
+/**
+ * @brief Method route for weak boundary/interface enforcement.
+ */
+enum class WeakBoundaryEnforcementRoute : std::uint8_t {
+    PenaltyCoercivity,
+    NitscheCoercivity,
+    MortarInfSup,
+    VariationalInequalityMonotonicity,
+    ActiveSetComplementarity,
+    StabilizedTraceCoupling,
+    Unknown,
+};
+
+/**
+ * @brief Evidence source for a nullspace claim.
+ */
+enum class NullspaceEvidenceKind : std::uint8_t {
+    DescriptorHint,
+    SymbolicOperatorIdentity,
+    MatrixRankEvidence,
+    TheoremBackedKernel,
+    ProducerCertifiedKernel,
+};
+
+enum class KernelTreatment : std::uint8_t {
+    Unknown,
+    Retained,
+    ProjectedOut,
+    FixedByConstraint,
+    AnchoredByOperator,
+};
+
+/**
+ * @brief How definiteness evidence should be interpreted for this route.
+ */
+enum class DefinitenessInterpretation : std::uint8_t {
+    CoercivePositiveRequired,
+    DissipativeSignRequired,
+    SolverSPDRequired,
+    IndefiniteAllowed,
+    SaddlePointExpected,
+    SignConventionDependent,
     Unknown,
 };
 
@@ -514,6 +580,27 @@ struct VariableDescriptor {
     std::string auxiliary_region{};      ///< Deployment region identity (empty = whole domain)
 };
 
+/**
+ * @brief Structured scope for declared or inferred nullspace metadata.
+ */
+struct NullspaceScope {
+    FieldId field{INVALID_FIELD_ID};
+    int component{-1};
+    int region{-1};
+    DomainKind domain{DomainKind::Cell};
+    NullspaceFamily family{};
+    std::string basis_id;
+};
+
+struct DeclaredNullspaceMetadata {
+    NullspaceScope scope;
+    KernelTreatment treatment{KernelTreatment::Unknown};
+    bool projected_from_norm{false};
+    bool fixed_by_constraint{false};
+    std::string evidence_scope_id;
+    NullspaceEvidenceKind evidence_kind{NullspaceEvidenceKind::DescriptorHint};
+};
+
 // ============================================================================
 // Data Structures
 // ============================================================================
@@ -535,6 +622,7 @@ struct PropertyClaim {
     PropertyKind kind{PropertyKind::Nullspace};
     PropertyStatus status{PropertyStatus::Unknown};
     AnalysisConfidence confidence{AnalysisConfidence::High};
+    EvidenceLevel evidence_level{EvidenceLevel::SyntaxPattern};
 
     /// Primary field (INVALID_FIELD_ID = system-wide). Retained for convenience
     /// when the claim applies to a single FE field — equivalent to
@@ -587,6 +675,9 @@ struct PropertyClaim {
     std::optional<CoercivityClass> coercivity_class;
     std::optional<CertificationClass> reduced_definiteness_class;
     std::optional<NullspaceHandlingClass> nullspace_handling_class;
+    std::optional<WeakBoundaryEnforcementRoute> weak_boundary_route;
+    std::optional<NullspaceEvidenceKind> nullspace_evidence_kind;
+    std::optional<DefinitenessInterpretation> definiteness_interpretation;
 
     /// Optional numeric evidence slots. These are scalar summaries only; full
     /// summary objects belong to later metadata phases.
@@ -651,9 +742,15 @@ struct AnalysisIssue {
  */
 struct AnalyzerRunLogSummary {
     std::string analyzer;
+    std::string pass_name;
+    std::string pass_version;
     std::string summary_id;
     std::string status;
     std::string message;
+    std::uint64_t claims_added{0};
+    std::uint64_t issues_added{0};
+    std::uint64_t requests_added{0};
+    std::uint64_t runtime_microseconds{0};
     std::uint64_t attempted_count{0};
     std::uint64_t certified_count{0};
     std::uint64_t incomplete_count{0};
@@ -671,6 +768,10 @@ struct AnalysisSummaryRequest {
     AnalysisSummaryKind summary_kind{};
     DomainKind domain{DomainKind::Cell};
     std::vector<VariableKey> variables;
+    std::vector<VariableKey> test_variables;
+    std::vector<VariableKey> trial_variables;
+    std::vector<VariableKey> state_variables;
+    std::vector<VariableKey> multiplier_variables;
     std::vector<std::size_t> source_claim_indices;
     std::vector<PropertyKind> source_claim_kinds;
     std::vector<std::string> source_analyzers;
@@ -783,6 +884,7 @@ struct ProblemAnalysisReport {
 [[nodiscard]] const char* toString(PropertyStatus s) noexcept;
 [[nodiscard]] const char* toString(AnalysisConfidence c) noexcept;
 [[nodiscard]] const char* toString(IssueSeverity s) noexcept;
+[[nodiscard]] const char* toString(EvidenceLevel e) noexcept;
 [[nodiscard]] const char* toString(VariableKind k) noexcept;
 [[nodiscard]] const char* toString(DomainKind k) noexcept;
 
@@ -799,6 +901,10 @@ struct ProblemAnalysisReport {
 [[nodiscard]] const char* toString(TemporalStabilityClass c) noexcept;
 [[nodiscard]] const char* toString(CoercivityClass c) noexcept;
 [[nodiscard]] const char* toString(NullspaceHandlingClass c) noexcept;
+[[nodiscard]] const char* toString(WeakBoundaryEnforcementRoute r) noexcept;
+[[nodiscard]] const char* toString(NullspaceEvidenceKind k) noexcept;
+[[nodiscard]] const char* toString(KernelTreatment k) noexcept;
+[[nodiscard]] const char* toString(DefinitenessInterpretation i) noexcept;
 [[nodiscard]] const char* toString(TemporalStateKind k) noexcept;
 [[nodiscard]] const char* toString(SpaceFamily f) noexcept;
 [[nodiscard]] const char* toString(ElementFamily f) noexcept;

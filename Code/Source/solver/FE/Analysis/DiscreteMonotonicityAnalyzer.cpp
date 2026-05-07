@@ -497,7 +497,10 @@ MatrixSignVerdict classifyMatrix(const DiscreteMatrixSummary& matrix)
         numeric::finiteNonnegative(matrix.max_abs_row_sum);
     verdict.numeric_evidence_valid = sign_numeric_valid;
     verdict.sign_evidence_complete =
-        matrix.sign_evidence_complete && sign_numeric_valid;
+        matrix.sign_evidence_complete &&
+        matrix.global_row_coverage_exact &&
+        !matrix.complex_values_present &&
+        sign_numeric_valid;
     verdict.row_sum_evidence_complete =
         matrix.row_sum_evidence_complete && row_sum_numeric_valid;
     if (!verdict.analyzable) {
@@ -512,12 +515,14 @@ MatrixSignVerdict classifyMatrix(const DiscreteMatrixSummary& matrix)
         matrix.positive_offdiag_count > 0u ||
         matrix.max_positive_offdiag > tol;
     verdict.diagonal_violation =
+        matrix.missing_diagonal_count > 0u ||
         matrix.nonpositive_diagonal_count > 0u ||
         matrix.negative_diagonal_count > 0u ||
         matrix.near_zero_diagonal_count > 0u;
     verdict.row_sum_violation =
         verdict.row_sum_evidence_complete &&
-        (matrix.row_sum_violation_count > 0u ||
+        (matrix.negative_row_sum_count > 0u ||
+         matrix.row_sum_violation_count > 0u ||
          matrix.min_row_sum < -tol);
 
     verdict.z_matrix = !verdict.positive_offdiag_violation;
@@ -526,7 +531,8 @@ MatrixSignVerdict classifyMatrix(const DiscreteMatrixSummary& matrix)
         verdict.row_sum_evidence_complete &&
         !verdict.diagonal_violation &&
         !verdict.row_sum_violation &&
-        matrix.diagonal_count > 0u;
+        matrix.diagonal_count == matrix.expected_row_count &&
+        matrix.missing_diagonal_count == 0u;
     return verdict;
 }
 

@@ -137,6 +137,9 @@ TEST(Phase6ExtendedAnalyzers, TransportCharacterConsumesPecletCflNonnormalSummar
     scale.role = ParameterScaleRole::PecletLike;
     scale.block = scalarBlock("transport-block");
     scale.max_scale_value = 12.0;
+    scale.accepted_upper_bound_present = true;
+    scale.accepted_upper_bound = 1.0;
+    scale.scale_theorem_id = "transport-regime-threshold";
     summaries.parameter_scales.push_back(scale);
 
     TemporalStabilitySummary temporal;
@@ -144,6 +147,9 @@ TEST(Phase6ExtendedAnalyzers, TransportCharacterConsumesPecletCflNonnormalSummar
     temporal.stability_class = TemporalStabilityClass::ConditionallyStable;
     temporal.cfl_estimate = 1.25;
     temporal.cfl_estimate_present = true;
+    temporal.accepted_cfl_bound_present = true;
+    temporal.accepted_cfl_bound = 1.0;
+    temporal.stability_theorem_id = "time-step-stability-bound";
     summaries.temporal_stability.push_back(temporal);
 
     DiscreteMatrixSummary matrix;
@@ -151,6 +157,8 @@ TEST(Phase6ExtendedAnalyzers, TransportCharacterConsumesPecletCflNonnormalSummar
     matrix.max_abs_entry = 4.0;
     matrix.max_symmetry_error = 1.0;
     matrix.nonnormality_indicator = 0.25;
+    matrix.nonnormality_tolerance = 1.0e-8;
+    matrix.nonnormality_norm_id = "operator-2-norm";
     summaries.discrete_matrices.push_back(matrix);
     ctx.setAnalysisSummaries(std::move(summaries));
 

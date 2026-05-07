@@ -44,6 +44,7 @@ namespace analysis {
 struct SparseMatrixRowEntry {
     GlobalDofId col{INVALID_GLOBAL_INDEX};
     Real value{};
+    Real imaginary_value{};
 };
 
 using SparseMatrixRowVisitor =

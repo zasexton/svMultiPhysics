@@ -81,6 +81,21 @@ public:
         bool gradients = true,
         bool hessians = false);
 
+    /**
+     * @brief Eagerly populate the cache for the given (basis, quadrature) key (D5)
+     *
+     * Pays the compute cost up front so that subsequent get_or_compute calls
+     * for the same key hit the warm-cache path immediately. Equivalent to
+     * calling get_or_compute and discarding the return value.
+     *
+     * Returns the inserted (or pre-existing) entry for convenience.
+     */
+    const BasisCacheEntry& prewarm(
+        const BasisFunction& basis,
+        const quadrature::QuadratureRule& quad,
+        bool gradients = true,
+        bool hessians = false);
+
     void clear();
     std::size_t size() const;
 

@@ -121,6 +121,10 @@ ReducedMatrixSummary reducedMatrix(VariableKey variable,
     matrix.offdiag_count = 4;
     matrix.scanned_row_count = 3;
     matrix.expected_row_count = 3;
+    matrix.global_row_coverage_exact = true;
+    matrix.row_ownership_disjoint = true;
+    matrix.duplicate_row_visit_count = 0;
+    matrix.missing_row_count = 0;
     matrix.scanned_entry_count = 7;
     matrix.nonpositive_diagonal_count = 0;
     matrix.negative_diagonal_count = 0;
@@ -176,6 +180,11 @@ CoefficientPropertySummary positiveCoefficient(std::string id = "positive-coeffi
 MeshGeometryQualitySummary positiveGeometry()
 {
     MeshGeometryQualitySummary mesh;
+    mesh.jacobian_bounds_present = true;
+    mesh.jacobian_bounds_cover_all_active_cells = true;
+    mesh.jacobian_bounds_cover_high_order_interior = true;
+    mesh.jacobian_bounds_are_certified_bounds = true;
+    mesh.jacobian_bound_method = "interval bound";
     mesh.min_jacobian = 0.25;
     mesh.max_jacobian = 1.5;
     return mesh;
@@ -291,7 +300,7 @@ TEST(Phase7Integration, ScalarDiffusion_AcuteSimplex_ZMatrixCertified)
     auto report = analyze(std::move(ctx));
 
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::Nullspace,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Likely));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::OperatorDefiniteness,
                                    PropertyStatus::Preserved));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::CoefficientPositivity,
@@ -320,6 +329,7 @@ TEST(Phase7Integration, ScalarDiffusion_ObtuseSimplex_ZMatrixViolated)
     ASSERT_EQ(reduced.free_free_matrix.worst_entries.size(), 1u);
     summaries.reduced_matrices.push_back(reduced);
     MeshGeometryQualitySummary mesh;
+    mesh.jacobian_bounds_present = true;
     mesh.min_jacobian = 0.1;
     mesh.max_jacobian = 1.0;
     mesh.poor_quality_element_count = 1;
@@ -443,7 +453,7 @@ TEST(Phase7Integration, MixedPair_StablePair_InfSupLikelySatisfied)
 
     auto report = analyze(std::move(ctx));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::MixedSaddlePoint,
-                                   PropertyStatus::Exact));
+                                   PropertyStatus::Likely));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::InfSupCondition,
                                    PropertyStatus::Preserved));
     const PropertyClaim* numeric = nullptr;
@@ -476,7 +486,7 @@ TEST(Phase7Integration, MixedPair_UnstablePair_InfSupRisk)
 
     auto report = analyze(std::move(ctx));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::InfSupCondition,
-                                   PropertyStatus::Likely));
+                                   PropertyStatus::Unknown));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::LockingRisk,
                                    PropertyStatus::Violated));
 }
@@ -495,6 +505,9 @@ TEST(Phase7Integration, Transport_HighPeclet_NoStabilization_Risk)
     peclet.role = ParameterScaleRole::PecletLike;
     peclet.block = blockFor(scalar, "first-order-operator");
     peclet.max_scale_value = 50.0;
+    peclet.accepted_upper_bound_present = true;
+    peclet.accepted_upper_bound = 1.0;
+    peclet.scale_theorem_id = "transport-regime-threshold";
     summaries.parameter_scales.push_back(peclet);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -1065,6 +1078,8 @@ TEST(Phase7Integration, ReducedDefinitenessRequiresSpectralOrFactorizationEviden
     indefinite.free_free_matrix.min_eigenvalue_estimate = -1.0;
     indefinite.free_free_matrix.coercivity_lower_bound = -1.0;
     indefinite.free_free_matrix.cholesky_factorization_succeeded = false;
+    indefinite.free_free_matrix.definiteness_interpretation =
+        DefinitenessInterpretation::SolverSPDRequired;
     summaries.reduced_matrices.push_back(indefinite);
     ctx.setAnalysisSummaries(std::move(summaries));
 
@@ -1333,6 +1348,11 @@ TEST(Phase7Integration, MeshAspectRatioRequiresThresholdBeforeRisk)
     ProblemAnalysisContext ok_ctx;
     AnalysisSummarySet ok_summaries;
     MeshGeometryQualitySummary ok_mesh;
+    ok_mesh.jacobian_bounds_present = true;
+    ok_mesh.jacobian_bounds_cover_all_active_cells = true;
+    ok_mesh.jacobian_bounds_cover_high_order_interior = true;
+    ok_mesh.jacobian_bounds_are_certified_bounds = true;
+    ok_mesh.jacobian_bound_method = "interval bound";
     ok_mesh.min_jacobian = 0.5;
     ok_mesh.max_jacobian = 1.5;
     ok_mesh.max_aspect_ratio = 2.0;
@@ -1348,6 +1368,7 @@ TEST(Phase7Integration, MeshAspectRatioRequiresThresholdBeforeRisk)
     ProblemAnalysisContext bad_ctx;
     AnalysisSummarySet bad_summaries;
     MeshGeometryQualitySummary bad_mesh;
+    bad_mesh.jacobian_bounds_present = true;
     bad_mesh.min_jacobian = 0.5;
     bad_mesh.max_jacobian = 1.5;
     bad_mesh.max_aspect_ratio = 25.0;
@@ -1469,7 +1490,7 @@ TEST(Phase7Integration, DmpRejectsSameVariableTransportWithDifferentTagWhenMatri
     ASSERT_NE(dmp, nullptr);
     EXPECT_EQ(dmp->status, PropertyStatus::Unknown);
     EXPECT_NE(dmp->evidence.front().description.find(
-                  "absence of transport contamination"),
+                  "transport-compatible theorem/stabilization/limiter evidence or absence of transport terms"),
               std::string::npos);
 }
 
@@ -1555,6 +1576,12 @@ TEST(Phase7Integration, SolverCgRequiresSpdEvidenceToCoverActiveSystem)
         matrix.structurally_symmetric = true;
         matrix.numerically_symmetric = true;
         matrix.diagonal_count = 2;
+        matrix.scanned_row_count = 2;
+        matrix.expected_row_count = 2;
+        matrix.global_row_coverage_exact = true;
+        matrix.row_ownership_disjoint = true;
+        matrix.duplicate_row_visit_count = 0;
+        matrix.missing_row_count = 0;
         matrix.nonpositive_diagonal_count = 0;
         matrix.negative_diagonal_count = 0;
         matrix.min_eigenvalue_estimate = 1.0;

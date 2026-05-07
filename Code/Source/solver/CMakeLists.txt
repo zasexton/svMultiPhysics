@@ -499,4 +499,14 @@ if(ENABLE_UNIT_TEST)
   # gtest_discover_tests(runUnitTest)
   add_test(NAME all_unit_tests COMMAND run_all_unit_tests)
 
+  # Standalone tight-loop binary for perf-stat hardware-counter profiling
+  # (Pη1, Pη2, Pη3). Statically links svfe so perf attributes counters to
+  # the inner evaluate loop with minimal contamination.
+  add_executable(perf_microbench_one
+      ${CMAKE_SOURCE_DIR}/../tests/unitTests/basis_comparison_tests/perf_microbench_main.cpp)
+  set_target_properties(perf_microbench_one PROPERTIES
+      CXX_STANDARD 20
+      CXX_STANDARD_REQUIRED ON)
+  target_link_libraries(perf_microbench_one PRIVATE svfe pthread)
+
 endif()

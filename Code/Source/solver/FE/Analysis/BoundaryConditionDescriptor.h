@@ -125,7 +125,7 @@ struct BoundaryConditionDescriptor {
     bool anchors_rigid_body_translation{false}; ///< Removes translation invariance
     bool anchors_rigid_body_rotation{false};   ///< Removes rotation invariance
 
-    /// Other variables coupled through this BC (e.g., RCR couples velocity + aux state)
+    /// Other variables coupled through this BC (e.g., trace variable plus auxiliary state).
     std::vector<VariableKey> related_variables;
 
     bool introduces_global_coupling{false};    ///< Non-local coupling (e.g., integral constraints)
@@ -140,6 +140,8 @@ struct BoundaryConditionDescriptor {
     std::optional<BalanceDescriptor> balance;
     std::optional<PairingKind> relation_kind;
     std::optional<InequalitySense> inequality_sense;
+    WeakBoundaryEnforcementRoute weak_boundary_route{
+        WeakBoundaryEnforcementRoute::Unknown};
     std::optional<NitscheMetadata> nitsche;
     std::string pairing_group;
     bool state_dependent_activation{false};

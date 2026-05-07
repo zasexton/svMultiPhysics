@@ -24,8 +24,19 @@ std::string SpaceCompatibilityAnalyzer::name() const {
     return "SpaceCompatibilityAnalyzer";
 }
 
-/// Map a TraceKind to the TraceCapabilityFlags it requires
-static TraceCapabilityFlags requiredTraceCapability(TraceKind tk) noexcept {
+struct TraceRequirement {
+    TraceCapabilityFlags trial_trace{TraceCapabilityFlags::None};
+    TraceCapabilityFlags test_trace{TraceCapabilityFlags::None};
+    bool natural_dual_trace_allowed{false};
+    bool weak_form_route{false};
+    bool requires_flux_unknown_trace{false};
+    bool requires_value_unknown_trace{false};
+    bool missing_trace_is_violation{false};
+    bool weak_boundary_theorem_required{false};
+};
+
+/// Map an essential trace label to strong trial-space trace requirements.
+static TraceCapabilityFlags essentialTraceRequirement(TraceKind tk) noexcept {
     switch (tk) {
     case TraceKind::Value:
         return TraceCapabilityFlags::Value;
@@ -44,6 +55,73 @@ static TraceCapabilityFlags requiredTraceCapability(TraceKind tk) noexcept {
         return TraceCapabilityFlags::None;  // no trace capability needed
     }
     return TraceCapabilityFlags::None;
+}
+
+static TraceRequirement requiredTraceCapability(
+    const BoundaryConditionDescriptor& bc) noexcept
+{
+    TraceRequirement req;
+    switch (bc.enforcement_kind) {
+    case EnforcementKind::Strong:
+        req.trial_trace = essentialTraceRequirement(bc.trace_kind);
+        req.missing_trace_is_violation =
+            req.trial_trace != TraceCapabilityFlags::None;
+        req.requires_flux_unknown_trace =
+            bc.trace_kind == TraceKind::Flux ||
+            bc.trace_kind == TraceKind::NormalFlux ||
+            bc.trace_kind == TraceKind::Mixed;
+        req.requires_value_unknown_trace =
+            bc.trace_kind == TraceKind::Value ||
+            bc.trace_kind == TraceKind::Mixed;
+        return req;
+    case EnforcementKind::WeakConsistent:
+        req.weak_form_route = true;
+        req.natural_dual_trace_allowed =
+            bc.trace_kind == TraceKind::Flux ||
+            bc.trace_kind == TraceKind::NormalFlux;
+        if (!req.natural_dual_trace_allowed) {
+            req.trial_trace = essentialTraceRequirement(bc.trace_kind);
+        }
+        return req;
+    case EnforcementKind::WeakPenalty:
+    case EnforcementKind::WeakNitsche:
+    case EnforcementKind::WeakInequality:
+        req.weak_form_route = true;
+        req.weak_boundary_theorem_required = true;
+        if (bc.trace_kind == TraceKind::Value ||
+            bc.trace_kind == TraceKind::Mixed) {
+            req.trial_trace = TraceCapabilityFlags::Value;
+            req.requires_value_unknown_trace = true;
+        } else if (bc.trace_kind == TraceKind::NormalComponent ||
+                   bc.trace_kind == TraceKind::TangentialComponent) {
+            req.trial_trace = essentialTraceRequirement(bc.trace_kind);
+        } else if (bc.trace_kind == TraceKind::Flux ||
+                   bc.trace_kind == TraceKind::NormalFlux) {
+            req.natural_dual_trace_allowed = true;
+        }
+        return req;
+    case EnforcementKind::AffineRelation:
+        return req;
+    }
+    return req;
+}
+
+static bool weakBoundaryEvidencePresent(const BoundaryConditionDescriptor& bc)
+{
+    if (bc.enforcement_kind == EnforcementKind::WeakNitsche) {
+        return bc.nitsche &&
+               bc.nitsche->primal_consistency_terms_present &&
+               bc.nitsche->penalty_positive &&
+               bc.nitsche->penalty_scaling_verified &&
+               bc.nitsche->penalty_trace_bound_verified &&
+               !bc.nitsche->trace_inequality_certificate_id.empty();
+    }
+    if (bc.enforcement_kind == EnforcementKind::WeakPenalty) {
+        return bc.scaling.has_value() &&
+               bc.consistency_kind.has_value() &&
+               bc.weak_boundary_route != WeakBoundaryEnforcementRoute::Unknown;
+    }
+    return bc.weak_boundary_route != WeakBoundaryEnforcementRoute::Unknown;
 }
 
 static void appendUnique(std::vector<VariableKey>& values, const VariableKey& value)
@@ -118,7 +196,8 @@ static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
                                        bool bounded_projection_certificate,
                                        std::uint64_t missing_space_count,
                                        std::string label,
-                                       std::string evidence)
+                                       std::string evidence,
+                                       bool descriptor_only = false)
 {
     PropertyClaim claim;
     claim.kind = PropertyKind::CompatibleComplexStructure;
@@ -129,8 +208,18 @@ static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
     }
     claim.claim_origin = "SpaceCompatibilityAnalyzer";
     claim.estimate_scope = std::move(label);
+    claim.evidence_level = descriptor_only
+        ? EvidenceLevel::DescriptorHint
+        : EvidenceLevel::StructuralMetadata;
 
-    if (!exact_sequence || missing_space_count > 0u) {
+    if (descriptor_only) {
+        claim.status = PropertyStatus::Unknown;
+        claim.confidence = AnalysisConfidence::Low;
+        claim.certification_class = CertificationClass::NotCertified;
+        claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
+        claim.description =
+            "Per-field exact-sequence flags are descriptor hints only; ordered complex, differential-map, theorem, and bounded-projection metadata are required";
+    } else if (!exact_sequence || missing_space_count > 0u) {
         claim.status = PropertyStatus::Violated;
         claim.confidence = AnalysisConfidence::High;
         claim.certification_class = CertificationClass::Violated;
@@ -141,6 +230,7 @@ static void emitCompatibleComplexClaim(ProblemAnalysisReport& report,
                bounded_projection_certificate) {
         claim.status = PropertyStatus::Preserved;
         claim.confidence = AnalysisConfidence::High;
+        claim.evidence_level = EvidenceLevel::CertifiedNumericTheorem;
         claim.certification_class = CertificationClass::Certified;
         claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
         claim.description =
@@ -228,7 +318,8 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             false,
             0u,
             "field-descriptor-exact-sequence",
-            "FieldDescriptor metadata reports exact-sequence structure");
+            "FieldDescriptor metadata reports exact-sequence structure",
+            true);
     }
 
     // =====================================================================
@@ -244,25 +335,38 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         // Skip check when trace_capabilities is None (unknown/not populated)
         if (fd->trace_capabilities == TraceCapabilityFlags::None) continue;
 
-        TraceCapabilityFlags required = requiredTraceCapability(bc.trace_kind);
-        if (required == TraceCapabilityFlags::None) continue;
+        const TraceRequirement requirement = requiredTraceCapability(bc);
+        const TraceCapabilityFlags required = requirement.trial_trace;
 
         // Check if the field's trace capabilities support the BC's trace kind
-        bool supported = (fd->trace_capabilities & required) == required;
+        const bool supported =
+            required == TraceCapabilityFlags::None ||
+            (fd->trace_capabilities & required) == required;
 
         if (!supported) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
-            claim.status = PropertyStatus::Violated;
-            claim.confidence = AnalysisConfidence::High;
-            claim.space_compatibility_class = SpaceCompatibilityClass::Incompatible;
+            claim.status = requirement.missing_trace_is_violation
+                ? PropertyStatus::Violated
+                : PropertyStatus::Unknown;
+            claim.confidence = requirement.missing_trace_is_violation
+                ? AnalysisConfidence::High
+                : AnalysisConfidence::Medium;
+            claim.certification_class = requirement.missing_trace_is_violation
+                ? CertificationClass::Violated
+                : CertificationClass::NotCertified;
+            claim.evidence_level = EvidenceLevel::StructuralMetadata;
+            claim.space_compatibility_class = requirement.missing_trace_is_violation
+                ? SpaceCompatibilityClass::Incompatible
+                : SpaceCompatibilityClass::Unknown;
             claim.field = fd->field_id;
             claim.variables.push_back(bc.primary_variable);
             claim.description =
                 "BC trace kind '" + std::string(toString(bc.trace_kind)) +
                 "' is incompatible with field '" + fd->name +
                 "' (space family: " + std::string(toString(fd->space_family)) +
-                "): field does not support required trace capability";
+                "): field does not support the trace capability required by enforcement route '" +
+                std::string(toString(bc.enforcement_kind)) + "'";
             claim.claim_origin = "SpaceCompatibilityAnalyzer";
             claim.addEvidence("SpaceCompatibilityAnalyzer",
                 "Field trace_capabilities=0x" +
@@ -270,6 +374,30 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 " does not include required=0x" +
                 std::to_string(static_cast<std::uint32_t>(required)) +
                 " for BC on " + bc.source);
+            report.claims.push_back(std::move(claim));
+            continue;
+        }
+
+        if (requirement.weak_boundary_theorem_required &&
+            !weakBoundaryEvidencePresent(bc)) {
+            PropertyClaim claim;
+            claim.kind = PropertyKind::SpaceCompatibility;
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Medium;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.evidence_level = EvidenceLevel::StructuralMetadata;
+            claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
+            claim.field = fd->field_id;
+            claim.variables.push_back(bc.primary_variable);
+            claim.description =
+                "Weak boundary enforcement route '" +
+                std::string(toString(bc.enforcement_kind)) +
+                "' requires method/theorem-specific trace, consistency, and penalty evidence before space compatibility can be certified";
+            claim.claim_origin = "SpaceCompatibilityAnalyzer";
+            claim.addEvidence("SpaceCompatibilityAnalyzer",
+                "Trace capability is present or not required, but weak-boundary theorem/penalty metadata is incomplete for BC on " +
+                bc.source,
+                AnalysisConfidence::Medium);
             report.claims.push_back(std::move(claim));
         }
     }
@@ -280,47 +408,48 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
 
     auto saddle_claims = report.claimsOfKind(PropertyKind::MixedSaddlePoint);
     for (const auto* sc : saddle_claims) {
-        // Identify momentum and constraint variables from the saddle-point claim
-        // The MixedOperatorAnalyzer puts all variables in the claim;
-        // we need to identify which has coercive diagonal and which doesn't.
-        // Use field descriptors to distinguish.
-
-        const FieldDescriptor* momentum_fd = nullptr;
-        const FieldDescriptor* constraint_fd = nullptr;
+        // Treat the variable order as pair metadata only when the upstream claim
+        // provided an ordered pair. Do not infer primal/multiplier roles from
+        // field names, value dimension, or physics-specific wording.
+        const FieldDescriptor* first_fd = nullptr;
+        const FieldDescriptor* second_fd = nullptr;
         if (sc->variables.size() >= 2u &&
             sc->variables[0].kind == VariableKind::FieldComponent &&
             sc->variables[1].kind == VariableKind::FieldComponent) {
-            momentum_fd = context.fieldDescriptor(sc->variables[0].field_id);
-            constraint_fd = context.fieldDescriptor(sc->variables[1].field_id);
+            first_fd = context.fieldDescriptor(sc->variables[0].field_id);
+            second_fd = context.fieldDescriptor(sc->variables[1].field_id);
         }
 
-        if (!momentum_fd || !constraint_fd) {
-            for (const auto& vk : sc->variables) {
-                if (vk.kind != VariableKind::FieldComponent) continue;
-                const auto* fd = context.fieldDescriptor(vk.field_id);
-                if (!fd) continue;
-
-                // Fallback only for legacy claims that do not encode pair order.
-                if (!momentum_fd ||
-                    fd->value_dimension > momentum_fd->value_dimension) {
-                    constraint_fd = momentum_fd;
-                    momentum_fd = fd;
-                } else if (!constraint_fd) {
-                    constraint_fd = fd;
-                }
-            }
-        }
-
-        if (!momentum_fd || !constraint_fd) continue;
-
-        // Skip if space families are unknown
-        if (momentum_fd->space_family == SpaceFamily::Unknown &&
-            constraint_fd->space_family == SpaceFamily::Unknown) {
+        if (!first_fd || !second_fd) {
+            PropertyClaim claim;
+            claim.kind = PropertyKind::SpaceCompatibility;
+            claim.status = PropertyStatus::Unknown;
+            claim.confidence = AnalysisConfidence::Low;
+            claim.certification_class = CertificationClass::NotCertified;
+            claim.evidence_level = EvidenceLevel::DescriptorHint;
+            claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
+            claim.variables = sc->variables;
+            claim.domain = sc->domain;
+            claim.tested_block_id = sc->tested_block_id;
+            claim.estimate_scope = sc->estimate_scope;
+            claim.claim_origin = "SpaceCompatibilityAnalyzer";
+            claim.description =
+                "Mixed pair space compatibility requires explicit ordered field-role, block, inf-sup, rank, or theorem metadata";
+            claim.addEvidence("SpaceCompatibilityAnalyzer",
+                "MixedSaddlePoint claim did not provide an ordered field pair",
+                AnalysisConfidence::Low);
+            report.claims.push_back(std::move(claim));
             continue;
         }
 
-        if (momentum_fd->space_family == SpaceFamily::H1 &&
-            constraint_fd->space_family == SpaceFamily::H1) {
+        // Skip if space families are unknown
+        if (first_fd->space_family == SpaceFamily::Unknown &&
+            second_fd->space_family == SpaceFamily::Unknown) {
+            continue;
+        }
+
+        if (first_fd->space_family == SpaceFamily::H1 &&
+            second_fd->space_family == SpaceFamily::H1) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
             claim.variables = sc->variables;
@@ -329,7 +458,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
             claim.tested_block_id = sc->tested_block_id;
             claim.estimate_scope = sc->estimate_scope;
             const bool taylor_hood_like =
-                momentum_fd->polynomial_order > constraint_fd->polynomial_order;
+                first_fd->polynomial_order > second_fd->polynomial_order;
             const bool certified_infsup =
                 hasCertifiedInfSupEvidence(report, sc->variables);
             const bool certified_complex =
@@ -355,17 +484,19 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 }
             } else if (taylor_hood_like) {
                 claim.status = PropertyStatus::Likely;
-                claim.confidence = AnalysisConfidence::Medium;
+                claim.confidence = AnalysisConfidence::Low;
                 claim.certification_class = CertificationClass::NotCertified;
+                claim.evidence_level = EvidenceLevel::StructuralMetadata;
                 claim.space_compatibility_class = SpaceCompatibilityClass::WeaklyCompatible;
                 claim.description =
-                    "Mixed H1/H1 space pair has higher-order primary field evidence but lacks certified inf-sup or compatible-complex evidence";
+                    "Mixed H1/H1 space pair has a stable-pair order candidate but lacks certified inf-sup or compatible-complex evidence";
                 claim.addEvidence("SpaceCompatibilityAnalyzer",
-                    "H1 primary order " +
-                    std::to_string(momentum_fd->polynomial_order) +
-                    " exceeds H1 constraint order " +
-                    std::to_string(constraint_fd->polynomial_order),
-                    AnalysisConfidence::Medium);
+                    "Ordered H1/H1 pair has polynomial orders " +
+                    std::to_string(first_fd->polynomial_order) +
+                    " and " +
+                    std::to_string(second_fd->polynomial_order) +
+                    "; order relation is a structural candidate, not certification",
+                    AnalysisConfidence::Low);
             } else if (stabilized) {
                 claim.status = PropertyStatus::Likely;
                 claim.confidence = AnalysisConfidence::Medium;
@@ -393,8 +524,8 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
 
         // H(div) velocity with H1 pressure is not a de Rham/mixed-method
         // compatibility certificate by itself.  It needs explicit pair evidence.
-        if (momentum_fd->space_family == SpaceFamily::HDiv &&
-            constraint_fd->space_family == SpaceFamily::H1) {
+        if (first_fd->space_family == SpaceFamily::HDiv &&
+            second_fd->space_family == SpaceFamily::H1) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
             claim.variables = sc->variables;
@@ -423,8 +554,8 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.certification_class = CertificationClass::NotCertified;
                 claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
                 claim.description =
-                    "Mixed system has HDiv/H1 space pair (" + momentum_fd->name +
-                    "/" + constraint_fd->name +
+                    "Mixed system has HDiv/H1 space pair (" + first_fd->name +
+                    "/" + second_fd->name +
                     ") without explicit inf-sup or compatible-complex evidence";
                 claim.addEvidence("SpaceCompatibilityAnalyzer",
                     "Standard divergence-compatible mixed pairs require explicit HDiv/L2-style or theorem-backed compatibility evidence",
@@ -438,7 +569,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         // methods, but stability is a property of the particular pair and mesh
         // assumptions.  Require a certified inf-sup or compatible-complex
         // claim before marking the pair compatible.
-        if (constraint_fd->space_family == SpaceFamily::L2) {
+        if (second_fd->space_family == SpaceFamily::L2) {
             PropertyClaim claim;
             claim.kind = PropertyKind::SpaceCompatibility;
             claim.variables = sc->variables;
@@ -457,7 +588,7 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.space_compatibility_class = SpaceCompatibilityClass::Compatible;
                 claim.description =
                     "Mixed " +
-                    std::string(toString(momentum_fd->space_family)) +
+                    std::string(toString(first_fd->space_family)) +
                     "/L2 space pair is backed by certified compatibility evidence";
                 claim.addEvidence("SpaceCompatibilityAnalyzer",
                     certified_infsup
@@ -470,9 +601,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
                 claim.space_compatibility_class = SpaceCompatibilityClass::Unknown;
                 claim.description =
                     "Mixed system has " +
-                    std::string(toString(momentum_fd->space_family)) +
-                    "/L2 space pair (" + momentum_fd->name + "/" +
-                    constraint_fd->name +
+                    std::string(toString(first_fd->space_family)) +
+                    "/L2 space pair (" + first_fd->name + "/" +
+                    second_fd->name +
                     ") without explicit inf-sup or compatible-complex evidence";
                 claim.addEvidence("SpaceCompatibilityAnalyzer",
                     "L2 multiplier compatibility requires theorem-backed stable-pair, Fortin, or compatible-complex evidence",
@@ -494,9 +625,9 @@ void SpaceCompatibilityAnalyzer::run(const ProblemAnalysisContext& context,
         claim.estimate_scope = sc->estimate_scope;
         claim.description =
             "Mixed system space pair compatibility unknown: " +
-            std::string(toString(momentum_fd->space_family)) + "/" +
-            std::string(toString(constraint_fd->space_family)) +
-            " (" + momentum_fd->name + "/" + constraint_fd->name + ")";
+            std::string(toString(first_fd->space_family)) + "/" +
+            std::string(toString(second_fd->space_family)) +
+            " (" + first_fd->name + "/" + second_fd->name + ")";
         claim.claim_origin = "SpaceCompatibilityAnalyzer";
         claim.addEvidence("SpaceCompatibilityAnalyzer",
             "Unrecognized space family combination",

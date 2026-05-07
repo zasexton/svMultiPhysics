@@ -78,6 +78,15 @@ const char* toString(NullspaceFamily f) noexcept {
     switch (f) {
         case NullspaceFamily::ScalarConstant:        return "ScalarConstant";
         case NullspaceFamily::ComponentwiseConstant:  return "ComponentwiseConstant";
+        case NullspaceFamily::VectorConstant:         return "VectorConstant";
+        case NullspaceFamily::RigidTranslation:       return "RigidTranslation";
+        case NullspaceFamily::RigidRotation:          return "RigidRotation";
+        case NullspaceFamily::RigidBody:              return "RigidBody";
+        case NullspaceFamily::GaugeConstant:          return "GaugeConstant";
+        case NullspaceFamily::HarmonicField:          return "HarmonicField";
+        case NullspaceFamily::GradientKernel:         return "GradientKernel";
+        case NullspaceFamily::CurlKernel:             return "CurlKernel";
+        case NullspaceFamily::DivergenceFreeKernel:   return "DivergenceFreeKernel";
         case NullspaceFamily::KernelOfSymGrad:        return "KernelOfSymGrad";
         case NullspaceFamily::UserDefined:            return "UserDefined";
     }
