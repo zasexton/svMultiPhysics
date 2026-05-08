@@ -62,6 +62,22 @@ double parse_double(std::string_view raw, std::string_view context)
   }
 }
 
+int parse_positive_int(std::string_view raw, std::string_view context)
+{
+  const auto s = trim_copy(std::string(raw));
+  try {
+    size_t pos = 0;
+    const int v = std::stoi(s, &pos);
+    if (pos != s.size() || v < 1) {
+      throw std::runtime_error("");
+    }
+    return v;
+  } catch (...) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse positive integer value '" +
+                             std::string(raw) + "' for " + std::string(context) + ".");
+  }
+}
+
 std::vector<std::string> split_csv_line(const std::string& line)
 {
   std::vector<std::string> out;
@@ -275,6 +291,14 @@ int infer_polynomial_order(const svmp::MeshBase& mesh)
   return order;
 }
 
+int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int inferred_order)
+{
+  if (const auto* p = find_param(input.equation_params, "Element_order"); p && p->defined) {
+    return parse_positive_int(p->value, "Element_order");
+  }
+  return inferred_order;
+}
+
 void apply_thermal_properties(const svmp::Physics::EquationModuleInput& input,
                               svmp::Physics::formulations::poisson::PoissonOptions& options)
 {
@@ -436,7 +460,7 @@ create_poisson_with_field_name(const svmp::Physics::EquationModuleInput& input,
   }
 
   const auto element_type = infer_base_element_type(*input.mesh);
-  const int order = infer_polynomial_order(*input.mesh);
+  const int order = resolve_element_order(input, infer_polynomial_order(*input.mesh));
 
   auto space = svmp::FE::spaces::SpaceFactory::create_h1(element_type, order);
 

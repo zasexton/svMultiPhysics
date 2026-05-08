@@ -26,7 +26,7 @@ inline constexpr std::uint64_t kCacheKeyFNVOffset = 14695981039346656037ULL;
 inline constexpr std::uint64_t kCacheKeyFNVPrime = 1099511628211ULL;
 
 // Increment this when the meaning/order of fields in computeKernelCacheKey changes.
-inline constexpr std::uint64_t kKernelCacheKeySchemaVersion = 2ULL;
+inline constexpr std::uint64_t kKernelCacheKeySchemaVersion = 3ULL;
 
 struct KernelCacheKeyInputs {
     std::uint64_t cache_key_schema_version{kKernelCacheKeySchemaVersion};

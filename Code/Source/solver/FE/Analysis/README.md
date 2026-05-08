@@ -337,46 +337,119 @@ The subsystem is careful to scope claims narrowly when only part of the structur
 7. `CompatibilityAnalyzer`
 8. `TopologyScopeAnalyzer`
 9. `InterfaceValidationAnalyzer`
-10. `NullspaceDegeneracyAnalyzer`
-11. `InfSupAnalyzer`
-12. `TransportCharacterAnalyzer`
-13. `ConservationAnalyzer`
-14. `DAEStructureAnalyzer`
-15. `SpaceCompatibilityAnalyzer`
-16. `OperatorApplicabilityAnalyzer`
-17. `DiscreteMonotonicityAnalyzer`
-18. `MeshGeometryAnalyzer`
-19. `TemporalStabilityAnalyzer`
-20. `EnergyEntropyLawAnalyzer`
-21. `CoefficientConstitutiveAnalyzer`
-22. `NonlinearTangentAnalyzer`
-23. `LockingRiskAnalyzer`
-24. `SpectralSpuriousModeAnalyzer`
-25. `ErrorEstimatorAnalyzer`
-26. `QuadratureAdequacyAnalyzer`
-27. `MinimumResidualStabilityAnalyzer`
-28. `PreservationStructureAnalyzer`
-29. `CoupledSystemStabilityAnalyzer`
-30. `RobustnessTrendAnalyzer`
-31. `SchurQualityAnalyzer`
-32. `ToleranceAdequacyAnalyzer`
-33. `SolverCompatibilityAnalyzer`
-34. `NumericSummaryPlanner`
-35. `FortinCertificationAnalyzer`
+10. `TransportCharacterAnalyzer`
+11. `ConservationAnalyzer`
+12. `DAEStructureAnalyzer`
+13. `NumericSummaryPlanner`
+14. `FortinCertificationAnalyzer`
+15. `InfSupAnalyzer`
+16. `SpaceCompatibilityAnalyzer`
+17. `NullspaceDegeneracyAnalyzer`
+18. `OperatorApplicabilityAnalyzer`
+19. `DiscreteMonotonicityAnalyzer`
+20. `MeshGeometryAnalyzer`
+21. `TemporalStabilityAnalyzer`
+22. `EnergyEntropyLawAnalyzer`
+23. `CoefficientConstitutiveAnalyzer`
+24. `NonlinearTangentAnalyzer`
+25. `LockingRiskAnalyzer`
+26. `SpectralSpuriousModeAnalyzer`
+27. `ErrorEstimatorAnalyzer`
+28. `QuadratureAdequacyAnalyzer`
+29. `MinimumResidualStabilityAnalyzer`
+30. `PreservationStructureAnalyzer`
+31. `CoupledSystemStabilityAnalyzer`
+32. `RobustnessTrendAnalyzer`
+33. `SchurQualityAnalyzer`
+34. `ToleranceAdequacyAnalyzer`
+35. `SolverCompatibilityAnalyzer`
+36. `NumericSummaryPlanner`
 
 The order matters because some later passes consume earlier claims. The default
 pipeline is staged:
 
-- Stage 1: structural analyzers (`CouplingGraphAnalyzer` through `OperatorApplicabilityAnalyzer`)
-- Stage 2: analyzers that consume already-provided numeric summaries (`DiscreteMonotonicityAnalyzer` through `ToleranceAdequacyAnalyzer`)
-- Stage 3: solver compatibility (`SolverCompatibilityAnalyzer`)
-- Stage 4: numeric summary request planning (`NumericSummaryPlanner`)
-- Stage 5: request-plan-driven stable-pair/Fortin certification (`FortinCertificationAnalyzer`)
+- Stage 1: build structural claims from forms, BCs, variables, spaces,
+  topology, constraints, couplings, solver settings, and time metadata.
+- Stage 2: run `NumericSummaryPlanner` to create scoped evidence requests.
+- Stage 3: when `analyzeWithEvidenceSynthesis()` is used, run
+  `AnalysisSummaryProducerRegistry` to satisfy missing requests and attach
+  produced summaries to the working context.
+- Stage 4: run request-plan-driven theorem, stable-pair, Fortin, inf-sup, and
+  summary-backed analyzers.
+- Stage 5: run a final `NumericSummaryPlanner` to record follow-up evidence
+  requests introduced by later claims.
 
-`NumericSummaryPlanner` only records scoped requests. It does not materialize
-external numeric summaries; summary-backed certification that depends on newly
-computed numeric evidence requires a later analysis pass after those summaries
-are attached to the context.
+`FESystem::runProblemAnalysis()` uses `analyzeWithEvidenceSynthesis()` with
+the default producer registry. Matrix-, reduced-system-, solver-, and
+refinement-backed producers need backend hooks to materialize those summaries;
+without hooks, the corresponding requests remain unavailable and claims remain
+`Unknown`, `Likely`, or `NumericallySupported` rather than being upgraded.
+
+## Automatic Evidence Synthesis
+
+`AnalysisSummaryProducer` is the common interface for request-driven summary
+generation:
+
+```cpp
+class AnalysisSummaryProducer {
+public:
+    virtual bool canProduce(const AnalysisSummaryRequest& request,
+                            const ProblemAnalysisContext& context) const = 0;
+
+    virtual SummaryProductionResult produce(const AnalysisSummaryRequest& request,
+                                            const ProblemAnalysisContext& context,
+                                            const AssemblyAccess& assembly,
+                                            const MeshAccess& mesh,
+                                            const SolverAccess& solver) const = 0;
+};
+```
+
+The registry consumes the `AnalysisRequestPlan`, checks existing summaries with
+strict scoped coverage, and invokes producers only for missing evidence. A
+summary of the right kind is not enough: the block, variables, domain, marker,
+contribution, parameter, state, time-scheme, norm, theorem, and tolerance scope
+must cover the request before it can support certification.
+
+Every produced summary carries provenance metadata:
+
+- producer id and version
+- mesh and formulation revisions
+- operator, contribution, variable, domain, marker, parameter, state, and
+  time-scheme scope
+- norm and theorem identifiers when relevant
+- tolerance metadata
+- whether evidence is current-matrix-only, theorem-family, or uniform-family
+- provenance such as inferred-from-form/space metadata, generated assembled
+  matrix evidence, generated reduced evidence, refinement diagnostics, theorem
+  registry matching, or user-declared evidence
+
+The default registry includes producers for norm metadata, theorem
+applicability, Fortin/stable-pair metadata, numerical inf-sup estimates, mesh
+family and geometry quality, discrete and reduced matrices, coefficient bounds,
+boundary symbols, temporal stability, DAE structure, Schur complements,
+refinement trends, quadrature adequacy, and invariant-domain summaries.
+
+The core certification policy is conservative:
+
+- structural identity from forms, spaces, BCs, and topology may be `Exact`
+- complete theorem-registry matches with all scoped assumptions may be
+  `Preserved` and `Certified`
+- current-matrix diagnostics are `Likely` or `NumericallySupported` unless
+  explicitly scoped as finite-dimensional evidence
+- generated refinement trends are diagnostic unless paired with a theorem route
+- missing norm, theorem, nullspace, mesh-family, coefficient, boundary, or
+  scope metadata leaves the result `Unknown`, `Likely`, or not certified
+- contradictory finite evidence produces `Violated`
+
+Producer matching obeys the same physics-agnostic rule as analyzers. Theorem
+registry entries may use standard mathematical names such as Taylor-Hood,
+MINI, Raviart-Thomas, BDM, Nedelec, DG/IP, Fortin, M-matrix, SSP,
+A-stability, or L-stability, but matching is based only on mathematical
+metadata: variable kind, value dimension, space and element family, continuity,
+mapping transform, reference cell, polynomial order, trace capabilities,
+operator DAG or pairing descriptors, domain/marker scope, nullspace handling,
+mesh-family evidence, coefficients, time scheme, solver settings, and scoped
+summaries. Field names and physics names are never theorem triggers.
 
 ## Analyzer Family Matrix
 
@@ -671,7 +744,13 @@ These are attached to `FESystem` and then passed into `ProblemAnalysisContext` d
 - interface topology context
 - constraint summary
 
-It then creates the default `ProblemAnalyzer` and returns the resulting report.
+It then creates the default `ProblemAnalyzer`, the default
+`AnalysisSummaryProducerRegistry`, and runs the evidence-synthesis analysis
+path. Producers that only need form, BC, space, mesh-family, or invariant-domain
+metadata can synthesize summaries immediately. Producers that need assembled
+matrices, reduced systems, solver probes, or generated refinement experiments
+leave scoped requests marked unavailable until the relevant backend accessors
+are supplied.
 
 `FESystem::analysisReport()` caches that result and invalidates it when analysis inputs change.
 
@@ -767,7 +846,18 @@ The subsystem generally does not inspect coefficients deeply enough to prove:
 - conditioning
 - transport dominance from actual Peclet/Reynolds scales
 
-Such properties are represented as likely or unknown unless explicit metadata is available.
+Such properties are represented as likely or unknown unless scoped summaries can
+be inferred or generated.
+
+### Black-Box Or Custom Kernels
+
+Black-box kernels can still participate through normalized contributions and
+matrix diagnostics. The subsystem does not infer theorem families, global
+coefficient bounds, Fortin operators, quadrature exactness, invariant-domain
+sets, or uniform-in-mesh constants from provider names or application naming
+conventions. If the required hooks or mathematical descriptors are unavailable,
+producer attempts are logged and the associated requests remain unknown or
+diagnostic-only.
 
 ### Geometry-Dependent Anchoring
 
@@ -821,6 +911,20 @@ For handwritten kernels:
    - traits
    - pairings/nullspace hints if known
 
+### Adding A New Summary Producer
+
+1. Add an `AnalysisSummaryProducer` subclass.
+2. Declare the `AnalysisSummaryKind` values it produces.
+3. Match requests by strict mathematical scope, not by kind alone.
+4. Prefer `AssemblyAccess`, `MeshAccess`, and `SolverAccess` hooks over
+   backend-specific casts.
+5. Stamp every summary with `SummaryEvidenceMetadata` provenance, revisions,
+   variables, domain/marker scope, norm/theorem ids, tolerance metadata, and
+   current-matrix/theorem/uniform-family scope.
+6. Return `Unavailable` with missing hook names when evidence cannot be
+   produced, rather than asking users to supply theorem IDs, norm IDs, beta
+   constants, or Fortin flags for standard cases.
+
 ### Adding New Variable Kinds
 
 If future coupled systems introduce new unknown types:
@@ -871,6 +975,9 @@ The subsystem is tested through:
 - unit tests for core types and reports
 - formulation-record and lowering tests
 - analyzer unit tests
+- producer-registry tests for automatic request fulfillment
+- strict scoped matching tests so one block, marker, contribution, or variable
+  scope cannot certify another
 - integration-style FE analysis tests
 
 Important categories include:
@@ -882,6 +989,11 @@ Important categories include:
 - disconnected meshes
 - interface and coupled-boundary cases
 - variable descriptor handling for non-FE unknowns
+- norm inference, theorem applicability, Fortin/stable-pair matching, and
+  numerical inf-sup requests without field-name or physics-name triggers
+- sparse-matrix scanner robustness: duplicate entries, invalid indices,
+  row-major/column-major sparse traversal, incomplete distributed coverage, and
+  diagnostic Gershgorin bounds
 
 ## Certification Evidence Contract
 
@@ -1006,9 +1118,12 @@ For a new developer, the best order is:
 5. `FormulationRecord.h`
 6. `FormContributionLowerer.*`
 7. `ProblemAnalyzer.*`
-8. `../Docs/FORTIN_OPERATOR_AUTOGENERATION.md` for theorem-backed mixed-pair
+8. `AnalysisSummaryTypes.h`
+9. `AnalysisSummaryMatching.h`
+10. `AnalysisSummaryProducer.*`
+11. `../Docs/FORTIN_OPERATOR_AUTOGENERATION.md` for theorem-backed mixed-pair
    certification
-9. individual analyzer passes
+12. individual analyzer passes
 
 ## Summary
 

@@ -488,7 +488,7 @@ TEST(Phase7Integration, MixedPair_UnstablePair_InfSupRisk)
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::InfSupCondition,
                                    PropertyStatus::Unknown));
     EXPECT_TRUE(hasClaimWithStatus(report, PropertyKind::LockingRisk,
-                                   PropertyStatus::Violated));
+                                   PropertyStatus::Likely));
 }
 
 TEST(Phase7Integration, Transport_HighPeclet_NoStabilization_Risk)

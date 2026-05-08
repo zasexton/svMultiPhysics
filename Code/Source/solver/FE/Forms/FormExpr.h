@@ -176,6 +176,22 @@ struct JITSpecializationOptions {
     std::uint32_t raw_bytes_per_op_estimate{10};
 };
 
+struct JITBasisBakeOptions {
+    // Bake scalar basis values and affine reference derivatives into specialized
+    // LLVM kernels when the basis/quadrature tuple is known at setup time.
+    bool enable{true};
+
+    // Baked lookups need compile-time DOF/QP indices. Allow the wrapper to
+    // specialize DOF trip counts for small elements even when the general DOF
+    // specialization switch is off.
+    bool force_dof_specialization{true};
+
+    // Guardrails against embedding very large tables or exploding code size.
+    std::uint32_t max_baked_qpts{64};
+    std::uint32_t max_baked_dofs{128};
+    std::uint32_t max_baked_entries{8192};
+};
+
 struct JITOptions {
     // Default-on when FE is built with LLVM JIT support; the interpreter remains
     // available as a fallback and for debugging.
@@ -193,6 +209,7 @@ struct JITOptions {
     bool debug_info{false};
     std::string dump_directory{"svmp_fe_jit_dumps"};
     JITSpecializationOptions specialization{};
+    JITBasisBakeOptions basis_baking{};
     TensorJITOptions tensor{};
 };
 

@@ -901,31 +901,31 @@ TEST(ProblemAnalyzer, DefaultHasAllPasses) {
     EXPECT_EQ(names[6], "CompatibilityAnalyzer");
     EXPECT_EQ(names[7], "TopologyScopeAnalyzer");
     EXPECT_EQ(names[8], "InterfaceValidationAnalyzer");
-    EXPECT_EQ(names[9], "NullspaceDegeneracyAnalyzer");
-    EXPECT_EQ(names[10], "InfSupAnalyzer");
-    EXPECT_EQ(names[11], "TransportCharacterAnalyzer");
-    EXPECT_EQ(names[12], "ConservationAnalyzer");
-    EXPECT_EQ(names[13], "DAEStructureAnalyzer");
-    EXPECT_EQ(names[14], "SpaceCompatibilityAnalyzer");
-    EXPECT_EQ(names[15], "OperatorApplicabilityAnalyzer");
-    EXPECT_EQ(names[16], "DiscreteMonotonicityAnalyzer");
-    EXPECT_EQ(names[17], "MeshGeometryAnalyzer");
-    EXPECT_EQ(names[18], "TemporalStabilityAnalyzer");
-    EXPECT_EQ(names[19], "EnergyEntropyLawAnalyzer");
-    EXPECT_EQ(names[20], "CoefficientConstitutiveAnalyzer");
-    EXPECT_EQ(names[21], "NonlinearTangentAnalyzer");
-    EXPECT_EQ(names[22], "LockingRiskAnalyzer");
-    EXPECT_EQ(names[23], "SpectralSpuriousModeAnalyzer");
-    EXPECT_EQ(names[24], "ErrorEstimatorAnalyzer");
-    EXPECT_EQ(names[25], "QuadratureAdequacyAnalyzer");
-    EXPECT_EQ(names[26], "MinimumResidualStabilityAnalyzer");
-    EXPECT_EQ(names[27], "PreservationStructureAnalyzer");
-    EXPECT_EQ(names[28], "CoupledSystemStabilityAnalyzer");
-    EXPECT_EQ(names[29], "RobustnessTrendAnalyzer");
-    EXPECT_EQ(names[30], "SchurQualityAnalyzer");
-    EXPECT_EQ(names[31], "ToleranceAdequacyAnalyzer");
-    EXPECT_EQ(names[32], "NumericSummaryPlanner");
-    EXPECT_EQ(names[33], "FortinCertificationAnalyzer");
+    EXPECT_EQ(names[9], "TransportCharacterAnalyzer");
+    EXPECT_EQ(names[10], "ConservationAnalyzer");
+    EXPECT_EQ(names[11], "DAEStructureAnalyzer");
+    EXPECT_EQ(names[12], "NumericSummaryPlanner");
+    EXPECT_EQ(names[13], "FortinCertificationAnalyzer");
+    EXPECT_EQ(names[14], "InfSupAnalyzer");
+    EXPECT_EQ(names[15], "SpaceCompatibilityAnalyzer");
+    EXPECT_EQ(names[16], "NullspaceDegeneracyAnalyzer");
+    EXPECT_EQ(names[17], "OperatorApplicabilityAnalyzer");
+    EXPECT_EQ(names[18], "DiscreteMonotonicityAnalyzer");
+    EXPECT_EQ(names[19], "MeshGeometryAnalyzer");
+    EXPECT_EQ(names[20], "TemporalStabilityAnalyzer");
+    EXPECT_EQ(names[21], "EnergyEntropyLawAnalyzer");
+    EXPECT_EQ(names[22], "CoefficientConstitutiveAnalyzer");
+    EXPECT_EQ(names[23], "NonlinearTangentAnalyzer");
+    EXPECT_EQ(names[24], "LockingRiskAnalyzer");
+    EXPECT_EQ(names[25], "SpectralSpuriousModeAnalyzer");
+    EXPECT_EQ(names[26], "ErrorEstimatorAnalyzer");
+    EXPECT_EQ(names[27], "QuadratureAdequacyAnalyzer");
+    EXPECT_EQ(names[28], "MinimumResidualStabilityAnalyzer");
+    EXPECT_EQ(names[29], "PreservationStructureAnalyzer");
+    EXPECT_EQ(names[30], "CoupledSystemStabilityAnalyzer");
+    EXPECT_EQ(names[31], "RobustnessTrendAnalyzer");
+    EXPECT_EQ(names[32], "SchurQualityAnalyzer");
+    EXPECT_EQ(names[33], "ToleranceAdequacyAnalyzer");
     EXPECT_EQ(names[34], "SolverCompatibilityAnalyzer");
     EXPECT_EQ(names[35], "NumericSummaryPlanner");
 }
@@ -1126,6 +1126,19 @@ TEST(ProblemAnalysisReport, Phase1_PrintIncludesNewKindsAndStructuredFields) {
 
 TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     AnalysisSummarySet summaries;
+
+    NormMetadataSummary norm;
+    norm.norm_id = "norm:h1:field:0";
+    norm.norm_family = "H1";
+    norm.variables = {VariableKey::field(0)};
+    norm.norm_metadata_present = true;
+    norm.mass_matrix_component_present = true;
+    norm.gradient_matrix_component_present = true;
+    norm.nullspace_handling = NullspaceHandlingClass::NotApplicable;
+    norm.evidence.producer_id = "unit-test";
+    norm.evidence.provenance = {
+        EvidenceProvenance::InferredFromFormAndSpaces};
+    summaries.norm_metadata.push_back(norm);
 
     CoefficientPropertySummary coeff;
     coeff.coefficient = "kappa";
@@ -1393,7 +1406,8 @@ TEST(AnalysisSummaryTypes, CommonSummaryContractsStoreRequiredFields) {
     minres.normal_equation_conditioning_present = true;
     summaries.minimum_residual_stability.push_back(minres);
 
-    EXPECT_EQ(summaries.totalSummaryCount(), 32u);
+    EXPECT_EQ(summaries.totalSummaryCount(), 33u);
+    EXPECT_TRUE(summaries.has(AnalysisSummaryKind::NormMetadata));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::CoefficientProperties));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::DiscreteMatrix));
     EXPECT_TRUE(summaries.has(AnalysisSummaryKind::ReducedMatrix));

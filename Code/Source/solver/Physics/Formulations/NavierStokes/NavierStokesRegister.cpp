@@ -91,6 +91,22 @@ double parse_double(std::string_view raw, std::string_view context)
   }
 }
 
+int parse_positive_int(std::string_view raw, std::string_view context)
+{
+  const auto s = trim_copy(std::string(raw));
+  try {
+    size_t pos = 0;
+    const int v = std::stoi(s, &pos);
+    if (pos != s.size() || v < 1) {
+      throw std::runtime_error("");
+    }
+    return v;
+  } catch (...) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse positive integer value '" +
+                             std::string(raw) + "' for " + std::string(context) + ".");
+  }
+}
+
 const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
                                                 std::string_view key)
 {
@@ -523,6 +539,14 @@ int infer_polynomial_order(const svmp::MeshBase& mesh)
   }
 
   return order;
+}
+
+int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int inferred_order)
+{
+  if (const auto* p = find_param(input.equation_params, "Element_order"); p && p->defined) {
+    return parse_positive_int(p->value, "Element_order");
+  }
+  return inferred_order;
 }
 
 const svmp::Physics::DomainInput& select_single_domain(const svmp::Physics::EquationModuleInput& input,
@@ -1999,7 +2023,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   }
 
   const auto element_type = infer_base_element_type(*input.mesh);
-  const int vel_order = infer_polynomial_order(*input.mesh);
+  const int vel_order = resolve_element_order(input, infer_polynomial_order(*input.mesh));
 
   bool taylor_hood = false;
   if (const auto* p = find_param(input.equation_params, "Use_taylor_hood_type_basis"); p && p->defined) {

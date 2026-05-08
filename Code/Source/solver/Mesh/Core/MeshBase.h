@@ -214,8 +214,10 @@ public:
   const std::vector<CellShape>& cell_shapes() const noexcept { return cell_shape_; }
   const CellShape& cell_shape(index_t c) const { return cell_shape_.at(static_cast<size_t>(c)); }
   std::pair<const index_t*, size_t> cell_vertices_span(index_t c) const;
+  std::pair<const index_t*, size_t> cell_corner_vertices_span(index_t c) const;
   // Convenience: return cell vertices as a vector
   std::vector<index_t> cell_vertices(index_t c) const;
+  std::vector<index_t> cell_corner_vertices(index_t c) const;
   // Legacy/compat: get full connectivity for a cell
   std::vector<index_t> get_cell_connectivity(index_t c) const { return cell_vertices(c); }
   const std::vector<offset_t>& cell2vertex_offsets() const noexcept { return cell2vertex_offsets_; }

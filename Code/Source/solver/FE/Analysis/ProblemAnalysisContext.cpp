@@ -6,6 +6,7 @@
  */
 
 #include "Analysis/ProblemAnalysisContext.h"
+#include "Analysis/AnalysisSummaryMatching.h"
 
 #include <algorithm>
 
@@ -129,6 +130,13 @@ void ProblemAnalysisContext::clearAnalysisSummaries() {
 
 bool ProblemAnalysisContext::hasSummaryKind(AnalysisSummaryKind kind) const noexcept {
     return analysis_summaries_ && analysis_summaries_->has(kind);
+}
+
+bool ProblemAnalysisContext::hasSummaryForRequest(
+    const AnalysisSummaryRequest& request) const noexcept
+{
+    return analysis_summaries_ &&
+           analysisSummarySetCoversRequest(*analysis_summaries_, request);
 }
 
 CertificationClass ProblemAnalysisContext::summaryCertificationOrUnknown(

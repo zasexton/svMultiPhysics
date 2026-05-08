@@ -1754,6 +1754,12 @@ void LockingRiskAnalyzer::run(const ProblemAnalysisContext& context,
     bool likely_risk = false;
     std::vector<VariableKey> variables;
     std::string evidence;
+    const auto hard_violation_evidence = [](const PropertyClaim& claim) {
+        return claim.certification_class.has_value() &&
+               *claim.certification_class == CertificationClass::Violated &&
+               static_cast<int>(claim.evidence_level) >=
+                   static_cast<int>(EvidenceLevel::ScopedNumericSummary);
+    };
 
     if (const auto* constraints = context.constraintSummary()) {
         for (const auto& set : constraints->constrained_sets) {
@@ -1763,7 +1769,7 @@ void LockingRiskAnalyzer::run(const ProblemAnalysisContext& context,
             if (set.num_total_dofs > 0) {
                 saw_evidence = true;
                 if (set.constrained_fraction >= 0.99) {
-                    hard_violation = true;
+                    likely_risk = true;
                 } else if (set.constrained_fraction >= 0.85) {
                     likely_risk = true;
                 }
@@ -1771,7 +1777,7 @@ void LockingRiskAnalyzer::run(const ProblemAnalysisContext& context,
         }
         if (constraints->hasConflicts()) {
             saw_evidence = true;
-            hard_violation = true;
+            likely_risk = true;
         }
         evidence += "constraint_summary_sets=" +
                     std::to_string(constraints->constrained_sets.size()) + "; ";
@@ -1802,7 +1808,11 @@ void LockingRiskAnalyzer::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::InfSupCondition) {
             if (claim.status == PropertyStatus::Violated) {
                 saw_evidence = true;
-                hard_violation = true;
+                if (hard_violation_evidence(claim)) {
+                    hard_violation = true;
+                } else {
+                    likely_risk = true;
+                }
                 for (const auto& var : claim.variables) appendUnique(variables, var);
             } else if (claim.inf_sup_class == InfSupClass::LikelyViolated) {
                 saw_evidence = true;
@@ -1816,7 +1826,11 @@ void LockingRiskAnalyzer::run(const ProblemAnalysisContext& context,
         if (claim.kind == PropertyKind::SpaceCompatibility) {
             if (claim.space_compatibility_class == SpaceCompatibilityClass::Incompatible) {
                 saw_evidence = true;
-                hard_violation = true;
+                if (hard_violation_evidence(claim)) {
+                    hard_violation = true;
+                } else {
+                    likely_risk = true;
+                }
                 for (const auto& var : claim.variables) appendUnique(variables, var);
             } else if (claim.status == PropertyStatus::Preserved) {
                 saw_evidence = true;

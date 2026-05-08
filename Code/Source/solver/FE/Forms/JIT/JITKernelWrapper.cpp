@@ -20,6 +20,8 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <cctype>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -70,6 +72,33 @@ struct RequestedKernelOutputs {
         return value != nullptr && value[0] != '\0' && value[0] != '0';
     }();
     return enabled;
+}
+
+[[nodiscard]] std::optional<bool> parseOptionalBoolEnv(const char* name) noexcept
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return std::nullopt;
+    }
+
+    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
+        ++value;
+    }
+    if (*value == '\0') {
+        return std::nullopt;
+    }
+
+    std::string s(value);
+    for (char& ch : s) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (s == "1" || s == "true" || s == "on" || s == "yes") {
+        return true;
+    }
+    if (s == "0" || s == "false" || s == "off" || s == "no") {
+        return false;
+    }
+    return std::nullopt;
 }
 
 [[nodiscard]] const char* integralDomainName(IntegralDomain domain) noexcept
@@ -375,6 +404,10 @@ JITKernelWrapper::JITKernelWrapper(std::shared_ptr<assembly::AssemblyKernel> fal
         // path than on the SIMD-padded batch path used by linear kernels.
         options_.vectorize = false;
         options_.simd_batch = false;
+    }
+
+    if (const auto env_enable = parseOptionalBoolEnv("SVMP_JIT_BASIS_BAKING")) {
+        options_.basis_baking.enable = *env_enable;
     }
 }
 
@@ -2090,19 +2123,29 @@ void JITKernelWrapper::primeCellSpecializations(std::span<const CellSpecializati
         JITCompileSpecialization spec;
         spec.domain = IntegralDomain::Cell;
         spec.is_affine = hint.is_affine;
+        const bool want_bake = options_.basis_baking.enable &&
+            hint.baked_basis.enabled &&
+            hint.baked_basis.hash != 0u;
+        if (want_bake) {
+            spec.baked_basis = hint.baked_basis;
+        }
         if (hint.is_affine) {
             primed_is_affine_ = true;
         }
         bool any = false;
 
-        if (options_.specialization.specialize_n_qpts &&
+        const bool specialize_qpts = options_.specialization.specialize_n_qpts || want_bake;
+        if (specialize_qpts &&
             hint.n_qpts > 0u &&
             hint.n_qpts <= options_.specialization.max_specialized_n_qpts) {
             spec.n_qpts_minus = hint.n_qpts;
             any = true;
         }
 
-        if (options_.specialization.specialize_dofs &&
+        const bool specialize_dofs =
+            options_.specialization.specialize_dofs ||
+            (want_bake && options_.basis_baking.force_dof_specialization);
+        if (specialize_dofs &&
             hint.n_test_dofs > 0u &&
             hint.n_trial_dofs > 0u &&
             hint.n_test_dofs <= options_.specialization.max_specialized_dofs &&
@@ -2143,10 +2186,12 @@ void JITKernelWrapper::primeCellSpecializations(std::span<const CellSpecializati
                    << " domain=" << integralDomainName(spec.domain)
                    << " n_qpts=" << hint.n_qpts
                    << " n_test_dofs=" << hint.n_test_dofs
-                   << " n_trial_dofs=" << hint.n_trial_dofs;
+                   << " n_trial_dofs=" << hint.n_trial_dofs
+                   << " basis_bake=" << (spec.baked_basis.enabled ? 1 : 0);
             traceSpecialization(this, *fallback_, revision, detail.str());
         }
 
+        rememberPrimedBasisBake(role, spec);
         (void)compileSpecializedDispatch(role, ir, spec, "prime");
     };
 
@@ -2435,6 +2480,8 @@ void JITKernelWrapper::markDirty(std::string_view reason) noexcept
 
     specialized_dispatch_.clear();
     attempted_specializations_.clear();
+    primed_basis_bake_by_shape_.clear();
+    ambiguous_basis_bake_shapes_.clear();
     traced_specialization_hits_.clear();
     traced_specialization_compiles_.clear();
     traced_specialization_skips_.clear();
@@ -2529,6 +2576,90 @@ void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
     }
 }
 
+JITKernelWrapper::SpecializationKey JITKernelWrapper::makeSpecializationKey(
+    KernelRole role,
+    const JITCompileSpecialization& specialization,
+    bool include_basis_bake) const noexcept
+{
+    SpecializationKey key;
+    key.role = role;
+    key.domain = specialization.domain;
+
+    if (specialization.n_qpts_minus) {
+        key.has_n_qpts_minus = true;
+        key.n_qpts_minus = *specialization.n_qpts_minus;
+    }
+    if (specialization.n_test_dofs_minus) {
+        key.has_n_test_dofs_minus = true;
+        key.n_test_dofs_minus = *specialization.n_test_dofs_minus;
+    }
+    if (specialization.n_trial_dofs_minus) {
+        key.has_n_trial_dofs_minus = true;
+        key.n_trial_dofs_minus = *specialization.n_trial_dofs_minus;
+    }
+    if (specialization.n_qpts_plus) {
+        key.has_n_qpts_plus = true;
+        key.n_qpts_plus = *specialization.n_qpts_plus;
+    }
+    if (specialization.n_test_dofs_plus) {
+        key.has_n_test_dofs_plus = true;
+        key.n_test_dofs_plus = *specialization.n_test_dofs_plus;
+    }
+    if (specialization.n_trial_dofs_plus) {
+        key.has_n_trial_dofs_plus = true;
+        key.n_trial_dofs_plus = *specialization.n_trial_dofs_plus;
+    }
+
+    if (include_basis_bake && specialization.baked_basis.enabled) {
+        key.has_basis_bake_hash = true;
+        key.basis_bake_hash = specialization.baked_basis.hash;
+    }
+    return key;
+}
+
+void JITKernelWrapper::rememberPrimedBasisBake(KernelRole role,
+                                               const JITCompileSpecialization& specialization)
+{
+    if (!specialization.baked_basis.enabled) {
+        return;
+    }
+
+    const auto shape_key = makeSpecializationKey(role, specialization, /*include_basis_bake=*/false);
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (ambiguous_basis_bake_shapes_.find(shape_key) != ambiguous_basis_bake_shapes_.end()) {
+        return;
+    }
+
+    const auto it = primed_basis_bake_by_shape_.find(shape_key);
+    if (it == primed_basis_bake_by_shape_.end()) {
+        primed_basis_bake_by_shape_.emplace(shape_key, specialization.baked_basis);
+        return;
+    }
+
+    if (it->second.hash != specialization.baked_basis.hash) {
+        primed_basis_bake_by_shape_.erase(it);
+        ambiguous_basis_bake_shapes_.insert(shape_key);
+    }
+}
+
+void JITKernelWrapper::attachPrimedBasisBake(KernelRole role,
+                                             JITCompileSpecialization& specialization)
+{
+    if (!options_.basis_baking.enable || specialization.domain != IntegralDomain::Cell) {
+        return;
+    }
+
+    const auto shape_key = makeSpecializationKey(role, specialization, /*include_basis_bake=*/false);
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (ambiguous_basis_bake_shapes_.find(shape_key) != ambiguous_basis_bake_shapes_.end()) {
+        return;
+    }
+    const auto it = primed_basis_bake_by_shape_.find(shape_key);
+    if (it != primed_basis_bake_by_shape_.end()) {
+        specialization.baked_basis = it->second;
+    }
+}
+
 std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::compileSpecializedDispatch(
     KernelRole role,
     const FormIR& ir,
@@ -2595,6 +2726,9 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
             oss << " plus[qpts=" << (key.has_n_qpts_plus ? std::to_string(key.n_qpts_plus) : "*")
                 << ",test=" << (key.has_n_test_dofs_plus ? std::to_string(key.n_test_dofs_plus) : "*")
                 << ",trial=" << (key.has_n_trial_dofs_plus ? std::to_string(key.n_trial_dofs_plus) : "*") << "]";
+        }
+        if (key.has_basis_bake_hash) {
+            oss << " bake=0x" << std::hex << key.basis_bake_hash << std::dec;
         }
         return oss.str();
     };
@@ -2805,7 +2939,8 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
     spec.is_affine = primed_is_affine_;
     bool any = false;
 
-    if (options_.specialization.specialize_n_qpts) {
+    const bool runtime_wants_bake = options_.basis_baking.enable && domain == IntegralDomain::Cell;
+    if (options_.specialization.specialize_n_qpts || runtime_wants_bake) {
         const auto n_qpts_minus = static_cast<std::uint32_t>(ctx_minus.numQuadraturePoints());
         if (n_qpts_minus > 0u && n_qpts_minus <= options_.specialization.max_specialized_n_qpts) {
             spec.n_qpts_minus = n_qpts_minus;
@@ -2838,7 +2973,8 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
         }
     }
 
-    if (options_.specialization.specialize_dofs) {
+    if (options_.specialization.specialize_dofs ||
+        (runtime_wants_bake && options_.basis_baking.force_dof_specialization)) {
         const auto n_test_minus = static_cast<std::uint32_t>(ctx_minus.numTestDofs());
         const auto n_trial_minus = static_cast<std::uint32_t>(ctx_minus.numTrialDofs());
         const bool ok_minus = n_test_minus > 0u && n_trial_minus > 0u &&
@@ -2891,6 +3027,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
         return nullptr;
     }
 
+    attachPrimedBasisBake(role, spec);
     return compileSpecializedDispatch(role, ir, spec, "runtime");
 }
 

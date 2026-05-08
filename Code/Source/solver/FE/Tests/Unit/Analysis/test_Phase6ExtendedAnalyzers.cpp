@@ -573,7 +573,10 @@ TEST(Phase6ExtendedAnalyzers, LockingRiskUsesConstraintInfSupAndSpaceEvidence)
         bad_report, PropertyKind::LockingRisk,
         "LockingRiskAnalyzer");
     ASSERT_NE(bad_claim, nullptr);
-    EXPECT_EQ(bad_claim->status, PropertyStatus::Violated);
+    EXPECT_EQ(bad_claim->status, PropertyStatus::Likely);
+    ASSERT_TRUE(bad_claim->certification_class.has_value());
+    EXPECT_EQ(*bad_claim->certification_class,
+              CertificationClass::NotCertified);
 
     auto missing_report = ProblemAnalyzer::createDefault().analyze(
         ProblemAnalysisContext{});

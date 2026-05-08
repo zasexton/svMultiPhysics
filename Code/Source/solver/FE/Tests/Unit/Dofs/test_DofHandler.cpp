@@ -1362,3 +1362,33 @@ TEST(DofHandler, CannotDistributeAfterFinalize) {
 
     EXPECT_THROW(handler.distributeDofs(topo, layout), FEException);
 }
+
+TEST(DofLayoutInfo, LagrangeAcceptsHighOrderElementAlias) {
+    const auto layout = DofLayoutInfo::Lagrange(2, ElementType::Hex27);
+
+    EXPECT_EQ(layout.dofs_per_vertex, 1);
+    EXPECT_EQ(layout.dofs_per_edge, 1);
+    EXPECT_EQ(layout.dofs_per_face, 1);
+    EXPECT_EQ(layout.dofs_per_cell, 1);
+    EXPECT_EQ(layout.total_dofs_per_element, 27);
+}
+
+TEST(DofHandler, IgnoresInactiveHighOrderGeometryVertices) {
+    auto topo = makeSingleHexWithEdgesAndFaces();
+    topo.n_vertices = 27;
+    topo.vertex_gids.resize(27);
+    std::iota(topo.vertex_gids.begin(), topo.vertex_gids.end(), 0);
+
+    DofHandler handler;
+    handler.distributeDofs(topo, DofLayoutInfo::Lagrange(2, ElementType::Hex8));
+    handler.finalize();
+
+    EXPECT_EQ(handler.getNumDofs(), 27);
+    ASSERT_EQ(handler.getCellDofs(0).size(), 27u);
+
+    const auto* entity = handler.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    EXPECT_EQ(entity->getVertexDofs(0).size(), 1u);
+    EXPECT_TRUE(entity->getVertexDofs(8).empty());
+    EXPECT_TRUE(entity->getVertexDofs(26).empty());
+}

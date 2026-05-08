@@ -58,6 +58,18 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     return h;
 }
 
+[[nodiscard]] std::uint64_t hashBasisBakeOptionsForCacheKey(
+    const JITBasisBakeOptions& opt) noexcept
+{
+    std::uint64_t h = kCacheKeyFNVOffset;
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.enable ? 1u : 0u));
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.force_dof_specialization ? 1u : 0u));
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.max_baked_qpts));
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.max_baked_dofs));
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.max_baked_entries));
+    return h;
+}
+
 [[nodiscard]] std::uint64_t computeKernelCacheKey(const KernelCacheKeyInputs& in) noexcept
 {
     std::uint64_t h = kCacheKeyFNVOffset;
@@ -76,6 +88,7 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, static_cast<std::uint64_t>(in.jit_options.simd_batch ? 1u : 0u));
     mixCacheKey(h, hashTensorOptionsForCacheKey(in.jit_options.tensor));
     mixCacheKey(h, hashSpecializationCodegenOptionsForCacheKey(in.jit_options.specialization));
+    mixCacheKey(h, hashBasisBakeOptionsForCacheKey(in.jit_options.basis_baking));
     mixCacheKey(h, static_cast<std::uint64_t>(in.jit_options.debug_info ? 1u : 0u));
     mixCacheKey(h, hashStringForCacheKey(in.target_triple));
     mixCacheKey(h, hashStringForCacheKey(in.data_layout));
@@ -105,6 +118,11 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
         mixOptU32(in.specialization->n_trial_dofs_plus);
 
         mixCacheKey(h, static_cast<std::uint64_t>(in.specialization->is_affine ? 1u : 0u));
+        mixCacheKey(h, static_cast<std::uint64_t>(in.specialization->baked_basis.enabled ? 1u : 0u));
+        if (in.specialization->baked_basis.enabled) {
+            mixCacheKey(h, in.specialization->baked_basis.hash);
+            mixCacheKey(h, static_cast<std::uint64_t>(in.specialization->baked_basis.geometry_affine ? 1u : 0u));
+        }
 
         // text_budget_bytes affects whether DOF loop unroll metadata is emitted
         // for specialized kernels, so it belongs to the matched-specialization key.

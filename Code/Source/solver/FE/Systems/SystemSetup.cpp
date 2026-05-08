@@ -17,6 +17,7 @@
 #include "Assembly/AssemblerSelection.h"
 #include "Assembly/MatrixFreeAssembler.h"
 
+#include "Basis/BasisCache.h"
 #include "Basis/VectorBasis.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -53,11 +54,13 @@
 #include "Core/KernelTrace.h"
 #include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MonolithicCellKernel.h"
+#include "Forms/JIT/JITCacheKey.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -123,6 +126,19 @@ void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value
     }
 }
 
+[[nodiscard]] int referenceVertexCount(ElementType type) noexcept;
+
+void getCellCornerNodes(const assembly::IMeshAccess& access,
+                        GlobalIndex cell,
+                        std::vector<GlobalIndex>& nodes)
+{
+    access.getCellNodes(cell, nodes);
+    const int n_corners = referenceVertexCount(access.getCellType(cell));
+    if (n_corners > 0 && nodes.size() > static_cast<std::size_t>(n_corners)) {
+        nodes.resize(static_cast<std::size_t>(n_corners));
+    }
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 [[nodiscard]] dofs::MeshTopologyInfo meshTopologyFromAccess(
     const assembly::IMeshAccess& access,
@@ -146,7 +162,7 @@ void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value
 
     std::vector<GlobalIndex> nodes;
     for (GlobalIndex cell = 0; cell < topology.n_cells; ++cell) {
-        access.getCellNodes(cell, nodes);
+        getCellCornerNodes(access, cell, nodes);
         topology.cell_gids.push_back(static_cast<dofs::gid_t>(cell));
         topology.cell2vertex_offsets[static_cast<std::size_t>(cell + 1)] =
             topology.cell2vertex_offsets[static_cast<std::size_t>(cell)] +
@@ -194,7 +210,7 @@ void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value
     std::vector<GlobalIndex> global_nodes;
     for (GlobalIndex local_cell = 0; local_cell < topology.n_cells; ++local_cell) {
         const auto global_cell = participant.cell_offset + local_cell;
-        access.getCellNodes(global_cell, global_nodes);
+        getCellCornerNodes(access, global_cell, global_nodes);
         topology.cell_gids.push_back(static_cast<dofs::gid_t>(global_cell));
         topology.cell2vertex_offsets[static_cast<std::size_t>(local_cell + 1)] =
             topology.cell2vertex_offsets[static_cast<std::size_t>(local_cell)] +
@@ -533,6 +549,25 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
     static const std::vector<std::vector<int>> quad_faces =
         {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
 
+    switch (type) {
+        case ElementType::Triangle6:
+            type = ElementType::Triangle3;
+            break;
+        case ElementType::Quad8:
+        case ElementType::Quad9:
+            type = ElementType::Quad4;
+            break;
+        case ElementType::Tetra10:
+            type = ElementType::Tetra4;
+            break;
+        case ElementType::Hex20:
+        case ElementType::Hex27:
+            type = ElementType::Hex8;
+            break;
+        default:
+            break;
+    }
+
     if (type == ElementType::Tetra4) return &tet_faces;
     if (type == ElementType::Triangle3) return &tri_faces;
     if (type == ElementType::Hex8) return &hex_faces;
@@ -693,7 +728,7 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
         if (mesh_access != nullptr && mesh_access->numCells() > 0) {
             std::vector<GlobalIndex> nodes;
             for (GlobalIndex cell_id = 0; cell_id < mesh_access->numCells(); ++cell_id) {
-                mesh_access->getCellNodes(cell_id, nodes);
+                getCellCornerNodes(*mesh_access, cell_id, nodes);
                 FE_THROW_IF(nodes.empty(), InvalidArgumentException,
                             "FESystem::computeSetupStoragePlan: cell has no vertices");
                 const auto layout = dofs::DofLayoutInfo::Lagrange(
@@ -4878,7 +4913,148 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         auto build_cell_hints =
             [&](const spaces::FunctionSpace& qpt_space,
                 const spaces::FunctionSpace& test_space,
-                const spaces::FunctionSpace& trial_space) {
+                const spaces::FunctionSpace& trial_space,
+                const forms::JITBasisBakeOptions* bake_options) {
+                auto mix_double = [](std::uint64_t& h, double value) {
+                    std::uint64_t bits = 0;
+                    static_assert(sizeof(bits) == sizeof(value));
+                    std::memcpy(&bits, &value, sizeof(bits));
+                    forms::jit::mixCacheKey(h, bits);
+                };
+
+                auto build_baked_side =
+                    [&](const spaces::FunctionSpace& space,
+                        const elements::Element& element,
+                        const quadrature::QuadratureRule& quad_rule,
+                        GlobalIndex cell_id,
+                        const forms::JITBasisBakeOptions& opt) {
+                    forms::jit::JITBakedBasisSide side;
+                    const auto& basis = element.basis();
+                    if (basis.is_vector_valued()) {
+                        return side;
+                    }
+
+                    const auto n_qpts = quad_rule.num_points();
+                    const auto n_space_dofs = space.dofs_per_element(cell_id);
+                    const auto n_basis_dofs = basis.size();
+                    if (n_qpts == 0u || n_space_dofs == 0u || n_basis_dofs == 0u) {
+                        return side;
+                    }
+                    if (n_qpts > opt.max_baked_qpts ||
+                        n_space_dofs > opt.max_baked_dofs ||
+                        n_qpts * n_space_dofs > opt.max_baked_entries) {
+                        return side;
+                    }
+                    if (n_space_dofs != n_basis_dofs) {
+                        const bool product_scalar =
+                            space.space_type() == spaces::SpaceType::Product &&
+                            n_space_dofs % n_basis_dofs == 0u;
+                        if (!product_scalar) {
+                            return side;
+                        }
+                    }
+
+                    const auto& entry =
+                        basis::BasisCache::instance().get_or_compute(basis, quad_rule,
+                                                                      /*gradients=*/true,
+                                                                      /*hessians=*/true);
+                    if (entry.num_qpts != n_qpts || entry.num_dofs != n_basis_dofs) {
+                        return side;
+                    }
+
+                    side.enabled = true;
+                    side.scalar_basis = true;
+                    side.n_qpts = static_cast<std::uint32_t>(n_qpts);
+                    side.n_dofs = static_cast<std::uint32_t>(n_space_dofs);
+                    side.basis_hash = forms::jit::hashStringForCacheKey(basis.cache_identity());
+                    side.quadrature_hash = forms::jit::hashStringForCacheKey(quad_rule.cache_identity());
+
+                    side.scalar_values_qmajor.resize(n_qpts * n_space_dofs);
+                    side.ref_gradients_qmajor.resize(n_qpts * n_space_dofs * 3u);
+                    side.ref_hessians_qmajor.resize(n_qpts * n_space_dofs * 9u);
+
+                    for (std::size_t q = 0; q < n_qpts; ++q) {
+                        for (std::size_t dof = 0; dof < n_space_dofs; ++dof) {
+                            const std::size_t scalar_dof = dof % n_basis_dofs;
+                            const std::size_t qmajor = q * n_space_dofs + dof;
+                            side.scalar_values_qmajor[qmajor] = entry.scalarValue(scalar_dof, q);
+
+                            const auto& g = entry.gradients[q][scalar_dof];
+                            for (std::size_t d = 0; d < 3u; ++d) {
+                                side.ref_gradients_qmajor[qmajor * 3u + d] = g[d];
+                            }
+
+                            const auto& H = entry.hessians[q][scalar_dof];
+                            for (std::size_t r = 0; r < 3u; ++r) {
+                                for (std::size_t c = 0; c < 3u; ++c) {
+                                    side.ref_hessians_qmajor[qmajor * 9u + r * 3u + c] = H(r, c);
+                                }
+                            }
+                        }
+                    }
+
+                    side.ref_gradients_qp_constant = true;
+                    for (std::size_t q = 1; q < n_qpts && side.ref_gradients_qp_constant; ++q) {
+                        for (std::size_t dof = 0; dof < n_space_dofs && side.ref_gradients_qp_constant; ++dof) {
+                            for (std::size_t d = 0; d < 3u; ++d) {
+                                const double first = side.ref_gradients_qmajor[dof * 3u + d];
+                                const double current =
+                                    side.ref_gradients_qmajor[(q * n_space_dofs + dof) * 3u + d];
+                                if (current != first) {
+                                    side.ref_gradients_qp_constant = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    std::uint64_t h = forms::jit::kCacheKeyFNVOffset;
+                    forms::jit::mixCacheKey(h, side.basis_hash);
+                    forms::jit::mixCacheKey(h, side.quadrature_hash);
+                    forms::jit::mixCacheKey(h, side.n_qpts);
+                    forms::jit::mixCacheKey(h, side.n_dofs);
+                    forms::jit::mixCacheKey(h, static_cast<std::uint64_t>(side.ref_gradients_qp_constant ? 1u : 0u));
+                    for (const double value : side.scalar_values_qmajor) {
+                        mix_double(h, value);
+                    }
+                    for (const double value : side.ref_gradients_qmajor) {
+                        mix_double(h, value);
+                    }
+                    for (const double value : side.ref_hessians_qmajor) {
+                        mix_double(h, value);
+                    }
+                    side.table_hash = h;
+                    return side;
+                };
+
+                auto build_baked_spec =
+                    [&](const elements::Element& test_element,
+                        const elements::Element& trial_element,
+                        const quadrature::QuadratureRule& quad_rule,
+                        GlobalIndex cell_id) {
+                    forms::jit::JITBakedBasisSpec spec;
+                    if (bake_options == nullptr || !bake_options->enable) {
+                        return spec;
+                    }
+
+                    spec.geometry_affine = meshAccess().getCellGeometryOrder(cell_id) <= 1;
+                    spec.test = build_baked_side(test_space, test_element, quad_rule, cell_id, *bake_options);
+                    spec.trial = build_baked_side(trial_space, trial_element, quad_rule, cell_id, *bake_options);
+                    spec.enabled = spec.test.enabled || spec.trial.enabled;
+                    if (!spec.enabled) {
+                        return spec;
+                    }
+
+                    std::uint64_t h = forms::jit::kCacheKeyFNVOffset;
+                    forms::jit::mixCacheKey(h, static_cast<std::uint64_t>(spec.geometry_affine ? 1u : 0u));
+                    forms::jit::mixCacheKey(h, static_cast<std::uint64_t>(spec.test.enabled ? 1u : 0u));
+                    forms::jit::mixCacheKey(h, spec.test.table_hash);
+                    forms::jit::mixCacheKey(h, static_cast<std::uint64_t>(spec.trial.enabled ? 1u : 0u));
+                    forms::jit::mixCacheKey(h, spec.trial.table_hash);
+                    spec.hash = h;
+                    return spec;
+                };
+
                 std::vector<forms::jit::JITKernelWrapper::CellSpecializationHint> hints;
                 hints.reserve(cell_exemplars.size());
                 for (const auto& [cell_type, cell_id] : cell_exemplars) {
@@ -4889,13 +5065,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
                     forms::jit::JITKernelWrapper::CellSpecializationHint hint;
                     hint.n_qpts = static_cast<std::uint32_t>(quad_rule->num_points());
-                    hint.n_test_dofs = static_cast<std::uint32_t>(test_space.dofs_per_element());
-                    hint.n_trial_dofs = static_cast<std::uint32_t>(trial_space.dofs_per_element());
+                    hint.n_test_dofs = static_cast<std::uint32_t>(test_space.dofs_per_element(cell_id));
+                    hint.n_trial_dofs = static_cast<std::uint32_t>(trial_space.dofs_per_element(cell_id));
 
                     // Detect P1 simplices for QP-constant term hoisting
                     const auto& test_element = test_space.getElement(cell_type, cell_id);
+                    const auto& trial_element = trial_space.getElement(cell_type, cell_id);
                     hint.is_affine = (test_element.polynomial_order() <= 1) &&
                         (cell_type == ElementType::Tetra4 || cell_type == ElementType::Triangle3);
+                    hint.baked_basis = build_baked_spec(test_element, trial_element, *quad_rule, cell_id);
 
                     hints.push_back(hint);
                 }
@@ -4948,7 +5126,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     return;
                 }
 
-                const auto hints = build_cell_hints(qpt_space, test_space, trial_space);
+                const auto* bake_options =
+                    jit_kernel->wantsBasisBakingHints() ? &jit_kernel->basisBakeOptions() : nullptr;
+                const auto hints = build_cell_hints(qpt_space, test_space, trial_space, bake_options);
                 if (!hints.empty()) {
                     jit_kernel->primeCellSpecializations(hints);
                 }

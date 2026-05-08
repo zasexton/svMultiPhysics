@@ -52,6 +52,8 @@
 
 #include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/ProblemAnalyzer.h"
+#include "Analysis/AnalysisSummaryProducer.h"
+#include "Analysis/AnalysisSummaryMatching.h"
 #include "Analysis/FormExprScanner.h"
 #include "Analysis/SparseMatrixSummaryScanner.h"
 #include "Math/FiniteDifference.h"
@@ -980,9 +982,10 @@ void appendAnalysisVector(std::vector<T>& dst, const std::vector<T>& src)
     dst.insert(dst.end(), src.begin(), src.end());
 }
 
-void mergeAnalysisSummarySets(analysis::AnalysisSummarySet& dst,
-                              const analysis::AnalysisSummarySet& src)
+void appendRegisteredAnalysisSummarySet(analysis::AnalysisSummarySet& dst,
+                                        const analysis::AnalysisSummarySet& src)
 {
+    appendAnalysisVector(dst.norm_metadata, src.norm_metadata);
     appendAnalysisVector(dst.coefficient_properties, src.coefficient_properties);
     appendAnalysisVector(dst.discrete_matrices, src.discrete_matrices);
     appendAnalysisVector(dst.reduced_matrices, src.reduced_matrices);
@@ -2953,6 +2956,332 @@ buildMeshGeometryQualitySummary(const assembly::IMeshAccess& mesh)
     return summary;
 }
 
+template <typename Summary, typename Inserter>
+[[nodiscard]] std::optional<Summary> firstSummaryCoveringRequest(
+    const std::vector<Summary>& summaries,
+    const analysis::AnalysisSummaryRequest& request,
+    Inserter insert)
+{
+    for (const auto& summary : summaries) {
+        analysis::AnalysisSummarySet one;
+        insert(one, summary);
+        if (analysis::analysisSummarySetCoversRequest(one, request)) {
+            return summary;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool summariesHaveAssembledEvidence(
+    const analysis::AnalysisSummarySet* summaries) noexcept
+{
+    return summaries != nullptr &&
+           (!summaries->discrete_matrices.empty() ||
+            !summaries->reduced_matrices.empty() ||
+            !summaries->nullspace_degeneracies.empty() ||
+            !summaries->inf_sup_estimates.empty() ||
+            !summaries->schur_complements.empty() ||
+            !summaries->coefficient_properties.empty() ||
+            !summaries->parameter_scales.empty() ||
+            !summaries->stabilization_adequacy.empty() ||
+            !summaries->boundary_symbols.empty() ||
+            !summaries->temporal_stability.empty() ||
+            !summaries->dae_structure_evidence.empty() ||
+            !summaries->numerical_error_budgets.empty() ||
+            !summaries->local_stencils.empty() ||
+            !summaries->quadrature_adequacy.empty());
+}
+
+class FESystemAnalysisAssemblyAccess final : public analysis::AssemblyAccess {
+public:
+    FESystemAnalysisAssemblyAccess(const analysis::AnalysisSummarySet* summaries,
+                                   bool pending)
+        : summaries_(summaries), pending_(pending) {}
+
+    [[nodiscard]] bool evidencePending() const noexcept override {
+        return pending_;
+    }
+
+    [[nodiscard]] std::optional<analysis::NormMetadataSummary>
+    normMetadata(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->norm_metadata : empty_.norm_metadata,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.norm_metadata.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::DiscreteMatrixSummary>
+    discreteMatrixSummary(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->discrete_matrices
+                                : empty_.discrete_matrices,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.discrete_matrices.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::ReducedMatrixSummary>
+    reducedMatrixSummary(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->reduced_matrices
+                                : empty_.reduced_matrices,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.reduced_matrices.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::CoefficientPropertySummary>
+    coefficientProperties(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->coefficient_properties
+                                : empty_.coefficient_properties,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.coefficient_properties.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::BoundarySymbolSummary>
+    boundarySymbol(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->boundary_symbols
+                                : empty_.boundary_symbols,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.boundary_symbols.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::InfSupEstimateSummary>
+    infSupEstimate(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->inf_sup_estimates
+                                : empty_.inf_sup_estimates,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.inf_sup_estimates.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::DAEStructureEvidenceSummary>
+    daeStructureEvidence(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->dae_structure_evidence
+                                : empty_.dae_structure_evidence,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.dae_structure_evidence.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::QuadratureAdequacySummary>
+    quadratureAdequacy(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->quadrature_adequacy
+                                : empty_.quadrature_adequacy,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.quadrature_adequacy.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::NullspaceDegeneracySummary>
+    nullspaceDegeneracy(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->nullspace_degeneracies
+                                : empty_.nullspace_degeneracies,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.nullspace_degeneracies.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::ParameterScaleSummary>
+    parameterScale(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->parameter_scales
+                                : empty_.parameter_scales,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.parameter_scales.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::StabilizationAdequacySummary>
+    stabilizationAdequacy(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->stabilization_adequacy
+                                : empty_.stabilization_adequacy,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.stabilization_adequacy.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::InitialCompatibilitySummary>
+    initialCompatibility(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->initial_compatibility
+                                : empty_.initial_compatibility,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.initial_compatibility.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::LocalStencilSummary>
+    localStencil(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->local_stencils
+                                : empty_.local_stencils,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.local_stencils.push_back(summary);
+                     });
+    }
+
+    [[nodiscard]] std::optional<analysis::NumericalErrorBudgetSummary>
+    numericalErrorBudget(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        return first(summaries_ ? summaries_->numerical_error_budgets
+                                : empty_.numerical_error_budgets,
+                     request,
+                     [](auto& set, const auto& summary) {
+                         set.numerical_error_budgets.push_back(summary);
+                     });
+    }
+
+private:
+    template <typename Summary, typename Inserter>
+    [[nodiscard]] static std::optional<Summary>
+    first(const std::vector<Summary>& summaries,
+          const analysis::AnalysisSummaryRequest& request,
+          Inserter insert)
+    {
+        return firstSummaryCoveringRequest(summaries, request, insert);
+    }
+
+    const analysis::AnalysisSummarySet* summaries_{nullptr};
+    bool pending_{false};
+    static const analysis::AnalysisSummarySet empty_;
+};
+
+const analysis::AnalysisSummarySet FESystemAnalysisAssemblyAccess::empty_{};
+
+class FESystemAnalysisMeshAccess final : public analysis::MeshAccess {
+public:
+    FESystemAnalysisMeshAccess(const assembly::IMeshAccess* mesh,
+                               const analysis::AnalysisSummarySet* summaries,
+                               std::string revision,
+                               bool pending)
+        : mesh_(mesh),
+          summaries_(summaries),
+          revision_(std::move(revision)),
+          pending_(pending)
+    {}
+
+    [[nodiscard]] bool evidencePending() const noexcept override {
+        return pending_;
+    }
+
+    [[nodiscard]] std::string meshRevision() const override {
+        return revision_;
+    }
+
+    [[nodiscard]] std::optional<analysis::MeshGeometryQualitySummary>
+    meshGeometryQuality(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        if (summaries_) {
+            auto summary = firstSummaryCoveringRequest(
+                summaries_->mesh_geometry_quality,
+                request,
+                [](auto& set, const auto& value) {
+                    set.mesh_geometry_quality.push_back(value);
+                });
+            if (summary) {
+                return summary;
+            }
+        }
+        if (mesh_ == nullptr) {
+            return std::nullopt;
+        }
+        auto summary = buildMeshGeometryQualitySummary(*mesh_);
+        if (!summary) {
+            return std::nullopt;
+        }
+        summary->domain = request.domain;
+        return summary;
+    }
+
+    [[nodiscard]] std::optional<analysis::RobustnessTrendSummary>
+    refinementExperiment(const analysis::AnalysisSummaryRequest& request,
+                         const analysis::AssemblyAccess&) const override
+    {
+        if (summaries_ == nullptr) {
+            return std::nullopt;
+        }
+        return firstSummaryCoveringRequest(
+            summaries_->robustness_trends,
+            request,
+            [](auto& set, const auto& summary) {
+                set.robustness_trends.push_back(summary);
+            });
+    }
+
+private:
+    const assembly::IMeshAccess* mesh_{nullptr};
+    const analysis::AnalysisSummarySet* summaries_{nullptr};
+    std::string revision_;
+    bool pending_{false};
+};
+
+class FESystemAnalysisSolverAccess final : public analysis::SolverAccess {
+public:
+    FESystemAnalysisSolverAccess(const analysis::AnalysisSummarySet* summaries,
+                                 bool pending)
+        : summaries_(summaries), pending_(pending) {}
+
+    [[nodiscard]] bool evidencePending() const noexcept override {
+        return pending_;
+    }
+
+    [[nodiscard]] std::optional<analysis::TemporalStabilitySummary>
+    temporalStability(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        if (summaries_ == nullptr) {
+            return std::nullopt;
+        }
+        return firstSummaryCoveringRequest(
+            summaries_->temporal_stability,
+            request,
+            [](auto& set, const auto& summary) {
+                set.temporal_stability.push_back(summary);
+            });
+    }
+
+    [[nodiscard]] std::optional<analysis::SchurComplementSummary>
+    schurComplement(const analysis::AnalysisSummaryRequest& request) const override
+    {
+        if (summaries_ == nullptr) {
+            return std::nullopt;
+        }
+        return firstSummaryCoveringRequest(
+            summaries_->schur_complements,
+            request,
+            [](auto& set, const auto& summary) {
+                set.schur_complements.push_back(summary);
+            });
+    }
+
+private:
+    const analysis::AnalysisSummarySet* summaries_{nullptr};
+    bool pending_{false};
+};
+
 [[nodiscard]] bool hasTemporalMetadata(
     const std::vector<analysis::ContributionDescriptor>& contributions,
     const std::vector<analysis::VariableDescriptor>& variables)
@@ -4674,11 +5003,11 @@ void FESystem::addAnalysisSummaries(analysis::AnalysisSummarySet summaries) {
     if (!registered_analysis_summaries_) {
         registered_analysis_summaries_.emplace();
     }
-    mergeAnalysisSummarySets(*registered_analysis_summaries_, summaries);
+    appendRegisteredAnalysisSummarySet(*registered_analysis_summaries_, summaries);
     if (!analysis_summaries_) {
         analysis_summaries_.emplace();
     }
-    mergeAnalysisSummarySets(*analysis_summaries_, summaries);
+    appendRegisteredAnalysisSummarySet(*analysis_summaries_, summaries);
     invalidateAnalysisCache();
 }
 
@@ -4719,7 +5048,7 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
 
     analysis::AnalysisSummarySet summaries;
     if (registered_analysis_summaries_) {
-        mergeAnalysisSummarySets(summaries, *registered_analysis_summaries_);
+        appendRegisteredAnalysisSummarySet(summaries, *registered_analysis_summaries_);
     }
     const auto registered_summary_count = summaries.totalSummaryCount();
 
@@ -5527,7 +5856,32 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
     }
 
     auto analyzer = analysis::ProblemAnalyzer::createDefault();
-    return analyzer.analyze(ctx);
+    auto producer_registry =
+        analysis::AnalysisSummaryProducerRegistry::createDefault();
+    const auto* summaries =
+        analysis_summaries_ ? &*analysis_summaries_ : nullptr;
+    const bool assembled_backend_pending =
+        !summariesHaveAssembledEvidence(summaries);
+    const auto revision = operatorRevisionSnapshot();
+    std::ostringstream mesh_revision;
+    mesh_revision << "mesh:g" << revision.mesh.geometry
+                  << ":t" << revision.mesh.topology
+                  << ":o" << revision.mesh.ownership
+                  << ":n" << revision.mesh.numbering
+                  << ":layout" << revision.mesh.field_layout;
+    FESystemAnalysisAssemblyAccess assembly_access(summaries,
+                                                   assembled_backend_pending);
+    FESystemAnalysisMeshAccess mesh_access(mesh_access_.get(),
+                                           summaries,
+                                           mesh_revision.str(),
+                                           mesh_access_ == nullptr);
+    FESystemAnalysisSolverAccess solver_access(summaries,
+                                               assembled_backend_pending);
+    return analyzer.analyzeWithEvidenceSynthesis(ctx,
+                                                 producer_registry,
+                                                 assembly_access,
+                                                 mesh_access,
+                                                 solver_access);
 }
 
 const analysis::ProblemAnalysisReport& FESystem::analysisReport() const {

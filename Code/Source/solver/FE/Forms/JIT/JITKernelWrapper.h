@@ -17,6 +17,7 @@
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/JIT/KernelArgs.h"
 #include "Forms/FormExpr.h"
+#include "Forms/JIT/JITSpecialization.h"
 
 #include <cstdint>
 #include <memory>
@@ -37,7 +38,6 @@ class FormIR;
 namespace jit {
 
 class JITCompiler;
-struct JITCompileSpecialization;
 
 class JITKernelWrapper final : public assembly::AssemblyKernel {
 public:
@@ -46,6 +46,7 @@ public:
         std::uint32_t n_test_dofs{0};
         std::uint32_t n_trial_dofs{0};
         bool is_affine{false};  ///< P1 simplex — enables QP-constant term hoisting in JIT
+        JITBakedBasisSpec baked_basis{};
     };
 
     struct BoundarySpecializationHint {
@@ -117,6 +118,14 @@ public:
 
     void primeCellSpecializations(std::span<const CellSpecializationHint> hints);
     void primeBoundarySpecializations(std::span<const BoundarySpecializationHint> hints);
+    [[nodiscard]] bool wantsBasisBakingHints() const noexcept
+    {
+        return options_.enable && options_.specialization.enable && options_.basis_baking.enable;
+    }
+    [[nodiscard]] const JITBasisBakeOptions& basisBakeOptions() const noexcept
+    {
+        return options_.basis_baking;
+    }
 
     [[nodiscard]] const assembly::AssemblyKernel& fallbackKernel() const noexcept { return *fallback_; }
     [[nodiscard]] std::shared_ptr<const assembly::AssemblyKernel> fallbackKernelShared() const noexcept { return fallback_; }
@@ -186,6 +195,9 @@ private:
 	        std::uint32_t n_test_dofs_plus{0};
 	        std::uint32_t n_trial_dofs_plus{0};
 
+	        bool has_basis_bake_hash{false};
+	        std::uint64_t basis_bake_hash{0};
+
 	        friend bool operator==(const SpecializationKey& a, const SpecializationKey& b) noexcept
 	        {
 	            return a.role == b.role &&
@@ -201,7 +213,9 @@ private:
 	                   a.has_n_trial_dofs_plus == b.has_n_trial_dofs_plus &&
 	                   a.n_qpts_plus == b.n_qpts_plus &&
 	                   a.n_test_dofs_plus == b.n_test_dofs_plus &&
-	                   a.n_trial_dofs_plus == b.n_trial_dofs_plus;
+	                   a.n_trial_dofs_plus == b.n_trial_dofs_plus &&
+	                   a.has_basis_bake_hash == b.has_basis_bake_hash &&
+	                   a.basis_bake_hash == b.basis_bake_hash;
 	        }
 	    };
 
@@ -229,6 +243,8 @@ private:
 	            mix(static_cast<std::uint64_t>(k.n_qpts_plus));
 	            mix(static_cast<std::uint64_t>(k.n_test_dofs_plus));
 	            mix(static_cast<std::uint64_t>(k.n_trial_dofs_plus));
+	            mix(static_cast<std::uint64_t>(k.has_basis_bake_hash ? 1u : 0u));
+	            mix(k.basis_bake_hash);
 
 	            return static_cast<std::size_t>(h);
 	        }
@@ -244,6 +260,12 @@ private:
 	        IntegralDomain domain,
 	        const assembly::AssemblyContext& ctx_minus,
 	        const assembly::AssemblyContext* ctx_plus);
+    [[nodiscard]] SpecializationKey makeSpecializationKey(
+        KernelRole role,
+        const JITCompileSpecialization& specialization,
+        bool include_basis_bake) const noexcept;
+    void rememberPrimedBasisBake(KernelRole role, const JITCompileSpecialization& specialization);
+    void attachPrimedBasisBake(KernelRole role, JITCompileSpecialization& specialization);
     [[nodiscard]] std::shared_ptr<const CompiledDispatch> compileSpecializedDispatch(
         KernelRole role,
         const FormIR& ir,
@@ -270,6 +292,9 @@ private:
 	    std::unordered_map<SpecializationKey, std::shared_ptr<CompiledDispatch>, SpecializationKeyHash>
 	        specialized_dispatch_{};
 	    std::unordered_set<SpecializationKey, SpecializationKeyHash> attempted_specializations_{};
+	    std::unordered_map<SpecializationKey, JITBakedBasisSpec, SpecializationKeyHash>
+	        primed_basis_bake_by_shape_{};
+	    std::unordered_set<SpecializationKey, SpecializationKeyHash> ambiguous_basis_bake_shapes_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_hits_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_compiles_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_skips_{};

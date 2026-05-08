@@ -184,6 +184,8 @@ public:
         return analysis_summaries_ ? &*analysis_summaries_ : nullptr;
     }
     [[nodiscard]] bool hasSummaryKind(AnalysisSummaryKind kind) const noexcept;
+    [[nodiscard]] bool hasSummaryForRequest(
+        const AnalysisSummaryRequest& request) const noexcept;
     [[nodiscard]] CertificationClass summaryCertificationOrUnknown(
         AnalysisSummaryKind kind,
         CertificationClass when_present) const noexcept;

@@ -107,6 +107,76 @@ void expectDenseDataNear(const std::vector<Real>& actual,
 
 } // namespace
 
+TEST(JITBasisBaking, DumpedIRContainsBakedScalarBasisConstants)
+{
+    requireLLVMJITOrSkip();
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto ir = compiler.compileBilinear((u * v).dx());
+    const auto term_indices = cellTermIndices(ir);
+    ASSERT_FALSE(term_indices.empty());
+
+    forms::JITOptions opt = makeUnitTestJITOptions();
+    opt.cache_kernels = false;
+    opt.dump_llvm_ir = true;
+    opt.dump_llvm_ir_optimized = false;
+    opt.dump_directory = "svmp_fe_jit_dumps_tests_basis_baking";
+    std::filesystem::remove_all(opt.dump_directory);
+
+    jit::JITCompileSpecialization spec;
+    spec.domain = IntegralDomain::Cell;
+    spec.n_qpts_minus = 1u;
+    spec.n_test_dofs_minus = 4u;
+    spec.n_trial_dofs_minus = 4u;
+    spec.is_affine = true;
+    spec.baked_basis.enabled = true;
+    spec.baked_basis.geometry_affine = true;
+    spec.baked_basis.hash = 0x8765'4321'feed'cafeULL;
+
+    auto fill_side = [](jit::JITBakedBasisSide& side,
+                        std::uint64_t hash,
+                        std::vector<double> values) {
+        side.enabled = true;
+        side.scalar_basis = true;
+        side.n_qpts = 1u;
+        side.n_dofs = 4u;
+        side.basis_hash = hash;
+        side.quadrature_hash = 0x0102'0304'0506'0708ULL;
+        side.table_hash = hash ^ 0xa5a5'a5a5'a5a5'a5a5ULL;
+        side.scalar_values_qmajor = std::move(values);
+    };
+    fill_side(spec.baked_basis.test, 0x1111'2222'3333'4444ULL, {2.0, 3.0, 5.0, 7.0});
+    fill_side(spec.baked_basis.trial, 0x9999'aaaa'bbbb'ccccULL, {11.0, 13.0, 17.0, 19.0});
+
+    auto engine = forms::jit::JITEngine::create(opt);
+    ASSERT_NE(engine, nullptr);
+    forms::jit::LLVMGen gen(opt);
+
+    constexpr std::string_view symbol = "jit_basis_bake_probe";
+    std::uintptr_t addr = 0u;
+    const auto result = gen.compileAndAddKernel(*engine,
+                                                ir,
+                                                term_indices,
+                                                IntegralDomain::Cell,
+                                                /*boundary_marker=*/-1,
+                                                /*interface_marker=*/-1,
+                                                symbol,
+                                                addr,
+                                                &spec);
+    ASSERT_TRUE(result.ok) << result.message;
+    ASSERT_NE(addr, 0u);
+
+    const auto before_ir =
+        readFileToString(std::filesystem::path(opt.dump_directory) /
+                         (std::string(symbol) + "_before.ll"));
+    ASSERT_FALSE(before_ir.empty());
+    EXPECT_NE(before_ir.find("2.000000e+00"), std::string::npos);
+    EXPECT_NE(before_ir.find("1.100000e+01"), std::string::npos);
+}
+
 TEST(JITVectorization, VectorizedKernelFasterOrEqualToScalar)
 {
     requireLLVMJITOrSkip();

@@ -2784,6 +2784,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	            (specialization != nullptr) ? specialization->n_trial_dofs_plus : std::optional<std::uint32_t>{};
 
         const bool is_affine = (specialization != nullptr) && specialization->is_affine;
+        const auto* baked_basis =
+            (specialization != nullptr &&
+             specialization->baked_basis.enabled &&
+             domain == IntegralDomain::Cell)
+                ? &specialization->baked_basis
+                : nullptr;
 
         // Budget-aware loop unrolling: suppress_dof_unroll gates test/trial
         // DOF loops; suppress_qp_unroll additionally gates QP loops.
@@ -4789,6 +4795,170 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return loadRealPtrAt(basis_base, offset64);
         };
 
+        auto constantU32 = [](llvm::Value* v) -> std::optional<std::uint32_t> {
+            if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(v)) {
+                return static_cast<std::uint32_t>(c->getZExtValue());
+            }
+            return std::nullopt;
+        };
+
+        auto bakedSide = [&](bool test_side) -> const JITBakedBasisSide* {
+            if (baked_basis == nullptr) {
+                return nullptr;
+            }
+            const auto& side_spec = test_side ? baked_basis->test : baked_basis->trial;
+            if (!side_spec.enabled) {
+                return nullptr;
+            }
+
+            const auto& expected_qpts = fixed_n_qpts_minus;
+            const auto& expected_dofs = test_side ? fixed_n_test_dofs_minus : fixed_n_trial_dofs_minus;
+            if (!expected_qpts || !expected_dofs ||
+                *expected_qpts != side_spec.n_qpts ||
+                *expected_dofs != side_spec.n_dofs) {
+                return nullptr;
+            }
+            return &side_spec;
+        };
+
+        auto emitBakedTableValue = [&](const std::vector<double>& values,
+                                       std::uint32_t n_qpts,
+                                       std::uint32_t n_dofs,
+                                       std::uint32_t values_per_entry,
+                                       std::uint32_t component,
+                                       llvm::Value* dof_index,
+                                       llvm::Value* q_index) -> llvm::Value* {
+            if (values_per_entry == 0u || component >= values_per_entry ||
+                n_qpts == 0u || n_dofs == 0u) {
+                return nullptr;
+            }
+
+            const std::size_t entry_count =
+                static_cast<std::size_t>(n_qpts) * static_cast<std::size_t>(n_dofs);
+            const std::size_t expected_size = entry_count * static_cast<std::size_t>(values_per_entry);
+            if (values.size() < expected_size ||
+                entry_count > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
+                return nullptr;
+            }
+
+            const auto dof = constantU32(dof_index);
+            const auto q = constantU32(q_index);
+            if (dof && q) {
+                if (*dof >= n_dofs || *q >= n_qpts) {
+                    return nullptr;
+                }
+                const std::size_t entry =
+                    static_cast<std::size_t>(*q) * static_cast<std::size_t>(n_dofs) +
+                    static_cast<std::size_t>(*dof);
+                return rc(values[entry * static_cast<std::size_t>(values_per_entry) +
+                                 static_cast<std::size_t>(component)]);
+            }
+
+            constexpr std::size_t kMaxDynamicBakedSelectEntries = 64u;
+            if ((!dof && suppress_dof_unroll) ||
+                (!q && suppress_qp_unroll) ||
+                entry_count > kMaxDynamicBakedSelectEntries) {
+                return nullptr;
+            }
+
+            auto* q_scaled = builder.CreateMul(q_index, builder.getInt32(n_dofs));
+            auto* flat_index = builder.CreateAdd(q_scaled, dof_index);
+            llvm::Value* out = rc(0.0);
+            for (std::size_t entry = 0; entry < entry_count; ++entry) {
+                const auto entry_u32 = static_cast<std::uint32_t>(entry);
+                auto* is_entry = builder.CreateICmpEQ(flat_index, builder.getInt32(entry_u32));
+                const double value = values[entry * static_cast<std::size_t>(values_per_entry) +
+                                            static_cast<std::size_t>(component)];
+                out = builder.CreateSelect(is_entry, rc(value), out);
+            }
+            return out;
+        };
+
+        auto bakedBasisScalar = [&](bool test_side,
+                                    llvm::Value* dof_index,
+                                    llvm::Value* q_index) -> llvm::Value* {
+            const auto* side_spec = bakedSide(test_side);
+            if (side_spec == nullptr || side_spec->scalar_values_qmajor.empty()) {
+                return nullptr;
+            }
+            return emitBakedTableValue(side_spec->scalar_values_qmajor,
+                                       side_spec->n_qpts,
+                                       side_spec->n_dofs,
+                                       1u,
+                                       0u,
+                                       dof_index,
+                                       q_index);
+        };
+
+        auto loadBasisScalarMaybeBaked = [&](const SideView& side,
+                                             bool test_side,
+                                             llvm::Value* dof_index,
+                                             llvm::Value* q_index) -> llvm::Value* {
+            if (auto* baked = bakedBasisScalar(test_side, dof_index, q_index)) {
+                return baked;
+            }
+            return loadBasisScalar(test_side ? side.test_basis_values : side.trial_basis_values,
+                                   test_side ? side.n_test_dofs : side.n_trial_dofs,
+                                   dof_index,
+                                   q_index);
+        };
+
+        auto bakedRefGradient = [&](bool test_side,
+                                    llvm::Value* dof_index,
+                                    llvm::Value* q_index)
+            -> std::optional<std::array<llvm::Value*, 3>> {
+            const auto* side_spec = bakedSide(test_side);
+            if (side_spec == nullptr || side_spec->ref_gradients_qmajor.empty()) {
+                return std::nullopt;
+            }
+            std::array<llvm::Value*, 3> out{};
+            for (std::uint32_t c = 0; c < 3u; ++c) {
+                out[c] = emitBakedTableValue(side_spec->ref_gradients_qmajor,
+                                             side_spec->n_qpts,
+                                             side_spec->n_dofs,
+                                             3u,
+                                             c,
+                                             dof_index,
+                                             q_index);
+                if (out[c] == nullptr) {
+                    return std::nullopt;
+                }
+            }
+            return out;
+        };
+
+        auto bakedRefHessian = [&](bool test_side,
+                                   llvm::Value* dof_index,
+                                   llvm::Value* q_index)
+            -> std::optional<std::array<llvm::Value*, 9>> {
+            const auto* side_spec = bakedSide(test_side);
+            if (side_spec == nullptr || side_spec->ref_hessians_qmajor.empty()) {
+                return std::nullopt;
+            }
+            std::array<llvm::Value*, 9> out{};
+            for (std::size_t k = 0; k < 9u; ++k) {
+                out[k] = emitBakedTableValue(side_spec->ref_hessians_qmajor,
+                                             side_spec->n_qpts,
+                                             side_spec->n_dofs,
+                                             9u,
+                                             static_cast<std::uint32_t>(k),
+                                             dof_index,
+                                             q_index);
+                if (out[k] == nullptr) {
+                    return std::nullopt;
+                }
+            }
+            return out;
+        };
+
+        auto loadInverseJacobianComponent = [&](const SideView& side,
+                                                std::uint32_t row,
+                                                std::uint32_t col) -> llvm::Value* {
+            auto* base9_64 = builder.getInt64(0);
+            const auto idx = static_cast<std::uint64_t>(row * 3u + col);
+            return loadRealPtrAt(side.inverse_jacobians, builder.CreateAdd(base9_64, builder.getInt64(idx)));
+        };
+
         auto loadVec3FromTable = [&](llvm::Value* base_ptr,
                                      llvm::Value* n_dofs,
                                      llvm::Value* dof_index,
@@ -4813,6 +4983,32 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto* y = loadRealPtrAt(base_ptr, builder.CreateAdd(base3_64, builder.getInt64(1)));
             auto* z = loadRealPtrAt(base_ptr, builder.CreateAdd(base3_64, builder.getInt64(2)));
             return {x, y, z};
+        };
+
+        auto loadScalarPhysicalGradientMaybeBaked = [&](const SideView& side,
+                                                        bool test_side,
+                                                        llvm::Value* dof_index,
+                                                        llvm::Value* q_index) -> std::array<llvm::Value*, 3> {
+            if (baked_basis != nullptr && baked_basis->geometry_affine) {
+                if (const auto g_ref = bakedRefGradient(test_side, dof_index, q_index)) {
+                    std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
+                    for (std::uint32_t phys = 0; phys < 3u; ++phys) {
+                        llvm::Value* acc = nullptr;
+                        for (std::uint32_t ref = 0; ref < 3u; ++ref) {
+                            auto* coeff = (*g_ref)[ref];
+                            auto* Jij = loadInverseJacobianComponent(side, ref, phys);
+                            auto* term = builder.CreateFMul(Jij, coeff);
+                            acc = acc ? builder.CreateFAdd(acc, term) : term;
+                        }
+                        out[phys] = acc ? acc : rc(0.0);
+                    }
+                    return out;
+                }
+            }
+            return loadVec3FromTableQMajor(test_side ? side.test_phys_grads_xyz : side.trial_phys_grads_xyz,
+                                           test_side ? side.n_test_dofs : side.n_trial_dofs,
+                                           dof_index,
+                                           q_index);
         };
 
         auto loadMat3FromTable = [&](llvm::Value* base_ptr,
@@ -4846,6 +5042,39 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
             return out;
+        };
+
+        auto loadScalarPhysicalHessianMaybeBaked = [&](const SideView& side,
+                                                       bool test_side,
+                                                       llvm::Value* dof_index,
+                                                       llvm::Value* q_index,
+                                                       std::uint32_t dim) -> CodeValue {
+            if (baked_basis != nullptr && baked_basis->geometry_affine) {
+                if (const auto H_ref = bakedRefHessian(test_side, dof_index, q_index)) {
+                    CodeValue out = makeMatrix(dim, dim);
+                    for (std::uint32_t r = 0; r < dim; ++r) {
+                        for (std::uint32_t c = 0; c < dim; ++c) {
+                            llvm::Value* acc = nullptr;
+                            for (std::uint32_t a = 0; a < dim; ++a) {
+                                for (std::uint32_t b = 0; b < dim; ++b) {
+                                    auto* coeff = (*H_ref)[a * 3u + b];
+                                    auto* J_ar = loadInverseJacobianComponent(side, a, r);
+                                    auto* J_bc = loadInverseJacobianComponent(side, b, c);
+                                    auto* term = builder.CreateFMul(builder.CreateFMul(J_ar, coeff), J_bc);
+                                    acc = acc ? builder.CreateFAdd(acc, term) : term;
+                                }
+                            }
+                            out.elems[static_cast<std::size_t>(r * dim + c)] = acc ? acc : rc(0.0);
+                        }
+                    }
+                    return out;
+                }
+            }
+            return loadMatDimFromTable(test_side ? side.test_phys_hessians : side.trial_phys_hessians,
+                                       side.n_qpts,
+                                       dof_index,
+                                       q_index,
+                                       dim);
         };
 
         auto loadMatDimFromTableQMajor = [&](llvm::Value* base_ptr,
@@ -4933,10 +5162,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             CodeValue sb_val = makeZero(shape);
             auto* n_dofs = test_side ? side.n_test_dofs : side.n_trial_dofs;
             auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-            const auto g = loadVec3FromTableQMajor(test_side ? side.test_phys_grads_xyz : side.trial_phys_grads_xyz,
-                                                   n_dofs,
-                                                   dof_index,
-                                                   product_grad_q_index);
+            const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, product_grad_q_index);
             const auto comp_flags = emitComponentFlags(dof_index, dofs_per_comp, vd);
             for (std::size_t r = 0; r < vd; ++r) {
                 for (std::size_t d = 0; d < dim; ++d) {
@@ -5013,10 +5239,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             auto* j = builder.CreateAdd(base, jj);
                             auto* j64 = builder.CreateZExt(j, i64);
                             auto* cj = loadRealPtrAt(coeffs, j64);
-                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz,
-                                                                    side.n_trial_dofs,
-                                                                    j,
-                                                                    jac_q_index);
+                            const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, jac_q_index);
                             std::vector<llvm::Value*> terms;
                             terms.reserve(dim);
                             for (std::size_t d = 0; d < dim; ++d) {
@@ -5275,10 +5498,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     builder.CreateUDiv(side.n_trial_dofs,
                                        builder.getInt32(static_cast<std::uint32_t>(vd)));
                 const auto comp_flags = emitComponentFlags(dof_index, dofs_per_comp, vd);
-                auto* phi = loadBasisScalar(side.trial_basis_values,
-                                            side.n_trial_dofs,
-                                            dof_index,
-                                            q);
+                auto* phi = loadBasisScalarMaybeBaked(side, false, dof_index, q);
                 for (std::size_t c = 0; c < vd; ++c) {
                     sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, rc(0.0));
                 }
@@ -5633,7 +5853,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                auto* sum = emitReduceSumScalar(side.n_trial_dofs, tag + ".sum", [&](llvm::Value* j) -> llvm::Value* {
 	                    auto* j64 = builder.CreateZExt(j, i64);
 	                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                    auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
+	                    auto* phi = loadBasisScalarMaybeBaked(side, false, j, q_index);
 	                    return builder.CreateFMul(cj, phi);
 	                });
 	                builder.CreateBr(merge);
@@ -5689,7 +5909,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* j = builder.CreateAdd(base, jj);
 	                        auto* j64 = builder.CreateZExt(j, i64);
 	                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                        auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
+	                        auto* phi = loadBasisScalarMaybeBaked(side, false, j, q_index);
 	                        return builder.CreateFMul(cj, phi);
 	                    });
 	                    sb_sums.push_back(sum);
@@ -5746,7 +5966,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                    emitReduceSumScalar(side.n_trial_dofs, tag + ".sum", [&](llvm::Value* j) -> llvm::Value* {
 		                        auto* j64 = builder.CreateZExt(j, i64);
 		                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                        auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
+		                        auto* phi = loadBasisScalarMaybeBaked(side, false, j, q_index);
 		                        return builder.CreateFMul(cj, phi);
 		                    });
 		                builder.CreateBr(merge);
@@ -5806,7 +6026,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                            auto* j = builder.CreateAdd(base, jj);
 		                            auto* j64 = builder.CreateZExt(j, i64);
 		                            auto* cj = loadRealPtrAt(coeffs, j64);
-		                            auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
+		                            auto* phi = loadBasisScalarMaybeBaked(side, false, j, q_index);
 		                            return builder.CreateFMul(cj, phi);
 		                        });
 		                    sb_sums.push_back(sum);
@@ -5891,7 +6111,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                auto* sum = emitReduceSumScalar(side.n_trial_dofs, std::string(tag) + ".sum", [&](llvm::Value* j) -> llvm::Value* {
 	                    auto* j64 = builder.CreateZExt(j, i64);
 	                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                    auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
+	                    auto* phi = loadBasisScalarMaybeBaked(side, false, j, q_index);
 	                    return builder.CreateFMul(cj, phi);
 	                });
 	                builder.CreateBr(merge);
@@ -5947,7 +6167,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        auto* j = builder.CreateAdd(base, jj);
 	                        auto* j64 = builder.CreateZExt(j, i64);
 	                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                        auto* phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j, q_index);
+	                        auto* phi = loadBasisScalarMaybeBaked(side, false, j, q_index);
 	                        return builder.CreateFMul(cj, phi);
 	                    });
 	                    sb_sums.push_back(sum);
@@ -6499,7 +6719,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                     case FormExprType::TestFunction: {
                         if (shape.kind == Shape::Kind::Scalar) {
-                            values[op_idx] = makeScalar(loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index));
+                            values[op_idx] = makeScalar(loadBasisScalarMaybeBaked(side, true, i_index, q_index));
                             break;
                         }
                         if (shape.kind != Shape::Kind::Vector) {
@@ -6530,7 +6750,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(sb);
                         {
                             const auto dofs_per_comp = builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
+                            const auto phi = loadBasisScalarMaybeBaked(side, true, i_index, q_index);
                             const auto comp_flags = emitComponentFlags(i_index, dofs_per_comp, vd);
                             for (std::size_t c = 0; c < vd; ++c) {
                                 sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, rc(0.0));
@@ -6558,7 +6778,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             break;
                         }
                         if (shape.kind == Shape::Kind::Scalar) {
-                            values[op_idx] = makeScalar(loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index));
+                            values[op_idx] = makeScalar(loadBasisScalarMaybeBaked(side, false, j_index, q_index));
                             break;
                         }
                         if (shape.kind != Shape::Kind::Vector) {
@@ -6589,7 +6809,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         builder.SetInsertPoint(sb);
                         {
                             const auto dofs_per_comp = builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-                            const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
+                            const auto phi = loadBasisScalarMaybeBaked(side, false, j_index, q_index);
                             const auto comp_flags = emitComponentFlags(j_index, dofs_per_comp, vd);
                             for (std::size_t c = 0; c < vd; ++c) {
                                 sb_vals[c] = builder.CreateSelect(comp_flags[c], phi, rc(0.0));
@@ -6627,7 +6847,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         auto* grad_q_index = is_affine ? builder.getInt32(0) : q_index;
                         if (kid.type == FormExprType::TestFunction) {
                             if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, grad_q_index);
+                                const auto v = loadScalarPhysicalGradientMaybeBaked(side, true, i_index, grad_q_index);
                                 values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
@@ -6646,7 +6866,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    const auto sums = emitReduceSum(side.n_trial_dofs, "grad_u", dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, grad_q_index);
+	                                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, grad_q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -6668,7 +6888,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 throw std::runtime_error("LLVMGen: grad(u) unsupported shape");
                             }
                             if (shape.kind == Shape::Kind::Vector) {
-                                const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, grad_q_index);
+                                const auto v = loadScalarPhysicalGradientMaybeBaked(side, false, j_index, grad_q_index);
                                 values[op_idx] = makeVector(shape.dims[0], v[0], v[1], v[2]);
                                 break;
                             }
@@ -6688,7 +6908,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -6720,7 +6940,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        emitReduceSum(side.n_trial_dofs, "grad_state_u", dim, [&](llvm::Value* j) {
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
-	                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                            const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 	                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -6835,7 +7055,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            auto gradTrialBasis = [&]() -> CodeValue {
 	                                CodeValue g = makeZero(shape);
 	                                if (shape.kind == Shape::Kind::Vector) {
-	                                    const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
+	                                    const auto v = loadScalarPhysicalGradientMaybeBaked(side, false, j_index, q_index);
 	                                    g = makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                                    return g;
 	                                }
@@ -6855,7 +7075,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
 		                                            const auto g =
-		                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                                loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                            std::vector<llvm::Value*> terms;
 		                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -7363,12 +7583,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            break;
 	                        }
 
-	                        auto divScalarBasis = [&](llvm::Value* n_dofs,
-	                                                  llvm::Value* dof_index,
-	                                                  llvm::Value* grads_xyz) -> llvm::Value* {
+	                        auto divScalarBasis = [&](bool test_side,
+	                                                  llvm::Value* n_dofs,
+	                                                  llvm::Value* dof_index) -> llvm::Value* {
 	                            auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                            auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                            const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
+	                            const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, q_index);
 	                            llvm::Value* out = rc(0.0);
 	                            if (vd >= 1) {
 	                                out = builder.CreateSelect(builder.CreateICmpEQ(comp, builder.getInt32(0)), g[0], out);
@@ -7398,7 +7618,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             llvm::Value* v_sb = rc(0.0);
                             builder.SetInsertPoint(sb);
-                            v_sb = divScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
+                            v_sb = divScalarBasis(/*test_side=*/true, side.n_test_dofs, i_index);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
@@ -7425,7 +7645,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             llvm::Value* v_sb = rc(0.0);
                             builder.SetInsertPoint(sb);
-                            v_sb = divScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
+                            v_sb = divScalarBasis(/*test_side=*/false, side.n_trial_dofs, j_index);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
@@ -7465,7 +7685,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    side.n_trial_dofs, "div_u_sb", [&](llvm::Value* j) -> llvm::Value* {
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        auto* div_phi = divScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+		                                        auto* div_phi = divScalarBasis(/*test_side=*/false, side.n_trial_dofs, j);
 		                                        return builder.CreateFMul(cj, div_phi);
 		                                    });
 	                                builder.CreateBr(merge);
@@ -7503,7 +7723,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                        return builder.CreateFMul(cj, g[comp]);
 		                                    });
 		                                div = builder.CreateFAdd(div, acc);
@@ -7651,12 +7871,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
                         const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
-                        auto curlScalarBasis = [&](llvm::Value* n_dofs,
-                                                   llvm::Value* dof_index,
-                                                   llvm::Value* grads_xyz) -> std::array<llvm::Value*, 3> {
+                        auto curlScalarBasis = [&](bool test_side,
+                                                   llvm::Value* n_dofs,
+                                                   llvm::Value* dof_index) -> std::array<llvm::Value*, 3> {
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
+	                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, q_index);
 	                        llvm::Value* x = rc(0.0);
 	                        llvm::Value* y = rc(0.0);
 	                        llvm::Value* z = rc(0.0);
@@ -7694,7 +7914,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(sb);
-                            sb_vals = curlScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
+                            sb_vals = curlScalarBasis(/*test_side=*/true, side.n_test_dofs, i_index);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
@@ -7725,7 +7945,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(sb);
-                            sb_vals = curlScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
+                            sb_vals = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j_index);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
@@ -7775,7 +7995,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
 	                                    auto* j64 = builder.CreateZExt(j, i64);
 	                                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                                    const auto phi = curlScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+	                                    const auto phi = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j);
 	                                    std::vector<llvm::Value*> terms;
 	                                    terms.reserve(3u);
 	                                    for (std::size_t d = 0; d < 3u; ++d) {
@@ -7879,7 +8099,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
 	                                        const auto g =
-	                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(3u);
 	                                        for (std::size_t d = 0; d < 3u; ++d) {
@@ -7992,7 +8212,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                auto* j64 = builder.CreateZExt(j, i64);
 	                                auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 	                                const auto H =
-	                                    loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+	                                    loadScalarPhysicalHessianMaybeBaked(side, false, j, q_index, dim_u32);
 	                                std::vector<llvm::Value*> terms;
 	                                terms.reserve(mat_len);
 	                                for (std::size_t i = 0; i < mat_len; ++i) {
@@ -8012,13 +8232,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        };
 
                         if (kid.type == FormExprType::TestFunction) {
-                            values[op_idx] = loadMatDimFromTable(side.test_phys_hessians, side.n_qpts, i_index, q_index, dim_u32);
+                            values[op_idx] = loadScalarPhysicalHessianMaybeBaked(side, true, i_index, q_index, dim_u32);
                             break;
                         }
                         if (kid.type == FormExprType::TrialFunction) {
                             values[op_idx] =
                                 is_residual ? hessCurrentSolution()
-                                            : loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32);
+                                            : loadScalarPhysicalHessianMaybeBaked(side, false, j_index, q_index, dim_u32);
                             break;
                         }
 	                        if (kid.type == FormExprType::PreviousSolutionRef) {
@@ -8080,7 +8300,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             if (dt_child.type == FormExprType::TrialFunction) {
                                 const auto H =
                                     is_residual ? hessCurrentSolution()
-                                                : loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32);
+                                                : loadScalarPhysicalHessianMaybeBaked(side, false, j_index, q_index, dim_u32);
                                 values[op_idx] = mul(makeScalar(coeff0), H);
                                 break;
                             }
@@ -9422,7 +9642,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    auto* j64 = builder.CreateZExt(j, i64);
 	                                    auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 	                                    const auto g =
-	                                        loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                        loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                    std::vector<llvm::Value*> terms;
 	                                    terms.reserve(dim);
 	                                    for (std::size_t d = 0; d < dim; ++d) {
@@ -9570,7 +9790,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    emitReduceSum(side.n_trial_dofs, "prev_grad" + std::to_string(k), dim, [&](llvm::Value* j) {
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs, j64);
-	                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                        std::vector<llvm::Value*> terms;
 	                                        terms.reserve(dim);
 	                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -10093,8 +10313,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                         auto* j = builder.CreateAdd(base, jj);
                                         auto* j64 = builder.CreateZExt(j, i64);
                                         auto* cj = loadRealPtrAt(coeffs, j64);
-                                        const auto g = loadVec3FromTableQMajor(
-                                            side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+                                        const auto g =
+                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
                                         return builder.CreateFMul(cj, g[comp]);
                                     });
                                 div_sum = builder.CreateFAdd(div_sum, acc);
@@ -10127,7 +10347,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        auto* j = builder.CreateAdd(base, jj);
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                        return builder.CreateFMul(cj, g[comp]);
 		                                    });
 		                                div = builder.CreateFAdd(div, acc);
@@ -10178,7 +10398,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs, j64);
 	                                            const auto g =
-	                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                                loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                            return builder.CreateFMul(cj, g[comp]);
 	                                        });
 	                                    div_sum = builder.CreateFAdd(div_sum, acc);
@@ -10334,7 +10554,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                                     auto* j64 = builder.CreateZExt(j, i64);
 	                                                     auto* cj = loadRealPtrAt(coeffs, j64);
 	                                                     const auto g =
-	                                                         loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                                         loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                                     std::vector<llvm::Value*> terms;
 	                                                     terms.reserve(3u);
 	                                                     for (std::size_t d = 0; d < 3u; ++d) {
@@ -10374,8 +10594,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                emitReduceSum(side.n_trial_dofs, "prev_hess" + std::to_string(k), mat_len, [&](llvm::Value* j) {
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
-		                                    const auto H = loadMatDimFromTable(
-		                                        side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+		                                    const auto H =
+		                                        loadScalarPhysicalHessianMaybeBaked(side, false, j, q_index, dim_u32);
 		                                    std::vector<llvm::Value*> terms;
 		                                    terms.reserve(mat_len);
 		                                    for (std::size_t i = 0; i < mat_len; ++i) {
@@ -11240,7 +11460,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
 		                                            const auto g =
-		                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                                loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                            std::vector<llvm::Value*> terms;
 		                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -11269,7 +11489,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
-		                                            const auto g = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                            const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                            std::vector<llvm::Value*> terms;
 	                                            terms.reserve(dim);
 		                                            for (std::size_t d = 0; d < dim; ++d) {
@@ -11408,7 +11628,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs, j64);
 		                                            const auto g =
-		                                                loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                                loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                            return builder.CreateFMul(cj, g[comp]);
 		                                        });
 		                                    div = builder.CreateFAdd(div, acc);
@@ -11540,7 +11760,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                                         auto* j64 = builder.CreateZExt(j, i64);
 	                                                         auto* cj = loadRealPtrAt(coeffs, j64);
 	                                                         const auto g =
-	                                                             loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                                             loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                                         std::vector<llvm::Value*> terms;
 	                                                         terms.reserve(3u);
 	                                                         for (std::size_t d = 0; d < 3u; ++d) {
@@ -11584,8 +11804,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    emitReduceSum(side.n_trial_dofs, "prev_hess" + std::to_string(k), mat_len, [&](llvm::Value* j) {
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
-		                                        const auto H = loadMatDimFromTable(
-		                                            side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+		                                        const auto H =
+		                                            loadScalarPhysicalHessianMaybeBaked(side, false, j, q_index, dim_u32);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(mat_len);
 		                                        for (std::size_t i = 0; i < mat_len; ++i) {
@@ -14728,7 +14948,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     if (shape.kind == Shape::Kind::Scalar) {
-                        return makeScalar(loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index));
+                        return makeScalar(loadBasisScalarMaybeBaked(side, true, i_index, q_index));
                     }
 
                     if (shape.kind != Shape::Kind::Vector) {
@@ -14761,7 +14981,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto dofs_per_comp =
                             builder.CreateUDiv(side.n_test_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                         const auto comp = builder.CreateUDiv(i_index, dofs_per_comp);
-                        const auto phi = loadBasisScalar(side.test_basis_values, side.n_test_dofs, i_index, q_index);
+                        const auto phi = loadBasisScalarMaybeBaked(side, true, i_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
                             sb_vals[c] = builder.CreateSelect(is_c, phi, rc(0.0));
@@ -14792,7 +15012,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     }
 
                     if (shape.kind == Shape::Kind::Scalar) {
-                        return makeScalar(loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index));
+                        return makeScalar(loadBasisScalarMaybeBaked(side, false, j_index, q_index));
                     }
 
                     if (shape.kind != Shape::Kind::Vector) {
@@ -14825,7 +15045,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto dofs_per_comp =
                             builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
                         const auto comp = builder.CreateUDiv(j_index, dofs_per_comp);
-                        const auto phi = loadBasisScalar(side.trial_basis_values, side.n_trial_dofs, j_index, q_index);
+                        const auto phi = loadBasisScalarMaybeBaked(side, false, j_index, q_index);
                         for (std::size_t c = 0; c < vd; ++c) {
                             auto* is_c = builder.CreateICmpEQ(comp, builder.getInt32(static_cast<std::uint32_t>(c)));
                             sb_vals[c] = builder.CreateSelect(is_c, phi, rc(0.0));
@@ -14882,7 +15102,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        if (is_plus != test_active_plus) return makeZero(shape);
 
 	                        if (shape.kind == Shape::Kind::Vector) {
-	                            const auto v = loadVec3FromTableQMajor(side.test_phys_grads_xyz, side.n_test_dofs, i_index, q_index);
+	                            const auto v = loadScalarPhysicalGradientMaybeBaked(side, true, i_index, q_index);
 	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                        }
 	                        if (shape.kind == Shape::Kind::Matrix) {
@@ -14903,7 +15123,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -14925,7 +15145,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        if (is_plus != trial_active_plus) return makeZero(shape);
 
 	                        if (shape.kind == Shape::Kind::Vector) {
-	                            const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
+	                            const auto v = loadScalarPhysicalGradientMaybeBaked(side, false, j_index, q_index);
 	                            return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                        }
 	                        if (shape.kind == Shape::Kind::Matrix) {
@@ -14945,7 +15165,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
 		                                    const auto g =
-		                                        loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                        loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                    std::vector<llvm::Value*> terms;
 		                                    terms.reserve(dim);
 		                                    for (std::size_t d = 0; d < dim; ++d) {
@@ -14977,7 +15197,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -15094,7 +15314,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            }
 	                            CodeValue g = makeZero(shape);
 	                            if (shape.kind == Shape::Kind::Vector) {
-	                                const auto v = loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j_index, q_index);
+	                                const auto v = loadScalarPhysicalGradientMaybeBaked(side, false, j_index, q_index);
 	                                return makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                            }
 	                            if (shape.kind == Shape::Kind::Matrix) {
@@ -15113,7 +15333,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs, j64);
 		                                        const auto g =
-		                                            loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                        std::vector<llvm::Value*> terms;
 		                                        terms.reserve(dim);
 		                                        for (std::size_t d = 0; d < dim; ++d) {
@@ -15247,12 +15467,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     const auto& kid = term.ir.ops[child_idx];
                     const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
-	                    auto divScalarBasis = [&](llvm::Value* n_dofs,
-	                                              llvm::Value* dof_index,
-	                                              llvm::Value* grads_xyz) -> llvm::Value* {
+	                    auto divScalarBasis = [&](bool test_side,
+	                                              llvm::Value* n_dofs,
+	                                              llvm::Value* dof_index) -> llvm::Value* {
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
+	                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, q_index);
 	                        llvm::Value* out = rc(0.0);
 	                        if (vd >= 1) {
 	                            out = builder.CreateSelect(builder.CreateICmpEQ(comp, builder.getInt32(0)), g[0], out);
@@ -15284,7 +15504,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         llvm::Value* v_sb = rc(0.0);
                         builder.SetInsertPoint(sb);
-                        v_sb = divScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
+                        v_sb = divScalarBasis(/*test_side=*/true, side.n_test_dofs, i_index);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
@@ -15313,7 +15533,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         llvm::Value* v_sb = rc(0.0);
                         builder.SetInsertPoint(sb);
-                        v_sb = divScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
+                        v_sb = divScalarBasis(/*test_side=*/false, side.n_trial_dofs, j_index);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
@@ -15353,7 +15573,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                side.n_trial_dofs, "div_u_sb", [&](llvm::Value* j) -> llvm::Value* {
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
-		                                    auto* div_phi = divScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+		                                    auto* div_phi = divScalarBasis(/*test_side=*/false, side.n_trial_dofs, j);
 		                                    return builder.CreateFMul(cj, div_phi);
 		                                });
 	                            builder.CreateBr(merge);
@@ -15389,7 +15609,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    auto* j64 = builder.CreateZExt(j, i64);
 		                                    auto* cj = loadRealPtrAt(coeffs, j64);
 		                                    const auto g =
-		                                        loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+		                                        loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 		                                    return builder.CreateFMul(cj, g[comp]);
 		                                });
 		                            div = builder.CreateFAdd(div, acc);
@@ -15507,12 +15727,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     const auto& kid = term.ir.ops[child_idx];
                     const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
-	                    auto curlScalarBasis = [&](llvm::Value* n_dofs,
-	                                               llvm::Value* dof_index,
-	                                               llvm::Value* grads_xyz) -> std::array<llvm::Value*, 3> {
+	                    auto curlScalarBasis = [&](bool test_side,
+	                                               llvm::Value* n_dofs,
+	                                               llvm::Value* dof_index) -> std::array<llvm::Value*, 3> {
 	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
 	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadVec3FromTableQMajor(grads_xyz, n_dofs, dof_index, q_index);
+	                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, q_index);
 	                        llvm::Value* x = rc(0.0);
 	                        llvm::Value* y = rc(0.0);
 	                        llvm::Value* z = rc(0.0);
@@ -15552,7 +15772,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(sb);
-                        sb_vals = curlScalarBasis(side.n_test_dofs, i_index, side.test_phys_grads_xyz);
+                        sb_vals = curlScalarBasis(/*test_side=*/true, side.n_test_dofs, i_index);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
@@ -15585,7 +15805,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(sb);
-                        sb_vals = curlScalarBasis(side.n_trial_dofs, j_index, side.trial_phys_grads_xyz);
+                        sb_vals = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j_index);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
@@ -15635,7 +15855,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
 	                                auto* j64 = builder.CreateZExt(j, i64);
 	                                auto* cj = loadRealPtrAt(coeffs, j64);
-	                                const auto phi = curlScalarBasis(side.n_trial_dofs, j, side.trial_phys_grads_xyz);
+	                                const auto phi = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j);
 	                                std::vector<llvm::Value*> terms;
 	                                terms.reserve(3u);
 	                                for (std::size_t d = 0; d < 3u; ++d) {
@@ -15735,7 +15955,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                                 auto* j64 = builder.CreateZExt(j, i64);
 	                                                 auto* cj = loadRealPtrAt(coeffs, j64);
 	                                                 const auto g =
-	                                                     loadVec3FromTableQMajor(side.trial_phys_grads_xyz, side.n_trial_dofs, j, q_index);
+	                                                     loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
 	                                                 std::vector<llvm::Value*> terms;
 	                                                 terms.reserve(3u);
 	                                                 for (std::size_t d = 0; d < 3u; ++d) {
@@ -15841,7 +16061,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                auto* j64 = builder.CreateZExt(j, i64);
 		                                auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 		                                const auto H =
-		                                    loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j, q_index, dim_u32);
+		                                    loadScalarPhysicalHessianMaybeBaked(side, false, j, q_index, dim_u32);
 		                                std::vector<llvm::Value*> terms;
 		                                terms.reserve(mat_len);
 		                                for (std::size_t i = 0; i < mat_len; ++i) {
@@ -15862,14 +16082,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                    if (kid.type == FormExprType::TestFunction) {
 	                        if (is_plus != test_active_plus) return matZero();
-	                        return loadMatDimFromTable(side.test_phys_hessians, side.n_qpts, i_index, q_index, dim_u32);
+	                        return loadScalarPhysicalHessianMaybeBaked(side, true, i_index, q_index, dim_u32);
 	                    }
 	                    if (kid.type == FormExprType::TrialFunction) {
 	                        if (is_residual) {
 	                            return hessCurrentSolution();
 	                        }
 	                        if (is_plus != trial_active_plus) return matZero();
-	                        return loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32);
+	                        return loadScalarPhysicalHessianMaybeBaked(side, false, j_index, q_index, dim_u32);
 	                    }
 		                    if (kid.type == FormExprType::PreviousSolutionRef) {
 		                        const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
@@ -15929,7 +16149,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            }
 	                            if (is_plus != trial_active_plus) return matZero();
 	                            return mul(makeScalar(coeff0),
-	                                       loadMatDimFromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index, dim_u32));
+	                                       loadScalarPhysicalHessianMaybeBaked(side, false, j_index, q_index, dim_u32));
 	                        }
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {

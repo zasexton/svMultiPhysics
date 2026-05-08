@@ -42,6 +42,7 @@ using CoefficientId = std::string;
 inline constexpr std::size_t kDefaultWorstSampleLimit = 8;
 
 enum class AnalysisSummaryKind : std::uint8_t {
+    NormMetadata,
     CoefficientProperties,
     DiscreteMatrix,
     ReducedMatrix,
@@ -78,6 +79,7 @@ enum class AnalysisSummaryKind : std::uint8_t {
 
 inline const char* toString(AnalysisSummaryKind kind) noexcept {
     switch (kind) {
+        case AnalysisSummaryKind::NormMetadata: return "NormMetadata";
         case AnalysisSummaryKind::CoefficientProperties: return "CoefficientProperties";
         case AnalysisSummaryKind::DiscreteMatrix: return "DiscreteMatrix";
         case AnalysisSummaryKind::ReducedMatrix: return "ReducedMatrix";
@@ -258,6 +260,48 @@ enum class SchurQualityClass : std::uint8_t {
     InsufficientEvidence,
 };
 
+enum class EvidenceProvenance : std::uint8_t {
+    InferredFromFormAndSpaces,
+    InferredFromBoundaryConditions,
+    InferredFromMeshMetadata,
+    InferredFromSolverSettings,
+    GeneratedFromLocalProjection,
+    GeneratedFromAssembledMatrix,
+    GeneratedFromReducedMatrix,
+    GeneratedFromRefinementExperiment,
+    MatchedToTheoremRegistry,
+    UserDeclared,
+    Unknown,
+};
+
+inline const char* toString(EvidenceProvenance provenance) noexcept {
+    switch (provenance) {
+        case EvidenceProvenance::InferredFromFormAndSpaces:
+            return "InferredFromFormAndSpaces";
+        case EvidenceProvenance::InferredFromBoundaryConditions:
+            return "InferredFromBoundaryConditions";
+        case EvidenceProvenance::InferredFromMeshMetadata:
+            return "InferredFromMeshMetadata";
+        case EvidenceProvenance::InferredFromSolverSettings:
+            return "InferredFromSolverSettings";
+        case EvidenceProvenance::GeneratedFromLocalProjection:
+            return "GeneratedFromLocalProjection";
+        case EvidenceProvenance::GeneratedFromAssembledMatrix:
+            return "GeneratedFromAssembledMatrix";
+        case EvidenceProvenance::GeneratedFromReducedMatrix:
+            return "GeneratedFromReducedMatrix";
+        case EvidenceProvenance::GeneratedFromRefinementExperiment:
+            return "GeneratedFromRefinementExperiment";
+        case EvidenceProvenance::MatchedToTheoremRegistry:
+            return "MatchedToTheoremRegistry";
+        case EvidenceProvenance::UserDeclared:
+            return "UserDeclared";
+        case EvidenceProvenance::Unknown:
+            return "Unknown";
+    }
+    return "Unknown";
+}
+
 enum class ToleranceAdequacyClass : std::uint8_t {
     Reasonable,
     TooStrictForConditioning,
@@ -273,6 +317,71 @@ struct OperatorBlockId {
     std::string contribution_id;
     std::string operator_tag;
     int marker{-1};
+};
+
+struct SummaryEvidenceMetadata {
+    AnalysisSummaryKind summary_kind{AnalysisSummaryKind::NormMetadata};
+    std::string summary_id;
+    std::string request_id;
+    std::string producer_id;
+    std::string producer_version;
+    std::string mesh_revision;
+    std::string formulation_revision;
+    std::string operator_tag;
+    std::vector<std::string> contribution_ids;
+    std::vector<VariableKey> variables;
+    DomainKind domain{DomainKind::Cell};
+    int marker{-1};
+    std::string parameter_hash;
+    std::string parameter_scope;
+    std::string state_sample_scope;
+    std::string time_scheme_scope;
+    std::string norm_id;
+    std::string theorem_id;
+    std::string mesh_family_scope;
+    std::string tolerance_metadata;
+    bool tolerance_metadata_present{false};
+    bool current_matrix_only{false};
+    bool theorem_family_evidence{false};
+    bool uniform_family_evidence{false};
+    bool inferred_evidence{false};
+    bool generated_numeric_evidence{false};
+    bool theorem_matched_evidence{false};
+    bool user_declared_evidence{false};
+    bool strict_scope_complete{false};
+    std::vector<EvidenceProvenance> provenance;
+};
+
+struct NormMetadataSummary {
+    std::string norm_id;
+    std::string scope_id;
+    std::string norm_family;
+    OperatorBlockId block;
+    std::vector<VariableKey> variables;
+    std::vector<std::string> contribution_ids;
+    std::string theorem_id;
+    std::string parameter_scope;
+    std::string state_sample_scope;
+    std::string time_scheme_scope;
+    bool norm_metadata_present{false};
+    bool norm_matrix_available{false};
+    bool mass_matrix_component_present{false};
+    bool gradient_matrix_component_present{false};
+    bool divergence_matrix_component_present{false};
+    bool curl_matrix_component_present{false};
+    bool jump_penalty_component_present{false};
+    bool trace_mass_component_present{false};
+    bool energy_or_entropy_weight_present{false};
+    bool equivalence_bounds_present{false};
+    Real equivalence_lower_bound{};
+    Real equivalence_upper_bound{};
+    NullspaceHandlingClass nullspace_handling{NullspaceHandlingClass::Unknown};
+    std::string nullspace_scope;
+    bool gauge_or_nullspace_metadata_present{false};
+    bool current_matrix_only{false};
+    bool theorem_family_scope_present{false};
+    bool uniform_family_scope_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct MatrixEntrySample {
@@ -364,6 +473,7 @@ struct CoefficientPropertySummary {
     bool local_spectrum_quadrature_coverage_complete{false};
     bool local_spectrum_fallback_global{false};
     LocalOperatorSpectrumSample worst_local_spectrum_sample;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct DiscreteMatrixSummary {
@@ -461,6 +571,7 @@ struct DiscreteMatrixSummary {
     void addWorstEntry(MatrixEntrySample sample) {
         addBoundedWorstSample(worst_entries, std::move(sample), worst_entry_sample_limit);
     }
+    SummaryEvidenceMetadata evidence;
 };
 
 struct ReducedMatrixSummary {
@@ -472,6 +583,7 @@ struct ReducedMatrixSummary {
     std::uint64_t retained_multiplier_dof_count{0};
     bool affine_terms_accounted_for{false};
     bool reduction_exact_for_analysis{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct NullspaceDegeneracySummary {
@@ -494,6 +606,7 @@ struct NullspaceDegeneracySummary {
     bool kernel_claim_evidence_present{false};
     bool constraint_rank_evidence_present{false};
     std::string reason;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct SchurComplementSummary {
@@ -533,6 +646,7 @@ struct SchurComplementSummary {
     bool block_solve_tolerance_present{false};
     Real block_solve_tolerance{};
     SchurQualityClass condition_risk_class{SchurQualityClass::InsufficientEvidence};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct RobustnessTrendSummary {
@@ -559,6 +673,7 @@ struct RobustnessTrendSummary {
     Real explicit_uniform_upper_bound{};
     bool comparable_parameter_scope{true};
     RobustnessTrendClass trend_class{RobustnessTrendClass::Unknown};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct ApplicabilitySummary {
@@ -566,10 +681,19 @@ struct ApplicabilitySummary {
     ApplicabilityClass applicability{ApplicabilityClass::Unknown};
     OperatorBlockId block;
     std::vector<VariableKey> variables;
+    std::string theorem_id;
+    std::string citation_key;
+    std::string evidence_route;
     std::string reason;
     bool inferred_from_field_descriptors{false};
     bool inferred_from_contribution_traits{false};
     bool inferred_from_block_structure{false};
+    bool theorem_registry_match_present{false};
+    bool all_assumptions_satisfied{false};
+    bool missing_assumptions_present{false};
+    std::vector<std::string> missing_assumptions;
+    std::vector<AnalysisSummaryKind> required_followup_summary_kinds;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct LocalStencilSummary {
@@ -586,6 +710,7 @@ struct LocalStencilSummary {
     void addWorstLocalEntry(MatrixEntrySample sample) {
         addBoundedWorstSample(worst_local_entries, std::move(sample), worst_entry_sample_limit);
     }
+    SummaryEvidenceMetadata evidence;
 };
 
 struct MeshGeometryQualitySummary {
@@ -623,6 +748,7 @@ struct MeshGeometryQualitySummary {
     bool cut_cell_conditioning_evidence_present{false};
     std::size_t worst_element_sample_limit{kDefaultWorstSampleLimit};
     std::vector<ElementId> worst_elements;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct FluxBalanceSummary {
@@ -646,6 +772,7 @@ struct FluxBalanceSummary {
     bool time_update_balance_present{false};
     bool steady_balance_scope{false};
     bool transient_balance_scope{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct TemporalStabilitySummary {
@@ -696,6 +823,7 @@ struct TemporalStabilitySummary {
     bool ssp_or_tvd_evidence_present{false};
     bool invariant_domain_evidence_present{false};
     bool nonlinear_stability_evidence_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct BoundarySymbolSummary {
@@ -726,6 +854,7 @@ struct BoundarySymbolSummary {
     bool mixed_corner_edge_coverage_present{false};
     WeakBoundaryEnforcementRoute weak_boundary_route{
         WeakBoundaryEnforcementRoute::Unknown};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct InfSupEstimateSummary {
@@ -748,6 +877,7 @@ struct InfSupEstimateSummary {
     bool uniform_lower_bound_value_present{false};
     bool mesh_family_scope_present{false};
     bool boundary_condition_scope_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct InfSupPairCertificationSummary {
@@ -785,6 +915,7 @@ struct InfSupPairCertificationSummary {
     bool fortin_operator_norm_bound_symbolic_present{false};
     bool projection_plan_present{false};
     std::vector<std::string> diagnostics;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct EnergyEntropySummary {
@@ -826,6 +957,7 @@ struct EnergyEntropySummary {
     bool entropy_flux_inequality_residual_present{false};
     bool entropy_flux_inequality_tolerance_present{false};
     bool entropy_dissipation_bound_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct InvariantDomainSummary {
@@ -855,6 +987,7 @@ struct InvariantDomainSummary {
     bool mass_positivity_evidence_present{false};
     std::uint64_t post_step_violation_count{0};
     std::string invariant_domain_theorem_id;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct EquilibriumPreservationSummary {
@@ -869,6 +1002,7 @@ struct EquilibriumPreservationSummary {
     bool equilibrium_scope_metadata_present{false};
     bool source_model_scope_metadata_present{false};
     bool reconstruction_scope_metadata_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct MovingDomainSummary {
@@ -887,6 +1021,7 @@ struct MovingDomainSummary {
     Real geometric_conservation_residual{};
     Real geometric_conservation_tolerance{};
     Real free_stream_preservation_residual{};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct TransferOperatorSummary {
@@ -915,6 +1050,7 @@ struct TransferOperatorSummary {
     bool interface_mass_condition_number_present{false};
     bool accepted_interface_mass_condition_bound_present{false};
     bool action_reaction_flux_metadata_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct AdjointConsistencySummary {
@@ -928,6 +1064,7 @@ struct AdjointConsistencySummary {
     bool discrete_adjoint_residual_present{false};
     Real discrete_adjoint_residual{};
     Real discrete_adjoint_tolerance{};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct ParameterScaleSummary {
@@ -954,6 +1091,7 @@ struct ParameterScaleSummary {
     Real coefficient_contrast_factor{1};
     Real layer_resolution_metric{};
     Real frequency_resolution_metric{};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct StabilizationAdequacySummary {
@@ -1005,6 +1143,7 @@ struct StabilizationAdequacySummary {
     bool mass_lumping_evidence_present{false};
     bool limiter_bounds_evidence_present{false};
     std::uint64_t violation_count{0};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct NumericalErrorBudgetSummary {
@@ -1033,6 +1172,7 @@ struct NumericalErrorBudgetSummary {
     bool recommended_tolerance_present{false};
     bool nonfinite_evidence_present{false};
     std::string reason;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct InitialCompatibilitySummary {
@@ -1052,6 +1192,7 @@ struct InitialCompatibilitySummary {
     bool invariant_domain_admissibility_residual_present{false};
     std::uint64_t checked_constraint_family_count{0};
     std::uint64_t checked_boundary_condition_count{0};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct DAEStructureEvidenceSummary {
@@ -1091,6 +1232,7 @@ struct DAEStructureEvidenceSummary {
     bool smoothness_or_regular_operator_evidence_present{false};
     Real initial_constraint_residual{};
     Real residual_tolerance{};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct CompatibleComplexSummary {
@@ -1107,6 +1249,7 @@ struct CompatibleComplexSummary {
     bool mesh_family_scope_present{false};
     bool shape_regular_mesh_evidence_present{false};
     std::uint64_t missing_space_count{0};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct NonlinearTangentSummary {
@@ -1135,6 +1278,7 @@ struct NonlinearTangentSummary {
     bool local_spectrum_quadrature_coverage_complete{false};
     bool local_spectrum_fallback_global{false};
     LocalOperatorSpectrumSample worst_local_spectrum_sample;
+    SummaryEvidenceMetadata evidence;
 };
 
 struct SpectralStructureSummary {
@@ -1161,6 +1305,7 @@ struct SpectralStructureSummary {
     Real rayleigh_quotient_lower_bound{};
     Real projection_bound{};
     NullspaceHandlingClass nullspace_handling{NullspaceHandlingClass::Unknown};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct ErrorEstimatorSummary {
@@ -1195,6 +1340,7 @@ struct ErrorEstimatorSummary {
     Real effectivity_lower_bound{};
     Real effectivity_upper_bound{};
     Real shape_regular_constant{};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct MinimumResidualStabilitySummary {
@@ -1236,6 +1382,7 @@ struct MinimumResidualStabilitySummary {
     std::string condition_bound_scope;
     std::uint64_t missing_required_metadata_count{0};
     std::uint64_t violation_count{0};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct QuadratureAdequacySummary {
@@ -1263,6 +1410,7 @@ struct QuadratureAdequacySummary {
     bool aliasing_tolerance_present{false};
     Real aliasing_indicator{};
     Real aliasing_tolerance{};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct CoupledSystemStabilitySummary {
@@ -1307,9 +1455,11 @@ struct CoupledSystemStabilitySummary {
     bool coupled_energy_coercivity_lower_bound_present{false};
     bool coupled_energy_norm_equivalence_bounds_present{false};
     bool coupled_operator_stability_evidence_present{false};
+    SummaryEvidenceMetadata evidence;
 };
 
 struct AnalysisSummarySet {
+    std::vector<NormMetadataSummary> norm_metadata;
     std::vector<CoefficientPropertySummary> coefficient_properties;
     std::vector<DiscreteMatrixSummary> discrete_matrices;
     std::vector<ReducedMatrixSummary> reduced_matrices;
@@ -1349,6 +1499,7 @@ struct AnalysisSummarySet {
 
     [[nodiscard]] std::size_t totalSummaryCount() const noexcept {
         return coefficient_properties.size()
+             + norm_metadata.size()
              + discrete_matrices.size()
              + reduced_matrices.size()
              + schur_complements.size()
@@ -1384,6 +1535,7 @@ struct AnalysisSummarySet {
 
     [[nodiscard]] bool has(AnalysisSummaryKind kind) const noexcept {
         switch (kind) {
+            case AnalysisSummaryKind::NormMetadata: return !norm_metadata.empty();
             case AnalysisSummaryKind::CoefficientProperties: return !coefficient_properties.empty();
             case AnalysisSummaryKind::DiscreteMatrix: return !discrete_matrices.empty();
             case AnalysisSummaryKind::ReducedMatrix: return !reduced_matrices.empty();

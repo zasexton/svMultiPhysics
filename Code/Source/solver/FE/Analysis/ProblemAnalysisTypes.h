@@ -782,6 +782,14 @@ struct AnalysisSummaryRequest {
     std::string request_id;
     AnalysisConfidence confidence{AnalysisConfidence::Medium};
     bool already_available{false};
+    bool strict_scope_required{true};
+    bool production_attempted{false};
+    bool production_succeeded{false};
+    bool production_pending{false};
+    bool production_unavailable{false};
+    std::string production_status;
+    std::string unavailable_reason;
+    std::vector<std::string> missing_backend_hooks;
 };
 
 /**

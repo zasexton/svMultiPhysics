@@ -476,6 +476,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         std::uint32_t specialization_text_budget_bytes{0};
         std::uint32_t specialization_bytes_per_op_estimate{58};
         std::uint32_t specialization_raw_bytes_per_op_estimate{10};
+        JITBasisBakeOptions basis_baking{};
         TensorJITOptions tensor{};
 
         bool operator==(const CompilerKey& other) const noexcept
@@ -502,6 +503,11 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
                    specialization_text_budget_bytes == other.specialization_text_budget_bytes &&
                    specialization_bytes_per_op_estimate == other.specialization_bytes_per_op_estimate &&
                    specialization_raw_bytes_per_op_estimate == other.specialization_raw_bytes_per_op_estimate &&
+                   basis_baking.enable == other.basis_baking.enable &&
+                   basis_baking.force_dof_specialization == other.basis_baking.force_dof_specialization &&
+                   basis_baking.max_baked_qpts == other.basis_baking.max_baked_qpts &&
+                   basis_baking.max_baked_dofs == other.basis_baking.max_baked_dofs &&
+                   basis_baking.max_baked_entries == other.basis_baking.max_baked_entries &&
                    tensor.mode == other.tensor.mode &&
                    tensor.force_loop_nest == other.tensor.force_loop_nest &&
                    tensor.enable_symmetry_lowering == other.tensor.enable_symmetry_lowering &&
@@ -545,6 +551,11 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             hashMix(h, static_cast<std::uint64_t>(k.specialization_text_budget_bytes));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_bytes_per_op_estimate));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_raw_bytes_per_op_estimate));
+            hashMix(h, static_cast<std::uint64_t>(k.basis_baking.enable ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.basis_baking.force_dof_specialization ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.basis_baking.max_baked_qpts));
+            hashMix(h, static_cast<std::uint64_t>(k.basis_baking.max_baked_dofs));
+            hashMix(h, static_cast<std::uint64_t>(k.basis_baking.max_baked_entries));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.mode));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.force_loop_nest ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.tensor.enable_symmetry_lowering ? 1u : 0u));
@@ -596,6 +607,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     key.specialization_text_budget_bytes = options.specialization.text_budget_bytes;
     key.specialization_bytes_per_op_estimate = options.specialization.bytes_per_op_estimate;
     key.specialization_raw_bytes_per_op_estimate = options.specialization.raw_bytes_per_op_estimate;
+    key.basis_baking = options.basis_baking;
     key.tensor = options.tensor;
 
     std::lock_guard<std::mutex> lock(*registry_mutex);

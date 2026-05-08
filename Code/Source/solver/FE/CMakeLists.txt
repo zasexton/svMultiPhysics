@@ -566,6 +566,7 @@ set(FE_ANALYSIS_HEADERS
     Analysis/ProblemAnalysisTypes.h
     Analysis/AnalysisSummaryTypes.h
     Analysis/AnalysisSummaryMatching.h
+    Analysis/AnalysisSummaryProducer.h
     Analysis/ProblemAnalysisContext.h
     Analysis/ProblemAnalyzer.h
     Analysis/FormulationRecord.h
@@ -632,6 +633,7 @@ set(FE_ANALYSIS_SOURCES
     Analysis/AdvancedStabilityAnalyzers.cpp
     Analysis/SolverCompatibilityAnalyzer.cpp
     Analysis/NumericSummaryPlanner.cpp
+    Analysis/AnalysisSummaryProducer.cpp
     Analysis/SparseMatrixSummaryScanner.cpp
     Analysis/FortinOperatorAutogeneration.cpp
     Analysis/ContributionDescriptor.cpp
@@ -2219,6 +2221,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Analysis/test_Phase6ExtendedAnalyzers.cpp
         Tests/Unit/Analysis/test_Phase7MathematicalIntegration.cpp
         Tests/Unit/Analysis/test_AnalysisEvidenceContracts.cpp
+        Tests/Unit/Analysis/test_AnalysisSummaryProducer.cpp
         Tests/Unit/Analysis/test_FortinOperatorAutogeneration.cpp
         Tests/Unit/Analysis/test_main.cpp
     )

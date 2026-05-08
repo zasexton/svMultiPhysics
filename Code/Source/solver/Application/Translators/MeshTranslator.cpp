@@ -126,23 +126,40 @@ svmp::index_t match_face_vertex_to_volume(
   return svmp::INVALID_INDEX;
 }
 
-svmp::CellShape boundary_shape_for_vertices(int dim, std::size_t n_vertices)
+std::vector<svmp::index_t> cell_corner_vertices(const svmp::MeshBase& mesh, svmp::index_t c)
+{
+  auto [ptr, count] = mesh.cell_corner_vertices_span(c);
+  return std::vector<svmp::index_t>(ptr, ptr + count);
+}
+
+std::vector<svmp::index_t> face_corner_vertices(const svmp::MeshBase& mesh, svmp::index_t f)
+{
+  auto [ptr, count] = mesh.face_vertices_span(f);
+  std::size_t n_corners = count;
+  const auto& shapes = mesh.face_shapes();
+  if (static_cast<std::size_t>(f) < shapes.size() && shapes[static_cast<std::size_t>(f)].num_corners > 0) {
+    n_corners = std::min(count, static_cast<std::size_t>(shapes[static_cast<std::size_t>(f)].num_corners));
+  }
+  return std::vector<svmp::index_t>(ptr, ptr + n_corners);
+}
+
+svmp::CellShape boundary_shape_for_corners(int dim, std::size_t n_corners, int order)
 {
   svmp::CellShape shape{};
   if (dim == 2) {
     shape.family = svmp::CellFamily::Line;
     shape.num_corners = 2;
-  } else if (n_vertices == 3u) {
+  } else if (n_corners == 3u) {
     shape.family = svmp::CellFamily::Triangle;
     shape.num_corners = 3;
-  } else if (n_vertices == 4u) {
+  } else if (n_corners == 4u) {
     shape.family = svmp::CellFamily::Quad;
     shape.num_corners = 4;
   } else {
     shape.family = svmp::CellFamily::Polygon;
-    shape.num_corners = static_cast<int>(n_vertices);
+    shape.num_corners = static_cast<int>(n_corners);
   }
-  shape.order = 1;
+  shape.order = std::max(1, order);
   shape.is_mixed_order = false;
   return shape;
 }
@@ -273,10 +290,22 @@ std::optional<MatchedBoundaryFace> match_owned_cell_boundary_face(
         continue;
       }
 
+      std::vector<svmp::index_t> oriented_face_vertices;
+      try {
+        oriented_face_vertices = mesh.base().cell_face_geometry_dofs(cell, lf);
+      } catch (const std::exception&) {
+        oriented_face_vertices.clear();
+      }
+      if (oriented_face_vertices.empty()) {
+        oriented_face_vertices = candidate;
+      }
+
       MatchedBoundaryFace match;
       match.cell = cell;
-      match.oriented_vertices = std::move(candidate);
-      match.shape = boundary_shape_for_vertices(mesh.dim(), sorted_face_vertices.size());
+      match.oriented_vertices = std::move(oriented_face_vertices);
+      match.shape = boundary_shape_for_corners(mesh.dim(),
+                                               sorted_face_vertices.size(),
+                                               mesh.base().geometry_order(cell));
       return match;
     }
   }
@@ -431,7 +460,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
       svmp::index_t local_skipped = 0;
 
       for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(face_mesh.n_cells()); ++c) {
-        auto face_cell_vertices = face_mesh.cell_vertices(c);
+        auto face_cell_vertices = cell_corner_vertices(face_mesh, c);
 
         std::vector<svmp::index_t> vol_vertex_ids;
         vol_vertex_ids.reserve(face_cell_vertices.size());
@@ -529,7 +558,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     if (adj_cell == svmp::INVALID_INDEX || !mesh.is_owned_cell(adj_cell)) {
       continue;
     }
-    auto verts = mesh.face_vertices(f);
+    auto verts = face_corner_vertices(mesh.base(), f);
     std::sort(verts.begin(), verts.end());
     boundary_face_by_vertices.emplace(make_face_vertex_key(verts), f);
   }
@@ -582,7 +611,7 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
     svmp::index_t local_skipped = 0;
 
     for (svmp::index_t c = 0; c < static_cast<svmp::index_t>(face_mesh.n_cells()); ++c) {
-      auto face_cell_vertices = face_mesh.cell_vertices(c);
+      auto face_cell_vertices = cell_corner_vertices(face_mesh, c);
 
       std::vector<svmp::index_t> vol_vertex_ids;
       vol_vertex_ids.reserve(face_cell_vertices.size());

@@ -454,6 +454,7 @@ struct DofLayoutInfo {
     }
 
     // Factory for common Lagrange spaces
+    static DofLayoutInfo Lagrange(int order, ElementType base_cell_type, int num_components = 1);
     static DofLayoutInfo Lagrange(int order, int dim, int num_verts_per_cell, int num_components = 1);
     static DofLayoutInfo DG(int order, int num_verts_per_cell, int num_components = 1);
 };

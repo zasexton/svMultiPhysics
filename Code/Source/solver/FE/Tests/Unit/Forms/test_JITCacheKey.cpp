@@ -212,6 +212,16 @@ TEST(JITCacheKey, GenericCodegenOptionsChangeKey)
                      [](auto& in) { in.jit_options.specialization.bytes_per_op_estimate += 1u; });
     expectKeyChanges("raw bytes per op",
                      [](auto& in) { in.jit_options.specialization.raw_bytes_per_op_estimate += 1u; });
+
+    expectKeyChanges("basis baking enable", [](auto& in) { in.jit_options.basis_baking.enable = false; });
+    expectKeyChanges("basis baking dof specialization",
+                     [](auto& in) { in.jit_options.basis_baking.force_dof_specialization = false; });
+    expectKeyChanges("basis baking max qpts",
+                     [](auto& in) { in.jit_options.basis_baking.max_baked_qpts += 1u; });
+    expectKeyChanges("basis baking max dofs",
+                     [](auto& in) { in.jit_options.basis_baking.max_baked_dofs += 1u; });
+    expectKeyChanges("basis baking max entries",
+                     [](auto& in) { in.jit_options.basis_baking.max_baked_entries += 1u; });
 }
 
 TEST(JITCacheKey, NonCodegenOptionsDoNotChangeKernelKey)
@@ -257,6 +267,21 @@ TEST(JITCacheKey, MatchedSpecializationInputsChangeKey)
     expectMatchedSpecializationKeyChanges("trial dofs plus",
                                           [](auto&, auto& spec) { spec.n_trial_dofs_plus = 15u; });
     expectMatchedSpecializationKeyChanges("affine flag", [](auto&, auto& spec) { spec.is_affine = false; });
+    expectMatchedSpecializationKeyChanges("baked basis presence", [](auto&, auto& spec) {
+        spec.baked_basis.enabled = true;
+        spec.baked_basis.geometry_affine = true;
+        spec.baked_basis.hash = 0x1234'5678'9abc'def0ULL;
+    });
+    expectMatchedSpecializationKeyChanges("baked basis hash", [](auto&, auto& spec) {
+        spec.baked_basis.enabled = true;
+        spec.baked_basis.geometry_affine = true;
+        spec.baked_basis.hash = 0x1234'5678'9abc'def1ULL;
+    });
+    expectMatchedSpecializationKeyChanges("baked basis geometry mode", [](auto&, auto& spec) {
+        spec.baked_basis.enabled = true;
+        spec.baked_basis.geometry_affine = false;
+        spec.baked_basis.hash = 0x1234'5678'9abc'def0ULL;
+    });
     expectMatchedSpecializationKeyChanges("optional presence",
                                           [](auto&, auto& spec) { spec.n_qpts_minus.reset(); });
     expectMatchedSpecializationKeyChanges("matched text budget",
@@ -280,6 +305,9 @@ TEST(JITCacheKey, UnmatchedSpecializationInputsAreIgnored)
     changed_spec.n_qpts_minus = 99u;
     changed_spec.n_test_dofs_minus.reset();
     changed_spec.is_affine = !changed_spec.is_affine;
+    changed_spec.baked_basis.enabled = true;
+    changed_spec.baked_basis.geometry_affine = true;
+    changed_spec.baked_basis.hash = 0xfeed'face'1234'5678ULL;
 
     auto changed = no_spec;
     changed.specialization = &changed_spec;

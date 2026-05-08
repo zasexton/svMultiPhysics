@@ -354,6 +354,22 @@ bool summaryAlreadyAvailable(const ProblemAnalysisContext& context,
                                         target_contribution_ids);
     };
     switch (kind) {
+        case AnalysisSummaryKind::NormMetadata:
+            return std::any_of(
+                summaries->norm_metadata.begin(),
+                summaries->norm_metadata.end(),
+                [&](const NormMetadataSummary& summary) {
+                    const auto& summary_scope =
+                        summary.scope_id.empty()
+                            ? summary.norm_id
+                            : summary.scope_id;
+                    const bool scope_ok =
+                        scope_id.empty() ||
+                        summary_scope.empty() ||
+                        summary_scope == scope_id;
+                    return scope_ok &&
+                           block_covers(summary.block, summary.variables);
+                });
         case AnalysisSummaryKind::CoefficientProperties:
             return std::any_of(
                 summaries->coefficient_properties.begin(),
@@ -543,14 +559,19 @@ bool summaryAlreadyAvailable(const ProblemAnalysisContext& context,
                 summaries->initial_compatibility.end(),
                 [&](const InitialCompatibilitySummary& summary) {
                     const bool scope_ok =
-                        !scope_id.empty() &&
-                        (summary.compatibility_scope == scope_id ||
-                         summary.invariant_set_id == scope_id);
+                        scope_id.empty()
+                            ? (!summary.compatibility_scope.empty() ||
+                               !summary.invariant_set_id.empty())
+                            : (summary.compatibility_scope == scope_id ||
+                               summary.invariant_set_id == scope_id);
                     if (!scope_ok) {
                         return false;
                     }
                     if (variables.empty()) {
-                        return !summary.invariant_domain_variables.empty();
+                        return !summary.invariant_domain_variables.empty() ||
+                               summary.algebraic_constraint_metadata_present ||
+                               summary.boundary_constraint_metadata_present ||
+                               summary.invariant_domain_metadata_present;
                     }
                     return variableSetCoversAll(
                         summary.invariant_domain_variables,
@@ -804,6 +825,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::ReducedMatrix,
                        claim.domain, claim.variables, i, claim,
                        source + " classified an operator block; request reduced free-free evidence after constraints");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NormMetadata,
+                       claim.domain, claim.variables, i, claim,
+                       source + " classified an operator block; request automatically inferred norm metadata, norm-matrix availability, and nullspace/gauge handling");
             addRequest(report.request_plan, context, AnalysisSummaryKind::CoefficientProperties,
                        claim.domain, claim.variables, i, claim,
                        source + " classified an elliptic/coercive structure; request coefficient positivity and anisotropy metadata");
@@ -840,6 +864,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                        claim.domain, claim.variables, i, claim,
                        source + " detected saddle-point structure; request numerical inf-sup estimate");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NormMetadata,
+                       claim.domain, claim.variables, i, claim,
+                       source + " detected saddle-point structure; request primal and multiplier norm metadata for inf-sup quotients");
             if (shouldRequestStablePairCertification(report, claim)) {
                 addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
                            claim.domain, claim.variables, i, claim,
@@ -870,6 +897,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
             addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                        claim.domain, claim.variables, i, claim,
                        source + " emitted an inf-sup claim; request estimate value, scope, and nullspace handling");
+            addRequest(report.request_plan, context, AnalysisSummaryKind::NormMetadata,
+                       claim.domain, claim.variables, i, claim,
+                       source + " emitted an inf-sup claim; request theorem-specified primal and multiplier norm metadata");
             if (shouldRequestStablePairCertification(report, claim)) {
                 addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
                            claim.domain, claim.variables, i, claim,
@@ -947,6 +977,9 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                 addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
                            claim.domain, claim.variables, i, claim,
                            source + " emitted a mixed space compatibility claim; request inf-sup evidence for the space pair");
+                addRequest(report.request_plan, context, AnalysisSummaryKind::NormMetadata,
+                           claim.domain, claim.variables, i, claim,
+                           source + " emitted a mixed space compatibility claim; request automatically inferred norm metadata for the pair");
                 if (shouldRequestStablePairCertification(report, claim)) {
                     addRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
                                claim.domain, claim.variables, i, claim,
@@ -1138,9 +1171,8 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
     }
 
     for (const auto& contribution : context.contributions()) {
-        const auto variables = contribution.test_variables.empty()
-            ? contribution.trial_variables
-            : contribution.test_variables;
+        std::vector<VariableKey> variables = contribution.test_variables;
+        appendVariables(variables, contribution.trial_variables);
 
         if (contribution.domain == DomainKind::InteriorFace ||
             contribution.domain == DomainKind::InterfaceFace) {
@@ -1197,6 +1229,40 @@ void NumericSummaryPlanner::run(const ProblemAnalysisContext& context,
                                   "ProblemAnalysisContext has boundary contribution '" +
                                       contribution.operator_tag +
                                       "' with adjoint-consistency metadata; request adjoint consistency summary",
+                                  AnalysisConfidence::Medium,
+                                  contribution.operator_tag,
+                                  contribution.contribution_id);
+            }
+        }
+
+        for (const auto& pairing : contribution.pairings) {
+            if (pairing.kind != PairingKind::ConstraintPair) {
+                continue;
+            }
+            std::vector<VariableKey> pair_variables{pairing.row_var,
+                                                    pairing.col_var};
+            addContextRequest(report.request_plan, context, AnalysisSummaryKind::InfSupEstimate,
+                              contribution.domain, pair_variables,
+                              "ProblemAnalysisContext has constraint-pair contribution '" +
+                                  contribution.operator_tag +
+                                  "'; request numerical inf-sup estimate",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
+            addContextRequest(report.request_plan, context, AnalysisSummaryKind::NormMetadata,
+                              contribution.domain, pair_variables,
+                              "ProblemAnalysisContext has constraint-pair contribution '" +
+                                  contribution.operator_tag +
+                                  "'; request primal and multiplier norm metadata",
+                              AnalysisConfidence::Medium,
+                              contribution.operator_tag,
+                              contribution.contribution_id);
+            if (!pairing.has_stabilizing_surrogate) {
+                addContextRequest(report.request_plan, context, AnalysisSummaryKind::InfSupPairCertification,
+                                  contribution.domain, pair_variables,
+                                  "ProblemAnalysisContext has constraint-pair contribution '" +
+                                      contribution.operator_tag +
+                                      "'; request metadata-driven stable-pair/Fortin certification evidence",
                                   AnalysisConfidence::Medium,
                                   contribution.operator_tag,
                                   contribution.contribution_id);

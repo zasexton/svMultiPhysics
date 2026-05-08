@@ -321,6 +321,421 @@ variablesForBlock(const OperatorBlockId& block)
                                  empty_contribution_ids);
 }
 
+[[nodiscard]] inline OperatorBlockId requestTargetBlock(
+    const AnalysisSummaryRequest& request)
+{
+    OperatorBlockId block;
+    block.domain = request.domain;
+    block.operator_tag = request.block_id;
+    block.contribution_id = request.contribution_id;
+    block.test_variables = request.test_variables.empty()
+        ? request.variables
+        : request.test_variables;
+    block.trial_variables = request.trial_variables.empty()
+        ? request.variables
+        : request.trial_variables;
+    return block;
+}
+
+[[nodiscard]] inline std::vector<std::string> requestContributionIds(
+    const AnalysisSummaryRequest& request)
+{
+    if (request.contribution_id.empty()) {
+        return {};
+    }
+    return {request.contribution_id};
+}
+
+[[nodiscard]] inline bool variablesCoverRequest(
+    const std::vector<VariableKey>& evidence,
+    DomainKind evidence_domain,
+    const AnalysisSummaryRequest& request)
+{
+    if (evidence_domain != request.domain) {
+        return false;
+    }
+    const auto target_block = requestTargetBlock(request);
+    return variableSetCoversAll(evidence, variablesForBlock(target_block));
+}
+
+[[nodiscard]] inline bool summaryBlockCoversRequest(
+    const OperatorBlockId& evidence_block,
+    const std::vector<VariableKey>& evidence_variables,
+    const std::string& evidence_contribution_id,
+    const AnalysisSummaryRequest& request)
+{
+    const auto target_block = requestTargetBlock(request);
+    const auto target_contribution_ids = requestContributionIds(request);
+    if (target_block.operator_tag.empty() &&
+        !evidence_block.operator_tag.empty() &&
+        evidence_block.contribution_id.empty() &&
+        evidence_contribution_id.empty()) {
+        return false;
+    }
+    if (target_contribution_ids.empty() &&
+        (!evidence_block.contribution_id.empty() ||
+         !evidence_contribution_id.empty())) {
+        return false;
+    }
+    return strictScopedEvidenceMatches(evidence_block,
+                                       evidence_variables,
+                                       evidence_contribution_id,
+                                       target_block,
+                                       target_contribution_ids);
+}
+
+[[nodiscard]] inline bool matrixSummaryCoversRequest(
+    const DiscreteMatrixSummary& summary,
+    const AnalysisSummaryRequest& request)
+{
+    if (!request.contribution_id.empty() &&
+        summary.block.contribution_id != request.contribution_id &&
+        std::find(summary.contribution_ids.begin(),
+                  summary.contribution_ids.end(),
+                  request.contribution_id) == summary.contribution_ids.end()) {
+        return false;
+    }
+    return summaryBlockCoversRequest(summary.block,
+                                     variablesForBlock(summary.block),
+                                     summary.block.contribution_id,
+                                     request);
+}
+
+[[nodiscard]] inline bool scopeIdCompatible(const std::string& evidence_scope,
+                                            const AnalysisSummaryRequest& request)
+{
+    return request.scope_id.empty() ||
+           evidence_scope.empty() ||
+           evidence_scope == request.scope_id;
+}
+
+[[nodiscard]] inline bool analysisSummarySetCoversRequest(
+    const AnalysisSummarySet& summaries,
+    const AnalysisSummaryRequest& request)
+{
+    const auto target_block = requestTargetBlock(request);
+    const auto target_contribution_ids = requestContributionIds(request);
+    auto block_covers = [&](const OperatorBlockId& block,
+                            const std::vector<VariableKey>& variables,
+                            const std::string& contribution_id = {}) {
+        return summaryBlockCoversRequest(block,
+                                         variables,
+                                         contribution_id,
+                                         request);
+    };
+
+    switch (request.summary_kind) {
+        case AnalysisSummaryKind::NormMetadata:
+            return std::any_of(
+                summaries.norm_metadata.begin(),
+                summaries.norm_metadata.end(),
+                [&](const NormMetadataSummary& summary) {
+                    const auto& summary_scope =
+                        summary.scope_id.empty()
+                            ? summary.norm_id
+                            : summary.scope_id;
+                    return scopeIdCompatible(summary_scope, request) &&
+                           block_covers(summary.block,
+                                        summary.variables,
+                                        {});
+                });
+        case AnalysisSummaryKind::CoefficientProperties:
+            return std::any_of(
+                summaries.coefficient_properties.begin(),
+                summaries.coefficient_properties.end(),
+                [&](const CoefficientPropertySummary& summary) {
+                    return strictScopedEvidenceMatches(summary.block,
+                                                       summary.variables,
+                                                       summary.contribution_id,
+                                                       target_block,
+                                                       target_contribution_ids);
+                });
+        case AnalysisSummaryKind::DiscreteMatrix:
+            return std::any_of(
+                summaries.discrete_matrices.begin(),
+                summaries.discrete_matrices.end(),
+                [&](const DiscreteMatrixSummary& summary) {
+                    return matrixSummaryCoversRequest(summary, request);
+                });
+        case AnalysisSummaryKind::ReducedMatrix:
+            return std::any_of(
+                summaries.reduced_matrices.begin(),
+                summaries.reduced_matrices.end(),
+                [&](const ReducedMatrixSummary& summary) {
+                    return matrixSummaryCoversRequest(summary.free_free_matrix,
+                                                      request);
+                });
+        case AnalysisSummaryKind::LocalStencil:
+            return std::any_of(
+                summaries.local_stencils.begin(),
+                summaries.local_stencils.end(),
+                [&](const LocalStencilSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::MeshGeometryQuality:
+            return std::any_of(
+                summaries.mesh_geometry_quality.begin(),
+                summaries.mesh_geometry_quality.end(),
+                [&](const MeshGeometryQualitySummary& summary) {
+                    return summary.domain == request.domain &&
+                           (summary.jacobian_bounds_present ||
+                            summary.shape_regular_evidence_present ||
+                            summary.mesh_family_scope_present);
+                });
+        case AnalysisSummaryKind::FluxBalance:
+            return std::any_of(
+                summaries.flux_balances.begin(),
+                summaries.flux_balances.end(),
+                [&](const FluxBalanceSummary& summary) {
+                    return block_covers(summary.block, {});
+                });
+        case AnalysisSummaryKind::TemporalStability:
+            return std::any_of(
+                summaries.temporal_stability.begin(),
+                summaries.temporal_stability.end(),
+                [&](const TemporalStabilitySummary& summary) {
+                    return block_covers(summary.block,
+                                        summary.variables,
+                                        summary.contribution_id);
+                });
+        case AnalysisSummaryKind::BoundarySymbol:
+            return std::any_of(
+                summaries.boundary_symbols.begin(),
+                summaries.boundary_symbols.end(),
+                [&](const BoundarySymbolSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::InfSupEstimate:
+            return std::any_of(
+                summaries.inf_sup_estimates.begin(),
+                summaries.inf_sup_estimates.end(),
+                [&](const InfSupEstimateSummary& summary) {
+                    std::vector<VariableKey> pair{
+                        summary.primal_variable,
+                        summary.multiplier_variable};
+                    return scopeIdCompatible(summary.estimate_scope, request) &&
+                           block_covers(summary.block, pair);
+                });
+        case AnalysisSummaryKind::InfSupPairCertification:
+            return std::any_of(
+                summaries.inf_sup_pair_certifications.begin(),
+                summaries.inf_sup_pair_certifications.end(),
+                [&](const InfSupPairCertificationSummary& summary) {
+                    std::vector<VariableKey> pair{
+                        summary.primal_variable,
+                        summary.multiplier_variable};
+                    return block_covers(summary.block, pair);
+                });
+        case AnalysisSummaryKind::EnergyEntropyBalance:
+            return !request.scope_id.empty() &&
+                   std::any_of(summaries.energy_entropy.begin(),
+                               summaries.energy_entropy.end(),
+                               [&](const EnergyEntropySummary& summary) {
+                                   return summary.energy_entropy_id == request.scope_id ||
+                                          summary.energy_functional_id == request.scope_id;
+                               });
+        case AnalysisSummaryKind::InvariantDomain:
+            return std::any_of(
+                summaries.invariant_domains.begin(),
+                summaries.invariant_domains.end(),
+                [&](const InvariantDomainSummary& summary) {
+                    const bool scope_ok =
+                        request.scope_id.empty() ||
+                        summary.invariant_set_id == request.scope_id;
+                    return scope_ok &&
+                           variablesCoverRequest(summary.variables,
+                                                 request.domain,
+                                                 request);
+                });
+        case AnalysisSummaryKind::EquilibriumPreservation:
+            return !request.scope_id.empty() &&
+                   std::any_of(
+                       summaries.equilibrium_preservation.begin(),
+                       summaries.equilibrium_preservation.end(),
+                       [&](const EquilibriumPreservationSummary& summary) {
+                           return summary.equilibrium_id == request.scope_id ||
+                                  summary.equilibrium_family_id == request.scope_id;
+                       });
+        case AnalysisSummaryKind::MovingDomain:
+            return !request.scope_id.empty() &&
+                   std::any_of(
+                       summaries.moving_domain.begin(),
+                       summaries.moving_domain.end(),
+                       [&](const MovingDomainSummary& summary) {
+                           return summary.constant_state_scope == request.scope_id ||
+                                  summary.gcl_theorem_id == request.scope_id ||
+                                  summary.mesh_update_time_scheme == request.scope_id;
+                       });
+        case AnalysisSummaryKind::TransferOperator:
+            return !request.scope_id.empty() &&
+                   std::any_of(summaries.transfer_operators.begin(),
+                               summaries.transfer_operators.end(),
+                               [&](const TransferOperatorSummary& summary) {
+                                   return summary.interface_pair_id == request.scope_id ||
+                                          summary.projection_space_id == request.scope_id;
+                               });
+        case AnalysisSummaryKind::AdjointConsistency:
+            return std::any_of(
+                summaries.adjoint_consistency.begin(),
+                summaries.adjoint_consistency.end(),
+                [&](const AdjointConsistencySummary& summary) {
+                    return request.contribution_id.empty()
+                        ? (request.scope_id.empty() ||
+                           summary.goal_functional_id == request.scope_id)
+                        : summary.contribution_id == request.contribution_id;
+                });
+        case AnalysisSummaryKind::ParameterScale:
+            return std::any_of(
+                summaries.parameter_scales.begin(),
+                summaries.parameter_scales.end(),
+                [&](const ParameterScaleSummary& summary) {
+                    return block_covers(summary.block,
+                                        summary.variables,
+                                        summary.contribution_id);
+                });
+        case AnalysisSummaryKind::StabilizationAdequacy:
+            return std::any_of(
+                summaries.stabilization_adequacy.begin(),
+                summaries.stabilization_adequacy.end(),
+                [&](const StabilizationAdequacySummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::InitialCompatibility:
+            return std::any_of(
+                summaries.initial_compatibility.begin(),
+                summaries.initial_compatibility.end(),
+                [&](const InitialCompatibilitySummary& summary) {
+                    const bool scope_ok =
+                        request.scope_id.empty()
+                            ? (!summary.compatibility_scope.empty() ||
+                               !summary.invariant_set_id.empty())
+                            : (summary.compatibility_scope == request.scope_id ||
+                               summary.invariant_set_id == request.scope_id);
+                    if (!scope_ok) {
+                        return false;
+                    }
+                    if (request.variables.empty()) {
+                        return !summary.invariant_domain_variables.empty() ||
+                               summary.algebraic_constraint_metadata_present ||
+                               summary.boundary_constraint_metadata_present ||
+                               summary.invariant_domain_metadata_present;
+                    }
+                    return variableSetCoversAll(
+                        summary.invariant_domain_variables,
+                        request.variables);
+                });
+        case AnalysisSummaryKind::CompatibleComplex:
+            return std::any_of(
+                summaries.compatible_complexes.begin(),
+                summaries.compatible_complexes.end(),
+                [&](const CompatibleComplexSummary& summary) {
+                    return variablesCoverRequest(summary.variables,
+                                                 request.domain,
+                                                 request);
+                });
+        case AnalysisSummaryKind::NonlinearTangent:
+            return std::any_of(
+                summaries.nonlinear_tangents.begin(),
+                summaries.nonlinear_tangents.end(),
+                [&](const NonlinearTangentSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::SpectralStructure:
+            return std::any_of(
+                summaries.spectral_structures.begin(),
+                summaries.spectral_structures.end(),
+                [&](const SpectralStructureSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::ErrorEstimator:
+            return std::any_of(
+                summaries.error_estimators.begin(),
+                summaries.error_estimators.end(),
+                [&](const ErrorEstimatorSummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::QuadratureAdequacy:
+            return std::any_of(
+                summaries.quadrature_adequacy.begin(),
+                summaries.quadrature_adequacy.end(),
+                [&](const QuadratureAdequacySummary& summary) {
+                    return block_covers(summary.block,
+                                        variablesForBlock(summary.block));
+                });
+        case AnalysisSummaryKind::CoupledSystemStability:
+            return std::any_of(
+                summaries.coupled_system_stability.begin(),
+                summaries.coupled_system_stability.end(),
+                [&](const CoupledSystemStabilitySummary& summary) {
+                    const bool scope_ok =
+                        request.scope_id.empty() ||
+                        summary.coupling_group == request.scope_id;
+                    return scope_ok &&
+                           variablesCoverRequest(summary.variables,
+                                                 request.domain,
+                                                 request);
+                });
+        case AnalysisSummaryKind::DAEStructureEvidence:
+            return std::any_of(
+                summaries.dae_structure_evidence.begin(),
+                summaries.dae_structure_evidence.end(),
+                [&](const DAEStructureEvidenceSummary& summary) {
+                    return variablesCoverRequest(summary.variables,
+                                                 request.domain,
+                                                 request);
+                });
+        case AnalysisSummaryKind::SchurComplement:
+            return std::any_of(
+                summaries.schur_complements.begin(),
+                summaries.schur_complements.end(),
+                [&](const SchurComplementSummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::MinimumResidualStability:
+            return std::any_of(
+                summaries.minimum_residual_stability.begin(),
+                summaries.minimum_residual_stability.end(),
+                [&](const MinimumResidualStabilitySummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::NullspaceDegeneracy:
+            return std::any_of(
+                summaries.nullspace_degeneracies.begin(),
+                summaries.nullspace_degeneracies.end(),
+                [&](const NullspaceDegeneracySummary& summary) {
+                    return block_covers(summary.block,
+                                        summary.affected_variables);
+                });
+        case AnalysisSummaryKind::RobustnessTrend:
+            return std::any_of(
+                summaries.robustness_trends.begin(),
+                summaries.robustness_trends.end(),
+                [&](const RobustnessTrendSummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::Applicability:
+            return std::any_of(
+                summaries.applicability.begin(),
+                summaries.applicability.end(),
+                [&](const ApplicabilitySummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+        case AnalysisSummaryKind::NumericalErrorBudget:
+            return std::any_of(
+                summaries.numerical_error_budgets.begin(),
+                summaries.numerical_error_budgets.end(),
+                [&](const NumericalErrorBudgetSummary& summary) {
+                    return block_covers(summary.block, summary.variables);
+                });
+    }
+    return false;
+}
+
 [[nodiscard]] inline bool matchesParameterRole(
     const ParameterScaleSummary& summary,
     ParameterScaleRole expected)

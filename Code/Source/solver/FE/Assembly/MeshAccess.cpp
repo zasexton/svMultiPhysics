@@ -41,34 +41,41 @@ ElementType element_type_from_mesh_cell(const svmp::MeshBase& mesh, GlobalIndex 
         case CellFamily::Line:
             if (n == 2u) return ElementType::Line2;
             if (n == 3u) return ElementType::Line3;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Line2;
             break;
         case CellFamily::Triangle:
             if (n == 3u) return ElementType::Triangle3;
             if (n == 6u) return ElementType::Triangle6;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Triangle3;
             break;
         case CellFamily::Quad:
             if (n == 4u) return ElementType::Quad4;
             if (n == 8u) return ElementType::Quad8;
             if (n == 9u) return ElementType::Quad9;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Quad4;
             break;
         case CellFamily::Tetra:
             if (n == 4u) return ElementType::Tetra4;
             if (n == 10u) return ElementType::Tetra10;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Tetra4;
             break;
         case CellFamily::Hex:
             if (n == 8u) return ElementType::Hex8;
             if (n == 20u) return ElementType::Hex20;
             if (n == 27u) return ElementType::Hex27;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Hex8;
             break;
         case CellFamily::Wedge:
             if (n == 6u) return ElementType::Wedge6;
             if (n == 15u) return ElementType::Wedge15;
             if (n == 18u) return ElementType::Wedge18;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Wedge6;
             break;
         case CellFamily::Pyramid:
             if (n == 5u) return ElementType::Pyramid5;
             if (n == 13u) return ElementType::Pyramid13;
             if (n == 14u) return ElementType::Pyramid14;
+            if (shape.order > 2 && static_cast<int>(n) == shape.expected_vertices()) return ElementType::Pyramid5;
             break;
         default:
             break;

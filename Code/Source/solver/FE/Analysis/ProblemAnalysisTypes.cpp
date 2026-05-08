@@ -814,6 +814,12 @@ std::string requestLabel(const AnalysisSummaryRequest& request)
     if (request.already_available) {
         oss << ",available=true";
     }
+    if (!request.production_status.empty()) {
+        oss << ",production=" << request.production_status;
+    }
+    if (!request.unavailable_reason.empty()) {
+        oss << ",unavailable=" << request.unavailable_reason;
+    }
     oss << ")";
     return oss.str();
 }
@@ -1029,6 +1035,12 @@ void ProblemAnalysisReport::print(std::ostream& out) const {
             out << " confidence=" << toString(request.confidence);
             if (request.already_available) {
                 out << " available=true";
+            }
+            if (!request.production_status.empty()) {
+                out << " production=" << request.production_status;
+            }
+            if (!request.unavailable_reason.empty()) {
+                out << " unavailable=" << request.unavailable_reason;
             }
             out << " (" << request.reasons.size() << " reason";
             if (request.reasons.size() != 1u) {

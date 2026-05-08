@@ -7,6 +7,7 @@
 
 #include "Analysis/FortinOperatorAutogeneration.h"
 
+#include "Analysis/AnalysisSummaryMatching.h"
 #include "Basis/BubbleBasis.h"
 #include "Basis/LagrangeBasis.h"
 #include "Basis/VectorBasis.h"
@@ -578,6 +579,55 @@ bool reportAlreadyHasCertifiedPair(const ProblemAnalysisReport& report,
                    claim.variables.size() >= 2u &&
                    sameUnorderedPair(a, b, claim.variables[0], claim.variables[1]);
         });
+}
+
+bool requestCoversFortinCandidate(const AnalysisSummaryRequest& request,
+                                  const FortinCandidate& candidate)
+{
+    if (request.summary_kind != AnalysisSummaryKind::InfSupPairCertification) {
+        return false;
+    }
+    const auto variables = request.variables.empty()
+        ? variablesForBlock(requestTargetBlock(request))
+        : request.variables;
+    if (std::find(variables.begin(),
+                  variables.end(),
+                  candidate.coupling.primal_variable) == variables.end() ||
+        std::find(variables.begin(),
+                  variables.end(),
+                  candidate.coupling.multiplier_variable) == variables.end()) {
+        return false;
+    }
+    if (request.domain != candidate.coupling.domain) {
+        return false;
+    }
+    if (!request.block_id.empty() &&
+        request.block_id != candidate.coupling.operator_tag) {
+        return false;
+    }
+    if (!request.contribution_id.empty() &&
+        std::find(candidate.coupling.contribution_ids.begin(),
+                  candidate.coupling.contribution_ids.end(),
+                  request.contribution_id) ==
+            candidate.coupling.contribution_ids.end()) {
+        return false;
+    }
+    return true;
+}
+
+bool reportRequestedFortinCandidate(const ProblemAnalysisReport& report,
+                                    const FortinCandidate& candidate)
+{
+    const auto requests =
+        report.request_plan.requestsOfKind(
+            AnalysisSummaryKind::InfSupPairCertification);
+    return std::any_of(requests.begin(),
+                       requests.end(),
+                       [&](const AnalysisSummaryRequest* request) {
+                           return request &&
+                                  requestCoversFortinCandidate(*request,
+                                                               candidate);
+                       });
 }
 
 struct DenseMatrix {
@@ -2195,6 +2245,16 @@ void FortinCertificationAnalyzer::run(const ProblemAnalysisContext& context,
         run_log.detail_lines.push_back(detail);
         for (const auto& diagnostic : candidate.diagnostics) {
             appendUnique(run_log.diagnostics, diagnostic);
+        }
+
+        if (!reportRequestedFortinCandidate(report, candidate)) {
+            ++run_log.skipped_count;
+            run_log.detail_lines.push_back(
+                "skipped unrequested candidate for " +
+                variableShortLabel(candidate.coupling.primal_variable) +
+                "/" +
+                variableShortLabel(candidate.coupling.multiplier_variable));
+            continue;
         }
 
         if (candidate.status == FortinCandidateStatus::Complete) {

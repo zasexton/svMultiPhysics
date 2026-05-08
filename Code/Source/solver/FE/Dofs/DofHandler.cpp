@@ -2767,6 +2767,66 @@ ElementType infer_element_type_from_cell(int dim, std::size_t n_verts) {
     return ElementType::Unknown;
 }
 
+ElementType base_lagrange_element_type(ElementType type) noexcept {
+    switch (type) {
+        case ElementType::Line3: return ElementType::Line2;
+        case ElementType::Triangle6: return ElementType::Triangle3;
+        case ElementType::Quad8:
+        case ElementType::Quad9: return ElementType::Quad4;
+        case ElementType::Tetra10: return ElementType::Tetra4;
+        case ElementType::Hex20:
+        case ElementType::Hex27: return ElementType::Hex8;
+        case ElementType::Wedge15:
+        case ElementType::Wedge18: return ElementType::Wedge6;
+        case ElementType::Pyramid13:
+        case ElementType::Pyramid14: return ElementType::Pyramid5;
+        default: return type;
+    }
+}
+
+int reference_vertex_count(ElementType type) noexcept {
+    switch (base_lagrange_element_type(type)) {
+        case ElementType::Line2: return 2;
+        case ElementType::Triangle3: return 3;
+        case ElementType::Quad4: return 4;
+        case ElementType::Tetra4: return 4;
+        case ElementType::Hex8: return 8;
+        case ElementType::Wedge6: return 6;
+        case ElementType::Pyramid5: return 5;
+        case ElementType::Point1: return 1;
+        case ElementType::Unknown:
+        default: return 0;
+    }
+}
+
+int reference_dimension(ElementType type) noexcept {
+    switch (base_lagrange_element_type(type)) {
+        case ElementType::Point1: return 0;
+        case ElementType::Line2: return 1;
+        case ElementType::Triangle3:
+        case ElementType::Quad4: return 2;
+        case ElementType::Tetra4:
+        case ElementType::Hex8:
+        case ElementType::Wedge6:
+        case ElementType::Pyramid5: return 3;
+        case ElementType::Unknown:
+        default: return -1;
+    }
+}
+
+std::vector<std::uint8_t> active_vertices_from_topology(const MeshTopologyView& topology) {
+    const auto n_vertices = static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_vertices, 0));
+    std::vector<std::uint8_t> active(n_vertices, 0u);
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        for (const auto v : topology.getCellVertices(c)) {
+            if (v >= 0 && static_cast<std::size_t>(v) < n_vertices) {
+                active[static_cast<std::size_t>(v)] = 1u;
+            }
+        }
+    }
+    return active;
+}
+
 LocalIndex checked_local_index_from_size(std::size_t value, const char* context) {
     const auto max_local = static_cast<std::size_t>(std::numeric_limits<LocalIndex>::max());
     if (value > max_local) {
@@ -3212,14 +3272,18 @@ static void derive_face_connectivity(MeshTopologyInfo& topology) {
 // DofLayoutInfo factories
 // =============================================================================
 
-DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell, int num_components) {
+DofLayoutInfo DofLayoutInfo::Lagrange(int order, ElementType base_cell_type, int num_components) {
     DofLayoutInfo info;
     info.is_continuous = true;
     info.num_components = std::max(1, num_components);
     FE_CHECK_ARG(order >= 1, "DofLayoutInfo::Lagrange requires polynomial order >= 1");
 
-    const auto cell_type = infer_element_type_from_cell(dim, static_cast<std::size_t>(num_verts_per_cell));
+    const auto cell_type = base_lagrange_element_type(base_cell_type);
     FE_CHECK_ARG(cell_type != ElementType::Unknown,
+                 "DofLayoutInfo::Lagrange: unsupported cell topology");
+    const int dim = reference_dimension(cell_type);
+    const int num_verts_per_cell = reference_vertex_count(cell_type);
+    FE_CHECK_ARG(dim >= 1 && num_verts_per_cell > 0,
                  "DofLayoutInfo::Lagrange: unsupported cell topology");
 
     info.dofs_per_vertex = 1;
@@ -3315,6 +3379,13 @@ DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell
            (info.dofs_per_tri_face > 1 || info.dofs_per_quad_face > 1))));
 
     return info;
+}
+
+DofLayoutInfo DofLayoutInfo::Lagrange(int order, int dim, int num_verts_per_cell, int num_components) {
+    const auto cell_type = infer_element_type_from_cell(dim, static_cast<std::size_t>(num_verts_per_cell));
+    FE_CHECK_ARG(cell_type != ElementType::Unknown,
+                 "DofLayoutInfo::Lagrange: unsupported cell topology");
+    return DofLayoutInfo::Lagrange(order, cell_type, num_components);
 }
 
 DofLayoutInfo DofLayoutInfo::DG(int order, int num_verts_per_cell, int num_components) {
@@ -5989,9 +6060,16 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     // -------------------------------------------------------------------------
     // Map: vertex_local_id -> first DOF for that vertex
     std::vector<GlobalIndex> vertex_first_dof(n_vertices, -1);
+    const auto active_vertices = active_vertices_from_topology(topology);
 
     if (layout.dofs_per_vertex > 0) {
+        const std::vector<GlobalIndex> empty_dofs;
         for (GlobalIndex v = 0; v < topology.n_vertices; ++v) {
+            if (static_cast<std::size_t>(v) >= active_vertices.size() ||
+                active_vertices[static_cast<std::size_t>(v)] == 0u) {
+                entity_dof_map_->setVertexDofs(v, empty_dofs);
+                continue;
+            }
             vertex_first_dof[static_cast<std::size_t>(v)] = next_dof;
             std::vector<GlobalIndex> v_dofs;
             for (LocalIndex d = 0; d < layout.dofs_per_vertex; ++d) {
@@ -6494,13 +6572,24 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
     // Build per-entity keys, touch flags (owned-cell incidence), and CellOwner candidates.
     // -------------------------------------------------------------------------
     const auto n_vertices = static_cast<std::size_t>(topology.n_vertices);
-    std::vector<gid_t> vertex_keys(n_vertices, gid_t{-1});
-    std::vector<int> vertex_touch(n_vertices, -1);
-    std::vector<gid_t> vertex_cell_gid_candidate(n_vertices, std::numeric_limits<gid_t>::max());
-    std::vector<int> vertex_cell_owner_candidate(n_vertices, -1);
-
+    const auto active_vertices = active_vertices_from_topology(topology);
+    std::vector<std::size_t> active_vertex_indices;
+    active_vertex_indices.reserve(n_vertices);
+    std::vector<GlobalIndex> active_vertex_slot(n_vertices, -1);
     for (std::size_t v = 0; v < n_vertices; ++v) {
-        vertex_keys[v] = topology.vertex_gids[v];
+        if (v < active_vertices.size() && active_vertices[v] != 0u) {
+            active_vertex_slot[v] = static_cast<GlobalIndex>(active_vertex_indices.size());
+            active_vertex_indices.push_back(v);
+        }
+    }
+
+    std::vector<gid_t> vertex_keys(active_vertex_indices.size(), gid_t{-1});
+    std::vector<int> vertex_touch(active_vertex_indices.size(), -1);
+    std::vector<gid_t> vertex_cell_gid_candidate(active_vertex_indices.size(), std::numeric_limits<gid_t>::max());
+    std::vector<int> vertex_cell_owner_candidate(active_vertex_indices.size(), -1);
+
+    for (std::size_t slot = 0; slot < active_vertex_indices.size(); ++slot) {
+        vertex_keys[slot] = topology.vertex_gids[active_vertex_indices[slot]];
     }
 
     const auto n_edges = static_cast<std::size_t>(topology.n_edges);
@@ -6618,13 +6707,18 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
             if (sv >= n_vertices) {
                 throw FEException("DofHandler::distributeCGDofsParallel: cell vertex index out of range");
             }
-            if (cgid < vertex_cell_gid_candidate[sv] ||
-                (cgid == vertex_cell_gid_candidate[sv] && cell_owner < vertex_cell_owner_candidate[sv])) {
-                vertex_cell_gid_candidate[sv] = cgid;
-                vertex_cell_owner_candidate[sv] = cell_owner;
+            const auto vertex_slot = active_vertex_slot[sv];
+            if (vertex_slot < 0) {
+                throw FEException("DofHandler::distributeCGDofsParallel: active vertex slot missing");
+            }
+            const auto slot = static_cast<std::size_t>(vertex_slot);
+            if (cgid < vertex_cell_gid_candidate[slot] ||
+                (cgid == vertex_cell_gid_candidate[slot] && cell_owner < vertex_cell_owner_candidate[slot])) {
+                vertex_cell_gid_candidate[slot] = cgid;
+                vertex_cell_owner_candidate[slot] = cell_owner;
             }
             if (owned_cell) {
-                vertex_touch[sv] = my_rank_;
+                vertex_touch[slot] = my_rank_;
             }
         }
 
@@ -7250,11 +7344,20 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	    // -------------------------------------------------------------------------
 	    const auto n_cells = static_cast<std::size_t>(topology.n_cells);
 	    std::vector<GlobalIndex> vertex_first_dof(n_vertices, -1);
+	    std::vector<int> vertex_owner_rank_by_vertex(n_vertices, -1);
 	    if (layout.dofs_per_vertex > 0) {
+	        const std::vector<GlobalIndex> empty_dofs;
 	        for (std::size_t sv = 0; sv < n_vertices; ++sv) {
 	            const auto v = static_cast<GlobalIndex>(sv);
-	            const gid_t base = vertex_global_id[sv] * static_cast<gid_t>(layout.dofs_per_vertex);
+	            const auto slot_id = active_vertex_slot[sv];
+	            if (slot_id < 0) {
+	                entity_dof_map_->setVertexDofs(v, empty_dofs);
+	                continue;
+	            }
+	            const auto slot = static_cast<std::size_t>(slot_id);
+	            const gid_t base = vertex_global_id[slot] * static_cast<gid_t>(layout.dofs_per_vertex);
 	            vertex_first_dof[sv] = static_cast<GlobalIndex>(base);
+	            vertex_owner_rank_by_vertex[sv] = vertex_owner_rank[slot];
 	            std::vector<GlobalIndex> v_dofs;
 	            v_dofs.reserve(static_cast<std::size_t>(layout.dofs_per_vertex) * static_cast<std::size_t>(nc));
 	            for (gid_t comp = 0; comp < nc; ++comp) {
@@ -7735,7 +7838,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
                                LocalIndex dofs_per_entity) {
         if (dofs_per_entity <= 0) return;
         for (std::size_t i = 0; i < first_dof.size(); ++i) {
-            if (owner_rank[i] != my_rank_) continue;
+            if (owner_rank[i] != my_rank_ || first_dof[i] < 0) continue;
             const auto base = first_dof[i];
             for (gid_t comp = 0; comp < nc; ++comp) {
                 const GlobalIndex offset = static_cast<GlobalIndex>(
@@ -7764,7 +7867,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         }
     };
 
-    add_entity_dofs(vertex_first_dof, vertex_owner_rank, layout.dofs_per_vertex);
+    add_entity_dofs(vertex_first_dof, vertex_owner_rank_by_vertex, layout.dofs_per_vertex);
     add_entity_dofs(edge_first_dof, edge_owner_rank, layout.dofs_per_edge);
     add_entity_dofs_variable(face_first_dof, face_owner_rank, face_dof_count);
 
@@ -7788,7 +7891,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         if (dofs_per_entity <= 0) return;
         for (std::size_t i = 0; i < first_dof.size(); ++i) {
             const int owner = owner_rank[i];
-            if (owner == my_rank_) continue;
+            if (owner < 0 || owner == my_rank_ || first_dof[i] < 0) continue;
             const auto base = first_dof[i];
             for (gid_t comp = 0; comp < nc; ++comp) {
                 const GlobalIndex offset = static_cast<GlobalIndex>(
@@ -7826,7 +7929,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         }
     };
 
-    add_entity_ghosts(vertex_first_dof, vertex_owner_rank, layout.dofs_per_vertex);
+    add_entity_ghosts(vertex_first_dof, vertex_owner_rank_by_vertex, layout.dofs_per_vertex);
     add_entity_ghosts(edge_first_dof, edge_owner_rank, layout.dofs_per_edge);
     add_entity_ghosts_variable(face_first_dof, face_owner_rank, face_dof_count);
 
@@ -8348,7 +8451,7 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
 
     const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
-    const auto cell0 = mesh.cell_vertices_span(0);
+    const auto cell0 = mesh.cell_corner_vertices_span(0);
     const int n_verts = static_cast<int>(cell0.second);
     if (n_verts <= 0) {
         throw FEException("DofHandler::distributeDofs(MeshBase): cell 0 has no vertices");
@@ -8461,11 +8564,40 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     topo.n_cells = static_cast<GlobalIndex>(mesh.n_cells());
     topo.n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
     topo.dim = mesh.dim();
-    topo.cell2vertex_offsets = mesh.cell2vertex_offsets();
-    topo.cell2vertex_data = mesh.cell2vertex();
+    std::vector<MeshOffset> corner_cell2vertex_offsets;
+    std::vector<MeshIndex> corner_cell2vertex_data;
+    corner_cell2vertex_offsets.reserve(static_cast<std::size_t>(mesh.n_cells()) + 1u);
+    corner_cell2vertex_offsets.push_back(MeshOffset{0});
+    for (index_t c = 0; c < static_cast<index_t>(mesh.n_cells()); ++c) {
+        auto [corners, n_corners] = mesh.cell_corner_vertices_span(c);
+        corner_cell2vertex_data.insert(corner_cell2vertex_data.end(), corners, corners + n_corners);
+        corner_cell2vertex_offsets.push_back(static_cast<MeshOffset>(corner_cell2vertex_data.size()));
+    }
+    topo.cell2vertex_offsets = std::span<const MeshOffset>(corner_cell2vertex_offsets.data(),
+                                                           corner_cell2vertex_offsets.size());
+    topo.cell2vertex_data = std::span<const MeshIndex>(corner_cell2vertex_data.data(),
+                                                       corner_cell2vertex_data.size());
     topo.vertex_gids = mesh.vertex_gids();
     topo.vertex_coords = mesh.X_ref();
     topo.cell_gids = mesh.cell_gids();
+
+    std::vector<MeshOffset> corner_face2vertex_offsets;
+    std::vector<MeshIndex> corner_face2vertex_data;
+    if (mesh.n_faces() > 0) {
+        corner_face2vertex_offsets.reserve(static_cast<std::size_t>(mesh.n_faces()) + 1u);
+        corner_face2vertex_offsets.push_back(MeshOffset{0});
+        const auto& face_shapes = mesh.face_shapes();
+        for (index_t f = 0; f < static_cast<index_t>(mesh.n_faces()); ++f) {
+            auto [face_nodes, n_face_nodes] = mesh.face_vertices_span(f);
+            std::size_t n_corners = n_face_nodes;
+            if (static_cast<std::size_t>(f) < face_shapes.size() && face_shapes[static_cast<std::size_t>(f)].num_corners > 0) {
+                n_corners = std::min(n_face_nodes,
+                                     static_cast<std::size_t>(face_shapes[static_cast<std::size_t>(f)].num_corners));
+            }
+            corner_face2vertex_data.insert(corner_face2vertex_data.end(), face_nodes, face_nodes + n_corners);
+            corner_face2vertex_offsets.push_back(static_cast<MeshOffset>(corner_face2vertex_data.size()));
+        }
+    }
 
     const bool need_edges = layout.is_continuous && layout.dofs_per_edge > 0;
     const bool need_faces = layout.is_continuous && layout.has_face_dofs();
@@ -8487,10 +8619,11 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
             } else {
                 topo.n_edges = static_cast<GlobalIndex>(mesh.n_faces());
                 topo.edge_gids = mesh.face_gids();
-                topo.edge2vertex_data = mesh.face2vertex();
+                topo.edge2vertex_data = std::span<const MeshIndex>(corner_face2vertex_data.data(),
+                                                                   corner_face2vertex_data.size());
 
-                const auto f2v_offsets = mesh.face2vertex_offsets();
-                const auto f2v = mesh.face2vertex();
+                const auto& f2v_offsets = corner_face2vertex_offsets;
+                const auto& f2v = corner_face2vertex_data;
                 if (f2v_offsets.size() != static_cast<std::size_t>(mesh.n_faces()) + 1u) {
                     throw FEException("DofHandler::distributeDofs(MeshBase): invalid face2vertex_offsets size for 2D edge mapping");
                 }
@@ -8543,8 +8676,10 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
         } else {
             topo.n_faces = static_cast<GlobalIndex>(mesh.n_faces());
             topo.face_gids = mesh.face_gids();
-            topo.face2vertex_offsets = mesh.face2vertex_offsets();
-            topo.face2vertex_data = mesh.face2vertex();
+            topo.face2vertex_offsets = std::span<const MeshOffset>(corner_face2vertex_offsets.data(),
+                                                                   corner_face2vertex_offsets.size());
+            topo.face2vertex_data = std::span<const MeshIndex>(corner_face2vertex_data.data(),
+                                                               corner_face2vertex_data.size());
             cell2face = buildCellToFacesRefOrder(topo.dim,
                                                  topo.cell2vertex_offsets,
                                                  topo.cell2vertex_data,
@@ -8615,7 +8750,7 @@ void DofHandler::distributeDofs(const Mesh& mesh,
 
     const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
-    const auto cell0 = local_mesh.cell_vertices_span(0);
+    const auto cell0 = local_mesh.cell_corner_vertices_span(0);
     const int n_verts = static_cast<int>(cell0.second);
     if (n_verts <= 0) {
         throw FEException("DofHandler::distributeDofs(Mesh): cell 0 has no vertices");
@@ -8728,11 +8863,40 @@ void DofHandler::distributeDofs(const Mesh& mesh,
     topo.n_cells = static_cast<GlobalIndex>(local_mesh.n_cells());
     topo.n_vertices = static_cast<GlobalIndex>(local_mesh.n_vertices());
     topo.dim = local_mesh.dim();
-    topo.cell2vertex_offsets = local_mesh.cell2vertex_offsets();
-    topo.cell2vertex_data = local_mesh.cell2vertex();
+    std::vector<MeshOffset> corner_cell2vertex_offsets;
+    std::vector<MeshIndex> corner_cell2vertex_data;
+    corner_cell2vertex_offsets.reserve(static_cast<std::size_t>(local_mesh.n_cells()) + 1u);
+    corner_cell2vertex_offsets.push_back(MeshOffset{0});
+    for (index_t c = 0; c < static_cast<index_t>(local_mesh.n_cells()); ++c) {
+        auto [corners, n_corners] = local_mesh.cell_corner_vertices_span(c);
+        corner_cell2vertex_data.insert(corner_cell2vertex_data.end(), corners, corners + n_corners);
+        corner_cell2vertex_offsets.push_back(static_cast<MeshOffset>(corner_cell2vertex_data.size()));
+    }
+    topo.cell2vertex_offsets = std::span<const MeshOffset>(corner_cell2vertex_offsets.data(),
+                                                           corner_cell2vertex_offsets.size());
+    topo.cell2vertex_data = std::span<const MeshIndex>(corner_cell2vertex_data.data(),
+                                                       corner_cell2vertex_data.size());
     topo.vertex_gids = local_mesh.vertex_gids();
     topo.vertex_coords = local_mesh.X_ref();
     topo.cell_gids = local_mesh.cell_gids();
+
+    std::vector<MeshOffset> corner_face2vertex_offsets;
+    std::vector<MeshIndex> corner_face2vertex_data;
+    if (local_mesh.n_faces() > 0) {
+        corner_face2vertex_offsets.reserve(static_cast<std::size_t>(local_mesh.n_faces()) + 1u);
+        corner_face2vertex_offsets.push_back(MeshOffset{0});
+        const auto& face_shapes = local_mesh.face_shapes();
+        for (index_t f = 0; f < static_cast<index_t>(local_mesh.n_faces()); ++f) {
+            auto [face_nodes, n_face_nodes] = local_mesh.face_vertices_span(f);
+            std::size_t n_corners = n_face_nodes;
+            if (static_cast<std::size_t>(f) < face_shapes.size() && face_shapes[static_cast<std::size_t>(f)].num_corners > 0) {
+                n_corners = std::min(n_face_nodes,
+                                     static_cast<std::size_t>(face_shapes[static_cast<std::size_t>(f)].num_corners));
+            }
+            corner_face2vertex_data.insert(corner_face2vertex_data.end(), face_nodes, face_nodes + n_corners);
+            corner_face2vertex_offsets.push_back(static_cast<MeshOffset>(corner_face2vertex_data.size()));
+        }
+    }
 
     std::vector<int> cell_owner_ranks(static_cast<std::size_t>(topo.n_cells), opts.my_rank);
     for (GlobalIndex c = 0; c < topo.n_cells; ++c) {
@@ -8772,10 +8936,11 @@ void DofHandler::distributeDofs(const Mesh& mesh,
             } else {
                 topo.n_edges = static_cast<GlobalIndex>(local_mesh.n_faces());
                 topo.edge_gids = local_mesh.face_gids();
-                topo.edge2vertex_data = local_mesh.face2vertex();
+                topo.edge2vertex_data = std::span<const MeshIndex>(corner_face2vertex_data.data(),
+                                                                   corner_face2vertex_data.size());
 
-                const auto f2v_offsets = local_mesh.face2vertex_offsets();
-                const auto f2v = local_mesh.face2vertex();
+                const auto& f2v_offsets = corner_face2vertex_offsets;
+                const auto& f2v = corner_face2vertex_data;
                 if (f2v_offsets.size() != static_cast<std::size_t>(local_mesh.n_faces()) + 1u) {
                     throw FEException("DofHandler::distributeDofs(Mesh): invalid face2vertex_offsets size for 2D edge mapping");
                 }
@@ -8828,8 +8993,10 @@ void DofHandler::distributeDofs(const Mesh& mesh,
         } else {
             topo.n_faces = static_cast<GlobalIndex>(local_mesh.n_faces());
             topo.face_gids = local_mesh.face_gids();
-            topo.face2vertex_offsets = local_mesh.face2vertex_offsets();
-            topo.face2vertex_data = local_mesh.face2vertex();
+            topo.face2vertex_offsets = std::span<const MeshOffset>(corner_face2vertex_offsets.data(),
+                                                                   corner_face2vertex_offsets.size());
+            topo.face2vertex_data = std::span<const MeshIndex>(corner_face2vertex_data.data(),
+                                                               corner_face2vertex_data.size());
             cell2face = buildCellToFacesRefOrder(topo.dim,
                                                  topo.cell2vertex_offsets,
                                                  topo.cell2vertex_data,

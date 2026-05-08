@@ -45,6 +45,11 @@ namespace svmp {
 namespace FE {
 namespace analysis {
 
+class AnalysisSummaryProducerRegistry;
+class AssemblyAccess;
+class MeshAccess;
+class SolverAccess;
+
 // ============================================================================
 // AnalyzerPass — abstract base for individual analysis passes
 // ============================================================================
@@ -102,23 +107,31 @@ public:
     [[nodiscard]] ProblemAnalysisReport analyze(const ProblemAnalysisContext& context) const;
 
     /**
+     * @brief Run all passes while fulfilling NumericSummaryPlanner requests
+     *        before later summary-backed analyzers execute.
+     *
+     * This overload copies the input context, runs each `NumericSummaryPlanner`
+     * pass, asks the producer registry to satisfy the scoped request plan, and
+     * attaches any produced summaries to the working context for subsequent
+     * passes. Backend hooks may decline a request; those failures are recorded
+     * in request production fields, run logs, and issues without upgrading
+     * mathematical claims.
+     */
+    [[nodiscard]] ProblemAnalysisReport analyzeWithEvidenceSynthesis(
+        const ProblemAnalysisContext& context,
+        const AnalysisSummaryProducerRegistry& producer_registry,
+        const AssemblyAccess& assembly,
+        const MeshAccess& mesh,
+        const SolverAccess& solver) const;
+
+    /**
      * @brief Create a ProblemAnalyzer with all built-in passes
      *
-     * Passes are added in dependency order:
-     *   1. KernelAnalyzer (nullspace detection)
-     *   2. MixedOperatorAnalyzer
-     *   3. OperatorClassAnalyzer
-     *   4. StabilizationAnalyzer
-     *   5. ConstraintRankAnalyzer (reads kernel claims)
-     *   6. CompatibilityAnalyzer (reads kernel + constraint claims)
-     *   7. TopologyScopeAnalyzer (reads all prior claims)
-     *   8. DiscreteMonotonicityAnalyzer (matrix/stencil summary consumer)
-     *   9. MeshGeometryAnalyzer (mesh-quality summary consumer)
-     *  10. SolverCompatibilityAnalyzer (solver/operator compatibility)
-     *  11. NumericSummaryPlanner (runs last; reads all symbolic claims)
-     *
-     * Note: In Phase 1 this returns an analyzer with no passes.
-     * Passes are registered as they are implemented in Phase 7.
+     * Passes are added in dependency order. The first `NumericSummaryPlanner`
+     * runs after structural analyzers so `analyzeWithEvidenceSynthesis()` can
+     * materialize scoped evidence before Fortin, inf-sup, matrix, temporal,
+     * DAE, Schur, and other summary-backed analyzers run. A final planner pass
+     * records follow-up requests introduced by summary-backed claims.
      */
     [[nodiscard]] static ProblemAnalyzer createDefault();
 

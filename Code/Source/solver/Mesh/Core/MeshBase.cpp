@@ -1523,8 +1523,23 @@ std::pair<const index_t*, size_t> MeshBase::cell_vertices_span(index_t c) const 
     return {&cell2vertex_[start], count};
 }
 
+std::pair<const index_t*, size_t> MeshBase::cell_corner_vertices_span(index_t c) const {
+    auto [ptr, count] = cell_vertices_span(c);
+    const auto& shape = cell_shape(c);
+    const auto corners = static_cast<size_t>(std::max(0, shape.num_corners));
+    if (corners == 0u || corners > count) {
+        return {ptr, count};
+    }
+    return {ptr, corners};
+}
+
 std::vector<index_t> MeshBase::cell_vertices(index_t c) const {
     auto [ptr, count] = cell_vertices_span(c);
+    return std::vector<index_t>(ptr, ptr + count);
+}
+
+std::vector<index_t> MeshBase::cell_corner_vertices(index_t c) const {
+    auto [ptr, count] = cell_corner_vertices_span(c);
     return std::vector<index_t>(ptr, ptr + count);
 }
 
