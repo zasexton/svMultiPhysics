@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -50,6 +51,8 @@ public:
 
     void addModule(llvm::orc::ThreadSafeModule&& module);
     [[nodiscard]] bool tryLoadFromObjectCache(std::string_view name);
+    [[nodiscard]] bool tryLoadFromObjectCache(std::string_view name,
+                                              std::span<const std::string> expected_symbols);
 
     [[nodiscard]] SymbolAddress lookup(std::string_view name);
     [[nodiscard]] bool tryLookup(std::string_view name, SymbolAddress& out) noexcept;

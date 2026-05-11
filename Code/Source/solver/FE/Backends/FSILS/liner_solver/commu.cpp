@@ -32,6 +32,7 @@
 
 #include "fsils.hpp"
 #include "CmMod.h"
+#include "FE/Core/MpiCollectiveTrace.h"
 
 #include "mpi.h"
 
@@ -54,7 +55,10 @@ void fsils_commu_create(FSILS_commuType& commu, cm_mod::MpiCommWorldType commi)
   MPI_Comm_rank(commi, &commu.task);
   MPI_Comm_size(commi, &commu.nTasks);
 
-  MPI_Allreduce(&commu.task, &commu.master, 1, cm_mod::mpint, MPI_MIN, commi);
+  const auto seq = svmp::FE::debug::nextMpiCollectiveTraceSeq();
+  svmp::FE::debug::traceMpiCollective("before", seq, "fsils_commu_create::master_min", 1, cm_mod::mpint, MPI_MIN, commi);
+  const int rc = MPI_Allreduce(&commu.task, &commu.master, 1, cm_mod::mpint, MPI_MIN, commi);
+  svmp::FE::debug::traceMpiCollective("after", seq, "fsils_commu_create::master_min", 1, cm_mod::mpint, MPI_MIN, commi, rc);
 
   commu.masF = false;
   commu.tF = commu.task;
@@ -72,5 +76,4 @@ void fsils_commu_free(FSILS_commuType& commu)
 }
 
 };
-
 

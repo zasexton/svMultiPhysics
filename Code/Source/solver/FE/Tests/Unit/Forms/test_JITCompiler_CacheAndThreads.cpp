@@ -151,6 +151,32 @@ TEST(JITCompilerCache, CacheHitReturnsSameAddress)
     EXPECT_EQ(stats2.kernel.stores, 1u);
 }
 
+TEST(JITCompilerCache, RegistryDistinguishesSIMDBatchAndFastMathMode)
+{
+    requireLLVMJITOrSkip();
+
+    auto base = makeUnitTestJITOptions();
+    base.dump_directory = "svmp_fe_jit_dumps_tests_registry_key_base";
+    base.simd_batch = false;
+    base.fast_math_mode = JITFastMathMode::Strict;
+
+    auto simd = base;
+    simd.simd_batch = true;
+
+    auto relaxed = base;
+    relaxed.fast_math_mode = JITFastMathMode::Relaxed;
+
+    const auto compiler_base = jit::JITCompiler::getOrCreate(base);
+    const auto compiler_simd = jit::JITCompiler::getOrCreate(simd);
+    const auto compiler_relaxed = jit::JITCompiler::getOrCreate(relaxed);
+
+    ASSERT_NE(compiler_base, nullptr);
+    ASSERT_NE(compiler_simd, nullptr);
+    ASSERT_NE(compiler_relaxed, nullptr);
+    EXPECT_NE(compiler_base.get(), compiler_simd.get());
+    EXPECT_NE(compiler_base.get(), compiler_relaxed.get());
+}
+
 TEST(JITCompilerCache, CacheDisabledCompilesNewInstance)
 {
     requireLLVMJITOrSkip();
@@ -312,6 +338,70 @@ TEST(JITCompilerCache, ObjectCacheLoadsFromDiskAcrossCompilerInstances)
 
     EXPECT_EQ(second.kernels.front().cache_key, first.kernels.front().cache_key);
     EXPECT_EQ(second.kernels.front().symbol, first.kernels.front().symbol);
+
+    const auto second_stats = compiler_second->cacheStats();
+    EXPECT_GE(second_stats.object.disk_hits, 1u);
+    EXPECT_GT(second_stats.object.bytes_read, 0u);
+}
+
+TEST(JITCompilerCache, ColocatedObjectCacheLoadsFromDiskAcrossCompilerInstances)
+{
+    requireLLVMJITOrSkip();
+
+    ScopedTempDir cache_dir("jit_objcache_colocated_disk");
+
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    FormCompiler form_compiler;
+    auto mass_ir = form_compiler.compileBilinear((u * v).dx());
+    auto stiffness_ir = form_compiler.compileBilinear(inner(grad(u), grad(v)).dx());
+
+    std::vector<jit::JITCompiler::ColocatedKernelSpec> specs;
+    specs.push_back(jit::JITCompiler::ColocatedKernelSpec{
+        .ir = &mass_ir,
+        .domain = IntegralDomain::Cell,
+    });
+    specs.push_back(jit::JITCompiler::ColocatedKernelSpec{
+        .ir = &stiffness_ir,
+        .domain = IntegralDomain::Cell,
+    });
+
+    auto options_first = makeUnitTestJITOptions();
+    options_first.cache_directory = cache_dir.path().string();
+    options_first.dump_directory = (cache_dir.path() / "dump_first").string();
+    auto compiler_first = jit::JITCompiler::getOrCreate(options_first);
+    ASSERT_NE(compiler_first, nullptr);
+    compiler_first->resetCacheStats();
+
+    std::vector<jit::JITCompiler::ColocatedKernelResult> first_results;
+    const auto first = compiler_first->compileColocated(specs, first_results);
+    ASSERT_TRUE(first.ok) << first.message;
+    ASSERT_EQ(first_results.size(), specs.size());
+    ASSERT_NE(first_results[0].address, 0u);
+    ASSERT_NE(first_results[1].address, 0u);
+    ASSERT_NE(first_results[0].symbol, first_results[1].symbol);
+    ASSERT_FALSE(objectCacheFiles(cache_dir.path()).empty());
+
+    const auto first_stats = compiler_first->cacheStats();
+    EXPECT_GE(first_stats.object.notify_compiled, 1u);
+    EXPECT_GT(first_stats.object.bytes_written, 0u);
+
+    auto options_second = options_first;
+    options_second.dump_directory = (cache_dir.path() / "dump_second").string();
+    auto compiler_second = jit::JITCompiler::getOrCreate(options_second);
+    ASSERT_NE(compiler_second, nullptr);
+    compiler_second->resetCacheStats();
+
+    std::vector<jit::JITCompiler::ColocatedKernelResult> second_results;
+    const auto second = compiler_second->compileColocated(specs, second_results);
+    ASSERT_TRUE(second.ok) << second.message;
+    ASSERT_EQ(second_results.size(), specs.size());
+    ASSERT_NE(second_results[0].address, 0u);
+    ASSERT_NE(second_results[1].address, 0u);
+    EXPECT_EQ(second_results[0].symbol, first_results[0].symbol);
+    EXPECT_EQ(second_results[1].symbol, first_results[1].symbol);
 
     const auto second_stats = compiler_second->cacheStats();
     EXPECT_GE(second_stats.object.disk_hits, 1u);

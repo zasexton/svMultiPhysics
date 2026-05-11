@@ -917,14 +917,25 @@ void SimulationBuilder::createSolvers()
   components_.fe_system->setAnalysisSolverOptions(solver_options);
   const char* analysis_log = std::getenv("SVMP_FE_ANALYSIS_LOG");
   const auto analysis_log_mode = analysis_log ? lower_copy(analysis_log) : std::string{};
-  const auto& report = components_.fe_system->analysisReport();
-  if (analysis_log_mode == "full") {
-    report.print(oopCout());
-  } else {
-    report.printApplicationLog(oopCout());
-    if (analysis_log_mode == "trace") {
-      report.printTraceLog(oopCout(), components_.fe_system->latestAnalysisSummaries());
+  const bool mpi_setup_analysis_requested = !analysis_log_mode.empty();
+  const bool parallel_run = svmp::MeshComm::world().is_parallel();
+  if (!parallel_run || mpi_setup_analysis_requested) {
+    if (parallel_run && mpi_setup_analysis_requested) {
+      oopCout() << "[svMultiPhysics::Application] SVMP_FE_ANALYSIS_LOG requested during MPI setup; "
+                << "running setup analysis before FSILS priming." << std::endl;
     }
+    const auto& report = components_.fe_system->analysisReport();
+    if (analysis_log_mode == "full") {
+      report.print(oopCout());
+    } else {
+      report.printApplicationLog(oopCout());
+      if (analysis_log_mode == "trace") {
+        report.printTraceLog(oopCout(), components_.fe_system->latestAnalysisSummaries());
+      }
+    }
+  } else if (oopTraceEnabled()) {
+    oopCout() << "[svMultiPhysics::Application] SimulationBuilder: skipping implicit setup analysis report in MPI; "
+              << "set SVMP_FE_ANALYSIS_LOG to request it." << std::endl;
   }
 
   components_.linear_solver = components_.backend->createLinearSolver(solver_options);

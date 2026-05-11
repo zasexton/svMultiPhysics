@@ -700,6 +700,17 @@ void makeTypedZero(KernelIROp& op) noexcept
     return op.type == FormExprType::Constant;
 }
 
+[[nodiscard]] bool isFinitePowerOfTwo(double value) noexcept
+{
+    if (!std::isfinite(value) || value == 0.0) {
+        return false;
+    }
+    int exponent = 0;
+    const double mantissa = std::frexp(std::fabs(value), &exponent);
+    (void)exponent;
+    return mantissa == 0.5;
+}
+
 [[nodiscard]] double constantVal(const KernelIROp& op) noexcept
 {
     return std::bit_cast<double>(op.imm0);
@@ -906,11 +917,21 @@ std::size_t KernelIR::optimize()
                     break;
 
                 case FormExprType::Minimum:
-                    if (k0_const && k1_const) { makeConstant(op, std::fmin(constantVal(kid0), constantVal(kid1))); break; }
+                    if (k0_const && k1_const) {
+                        const double a = constantVal(kid0);
+                        const double b = constantVal(kid1);
+                        makeConstant(op, (b < a) ? b : a);
+                        break;
+                    }
                     break;
 
                 case FormExprType::Maximum:
-                    if (k0_const && k1_const) { makeConstant(op, std::fmax(constantVal(kid0), constantVal(kid1))); break; }
+                    if (k0_const && k1_const) {
+                        const double a = constantVal(kid0);
+                        const double b = constantVal(kid1);
+                        makeConstant(op, (a < b) ? b : a);
+                        break;
+                    }
                     break;
 
                 // Comparisons: const op const → 1.0 or 0.0
@@ -1231,19 +1252,18 @@ std::size_t KernelIR::optimize()
                     changed = true; continue;
                 }
 
-                // ---- Divide by exact-reciprocal constant → Multiply ----
-                // Only when c * (1/c) == 1.0 in double precision, ensuring
-                // the rewrite is FP-identical (no rounding change).
+                // ---- Divide by power-of-two constant -> Multiply ----
+                // Multiplication by the reciprocal is strictly safe only for
+                // binary scale factors. The previous c * (1/c) == 1.0 test
+                // can still change rounding for general divisors.
                 if (op.type == FormExprType::Divide && isConstant(kid1)) {
                     const double c = constantVal(kid1);
-                    if (c != 0.0 && c != -1.0) { // -1 already handled above
+                    if (c != 0.0 && c != -1.0 && isFinitePowerOfTwo(c)) {
                         const double recip = 1.0 / c;
-                        if (c * recip == 1.0) {
-                            const auto recip_idx = appendConstOp(recip);
-                            op.type = FormExprType::Multiply;
-                            setKid_sr(op, 1, recip_idx);
-                            changed = true; continue;
-                        }
+                        const auto recip_idx = appendConstOp(recip);
+                        op.type = FormExprType::Multiply;
+                        setKid_sr(op, 1, recip_idx);
+                        changed = true; continue;
                     }
                 }
 

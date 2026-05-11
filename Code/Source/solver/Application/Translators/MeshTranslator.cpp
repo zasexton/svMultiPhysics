@@ -12,6 +12,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -100,6 +101,38 @@ bool has_nonlocal_vertex_gids(const svmp::MeshBase& mesh)
   return false;
 }
 
+bool vertex_coordinates_match(const svmp::MeshBase& volume_mesh,
+                              svmp::index_t volume_vertex,
+                              const svmp::MeshBase& face_mesh,
+                              svmp::index_t face_vertex)
+{
+  if (volume_vertex < 0 || face_vertex < 0 || volume_mesh.dim() != face_mesh.dim()) {
+    return false;
+  }
+
+  const auto dim = volume_mesh.dim();
+  const auto volume_base = static_cast<std::size_t>(volume_vertex) * static_cast<std::size_t>(dim);
+  const auto face_base = static_cast<std::size_t>(face_vertex) * static_cast<std::size_t>(dim);
+  const auto& volume_x = volume_mesh.X_ref();
+  const auto& face_x = face_mesh.X_ref();
+  if (volume_base + static_cast<std::size_t>(dim) > volume_x.size() ||
+      face_base + static_cast<std::size_t>(dim) > face_x.size()) {
+    return false;
+  }
+
+  constexpr double rel_tol = 1e-10;
+  constexpr double abs_tol = 1e-12;
+  for (int d = 0; d < dim; ++d) {
+    const double a = static_cast<double>(volume_x[volume_base + static_cast<std::size_t>(d)]);
+    const double b = static_cast<double>(face_x[face_base + static_cast<std::size_t>(d)]);
+    const double scale = std::max({1.0, std::abs(a), std::abs(b)});
+    if (std::abs(a - b) > abs_tol + rel_tol * scale) {
+      return false;
+    }
+  }
+  return true;
+}
+
 svmp::index_t match_face_vertex_to_volume(
     const svmp::Mesh& volume_mesh,
     const svmp::search::VertexCoordinateLocator& coordinate_locator,
@@ -116,9 +149,29 @@ svmp::index_t match_face_vertex_to_volume(
     const auto& gids = face_mesh.vertex_gids();
     const auto i = static_cast<std::size_t>(face_vertex);
     if (face_vertex >= 0 && i < gids.size() && gids[i] != svmp::INVALID_GID) {
-      const auto local = volume_mesh.base().global_to_local_vertex(gids[i]);
+      const auto try_gid = [&](svmp::gid_t gid) -> svmp::index_t {
+        const auto local = volume_mesh.base().global_to_local_vertex(gid);
+        if (local == svmp::INVALID_INDEX) {
+          return svmp::INVALID_INDEX;
+        }
+        if (!vertex_coordinates_match(volume_mesh.base(), local, face_mesh, face_vertex)) {
+          return svmp::INVALID_INDEX;
+        }
+        return local;
+      };
+
+      const auto local = try_gid(gids[i]);
       if (local != svmp::INVALID_INDEX) {
         return local;
+      }
+
+      // Legacy VTP surface files often store one-based GlobalNodeID while the
+      // volume mesh uses zero-based stable vertex ids after MPI partitioning.
+      if (gids[i] > 0) {
+        const auto zero_based_local = try_gid(gids[i] - 1);
+        if (zero_based_local != svmp::INVALID_INDEX) {
+          return zero_based_local;
+        }
       }
     }
   }

@@ -51,6 +51,7 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     std::uint64_t h = kCacheKeyFNVOffset;
     mixCacheKey(h, static_cast<std::uint64_t>(opt.enable_loop_unroll_metadata ? 1u : 0u));
     mixCacheKey(h, static_cast<std::uint64_t>(opt.max_unroll_trip_count));
+    mixCacheKey(h, static_cast<std::uint64_t>(opt.text_budget_bytes));
     // Both bytes/op estimates are live codegen inputs. Include them so changing
     // the estimate invalidates cached kernels compiled with the old policy.
     mixCacheKey(h, static_cast<std::uint64_t>(opt.bytes_per_op_estimate));
@@ -86,6 +87,7 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(in.jit_options.optimization_level)));
     mixCacheKey(h, static_cast<std::uint64_t>(in.jit_options.vectorize ? 1u : 0u));
     mixCacheKey(h, static_cast<std::uint64_t>(in.jit_options.simd_batch ? 1u : 0u));
+    mixCacheKey(h, static_cast<std::uint64_t>(in.jit_options.fast_math_mode));
     mixCacheKey(h, hashTensorOptionsForCacheKey(in.jit_options.tensor));
     mixCacheKey(h, hashSpecializationCodegenOptionsForCacheKey(in.jit_options.specialization));
     mixCacheKey(h, hashBasisBakeOptionsForCacheKey(in.jit_options.basis_baking));
@@ -123,10 +125,6 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
             mixCacheKey(h, in.specialization->baked_basis.hash);
             mixCacheKey(h, static_cast<std::uint64_t>(in.specialization->baked_basis.geometry_affine ? 1u : 0u));
         }
-
-        // text_budget_bytes affects whether DOF loop unroll metadata is emitted
-        // for specialized kernels, so it belongs to the matched-specialization key.
-        mixCacheKey(h, static_cast<std::uint64_t>(in.jit_options.specialization.text_budget_bytes));
     }
     return h;
 }

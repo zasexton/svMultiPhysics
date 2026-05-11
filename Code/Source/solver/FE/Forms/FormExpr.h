@@ -176,6 +176,17 @@ struct JITSpecializationOptions {
     std::uint32_t raw_bytes_per_op_estimate{10};
 };
 
+enum class JITFastMathMode : std::uint8_t {
+    // Preserve strict IEEE-style builder flags; useful for interpreter parity
+    // and validation runs.
+    Strict = 0,
+    // Permit only contraction, leaving reassociation and signed-zero behavior
+    // strict.
+    ContractOnly = 1,
+    // Enable the previous relaxed builder policy for throughput-oriented runs.
+    Relaxed = 2,
+};
+
 struct JITBasisBakeOptions {
     // Bake scalar basis values and affine reference derivatives into specialized
     // LLVM kernels when the basis/quadrature tuple is known at setup time.
@@ -208,6 +219,7 @@ struct JITOptions {
     bool dump_llvm_ir_optimized{false};
     bool debug_info{false};
     std::string dump_directory{"svmp_fe_jit_dumps"};
+    JITFastMathMode fast_math_mode{JITFastMathMode::Strict};
     JITSpecializationOptions specialization{};
     JITBasisBakeOptions basis_baking{};
     TensorJITOptions tensor{};

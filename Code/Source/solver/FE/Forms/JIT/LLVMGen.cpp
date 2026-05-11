@@ -1935,9 +1935,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         llvm::IRBuilder<> builder(*ctx);
         llvm::FastMathFlags fmf;
-        fmf.setNoSignedZeros();
-        fmf.setAllowReassoc();
-        fmf.setAllowContract(true);
+        switch (options_.fast_math_mode) {
+            case JITFastMathMode::Strict:
+                break;
+            case JITFastMathMode::ContractOnly:
+                fmf.setAllowContract(true);
+                break;
+            case JITFastMathMode::Relaxed:
+                fmf.setNoSignedZeros();
+                fmf.setAllowReassoc();
+                fmf.setAllowContract(true);
+                break;
+        }
         builder.setFastMathFlags(fmf);
 #if LLVM_VERSION_MAJOR >= 15
         auto* i8_ptr = builder.getPtrTy();
@@ -2850,10 +2859,37 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 ? static_cast<std::uint64_t>(*fixed_n_trial_dofs_minus)
                 : static_cast<std::uint64_t>(hw.defaultTestDofEstimate());
 
-            // Linear forms have no trial DOF loop (trial index hard-coded
-            // to 0), so text_full should use effective_n_j = 1.
-            const bool has_matrix_terms =
-                coupled || (ir.kind() != FormKind::Linear);
+            // Only matrix-targeted terms have a trial-DOF loop. Residual and
+            // vector-only kernels can otherwise be overestimated and have
+            // unrolling suppressed too aggressively.
+            bool has_matrix_terms = false;
+            if (coupled) {
+                for (const auto& blk : coupled->blocks) {
+                    if (blk.want_matrix) {
+                        has_matrix_terms = true;
+                        break;
+                    }
+                    for (const auto& t : blk.terms) {
+                        if (t.target == LoweredTerm::Target::Matrix ||
+                            (t.target == LoweredTerm::Target::Auto && blk.want_matrix)) {
+                            has_matrix_terms = true;
+                            break;
+                        }
+                    }
+                    if (has_matrix_terms) {
+                        break;
+                    }
+                }
+            } else {
+                for (const auto& t : terms) {
+                    if (t.target == LoweredTerm::Target::Matrix ||
+                        (t.target == LoweredTerm::Target::Auto &&
+                         ir.kind() == FormKind::Bilinear)) {
+                        has_matrix_terms = true;
+                        break;
+                    }
+                }
+            }
             const auto effective_n_j = has_matrix_terms ? n_j : 1ULL;
 
             // Use fallback ops-per-term when no terms have been lowered yet.
@@ -2955,8 +2991,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                    }
 	                    return false;
 	                }();
+	                // Current SIMD batch helper packing stores only lane 0 and lane 1.
+	                // Wider hardware vectors stay on the scalar batch path until the
+	                // helper layout is generalized to N lanes.
 	                const bool use_simd_batch = options_.simd_batch && !simd_batch_env_off &&
-	                                            use_batch && !coupled && simd_w >= 2 &&
+	                                            use_batch && !coupled && simd_w == 2 &&
 	                                            !has_external_calls && !has_field_solutions;
 	                {
 	                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
@@ -3378,7 +3417,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto emitReduceSum = [&](llvm::Value* end,
                                  std::string_view name,
                                  std::size_t n_acc,
-                                 const auto& term_fn) -> std::vector<llvm::Value*> {
+                                 const auto& term_fn,
+                                 bool is_dof_loop = true,
+                                 bool is_qp_loop = false) -> std::vector<llvm::Value*> {
             if (n_acc == 0u) {
                 throw std::invalid_argument("LLVMGen: emitReduceSum requires n_acc > 0");
             }
@@ -3422,7 +3463,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                acc_phi[k]->addIncoming(next, latch);
 	            }
 	            auto* backedge = builder.CreateBr(header);
-	            attachLoopUnrollMetadata(backedge, end);
+	            attachLoopUnrollMetadata(backedge, end, is_dof_loop, is_qp_loop);
 
 	            builder.SetInsertPoint(exit);
 	            std::vector<llvm::Value*> out;

@@ -179,6 +179,8 @@ TEST(JITCacheKey, GenericCodegenOptionsChangeKey)
     expectKeyChanges("optimization level", [](auto& in) { in.jit_options.optimization_level = 3; });
     expectKeyChanges("vectorize", [](auto& in) { in.jit_options.vectorize = false; });
     expectKeyChanges("SIMD batch", [](auto& in) { in.jit_options.simd_batch = false; });
+    expectKeyChanges("fast math mode",
+                     [](auto& in) { in.jit_options.fast_math_mode = JITFastMathMode::Relaxed; });
     expectKeyChanges("debug info", [](auto& in) { in.jit_options.debug_info = true; });
 
     expectKeyChanges("tensor mode", [](auto& in) { in.jit_options.tensor.mode = TensorLoweringMode::Auto; });
@@ -208,6 +210,8 @@ TEST(JITCacheKey, GenericCodegenOptionsChangeKey)
                      [](auto& in) { in.jit_options.specialization.enable_loop_unroll_metadata = false; });
     expectKeyChanges("max unroll trip count",
                      [](auto& in) { in.jit_options.specialization.max_unroll_trip_count = 12u; });
+    expectKeyChanges("text budget",
+                     [](auto& in) { in.jit_options.specialization.text_budget_bytes = 999u; });
     expectKeyChanges("bytes per op",
                      [](auto& in) { in.jit_options.specialization.bytes_per_op_estimate += 1u; });
     expectKeyChanges("raw bytes per op",
@@ -245,8 +249,6 @@ TEST(JITCacheKey, NonCodegenOptionsDoNotChangeKernelKey)
                        [](auto& in) { in.jit_options.specialization.max_specialized_dofs += 1u; });
     expectKeyUnchanged("max specialization variants",
                        [](auto& in) { in.jit_options.specialization.max_variants_per_kernel += 1u; });
-    expectKeyUnchanged("unmatched text budget",
-                       [](auto& in) { in.jit_options.specialization.text_budget_bytes = 999u; });
 }
 
 TEST(JITCacheKey, MatchedSpecializationInputsChangeKey)
@@ -311,7 +313,6 @@ TEST(JITCacheKey, UnmatchedSpecializationInputsAreIgnored)
 
     auto changed = no_spec;
     changed.specialization = &changed_spec;
-    changed.jit_options.specialization.text_budget_bytes = 7777u;
     EXPECT_EQ(keyFor(changed), keyFor(no_spec));
 }
 

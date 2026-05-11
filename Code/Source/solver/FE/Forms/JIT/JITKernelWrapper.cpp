@@ -177,6 +177,15 @@ inline void callJIT(std::uintptr_t addr, const void* args) noexcept
     reinterpret_cast<JITFn>(addr)(args);
 }
 
+[[nodiscard]] std::size_t effectiveSimdBatchWidth(const JITOptions& options) noexcept
+{
+    if (!options.simd_batch) {
+        return 1u;
+    }
+    const auto hardware_width = static_cast<std::size_t>(jit::hardwareProfile().simdDoubles());
+    return (hardware_width == 2u) ? 2u : 1u;
+}
+
 [[nodiscard]] inline assembly::jit::KernelOutputViewV6 makeOutputViewV6(
     assembly::KernelOutput& output,
     Real* matrix_override = nullptr,
@@ -467,11 +476,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         // is thread-safe (no shared member vectors).
         auto callJITCell = [&](std::uintptr_t addr, const assembly::jit::CellKernelArgsV6& v6_args) {
             if (options_.vectorize) {
-                // SIMD batch: pad to simd_w elements (the JIT kernel reads simd_w at a time).
-                const auto sw = options_.simd_batch
-                    ? static_cast<std::uint32_t>(jit::hardwareProfile().simdDoubles())
-                    : 1u;
-                const auto pn = (sw >= 2 && options_.simd_batch) ? sw : 1u;
+                const auto pn = static_cast<std::uint32_t>(effectiveSimdBatchWidth(options_));
 
                 thread_local std::vector<assembly::jit::KernelSideArgsV6> local_sides;
                 thread_local std::vector<assembly::jit::KernelOutputViewV6> local_outs;
@@ -768,10 +773,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                 if (options_.vectorize) {
                     // SIMD batch padding: round up to next multiple of simd_w
                     // so the JIT kernel's SIMD loop doesn't read past the end.
-                    const auto simd_w = options_.simd_batch
-                        ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
-                        : std::size_t{1};
-                    const auto padded_n = (simd_w >= 2 && options_.simd_batch)
+                    const auto simd_w = effectiveSimdBatchWidth(options_);
+                    const auto padded_n = (simd_w >= 2)
                         ? ((n + simd_w - 1) / simd_w) * simd_w
                         : n;
 
@@ -915,10 +918,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                 // Tight per-element loop.
                 if (options_.vectorize) {
                     // SIMD batch padding (same as FormKernel path above).
-                    const auto simd_w = options_.simd_batch
-                        ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
-                        : std::size_t{1};
-                    const auto padded_n = (simd_w >= 2 && options_.simd_batch)
+                    const auto simd_w = effectiveSimdBatchWidth(options_);
+                    const auto padded_n = (simd_w >= 2)
                         ? ((n + simd_w - 1) / simd_w) * simd_w
                         : n;
 
@@ -1003,6 +1004,10 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             const auto& ctx = *contexts[idx];
                             auto& output = outputs[idx];
                             const auto coeffs = ctx.solutionCoefficients();
+                            FE_THROW_IF(coeffs.size() < static_cast<std::size_t>(ctx.numTrialDofs()),
+                                        InvalidArgumentException,
+                                        "JITKernelWrapper(LinearFormKernel)::computeCellBatch: "
+                                        "missing solution coefficients");
 
                             if (want_matrix) {
                                 accumulateKernelOutputMatrixTimesSolution(
@@ -1178,10 +1183,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                 if (sub_n > 0) {
                                     // Thread-local scratch for batch packing.
                                     // SIMD batch padding.
-                                    const auto simd_w_omp = options_.simd_batch
-                                        ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
-                                        : std::size_t{1};
-                                    const auto padded_sub_n = (simd_w_omp >= 2 && options_.simd_batch)
+                                    const auto simd_w_omp = effectiveSimdBatchWidth(options_);
+                                    const auto padded_sub_n = (simd_w_omp >= 2)
                                         ? ((sub_n + simd_w_omp - 1) / simd_w_omp) * simd_w_omp
                                         : sub_n;
                                     std::vector<assembly::jit::KernelSideArgsV6> local_sides(padded_sub_n);
@@ -1212,31 +1215,37 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                                         output.has_vector = want_vector;
                                     }
 
-                                    // Pad remaining slots for SIMD batch
-                                    if (padded_sub_n > sub_n) {
-                                        std::size_t last_v = sub_n - 1;
-                                        while (last_v > 0 && local_sides[last_v].integration_weights == nullptr) {
-                                            --last_v;
+                                    std::size_t fill_src = static_cast<std::size_t>(-1);
+                                    for (std::size_t pi = 0; pi < sub_n; ++pi) {
+                                        if (local_sides[pi].integration_weights != nullptr) {
+                                            fill_src = pi;
+                                            break;
                                         }
+                                    }
+
+                                    if (fill_src != static_cast<std::size_t>(-1)) {
                                         thread_local std::vector<Real> pad_m_omp, pad_v_omp;
                                         pad_m_omp.assign(
                                             static_cast<std::size_t>(n_test) * static_cast<std::size_t>(n_trial), 0.0);
                                         pad_v_omp.assign(static_cast<std::size_t>(n_test), 0.0);
-                                        for (std::size_t pi = sub_n; pi < padded_sub_n; ++pi) {
-                                            local_sides[pi] = local_sides[last_v];
-                                            local_outputs[pi] = local_outputs[last_v];
-                                            local_outputs[pi].element_matrix = pad_m_omp.data();
-                                            local_outputs[pi].element_vector = pad_v_omp.data();
+                                        for (std::size_t pi = 0; pi < padded_sub_n; ++pi) {
+                                            if (pi >= sub_n ||
+                                                local_sides[pi].integration_weights == nullptr) {
+                                                local_sides[pi] = local_sides[fill_src];
+                                                local_outputs[pi] = local_outputs[fill_src];
+                                                local_outputs[pi].element_matrix = pad_m_omp.data();
+                                                local_outputs[pi].element_vector = pad_v_omp.data();
+                                            }
                                         }
+
+                                        assembly::jit::CellKernelBatchArgsV1 batch_args;
+                                        batch_args.batch_size = static_cast<std::uint32_t>(padded_sub_n);
+                                        batch_args.sides   = local_sides.data();
+                                        batch_args.outputs = local_outputs.data();
+
+                                        if (tan_addr != 0) callJIT(tan_addr, &batch_args);
+                                        if (res_addr != 0) callJIT(res_addr, &batch_args);
                                     }
-
-                                    assembly::jit::CellKernelBatchArgsV1 batch_args;
-                                    batch_args.batch_size = static_cast<std::uint32_t>(padded_sub_n);
-                                    batch_args.sides   = local_sides.data();
-                                    batch_args.outputs = local_outputs.data();
-
-                                    if (tan_addr != 0) callJIT(tan_addr, &batch_args);
-                                    if (res_addr != 0) callJIT(res_addr, &batch_args);
                                 }
                             }
                         } else
@@ -1245,10 +1254,8 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                             // Serial vectorize path: stack-local scratch
                             // (thread-safe for concurrent calls).
                             // SIMD batch padding: round up to next SIMD width.
-                            const auto simd_w_nl = options_.simd_batch
-                                ? static_cast<std::size_t>(jit::hardwareProfile().simdDoubles())
-                                : std::size_t{1};
-                            const auto padded_n_nl = (simd_w_nl >= 2 && options_.simd_batch)
+                            const auto simd_w_nl = effectiveSimdBatchWidth(options_);
+                            const auto padded_n_nl = (simd_w_nl >= 2)
                                 ? ((n + simd_w_nl - 1) / simd_w_nl) * simd_w_nl
                                 : n;
 
@@ -2129,9 +2136,6 @@ void JITKernelWrapper::primeCellSpecializations(std::span<const CellSpecializati
         if (want_bake) {
             spec.baked_basis = hint.baked_basis;
         }
-        if (hint.is_affine) {
-            primed_is_affine_ = true;
-        }
         bool any = false;
 
         const bool specialize_qpts = options_.specialization.specialize_n_qpts || want_bake;
@@ -2191,6 +2195,7 @@ void JITKernelWrapper::primeCellSpecializations(std::span<const CellSpecializati
             traceSpecialization(this, *fallback_, revision, detail.str());
         }
 
+        rememberPrimedAffine(role, spec);
         rememberPrimedBasisBake(role, spec);
         (void)compileSpecializedDispatch(role, ir, spec, "prime");
     };
@@ -2482,6 +2487,8 @@ void JITKernelWrapper::markDirty(std::string_view reason) noexcept
     attempted_specializations_.clear();
     primed_basis_bake_by_shape_.clear();
     ambiguous_basis_bake_shapes_.clear();
+    primed_affine_by_shape_.clear();
+    ambiguous_affine_shapes_.clear();
     traced_specialization_hits_.clear();
     traced_specialization_compiles_.clear();
     traced_specialization_skips_.clear();
@@ -2546,34 +2553,64 @@ void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
         return;
     }
 
-    // Ensure the fallback kernel has been analyzed so we know the wrapped kind.
-    // Must be called BEFORE acquiring jit_mutex_ since maybeCompile() also locks it.
-    maybeCompile();
-
     std::lock_guard<std::mutex> lock(jit_mutex_);
 
-    // Inject the address into whichever compiled dispatch is appropriate.
-    // For coupled blocks, the tangent (bilinear) cell kernel is the primary target.
+    // Replace an existing dispatch when one was already compiled, otherwise
+    // publish a minimal role-appropriate dispatch. This path must not call
+    // maybeCompile(): colocated kernels use it specifically as a compilation
+    // bypass after the address has already been resolved elsewhere.
+    bool replaced_existing = false;
     if (compiled_tangent_.ok && compiled_tangent_.cell != 0) {
         compiled_tangent_.cell = addr;
-    } else if (compiled_bilinear_.ok && compiled_bilinear_.cell != 0) {
+        replaced_existing = true;
+    }
+    if (compiled_bilinear_.ok && compiled_bilinear_.cell != 0) {
         compiled_bilinear_.cell = addr;
-    } else if (compiled_form_.ok && compiled_form_.cell != 0) {
+        replaced_existing = true;
+    }
+    if (compiled_linear_.ok && compiled_linear_.cell != 0) {
+        compiled_linear_.cell = addr;
+        replaced_existing = true;
+    }
+    if (compiled_residual_.ok && compiled_residual_.cell != 0) {
+        compiled_residual_.cell = addr;
+        replaced_existing = true;
+    }
+    if (compiled_form_.ok && compiled_form_.cell != 0) {
         compiled_form_.cell = addr;
-    } else {
-        // No compiled dispatch available yet — set up a minimal one.
-        // This handles the case where the wrapper hasn't been compiled at all.
-        compiled_form_.ok = true;
-        compiled_form_.cell = addr;
+        replaced_existing = true;
+    }
 
-        // Also set tangent/bilinear if appropriate for the kernel kind.
-        if (kind_ == WrappedKind::FormKernel || kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
-            compiled_tangent_.ok = true;
-            compiled_tangent_.cell = addr;
-            compiled_bilinear_.ok = true;
-            compiled_bilinear_.cell = addr;
+    if (!replaced_existing) {
+        switch (kind_) {
+            case WrappedKind::FormKernel:
+                compiled_form_.ok = true;
+                compiled_form_.cell = addr;
+                break;
+            case WrappedKind::LinearFormKernel:
+                compiled_bilinear_.ok = true;
+                compiled_bilinear_.cell = addr;
+                break;
+            case WrappedKind::SymbolicNonlinearFormKernel:
+                compiled_tangent_.ok = true;
+                compiled_tangent_.cell = addr;
+                compiled_residual_.ok = true;
+                compiled_residual_.cell = addr;
+                break;
+            case WrappedKind::NonlinearFormKernel:
+                compiled_residual_.ok = true;
+                compiled_residual_.cell = addr;
+                break;
+            case WrappedKind::Unknown:
+                compiled_form_.ok = true;
+                compiled_form_.cell = addr;
+                break;
         }
     }
+
+    compiled_revision_ = revision_;
+    attempted_revision_ = revision_;
+    runtime_failed_ = false;
 }
 
 JITKernelWrapper::SpecializationKey JITKernelWrapper::makeSpecializationKey(
@@ -2613,8 +2650,56 @@ JITKernelWrapper::SpecializationKey JITKernelWrapper::makeSpecializationKey(
     if (include_basis_bake && specialization.baked_basis.enabled) {
         key.has_basis_bake_hash = true;
         key.basis_bake_hash = specialization.baked_basis.hash;
+        key.baked_geometry_affine = specialization.baked_basis.geometry_affine;
     }
+    key.is_affine = specialization.is_affine;
     return key;
+}
+
+JITKernelWrapper::SpecializationKey JITKernelWrapper::makeSpecializationShapeKey(
+    KernelRole role,
+    const JITCompileSpecialization& specialization) const noexcept
+{
+    auto key = makeSpecializationKey(role, specialization, /*include_basis_bake=*/false);
+    key.is_affine = false;
+    key.has_basis_bake_hash = false;
+    key.basis_bake_hash = 0u;
+    key.baked_geometry_affine = false;
+    return key;
+}
+
+void JITKernelWrapper::rememberPrimedAffine(KernelRole role,
+                                            const JITCompileSpecialization& specialization)
+{
+    const auto shape_key = makeSpecializationShapeKey(role, specialization);
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (ambiguous_affine_shapes_.find(shape_key) != ambiguous_affine_shapes_.end()) {
+        return;
+    }
+
+    const auto it = primed_affine_by_shape_.find(shape_key);
+    if (it == primed_affine_by_shape_.end()) {
+        primed_affine_by_shape_.emplace(shape_key, specialization.is_affine);
+        return;
+    }
+
+    if (it->second != specialization.is_affine) {
+        primed_affine_by_shape_.erase(it);
+        ambiguous_affine_shapes_.insert(shape_key);
+    }
+}
+
+void JITKernelWrapper::attachPrimedAffine(KernelRole role,
+                                          JITCompileSpecialization& specialization)
+{
+    const auto shape_key = makeSpecializationShapeKey(role, specialization);
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (ambiguous_affine_shapes_.find(shape_key) != ambiguous_affine_shapes_.end()) {
+        specialization.is_affine = false;
+        return;
+    }
+    const auto it = primed_affine_by_shape_.find(shape_key);
+    specialization.is_affine = (it != primed_affine_by_shape_.end()) ? it->second : false;
 }
 
 void JITKernelWrapper::rememberPrimedBasisBake(KernelRole role,
@@ -2624,7 +2709,7 @@ void JITKernelWrapper::rememberPrimedBasisBake(KernelRole role,
         return;
     }
 
-    const auto shape_key = makeSpecializationKey(role, specialization, /*include_basis_bake=*/false);
+    const auto shape_key = makeSpecializationShapeKey(role, specialization);
     std::lock_guard<std::mutex> lock(jit_mutex_);
     if (ambiguous_basis_bake_shapes_.find(shape_key) != ambiguous_basis_bake_shapes_.end()) {
         return;
@@ -2636,7 +2721,8 @@ void JITKernelWrapper::rememberPrimedBasisBake(KernelRole role,
         return;
     }
 
-    if (it->second.hash != specialization.baked_basis.hash) {
+    if (it->second.hash != specialization.baked_basis.hash ||
+        it->second.geometry_affine != specialization.baked_basis.geometry_affine) {
         primed_basis_bake_by_shape_.erase(it);
         ambiguous_basis_bake_shapes_.insert(shape_key);
     }
@@ -2649,7 +2735,7 @@ void JITKernelWrapper::attachPrimedBasisBake(KernelRole role,
         return;
     }
 
-    const auto shape_key = makeSpecializationKey(role, specialization, /*include_basis_bake=*/false);
+    const auto shape_key = makeSpecializationShapeKey(role, specialization);
     std::lock_guard<std::mutex> lock(jit_mutex_);
     if (ambiguous_basis_bake_shapes_.find(shape_key) != ambiguous_basis_bake_shapes_.end()) {
         return;
@@ -2670,34 +2756,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
         return nullptr;
     }
 
-    SpecializationKey key;
-    key.role = role;
-    key.domain = specialization.domain;
-
-    if (specialization.n_qpts_minus) {
-        key.has_n_qpts_minus = true;
-        key.n_qpts_minus = *specialization.n_qpts_minus;
-    }
-    if (specialization.n_test_dofs_minus) {
-        key.has_n_test_dofs_minus = true;
-        key.n_test_dofs_minus = *specialization.n_test_dofs_minus;
-    }
-    if (specialization.n_trial_dofs_minus) {
-        key.has_n_trial_dofs_minus = true;
-        key.n_trial_dofs_minus = *specialization.n_trial_dofs_minus;
-    }
-    if (specialization.n_qpts_plus) {
-        key.has_n_qpts_plus = true;
-        key.n_qpts_plus = *specialization.n_qpts_plus;
-    }
-    if (specialization.n_test_dofs_plus) {
-        key.has_n_test_dofs_plus = true;
-        key.n_test_dofs_plus = *specialization.n_test_dofs_plus;
-    }
-    if (specialization.n_trial_dofs_plus) {
-        key.has_n_trial_dofs_plus = true;
-        key.n_trial_dofs_plus = *specialization.n_trial_dofs_plus;
-    }
+    const auto key = makeSpecializationKey(role, specialization, /*include_basis_bake=*/true);
 
     const auto role_name = [role]() noexcept {
         switch (role) {
@@ -2729,6 +2788,10 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
         }
         if (key.has_basis_bake_hash) {
             oss << " bake=0x" << std::hex << key.basis_bake_hash << std::dec;
+        }
+        oss << " affine=" << (key.is_affine ? 1 : 0);
+        if (key.has_basis_bake_hash) {
+            oss << " bake_affine=" << (key.baked_geometry_affine ? 1 : 0);
         }
         return oss.str();
     };
@@ -2936,7 +2999,6 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
 
     JITCompileSpecialization spec;
     spec.domain = domain;
-    spec.is_affine = primed_is_affine_;
     bool any = false;
 
     const bool runtime_wants_bake = options_.basis_baking.enable && domain == IntegralDomain::Cell;
@@ -3027,6 +3089,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::getS
         return nullptr;
     }
 
+    attachPrimedAffine(role, spec);
     attachPrimedBasisBake(role, spec);
     return compileSpecializedDispatch(role, ir, spec, "runtime");
 }

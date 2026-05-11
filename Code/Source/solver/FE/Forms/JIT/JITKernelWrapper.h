@@ -197,6 +197,8 @@ private:
 
 	        bool has_basis_bake_hash{false};
 	        std::uint64_t basis_bake_hash{0};
+            bool baked_geometry_affine{false};
+            bool is_affine{false};
 
 	        friend bool operator==(const SpecializationKey& a, const SpecializationKey& b) noexcept
 	        {
@@ -215,7 +217,9 @@ private:
 	                   a.n_test_dofs_plus == b.n_test_dofs_plus &&
 	                   a.n_trial_dofs_plus == b.n_trial_dofs_plus &&
 	                   a.has_basis_bake_hash == b.has_basis_bake_hash &&
-	                   a.basis_bake_hash == b.basis_bake_hash;
+	                   a.basis_bake_hash == b.basis_bake_hash &&
+                       a.baked_geometry_affine == b.baked_geometry_affine &&
+                       a.is_affine == b.is_affine;
 	        }
 	    };
 
@@ -245,6 +249,8 @@ private:
 	            mix(static_cast<std::uint64_t>(k.n_trial_dofs_plus));
 	            mix(static_cast<std::uint64_t>(k.has_basis_bake_hash ? 1u : 0u));
 	            mix(k.basis_bake_hash);
+                mix(static_cast<std::uint64_t>(k.baked_geometry_affine ? 1u : 0u));
+                mix(static_cast<std::uint64_t>(k.is_affine ? 1u : 0u));
 
 	            return static_cast<std::size_t>(h);
 	        }
@@ -264,6 +270,11 @@ private:
         KernelRole role,
         const JITCompileSpecialization& specialization,
         bool include_basis_bake) const noexcept;
+    [[nodiscard]] SpecializationKey makeSpecializationShapeKey(
+        KernelRole role,
+        const JITCompileSpecialization& specialization) const noexcept;
+    void rememberPrimedAffine(KernelRole role, const JITCompileSpecialization& specialization);
+    void attachPrimedAffine(KernelRole role, JITCompileSpecialization& specialization);
     void rememberPrimedBasisBake(KernelRole role, const JITCompileSpecialization& specialization);
     void attachPrimedBasisBake(KernelRole role, JITCompileSpecialization& specialization);
     [[nodiscard]] std::shared_ptr<const CompiledDispatch> compileSpecializedDispatch(
@@ -295,6 +306,8 @@ private:
 	    std::unordered_map<SpecializationKey, JITBakedBasisSpec, SpecializationKeyHash>
 	        primed_basis_bake_by_shape_{};
 	    std::unordered_set<SpecializationKey, SpecializationKeyHash> ambiguous_basis_bake_shapes_{};
+        std::unordered_map<SpecializationKey, bool, SpecializationKeyHash> primed_affine_by_shape_{};
+        std::unordered_set<SpecializationKey, SpecializationKeyHash> ambiguous_affine_shapes_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_hits_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_compiles_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_skips_{};
@@ -305,8 +318,6 @@ private:
 	    bool warned_compile_failure_{false};
 	    bool runtime_failed_{false};
     bool warned_runtime_failure_{false};
-
-    bool primed_is_affine_{false};  ///< Cached from primeCellSpecializations hint
 
     // NOTE: scratch_batch_sides_/outputs_ are no longer used by computeCellBatch
     // (replaced with stack-local vectors for thread safety), but kept to avoid

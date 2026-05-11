@@ -52,6 +52,7 @@
 
 #include "Core/FEConfig.h"
 #include "Core/KernelTrace.h"
+#include "Core/MpiCollectiveTrace.h"
 #include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/JIT/JITCacheKey.h"
@@ -465,13 +466,25 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
     int local_count = static_cast<int>(keys.size());
     int min_count = 0;
     int max_count = 0;
+    auto seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::gaugeResolutionConsistent.min_count", 1, MPI_INT, MPI_MIN, comm);
     MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::gaugeResolutionConsistent.min_count", 1, MPI_INT, MPI_MIN, comm);
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::gaugeResolutionConsistent.max_count", 1, MPI_INT, MPI_MAX, comm);
     MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::gaugeResolutionConsistent.max_count", 1, MPI_INT, MPI_MAX, comm);
 
     unsigned long long min_hash = 0ULL;
     unsigned long long max_hash = 0ULL;
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::gaugeResolutionConsistent.min_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
     MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::gaugeResolutionConsistent.min_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::gaugeResolutionConsistent.max_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
     MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::gaugeResolutionConsistent.max_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
 
     return min_count == max_count && min_hash == max_hash;
 }
@@ -525,13 +538,25 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
     const int local_count = static_cast<int>(constraint_hashes.size());
     int min_count = 0;
     int max_count = 0;
+    auto seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::globalConstraintDefinitions.min_count", 1, MPI_INT, MPI_MIN, comm);
     MPI_Allreduce(&local_count, &min_count, 1, MPI_INT, MPI_MIN, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::globalConstraintDefinitions.min_count", 1, MPI_INT, MPI_MIN, comm);
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::globalConstraintDefinitions.max_count", 1, MPI_INT, MPI_MAX, comm);
     MPI_Allreduce(&local_count, &max_count, 1, MPI_INT, MPI_MAX, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::globalConstraintDefinitions.max_count", 1, MPI_INT, MPI_MAX, comm);
 
     std::uint64_t min_hash = 0ULL;
     std::uint64_t max_hash = 0ULL;
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::globalConstraintDefinitions.min_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
     MPI_Allreduce(&local_hash, &min_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::globalConstraintDefinitions.min_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MIN, comm);
+    seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "SystemSetup::globalConstraintDefinitions.max_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
     MPI_Allreduce(&local_hash, &max_hash, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
+    debug::traceMpiCollective("after", seq, "SystemSetup::globalConstraintDefinitions.max_hash", 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
 
     return min_count == max_count && min_hash == max_hash;
 }
@@ -3081,17 +3106,20 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                 int mpi_initialized = 0;
                                 MPI_Initialized(&mpi_initialized);
                                 if (mpi_initialized) {
-                                    const int local_flags[2] = {
-                                        has_any_v_dof ? 1 : 0,
-                                        has_unconstrained_v_dof ? 1 : 0};
-                                    int global_flags[2] = {0, 0};
-                                    MPI_Allreduce(local_flags,
-                                                  global_flags,
-                                                  2,
-                                                  MPI_INT,
-                                                  MPI_MAX,
-                                                  dof_handler_.mpiComm());
-                                    has_any_v_dof = (global_flags[0] != 0);
+	                                    const int local_flags[2] = {
+	                                        has_any_v_dof ? 1 : 0,
+	                                        has_unconstrained_v_dof ? 1 : 0};
+	                                    int global_flags[2] = {0, 0};
+	                                    const auto seq = debug::nextMpiCollectiveTraceSeq();
+	                                    debug::traceMpiCollective("before", seq, "SystemSetup::ibp_boundary_flags", 2, MPI_INT, MPI_MAX, dof_handler_.mpiComm());
+	                                    MPI_Allreduce(local_flags,
+	                                                  global_flags,
+	                                                  2,
+	                                                  MPI_INT,
+	                                                  MPI_MAX,
+	                                                  dof_handler_.mpiComm());
+	                                    debug::traceMpiCollective("after", seq, "SystemSetup::ibp_boundary_flags", 2, MPI_INT, MPI_MAX, dof_handler_.mpiComm());
+	                                    has_any_v_dof = (global_flags[0] != 0);
                                     has_unconstrained_v_dof = (global_flags[1] != 0);
                                 }
                             }
@@ -3373,16 +3401,19 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             int comm_size = 1;
             MPI_Comm_size(dof_handler_.mpiComm(), &comm_size);
             if (comm_size > 1) {
-                const int local_partial =
-                    (partition.globalSize() > partition.localOwnedSize()) ? 1 : 0;
-                int any_partial = 0;
-                MPI_Allreduce(&local_partial,
-                              &any_partial,
-                              1,
-                              MPI_INT,
-                              MPI_MAX,
-                              dof_handler_.mpiComm());
-                mpi_parallel = (any_partial != 0);
+	                const int local_partial =
+	                    (partition.globalSize() > partition.localOwnedSize()) ? 1 : 0;
+	                int any_partial = 0;
+	                const auto seq = debug::nextMpiCollectiveTraceSeq();
+	                debug::traceMpiCollective("before", seq, "SystemSetup::distributed_sparsity_any_partial", 1, MPI_INT, MPI_MAX, dof_handler_.mpiComm());
+	                MPI_Allreduce(&local_partial,
+	                              &any_partial,
+	                              1,
+	                              MPI_INT,
+	                              MPI_MAX,
+	                              dof_handler_.mpiComm());
+	                debug::traceMpiCollective("after", seq, "SystemSetup::distributed_sparsity_any_partial", 1, MPI_INT, MPI_MAX, dof_handler_.mpiComm());
+	                mpi_parallel = (any_partial != 0);
             }
         }
     }

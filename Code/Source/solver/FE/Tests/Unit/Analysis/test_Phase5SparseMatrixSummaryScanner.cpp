@@ -464,7 +464,32 @@ TEST(Phase5SparseMatrixSummaryScanner, MpiReductionMatchesSerialSmallProblem)
     options.mpi_comm = MPI_COMM_WORLD;
     auto mpi = scanSparseMatrixSummary(local_source, {}, options);
 
-    expectSameScalarSummary(serial.summary, mpi.summary);
+    EXPECT_EQ(serial.summary.rows, mpi.summary.rows);
+    EXPECT_EQ(serial.summary.cols, mpi.summary.cols);
+    EXPECT_EQ(serial.summary.square, mpi.summary.square);
+    EXPECT_DOUBLE_EQ(serial.summary.max_abs_entry, mpi.summary.max_abs_entry);
+    EXPECT_DOUBLE_EQ(serial.summary.max_abs_offdiag, mpi.summary.max_abs_offdiag);
+    EXPECT_DOUBLE_EQ(serial.summary.max_positive_offdiag, mpi.summary.max_positive_offdiag);
+    EXPECT_DOUBLE_EQ(serial.summary.min_row_sum, mpi.summary.min_row_sum);
+    EXPECT_DOUBLE_EQ(serial.summary.max_row_sum, mpi.summary.max_row_sum);
+    EXPECT_DOUBLE_EQ(serial.summary.max_abs_row_sum, mpi.summary.max_abs_row_sum);
+    EXPECT_EQ(serial.summary.diagonal_count, mpi.summary.diagonal_count);
+    EXPECT_EQ(serial.summary.nonpositive_diagonal_count, mpi.summary.nonpositive_diagonal_count);
+    EXPECT_EQ(serial.summary.negative_diagonal_count, mpi.summary.negative_diagonal_count);
+    EXPECT_EQ(serial.summary.near_zero_diagonal_count, mpi.summary.near_zero_diagonal_count);
+    EXPECT_EQ(serial.summary.offdiag_count, mpi.summary.offdiag_count);
+    EXPECT_EQ(serial.summary.positive_offdiag_count, mpi.summary.positive_offdiag_count);
+    EXPECT_EQ(serial.summary.negative_offdiag_count, mpi.summary.negative_offdiag_count);
+    EXPECT_EQ(serial.summary.near_zero_offdiag_count, mpi.summary.near_zero_offdiag_count);
+    EXPECT_EQ(serial.summary.row_sum_violation_count, mpi.summary.row_sum_violation_count);
+    EXPECT_EQ(serial.summary.invalid_entry_count, mpi.summary.invalid_entry_count);
+    EXPECT_EQ(serial.summary.nonfinite_entry_count, mpi.summary.nonfinite_entry_count);
+    EXPECT_EQ(serial.summary.nonfinite_row_sum_count, mpi.summary.nonfinite_row_sum_count);
+    EXPECT_EQ(serial.summary.scanned_row_count, mpi.summary.scanned_row_count);
+    EXPECT_EQ(serial.summary.expected_row_count, mpi.summary.expected_row_count);
+    EXPECT_EQ(serial.summary.scanned_entry_count, mpi.summary.scanned_entry_count);
+    EXPECT_FALSE(mpi.summary.sign_evidence_complete);
+    EXPECT_FALSE(mpi.summary.row_sum_evidence_complete);
     EXPECT_EQ(mpi.log.visited_rows, static_cast<std::uint64_t>(rows));
     EXPECT_EQ(mpi.log.visited_entries, serial.log.visited_entries);
     EXPECT_EQ(mpi.log.visited_partitions, 2u);
@@ -505,5 +530,77 @@ TEST(Phase5SparseMatrixSummaryScanner, MpiReductionMatchesSerialSmallProblem)
     EXPECT_EQ(mpi_bad.summary.worst_entries.front().col, 1);
     EXPECT_DOUBLE_EQ(mpi_bad.summary.worst_entries.front().value, 0.75);
     EXPECT_EQ(mpi_bad.summary.worst_entries.front().note, "positive offdiagonal");
+}
+
+TEST(Phase5SparseMatrixSummaryScanner, MpiReductionIsSymmetricWhenRanksHaveNoLocalRows)
+{
+    if (std::getenv("SVMP_FE_RUN_MPI_TESTS") == nullptr) {
+        GTEST_SKIP() << "Set SVMP_FE_RUN_MPI_TESTS=1 and run under mpiexec.";
+    }
+
+    int size = 1;
+    int rank = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (size != 2) {
+        GTEST_SKIP() << "This MPI reduction test expects exactly two ranks.";
+    }
+
+    constexpr GlobalIndex rows = 3;
+    const std::vector<std::vector<SparseMatrixRowEntry>> full_rows{
+        {{0, 4.0}, {1, 1.5}},
+        {{0, -1.0}, {1, 3.0}, {2, -0.5}},
+        {{1, -0.5}, {2, 2.0}},
+    };
+    const std::vector<std::vector<SparseMatrixRowEntry>> local_rows =
+        rank == 0 ? std::vector<std::vector<SparseMatrixRowEntry>>{} : full_rows;
+
+    const auto serial_source = CsrSparseRowScanSource::fromRows(
+        rows,
+        rows,
+        full_rows,
+        backends::BackendKind::FSILS);
+    const auto local_source = CsrSparseRowScanSource::fromRows(
+        rows,
+        rows,
+        local_rows,
+        backends::BackendKind::FSILS,
+        0,
+        false,
+        rank);
+
+    SparseMatrixScanOptions options;
+    options.sign_tolerance = 1.0e-12;
+    options.row_sum_tolerance = 1.0e-12;
+    options.compute_symmetry = false;
+    options.worst_entry_sample_limit = 2;
+
+    const auto serial = scanSparseMatrixSummary(serial_source, {}, options);
+    options.mpi_comm = MPI_COMM_WORLD;
+    const auto mpi = scanSparseMatrixSummary(local_source, {}, options);
+
+    EXPECT_EQ(mpi.summary.scanned_row_count, serial.summary.scanned_row_count);
+    EXPECT_EQ(mpi.summary.scanned_entry_count, serial.summary.scanned_entry_count);
+    EXPECT_EQ(mpi.summary.diagonal_count, serial.summary.diagonal_count);
+    EXPECT_EQ(mpi.summary.offdiag_count, serial.summary.offdiag_count);
+    EXPECT_EQ(mpi.summary.positive_offdiag_count, serial.summary.positive_offdiag_count);
+    EXPECT_DOUBLE_EQ(mpi.summary.max_abs_entry, serial.summary.max_abs_entry);
+    EXPECT_DOUBLE_EQ(mpi.summary.max_positive_offdiag, serial.summary.max_positive_offdiag);
+    EXPECT_DOUBLE_EQ(mpi.summary.min_row_sum, serial.summary.min_row_sum);
+    EXPECT_DOUBLE_EQ(mpi.summary.max_row_sum, serial.summary.max_row_sum);
+    ASSERT_TRUE(serial.summary.gershgorin_lower_bound.has_value());
+    ASSERT_TRUE(serial.summary.gershgorin_upper_bound.has_value());
+    ASSERT_TRUE(mpi.summary.gershgorin_lower_bound.has_value());
+    ASSERT_TRUE(mpi.summary.gershgorin_upper_bound.has_value());
+    EXPECT_DOUBLE_EQ(*mpi.summary.gershgorin_lower_bound,
+                     *serial.summary.gershgorin_lower_bound);
+    EXPECT_DOUBLE_EQ(*mpi.summary.gershgorin_upper_bound,
+                     *serial.summary.gershgorin_upper_bound);
+    EXPECT_EQ(mpi.log.visited_rows, serial.log.visited_rows);
+    EXPECT_EQ(mpi.log.visited_entries, serial.log.visited_entries);
+    EXPECT_EQ(mpi.log.visited_partitions, 2u);
+    EXPECT_TRUE(mpi.log.mpi_reduced);
+    ASSERT_FALSE(mpi.summary.worst_entries.empty());
+    EXPECT_EQ(mpi.summary.worst_entries.front().note, "positive offdiagonal");
 }
 #endif

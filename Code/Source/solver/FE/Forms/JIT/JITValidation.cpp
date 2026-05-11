@@ -766,18 +766,18 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
         switch (n.type()) {
             case FormExprType::TimeDerivative: {
                 const int order = n.timeDerivativeOrder().value_or(1);
-                if (order < 1 || static_cast<std::size_t>(order) > assembly::jit::kMaxTimeDerivativeOrderV4) {
+                if (order < 1 || static_cast<std::size_t>(order) > assembly::jit::kMaxTimeDerivativeOrderV6) {
                     fail("JIT: dt(order) expects 1 <= order <= " +
-                         std::to_string(assembly::jit::kMaxTimeDerivativeOrderV4));
+                         std::to_string(assembly::jit::kMaxTimeDerivativeOrderV6));
                 }
                 break;
             }
 
             case FormExprType::PreviousSolutionRef: {
                 const int steps = n.historyIndex().value_or(1);
-                if (steps < 1 || static_cast<std::size_t>(steps) > assembly::jit::kMaxPreviousSolutionsV4) {
+                if (steps < 1 || static_cast<std::size_t>(steps) > assembly::jit::kMaxPreviousSolutionsV6) {
                     fail("JIT: PreviousSolutionRef expects 1 <= steps_back <= " +
-                         std::to_string(assembly::jit::kMaxPreviousSolutionsV4));
+                         std::to_string(assembly::jit::kMaxPreviousSolutionsV6));
                 }
                 break;
             }
@@ -986,9 +986,9 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
             case FormExprType::HistoryWeightedSum:
             case FormExprType::HistoryConvolution: {
                 const auto kids = n.childrenShared();
-                if (kids.size() > assembly::jit::kMaxPreviousSolutionsV4) {
+                if (kids.size() > assembly::jit::kMaxPreviousSolutionsV6) {
                     fail("JIT: history operator weights length must be <= " +
-                         std::to_string(assembly::jit::kMaxPreviousSolutionsV4));
+                         std::to_string(assembly::jit::kMaxPreviousSolutionsV6));
                     break;
                 }
                 for (const auto& w : kids) {

@@ -75,6 +75,11 @@ void navierStokesTraceLog(const std::string& message)
   }
 }
 
+[[nodiscard]] bool temporalSpatialBcTraceEnabled() noexcept
+{
+  return navierStokesTraceEnabled();
+}
+
 double parse_double(std::string_view raw, std::string_view context)
 {
   const auto s = trim_copy(std::string(raw));
@@ -209,6 +214,8 @@ struct TemporalSpatialValues {
   int dim{0};
   int dof{0};
   int num_time_points{0};
+  int boundary_marker{0};
+  std::string file_path{};
 
   std::vector<double> t{};
   double period{0.0};
@@ -268,6 +275,30 @@ struct TemporalSpatialValues {
     constexpr double tol = 1e-8;
     if (best < coords.size() && best_d2 <= tol * tol) {
       return best;
+    }
+
+    if (temporalSpatialBcTraceEnabled()) {
+      int rank = 0;
+#if FE_HAS_MPI
+      int initialized = 0;
+      MPI_Initialized(&initialized);
+      if (initialized) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+      }
+#endif
+      std::ostringstream oss;
+      oss << "TemporalSpatialValues: rank=" << rank
+          << " marker=" << boundary_marker
+          << " file='" << file_path << "'"
+          << " failed coordinate match"
+          << " query=(" << p[0] << "," << p[1] << "," << p[2] << ")"
+          << " stored_nodes=" << coords.size();
+      if (best < coords.size()) {
+        const auto& c = coords[best];
+        oss << " nearest=(" << c[0] << "," << c[1] << "," << c[2] << ")"
+            << " nearest_d=" << std::sqrt(best_d2);
+      }
+      navierStokesTraceLog(oss.str());
     }
 
     throw std::runtime_error(
@@ -390,6 +421,8 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
   out->dim = dim;
   out->dof = ndof;
   out->num_time_points = num_ts;
+  out->boundary_marker = boundary_marker;
+  out->file_path = file_path;
   out->t.resize(static_cast<std::size_t>(num_ts));
 
   // Time sequence (t0 must be 0 and increasing).
@@ -419,6 +452,10 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
   out->coords.reserve(static_cast<std::size_t>(num_nodes));
   out->d.reserve(static_cast<std::size_t>(num_nodes) * static_cast<std::size_t>(num_ts) * static_cast<std::size_t>(ndof));
 
+  int missing_local_vertex_count = 0;
+  int non_boundary_file_node_count = 0;
+  int raw_gid_fallback_count = 0;
+
   for (int b = 0; b < num_nodes; ++b) {
     long long node_id_1based = 0;
     in >> node_id_1based;
@@ -429,8 +466,40 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
           "': invalid negative node id: " + std::to_string(node_id_1based) + ".");
     }
 
-    const auto node_gid = static_cast<svmp::gid_t>(node_gid0_ll);
-    const auto node_idx = mesh.global_to_local_vertex(node_gid);
+    struct NodeCandidate {
+      svmp::gid_t gid{svmp::INVALID_GID};
+      svmp::index_t local{svmp::INVALID_INDEX};
+      bool on_boundary{false};
+    };
+    const auto make_candidate = [&](svmp::gid_t gid) {
+      NodeCandidate c{};
+      c.gid = gid;
+      c.local = mesh.global_to_local_vertex(gid);
+      c.on_boundary = boundary_gids.empty() || boundary_gids.count(gid) != 0u;
+      return c;
+    };
+
+    const auto zero_based = make_candidate(static_cast<svmp::gid_t>(node_gid0_ll));
+    NodeCandidate chosen = zero_based;
+    bool used_raw_gid = false;
+    if (!identity_vertex_gids) {
+      const auto raw = make_candidate(static_cast<svmp::gid_t>(node_id_1based));
+      if (!(zero_based.local != svmp::INVALID_INDEX && zero_based.on_boundary)) {
+        if (raw.local != svmp::INVALID_INDEX && raw.on_boundary) {
+          chosen = raw;
+          used_raw_gid = true;
+        } else if (zero_based.local == svmp::INVALID_INDEX && raw.local != svmp::INVALID_INDEX) {
+          chosen = raw;
+          used_raw_gid = true;
+        }
+      }
+    }
+
+    const auto node_gid = chosen.gid;
+    const auto node_idx = chosen.local;
+    if (used_raw_gid) {
+      ++raw_gid_fallback_count;
+    }
 
     if (identity_vertex_gids && node_idx == svmp::INVALID_INDEX) {
       throw std::runtime_error(
@@ -444,7 +513,14 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
           std::to_string(node_id_1based) + " is not on boundary marker " + std::to_string(boundary_marker) + ".");
     }
 
-    const bool keep = (node_idx != svmp::INVALID_INDEX) && (boundary_gids.empty() || boundary_gids.count(node_gid) != 0u);
+    const bool has_local_vertex = node_idx != svmp::INVALID_INDEX;
+    const bool is_boundary_node = chosen.on_boundary;
+    if (!has_local_vertex) {
+      ++missing_local_vertex_count;
+    } else if (!is_boundary_node) {
+      ++non_boundary_file_node_count;
+    }
+    const bool keep = has_local_vertex && is_boundary_node;
     if (keep) {
       out->node_ids.push_back(node_idx);
 
@@ -473,6 +549,31 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
         }
       }
     }
+  }
+
+  if (temporalSpatialBcTraceEnabled()) {
+    int rank = 0;
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized) {
+      MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
+#endif
+    std::ostringstream oss;
+    oss << "TemporalSpatialValues: rank=" << rank
+        << " marker=" << boundary_marker
+        << " file='" << file_path << "'"
+        << " ndof=" << ndof
+        << " time_points=" << num_ts
+        << " file_nodes=" << num_nodes
+        << " kept_nodes=" << out->coords.size()
+        << " boundary_marker_nodes=" << boundary_gids.size()
+        << " missing_local_vertex_nodes=" << missing_local_vertex_count
+        << " non_boundary_file_nodes=" << non_boundary_file_node_count
+        << " raw_gid_fallback_nodes=" << raw_gid_fallback_count
+        << " identity_vertex_gids=" << (identity_vertex_gids ? 1 : 0);
+    navierStokesTraceLog(oss.str());
   }
 
   return out;

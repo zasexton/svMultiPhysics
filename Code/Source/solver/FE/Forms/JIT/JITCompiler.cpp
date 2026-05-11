@@ -456,6 +456,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     struct CompilerKey {
         int optimization_level{2};
         bool vectorize{true};
+        bool simd_batch{true};
         bool cache_kernels{true};
         std::string cache_directory{};
         bool cache_diagnostics{false};
@@ -465,6 +466,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         bool dump_llvm_ir_optimized{false};
         bool debug_info{false};
         std::string dump_directory{};
+        JITFastMathMode fast_math_mode{JITFastMathMode::Strict};
         bool specialization_enable{false};
         bool specialization_specialize_n_qpts{true};
         bool specialization_specialize_dofs{false};
@@ -483,6 +485,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
         {
             return optimization_level == other.optimization_level &&
                    vectorize == other.vectorize &&
+                   simd_batch == other.simd_batch &&
                    cache_kernels == other.cache_kernels &&
                    cache_directory == other.cache_directory &&
                    cache_diagnostics == other.cache_diagnostics &&
@@ -492,6 +495,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
                    dump_llvm_ir_optimized == other.dump_llvm_ir_optimized &&
                    debug_info == other.debug_info &&
                    dump_directory == other.dump_directory &&
+                   fast_math_mode == other.fast_math_mode &&
                    specialization_enable == other.specialization_enable &&
                    specialization_specialize_n_qpts == other.specialization_specialize_n_qpts &&
                    specialization_specialize_dofs == other.specialization_specialize_dofs &&
@@ -531,6 +535,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             std::uint64_t h = kFNVOffset;
             hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(k.optimization_level)));
             hashMix(h, static_cast<std::uint64_t>(k.vectorize ? 1u : 0u));
+            hashMix(h, static_cast<std::uint64_t>(k.simd_batch ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.cache_kernels ? 1u : 0u));
             hashMix(h, hashString(k.cache_directory));
             hashMix(h, static_cast<std::uint64_t>(k.cache_diagnostics ? 1u : 0u));
@@ -540,6 +545,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
             hashMix(h, static_cast<std::uint64_t>(k.dump_llvm_ir_optimized ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.debug_info ? 1u : 0u));
             hashMix(h, hashString(k.dump_directory));
+            hashMix(h, static_cast<std::uint64_t>(k.fast_math_mode));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_enable ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_specialize_n_qpts ? 1u : 0u));
             hashMix(h, static_cast<std::uint64_t>(k.specialization_specialize_dofs ? 1u : 0u));
@@ -587,6 +593,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     CompilerKey key;
     key.optimization_level = options.optimization_level;
     key.vectorize = options.vectorize;
+    key.simd_batch = options.simd_batch;
     key.cache_kernels = options.cache_kernels;
     key.cache_directory = options.cache_directory;
     key.cache_diagnostics = options.cache_diagnostics;
@@ -596,6 +603,7 @@ std::shared_ptr<JITCompiler> JITCompiler::getOrCreate(const JITOptions& options)
     key.dump_llvm_ir_optimized = options.dump_llvm_ir_optimized;
     key.debug_info = options.debug_info;
     key.dump_directory = options.dump_directory;
+    key.fast_math_mode = options.fast_math_mode;
     key.specialization_enable = options.specialization.enable;
     key.specialization_specialize_n_qpts = options.specialization.specialize_n_qpts;
     key.specialization_specialize_dofs = options.specialization.specialize_dofs;
@@ -1243,7 +1251,7 @@ JITCompileResult JITCompiler::compileColocated(
             combined_module_id += "_";
             combined_module_id += sym;
         }
-        if (impl_->engine->tryLoadFromObjectCache(combined_module_id)) {
+        if (impl_->engine->tryLoadFromObjectCache(combined_module_id, kernel_symbols)) {
             bool cache_resolved = true;
             for (std::size_t i = 0; i < specs.size(); ++i) {
                 JITEngine::SymbolAddress addr = 0;

@@ -36,6 +36,15 @@ inline void callJIT(std::uintptr_t addr, const void* args) noexcept
     reinterpret_cast<JITFn>(addr)(args);
 }
 
+[[nodiscard]] std::size_t effectiveSimdBatchWidth(const JITOptions& options) noexcept
+{
+    if (!options.simd_batch) {
+        return 1u;
+    }
+    const auto hardware_width = static_cast<std::size_t>(hardwareProfile().simdDoubles());
+    return (hardware_width == 2u) ? 2u : 1u;
+}
+
 inline void overrideFunctionalWeights(assembly::jit::KernelSideArgsV6& side) noexcept
 {
     side.n_test_dofs = 1u;
@@ -124,10 +133,7 @@ Real JITFunctionalKernelWrapper::evaluateCellTotal(const assembly::AssemblyConte
                                                static_cast<std::uint32_t>(ctx.numTrialDofs()));
 
         if (options_.vectorize) {
-            const auto simd_w = options_.simd_batch
-                ? static_cast<std::uint32_t>(hardwareProfile().simdDoubles())
-                : 1u;
-            const auto padded_n = (simd_w >= 2u && options_.simd_batch) ? simd_w : 1u;
+            const auto padded_n = static_cast<std::uint32_t>(effectiveSimdBatchWidth(options_));
 
             thread_local std::vector<assembly::jit::KernelSideArgsV6> sides;
             thread_local std::vector<assembly::jit::KernelOutputViewV6> outputs;
@@ -203,10 +209,8 @@ void JITFunctionalKernelWrapper::evaluateCellTotalBatch(
 
     try {
         if (options_.vectorize) {
-            const auto simd_w = options_.simd_batch
-                ? static_cast<std::size_t>(hardwareProfile().simdDoubles())
-                : std::size_t{1};
-            const auto padded_n = (simd_w >= 2u && options_.simd_batch)
+            const auto simd_w = effectiveSimdBatchWidth(options_);
+            const auto padded_n = (simd_w >= 2u)
                 ? ((n + simd_w - 1u) / simd_w) * simd_w
                 : n;
 

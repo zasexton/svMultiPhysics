@@ -41,6 +41,7 @@
 #include "Constraints/GaugeRegistry.h"
 
 #include "Analysis/ProblemAnalysisTypes.h"
+#include "Analysis/ProblemAnalysisContext.h"
 #include "Analysis/AnalysisSummaryTypes.h"
 #include "Analysis/FormulationRecord.h"
 #include "Analysis/BoundaryConditionDescriptor.h"
@@ -1398,6 +1399,8 @@ public:
     /// @endcond
 
 private:
+    [[nodiscard]] analysis::ProblemAnalysisContext buildProblemAnalysisContext() const;
+    [[nodiscard]] analysis::ProblemAnalysisReport runProblemAnalysisPlanOnly() const;
 
     struct PlannedCellTerm {
         FieldId test_field{INVALID_FIELD_ID};

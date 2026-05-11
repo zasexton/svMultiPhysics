@@ -47,6 +47,7 @@
 #include "Forms/SymbolicDifferentiation.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 
+#include "Core/MpiCollectiveTrace.h"
 #include "Spaces/FunctionSpace.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 
@@ -173,9 +174,15 @@ template <typename T>
 
     T global = value;
     if constexpr (std::is_same_v<T, int>) {
+        const auto seq = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective("before", seq, "FESystem::mpiAllreduceSumIfActive<int>", 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
         MPI_Allreduce(&value, &global, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+        debug::traceMpiCollective("after", seq, "FESystem::mpiAllreduceSumIfActive<int>", 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     } else {
+        const auto seq = debug::nextMpiCollectiveTraceSeq();
+        debug::traceMpiCollective("before", seq, "FESystem::mpiAllreduceSumIfActive<double>", 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
         MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        debug::traceMpiCollective("after", seq, "FESystem::mpiAllreduceSumIfActive<double>", 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     }
     return global;
 #else
@@ -203,7 +210,10 @@ template <typename T>
     }
     unsigned long long local = static_cast<unsigned long long>(value);
     unsigned long long global = local;
+    const auto seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "FESystem::mpiSumUint64", 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(&local, &global, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    debug::traceMpiCollective("after", seq, "FESystem::mpiSumUint64", 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
     return static_cast<std::uint64_t>(global);
 }
 
@@ -213,7 +223,10 @@ template <typename T>
         return value;
     }
     double global = value;
+    const auto seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, "FESystem::mpiReduceDouble", 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
     MPI_Allreduce(&value, &global, 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
+    debug::traceMpiCollective("after", seq, "FESystem::mpiReduceDouble", 1, MPI_DOUBLE, op, MPI_COMM_WORLD);
     return global;
 }
 #endif
@@ -5039,7 +5052,7 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
         return false;
     }
 
-    const auto baseline_report = runProblemAnalysis();
+    const auto baseline_report = runProblemAnalysisPlanOnly();
     const auto& plan = baseline_report.request_plan;
     if (plan.empty()) {
         invalidateAnalysisCache();
@@ -5555,6 +5568,11 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
     }
     invalidateAnalysisCache();
     if (analysis_summaries_) {
+#if FE_HAS_MPI
+        if (mpiWorldActiveForAnalysis()) {
+            return analysis_summaries_->totalSummaryCount() > registered_summary_count;
+        }
+#endif
         analysis_report_cache_ = runProblemAnalysis();
         analysis_report_version_ = analysis_inputs_version_;
         return analysis_summaries_->totalSummaryCount() > registered_summary_count;
@@ -5715,7 +5733,7 @@ void FESystem::invalidateAnalysisCache() noexcept {
     ++analysis_inputs_version_;
 }
 
-analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
+analysis::ProblemAnalysisContext FESystem::buildProblemAnalysisContext() const {
     analysis::ProblemAnalysisContext ctx;
 
     // Populate field descriptors from FieldRegistry.
@@ -5855,6 +5873,16 @@ analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
         ctx.setAnalysisSummaries(*analysis_summaries_);
     }
 
+    return ctx;
+}
+
+analysis::ProblemAnalysisReport FESystem::runProblemAnalysisPlanOnly() const {
+    auto analyzer = analysis::ProblemAnalyzer::createDefault();
+    return analyzer.analyze(buildProblemAnalysisContext());
+}
+
+analysis::ProblemAnalysisReport FESystem::runProblemAnalysis() const {
+    auto ctx = buildProblemAnalysisContext();
     auto analyzer = analysis::ProblemAnalyzer::createDefault();
     auto producer_registry =
         analysis::AnalysisSummaryProducerRegistry::createDefault();

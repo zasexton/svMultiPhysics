@@ -11,6 +11,7 @@
 
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/Interfaces/GenericMatrix.h"
+#include "Core/MpiCollectiveTrace.h"
 
 #if defined(FE_HAS_EIGEN)
 #include "Backends/Eigen/EigenMatrix.h"
@@ -1356,11 +1357,23 @@ namespace {
 }
 
 template <typename T>
-void allReduceInPlace(T& value, MPI_Datatype type, MPI_Op op, MPI_Comm comm)
+void allReduceBufferInPlace(std::vector<T>& values,
+                            MPI_Datatype type,
+                            MPI_Op op,
+                            MPI_Comm comm,
+                            const char* label)
 {
-    T reduced{};
-    MPI_Allreduce(&value, &reduced, 1, type, op, comm);
-    value = reduced;
+    if (values.empty()) {
+        return;
+    }
+
+    std::vector<T> reduced(values.size());
+    const auto count = static_cast<int>(values.size());
+    const auto seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", seq, label, count, type, op, comm);
+    MPI_Allreduce(values.data(), reduced.data(), count, type, op, comm);
+    debug::traceMpiCollective("after", seq, label, count, type, op, comm);
+    values = std::move(reduced);
 }
 
 [[nodiscard]] std::string serializeWorstSamples(const std::vector<MatrixEntrySample>& samples)
@@ -1423,7 +1436,10 @@ void allGatherWorstSamples(DiscreteMatrixSummary& summary, MPI_Comm comm)
 
     const int send_count = static_cast<int>(serialized.size());
     std::vector<int> recv_counts(static_cast<std::size_t>(size), 0);
+    const auto gather_seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", gather_seq, "SparseMatrixSummaryScanner::allGatherWorstSamples.counts", 1, MPI_INT, MPI_SUM, comm);
     MPI_Allgather(&send_count, 1, MPI_INT, recv_counts.data(), 1, MPI_INT, comm);
+    debug::traceMpiCollective("after", gather_seq, "SparseMatrixSummaryScanner::allGatherWorstSamples.counts", 1, MPI_INT, MPI_SUM, comm);
 
     std::vector<int> displacements(static_cast<std::size_t>(size), 0);
     int total = 0;
@@ -1433,6 +1449,8 @@ void allGatherWorstSamples(DiscreteMatrixSummary& summary, MPI_Comm comm)
     }
 
     std::string gathered(static_cast<std::size_t>(total), '\0');
+    const auto gatherv_seq = debug::nextMpiCollectiveTraceSeq();
+    debug::traceMpiCollective("before", gatherv_seq, "SparseMatrixSummaryScanner::allGatherWorstSamples.payload", send_count, MPI_CHAR, MPI_SUM, comm);
     MPI_Allgatherv(serialized.data(),
                    send_count,
                    MPI_CHAR,
@@ -1441,6 +1459,7 @@ void allGatherWorstSamples(DiscreteMatrixSummary& summary, MPI_Comm comm)
                    displacements.data(),
                    MPI_CHAR,
                    comm);
+    debug::traceMpiCollective("after", gatherv_seq, "SparseMatrixSummaryScanner::allGatherWorstSamples.payload", send_count, MPI_CHAR, MPI_SUM, comm);
 
     const auto samples = parseWorstSamples(gathered);
     summary.worst_entries.clear();
@@ -1465,129 +1484,221 @@ void reduceDiscreteMatrixSummaryMPI(DiscreteMatrixSummary& summary,
         return;
     }
 
-    auto sum_u64 = [comm](std::uint64_t& value) {
-        auto tmp = static_cast<unsigned long long>(value);
-        allReduceInPlace(tmp, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-        value = static_cast<std::uint64_t>(tmp);
+    constexpr std::size_t kDiagonalCount = 0;
+    constexpr std::size_t kMissingDiagonalCount = 1;
+    constexpr std::size_t kNonpositiveDiagonalCount = 2;
+    constexpr std::size_t kNegativeDiagonalCount = 3;
+    constexpr std::size_t kNearZeroDiagonalCount = 4;
+    constexpr std::size_t kOffdiagCount = 5;
+    constexpr std::size_t kPositiveOffdiagCount = 6;
+    constexpr std::size_t kNegativeOffdiagCount = 7;
+    constexpr std::size_t kNearZeroOffdiagCount = 8;
+    constexpr std::size_t kNegativeRowSumCount = 9;
+    constexpr std::size_t kPositiveRowSumCount = 10;
+    constexpr std::size_t kNearZeroRowSumCount = 11;
+    constexpr std::size_t kRowSumViolationCount = 12;
+    constexpr std::size_t kInvalidEntryCount = 13;
+    constexpr std::size_t kNonfiniteEntryCount = 14;
+    constexpr std::size_t kNonfiniteRowSumCount = 15;
+    constexpr std::size_t kScannedRowCount = 16;
+    constexpr std::size_t kScannedEntryCount = 17;
+    constexpr std::size_t kDuplicateRowVisitCount = 18;
+    constexpr std::size_t kMissingRowCount = 19;
+    constexpr std::size_t kRowsForRowSumExtrema = 20;
+    constexpr std::size_t kLogVisitedRows = 21;
+    constexpr std::size_t kLogVisitedEntries = 22;
+    constexpr std::size_t kLogVisitedPartitions = 23;
+    constexpr std::size_t kRetainedSymmetryEntries = 24;
+
+    std::vector<unsigned long long> sum_u64{
+        static_cast<unsigned long long>(summary.diagonal_count),
+        static_cast<unsigned long long>(summary.missing_diagonal_count),
+        static_cast<unsigned long long>(summary.nonpositive_diagonal_count),
+        static_cast<unsigned long long>(summary.negative_diagonal_count),
+        static_cast<unsigned long long>(summary.near_zero_diagonal_count),
+        static_cast<unsigned long long>(summary.offdiag_count),
+        static_cast<unsigned long long>(summary.positive_offdiag_count),
+        static_cast<unsigned long long>(summary.negative_offdiag_count),
+        static_cast<unsigned long long>(summary.near_zero_offdiag_count),
+        static_cast<unsigned long long>(summary.negative_row_sum_count),
+        static_cast<unsigned long long>(summary.positive_row_sum_count),
+        static_cast<unsigned long long>(summary.near_zero_row_sum_count),
+        static_cast<unsigned long long>(summary.row_sum_violation_count),
+        static_cast<unsigned long long>(summary.invalid_entry_count),
+        static_cast<unsigned long long>(summary.nonfinite_entry_count),
+        static_cast<unsigned long long>(summary.nonfinite_row_sum_count),
+        static_cast<unsigned long long>(summary.scanned_row_count),
+        static_cast<unsigned long long>(summary.scanned_entry_count),
+        static_cast<unsigned long long>(summary.duplicate_row_visit_count),
+        static_cast<unsigned long long>(summary.missing_row_count),
+        static_cast<unsigned long long>(log.visited_rows),
+        static_cast<unsigned long long>(log.visited_rows),
+        static_cast<unsigned long long>(log.visited_entries),
+        static_cast<unsigned long long>(log.visited_partitions),
+        static_cast<unsigned long long>(log.retained_symmetry_entries),
     };
-    auto max_real = [comm](Real& value) {
-        allReduceInPlace(value, MPI_DOUBLE, MPI_MAX, comm);
+
+    constexpr std::size_t kExpectedRows = 0;
+    constexpr std::size_t kMaxRowEntries = 1;
+    constexpr std::size_t kPeakStoredEntries = 2;
+    std::vector<unsigned long long> max_u64{
+        static_cast<unsigned long long>(summary.expected_row_count),
+        static_cast<unsigned long long>(log.max_row_entries),
+        static_cast<unsigned long long>(log.estimated_peak_stored_entries),
     };
-    auto min_real = [comm](Real& value) {
-        allReduceInPlace(value, MPI_DOUBLE, MPI_MIN, comm);
+
+    const bool local_has_rows_for_row_sum = log.visited_rows != 0U;
+    constexpr std::size_t kMaxAbsEntry = 0;
+    constexpr std::size_t kMaxAbsOffdiag = 1;
+    constexpr std::size_t kMaxPositiveOffdiag = 2;
+    constexpr std::size_t kMaxSymmetryError = 3;
+    constexpr std::size_t kMaxHermitianError = 4;
+    constexpr std::size_t kMaxComplexSymmetryError = 5;
+    constexpr std::size_t kMaxAbsImagEntry = 6;
+    constexpr std::size_t kMaxAbsRowSum = 7;
+    constexpr std::size_t kGershgorinUpper = 8;
+    constexpr std::size_t kMaxRowSum = 9;
+    std::vector<Real> max_real{
+        summary.max_abs_entry,
+        summary.max_abs_offdiag,
+        summary.max_positive_offdiag,
+        summary.max_symmetry_error,
+        summary.max_hermitian_error,
+        summary.max_complex_symmetry_error,
+        summary.max_abs_imag_entry,
+        summary.max_abs_row_sum,
+        summary.gershgorin_upper_bound
+            ? *summary.gershgorin_upper_bound
+            : -std::numeric_limits<Real>::infinity(),
+        local_has_rows_for_row_sum
+            ? summary.max_row_sum
+            : -std::numeric_limits<Real>::infinity(),
     };
 
-    sum_u64(summary.diagonal_count);
-    sum_u64(summary.missing_diagonal_count);
-    sum_u64(summary.nonpositive_diagonal_count);
-    sum_u64(summary.negative_diagonal_count);
-    sum_u64(summary.near_zero_diagonal_count);
-    sum_u64(summary.offdiag_count);
-    sum_u64(summary.positive_offdiag_count);
-    sum_u64(summary.negative_offdiag_count);
-    sum_u64(summary.near_zero_offdiag_count);
-    sum_u64(summary.negative_row_sum_count);
-    sum_u64(summary.positive_row_sum_count);
-    sum_u64(summary.near_zero_row_sum_count);
-    sum_u64(summary.row_sum_violation_count);
-    sum_u64(summary.invalid_entry_count);
-    sum_u64(summary.nonfinite_entry_count);
-    sum_u64(summary.nonfinite_row_sum_count);
-    sum_u64(summary.scanned_row_count);
-    sum_u64(summary.scanned_entry_count);
-    sum_u64(summary.duplicate_row_visit_count);
-    sum_u64(summary.missing_row_count);
+    constexpr std::size_t kGershgorinLower = 0;
+    constexpr std::size_t kMinRowSum = 1;
+    std::vector<Real> min_real{
+        summary.gershgorin_lower_bound
+            ? *summary.gershgorin_lower_bound
+            : std::numeric_limits<Real>::infinity(),
+        local_has_rows_for_row_sum
+            ? summary.min_row_sum
+            : std::numeric_limits<Real>::infinity(),
+    };
 
-    auto expected_rows = static_cast<unsigned long long>(summary.expected_row_count);
-    allReduceInPlace(expected_rows, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
-    summary.expected_row_count = static_cast<std::uint64_t>(expected_rows);
+    constexpr std::size_t kHasGershgorinLower = 0;
+    constexpr std::size_t kHasGershgorinUpper = 1;
+    constexpr std::size_t kDenseMaterialized = 2;
+    constexpr std::size_t kSymmetryTruncated = 3;
+    constexpr std::size_t kRowCoverageTruncated = 4;
+    constexpr std::size_t kComplexValuesPresent = 5;
+    std::vector<int> max_int{
+        summary.gershgorin_lower_bound ? 1 : 0,
+        summary.gershgorin_upper_bound ? 1 : 0,
+        log.dense_matrix_materialized ? 1 : 0,
+        log.symmetry_storage_truncated ? 1 : 0,
+        log.row_coverage_storage_truncated ? 1 : 0,
+        summary.complex_values_present ? 1 : 0,
+    };
 
-    max_real(summary.max_abs_entry);
-    max_real(summary.max_abs_offdiag);
-    max_real(summary.max_positive_offdiag);
-    max_real(summary.max_symmetry_error);
-    max_real(summary.max_hermitian_error);
-    max_real(summary.max_complex_symmetry_error);
-    max_real(summary.max_abs_imag_entry);
-    max_real(summary.max_abs_row_sum);
+    constexpr std::size_t kAllSquare = 0;
+    std::vector<int> min_int{
+        summary.square ? 1 : 0,
+    };
 
-    int has_gersh_lower = summary.gershgorin_lower_bound ? 1 : 0;
-    int has_gersh_upper = summary.gershgorin_upper_bound ? 1 : 0;
-    MPI_Allreduce(MPI_IN_PLACE, &has_gersh_lower, 1, MPI_INT, MPI_MAX, comm);
-    MPI_Allreduce(MPI_IN_PLACE, &has_gersh_upper, 1, MPI_INT, MPI_MAX, comm);
-    Real gersh_lower = summary.gershgorin_lower_bound
-                           ? *summary.gershgorin_lower_bound
-                           : std::numeric_limits<Real>::infinity();
-    Real gersh_upper = summary.gershgorin_upper_bound
-                           ? *summary.gershgorin_upper_bound
-                           : -std::numeric_limits<Real>::infinity();
-    min_real(gersh_lower);
-    max_real(gersh_upper);
-    if (has_gersh_lower != 0) {
-        summary.gershgorin_lower_bound = gersh_lower;
+    allReduceBufferInPlace(sum_u64,
+                           MPI_UNSIGNED_LONG_LONG,
+                           MPI_SUM,
+                           comm,
+                           "SparseMatrixSummaryScanner::u64_sum_batch");
+    allReduceBufferInPlace(max_u64,
+                           MPI_UNSIGNED_LONG_LONG,
+                           MPI_MAX,
+                           comm,
+                           "SparseMatrixSummaryScanner::u64_max_batch");
+    allReduceBufferInPlace(max_real,
+                           MPI_DOUBLE,
+                           MPI_MAX,
+                           comm,
+                           "SparseMatrixSummaryScanner::real_max_batch");
+    allReduceBufferInPlace(min_real,
+                           MPI_DOUBLE,
+                           MPI_MIN,
+                           comm,
+                           "SparseMatrixSummaryScanner::real_min_batch");
+    allReduceBufferInPlace(max_int,
+                           MPI_INT,
+                           MPI_MAX,
+                           comm,
+                           "SparseMatrixSummaryScanner::int_max_batch");
+    allReduceBufferInPlace(min_int,
+                           MPI_INT,
+                           MPI_MIN,
+                           comm,
+                           "SparseMatrixSummaryScanner::int_min_batch");
+
+    summary.diagonal_count = static_cast<std::uint64_t>(sum_u64[kDiagonalCount]);
+    summary.missing_diagonal_count = static_cast<std::uint64_t>(sum_u64[kMissingDiagonalCount]);
+    summary.nonpositive_diagonal_count = static_cast<std::uint64_t>(sum_u64[kNonpositiveDiagonalCount]);
+    summary.negative_diagonal_count = static_cast<std::uint64_t>(sum_u64[kNegativeDiagonalCount]);
+    summary.near_zero_diagonal_count = static_cast<std::uint64_t>(sum_u64[kNearZeroDiagonalCount]);
+    summary.offdiag_count = static_cast<std::uint64_t>(sum_u64[kOffdiagCount]);
+    summary.positive_offdiag_count = static_cast<std::uint64_t>(sum_u64[kPositiveOffdiagCount]);
+    summary.negative_offdiag_count = static_cast<std::uint64_t>(sum_u64[kNegativeOffdiagCount]);
+    summary.near_zero_offdiag_count = static_cast<std::uint64_t>(sum_u64[kNearZeroOffdiagCount]);
+    summary.negative_row_sum_count = static_cast<std::uint64_t>(sum_u64[kNegativeRowSumCount]);
+    summary.positive_row_sum_count = static_cast<std::uint64_t>(sum_u64[kPositiveRowSumCount]);
+    summary.near_zero_row_sum_count = static_cast<std::uint64_t>(sum_u64[kNearZeroRowSumCount]);
+    summary.row_sum_violation_count = static_cast<std::uint64_t>(sum_u64[kRowSumViolationCount]);
+    summary.invalid_entry_count = static_cast<std::uint64_t>(sum_u64[kInvalidEntryCount]);
+    summary.nonfinite_entry_count = static_cast<std::uint64_t>(sum_u64[kNonfiniteEntryCount]);
+    summary.nonfinite_row_sum_count = static_cast<std::uint64_t>(sum_u64[kNonfiniteRowSumCount]);
+    summary.scanned_row_count = static_cast<std::uint64_t>(sum_u64[kScannedRowCount]);
+    summary.scanned_entry_count = static_cast<std::uint64_t>(sum_u64[kScannedEntryCount]);
+    summary.duplicate_row_visit_count = static_cast<std::uint64_t>(sum_u64[kDuplicateRowVisitCount]);
+    summary.missing_row_count = static_cast<std::uint64_t>(sum_u64[kMissingRowCount]);
+    summary.expected_row_count = static_cast<std::uint64_t>(max_u64[kExpectedRows]);
+
+    summary.max_abs_entry = max_real[kMaxAbsEntry];
+    summary.max_abs_offdiag = max_real[kMaxAbsOffdiag];
+    summary.max_positive_offdiag = max_real[kMaxPositiveOffdiag];
+    summary.max_symmetry_error = max_real[kMaxSymmetryError];
+    summary.max_hermitian_error = max_real[kMaxHermitianError];
+    summary.max_complex_symmetry_error = max_real[kMaxComplexSymmetryError];
+    summary.max_abs_imag_entry = max_real[kMaxAbsImagEntry];
+    summary.max_abs_row_sum = max_real[kMaxAbsRowSum];
+
+    if (max_int[kHasGershgorinLower] != 0) {
+        summary.gershgorin_lower_bound = min_real[kGershgorinLower];
+    } else {
+        summary.gershgorin_lower_bound.reset();
     }
-    if (has_gersh_upper != 0) {
-        summary.gershgorin_upper_bound = gersh_upper;
+    if (max_int[kHasGershgorinUpper] != 0) {
+        summary.gershgorin_upper_bound = max_real[kGershgorinUpper];
+    } else {
+        summary.gershgorin_upper_bound.reset();
     }
 
-    auto row_count = log.visited_rows;
-    sum_u64(row_count);
-    Real min_row = log.visited_rows == 0U
-                       ? std::numeric_limits<Real>::infinity()
-                       : summary.min_row_sum;
-    Real max_row = log.visited_rows == 0U
-                       ? -std::numeric_limits<Real>::infinity()
-                       : summary.max_row_sum;
-    min_real(min_row);
-    max_real(max_row);
-    if (row_count == 0U) {
+    if (sum_u64[kRowsForRowSumExtrema] == 0U) {
         summary.min_row_sum = 0.0;
         summary.max_row_sum = 0.0;
     } else {
-        summary.min_row_sum = min_row;
-        summary.max_row_sum = max_row;
+        summary.min_row_sum = min_real[kMinRowSum];
+        summary.max_row_sum = max_real[kMaxRowSum];
     }
 
-    auto log_rows = log.visited_rows;
-    auto log_entries = log.visited_entries;
-    auto log_partitions = log.visited_partitions;
-    sum_u64(log_rows);
-    sum_u64(log_entries);
-    sum_u64(log_partitions);
-    log.visited_rows = log_rows;
-    log.visited_entries = log_entries;
-    log.visited_partitions = log_partitions;
+    log.visited_rows = static_cast<std::uint64_t>(sum_u64[kLogVisitedRows]);
+    log.visited_entries = static_cast<std::uint64_t>(sum_u64[kLogVisitedEntries]);
+    log.visited_partitions = static_cast<std::uint64_t>(sum_u64[kLogVisitedPartitions]);
+    log.max_row_entries = static_cast<std::size_t>(max_u64[kMaxRowEntries]);
+    log.retained_symmetry_entries = static_cast<std::size_t>(sum_u64[kRetainedSymmetryEntries]);
+    log.estimated_peak_stored_entries = static_cast<std::size_t>(max_u64[kPeakStoredEntries]);
+    log.dense_matrix_materialized = max_int[kDenseMaterialized] != 0;
+    log.symmetry_storage_truncated = max_int[kSymmetryTruncated] != 0;
+    log.row_coverage_storage_truncated = max_int[kRowCoverageTruncated] != 0;
 
-    auto max_row_entries = static_cast<unsigned long long>(log.max_row_entries);
-    allReduceInPlace(max_row_entries, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
-    log.max_row_entries = static_cast<std::size_t>(max_row_entries);
-
-    auto retained_symmetry =
-        static_cast<unsigned long long>(log.retained_symmetry_entries);
-    allReduceInPlace(retained_symmetry, MPI_UNSIGNED_LONG_LONG, MPI_SUM, comm);
-    log.retained_symmetry_entries = static_cast<std::size_t>(retained_symmetry);
-
-    auto peak_stored =
-        static_cast<unsigned long long>(log.estimated_peak_stored_entries);
-    allReduceInPlace(peak_stored, MPI_UNSIGNED_LONG_LONG, MPI_MAX, comm);
-    log.estimated_peak_stored_entries = static_cast<std::size_t>(peak_stored);
-
-    int dense = log.dense_matrix_materialized ? 1 : 0;
-    int sym_truncated = log.symmetry_storage_truncated ? 1 : 0;
-    int row_truncated = log.row_coverage_storage_truncated ? 1 : 0;
-    MPI_Allreduce(MPI_IN_PLACE, &dense, 1, MPI_INT, MPI_MAX, comm);
-    MPI_Allreduce(MPI_IN_PLACE, &sym_truncated, 1, MPI_INT, MPI_MAX, comm);
-    MPI_Allreduce(MPI_IN_PLACE, &row_truncated, 1, MPI_INT, MPI_MAX, comm);
-    log.dense_matrix_materialized = dense != 0;
-    log.symmetry_storage_truncated = sym_truncated != 0;
-    log.row_coverage_storage_truncated = row_truncated != 0;
-
-    int all_square = summary.square ? 1 : 0;
-    MPI_Allreduce(MPI_IN_PLACE, &all_square, 1, MPI_INT, MPI_MIN, comm);
-    summary.square = all_square != 0;
-    int complex_values = summary.complex_values_present ? 1 : 0;
-    MPI_Allreduce(MPI_IN_PLACE, &complex_values, 1, MPI_INT, MPI_MAX, comm);
-    summary.complex_values_present = complex_values != 0;
+    summary.square = min_int[kAllSquare] != 0;
+    summary.complex_values_present = max_int[kComplexValuesPresent] != 0;
 
     // A count-only MPI reduction cannot prove exact global row coverage because
     // duplicated rows and rows missing on all ranks can cancel in the count.

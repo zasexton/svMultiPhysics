@@ -16,6 +16,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -963,6 +964,30 @@ TEST(KernelIROptimize, ConstantFoldingMinimum)
     EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 3.0);
 }
 
+TEST(KernelIROptimize, ConstantFoldingMinimumMatchesOrderedSelectNaN)
+{
+    const auto nan = std::numeric_limits<Real>::quiet_NaN();
+    const auto expr = min(FormExpr::constant(nan), FormExpr::constant(Real(5.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_TRUE(std::isnan(std::bit_cast<double>(root_op.imm0)));
+}
+
+TEST(KernelIROptimize, ConstantFoldingMinimumIgnoresSecondOperandNaN)
+{
+    const auto nan = std::numeric_limits<Real>::quiet_NaN();
+    const auto expr = min(FormExpr::constant(Real(3.0)), FormExpr::constant(nan));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 3.0);
+}
+
 TEST(KernelIROptimize, ConstantFoldingMaximum)
 {
     const auto expr = max(FormExpr::constant(Real(3.0)), FormExpr::constant(Real(5.0)));
@@ -972,6 +997,30 @@ TEST(KernelIROptimize, ConstantFoldingMaximum)
     const auto& root_op = r.ir.ops[r.ir.root];
     EXPECT_EQ(root_op.type, FormExprType::Constant);
     EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 5.0);
+}
+
+TEST(KernelIROptimize, ConstantFoldingMaximumMatchesOrderedSelectNaN)
+{
+    const auto nan = std::numeric_limits<Real>::quiet_NaN();
+    const auto expr = max(FormExpr::constant(nan), FormExpr::constant(Real(5.0)));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_TRUE(std::isnan(std::bit_cast<double>(root_op.imm0)));
+}
+
+TEST(KernelIROptimize, ConstantFoldingMaximumIgnoresSecondOperandNaN)
+{
+    const auto nan = std::numeric_limits<Real>::quiet_NaN();
+    const auto expr = max(FormExpr::constant(Real(3.0)), FormExpr::constant(nan));
+    auto r = jit::lowerToKernelIR(expr);
+    r.ir.optimize();
+
+    const auto& root_op = r.ir.ops[r.ir.root];
+    EXPECT_EQ(root_op.type, FormExprType::Constant);
+    EXPECT_DOUBLE_EQ(std::bit_cast<double>(root_op.imm0), 3.0);
 }
 
 TEST(KernelIROptimize, ConstantFoldingLess)
@@ -1227,7 +1276,7 @@ TEST(KernelIRStrengthReduction, DivideByMinusOne_BecomesNegate)
     EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Negate);
 }
 
-// --- Divide by exact-reciprocal constant (Tier 2) ---
+// --- Divide by power-of-two constant (Tier 2) ---
 
 TEST(KernelIRStrengthReduction, DivideByTwo_BecomesMultiplyByHalf)
 {
@@ -1242,14 +1291,12 @@ TEST(KernelIRStrengthReduction, DivideByTwo_BecomesMultiplyByHalf)
     EXPECT_DOUBLE_EQ(std::bit_cast<double>(r.ir.ops[c1].imm0), 0.5);
 }
 
-TEST(KernelIRStrengthReduction, DivideByThree_BecomesMultiply)
+TEST(KernelIRStrengthReduction, DivideByThree_StaysDivide)
 {
-    // 3.0 * (1.0/3.0) == 1.0 in double precision (IEEE754 rounding),
-    // so x/3 is rewritten to x*(1/3).
     const auto x = FormExpr::parameterRef(0);
     auto r = jit::lowerToKernelIR(x / FormExpr::constant(Real(3.0)));
     r.ir.optimize();
-    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Multiply);
+    EXPECT_EQ(r.ir.ops[r.ir.root].type, FormExprType::Divide);
 }
 
 TEST(KernelIRStrengthReduction, DivideBy49_StaysDivide)

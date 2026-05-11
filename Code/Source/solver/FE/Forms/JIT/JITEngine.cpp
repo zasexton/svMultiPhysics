@@ -280,7 +280,9 @@ public:
         }
     }
 
-    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObjectById(std::string_view module_id_sv)
+    [[nodiscard]] std::unique_ptr<llvm::MemoryBuffer> getObjectById(
+        std::string_view module_id_sv,
+        std::span<const std::string> expected_symbols = {})
     {
         const std::string module_id(module_id_sv);
         {
@@ -329,7 +331,7 @@ public:
             return nullptr;
         }
 
-        if (!objectDefinesSymbol(**object_or_error, module_id)) {
+        if (!objectDefinesSymbols(**object_or_error, module_id, expected_symbols)) {
             if (counters_ != nullptr) {
                 counters_->misses.fetch_add(1u, std::memory_order_relaxed);
             }
@@ -354,11 +356,20 @@ public:
     }
 
 private:
-    [[nodiscard]] static bool objectDefinesSymbol(llvm::object::ObjectFile& object,
-                                                  std::string_view module_id)
+    [[nodiscard]] static bool symbolMatchesExpected(std::string_view name,
+                                                    std::string_view expected) noexcept
     {
-        const std::string expected(module_id);
-        const std::string expected_macho = "_" + expected;
+        if (name == expected) {
+            return true;
+        }
+        return name.size() == expected.size() + 1u &&
+               name.front() == '_' &&
+               name.substr(1u) == expected;
+    }
+
+    [[nodiscard]] static bool objectDefinesSymbol(llvm::object::ObjectFile& object,
+                                                  std::string_view expected)
+    {
         for (const auto& symbol : object.symbols()) {
             auto name_or_error = symbol.getName();
             if (!name_or_error) {
@@ -366,11 +377,30 @@ private:
                 continue;
             }
             const auto name = name_or_error->str();
-            if (name == expected || name == expected_macho) {
+            if (symbolMatchesExpected(name, expected)) {
                 return true;
             }
         }
         return false;
+    }
+
+    [[nodiscard]] static bool objectDefinesSymbols(
+        llvm::object::ObjectFile& object,
+        std::string_view module_id,
+        std::span<const std::string> expected_symbols)
+    {
+        if (expected_symbols.empty()) {
+            return objectDefinesSymbol(object, module_id);
+        }
+        for (const auto& expected : expected_symbols) {
+            if (expected.empty()) {
+                return false;
+            }
+            if (!objectDefinesSymbol(object, expected)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     [[nodiscard]] static std::string sanitizeFilename(std::string_view s)
@@ -626,6 +656,7 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
     llvm::orc::IRTransformLayer::TransformFunction transform =
         [llvm_opt_level,
          vectorize = options.vectorize,
+         enable_loop_unrolling = options.specialization.enable_loop_unroll_metadata,
          dump_optimized = options.dump_llvm_ir_optimized,
          dump_directory = options.dump_directory,
          use_target_aware](llvm::orc::ThreadSafeModule tsm,
@@ -652,10 +683,9 @@ void configureTransformLayer(llvm::orc::IRTransformLayer& transform_layer,
             tuning_options.LoopInterleaving = false;
             tuning_options.LoopVectorization = vectorize;
             tuning_options.SLPVectorization = vectorize;
-            // Keep LLVM's LoopUnrollPass disabled — the code generator already
-            // emits explicit loop unroll metadata, and full unrolling of the
-            // nested QP×test×trial loops creates massive code that thrashes icache.
-            tuning_options.LoopUnrolling = false;
+            // LLVM's unroller is enabled only when LLVMGen emits loop metadata;
+            // budget-aware codegen suppresses metadata on large DOF/QP loops.
+            tuning_options.LoopUnrolling = enable_loop_unrolling;
 
             // Create target machine for target-aware optimization when enabled.
             // On AVX-512 / AArch64, this enables proper register count awareness,
@@ -1075,6 +1105,12 @@ JITEngine::SymbolAddress JITEngine::lookup(std::string_view name)
 
 bool JITEngine::tryLoadFromObjectCache(std::string_view name)
 {
+    return tryLoadFromObjectCache(name, std::span<const std::string>{});
+}
+
+bool JITEngine::tryLoadFromObjectCache(std::string_view name,
+                                       std::span<const std::string> expected_symbols)
+{
 #if SVMP_FE_ENABLE_LLVM_JIT
     std::lock_guard<std::mutex> lock(mutex_);
     if (!impl_ || !impl_->jit || !impl_->object_cache) {
@@ -1083,7 +1119,7 @@ bool JITEngine::tryLoadFromObjectCache(std::string_view name)
 
     std::unique_ptr<llvm::MemoryBuffer> buf;
     if (auto* fs_cache = dynamic_cast<FileSystemObjectCache*>(impl_->object_cache.get())) {
-        buf = fs_cache->getObjectById(name);
+        buf = fs_cache->getObjectById(name, expected_symbols);
     } else if (auto* mem_cache = dynamic_cast<InMemoryObjectCache*>(impl_->object_cache.get())) {
         buf = mem_cache->getObjectById(name);
     }
@@ -1106,6 +1142,7 @@ bool JITEngine::tryLoadFromObjectCache(std::string_view name)
     return true;
 #else
     (void)name;
+    (void)expected_symbols;
     return false;
 #endif
 }

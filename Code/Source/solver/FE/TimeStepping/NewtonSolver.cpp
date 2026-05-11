@@ -5150,13 +5150,17 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     traceLog("NewtonSolver: applied pure algebraic reduced RHS shift");
                 }
             }
+            const bool mpi_runtime_analysis = mpiMultiTaskActive();
             if (!tangent_analysis_report_logged) {
                 tangent_analysis_report_logged = true;
                 const bool numeric_summaries_updated =
                     transient.system().updateAnalysisSummariesFromAssembledOperator(
                         J, options_.jacobian_op, &state);
-                if (numeric_summaries_updated) {
+                if (numeric_summaries_updated && !mpi_runtime_analysis) {
                     logPostTangentAnalysisReport(transient.system(), numeric_summaries_updated);
+                } else if (numeric_summaries_updated && oopTraceEnabled()) {
+                    traceLog("NewtonSolver: updated post-tangent analysis summaries in MPI; "
+                             "full report logging deferred to keep collectives rank-symmetric.");
                 }
             }
             if (oopTraceEnabled()) {

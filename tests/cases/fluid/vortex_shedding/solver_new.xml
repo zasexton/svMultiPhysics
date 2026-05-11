@@ -79,7 +79,7 @@
             <Linear_algebra type="fsils" >
                 <Preconditioner> fsils </Preconditioner>
             </Linear_algebra>
-            <Max_iterations> 1000 </Max_iterations>
+            <Max_iterations> 15 </Max_iterations>
             <Krylov_space_dimension> 250 </Krylov_space_dimension>
             <Tolerance> 1e-6 </Tolerance>
         </LS>
