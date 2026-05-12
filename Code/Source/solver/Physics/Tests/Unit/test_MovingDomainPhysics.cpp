@@ -1062,6 +1062,138 @@ TEST(MovingDomainPhysics, LevelSetTransportBoundaryOptionsValidateMarkers)
     }
 }
 
+TEST(MovingDomainPhysics, LevelSetTransportPrescribedVelocityJacobianMatchesFiniteDifference)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    system.setPrescribedFieldCoefficients(
+        velocity,
+        constantVectorTetraCoefficients(0.70, -0.15, 0.25));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, 0,
+                               FE::Real(0.20) + FE::Real(0.035) * x);
+        setFieldComponentValue(previous_solution, system, phi, vertex, 0,
+                               FE::Real(0.18) + FE::Real(0.025) * x);
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        "level_set",
+        1.0e-6,
+        2.0e-5,
+        1.0e-8);
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportCoupledVelocityJacobianMatchesFiniteDifference)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+    });
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::CoupledField;
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, 0,
+                               FE::Real(0.15) + FE::Real(0.04) * x);
+        setFieldComponentValue(previous_solution, system, phi, vertex, 0,
+                               FE::Real(0.12) + FE::Real(0.03) * x);
+        setFieldComponentValue(solution, system, velocity, vertex, 0,
+                               FE::Real(0.40) + FE::Real(0.015) * x);
+        setFieldComponentValue(solution, system, velocity, vertex, 1,
+                               FE::Real(-0.20) + FE::Real(0.010) * x);
+        setFieldComponentValue(solution, system, velocity, vertex, 2,
+                               FE::Real(0.30) - FE::Real(0.005) * x);
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        "level_set",
+        1.0e-6,
+        5.0e-5,
+        1.0e-8);
+}
+
 TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)
 {
     const auto mesh = makeMesh();

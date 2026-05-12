@@ -366,7 +366,7 @@ Checklist:
 - [x] Add inflow/outflow treatment for level-set boundaries.
 - [x] Add field registration and input translation.
 - [x] Add unit tests for constant velocity translation.
-- [ ] Add Jacobian tests for coupled and prescribed velocity modes.
+- [x] Add Jacobian tests for coupled and prescribed velocity modes.
 
 Done when:
 
