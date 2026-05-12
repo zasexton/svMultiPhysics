@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -37,6 +38,25 @@ struct LevelSetVolumeResult {
     std::string diagnostic{};
 };
 
+struct LevelSetGlobalShiftCorrectionOptions {
+    FE::Real target_negative_volume{0.0};
+    FE::Real volume_tolerance{1.0e-10};
+    int max_iterations{50};
+};
+
+struct LevelSetGlobalShiftCorrectionResult {
+    bool success{false};
+    int iterations{0};
+    FE::Real applied_shift{0.0};
+    FE::Real target_negative_volume{0.0};
+    FE::Real initial_negative_volume{0.0};
+    FE::Real corrected_negative_volume{0.0};
+    FE::Real volume_error{0.0};
+    LevelSetVolumeResult initial_volume{};
+    LevelSetVolumeResult corrected_volume{};
+    std::string diagnostic{};
+};
+
 [[nodiscard]] LevelSetVolumeResult computeLevelSetCutCellVolume(
     const FE::assembly::IMeshAccess& mesh,
     const FE::dofs::DofHandler& level_set_dofs,
@@ -48,6 +68,22 @@ struct LevelSetVolumeResult {
     FE::FieldId level_set_field,
     const LevelSetVolumeOptions& options,
     std::span<const FE::Real> solution);
+
+[[nodiscard]] LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
+    const FE::assembly::IMeshAccess& mesh,
+    const FE::dofs::DofHandler& level_set_dofs,
+    const LevelSetVolumeOptions& volume_options,
+    const LevelSetGlobalShiftCorrectionOptions& correction_options,
+    std::span<const FE::Real> coefficients,
+    std::vector<FE::Real>& corrected_coefficients);
+
+[[nodiscard]] LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
+    const FE::systems::FESystem& system,
+    FE::FieldId level_set_field,
+    const LevelSetVolumeOptions& volume_options,
+    const LevelSetGlobalShiftCorrectionOptions& correction_options,
+    std::span<const FE::Real> solution,
+    std::vector<FE::Real>& corrected_solution);
 
 } // namespace level_set
 } // namespace formulations

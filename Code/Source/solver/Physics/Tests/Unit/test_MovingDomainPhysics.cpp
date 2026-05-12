@@ -1203,6 +1203,95 @@ TEST(MovingDomainPhysics, LevelSetCutCellVolumeHandlesUncutCells)
     EXPECT_NEAR(result.positive_volume, 0.0, 1.0e-12);
 }
 
+TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = mesh->getNodeCoordinates(vertex);
+        coefficients[static_cast<std::size_t>(dofs.front())] =
+            x[0] + x[1] + x[2] - FE::Real(0.5);
+    }
+
+    ls::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 384.0;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected;
+    const auto result = ls::applyGlobalLevelSetShiftCorrection(
+        *mesh,
+        field_dofs,
+        ls::LevelSetVolumeOptions{},
+        correction_opts,
+        coefficients,
+        corrected);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(result.iterations, 0);
+    EXPECT_NEAR(result.applied_shift, 0.25, 1.0e-8);
+    EXPECT_NEAR(result.initial_negative_volume, 1.0 / 48.0, 1.0e-12);
+    EXPECT_NEAR(result.corrected_negative_volume,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
+    ASSERT_EQ(corrected.size(), coefficients.size());
+    for (std::size_t i = 0; i < coefficients.size(); ++i) {
+        EXPECT_NEAR(corrected[i], coefficients[i] + result.applied_shift, 1.0e-12);
+    }
+}
+
+TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionLeavesMatchedVolumeUnchanged)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), -1.0);
+
+    ls::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 6.0;
+
+    std::vector<FE::Real> corrected;
+    const auto result = ls::applyGlobalLevelSetShiftCorrection(
+        *mesh,
+        field_dofs,
+        ls::LevelSetVolumeOptions{},
+        correction_opts,
+        coefficients,
+        corrected);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_DOUBLE_EQ(result.applied_shift, 0.0);
+    EXPECT_EQ(corrected, coefficients);
+}
+
 TEST(MovingDomainPhysics, LevelSetTransportInflowBoundaryAddsUpwindPenalty)
 {
     const auto mesh = makeMesh();

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -131,6 +132,34 @@ using FE::interfaces::LevelSetInterfaceSource;
         return FE::Real{0.0};
     }
     return FE::Real{-1.0};
+}
+
+[[nodiscard]] std::pair<FE::Real, FE::Real> vertexCoefficientRange(
+    const FE::assembly::IMeshAccess& mesh,
+    const FE::dofs::EntityDofMap& entity_map,
+    std::span<const FE::Real> coefficients)
+{
+    FE::Real min_value = std::numeric_limits<FE::Real>::infinity();
+    FE::Real max_value = -std::numeric_limits<FE::Real>::infinity();
+    for (FE::GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        const FE::Real value = coefficientAtVertex(entity_map, vertex, coefficients);
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+    }
+    if (!std::isfinite(min_value) || !std::isfinite(max_value)) {
+        throw std::invalid_argument("level-set volume correction requires finite coefficients");
+    }
+    return {min_value, max_value};
+}
+
+[[nodiscard]] std::vector<FE::Real> shiftedCoefficients(std::span<const FE::Real> coefficients,
+                                                        FE::Real shift)
+{
+    std::vector<FE::Real> shifted(coefficients.begin(), coefficients.end());
+    for (auto& value : shifted) {
+        value += shift;
+    }
+    return shifted;
 }
 
 } // namespace
@@ -264,6 +293,148 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
         field_dofs,
         options,
         solution.subspan(offset, n_field_dofs));
+}
+
+LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
+    const FE::assembly::IMeshAccess& mesh,
+    const FE::dofs::DofHandler& level_set_dofs,
+    const LevelSetVolumeOptions& volume_options,
+    const LevelSetGlobalShiftCorrectionOptions& correction_options,
+    std::span<const FE::Real> coefficients,
+    std::vector<FE::Real>& corrected_coefficients)
+{
+    if (!(correction_options.volume_tolerance > 0.0)) {
+        throw std::invalid_argument("level-set global shift correction requires a positive volume tolerance");
+    }
+    if (correction_options.max_iterations <= 0) {
+        throw std::invalid_argument("level-set global shift correction requires positive max_iterations");
+    }
+
+    auto initial = computeLevelSetCutCellVolume(
+        mesh,
+        level_set_dofs,
+        volume_options,
+        coefficients);
+    const FE::Real target = correction_options.target_negative_volume;
+    if (target < -correction_options.volume_tolerance ||
+        target > initial.total_volume + correction_options.volume_tolerance) {
+        throw std::invalid_argument(
+            "level-set global shift correction target volume is outside the total volume range");
+    }
+
+    LevelSetGlobalShiftCorrectionResult result;
+    result.target_negative_volume = target;
+    result.initial_negative_volume = initial.negative_volume;
+    result.initial_volume = initial;
+    result.corrected_volume = initial;
+    result.corrected_negative_volume = initial.negative_volume;
+    result.volume_error = initial.negative_volume - target;
+    corrected_coefficients.assign(coefficients.begin(), coefficients.end());
+    if (std::abs(result.volume_error) <= correction_options.volume_tolerance) {
+        result.success = true;
+        return result;
+    }
+
+    const auto* entity_map = level_set_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::invalid_argument("level-set global shift correction requires a scalar nodal field");
+    }
+    const auto [min_coeff, max_coeff] =
+        vertexCoefficientRange(mesh, *entity_map, coefficients);
+    const FE::Real pad = std::max(volume_options.tolerance * FE::Real{10.0},
+                                  FE::Real{1.0e-12});
+    FE::Real lower = volume_options.isovalue - max_coeff - pad;
+    FE::Real upper = volume_options.isovalue - min_coeff + pad;
+    if (!(lower < upper)) {
+        lower -= FE::Real{1.0};
+        upper += FE::Real{1.0};
+    }
+
+    FE::Real best_shift = 0.0;
+    FE::Real best_error = std::abs(result.volume_error);
+    LevelSetVolumeResult best_volume = initial;
+    std::vector<FE::Real> best_coefficients(coefficients.begin(), coefficients.end());
+
+    for (int iter = 1; iter <= correction_options.max_iterations; ++iter) {
+        const FE::Real shift = FE::Real{0.5} * (lower + upper);
+        auto shifted = shiftedCoefficients(coefficients, shift);
+        auto volume = computeLevelSetCutCellVolume(
+            mesh,
+            level_set_dofs,
+            volume_options,
+            shifted);
+        const FE::Real signed_error = volume.negative_volume - target;
+        const FE::Real abs_error = std::abs(signed_error);
+        if (abs_error < best_error) {
+            best_error = abs_error;
+            best_shift = shift;
+            best_volume = volume;
+            best_coefficients = std::move(shifted);
+        }
+
+        result.iterations = iter;
+        if (abs_error <= correction_options.volume_tolerance) {
+            result.success = true;
+            result.applied_shift = shift;
+            result.corrected_negative_volume = volume.negative_volume;
+            result.volume_error = signed_error;
+            result.corrected_volume = volume;
+            corrected_coefficients = std::move(best_coefficients);
+            return result;
+        }
+
+        if (signed_error > 0.0) {
+            lower = shift;
+        } else {
+            upper = shift;
+        }
+    }
+
+    result.success = best_error <= correction_options.volume_tolerance;
+    result.applied_shift = best_shift;
+    result.corrected_negative_volume = best_volume.negative_volume;
+    result.volume_error = best_volume.negative_volume - target;
+    result.corrected_volume = best_volume;
+    result.diagnostic = result.success
+                            ? std::string{}
+                            : "level-set global shift correction did not reach the requested volume tolerance";
+    corrected_coefficients = std::move(best_coefficients);
+    return result;
+}
+
+LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
+    const FE::systems::FESystem& system,
+    FE::FieldId level_set_field,
+    const LevelSetVolumeOptions& volume_options,
+    const LevelSetGlobalShiftCorrectionOptions& correction_options,
+    std::span<const FE::Real> solution,
+    std::vector<FE::Real>& corrected_solution)
+{
+    const auto& field_dofs = system.fieldDofHandler(level_set_field);
+    const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
+    const auto offset = static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
+    if (offset + n_field_dofs > solution.size()) {
+        throw std::invalid_argument(
+            "level-set global shift correction received an incompatible system solution span");
+    }
+
+    std::vector<FE::Real> field_coefficients(
+        solution.begin() + static_cast<std::ptrdiff_t>(offset),
+        solution.begin() + static_cast<std::ptrdiff_t>(offset + n_field_dofs));
+    std::vector<FE::Real> corrected_field;
+    auto result = applyGlobalLevelSetShiftCorrection(
+        system.meshAccess(),
+        field_dofs,
+        volume_options,
+        correction_options,
+        field_coefficients,
+        corrected_field);
+
+    corrected_solution.assign(solution.begin(), solution.end());
+    std::copy(corrected_field.begin(),
+              corrected_field.end(),
+              corrected_solution.begin() + static_cast<std::ptrdiff_t>(offset));
+    return result;
 }
 
 } // namespace level_set
