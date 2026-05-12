@@ -395,7 +395,7 @@ Checklist:
 
 - [x] Define reinitialization option struct.
 - [x] Implement signed-distance repair path.
-- [ ] Add volume calculation from level-set/cut-cell data.
+- [x] Add volume calculation from level-set/cut-cell data.
 - [ ] Implement global level-set shift correction.
 - [ ] Add reinitialization cadence controls.
 - [ ] Add output diagnostics for volume and signed-distance error.

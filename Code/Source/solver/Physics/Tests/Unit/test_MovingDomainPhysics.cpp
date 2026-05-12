@@ -13,6 +13,7 @@
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/LevelSet/LevelSetReinitialization.h"
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
+#include "Physics/Formulations/LevelSet/LevelSetVolume.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
@@ -1122,6 +1123,84 @@ TEST(MovingDomainPhysics, LevelSetSignedDistanceProjectionReportsMissingInterfac
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.interface_fragments, 0u);
     EXPECT_EQ(repaired, input);
+}
+
+TEST(MovingDomainPhysics, LevelSetCutCellVolumeUsesGeneratedInterfaceFractions)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = mesh->getNodeCoordinates(vertex);
+        coefficients[static_cast<std::size_t>(dofs.front())] =
+            x[0] + x[1] + x[2] - FE::Real(0.5);
+    }
+
+    ls::LevelSetVolumeOptions volume_opts{};
+    volume_opts.tolerance = 1.0e-12;
+    const auto result = ls::computeLevelSetCutCellVolume(
+        *mesh,
+        field_dofs,
+        volume_opts,
+        coefficients);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.cells, 1u);
+    EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_EQ(result.full_negative_cells, 0u);
+    EXPECT_EQ(result.full_positive_cells, 0u);
+    EXPECT_NEAR(result.total_volume, 1.0 / 6.0, 1.0e-12);
+    EXPECT_NEAR(result.negative_volume, 1.0 / 48.0, 1.0e-12);
+    EXPECT_NEAR(result.positive_volume, 7.0 / 48.0, 1.0e-12);
+}
+
+TEST(MovingDomainPhysics, LevelSetCutCellVolumeHandlesUncutCells)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), -1.0);
+
+    const auto result = ls::computeLevelSetCutCellVolume(
+        *mesh,
+        field_dofs,
+        ls::LevelSetVolumeOptions{},
+        coefficients);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.cells, 1u);
+    EXPECT_EQ(result.cut_cells, 0u);
+    EXPECT_EQ(result.full_negative_cells, 1u);
+    EXPECT_EQ(result.full_positive_cells, 0u);
+    EXPECT_NEAR(result.total_volume, 1.0 / 6.0, 1.0e-12);
+    EXPECT_NEAR(result.negative_volume, 1.0 / 6.0, 1.0e-12);
+    EXPECT_NEAR(result.positive_volume, 0.0, 1.0e-12);
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportInflowBoundaryAddsUpwindPenalty)
