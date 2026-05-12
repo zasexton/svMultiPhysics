@@ -393,25 +393,25 @@ Goal: align test ownership with the new architecture.
 
 FE tests to add or move:
 
-- [ ] Option defaults and cadence helpers.
-- [ ] Field auto-registration and validation.
-- [ ] Level-set transport residual structure.
-- [ ] SUPG stabilization terms.
-- [ ] Inflow and outflow boundary validation.
-- [ ] Generated interface lifecycle.
-- [ ] Cut-cell volume calculation.
-- [ ] Global shift volume correction.
-- [ ] Signed-distance repair by projection.
-- [ ] Output diagnostics.
-- [ ] Restart record capture and validation.
-- [ ] Header compile tests for `FE/LevelSet`.
+- [x] Option defaults and cadence helpers.
+- [x] Field auto-registration and validation.
+- [x] Level-set transport residual structure.
+- [x] SUPG stabilization terms.
+- [x] Inflow and outflow boundary validation.
+- [x] Generated interface lifecycle.
+- [x] Cut-cell volume calculation.
+- [x] Global shift volume correction.
+- [x] Signed-distance repair by projection.
+- [x] Output diagnostics.
+- [x] Restart record capture and validation.
+- [x] Header compile tests for `FE/LevelSet`.
 
 Physics tests to keep:
 
-- [ ] Equation-module factory registration.
-- [ ] Input parameter translation.
-- [ ] Boundary condition translation.
-- [ ] Constant velocity input translation.
+- [x] Equation-module factory registration.
+- [x] Input parameter translation.
+- [x] Boundary condition translation.
+- [x] Constant velocity input translation.
 - [ ] JIT option translation into FE install options.
 - [ ] Compatibility of existing open-vessel example input files.
 
