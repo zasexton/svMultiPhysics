@@ -72,6 +72,15 @@ struct LevelSetReinitializationOptions {
     FE::Real signed_distance_tolerance{1.0e-6};
 };
 
+struct LevelSetVolumeCorrectionOptions {
+    bool enabled{false};
+    int cadence_steps{1};
+    bool use_initial_negative_volume_as_target{true};
+    FE::Real target_negative_volume{0.0};
+    FE::Real volume_tolerance{1.0e-10};
+    int max_iterations{50};
+};
+
 struct LevelSetInflowBoundary {
     int boundary_marker{-1};
     ScalarValue value{0.0};
@@ -92,6 +101,7 @@ struct LevelSetTransportOptions {
     LevelSetVelocityOptions velocity{};
     LevelSetSUPGOptions supg{};
     LevelSetReinitializationOptions reinitialization{};
+    LevelSetVolumeCorrectionOptions volume_correction{};
     LevelSetBoundaryOptions boundaries{};
     core::PhysicsJITPolicy jit_policy{};
 };
@@ -113,6 +123,10 @@ private:
 
 [[nodiscard]] bool shouldReinitializeLevelSet(
     const LevelSetReinitializationOptions& options,
+    int completed_step_index) noexcept;
+
+[[nodiscard]] bool shouldApplyLevelSetVolumeCorrection(
+    const LevelSetVolumeCorrectionOptions& options,
     int completed_step_index) noexcept;
 
 } // namespace level_set

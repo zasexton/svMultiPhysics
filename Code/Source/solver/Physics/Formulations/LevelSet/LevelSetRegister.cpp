@@ -414,6 +414,48 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           "Reinitialization_signed_distance_tolerance")) {
     options.reinitialization.signed_distance_tolerance = *value;
   }
+
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_volume_correction", "Enable_level_set_volume_correction",
+           "Volume_correction", "VolumeCorrection", "Correct_level_set_volume"})) {
+    options.volume_correction.enabled = *value;
+  }
+  if (const auto value = get_defined_positive_int(
+          params,
+          {"Volume_correction_cadence_steps", "Volume_correction_cadence",
+           "Level_set_volume_correction_cadence_steps", "VolumeCorrectionCadenceSteps"},
+          "Volume_correction_cadence_steps")) {
+    options.volume_correction.cadence_steps = *value;
+  }
+  if (const auto value = get_defined_bool(
+          params,
+          {"Volume_correction_use_initial_volume", "Use_initial_level_set_volume_as_target",
+           "VolumeCorrectionUseInitialVolume"})) {
+    options.volume_correction.use_initial_negative_volume_as_target = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Volume_correction_target_negative_volume",
+           "Level_set_volume_correction_target_negative_volume",
+           "VolumeCorrectionTargetNegativeVolume"},
+          "Volume_correction_target_negative_volume")) {
+    options.volume_correction.target_negative_volume = *value;
+    options.volume_correction.use_initial_negative_volume_as_target = false;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Volume_correction_tolerance", "Volume_correction_volume_tolerance",
+           "Level_set_volume_correction_tolerance", "VolumeCorrectionTolerance"},
+          "Volume_correction_tolerance")) {
+    options.volume_correction.volume_tolerance = *value;
+  }
+  if (const auto value = get_defined_positive_int(
+          params,
+          {"Volume_correction_max_iterations", "VolumeCorrectionMaxIterations"},
+          "Volume_correction_max_iterations")) {
+    options.volume_correction.max_iterations = *value;
+  }
 }
 
 void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,

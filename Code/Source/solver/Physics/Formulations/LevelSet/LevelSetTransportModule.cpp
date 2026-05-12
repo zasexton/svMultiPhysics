@@ -186,6 +186,30 @@ void validateReinitializationOptions(const LevelSetReinitializationOptions& opti
     }
 }
 
+void validateVolumeCorrectionOptions(const LevelSetVolumeCorrectionOptions& options)
+{
+    if (!options.enabled) {
+        return;
+    }
+    if (options.cadence_steps <= 0) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: volume correction cadence_steps must be positive");
+    }
+    if (!(options.volume_tolerance > 0.0)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: volume correction volume_tolerance must be positive");
+    }
+    if (options.max_iterations <= 0) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: volume correction max_iterations must be positive");
+    }
+    if (!options.use_initial_negative_volume_as_target &&
+        options.target_negative_volume < 0.0) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: volume correction target_negative_volume must be nonnegative");
+    }
+}
+
 } // namespace
 
 LevelSetTransportModule::LevelSetTransportModule(
@@ -198,6 +222,16 @@ LevelSetTransportModule::LevelSetTransportModule(
 
 bool shouldReinitializeLevelSet(
     const LevelSetReinitializationOptions& options,
+    int completed_step_index) noexcept
+{
+    return options.enabled &&
+           options.cadence_steps > 0 &&
+           completed_step_index > 0 &&
+           completed_step_index % options.cadence_steps == 0;
+}
+
+bool shouldApplyLevelSetVolumeCorrection(
+    const LevelSetVolumeCorrectionOptions& options,
     int completed_step_index) noexcept
 {
     return options.enabled &&
@@ -230,6 +264,7 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
             "LevelSetTransportModule::registerOn: SUPG velocity_epsilon must be positive");
     }
     validateReinitializationOptions(options_.reinitialization);
+    validateVolumeCorrectionOptions(options_.volume_correction);
     validateBoundaryOptions(options_.boundaries);
 
     const auto phi_id = ensureLevelSetField(system, options_.level_set, level_set_space_);

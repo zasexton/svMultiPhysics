@@ -59,6 +59,11 @@
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
   <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
+  <Enable_volume_correction>true</Enable_volume_correction>
+  <Volume_correction_use_initial_volume>true</Volume_correction_use_initial_volume>
+  <Volume_correction_cadence_steps>5</Volume_correction_cadence_steps>
+  <Volume_correction_tolerance>1.0e-6</Volume_correction_tolerance>
+  <Volume_correction_max_iterations>50</Volume_correction_max_iterations>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>

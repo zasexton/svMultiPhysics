@@ -847,6 +847,12 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_DOUBLE_EQ(defaults.reinitialization.pseudo_time_step_scale, 0.3);
     EXPECT_DOUBLE_EQ(defaults.reinitialization.interface_band_width, 3.0);
     EXPECT_DOUBLE_EQ(defaults.reinitialization.signed_distance_tolerance, 1.0e-6);
+    EXPECT_FALSE(defaults.volume_correction.enabled);
+    EXPECT_EQ(defaults.volume_correction.cadence_steps, 1);
+    EXPECT_TRUE(defaults.volume_correction.use_initial_negative_volume_as_target);
+    EXPECT_DOUBLE_EQ(defaults.volume_correction.target_negative_volume, 0.0);
+    EXPECT_DOUBLE_EQ(defaults.volume_correction.volume_tolerance, 1.0e-10);
+    EXPECT_EQ(defaults.volume_correction.max_iterations, 50);
     EXPECT_TRUE(defaults.boundaries.inflow.empty());
     EXPECT_TRUE(defaults.boundaries.outflow.empty());
 
@@ -868,6 +874,12 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     opts.reinitialization.pseudo_time_step_scale = 0.20;
     opts.reinitialization.interface_band_width = 2.5;
     opts.reinitialization.signed_distance_tolerance = 1.0e-5;
+    opts.volume_correction.enabled = true;
+    opts.volume_correction.cadence_steps = 5;
+    opts.volume_correction.use_initial_negative_volume_as_target = false;
+    opts.volume_correction.target_negative_volume = 0.375;
+    opts.volume_correction.volume_tolerance = 1.0e-7;
+    opts.volume_correction.max_iterations = 24;
     opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{
         .boundary_marker = 11,
         .value = FE::Real{2.5},
@@ -895,6 +907,12 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_DOUBLE_EQ(opts.reinitialization.pseudo_time_step_scale, 0.20);
     EXPECT_DOUBLE_EQ(opts.reinitialization.interface_band_width, 2.5);
     EXPECT_DOUBLE_EQ(opts.reinitialization.signed_distance_tolerance, 1.0e-5);
+    EXPECT_TRUE(opts.volume_correction.enabled);
+    EXPECT_EQ(opts.volume_correction.cadence_steps, 5);
+    EXPECT_FALSE(opts.volume_correction.use_initial_negative_volume_as_target);
+    EXPECT_DOUBLE_EQ(opts.volume_correction.target_negative_volume, 0.375);
+    EXPECT_DOUBLE_EQ(opts.volume_correction.volume_tolerance, 1.0e-7);
+    EXPECT_EQ(opts.volume_correction.max_iterations, 24);
     ASSERT_EQ(opts.boundaries.inflow.size(), 1u);
     EXPECT_EQ(opts.boundaries.inflow.front().boundary_marker, 11);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(opts.boundaries.inflow.front().value), 2.5);
@@ -922,6 +940,27 @@ TEST(MovingDomainPhysics, LevelSetReinitializationCadenceControlsCompletedSteps)
 
     opts.cadence_steps = 0;
     EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 3));
+}
+
+TEST(MovingDomainPhysics, LevelSetVolumeCorrectionCadenceControlsCompletedSteps)
+{
+    ls::LevelSetVolumeCorrectionOptions opts{};
+
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, 1));
+
+    opts.enabled = true;
+    opts.cadence_steps = 4;
+
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, -1));
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, 0));
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, 1));
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, 3));
+    EXPECT_TRUE(ls::shouldApplyLevelSetVolumeCorrection(opts, 4));
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, 5));
+    EXPECT_TRUE(ls::shouldApplyLevelSetVolumeCorrection(opts, 8));
+
+    opts.cadence_steps = 0;
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(opts, 4));
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
@@ -1016,6 +1055,14 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
         ParameterValue{true, "2.75"};
     input.equation_params["Reinitialization_signed_distance_tolerance"] =
         ParameterValue{true, "1.0e-4"};
+    input.equation_params["Enable_volume_correction"] = ParameterValue{true, "true"};
+    input.equation_params["Volume_correction_cadence_steps"] = ParameterValue{true, "5"};
+    input.equation_params["Volume_correction_use_initial_volume"] =
+        ParameterValue{true, "false"};
+    input.equation_params["Volume_correction_target_negative_volume"] =
+        ParameterValue{true, "0.375"};
+    input.equation_params["Volume_correction_tolerance"] = ParameterValue{true, "1.0e-7"};
+    input.equation_params["Volume_correction_max_iterations"] = ParameterValue{true, "24"};
 
     BoundaryConditionInput inflow{};
     inflow.name = "inlet";
@@ -1058,6 +1105,14 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-4);
     EXPECT_FALSE(ls::shouldReinitializeLevelSet(options.reinitialization, 3));
     EXPECT_TRUE(ls::shouldReinitializeLevelSet(options.reinitialization, 4));
+    EXPECT_TRUE(options.volume_correction.enabled);
+    EXPECT_EQ(options.volume_correction.cadence_steps, 5);
+    EXPECT_FALSE(options.volume_correction.use_initial_negative_volume_as_target);
+    EXPECT_DOUBLE_EQ(options.volume_correction.target_negative_volume, 0.375);
+    EXPECT_DOUBLE_EQ(options.volume_correction.volume_tolerance, 1.0e-7);
+    EXPECT_EQ(options.volume_correction.max_iterations, 24);
+    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(options.volume_correction, 4));
+    EXPECT_TRUE(ls::shouldApplyLevelSetVolumeCorrection(options.volume_correction, 5));
 #endif
 }
 
@@ -1301,6 +1356,59 @@ TEST(MovingDomainPhysics, LevelSetTransportReinitializationOptionsValidatePositi
     }
 
     opts.reinitialization.signed_distance_tolerance = 1.0e-6;
+    {
+        FE::systems::FESystem system(mesh);
+        system.addField(FE::systems::FieldSpec{
+            .name = "Velocity",
+            .space = makeVelocitySpace(mesh),
+            .components = 3,
+        });
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_NO_THROW(module.registerOn(system));
+    }
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportVolumeCorrectionOptionsValidatePositiveControls)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.volume_correction.enabled = true;
+
+    opts.volume_correction.cadence_steps = 0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.volume_correction.cadence_steps = 1;
+    opts.volume_correction.volume_tolerance = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.volume_correction.volume_tolerance = 1.0e-10;
+    opts.volume_correction.max_iterations = 0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.volume_correction.max_iterations = 50;
+    opts.volume_correction.use_initial_negative_volume_as_target = false;
+    opts.volume_correction.target_negative_volume = -1.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.volume_correction.target_negative_volume = 0.125;
     {
         FE::systems::FESystem system(mesh);
         system.addField(FE::systems::FieldSpec{

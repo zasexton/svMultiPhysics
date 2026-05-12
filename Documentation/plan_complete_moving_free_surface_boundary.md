@@ -539,7 +539,7 @@ Checklist:
 - [ ] Interface generation from level set.
 - [ ] Navier-Stokes unfitted free-surface stress boundary.
 - [ ] Cut-cell stabilization.
-- [ ] Reinitialization and volume correction settings.
+- [x] Reinitialization and volume correction settings.
 - [ ] Gravity.
 - [ ] Hydrostatic initial pressure.
 - [ ] Pressure gauge/nullspace configuration.
