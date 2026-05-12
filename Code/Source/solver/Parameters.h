@@ -170,6 +170,12 @@ class Parameter
       value_set_ = true;
     }
 
+    void set_raw_value(const T& value)
+    {
+      value_ = value;
+      value_set_ = true;
+    }
+
     bool check_required_set()
     {
       if (!required_) {
@@ -395,6 +401,17 @@ class ParameterLists
       std::visit([value](auto&& p) { p->set(value); }, params_map[name]);
     }
 
+    /// @brief Store a vetted extension parameter as a string-valued parameter.
+    void set_extra_parameter_value(const std::string& name, const std::string& value)
+    {
+      auto [it, inserted] = extra_string_params.emplace(name, Parameter<std::string>{});
+      if (inserted) {
+        it->second.set(name, false, std::string{});
+        params_map[name] = &it->second;
+      }
+      it->second.set_raw_value(value);
+    }
+
     /// @brief Check if any required parameters have not been set.
     void check_required()
     {
@@ -439,6 +456,8 @@ class ParameterLists
     std::map<std::string, std::variant<Parameter<bool>*, Parameter<double>*, Parameter<int>*, 
         Parameter<std::string>*, VectorParameter<double>*, VectorParameter<int>*,
         VectorParameter<std::string>* >> params_map;
+
+    std::map<std::string, Parameter<std::string>> extra_string_params;
 
     std::string xml_element_name = "";
 };

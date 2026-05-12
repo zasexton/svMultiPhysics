@@ -7,6 +7,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -58,6 +59,48 @@ svmp::Physics::ParameterMap snapshot_params(const ParameterLists& list)
         v);
   }
   return out;
+}
+
+std::string trim_copy(std::string s)
+{
+  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
+  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  return s;
+}
+
+std::string normalized_token(std::string raw)
+{
+  raw = trim_copy(std::move(raw));
+  std::transform(raw.begin(), raw.end(), raw.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  raw.erase(std::remove_if(raw.begin(), raw.end(), [](unsigned char ch) {
+              return ch == '_' || ch == '-' || std::isspace(ch);
+            }),
+            raw.end());
+  return raw;
+}
+
+std::string defined_param_token(const svmp::Physics::ParameterMap& params,
+                                std::string_view key)
+{
+  const auto it = params.find(std::string(key));
+  if (it == params.end() || !it->second.defined) {
+    return {};
+  }
+  return normalized_token(it->second.value);
+}
+
+bool is_unfitted_free_surface_bc(const svmp::Physics::ParameterMap& params)
+{
+  if (defined_param_token(params, "Type") != "freesurface") {
+    return false;
+  }
+  const auto implementation = defined_param_token(params, "Implementation");
+  return implementation == "unfitted" ||
+         implementation == "unfittedlevelset" ||
+         implementation == "levelset" ||
+         implementation == "embeddedlevelset";
 }
 
 svmp::Physics::DomainInput snapshot_domain(const DomainParameters& domain)
@@ -208,9 +251,11 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
       svmp::Physics::BoundaryConditionInput bc_in{};
       bc_in.name = bc->name.value();
       bc_in.boundary_marker = mesh->label_from_name(bc_in.name);
+      bc_in.params = snapshot_params(*bc);
       application::core::oopCout() << "[svMultiPhysics::Application]   BC '" << bc_in.name
                                    << "': boundary_marker=" << bc_in.boundary_marker << std::endl;
-      if (bc_in.boundary_marker == svmp::INVALID_LABEL) {
+      if (bc_in.boundary_marker == svmp::INVALID_LABEL &&
+          !is_unfitted_free_surface_bc(bc_in.params)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Boundary condition references face '" + bc_in.name +
             "', but that face is not registered. Ensure <Add_face name=\"" + bc_in.name +
@@ -218,7 +263,6 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
             "\"> references it, or set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
       }
 
-      bc_in.params = snapshot_params(*bc);
       if (bc->rcr.value_set) {
         const auto rcr = snapshot_params(bc->rcr);
         for (const auto& [k, v] : rcr) {

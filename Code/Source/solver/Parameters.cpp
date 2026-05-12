@@ -103,6 +103,216 @@ void xml_util_set_parameters( std::function<void(const std::string&, const std::
   }
 }
 
+namespace {
+
+bool is_oop_equation_extension_parameter(const std::string& name)
+{
+  static const std::set<std::string> names = {
+    "Enable_ALE",
+    "ALE",
+    "Use_ALE",
+    "Moving_mesh",
+    "Use_moving_mesh",
+    "Moving_control_volume_transient",
+    "Include_moving_control_volume_transient",
+    "ALE_moving_control_volume_transient",
+    "Mesh_velocity_field",
+    "MeshVelocityField",
+    "Mesh_motion_velocity_field",
+    "Mesh_velocity_source",
+    "MeshVelocitySource",
+    "ALE_mesh_velocity_source",
+    "ALEMeshVelocitySource",
+    "Mesh_displacement_field",
+    "MeshDisplacementField",
+    "Mesh_motion_displacement_field",
+    "Auto_register_mesh_displacement_field",
+    "AutoRegisterMeshDisplacementField",
+    "ALE_auto_register_mesh_displacement_field",
+    "MovingMeshTangentPath",
+    "Moving_mesh_tangent_path",
+    "Moving_mesh_geometry_tangent_path",
+    "ALE_moving_mesh_tangent_path",
+    "Level_set_field_name",
+    "LevelSetFieldName",
+    "Level_set_field",
+    "LevelSetField",
+    "Field_name",
+    "Level_set_source",
+    "LevelSetSource",
+    "Auto_register_level_set_field",
+    "AutoRegisterLevelSetField",
+    "Velocity_field_name",
+    "VelocityFieldName",
+    "Advection_velocity_field",
+    "AdvectionVelocityField",
+    "Velocity_source",
+    "VelocitySource",
+    "Auto_register_velocity_field",
+    "AutoRegisterVelocityField",
+    "Constant_velocity",
+    "ConstantVelocity",
+    "Velocity_value",
+    "VelocityValue",
+    "Enable_SUPG",
+    "SUPG",
+    "SUPG_enabled",
+    "SUPG_tau_scale",
+    "SUPGScale",
+    "SUPG_velocity_epsilon",
+    "SUPGVelocityEpsilon",
+    "Enable_reinitialization",
+    "Enable_level_set_reinitialization",
+    "Reinitialization",
+    "Reinitialization_enabled",
+    "Reinitialize_level_set",
+    "Reinitialization_method",
+    "Level_set_reinitialization_method",
+    "ReinitializationMethod",
+    "Reinitialization_cadence_steps",
+    "Reinitialization_cadence",
+    "Level_set_reinitialization_cadence_steps",
+    "ReinitializationCadenceSteps",
+    "Reinitialization_max_iterations",
+    "Reinitialization_iterations",
+    "ReinitializationMaxIterations",
+    "Reinitialization_pseudo_time_step_scale",
+    "ReinitializationPseudoTimeStepScale",
+    "Reinitialization_interface_band_width",
+    "ReinitializationInterfaceBandWidth",
+    "Reinitialization_signed_distance_tolerance",
+    "ReinitializationSignedDistanceTolerance",
+  };
+  return names.count(name) != 0;
+}
+
+bool is_oop_boundary_extension_parameter(const std::string& name)
+{
+  static const std::set<std::string> names = {
+    "Implementation",
+    "Free_surface_implementation",
+    "FreeSurfaceImplementation",
+    "Interface_marker",
+    "InterfaceMarker",
+    "Level_set_field_name",
+    "Level_set_field",
+    "LevelSetFieldName",
+    "LevelSetField",
+    "Generated_interface_domain_id",
+    "GeneratedInterfaceDomainId",
+    "Interface_domain_id",
+    "InterfaceDomainId",
+    "Level_set_isovalue",
+    "LevelSetIsovalue",
+    "Interface_isovalue",
+    "InterfaceIsovalue",
+    "External_pressure",
+    "ExternalPressure",
+    "Pressure",
+    "Surface_tension",
+    "SurfaceTension",
+    "Curvature",
+    "Use_level_set_curvature",
+    "UseLevelSetCurvature",
+    "Use_current_geometry_curvature",
+    "UseCurrentGeometryCurvature",
+    "Use_fitted_current_geometry_curvature",
+    "UseFittedCurrentGeometryCurvature",
+    "Normal_kinematic_policy",
+    "NormalKinematicPolicy",
+    "Free_surface_normal_kinematic_policy",
+    "FreeSurfaceNormalKinematicPolicy",
+    "Tangential_mesh_policy",
+    "TangentialMeshPolicy",
+    "Free_surface_tangential_mesh_policy",
+    "FreeSurfaceTangentialMeshPolicy",
+    "Prescribed_tangential_mesh_velocity",
+    "PrescribedTangentialMeshVelocity",
+    "Tangential_mesh_velocity",
+    "TangentialMeshVelocity",
+    "Kinematic_enforcement",
+    "KinematicEnforcement",
+    "Kinematic_penalty",
+    "KinematicPenalty",
+    "Kinematic_nitsche_gamma",
+    "KinematicNitscheGamma",
+    "Free_surface_nitsche_gamma",
+    "FreeSurfaceNitscheGamma",
+    "Nitsche_gamma",
+    "NitscheGamma",
+    "Kinematic_nitsche_symmetric",
+    "KinematicNitscheSymmetric",
+    "Nitsche_symmetric",
+    "NitscheSymmetric",
+    "Kinematic_nitsche_scale_with_p",
+    "KinematicNitscheScaleWithP",
+    "Nitsche_scale_with_p",
+    "NitscheScaleWithP",
+    "Enable_cut_cell_stabilization",
+    "EnableCutCellStabilization",
+    "Cut_cell_stabilization",
+    "CutCellStabilization",
+    "Cut_cell_velocity_gradient_penalty",
+    "CutCellVelocityGradientPenalty",
+    "Velocity_gradient_ghost_penalty",
+    "VelocityGradientGhostPenalty",
+    "Cut_cell_pressure_gradient_penalty",
+    "CutCellPressureGradientPenalty",
+    "Pressure_gradient_ghost_penalty",
+    "PressureGradientGhostPenalty",
+    "Use_cut_metadata_scale",
+    "UseCutMetadataScale",
+    "Use_cut_stabilization_scale",
+    "UseCutStabilizationScale",
+    "Contact_line_model",
+    "ContactLineModel",
+    "Free_surface_contact_line_model",
+    "FreeSurfaceContactLineModel",
+    "Contact_angle_radians",
+    "ContactAngleRadians",
+    "Prescribed_contact_angle_radians",
+    "PrescribedContactAngleRadians",
+    "Contact_angle_degrees",
+    "ContactAngleDegrees",
+    "Prescribed_contact_angle_degrees",
+    "PrescribedContactAngleDegrees",
+    "Contact_line_wall_marker",
+    "ContactLineWallMarker",
+    "Wall_boundary_marker",
+    "WallBoundaryMarker",
+    "Contact_line_marker",
+    "ContactLineMarker",
+    "Contact_line_wall_normal",
+    "ContactLineWallNormal",
+    "Contact_angle_wall_normal",
+    "ContactAngleWallNormal",
+    "Wall_normal",
+    "WallNormal",
+    "Contact_angle_penalty",
+    "ContactAnglePenalty",
+    "Contact_line_angle_penalty",
+    "ContactLineAnglePenalty",
+    "Contact_line_mobility",
+    "ContactLineMobility",
+    "Mobility",
+    "Wall_slip_model",
+    "WallSlipModel",
+    "Contact_line_wall_slip_model",
+    "ContactLineWallSlipModel",
+    "Wall_slip_length",
+    "WallSlipLength",
+    "Slip_length",
+    "SlipLength",
+    "Level_set_value",
+    "Penalty_scale",
+    "Penalty",
+    "Inflow_penalty_scale",
+  };
+  return names.count(name) != 0;
+}
+
+} // namespace
+
 //////////////////////////////////////////////////////////
 //                   Parameters                         //
 //////////////////////////////////////////////////////////
@@ -575,9 +785,11 @@ void BoundaryConditionParameters::set_values(tinyxml2::XMLElement* xml_elem)
    
     else if (item->GetText() != nullptr) {
       auto value = item->GetText();
-      try {
+      if (params_map.count(name) != 0) {
         set_parameter_value(name, value);
-      } catch (const std::bad_function_call& exception) {
+      } else if (is_oop_boundary_extension_parameter(name)) {
+        set_extra_parameter_value(name, value);
+      } else {
         throw std::runtime_error(error_msg + name + "'.");
       }
     } else {
@@ -2292,15 +2504,14 @@ void EquationParameters::set_values(tinyxml2::XMLElement* eq_elem)
 
       // A parameter can be an EqutionParameter or DomainParameter.
       //
-      try {
+      if (params_map.count(name) != 0) {
         set_parameter_value(name, value);
-      } catch (const std::exception &exception) {
-
-        try {
-          default_domain->set_parameter_value(name, value);
-        } catch (const std::bad_function_call& exception) {
-          throw std::runtime_error("Unknown " + xml_element_name_ + " XML element '" + name + ".");
-        }
+      } else if (default_domain->params_map.count(name) != 0) {
+        default_domain->set_parameter_value(name, value);
+      } else if (is_oop_equation_extension_parameter(name)) {
+        set_extra_parameter_value(name, value);
+      } else {
+        throw std::runtime_error("Unknown " + xml_element_name_ + " XML element '" + name + ".");
       }
 
     } else {

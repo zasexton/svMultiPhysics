@@ -453,7 +453,7 @@ Concrete changes:
 Checklist:
 
 - [x] Add example fitted ALE input file.
-- [ ] Add example unfitted level-set input file.
+- [x] Add example unfitted level-set input file.
 - [ ] Add mesh and initial conditions for half-filled vessel.
 - [ ] Add gravity/body-force setup.
 - [ ] Add hydrostatic initialization helper.

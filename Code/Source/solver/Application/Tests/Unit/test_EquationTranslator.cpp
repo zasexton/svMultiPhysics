@@ -209,6 +209,38 @@ TEST(EquationTranslatorOutputs, BuildInputCopiesOutputBlocks)
   EXPECT_TRUE(input.outputs.front().params.at("Cauchy_stress").defined);
 }
 
+TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
+{
+  auto mesh = buildTranslatorMesh();
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Enable_ALE>true</Enable_ALE>
+  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
+  <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>UnfittedLevelSet</Implementation>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
+  </Add_BC>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  EXPECT_EQ(input.equation_params.at("Enable_ALE").value, "true");
+  EXPECT_EQ(input.equation_params.at("Mesh_velocity_source").value, "coupled_displacement");
+  EXPECT_EQ(input.equation_params.at("Constant_velocity").value, "0.0 0.0 0.0");
+  ASSERT_EQ(input.boundary_conditions.size(), 1u);
+  const auto& bc = input.boundary_conditions.front();
+  EXPECT_EQ(bc.boundary_marker, svmp::INVALID_LABEL);
+  EXPECT_EQ(bc.params.at("Implementation").value, "UnfittedLevelSet");
+  EXPECT_EQ(bc.params.at("Level_set_field_name").value, "phi");
+  EXPECT_EQ(bc.params.at("Generated_interface_domain_id").value, "water_air");
+  EXPECT_EQ(bc.params.at("Enable_cut_cell_stabilization").value, "true");
+}
+
 TEST(EquationTranslatorNodePressureConstraints, BuildInputRejectsUnsupportedIdType)
 {
   auto mesh = buildTranslatorMesh();
