@@ -730,6 +730,37 @@ void validateGeometrySensitivityField(const FESystem& system,
                     "' but that field is not bound as the system mesh-displacement unknown");
 }
 
+void validateMovingGeometryTangentPath(std::string_view installer,
+                                       std::span<const FieldId> trial_fields,
+                                       const forms::FormExprNode* root,
+                                       const forms::SymbolicOptions& options)
+{
+    const auto& geometry_sensitivity = options.geometry_sensitivity;
+    if (geometry_sensitivity.mode != forms::GeometrySensitivityMode::MeshMotionUnknowns ||
+        root == nullptr ||
+        !containsGeometrySensitivityTerminal(*root)) {
+        return;
+    }
+
+    const FieldId mesh_field = geometry_sensitivity.mesh_motion_field;
+    if (mesh_field == INVALID_FIELD_ID) {
+        return;
+    }
+
+    if (std::find(trial_fields.begin(), trial_fields.end(), mesh_field) !=
+        trial_fields.end()) {
+        return;
+    }
+
+    throw InvalidArgumentException(
+        std::string(installer) +
+        ": moving-geometry tangent path is incomplete for MeshMotionUnknowns; "
+        "the residual uses current-geometry terminals but mesh-motion field " +
+        std::to_string(mesh_field) +
+        " is not an active or extra trial field. Include the mesh-displacement "
+        "field in the formulation field list or FormInstallOptions::extra_trial_fields.");
+}
+
 [[nodiscard]] std::unordered_set<FieldId> gatherResidualDependencies(
     const forms::FormExprNode& node,
     const forms::GeometrySensitivityOptions& geometry_sensitivity)
@@ -975,6 +1006,11 @@ KernelPtr installResidualForm(
     FE_CHECK_NOT_NULL(trial_rec.space.get(), "installResidualForm: trial field space");
 
     validateGeometrySensitivityField(system, options.compiler_options.geometry_sensitivity);
+    const FieldId single_trial_field[] = {trial_field};
+    validateMovingGeometryTangentPath("installResidualForm",
+                                      std::span<const FieldId>(single_trial_field, 1u),
+                                      residual_form.node(),
+                                      options.compiler_options);
     auto block_options = options;
     block_options.compiler_options =
         compilerOptionsForTrial(options.compiler_options, trial_field);
@@ -1261,6 +1297,10 @@ CoupledResidualKernels installCoupledResidual(
 
         const auto* root = base_expr.node();
         FE_CHECK_NOT_NULL(root, "installCoupledResidual: residual block root");
+        validateMovingGeometryTangentPath("installCoupledResidual",
+                                          trial_fields,
+                                          root,
+                                          options.compiler_options);
         const auto state_fields =
             gatherResidualDependencies(*root, options.compiler_options.geometry_sensitivity);
 
@@ -1813,6 +1853,10 @@ CoupledResidualKernels installCoupledResidualMixed(
 
         const auto* root = base_expr.node();
         FE_CHECK_NOT_NULL(root, "installCoupledResidualMixed: residual block root");
+        validateMovingGeometryTangentPath("installCoupledResidualMixed",
+                                          trial_fields,
+                                          root,
+                                          options.compiler_options);
         const auto state_fields =
             gatherResidualDependencies(*root, options.compiler_options.geometry_sensitivity);
 
@@ -2490,6 +2534,12 @@ CoupledResidualKernels installFormulation(
             trial_fields.push_back(fid);
         }
     }
+
+    validateGeometrySensitivityField(system, options.compiler_options.geometry_sensitivity);
+    validateMovingGeometryTangentPath("installFormulation",
+                                      std::span<const FieldId>(trial_fields),
+                                      residual.node(),
+                                      options.compiler_options);
 
     // Early validation: reject duplicate test function names across different
     // spaces before creating any side effects (FormulationRecord, contributions).

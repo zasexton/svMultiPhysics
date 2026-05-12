@@ -41,6 +41,7 @@
 #include <array>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 using svmp::FE::ElementType;
@@ -1027,6 +1028,58 @@ TEST(FormsInstaller, MovingMeshSymbolicJITAssemblyMatchesADReferenceAssembly)
         SCOPED_TRACE(::testing::Message() << "matrix flat i=" << i);
         EXPECT_NEAR(symbolic_jit.matrix[i], ad.matrix[i], 2.0e-10);
     }
+}
+
+TEST(FormsInstaller, MovingGeometrySensitivityRequiresMeshTrialField)
+{
+    constexpr int marker = 12;
+    auto mesh =
+        std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(
+            marker);
+    auto scalar_space =
+        std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    auto vector_space =
+        std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, /*components=*/3);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto fluid = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "fluid", .space = scalar_space, .components = 1});
+    const auto displacement = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "mesh_displacement",
+                                     .space = vector_space,
+                                     .components = 3});
+    sys.bindMeshMotionField(svmp::FE::systems::MeshMotionFieldRole::Displacement,
+                            displacement);
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(fluid, *scalar_space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(fluid, *scalar_space, "v");
+    const auto residual = (u * v * svmp::FE::forms::currentMeasure()).ds(marker);
+
+    svmp::FE::systems::FormInstallOptions install;
+    install.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
+    install.compiler_options.geometry_sensitivity.mesh_motion_field = displacement;
+    install.compiler_options.geometry_tangent_path =
+        svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
+
+    try {
+        (void)svmp::FE::systems::installFormulation(sys, "op", {fluid}, residual, install);
+        FAIL() << "Expected missing moving-geometry tangent path diagnostic";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("moving-geometry tangent path"), std::string::npos);
+        EXPECT_NE(message.find("FormInstallOptions::extra_trial_fields"),
+                  std::string::npos);
+        EXPECT_NE(message.find(std::to_string(displacement)), std::string::npos);
+    }
+
+    install.extra_trial_fields.push_back(displacement);
+    const auto kernels =
+        svmp::FE::systems::installFormulation(sys, "op", {fluid}, residual, install);
+    ASSERT_EQ(kernels.jacobian_blocks.size(), 1u);
+    ASSERT_EQ(kernels.jacobian_blocks.front().size(), 2u);
+    EXPECT_NE(kernels.jacobian_blocks.front()[1], nullptr);
 }
 
 TEST(FormsInstaller, FormsInstaller_InstallResidualForm_InvalidFieldId_Throws)

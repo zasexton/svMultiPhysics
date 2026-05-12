@@ -110,7 +110,7 @@ Checklist:
 - [x] Add finite-difference tests for moving-boundary normal tangents.
 - [x] Add finite-difference tests for moving-boundary measure tangents.
 - [x] Add mixed fluid/mesh residual tests that include boundary geometry terms.
-- [ ] Add diagnostics for invalid or missing moving-geometry tangent paths.
+- [x] Add diagnostics for invalid or missing moving-geometry tangent paths.
 
 Done when:
 
