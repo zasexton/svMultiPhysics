@@ -498,7 +498,7 @@ Checklist:
 - [x] Level-set transport preserves a translating circle to expected accuracy.
 - [x] Reinitialization preserves signed-distance quality near the interface.
 - [x] Volume correction maintains water volume within tolerance.
-- [ ] Fitted and unfitted implementations agree on a simple static flat-surface case.
+- [x] Fitted and unfitted implementations agree on a simple static flat-surface case.
 
 ## Validation Cases
 

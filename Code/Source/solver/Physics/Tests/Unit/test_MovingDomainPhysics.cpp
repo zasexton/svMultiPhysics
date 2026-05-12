@@ -250,20 +250,23 @@ std::shared_ptr<Mesh> makeOpenTankQuadMesh(int left_marker,
                                            int right_marker,
                                            int bottom_marker,
                                            int free_surface_marker,
-                                           std::string_view free_surface_set)
+                                           std::string_view free_surface_set,
+                                           FE::Real bottom_y = -1.0,
+                                           FE::Real middle_y = 0.0,
+                                           FE::Real top_y = 1.0)
 {
     auto base = std::make_shared<MeshBase>();
 
     const std::vector<real_t> x_ref = {
-        -1.0, -1.0,
-         0.0, -1.0,
-         1.0, -1.0,
-        -1.0,  0.0,
-         0.0,  0.0,
-         1.0,  0.0,
-        -1.0,  1.0,
-         0.0,  1.0,
-         1.0,  1.0,
+        -1.0, static_cast<real_t>(bottom_y),
+         0.0, static_cast<real_t>(bottom_y),
+         1.0, static_cast<real_t>(bottom_y),
+        -1.0, static_cast<real_t>(middle_y),
+         0.0, static_cast<real_t>(middle_y),
+         1.0, static_cast<real_t>(middle_y),
+        -1.0, static_cast<real_t>(top_y),
+         0.0, static_cast<real_t>(top_y),
+         1.0, static_cast<real_t>(top_y),
     };
     const std::vector<offset_t> cell2vertex_offsets = {0, 4, 8, 12, 16};
     const std::vector<index_t> cell2vertex = {
@@ -307,9 +310,9 @@ std::shared_ptr<Mesh> makeOpenTankQuadMesh(int left_marker,
             continue;
         }
         label_t label = INVALID_LABEL;
-        if (all_vertices_match(vertices, /*component=*/1, real_t(1.0))) {
+        if (all_vertices_match(vertices, /*component=*/1, static_cast<real_t>(top_y))) {
             label = static_cast<label_t>(free_surface_marker);
-        } else if (all_vertices_match(vertices, /*component=*/1, real_t(-1.0))) {
+        } else if (all_vertices_match(vertices, /*component=*/1, static_cast<real_t>(bottom_y))) {
             label = static_cast<label_t>(bottom_marker);
         } else if (all_vertices_match(vertices, /*component=*/0, real_t(-1.0))) {
             label = static_cast<label_t>(left_marker);
@@ -2771,6 +2774,202 @@ TEST(MovingDomainPhysics, StaticFlatWaterSurfaceWithGravityRemainsAtRest)
 
     const auto residual = residualVector(system, state, "equations");
     EXPECT_LT(vectorNorm(residual), 1.0e-10);
+#endif
+}
+
+TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr int left_marker = 111;
+    constexpr int right_marker = 112;
+    constexpr int bottom_marker = 113;
+    constexpr int free_surface_marker = 114;
+    constexpr int interface_marker = 115;
+    constexpr FE::GlobalIndex top_middle_vertex = 7;
+    constexpr FE::Real density = 2.0;
+    constexpr FE::Real gravity_y = -9.81;
+    constexpr FE::Real bottom_y = -1.0;
+    constexpr FE::Real interface_y = -0.5;
+    constexpr FE::Real fitted_middle_y = -0.75;
+    constexpr FE::Real external_pressure = 1.25;
+    constexpr FE::Real expected_surface_length = 2.0;
+
+    auto scalar_space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Quad4,
+        /*order=*/1);
+    auto u_space = std::make_shared<FE::spaces::ProductSpace>(
+        scalar_space,
+        /*components=*/2);
+
+    auto fitted_mesh = makeOpenTankQuadMesh(left_marker,
+                                            right_marker,
+                                            bottom_marker,
+                                            free_surface_marker,
+                                            "free_surface",
+                                            bottom_y,
+                                            fitted_middle_y,
+                                            interface_y);
+    auto fitted_opts = baseNavierStokesOptions();
+    fitted_opts.enable_convection = false;
+    fitted_opts.density = density;
+    fitted_opts.viscosity = 1.0e-3;
+    fitted_opts.body_force = {0.0, gravity_y, 0.0};
+    fitted_opts.velocity_dirichlet = {
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = left_marker,
+        },
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = right_marker,
+        },
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = bottom_marker,
+        },
+    };
+    fitted_opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::FittedALE,
+            .boundary_marker = free_surface_marker,
+            .external_pressure = external_pressure,
+        });
+
+    FE::systems::FESystem fitted_system(fitted_mesh);
+    ns::IncompressibleNavierStokesVMSModule fitted_module(
+        u_space,
+        scalar_space,
+        fitted_opts);
+    fitted_module.registerOn(fitted_system);
+    ASSERT_NO_THROW(fitted_system.setup());
+
+    const auto fitted_u =
+        fitted_system.findFieldByName(fitted_opts.velocity_field_name);
+    const auto fitted_p =
+        fitted_system.findFieldByName(fitted_opts.pressure_field_name);
+    ASSERT_NE(fitted_u, FE::INVALID_FIELD_ID);
+    ASSERT_NE(fitted_p, FE::INVALID_FIELD_ID);
+    const auto* fitted_velocity_entity_map =
+        fitted_system.fieldDofHandler(fitted_u).getEntityDofMap();
+    ASSERT_NE(fitted_velocity_entity_map, nullptr);
+    const auto top_middle_velocity_dofs =
+        fitted_velocity_entity_map->getVertexDofs(top_middle_vertex);
+    ASSERT_EQ(top_middle_velocity_dofs.size(), 2u);
+    const auto fitted_velocity_offset = fitted_system.fieldDofOffset(fitted_u);
+    for (const auto dof : top_middle_velocity_dofs) {
+        EXPECT_FALSE(
+            fitted_system.constraints().isConstrained(fitted_velocity_offset + dof));
+    }
+
+    std::vector<FE::Real> fitted_solution(
+        static_cast<std::size_t>(fitted_system.dofHandler().getNumDofs()),
+        0.0);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < static_cast<FE::GlobalIndex>(fitted_mesh->n_vertices());
+         ++vertex) {
+        const auto x = fitted_system.meshAccess().getNodeCoordinates(vertex);
+        const auto pressure =
+            external_pressure +
+            density * gravity_y * (x[1] - interface_y);
+        setFieldComponentValue(
+            fitted_solution,
+            fitted_system,
+            fitted_p,
+            vertex,
+            0,
+            pressure);
+    }
+    const auto fitted_previous_solution = fitted_solution;
+    FE::systems::SystemStateView fitted_state;
+    fitted_state.dt = 1.0;
+    fitted_state.u = std::span<const FE::Real>(fitted_solution);
+    fitted_state.u_prev = std::span<const FE::Real>(fitted_previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto fitted_time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, fitted_state);
+    fitted_state.time_integration = &fitted_time_context;
+    const auto fitted_residual =
+        residualVector(fitted_system, fitted_state, "equations");
+    EXPECT_LT(vectorNorm(fitted_residual), 1.0e-10);
+
+    auto background_mesh = makeOpenTankQuadMesh(left_marker,
+                                                right_marker,
+                                                bottom_marker,
+                                                free_surface_marker,
+                                                "outer_free_surface");
+    FE::systems::FESystem unfitted_system(background_mesh);
+    const auto phi = unfitted_system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(unfitted_system.setup());
+
+    std::vector<FE::Real> unfitted_solution(
+        static_cast<std::size_t>(unfitted_system.dofHandler().getNumDofs()),
+        0.0);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < static_cast<FE::GlobalIndex>(background_mesh->n_vertices());
+         ++vertex) {
+        const auto x = unfitted_system.meshAccess().getNodeCoordinates(vertex);
+        setFieldComponentValue(
+            unfitted_solution,
+            unfitted_system,
+            phi,
+            vertex,
+            0,
+            x[1] - interface_y);
+    }
+
+    ls::LevelSetGeneratedInterfaceOptions interface_options{};
+    interface_options.level_set_field_name = "phi";
+    interface_options.domain_id = "flat_static_surface";
+    interface_options.requested_interface_marker = interface_marker;
+    interface_options.tolerance = 1.0e-12;
+
+    ls::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto generated =
+        lifecycle.build(unfitted_system, interface_options, unfitted_solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+    EXPECT_EQ(generated.interface_marker, interface_marker);
+    EXPECT_EQ(generated.summary.active_fragment_count, 2u);
+    EXPECT_NEAR(generated.summary.measure, expected_surface_length, 1.0e-12);
+    EXPECT_NEAR(external_pressure * generated.summary.measure,
+                external_pressure * expected_surface_length,
+                1.0e-12);
+
+    for (const auto& fragment : generated.domain.fragments()) {
+        if (!fragment.active()) {
+            continue;
+        }
+        EXPECT_NEAR(fragment.measure, 1.0, 1.0e-12);
+        EXPECT_NEAR(fragment.normal[0], 0.0, 1.0e-12);
+        EXPECT_NEAR(fragment.normal[1], 1.0, 1.0e-12);
+        EXPECT_NEAR(fragment.normal[2], 0.0, 1.0e-12);
+    }
+
+    auto unfitted_opts = baseNavierStokesOptions();
+    unfitted_opts.enable_convection = false;
+    unfitted_opts.density = density;
+    unfitted_opts.viscosity = 1.0e-3;
+    unfitted_opts.body_force = {0.0, gravity_y, 0.0};
+    unfitted_opts.free_surface.push_back(
+        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+            .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+            .interface_marker = interface_marker,
+            .level_set_field_name = "phi",
+            .generated_interface_domain_id = "flat_static_surface",
+            .external_pressure = external_pressure,
+        });
+    ns::IncompressibleNavierStokesVMSModule unfitted_module(
+        u_space,
+        scalar_space,
+        unfitted_opts);
+    unfitted_module.registerOn(unfitted_system);
+    EXPECT_TRUE(formulationRecordsContain(unfitted_system,
+                                          FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(unfitted_system, FormExprType::Gradient));
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(unfitted_system,
+                                                        interface_marker));
 #endif
 }
 
