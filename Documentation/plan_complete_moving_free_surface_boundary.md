@@ -475,7 +475,7 @@ Checklist:
 - [x] Circle interface length converges under mesh refinement.
 - [x] Sphere interface area converges under mesh refinement.
 - [x] Level-set normal matches analytic normal for plane, circle, and sphere.
-- [ ] Curvature converges for circle and sphere.
+- [x] Curvature converges for circle and sphere.
 - [x] `.dI(marker)` integrates constants over generated interfaces.
 - [x] `.dI(marker)` integrates linear fields over generated interfaces.
 - [x] Field gradients evaluate correctly at cut-interface quadrature points.

@@ -16,6 +16,7 @@
 #include "Assembly/StandardAssembler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/Vocabulary.h"
 #include "Spaces/L2Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -485,6 +486,28 @@ TEST(FormSpatialDerivativesTest, NestedDerivativesMatchFiniteDifferences)
 
     const Real grad_div_err_int = assembleErrorIntegral(gerror);
     EXPECT_LT(grad_div_err_int, 1e-6);
+}
+
+TEST(FormSpatialDerivativesTest, LevelSetCurvatureMatchesAnalyticCircleAndSphere)
+{
+    const auto x = FormExpr::coordinate();
+    const auto dx = component(x, 0) + FormExpr::constant(0.50);
+    const auto dy = component(x, 1) + FormExpr::constant(0.75);
+    const auto dz = component(x, 2) + FormExpr::constant(1.25);
+
+    const auto rxy = sqrt(dx * dx + dy * dy);
+    const auto circle_phi = rxy - FormExpr::constant(0.60);
+    const auto circle_error =
+        meanCurvatureFromLevelSet(circle_phi) - FormExpr::constant(1.0) / rxy;
+    const Real circle_err_int = assembleErrorIntegral(circle_error * circle_error);
+    EXPECT_LT(circle_err_int, 1e-12);
+
+    const auto rxyz = sqrt(dx * dx + dy * dy + dz * dz);
+    const auto sphere_phi = rxyz - FormExpr::constant(0.80);
+    const auto sphere_error =
+        meanCurvatureFromLevelSet(sphere_phi) - FormExpr::constant(2.0) / rxyz;
+    const Real sphere_err_int = assembleErrorIntegral(sphere_error * sphere_error);
+    EXPECT_LT(sphere_err_int, 1e-12);
 }
 
 TEST(FormSpatialDerivativesTest, CurlOfMatrixCompositeMatchesReference)
