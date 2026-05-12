@@ -1,5 +1,12 @@
 #include <gtest/gtest.h>
 
+#include "Application/Translators/EquationTranslator.h"
+#include "FE/Systems/FESystem.h"
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
+#include "Parameters.h"
+#include "Physics/Core/EquationModuleRegistry.h"
 #include "tinyxml2.h"
 
 #include <algorithm>
@@ -7,6 +14,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -45,6 +54,37 @@ fs::path openVesselCaseDir(std::string_view case_name)
          std::string(case_name);
 }
 
+std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      1.0, 1.0,
+      0.0, 1.0,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Quad;
+  shape.num_corners = 4;
+  shape.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
+  base->register_label("wall_left", 1);
+  base->register_label("wall_right", 2);
+  base->register_label("wall_bottom", 3);
+
+  return svmp::create_mesh(std::move(base));
+}
+
 void loadXml(const fs::path& path, tinyxml2::XMLDocument& doc)
 {
   const auto status = doc.LoadFile(path.string().c_str());
@@ -79,6 +119,39 @@ const tinyxml2::XMLElement& childWithAttribute(const tinyxml2::XMLElement& paren
   throw std::runtime_error(
       std::string("missing ") + child_name + " with " + attribute_name + "='" +
       std::string(attribute_value) + "'");
+}
+
+tinyxml2::XMLElement& mutableChildWithAttribute(tinyxml2::XMLElement& parent,
+                                                const char* child_name,
+                                                const char* attribute_name,
+                                                std::string_view attribute_value)
+{
+  for (auto* element = parent.FirstChildElement(child_name);
+       element != nullptr;
+       element = element->NextSiblingElement(child_name)) {
+    const char* value = element->Attribute(attribute_name);
+    if (value != nullptr && attribute_value == value) {
+      return *element;
+    }
+  }
+  throw std::runtime_error(
+      std::string("missing ") + child_name + " with " + attribute_name + "='" +
+      std::string(attribute_value) + "'");
+}
+
+std::unique_ptr<EquationParameters> equationParametersFromElement(
+    tinyxml2::XMLElement& element)
+{
+  const char* type = nullptr;
+  element.QueryStringAttribute("type", &type);
+  if (type == nullptr) {
+    throw std::runtime_error("missing Add_equation type");
+  }
+
+  auto params = std::make_unique<EquationParameters>();
+  params->type.set(std::string(type));
+  params->set_values(&element);
+  return params;
 }
 
 std::string text(const tinyxml2::XMLElement& parent, const char* name)
@@ -281,4 +354,60 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(free_surface, "Enable_cut_cell_stabilization", "true");
   expectText(free_surface, "Cut_cell_velocity_gradient_penalty", "1.0");
   expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
+}
+
+TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
+{
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  tinyxml2::XMLDocument doc;
+  ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(root, nullptr);
+
+  auto mesh = makeTranslatorQuadMesh();
+  const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
+
+  auto level_set_params = equationParametersFromElement(
+      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set"));
+  const auto level_set_input =
+      application::translators::EquationTranslator::buildInput(
+          *level_set_params,
+          meshes);
+
+  EXPECT_EQ(level_set_input.equation_type, "level_set");
+  EXPECT_EQ(level_set_input.mesh_name, "tank");
+  EXPECT_EQ(level_set_input.equation_params.at("Level_set_field_name").value, "phi");
+  EXPECT_EQ(level_set_input.equation_params.at("Level_set_source").value,
+            "prescribed_data");
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = svmp::Physics::EquationModuleRegistry::instance().create(
+      "level_set",
+      level_set_input,
+      system);
+  ASSERT_TRUE(module);
+  const auto phi = system.findFieldByName("phi");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+  EXPECT_TRUE(system.fieldParticipatesInUnknownVector(phi));
+  EXPECT_TRUE(system.hasOperator("level_set"));
+
+  auto fluid_params = equationParametersFromElement(
+      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid"));
+  const auto fluid_input =
+      application::translators::EquationTranslator::buildInput(
+          *fluid_params,
+          meshes);
+
+  const auto free_surface = std::find_if(
+      fluid_input.boundary_conditions.begin(),
+      fluid_input.boundary_conditions.end(),
+      [](const svmp::Physics::BoundaryConditionInput& bc) {
+        return bc.name == "free_surface";
+      });
+  ASSERT_NE(free_surface, fluid_input.boundary_conditions.end());
+  EXPECT_EQ(free_surface->boundary_marker, svmp::INVALID_LABEL);
+  EXPECT_EQ(free_surface->params.at("Implementation").value, "UnfittedLevelSet");
+  EXPECT_EQ(free_surface->params.at("Level_set_field_name").value, "phi");
+  EXPECT_EQ(free_surface->params.at("Generated_interface_domain_id").value,
+            "open_vessel_surface");
 }

@@ -356,6 +356,7 @@ TEST(LevelSetTransport, AutoRegistersConfiguredFields)
 
     level_set::LevelSetTransportOptions options{};
     options.level_set.field_name = "phi";
+    options.level_set.source = level_set::LevelSetFieldSource::PrescribedData;
     options.velocity.field_name = "advecting_velocity";
     options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
     options.velocity.auto_register_field = true;

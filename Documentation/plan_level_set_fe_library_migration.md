@@ -413,7 +413,7 @@ Physics tests to keep:
 - [x] Boundary condition translation.
 - [x] Constant velocity input translation.
 - [x] JIT option translation into FE install options.
-- [ ] Compatibility of existing open-vessel example input files.
+- [x] Compatibility of existing open-vessel example input files.
 
 Done when:
 

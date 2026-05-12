@@ -31,7 +31,8 @@ namespace {
     case LevelSetFieldSource::Unknown:
         return systems::FieldSourceKind::Unknown;
     case LevelSetFieldSource::PrescribedData:
-        return systems::FieldSourceKind::PrescribedData;
+        // The source describes initialization; transport still owns the field.
+        return systems::FieldSourceKind::Unknown;
     }
     return systems::FieldSourceKind::Unknown;
 }
