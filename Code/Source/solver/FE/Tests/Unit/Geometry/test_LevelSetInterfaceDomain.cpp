@@ -209,3 +209,57 @@ TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryResolvesHashCollis
     EXPECT_LT(second_marker, 202);
     EXPECT_EQ(registry.size(), 2u);
 }
+
+TEST(LevelSetInterfaceDomain, LinearFragmentQuadratureRulesCarryCentroidWeightsAndNormals)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("linear-fragment-source");
+    request.interface_marker = 81;
+    request.quadrature_policy_key = 23;
+
+    LevelSetInterfaceDomain domain(request);
+    CutInterfaceFragment segment;
+    segment.parent_cell = 1;
+    segment.kind = CutInterfaceFragmentKind::Segment;
+    segment.normal = {{0.0, 1.0, 0.0}};
+    segment.measure = 2.0;
+    segment.topology_id = "segment-fragment";
+    segment.quadrature_points = {
+        CutInterfaceQuadraturePoint{.point = {{1.0, 0.0, 0.0}},
+                                    .parent_coordinate = {{1.0, 0.0, 0.0}},
+                                    .normal = {{0.0, 1.0, 0.0}},
+                                    .weight = 2.0}};
+    domain.addFragment(segment);
+
+    CutInterfaceFragment polygon;
+    polygon.parent_cell = 2;
+    polygon.kind = CutInterfaceFragmentKind::Polygon;
+    polygon.normal = {{0.0, 0.0, 1.0}};
+    polygon.measure = 0.5;
+    polygon.topology_id = "polygon-fragment";
+    polygon.quadrature_points = {
+        CutInterfaceQuadraturePoint{.point = {{1.0 / 3.0, 1.0 / 3.0, 0.0}},
+                                    .parent_coordinate = {{1.0 / 3.0, 1.0 / 3.0, 0.0}},
+                                    .normal = {{0.0, 0.0, 1.0}},
+                                    .weight = 0.5}};
+    domain.addFragment(polygon);
+
+    const auto rules = domain.interfaceQuadratureRules();
+    ASSERT_EQ(rules.size(), 2u);
+
+    EXPECT_EQ(rules[0].kind, svmp::FE::geometry::CutQuadratureKind::Interface);
+    EXPECT_EQ(rules[0].exact_polynomial_order, 1);
+    ASSERT_EQ(rules[0].points.size(), 1u);
+    EXPECT_DOUBLE_EQ(rules[0].points.front().point[0], 1.0);
+    EXPECT_DOUBLE_EQ(rules[0].points.front().weight, 2.0);
+    EXPECT_DOUBLE_EQ(rules[0].points.front().normal[1], 1.0);
+    EXPECT_EQ(rules[0].provenance.predicate_policy_key, 23u);
+
+    EXPECT_EQ(rules[1].kind, svmp::FE::geometry::CutQuadratureKind::Interface);
+    EXPECT_EQ(rules[1].exact_polynomial_order, 1);
+    ASSERT_EQ(rules[1].points.size(), 1u);
+    EXPECT_DOUBLE_EQ(rules[1].points.front().point[0], 1.0 / 3.0);
+    EXPECT_DOUBLE_EQ(rules[1].points.front().point[1], 1.0 / 3.0);
+    EXPECT_DOUBLE_EQ(rules[1].points.front().weight, 0.5);
+    EXPECT_DOUBLE_EQ(rules[1].points.front().normal[2], 1.0);
+}
