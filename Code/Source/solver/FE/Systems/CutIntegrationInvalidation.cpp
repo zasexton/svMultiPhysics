@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -258,6 +259,36 @@ std::vector<CutAdjacentInteriorFacet> identifyCutAdjacentInteriorFacets(
                              }),
                  facets.end());
     return facets;
+}
+
+CutAdjacentFacetSetHandle makeCutAdjacentFacetSetHandle(
+    int marker,
+    std::string name,
+    const std::vector<CutAdjacentInteriorFacet>& facets) {
+    CutAdjacentFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = std::move(name);
+    handle.facets.reserve(facets.size());
+    for (const auto& facet : facets) {
+        if (facet.facet >= 0) {
+            handle.facets.push_back(facet.facet);
+        }
+    }
+    std::sort(handle.facets.begin(), handle.facets.end());
+    handle.facets.erase(std::unique(handle.facets.begin(), handle.facets.end()),
+                        handle.facets.end());
+
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](std::uint64_t value) noexcept {
+        h ^= value;
+        h *= 1099511628211ull;
+    };
+    mix(static_cast<std::uint64_t>(marker));
+    for (const auto facet : handle.facets) {
+        mix(static_cast<std::uint64_t>(facet));
+    }
+    handle.stable_id = h;
+    return handle;
 }
 
 } // namespace systems

@@ -113,6 +113,21 @@ struct CutAdjacentInteriorFacet {
     std::uint64_t stable_id{0};
 };
 
+struct CutAdjacentFacetSetHandle {
+    int marker{-1};
+    std::string name{};
+    std::vector<MeshIndex> facets{};
+    std::uint64_t stable_id{0};
+
+    [[nodiscard]] bool valid() const noexcept {
+        return marker >= 0 && !facets.empty() && stable_id != 0u;
+    }
+
+    [[nodiscard]] bool empty() const noexcept {
+        return facets.empty();
+    }
+};
+
 [[nodiscard]] CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
     const CutIntegrationRevisionSnapshot& cached,
     const CutIntegrationRevisionSnapshot& current) noexcept;
@@ -131,6 +146,11 @@ struct CutAdjacentInteriorFacet {
 [[nodiscard]] std::vector<CutAdjacentInteriorFacet> identifyCutAdjacentInteriorFacets(
     const std::vector<MeshIndex>& cut_cells,
     const std::vector<CutInteriorFacetAdjacency>& interior_facets);
+
+[[nodiscard]] CutAdjacentFacetSetHandle makeCutAdjacentFacetSetHandle(
+    int marker,
+    std::string name,
+    const std::vector<CutAdjacentInteriorFacet>& facets);
 
 } // namespace systems
 } // namespace FE

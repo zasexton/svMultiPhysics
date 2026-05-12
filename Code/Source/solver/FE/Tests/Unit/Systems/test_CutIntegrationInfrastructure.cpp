@@ -2300,6 +2300,28 @@ TEST(CutIntegrationInfrastructure, IdentifiesInteriorFacetsAdjacentToCutCells)
     EXPECT_NE(facets[2].stable_id, 0u);
 }
 
+TEST(CutIntegrationInfrastructure, BuildsMarkerBackedCutAdjacentFacetSetHandle)
+{
+    const auto facets = identifyCutAdjacentInteriorFacets(
+        {2, 6},
+        {CutInteriorFacetAdjacency{.facet = 20, .first_cell = 1, .second_cell = 2},
+         CutInteriorFacetAdjacency{.facet = 21, .first_cell = 2, .second_cell = 6},
+         CutInteriorFacetAdjacency{.facet = 20, .first_cell = 1, .second_cell = 2},
+         CutInteriorFacetAdjacency{.facet = 23, .first_cell = 6, .second_cell = 8}});
+
+    const auto handle =
+        makeCutAdjacentFacetSetHandle(/*marker=*/130, "cut-adjacent-facets", facets);
+
+    EXPECT_TRUE(handle.valid());
+    EXPECT_EQ(handle.marker, 130);
+    EXPECT_EQ(handle.name, "cut-adjacent-facets");
+    ASSERT_EQ(handle.facets.size(), 3u);
+    EXPECT_EQ(handle.facets[0], 20);
+    EXPECT_EQ(handle.facets[1], 21);
+    EXPECT_EQ(handle.facets[2], 23);
+    EXPECT_NE(handle.stable_id, 0u);
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 TEST(CutIntegrationInfrastructure, ImportsClosedCutTopologyIntoAllAssemblyPathBindings)
 {
