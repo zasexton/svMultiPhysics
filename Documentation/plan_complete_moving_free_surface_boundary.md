@@ -362,7 +362,7 @@ Checklist:
 - [x] Add level-set field options.
 - [x] Add velocity source options.
 - [x] Add residual form for transient advection.
-- [ ] Add SUPG stabilization.
+- [x] Add SUPG stabilization.
 - [ ] Add inflow/outflow treatment for level-set boundaries.
 - [ ] Add field registration and input translation.
 - [ ] Add unit tests for constant velocity translation.

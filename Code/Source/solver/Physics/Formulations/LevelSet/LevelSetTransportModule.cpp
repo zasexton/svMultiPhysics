@@ -87,6 +87,14 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field space must be scalar");
     }
+    if (options_.supg.enabled && !(options_.supg.tau_scale > 0.0)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: SUPG tau_scale must be positive");
+    }
+    if (options_.supg.enabled && !(options_.supg.velocity_epsilon > 0.0)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: SUPG velocity_epsilon must be positive");
+    }
 
     const auto phi_id = resolveNamedField(
         system,
@@ -128,8 +136,17 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
                   *velocity_rec.space,
                   options_.velocity.field_name);
 
-    const auto residual =
-        (dt(phi) * eta + dot(velocity, grad(phi)) * eta).dx();
+    const auto strong_residual = dt(phi) + dot(velocity, grad(phi));
+    auto residual = (strong_residual * eta).dx();
+    if (options_.supg.enabled) {
+        const auto velocity_norm = sqrt(
+            dot(velocity, velocity) +
+            FormExpr::constant(options_.supg.velocity_epsilon));
+        const auto tau =
+            FormExpr::constant(options_.supg.tau_scale) * h() / velocity_norm;
+        residual = residual +
+                   (tau * dot(velocity, grad(eta)) * strong_residual).dx();
+    }
 
     if (!system.hasOperator("level_set")) {
         system.addOperator("level_set");

@@ -641,6 +641,9 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(defaults.velocity.field_name, "Velocity");
     EXPECT_EQ(defaults.velocity.source, ls::LevelSetVelocitySource::CoupledField);
     EXPECT_FALSE(defaults.velocity.auto_register_field);
+    EXPECT_FALSE(defaults.supg.enabled);
+    EXPECT_DOUBLE_EQ(defaults.supg.tau_scale, 0.5);
+    EXPECT_DOUBLE_EQ(defaults.supg.velocity_epsilon, 1.0e-12);
 
     ls::LevelSetTransportOptions opts{};
     opts.level_set.field_name = "phi";
@@ -649,6 +652,9 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     opts.velocity.field_name = "advecting_velocity";
     opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
     opts.velocity.auto_register_field = true;
+    opts.supg.enabled = true;
+    opts.supg.tau_scale = 0.25;
+    opts.supg.velocity_epsilon = 1.0e-8;
 
     EXPECT_EQ(opts.level_set.field_name, "phi");
     EXPECT_EQ(opts.level_set.source, ls::LevelSetFieldSource::PrescribedData);
@@ -656,6 +662,9 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(opts.velocity.field_name, "advecting_velocity");
     EXPECT_EQ(opts.velocity.source, ls::LevelSetVelocitySource::PrescribedData);
     EXPECT_TRUE(opts.velocity.auto_register_field);
+    EXPECT_TRUE(opts.supg.enabled);
+    EXPECT_DOUBLE_EQ(opts.supg.tau_scale, 0.25);
+    EXPECT_DOUBLE_EQ(opts.supg.velocity_epsilon, 1.0e-8);
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
@@ -728,6 +737,65 @@ TEST(MovingDomainPhysics, LevelSetTransportResidualUsesTransientAdvectionForm)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellDiameter));
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportSUPGAddsCellDiameterStabilization)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+    opts.supg.enabled = true;
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportSUPGOptionsValidatePositiveScales)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.supg.enabled = true;
+
+    opts.supg.tau_scale = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.supg.tau_scale = 0.5;
+    opts.supg.velocity_epsilon = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
 }
 
 TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)

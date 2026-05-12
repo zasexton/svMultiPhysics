@@ -9,6 +9,7 @@
 #include "Physics/Core/PhysicsJITPolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
+#include "FE/Core/Types.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <memory>
@@ -41,9 +42,16 @@ struct LevelSetVelocityOptions {
     bool auto_register_field{false};
 };
 
+struct LevelSetSUPGOptions {
+    bool enabled{false};
+    FE::Real tau_scale{0.5};
+    FE::Real velocity_epsilon{1.0e-12};
+};
+
 struct LevelSetTransportOptions {
     LevelSetFieldOptions level_set{};
     LevelSetVelocityOptions velocity{};
+    LevelSetSUPGOptions supg{};
     core::PhysicsJITPolicy jit_policy{};
 };
 
