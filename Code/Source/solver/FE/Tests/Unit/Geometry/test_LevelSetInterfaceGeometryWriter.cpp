@@ -43,4 +43,12 @@ TEST(LevelSetInterfaceGeometryWriter, WritesGeneratedSegmentAsVtpLine)
     EXPECT_NE(xml.find("NumberOfPolys=\"0\""), std::string::npos);
     EXPECT_NE(xml.find("0.5 0 0"), std::string::npos);
     EXPECT_NE(xml.find("0.5 1 0"), std::string::npos);
+    EXPECT_NE(xml.find("<PointData>"), std::string::npos);
+    EXPECT_NE(xml.find("Name=\"level_set_value\""), std::string::npos);
+    EXPECT_NE(xml.find("<CellData>"), std::string::npos);
+    EXPECT_NE(xml.find("Name=\"interface_normal\" NumberOfComponents=\"3\""), std::string::npos);
+    EXPECT_NE(xml.find("Name=\"interface_marker\""), std::string::npos);
+    EXPECT_NE(xml.find("> 91 </DataArray>"), std::string::npos);
+    EXPECT_NE(xml.find("Name=\"parent_cell\""), std::string::npos);
+    EXPECT_NE(xml.find("> 1 </DataArray>"), std::string::npos);
 }
