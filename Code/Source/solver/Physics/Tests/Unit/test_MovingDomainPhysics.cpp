@@ -57,6 +57,10 @@
 #include <variant>
 #include <vector>
 
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+#  include <mpi.h>
+#endif
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Mesh.h"
 #  include "Mesh/Topology/CellShape.h"
@@ -1614,6 +1618,104 @@ TEST(MovingDomainPhysics, LevelSetGeneratedInterfaceLifecyclePreservesMarkerIden
     EXPECT_EQ(initial.interface_marker, updated.interface_marker);
     EXPECT_EQ(initial.domain.marker(), updated.domain.marker());
     EXPECT_EQ(updated.value_revision, initial.value_revision + 1u);
+}
+
+TEST(MovingDomainPhysicsMPI, LevelSetGeneratedInterfaceConsistencyAcrossRanks)
+{
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized == 0) {
+        GTEST_SKIP() << "Requires MPI launch";
+    }
+
+    int comm_size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+    if (comm_size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int interface_marker = 77;
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, 0,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    ls::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.tolerance = 1.0e-12;
+
+    ls::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+
+    const int local_marker = result.interface_marker;
+    int min_marker = 0;
+    int max_marker = 0;
+    MPI_Allreduce(&local_marker, &min_marker, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_marker, &max_marker, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(min_marker, max_marker);
+    EXPECT_EQ(min_marker, interface_marker);
+
+    const auto local_revision =
+        static_cast<unsigned long long>(result.value_revision);
+    unsigned long long min_revision = 0;
+    unsigned long long max_revision = 0;
+    MPI_Allreduce(&local_revision, &min_revision, 1, MPI_UNSIGNED_LONG_LONG,
+                  MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_revision, &max_revision, 1, MPI_UNSIGNED_LONG_LONG,
+                  MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(min_revision, max_revision);
+    EXPECT_EQ(min_revision, 1ull);
+
+    const auto local_fragment_count =
+        static_cast<unsigned long long>(result.summary.active_fragment_count);
+    unsigned long long min_fragment_count = 0;
+    unsigned long long max_fragment_count = 0;
+    MPI_Allreduce(&local_fragment_count, &min_fragment_count, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_fragment_count, &max_fragment_count, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(min_fragment_count, max_fragment_count);
+    EXPECT_EQ(min_fragment_count, 1ull);
+
+    const auto local_quadrature_count =
+        static_cast<unsigned long long>(result.summary.quadrature_point_count);
+    unsigned long long min_quadrature_count = 0;
+    unsigned long long max_quadrature_count = 0;
+    MPI_Allreduce(&local_quadrature_count, &min_quadrature_count, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_quadrature_count, &max_quadrature_count, 1,
+                  MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(min_quadrature_count, max_quadrature_count);
+    EXPECT_EQ(min_quadrature_count, 1ull);
+
+    const double local_measure = static_cast<double>(result.summary.measure);
+    double min_measure = 0.0;
+    double max_measure = 0.0;
+    MPI_Allreduce(&local_measure, &min_measure, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_measure, &max_measure, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_GT(min_measure, 0.0);
+    EXPECT_NEAR(min_measure, max_measure, 1.0e-14);
+#else
+    GTEST_SKIP() << "Requires MPI support";
+#endif
 }
 
 TEST(MovingDomainPhysics, LevelSetRestartRecordsPreserveGeneratedInterfaceMetadata)

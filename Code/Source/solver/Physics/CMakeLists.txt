@@ -342,7 +342,7 @@ if(PHYSICS_BUILD_TESTS)
         add_test(
             NAME Physics_Tests_MPI_2
             COMMAND ${MPIEXEC_EXECUTABLE} -np 2 $<TARGET_FILE:test_physics>
-                    --gtest_filter=PoissonSquareSteadyMPI.*:PoissonModuleMPI.*
+                    --gtest_filter=PoissonSquareSteadyMPI.*:PoissonModuleMPI.*:MovingDomainPhysicsMPI.*
         )
         set_tests_properties(Physics_Tests_MPI_2 PROPERTIES
             TIMEOUT 180
