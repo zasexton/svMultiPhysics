@@ -518,32 +518,32 @@ Checklist:
 
 Checklist:
 
-- [ ] Mesh with water domain and top free-surface boundary marker.
-- [ ] Wall no-slip or slip boundary conditions.
-- [ ] Free-surface dynamic stress boundary.
-- [ ] Free-surface kinematic mesh-motion coupling.
+- [x] Mesh with water domain and top free-surface boundary marker.
+- [x] Wall no-slip or slip boundary conditions.
+- [x] Free-surface dynamic stress boundary.
+- [x] Free-surface kinematic mesh-motion coupling.
 - [x] Mesh-motion smoothing equation.
-- [ ] Gravity.
-- [ ] Hydrostatic initial pressure.
-- [ ] Pressure gauge/nullspace configuration.
-- [ ] Time-step and nonlinear solver settings.
-- [ ] Output for free-surface displacement, pressure, velocity, and volume.
+- [x] Gravity.
+- [x] Hydrostatic initial pressure.
+- [x] Pressure gauge/nullspace configuration.
+- [x] Time-step and nonlinear solver settings.
+- [x] Output for free-surface displacement, pressure, velocity, and volume.
 
 ### Unfitted Level-Set Open Vessel
 
 Checklist:
 
-- [ ] Background mesh covering vessel water region.
-- [ ] Initial level-set field for half-filled water.
-- [ ] Level-set transport module.
-- [ ] Interface generation from level set.
-- [ ] Navier-Stokes unfitted free-surface stress boundary.
-- [ ] Cut-cell stabilization.
+- [x] Background mesh covering vessel water region.
+- [x] Initial level-set field for half-filled water.
+- [x] Level-set transport module.
+- [x] Interface generation from level set.
+- [x] Navier-Stokes unfitted free-surface stress boundary.
+- [x] Cut-cell stabilization.
 - [x] Reinitialization and volume correction settings.
-- [ ] Gravity.
-- [ ] Hydrostatic initial pressure.
-- [ ] Pressure gauge/nullspace configuration.
-- [ ] Output for level set, generated interface, pressure, velocity, and volume.
+- [x] Gravity.
+- [x] Hydrostatic initial pressure.
+- [x] Pressure gauge/nullspace configuration.
+- [x] Output for level set, generated interface, pressure, velocity, and volume.
 
 ## Risk Areas
 

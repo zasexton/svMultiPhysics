@@ -12,6 +12,7 @@ add_executable(test_application
   Unit/test_LegacyParameterStubs.cpp
   Unit/test_MeshCollection.cpp
   Unit/test_MeshTranslator.cpp
+  Unit/test_OpenVesselExamples.cpp
   ../Core/MeshCollection.cpp
   ../Translators/EquationTranslator.cpp
   ../Translators/MeshTranslator.cpp
