@@ -49,11 +49,20 @@ struct LevelSetCellCutResult {
 
 [[nodiscard]] bool supportsLinearLevelSetCellCut2D(ElementType element_type) noexcept;
 
+[[nodiscard]] bool supportsLinearLevelSetCellCut3D(ElementType element_type) noexcept;
+
 [[nodiscard]] LevelSetCellCutResult cutLinearLevelSetCell2D(
     const CutInterfaceDomainRequest& request,
     const LevelSetCellCutInput& input);
 
+[[nodiscard]] LevelSetCellCutResult cutLinearLevelSetCell3D(
+    const CutInterfaceDomainRequest& request,
+    const LevelSetCellCutInput& input);
+
 void appendLinearLevelSetCellCut2D(LevelSetInterfaceDomain& domain,
+                                   const LevelSetCellCutInput& input);
+
+void appendLinearLevelSetCellCut3D(LevelSetInterfaceDomain& domain,
                                    const LevelSetCellCutInput& input);
 
 } // namespace interfaces

@@ -144,7 +144,7 @@ Checklist:
 
 - [x] Define a generic cut-interface data model.
 - [x] Implement 2D cell cuts for triangles and quads.
-- [ ] Implement 3D cell cuts for tetrahedra.
+- [x] Implement 3D cell cuts for tetrahedra.
 - [ ] Add extension points for hexes, wedges, and pyramids.
 - [ ] Handle edge cases:
   - [ ] no cut

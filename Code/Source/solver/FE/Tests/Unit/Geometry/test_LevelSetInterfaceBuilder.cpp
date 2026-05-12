@@ -113,6 +113,72 @@ TEST(LevelSetInterfaceBuilder, ReportsNoCutAndUnsupportedElement)
     EXPECT_FALSE(unsupported_result.diagnostic.empty());
 }
 
+TEST(LevelSetInterfaceBuilder, CutsLinearTetrahedronWithTriangularPatch)
+{
+    const auto request = make_request(/*marker=*/12);
+    const LevelSetCellCutInput input{
+        .parent_cell = 14,
+        .element_type = ElementType::Tetra4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}},
+                             {{0.0, 0.0, 1.0}}},
+        .level_set_values = {-0.25, 0.75, -0.25, -0.25}};
+
+    const auto result = cutLinearLevelSetCell3D(request, input);
+
+    ASSERT_TRUE(result.supported);
+    ASSERT_EQ(result.fragments.size(), 1u);
+    const auto& fragment = result.fragments.front();
+    EXPECT_TRUE(fragment.active());
+    EXPECT_EQ(fragment.kind, CutInterfaceFragmentKind::Polygon);
+    EXPECT_EQ(fragment.degeneracy, CutInterfaceDegeneracy::None);
+    ASSERT_EQ(fragment.vertices.size(), 3u);
+    ASSERT_EQ(fragment.quadrature_points.size(), 1u);
+    EXPECT_NEAR(fragment.measure, 0.28125, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().point[0], 0.25, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().point[1], 0.25, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().point[2], 0.25, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().normal[0], 1.0, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().normal[1], 0.0, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().normal[2], 0.0, 1.0e-14);
+    EXPECT_NEAR(fragment.quadrature_points.front().weight, 0.28125, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceBuilder, CutsLinearTetrahedronWithQuadrilateralPatch)
+{
+    LevelSetInterfaceDomain domain(make_request(/*marker=*/13));
+    const LevelSetCellCutInput input{
+        .parent_cell = 15,
+        .element_type = ElementType::Tetra4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}},
+                             {{0.0, 0.0, 1.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+
+    appendLinearLevelSetCellCut3D(domain, input);
+
+    const auto summary = domain.summary();
+    EXPECT_EQ(summary.fragment_count, 1u);
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.quadrature_point_count, 1u);
+    EXPECT_NEAR(summary.measure, std::sqrt(0.125), 1.0e-14);
+
+    const auto rules = domain.interfaceQuadratureRules();
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_EQ(rules.front().provenance.parent_entity, 15);
+    ASSERT_EQ(rules.front().points.size(), 1u);
+    EXPECT_NEAR(rules.front().points.front().point[0], 0.25, 1.0e-14);
+    EXPECT_NEAR(rules.front().points.front().point[1], 0.25, 1.0e-14);
+    EXPECT_NEAR(rules.front().points.front().point[2], 0.25, 1.0e-14);
+    const Real inv_sqrt2 = 1.0 / std::sqrt(2.0);
+    EXPECT_NEAR(rules.front().points.front().normal[0], inv_sqrt2, 1.0e-14);
+    EXPECT_NEAR(rules.front().points.front().normal[1], inv_sqrt2, 1.0e-14);
+    EXPECT_NEAR(rules.front().points.front().normal[2], 0.0, 1.0e-14);
+    EXPECT_NEAR(rules.front().points.front().weight, std::sqrt(0.125), 1.0e-14);
+}
+
 TEST(LevelSetInterfaceBuilder, RejectsFullZeroCellAsDegenerate)
 {
     const auto request = make_request(/*marker=*/8);
