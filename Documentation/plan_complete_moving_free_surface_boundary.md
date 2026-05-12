@@ -422,7 +422,7 @@ Checklist:
 
 - [x] Add generated-interface lifecycle orchestration.
 - [x] Update interface geometry after level-set state changes.
-- [ ] Preserve marker identity across time steps.
+- [x] Preserve marker identity across time steps.
 - [ ] Couple generated interface marker to Navier-Stokes free-surface options.
 - [ ] Add optional cut-cell stabilization options to Navier-Stokes.
 - [ ] Add restart data for level-set fields and generated-interface metadata as needed.

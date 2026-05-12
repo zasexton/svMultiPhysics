@@ -1545,6 +1545,46 @@ TEST(MovingDomainPhysics, LevelSetGeneratedInterfaceLifecycleUpdatesGeometryAfte
               updated.domain.fragments().front().stable_id);
 }
 
+TEST(MovingDomainPhysics, LevelSetGeneratedInterfaceLifecyclePreservesMarkerIdentity)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto make_solution = [&](FE::Real offset) {
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto x = mesh->getNodeCoordinates(vertex);
+            setFieldComponentValue(solution, system, phi, vertex, 0,
+                                   x[0] + x[1] + x[2] - offset);
+        }
+        return solution;
+    };
+
+    ls::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.domain_id = "water-air";
+
+    ls::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(system, options, make_solution(0.5));
+    const auto updated = lifecycle.build(system, options, make_solution(0.75));
+
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    ASSERT_TRUE(updated.success) << updated.diagnostic;
+    EXPECT_GE(initial.interface_marker, 1000000);
+    EXPECT_EQ(initial.interface_marker, updated.interface_marker);
+    EXPECT_EQ(initial.domain.marker(), updated.domain.marker());
+    EXPECT_EQ(updated.value_revision, initial.value_revision + 1u);
+}
+
 TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)
 {
     const auto mesh = makeMesh();
