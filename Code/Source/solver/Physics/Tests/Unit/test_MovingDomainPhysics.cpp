@@ -1225,6 +1225,78 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
 }
 
+TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleAddsLevelSetResidual)
+{
+    constexpr int interface_marker = 44;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
+                .contact_angle_radians = 1.0471975511965977462,
+                .wall_normal = {1.0, 0.0, 0.0},
+                .contact_angle_penalty = 4.0,
+            },
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addOperator("level_set");
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(system.hasOperator("level_set"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLevelSetUnknown)
+{
+    constexpr int interface_marker = 45;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
+                .contact_angle_radians = 1.0471975511965977462,
+                .wall_normal = {1.0, 0.0, 0.0},
+            },
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
 TEST(MovingDomainPhysics, NavierStokesCoupledALEDerivesMeshVelocityFromDisplacement)
 {
     const auto mesh = makeMesh();

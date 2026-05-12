@@ -110,6 +110,20 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
     return normal;
 }
 
+[[nodiscard]] FE::forms::FormExpr wallNormalExpression(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line,
+    int dim)
+{
+    const auto wall_normal = normalizedWallNormal(contact_line);
+    std::vector<FE::forms::FormExpr> wall_components;
+    wall_components.reserve(static_cast<std::size_t>(dim));
+    for (int d = 0; d < dim; ++d) {
+        wall_components.push_back(FE::forms::FormExpr::constant(
+            wall_normal[static_cast<std::size_t>(d)]));
+    }
+    return FE::forms::FormExpr::asVector(std::move(wall_components));
+}
+
 void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled)
 {
     if (isUnfittedLevelSet(bc)) {
@@ -160,11 +174,7 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             }
         }
         if (contact_line.model == FreeSurfaceContactLineModel::PrescribedContactAngle) {
-            if (isUnfittedLevelSet(bc)) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: prescribed contact angles are currently supported only for fitted ALE free surfaces");
-            }
-            if (!ale_enabled) {
+            if (!isUnfittedLevelSet(bc) && !ale_enabled) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles require ALE to be enabled");
             }
@@ -260,6 +270,58 @@ void applyFreeSurfaceContactAngleResidual(
         if (contact_line.model != FreeSurfaceContactLineModel::PrescribedContactAngle) {
             continue;
         }
+        const auto wall_n = wallNormalExpression(contact_line, dim);
+        const auto desired = FE::forms::FormExpr::constant(std::cos(
+            constantScalarValueOrThrow(
+                contact_line.contact_angle_radians,
+                "contact-line contact_angle_radians")));
+        const auto penalty = FE::forms::bc::toScalarExpr(
+            contact_line.contact_angle_penalty,
+            freeSurfaceValueName("ns_free_surface_contact_angle_penalty", bc));
+
+        if (isUnfittedLevelSet(bc)) {
+            const auto phi_id = system.findFieldByName(bc.level_set_field_name);
+            if (phi_id == FE::INVALID_FIELD_ID) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angle references unknown level-set field '" +
+                    bc.level_set_field_name + "'");
+            }
+            const auto& rec = system.fieldRecord(phi_id);
+            if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: level-set field '" +
+                    bc.level_set_field_name + "' must be scalar");
+            }
+            if (!system.fieldParticipatesInUnknownVector(phi_id)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed unfitted contact angles require the level-set field to be an unknown");
+            }
+
+            const auto phi = FE::forms::StateField(
+                phi_id,
+                *rec.space,
+                bc.level_set_field_name);
+            const auto eta = FE::forms::FormExpr::testFunction(
+                phi_id,
+                *rec.space,
+                "eta_contact_angle");
+            const auto n = FE::forms::unitNormalFromLevelSet(phi);
+            const auto angle_gap = FE::forms::dot(n, wall_n) - desired;
+            const auto residual =
+                (penalty * angle_gap * eta).dI(bc.interface_marker);
+
+            if (!system.hasOperator("level_set")) {
+                system.addOperator("level_set");
+            }
+            (void)FE::systems::installFormulation(
+                system,
+                "level_set",
+                {phi_id},
+                residual,
+                base_install_options);
+            continue;
+        }
+
         if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles require a coupled mesh displacement unknown");
@@ -270,22 +332,6 @@ void applyFreeSurfaceContactAngleResidual(
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: mesh displacement field for prescribed contact angle has no function space");
         }
-
-        const auto wall_normal = normalizedWallNormal(contact_line);
-        std::vector<FE::forms::FormExpr> wall_components;
-        wall_components.reserve(static_cast<std::size_t>(dim));
-        for (int d = 0; d < dim; ++d) {
-            wall_components.push_back(FE::forms::FormExpr::constant(
-                wall_normal[static_cast<std::size_t>(d)]));
-        }
-        const auto wall_n = FE::forms::FormExpr::asVector(std::move(wall_components));
-        const auto desired = FE::forms::FormExpr::constant(std::cos(
-            constantScalarValueOrThrow(
-                contact_line.contact_angle_radians,
-                "contact-line contact_angle_radians")));
-        const auto penalty = FE::forms::bc::toScalarExpr(
-            contact_line.contact_angle_penalty,
-            freeSurfaceValueName("ns_free_surface_contact_angle_penalty", bc));
 
         const auto psi = FE::forms::FormExpr::testFunction(
             ale_binding.mesh_displacement_field,
