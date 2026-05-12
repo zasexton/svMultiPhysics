@@ -982,6 +982,76 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesConstantVelocity)
 #endif
 }
 
+TEST(MovingDomainPhysics, MeshMotionRegistryTranslatesHarmonicSmoothingEquation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = makeRegistryQuadMesh();
+
+    EquationModuleInput input{};
+    input.equation_type = "mesh_motion";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Model"] = ParameterValue{true, "Harmonic"};
+    input.equation_params["Field_name"] = ParameterValue{true, "mesh_displacement"};
+    input.equation_params["Operator_tag"] = ParameterValue{true, "equations"};
+    input.equation_params["Kappa"] = ParameterValue{true, "2.5"};
+    input.equation_params["Moving_mesh_tangent_path"] =
+        ParameterValue{true, "symbolic"};
+
+    BoundaryConditionInput wall{};
+    wall.name = "wall";
+    wall.boundary_marker = 4;
+    wall.params["Type"] = ParameterValue{true, "Dirichlet"};
+    wall.params["Value"] = ParameterValue{true, "0.0"};
+    input.boundary_conditions.push_back(std::move(wall));
+
+    FE::systems::FESystem system(mesh);
+    system.addOperator("equations");
+    auto module = EquationModuleRegistry::instance().create("mesh_motion", input, system);
+
+    ASSERT_TRUE(module);
+    const auto displacement = system.findFieldByName("mesh_displacement");
+    ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Displacement),
+              displacement);
+    EXPECT_TRUE(system.hasOperator("equations"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+    ASSERT_NO_THROW(system.setup());
+#endif
+}
+
+TEST(MovingDomainPhysics, MeshMotionRegistryTranslatesPseudoElasticSmoothingEquation)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = makeRegistryQuadMesh();
+
+    EquationModuleInput input{};
+    input.equation_type = "pseudo_elastic_mesh_motion";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Field_name"] = ParameterValue{true, "mesh_displacement"};
+    input.equation_params["Operator_tag"] = ParameterValue{true, "equations"};
+    input.equation_params["Lambda_mesh"] = ParameterValue{true, "3.0"};
+    input.equation_params["Mu_mesh"] = ParameterValue{true, "1.5"};
+
+    FE::systems::FESystem system(mesh);
+    auto module = EquationModuleRegistry::instance().create(
+        "pseudo_elastic_mesh_motion", input, system);
+
+    ASSERT_TRUE(module);
+    ASSERT_NE(system.findFieldByName("mesh_displacement"), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.hasOperator("equations"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::SymmetricPart));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Trace));
+    ASSERT_NO_THROW(system.setup());
+#endif
+}
+
 TEST(MovingDomainPhysics, LevelSetTransportResidualUsesTransientAdvectionForm)
 {
     const auto mesh = makeMesh();

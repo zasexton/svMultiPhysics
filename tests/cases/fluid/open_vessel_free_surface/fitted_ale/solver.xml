@@ -122,4 +122,28 @@
   </Add_BC>
 </Add_equation>
 
+<Add_equation type="mesh_motion">
+  <Coupled>true</Coupled>
+  <Model>Harmonic</Model>
+  <Field_name>mesh_displacement</Field_name>
+  <Operator_tag>equations</Operator_tag>
+  <Kappa>1.0</Kappa>
+  <Moving_mesh_tangent_path>SymbolicRequired</Moving_mesh_tangent_path>
+
+  <Add_BC name="wall_left">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+  </Add_BC>
+
+  <Add_BC name="wall_right">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+  </Add_BC>
+
+  <Add_BC name="wall_bottom">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+  </Add_BC>
+</Add_equation>
+
 </svMultiPhysicsFile>

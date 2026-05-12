@@ -72,7 +72,9 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
             options_.auto_register_field,
             options_.bind_as_mesh_displacement});
 
-    system.addOperator(options_.operator_tag);
+    if (!system.hasOperator(options_.operator_tag)) {
+        system.addOperator(options_.operator_tag);
+    }
 
     using namespace svmp::FE::forms;
     const auto d_id = binding.displacement_field;

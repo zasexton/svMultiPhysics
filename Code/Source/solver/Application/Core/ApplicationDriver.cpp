@@ -389,7 +389,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params)
 
   oopCout() << "[svMultiPhysics::Application] <Use_new_OOP_solver>=true; running new OOP solver path." << std::endl;
   oopCout()
-      << "[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes, ustruct; "
+      << "[svMultiPhysics::Application] Supported (initial): equation types heatS/heatF (Poisson), fluid, stokes, level_set, mesh_motion, ustruct; "
          "single <Add_mesh>; steady constant BCs; selected file-driven temporal BCs; transient time loop (Generalized-α)."
       << std::endl;
   oopCout() << "[svMultiPhysics::Application] Not supported yet: Domain_file_path, multiple domains, "

@@ -522,7 +522,7 @@ Checklist:
 - [ ] Wall no-slip or slip boundary conditions.
 - [ ] Free-surface dynamic stress boundary.
 - [ ] Free-surface kinematic mesh-motion coupling.
-- [ ] Mesh-motion smoothing equation.
+- [x] Mesh-motion smoothing equation.
 - [ ] Gravity.
 - [ ] Hydrostatic initial pressure.
 - [ ] Pressure gauge/nullspace configuration.
