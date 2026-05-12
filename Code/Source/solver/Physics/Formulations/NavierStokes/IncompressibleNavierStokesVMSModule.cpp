@@ -16,6 +16,7 @@
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include <cstddef>
 #include <cmath>
@@ -75,6 +76,57 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
     return contact_line.contact_line_marker >= 0
                ? contact_line.contact_line_marker
                : contact_line.wall_boundary_marker;
+}
+
+[[nodiscard]] FE::FieldId resolveLevelSetFieldId(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    const auto phi_id = system.findFieldByName(bc.level_set_field_name);
+    if (phi_id == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field '" +
+            bc.level_set_field_name + "'");
+    }
+
+    const auto& rec = system.fieldRecord(phi_id);
+    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: level-set field '" +
+            bc.level_set_field_name + "' must be scalar");
+    }
+    return phi_id;
+}
+
+[[nodiscard]] int generatedInterfaceMarkerFor(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    if (!isUnfittedLevelSet(bc) || bc.interface_marker >= 0) {
+        return bc.interface_marker;
+    }
+    if (bc.generated_interface_domain_id.empty()) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: generated unfitted free surface requires a non-empty generated_interface_domain_id");
+    }
+
+    const auto phi_id = resolveLevelSetFieldId(bc, system);
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi_id);
+    key.domain_id = bc.generated_interface_domain_id;
+    key.isovalue = bc.level_set_isovalue;
+    key.requested_marker = bc.interface_marker;
+    return FE::interfaces::stableGeneratedInterfaceMarker(key);
+}
+
+[[nodiscard]] FreeSurfaceBoundary withResolvedInterfaceMarker(
+    FreeSurfaceBoundary bc,
+    const FE::systems::FESystem& system)
+{
+    if (isUnfittedLevelSet(bc) && bc.interface_marker < 0) {
+        bc.interface_marker = generatedInterfaceMarkerFor(bc, system);
+    }
+    return bc;
 }
 
 [[nodiscard]] FE::Real constantScalarValueOrThrow(
@@ -205,20 +257,8 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
         return FE::forms::FormExpr{};
     }
 
-    const auto phi_id = system.findFieldByName(bc.level_set_field_name);
-    if (phi_id == FE::INVALID_FIELD_ID) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field '" +
-            bc.level_set_field_name + "'");
-    }
-
+    const auto phi_id = resolveLevelSetFieldId(bc, system);
     const auto& rec = system.fieldRecord(phi_id);
-    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: level-set field '" +
-            bc.level_set_field_name + "' must be scalar");
-    }
-
     return FE::forms::FormExpr::discreteField(phi_id, *rec.space, bc.level_set_field_name);
 }
 
@@ -684,22 +724,23 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     auto free_surface_contact_angle_install = physicsInstallOptions(options_.jit_policy);
     for (const auto& bc : options_.free_surface) {
-        validateFreeSurfaceBoundary(bc, options_.enable_ale);
-        applyFreeSurfaceContactLineConstraints(system, bc, ale_binding, dim);
+        const auto effective_bc = withResolvedInterfaceMarker(bc, system);
+        validateFreeSurfaceBoundary(effective_bc, options_.enable_ale);
+        applyFreeSurfaceContactLineConstraints(system, effective_bc, ale_binding, dim);
         applyFreeSurfaceContactAngleResidual(
             system,
-            bc,
+            effective_bc,
             ale_binding,
             options_,
             free_surface_contact_angle_install,
             dim);
-        if (bc.implementation == FreeSurfaceImplementation::FittedALE) {
-            bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(bc.boundary_marker));
+        if (effective_bc.implementation == FreeSurfaceImplementation::FittedALE) {
+            bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(effective_bc.boundary_marker));
         }
         applyFreeSurfaceBoundary(
             momentum_form,
             continuity_form,
-            bc,
+            effective_bc,
             system,
             u,
             p,

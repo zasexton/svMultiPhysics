@@ -26,6 +26,7 @@
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
+#include "FE/Analysis/FormExprScanner.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Dofs/DofMap.h"
 #include "FE/Dofs/EntityDofMap.h"
@@ -40,6 +41,7 @@
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -102,6 +104,34 @@ bool formulationRecordsContain(const FE::systems::FESystem& system, FormExprType
         for (const auto& [block, expr] : record.block_residual_exprs) {
             (void)block;
             if (containsExprType(expr.get(), target)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool formulationRecordsContainInterfaceMarker(const FE::systems::FESystem& system,
+                                              int marker)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (record.residual_expr) {
+            const auto scan = FE::analysis::scanFormExpr(*record.residual_expr);
+            if (std::find(scan.interface_markers.begin(),
+                          scan.interface_markers.end(),
+                          marker) != scan.interface_markers.end()) {
+                return true;
+            }
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (!expr) {
+                continue;
+            }
+            const auto scan = FE::analysis::scanFormExpr(*expr);
+            if (std::find(scan.interface_markers.begin(),
+                          scan.interface_markers.end(),
+                          marker) != scan.interface_markers.end()) {
                 return true;
             }
         }
@@ -2531,6 +2561,40 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesLevelSetInterfaceGe
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesGeneratedInterfaceMarker)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .external_pressure = 1.0,
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, expected_marker));
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)

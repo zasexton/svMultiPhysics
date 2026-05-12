@@ -171,6 +171,8 @@ struct IncompressibleNavierStokesVMSOptions {
         // Unfitted/level-set free surfaces integrate on dI(interface_marker).
         int interface_marker{-1};
         std::string level_set_field_name{"level_set"};
+        std::string generated_interface_domain_id{"free_surface"};
+        FE::Real level_set_isovalue{0.0};
 
         // Dynamic stress balance: sigma(u,p)n = (-p_ext + gamma*kappa)n.
         ScalarValue external_pressure{0.0};

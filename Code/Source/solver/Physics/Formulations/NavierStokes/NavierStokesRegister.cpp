@@ -1902,6 +1902,17 @@ void append_free_surface_bc(
             {"Level_set_field_name", "Level_set_field", "LevelSetFieldName", "LevelSetField"})) {
       fs.level_set_field_name = *field_name;
     }
+    if (const auto domain_id = first_defined_string(
+            bc.params,
+            {"Generated_interface_domain_id", "GeneratedInterfaceDomainId",
+             "Interface_domain_id", "InterfaceDomainId"})) {
+      fs.generated_interface_domain_id = *domain_id;
+    }
+    if (const auto isovalue = first_defined_double(
+            bc.params,
+            {"Level_set_isovalue", "LevelSetIsovalue", "Interface_isovalue", "InterfaceIsovalue"})) {
+      fs.level_set_isovalue = static_cast<svmp::FE::Real>(*isovalue);
+    }
   }
 
   if (const auto pressure = first_defined_double(
