@@ -35,6 +35,75 @@ namespace {
     return field;
 }
 
+[[nodiscard]] FE::systems::FieldSourceKind sourceKind(LevelSetFieldSource source) noexcept
+{
+    switch (source) {
+    case LevelSetFieldSource::Unknown:
+        return FE::systems::FieldSourceKind::Unknown;
+    case LevelSetFieldSource::PrescribedData:
+        return FE::systems::FieldSourceKind::PrescribedData;
+    }
+    return FE::systems::FieldSourceKind::Unknown;
+}
+
+[[nodiscard]] FE::systems::FieldSourceKind sourceKind(LevelSetVelocitySource source) noexcept
+{
+    switch (source) {
+    case LevelSetVelocitySource::CoupledField:
+        return FE::systems::FieldSourceKind::Unknown;
+    case LevelSetVelocitySource::PrescribedData:
+        return FE::systems::FieldSourceKind::PrescribedData;
+    }
+    return FE::systems::FieldSourceKind::Unknown;
+}
+
+[[nodiscard]] FE::FieldId ensureLevelSetField(
+    FE::systems::FESystem& system,
+    const LevelSetFieldOptions& options,
+    std::shared_ptr<const FE::spaces::FunctionSpace> space)
+{
+    const auto existing = system.findFieldByName(options.field_name);
+    if (existing != FE::INVALID_FIELD_ID) {
+        return existing;
+    }
+    if (!options.auto_register_field) {
+        return resolveNamedField(system, options.field_name, "level-set");
+    }
+    if (!space) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: auto-registering the level-set field requires a function space");
+    }
+    return system.addField(FE::systems::FieldSpec{
+        .name = options.field_name,
+        .space = std::move(space),
+        .components = 1,
+        .source_kind = sourceKind(options.source),
+    });
+}
+
+[[nodiscard]] FE::FieldId ensureVelocityField(
+    FE::systems::FESystem& system,
+    const LevelSetVelocityOptions& options)
+{
+    const auto existing = system.findFieldByName(options.field_name);
+    if (existing != FE::INVALID_FIELD_ID) {
+        return existing;
+    }
+    if (!options.auto_register_field) {
+        return resolveNamedField(system, options.field_name, "velocity");
+    }
+    if (!options.space) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: auto-registering the velocity field requires a function space");
+    }
+    return system.addField(FE::systems::FieldSpec{
+        .name = options.field_name,
+        .space = options.space,
+        .components = options.space->value_dimension(),
+        .source_kind = sourceKind(options.source),
+    });
+}
+
 void validateScalarField(const FE::systems::FESystem& system,
                          FE::FieldId field,
                          const std::string& field_name)
@@ -109,10 +178,6 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: velocity field name must be non-empty");
     }
-    if (options_.level_set.auto_register_field && !level_set_space_) {
-        throw std::invalid_argument(
-            "LevelSetTransportModule::registerOn: auto-registering the level-set field requires a function space");
-    }
     if (level_set_space_ && level_set_space_->value_dimension() != 1) {
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field space must be scalar");
@@ -127,20 +192,14 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
     }
     validateBoundaryOptions(options_.boundaries);
 
-    const auto phi_id = resolveNamedField(
-        system,
-        options_.level_set.field_name,
-        "level-set");
+    const auto phi_id = ensureLevelSetField(system, options_.level_set, level_set_space_);
     validateScalarField(system, phi_id, options_.level_set.field_name);
     if (!system.fieldParticipatesInUnknownVector(phi_id)) {
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field must be an unknown for transport residual assembly");
     }
 
-    const auto velocity_id = resolveNamedField(
-        system,
-        options_.velocity.field_name,
-        "velocity");
+    const auto velocity_id = ensureVelocityField(system, options_.velocity);
     validateVelocityField(system, velocity_id, options_.velocity.field_name);
     if (options_.velocity.source == LevelSetVelocitySource::CoupledField &&
         !system.fieldParticipatesInUnknownVector(velocity_id)) {

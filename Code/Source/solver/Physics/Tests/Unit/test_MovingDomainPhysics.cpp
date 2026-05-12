@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
@@ -47,6 +49,11 @@
 #include <utility>
 #include <variant>
 #include <vector>
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Mesh.h"
+#  include "Mesh/Topology/CellShape.h"
+#endif
 
 namespace svmp {
 namespace Physics {
@@ -102,6 +109,31 @@ std::shared_ptr<SingleTetraMeshAccess> makeMesh()
 {
     return std::make_shared<SingleTetraMeshAccess>();
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+std::shared_ptr<Mesh> makeRegistryQuadMesh()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+    };
+    const std::vector<offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<index_t> cell2vertex = {0, 1, 2, 3};
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, x_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    return create_mesh(std::move(base));
+}
+#endif
 
 FE::systems::SetupInputs makeSingleTriangleSetupInputs()
 {
@@ -641,6 +673,7 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(defaults.velocity.field_name, "Velocity");
     EXPECT_EQ(defaults.velocity.source, ls::LevelSetVelocitySource::CoupledField);
     EXPECT_FALSE(defaults.velocity.auto_register_field);
+    EXPECT_EQ(defaults.velocity.space, nullptr);
     EXPECT_FALSE(defaults.supg.enabled);
     EXPECT_DOUBLE_EQ(defaults.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(defaults.supg.velocity_epsilon, 1.0e-12);
@@ -670,6 +703,7 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(opts.velocity.field_name, "advecting_velocity");
     EXPECT_EQ(opts.velocity.source, ls::LevelSetVelocitySource::PrescribedData);
     EXPECT_TRUE(opts.velocity.auto_register_field);
+    EXPECT_EQ(opts.velocity.space, nullptr);
     EXPECT_TRUE(opts.supg.enabled);
     EXPECT_DOUBLE_EQ(opts.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(opts.supg.velocity_epsilon, 1.0e-8);
@@ -717,6 +751,82 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
     ls::LevelSetTransportModule empty_velocity_name_module(scalar_space, opts);
     EXPECT_THROW(empty_velocity_name_module.registerOn(empty_velocity_name_system),
                  std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportAutoRegistersConfiguredFields)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+    opts.velocity.auto_register_field = true;
+    opts.velocity.space = vector_space;
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.fieldRecord(phi).source_kind, FE::systems::FieldSourceKind::Unknown);
+    EXPECT_EQ(system.fieldRecord(velocity).source_kind,
+              FE::systems::FieldSourceKind::PrescribedData);
+    EXPECT_TRUE(system.hasOperator("level_set"));
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = makeRegistryQuadMesh();
+
+    EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] = ParameterValue{true, "phi"};
+    input.equation_params["Velocity_field_name"] = ParameterValue{true, "advecting_velocity"};
+    input.equation_params["Velocity_source"] = ParameterValue{true, "prescribed_data"};
+    input.equation_params["Enable_SUPG"] = ParameterValue{true, "true"};
+    input.equation_params["SUPG_tau_scale"] = ParameterValue{true, "0.25"};
+
+    BoundaryConditionInput inflow{};
+    inflow.name = "inlet";
+    inflow.boundary_marker = 4;
+    inflow.params["Type"] = ParameterValue{true, "LevelSetInflow"};
+    inflow.params["Value"] = ParameterValue{true, "0.5"};
+    inflow.params["Penalty_scale"] = ParameterValue{true, "2.0"};
+    input.boundary_conditions.push_back(std::move(inflow));
+
+    BoundaryConditionInput outflow{};
+    outflow.name = "outlet";
+    outflow.boundary_marker = 5;
+    outflow.params["Type"] = ParameterValue{true, "LevelSetOutflow"};
+    input.boundary_conditions.push_back(std::move(outflow));
+
+    FE::systems::FESystem system(mesh);
+    auto module = EquationModuleRegistry::instance().create("level_set", input, system);
+
+    ASSERT_TRUE(module);
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.fieldRecord(phi).source_kind, FE::systems::FieldSourceKind::Unknown);
+    EXPECT_EQ(system.fieldRecord(velocity).source_kind,
+              FE::systems::FieldSourceKind::PrescribedData);
+    EXPECT_TRUE(system.hasOperator("level_set"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+#endif
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportResidualUsesTransientAdvectionForm)

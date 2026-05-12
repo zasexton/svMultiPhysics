@@ -44,6 +44,7 @@ struct LevelSetVelocityOptions {
     std::string field_name{"Velocity"};
     LevelSetVelocitySource source{LevelSetVelocitySource::CoupledField};
     bool auto_register_field{false};
+    std::shared_ptr<const FE::spaces::FunctionSpace> space{};
 };
 
 struct LevelSetSUPGOptions {
