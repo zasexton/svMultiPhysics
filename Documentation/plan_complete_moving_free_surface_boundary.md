@@ -487,7 +487,7 @@ Checklist:
 
 Checklist:
 
-- [ ] Static flat water surface with gravity remains at rest.
+- [x] Static flat water surface with gravity remains at rest.
 - [x] Hydrostatic pressure field matches analytic pressure.
 - [x] External-pressure free-surface traction has the expected sign.
 - [x] Surface-tension pressure jump matches Laplace law for a circular interface.

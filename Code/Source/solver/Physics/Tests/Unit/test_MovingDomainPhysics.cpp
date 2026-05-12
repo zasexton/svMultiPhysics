@@ -245,6 +245,89 @@ std::shared_ptr<Mesh> makeStructuredQuadMesh(int cells_per_axis,
 
     return create_mesh(std::move(base));
 }
+
+std::shared_ptr<Mesh> makeOpenTankQuadMesh(int left_marker,
+                                           int right_marker,
+                                           int bottom_marker,
+                                           int free_surface_marker,
+                                           std::string_view free_surface_set)
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<real_t> x_ref = {
+        -1.0, -1.0,
+         0.0, -1.0,
+         1.0, -1.0,
+        -1.0,  0.0,
+         0.0,  0.0,
+         1.0,  0.0,
+        -1.0,  1.0,
+         0.0,  1.0,
+         1.0,  1.0,
+    };
+    const std::vector<offset_t> cell2vertex_offsets = {0, 4, 8, 12, 16};
+    const std::vector<index_t> cell2vertex = {
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+        3, 4, 7, 6,
+        4, 5, 8, 7,
+    };
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        std::vector<CellShape>(4, shape));
+    base->finalize();
+
+    base->register_label("wall_left", static_cast<label_t>(left_marker));
+    base->register_label("wall_right", static_cast<label_t>(right_marker));
+    base->register_label("wall_bottom", static_cast<label_t>(bottom_marker));
+    base->register_label("free_surface", static_cast<label_t>(free_surface_marker));
+
+    const auto coordinate = [&](index_t vertex, int component) {
+        return base->X_ref().at(static_cast<std::size_t>(2 * vertex + component));
+    };
+    const auto all_vertices_match = [&](std::span<const index_t> vertices,
+                                        int component,
+                                        real_t value) {
+        return std::all_of(vertices.begin(), vertices.end(), [&](index_t vertex) {
+            return std::abs(coordinate(vertex, component) - value) < real_t(1.0e-14);
+        });
+    };
+
+    for (index_t face = 0; face < static_cast<index_t>(base->n_faces()); ++face) {
+        const auto vertices = base->face_vertices(face);
+        if (vertices.size() != 2u) {
+            continue;
+        }
+        label_t label = INVALID_LABEL;
+        if (all_vertices_match(vertices, /*component=*/1, real_t(1.0))) {
+            label = static_cast<label_t>(free_surface_marker);
+        } else if (all_vertices_match(vertices, /*component=*/1, real_t(-1.0))) {
+            label = static_cast<label_t>(bottom_marker);
+        } else if (all_vertices_match(vertices, /*component=*/0, real_t(-1.0))) {
+            label = static_cast<label_t>(left_marker);
+        } else if (all_vertices_match(vertices, /*component=*/0, real_t(1.0))) {
+            label = static_cast<label_t>(right_marker);
+        }
+
+        if (label == INVALID_LABEL) {
+            continue;
+        }
+        base->set_boundary_label(face, label);
+        if (label == static_cast<label_t>(free_surface_marker)) {
+            base->add_to_set(EntityKind::Face, std::string(free_surface_set), face);
+        }
+    }
+
+    return create_mesh(std::move(base));
+}
 #endif
 
 FE::systems::SetupInputs makeSingleTriangleSetupInputs()
@@ -2591,6 +2674,104 @@ TEST(MovingDomainPhysics, SurfaceTensionPressureJumpMatchesLaplaceLaw)
                                         /*surface_tension=*/gamma,
                                         /*curvature=*/2.0 / sphere_radius);
     EXPECT_LT(vectorNorm(sphere_jump), 1.0e-12);
+}
+
+TEST(MovingDomainPhysics, StaticFlatWaterSurfaceWithGravityRemainsAtRest)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr int left_marker = 101;
+    constexpr int right_marker = 102;
+    constexpr int bottom_marker = 103;
+    constexpr int free_surface_marker = 104;
+    constexpr FE::GlobalIndex top_middle_vertex = 7;
+    constexpr FE::Real density = 2.0;
+    constexpr FE::Real gravity_y = -9.81;
+    constexpr FE::Real surface_y = 1.0;
+    constexpr FE::Real atmospheric_pressure = 0.0;
+
+    auto mesh = makeOpenTankQuadMesh(left_marker,
+                                     right_marker,
+                                     bottom_marker,
+                                     free_surface_marker,
+                                     "free_surface");
+    auto scalar_space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Quad4,
+        /*order=*/1);
+    auto u_space = std::make_shared<FE::spaces::ProductSpace>(
+        scalar_space,
+        /*components=*/2);
+    auto p_space = scalar_space;
+
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.density = density;
+    opts.viscosity = 1.0e-3;
+    opts.body_force = {0.0, gravity_y, 0.0};
+    opts.velocity_dirichlet = {
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = left_marker,
+        },
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = right_marker,
+        },
+        ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+            .boundary_marker = bottom_marker,
+        },
+    };
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = free_surface_marker,
+        .external_pressure = atmospheric_pressure,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    ASSERT_NO_THROW(system.setup());
+
+    const auto u = system.findFieldByName(opts.velocity_field_name);
+    const auto p = system.findFieldByName(opts.pressure_field_name);
+    ASSERT_NE(u, FE::INVALID_FIELD_ID);
+    ASSERT_NE(p, FE::INVALID_FIELD_ID);
+
+    const auto* velocity_entity_map = system.fieldDofHandler(u).getEntityDofMap();
+    ASSERT_NE(velocity_entity_map, nullptr);
+    const auto top_middle_velocity_dofs =
+        velocity_entity_map->getVertexDofs(top_middle_vertex);
+    ASSERT_EQ(top_middle_velocity_dofs.size(), 2u);
+    const auto velocity_offset = system.fieldDofOffset(u);
+    for (const auto dof : top_middle_velocity_dofs) {
+        EXPECT_FALSE(system.constraints().isConstrained(velocity_offset + dof));
+    }
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        0.0);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < static_cast<FE::GlobalIndex>(mesh->n_vertices());
+         ++vertex) {
+        const auto x = system.meshAccess().getNodeCoordinates(vertex);
+        const auto pressure =
+            atmospheric_pressure +
+            density * gravity_y * (x[1] - surface_y);
+        setFieldComponentValue(solution, system, p, vertex, 0, pressure);
+    }
+    const auto previous_solution = solution;
+
+    FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    const auto residual = residualVector(system, state, "equations");
+    EXPECT_LT(vectorNorm(residual), 1.0e-10);
+#endif
 }
 
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry)
