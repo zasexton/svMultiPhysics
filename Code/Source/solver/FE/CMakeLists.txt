@@ -747,6 +747,7 @@ set(FE_GEOMETRY_HEADERS
     Geometry/GeometryMapping.h
     Geometry/GeometryFrameUtils.h
     Geometry/CutQuadrature.h
+    Interfaces/LevelSetInterfaceDomain.h
     Geometry/FrameAwareTransform.h
     Geometry/MovingFrame.h
     Geometry/FiniteDeformationKinematics.h
@@ -2052,6 +2053,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Geometry/test_LinearMapping.cpp
         Tests/Unit/Geometry/test_FrameGeometry.cpp
         Tests/Unit/Geometry/test_CutQuadrature.cpp
+        Tests/Unit/Geometry/test_LevelSetInterfaceDomain.cpp
         Tests/Unit/Geometry/test_FrameAwareTransform.cpp
         Tests/Unit/Geometry/test_MovingFrame.cpp
         Tests/Unit/Geometry/test_FiniteDeformationKinematics.cpp

@@ -142,7 +142,7 @@ Concrete changes:
 
 Checklist:
 
-- [ ] Define a generic cut-interface data model.
+- [x] Define a generic cut-interface data model.
 - [ ] Implement 2D cell cuts for triangles and quads.
 - [ ] Implement 3D cell cuts for tetrahedra.
 - [ ] Add extension points for hexes, wedges, and pyramids.
