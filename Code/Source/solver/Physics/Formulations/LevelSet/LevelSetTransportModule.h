@@ -13,6 +13,7 @@
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Spaces/FunctionSpace.h"
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,7 +32,8 @@ enum class LevelSetFieldSource {
 
 enum class LevelSetVelocitySource {
     CoupledField,
-    PrescribedData
+    PrescribedData,
+    ConstantVector
 };
 
 struct LevelSetFieldOptions {
@@ -45,6 +47,7 @@ struct LevelSetVelocityOptions {
     LevelSetVelocitySource source{LevelSetVelocitySource::CoupledField};
     bool auto_register_field{false};
     std::shared_ptr<const FE::spaces::FunctionSpace> space{};
+    std::array<FE::Real, 3> constant_value{0.0, 0.0, 0.0};
 };
 
 struct LevelSetSUPGOptions {

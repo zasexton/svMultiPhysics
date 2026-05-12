@@ -8,11 +8,13 @@
 #include "Mesh/Core/MeshBase.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <initializer_list>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -127,6 +129,46 @@ std::optional<svmp::FE::Real> get_defined_real(
   return std::nullopt;
 }
 
+std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw, std::string_view context)
+{
+  std::istringstream in{std::string(raw)};
+  std::array<svmp::FE::Real, 3> out{0.0, 0.0, 0.0};
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    double value = 0.0;
+    if (!(in >> value) || !std::isfinite(value)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Failed to parse three numeric components for " +
+          std::string(context) + ".");
+    }
+    out[i] = static_cast<svmp::FE::Real>(value);
+  }
+  std::string extra;
+  if (in >> extra) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Failed to parse three numeric components for " +
+        std::string(context) + ".");
+  }
+  return out;
+}
+
+std::optional<std::array<svmp::FE::Real, 3>> get_defined_vector3(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view context)
+{
+  for (const auto key : keys) {
+    const auto* p = find_param(params, key);
+    if (!p || !p->defined) {
+      continue;
+    }
+    const auto value = trim_copy(p->value);
+    if (!value.empty()) {
+      return parse_real_vector3(value, context);
+    }
+  }
+  return std::nullopt;
+}
+
 int parse_positive_int(std::string_view raw, std::string_view context)
 {
   const auto s = trim_copy(std::string(raw));
@@ -228,11 +270,14 @@ ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
   if (value == "coupled" || value == "coupledfield" || value == "unknown" || value == "navierstokes") {
     return ls::LevelSetVelocitySource::CoupledField;
   }
-  if (value == "prescribed" || value == "prescribeddata" || value == "data" || value == "constant") {
+  if (value == "prescribed" || value == "prescribeddata" || value == "data") {
     return ls::LevelSetVelocitySource::PrescribedData;
   }
+  if (value == "constant" || value == "constantvector") {
+    return ls::LevelSetVelocitySource::ConstantVector;
+  }
   throw std::runtime_error(
-      "[svMultiPhysics::Physics] Velocity_source must be one of 'coupled_field' or 'prescribed_data'.");
+      "[svMultiPhysics::Physics] Velocity_source must be one of 'coupled_field', 'prescribed_data', or 'constant'.");
 }
 
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
@@ -261,12 +306,22 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     options.velocity.source = parse_velocity_source(*value);
     if (options.velocity.source == ls::LevelSetVelocitySource::PrescribedData) {
       options.velocity.auto_register_field = true;
+    } else if (options.velocity.source == ls::LevelSetVelocitySource::ConstantVector) {
+      options.velocity.auto_register_field = false;
     }
   }
   if (const auto value = get_defined_bool(
           params,
           {"Auto_register_velocity_field", "AutoRegisterVelocityField"})) {
     options.velocity.auto_register_field = *value;
+  }
+  if (const auto value = get_defined_vector3(
+          params,
+          {"Constant_velocity", "ConstantVelocity", "Velocity_value", "VelocityValue"},
+          "Constant_velocity")) {
+    options.velocity.source = ls::LevelSetVelocitySource::ConstantVector;
+    options.velocity.auto_register_field = false;
+    options.velocity.constant_value = *value;
   }
 
   if (const auto value = get_defined_bool(params, {"Enable_SUPG", "SUPG", "SUPG_enabled"})) {

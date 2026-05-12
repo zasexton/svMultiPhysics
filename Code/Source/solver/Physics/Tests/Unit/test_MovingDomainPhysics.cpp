@@ -674,6 +674,9 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(defaults.velocity.source, ls::LevelSetVelocitySource::CoupledField);
     EXPECT_FALSE(defaults.velocity.auto_register_field);
     EXPECT_EQ(defaults.velocity.space, nullptr);
+    EXPECT_DOUBLE_EQ(defaults.velocity.constant_value[0], 0.0);
+    EXPECT_DOUBLE_EQ(defaults.velocity.constant_value[1], 0.0);
+    EXPECT_DOUBLE_EQ(defaults.velocity.constant_value[2], 0.0);
     EXPECT_FALSE(defaults.supg.enabled);
     EXPECT_DOUBLE_EQ(defaults.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(defaults.supg.velocity_epsilon, 1.0e-12);
@@ -687,6 +690,7 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     opts.velocity.field_name = "advecting_velocity";
     opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
     opts.velocity.auto_register_field = true;
+    opts.velocity.constant_value = {1.0, -2.0, 0.5};
     opts.supg.enabled = true;
     opts.supg.tau_scale = 0.25;
     opts.supg.velocity_epsilon = 1.0e-8;
@@ -704,6 +708,9 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(opts.velocity.source, ls::LevelSetVelocitySource::PrescribedData);
     EXPECT_TRUE(opts.velocity.auto_register_field);
     EXPECT_EQ(opts.velocity.space, nullptr);
+    EXPECT_DOUBLE_EQ(opts.velocity.constant_value[0], 1.0);
+    EXPECT_DOUBLE_EQ(opts.velocity.constant_value[1], -2.0);
+    EXPECT_DOUBLE_EQ(opts.velocity.constant_value[2], 0.5);
     EXPECT_TRUE(opts.supg.enabled);
     EXPECT_DOUBLE_EQ(opts.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(opts.supg.velocity_epsilon, 1.0e-8);
@@ -826,6 +833,35 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     EXPECT_TRUE(system.hasOperator("level_set"));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+#endif
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesConstantVelocity)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = makeRegistryQuadMesh();
+
+    EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] = ParameterValue{true, "phi"};
+    input.equation_params["Velocity_field_name"] = ParameterValue{true, "unused_velocity"};
+    input.equation_params["Velocity_source"] = ParameterValue{true, "constant"};
+    input.equation_params["Constant_velocity"] = ParameterValue{true, "1.5 -0.25 0.0"};
+
+    FE::systems::FESystem system(mesh);
+    auto module = EquationModuleRegistry::instance().create("level_set", input, system);
+
+    ASSERT_TRUE(module);
+    EXPECT_NE(system.findFieldByName("phi"), FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.findFieldByName("unused_velocity"), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.hasOperator("level_set"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Constant));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::DiscreteField));
 #endif
 }
 

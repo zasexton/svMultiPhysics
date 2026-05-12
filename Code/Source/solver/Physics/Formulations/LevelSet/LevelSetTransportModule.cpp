@@ -52,6 +52,7 @@ namespace {
     case LevelSetVelocitySource::CoupledField:
         return FE::systems::FieldSourceKind::Unknown;
     case LevelSetVelocitySource::PrescribedData:
+    case LevelSetVelocitySource::ConstantVector:
         return FE::systems::FieldSourceKind::PrescribedData;
     }
     return FE::systems::FieldSourceKind::Unknown;
@@ -174,7 +175,8 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field name must be non-empty");
     }
-    if (options_.velocity.field_name.empty()) {
+    if (options_.velocity.source != LevelSetVelocitySource::ConstantVector &&
+        options_.velocity.field_name.empty()) {
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: velocity field name must be non-empty");
     }
@@ -199,32 +201,50 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
             "LevelSetTransportModule::registerOn: level-set field must be an unknown for transport residual assembly");
     }
 
-    const auto velocity_id = ensureVelocityField(system, options_.velocity);
-    validateVelocityField(system, velocity_id, options_.velocity.field_name);
-    if (options_.velocity.source == LevelSetVelocitySource::CoupledField &&
-        !system.fieldParticipatesInUnknownVector(velocity_id)) {
-        throw std::invalid_argument(
-            "LevelSetTransportModule::registerOn: coupled velocity source must be an unknown field");
-    }
-    if (options_.velocity.source == LevelSetVelocitySource::PrescribedData &&
-        system.fieldParticipatesInUnknownVector(velocity_id)) {
-        throw std::invalid_argument(
-            "LevelSetTransportModule::registerOn: prescribed velocity source must not be an unknown field");
+    FE::FieldId velocity_id = FE::INVALID_FIELD_ID;
+    if (options_.velocity.source != LevelSetVelocitySource::ConstantVector) {
+        velocity_id = ensureVelocityField(system, options_.velocity);
+        validateVelocityField(system, velocity_id, options_.velocity.field_name);
+        if (options_.velocity.source == LevelSetVelocitySource::CoupledField &&
+            !system.fieldParticipatesInUnknownVector(velocity_id)) {
+            throw std::invalid_argument(
+                "LevelSetTransportModule::registerOn: coupled velocity source must be an unknown field");
+        }
+        if (options_.velocity.source == LevelSetVelocitySource::PrescribedData &&
+            system.fieldParticipatesInUnknownVector(velocity_id)) {
+            throw std::invalid_argument(
+                "LevelSetTransportModule::registerOn: prescribed velocity source must not be an unknown field");
+        }
     }
 
     const auto& phi_rec = system.fieldRecord(phi_id);
-    const auto& velocity_rec = system.fieldRecord(velocity_id);
 
     using namespace FE::forms;
     const auto phi = StateField(phi_id, *phi_rec.space, options_.level_set.field_name);
     const auto eta = TestField(phi_id, *phi_rec.space, "eta");
-    const auto velocity =
-        options_.velocity.source == LevelSetVelocitySource::CoupledField
-            ? StateField(velocity_id, *velocity_rec.space, options_.velocity.field_name)
-            : FormExpr::discreteField(
-                  velocity_id,
-                  *velocity_rec.space,
-                  options_.velocity.field_name);
+    FormExpr velocity;
+    if (options_.velocity.source == LevelSetVelocitySource::ConstantVector) {
+        const int dim = phi_rec.space ? phi_rec.space->topological_dimension() : 0;
+        if (dim < 1 || dim > 3) {
+            throw std::invalid_argument(
+                "LevelSetTransportModule::registerOn: constant velocity requires level-set space dimension in [1, 3]");
+        }
+        std::vector<FormExpr> components;
+        components.reserve(static_cast<std::size_t>(dim));
+        for (int d = 0; d < dim; ++d) {
+            components.push_back(
+                FormExpr::constant(options_.velocity.constant_value[static_cast<std::size_t>(d)]));
+        }
+        velocity = FormExpr::asVector(std::move(components));
+    } else {
+        const auto& velocity_rec = system.fieldRecord(velocity_id);
+        velocity = options_.velocity.source == LevelSetVelocitySource::CoupledField
+                       ? StateField(velocity_id, *velocity_rec.space, options_.velocity.field_name)
+                       : FormExpr::discreteField(
+                             velocity_id,
+                             *velocity_rec.space,
+                             options_.velocity.field_name);
+    }
 
     const auto strong_residual = dt(phi) + dot(velocity, grad(phi));
     auto residual = (strong_residual * eta).dx();

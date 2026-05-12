@@ -365,7 +365,7 @@ Checklist:
 - [x] Add SUPG stabilization.
 - [x] Add inflow/outflow treatment for level-set boundaries.
 - [x] Add field registration and input translation.
-- [ ] Add unit tests for constant velocity translation.
+- [x] Add unit tests for constant velocity translation.
 - [ ] Add Jacobian tests for coupled and prescribed velocity modes.
 
 Done when:
