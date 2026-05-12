@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 
 using namespace svmp::FE;
@@ -20,6 +21,15 @@ CutInterfaceDomainRequest make_request(int marker)
     request.tolerance = 1.0e-12;
     request.quadrature_policy_key = 31;
     return request;
+}
+
+void expect_normal_near(const std::array<Real, 3>& actual,
+                        const std::array<Real, 3>& expected,
+                        Real tolerance)
+{
+    EXPECT_NEAR(actual[0], expected[0], tolerance);
+    EXPECT_NEAR(actual[1], expected[1], tolerance);
+    EXPECT_NEAR(actual[2], expected[2], tolerance);
 }
 
 } // namespace
@@ -177,6 +187,52 @@ TEST(LevelSetInterfaceBuilder, CutsLinearTetrahedronWithQuadrilateralPatch)
     EXPECT_NEAR(rules.front().points.front().normal[1], inv_sqrt2, 1.0e-14);
     EXPECT_NEAR(rules.front().points.front().normal[2], 0.0, 1.0e-14);
     EXPECT_NEAR(rules.front().points.front().weight, std::sqrt(0.125), 1.0e-14);
+}
+
+TEST(LevelSetInterfaceBuilder, GeneratedNormalsMatchLinearLevelSetGradients)
+{
+    const auto request = make_request(/*marker=*/24);
+    const LevelSetCellCutInput quad_input{
+        .parent_cell = 16,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-1.25, -0.25, 1.75, 0.75}};
+    const auto quad_result = cutLinearLevelSetCell2D(request, quad_input);
+    ASSERT_TRUE(quad_result.hasActiveFragments());
+    ASSERT_EQ(quad_result.fragments.size(), 1u);
+    const Real inv_sqrt5 = Real{1.0} / std::sqrt(Real{5.0});
+    const std::array<Real, 3> expected_quad_normal{
+        {inv_sqrt5, Real{2.0} * inv_sqrt5, Real{0.0}}};
+    expect_normal_near(quad_result.fragments.front().normal,
+                       expected_quad_normal,
+                       1.0e-14);
+    expect_normal_near(quad_result.fragments.front().quadrature_points.front().normal,
+                       expected_quad_normal,
+                       1.0e-14);
+
+    const LevelSetCellCutInput tetra_input{
+        .parent_cell = 17,
+        .element_type = ElementType::Tetra4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}},
+                             {{0.0, 0.0, 1.0}}},
+        .level_set_values = {-1.25, -0.25, 0.75, 1.75}};
+    const auto tetra_result = cutLinearLevelSetCell3D(request, tetra_input);
+    ASSERT_TRUE(tetra_result.hasActiveFragments());
+    ASSERT_EQ(tetra_result.fragments.size(), 1u);
+    const Real inv_sqrt14 = Real{1.0} / std::sqrt(Real{14.0});
+    const std::array<Real, 3> expected_tetra_normal{
+        {inv_sqrt14, Real{2.0} * inv_sqrt14, Real{3.0} * inv_sqrt14}};
+    expect_normal_near(tetra_result.fragments.front().normal,
+                       expected_tetra_normal,
+                       1.0e-14);
+    expect_normal_near(tetra_result.fragments.front().quadrature_points.front().normal,
+                       expected_tetra_normal,
+                       1.0e-14);
 }
 
 TEST(LevelSetInterfaceBuilder, RejectsFullZeroCellAsDegenerate)

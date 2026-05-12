@@ -185,7 +185,7 @@ Checklist:
 - [x] Add integration tests for constants.
 - [x] Add integration tests for linear fields.
 - [x] Add integration tests for field gradients.
-- [ ] Add tests comparing generated normals with level-set-gradient normals.
+- [x] Add tests comparing generated normals with level-set-gradient normals.
 
 Done when:
 
