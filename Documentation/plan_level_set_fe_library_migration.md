@@ -469,18 +469,31 @@ Goal: prove the migration preserved behavior and improved dependency boundaries.
 
 Checklist:
 
-- [ ] Build `svfe`.
-- [ ] Build `svphysics`.
-- [ ] Run FE geometry tests.
-- [ ] Run FE systems tests that cover form installation.
-- [ ] Run new FE level-set tests.
-- [ ] Run Physics unit tests.
-- [ ] Run application input translation tests.
-- [ ] Run open-vessel example coverage tests.
-- [ ] Run moving free-surface verification tests.
-- [ ] Run dependency guard checks:
-  - [ ] `rg '#include "Physics/' Code/Source/solver/FE/LevelSet`
-  - [ ] `rg 'Physics/Formulations/LevelSet' Code Documentation tests`
+- [x] Build `svfe`.
+- [x] Build `svphysics`.
+- [x] Run FE geometry tests.
+- [x] Run FE systems tests that cover form installation.
+- [x] Run new FE level-set tests.
+- [x] Run Physics unit tests.
+- [x] Run application input translation tests.
+- [x] Run open-vessel example coverage tests.
+- [x] Run moving free-surface verification tests.
+- [x] Run dependency guard checks:
+  - [x] `rg '#include "Physics/' Code/Source/solver/FE/LevelSet`
+  - [x] `rg 'Physics/Formulations/LevelSet' Code tests`
+
+Verification notes:
+
+- `svfe` and FE geometry, level-set, and targeted generated-interface systems
+  tests pass. The full FE systems target still has unrelated Stokes coupling
+  and pressure-gauge failures.
+- `svphysics` builds, and targeted level-set registration and free-surface
+  Physics tests pass. The full serial Physics test target still has an
+  unrelated mesh-motion coefficient naming failure.
+- Application translation and open-vessel compatibility tests pass with
+  `test_application --gtest_filter='EquationTranslator*.*:OpenVesselExamples.*'`.
+- Moving free-surface coverage passes through the targeted fitted, unfitted,
+  cut-cell, generated-interface, and coupled ALE free-surface Physics tests.
 
 Done when:
 
@@ -489,16 +502,16 @@ Done when:
 
 ## Completion Criteria
 
-- [ ] `Code/Source/solver/FE/LevelSet` contains all reusable level-set
+- [x] `Code/Source/solver/FE/LevelSet` contains all reusable level-set
   implementation.
-- [ ] `Code/Source/solver/Physics/Formulations/LevelSet` contains no reusable
+- [x] `Code/Source/solver/Physics/Formulations/LevelSet` contains no reusable
   algorithms.
-- [ ] `FE::level_set` exposes generated interface, transport, volume,
+- [x] `FE::level_set` exposes generated interface, transport, volume,
   reinitialization, diagnostics, and restart APIs.
-- [ ] Physics level-set registration is an adapter over `FE::level_set`.
-- [ ] Navier-Stokes free-surface code uses FE level-set services directly.
-- [ ] Existing level-set input files remain compatible.
-- [ ] FE tests own reusable level-set behavior.
-- [ ] Physics tests own only input and registration behavior.
-- [ ] No `Physics/...` include appears under `FE/LevelSet`.
-- [ ] No stale `Physics/Formulations/LevelSet` include remains after removal.
+- [x] Physics level-set registration is an adapter over `FE::level_set`.
+- [x] Navier-Stokes free-surface code uses FE level-set services directly.
+- [x] Existing level-set input files remain compatible.
+- [x] FE tests own reusable level-set behavior.
+- [x] Physics tests own only input and registration behavior.
+- [x] No `Physics/...` include appears under `FE/LevelSet`.
+- [x] No stale `Physics/Formulations/LevelSet` include remains after removal.
