@@ -11,6 +11,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
+#include "Physics/Formulations/LevelSet/LevelSetReinitialization.h"
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -1038,6 +1039,89 @@ TEST(MovingDomainPhysics, LevelSetTransportReinitializationOptionsValidatePositi
         ls::LevelSetTransportModule module(scalar_space, opts);
         EXPECT_NO_THROW(module.registerOn(system));
     }
+}
+
+TEST(MovingDomainPhysics, LevelSetSignedDistanceProjectionRepairsNodalField)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> distorted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = mesh->getNodeCoordinates(vertex);
+        distorted[static_cast<std::size_t>(dofs.front())] =
+            FE::Real(4.0) * (x[0] - FE::Real(0.25));
+    }
+
+    ls::LevelSetReinitializationOptions opts{};
+    opts.signed_distance_tolerance = 1.0e-12;
+
+    std::vector<FE::Real> repaired;
+    const auto result = ls::repairLevelSetSignedDistanceByProjection(
+        *mesh,
+        field_dofs,
+        opts,
+        distorted,
+        repaired);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.method, ls::LevelSetReinitializationMethod::Projection);
+    EXPECT_EQ(result.repaired_dofs, 4u);
+    EXPECT_EQ(result.interface_fragments, 1u);
+    EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_GT(result.max_abs_update, 0.0);
+
+    const auto vertex_value = [&](FE::GlobalIndex vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        return repaired[static_cast<std::size_t>(dofs.front())];
+    };
+    EXPECT_NEAR(vertex_value(0), -0.25, 1.0e-12);
+    EXPECT_NEAR(vertex_value(1), 0.75, 1.0e-12);
+    EXPECT_NEAR(vertex_value(2), -std::sqrt(0.125), 1.0e-12);
+    EXPECT_NEAR(vertex_value(3), -std::sqrt(0.125), 1.0e-12);
+}
+
+TEST(MovingDomainPhysics, LevelSetSignedDistanceProjectionReportsMissingInterface)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    std::vector<FE::Real> input(static_cast<std::size_t>(field_dofs.getNumDofs()), 1.0);
+    std::vector<FE::Real> repaired;
+    const auto result = ls::repairLevelSetSignedDistanceByProjection(
+        *mesh,
+        field_dofs,
+        ls::LevelSetReinitializationOptions{},
+        input,
+        repaired);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.interface_fragments, 0u);
+    EXPECT_EQ(repaired, input);
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportInflowBoundaryAddsUpwindPenalty)
