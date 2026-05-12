@@ -2322,6 +2322,45 @@ TEST(CutIntegrationInfrastructure, BuildsMarkerBackedCutAdjacentFacetSetHandle)
     EXPECT_NE(handle.stable_id, 0u);
 }
 
+TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfaceDomain)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/10,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/1);
+    request.interface_marker = 54;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput cut_input{
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    auto cell_two_input = cut_input;
+    cell_two_input.parent_cell = 2;
+    appendLinearLevelSetCellCut2D(domain, cell_two_input);
+    auto cell_six_input = cut_input;
+    cell_six_input.parent_cell = 6;
+    appendLinearLevelSetCellCut2D(domain, cell_six_input);
+
+    const auto adjacent_facets = identifyCutAdjacentInteriorFacets(
+        domain.cutCells(),
+        {CutInteriorFacetAdjacency{.facet = 20, .first_cell = 1, .second_cell = 2},
+         CutInteriorFacetAdjacency{.facet = 21, .first_cell = 2, .second_cell = 6},
+         CutInteriorFacetAdjacency{.facet = 22, .first_cell = 3, .second_cell = 4},
+         CutInteriorFacetAdjacency{.facet = 23, .first_cell = 6, .second_cell = 8}});
+    const auto handle =
+        makeCutAdjacentFacetSetHandle(/*marker=*/131, "generated-cut-facets", adjacent_facets);
+
+    ASSERT_TRUE(handle.valid());
+    ASSERT_EQ(handle.facets.size(), 3u);
+    EXPECT_EQ(handle.facets[0], 20);
+    EXPECT_EQ(handle.facets[1], 21);
+    EXPECT_EQ(handle.facets[2], 23);
+}
+
 TEST(CutIntegrationInfrastructure, IntegratesScalarOperatorsOverCutAdjacentFacetSet)
 {
     CutIntegrationContext context;
