@@ -11710,6 +11710,18 @@ void StandardAssembler::prepareContextFace(
             facet_area += scratch_integration_weights_[static_cast<std::size_t>(q)];
         }
 
+        Real cell_volume = 0.0;
+        const auto cell_quad_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+        const auto& cell_quad_points = cell_quad_rule->points();
+        const auto& cell_quad_weights = cell_quad_rule->weights();
+        for (std::size_t q = 0; q < cell_quad_points.size(); ++q) {
+            const math::Vector<Real, 3> xi{
+                cell_quad_points[q][0],
+                cell_quad_points[q][1],
+                cell_quad_points[q][2]};
+            cell_volume += cell_quad_weights[q] * std::abs(mapping->jacobian_determinant(xi));
+        }
+
         Real h = 0.0;
         for (std::size_t a = 0; a < n_nodes; ++a) {
             for (std::size_t b = a + 1; b < n_nodes; ++b) {
@@ -11721,7 +11733,7 @@ void StandardAssembler::prepareContextFace(
             }
         }
 
-        context.setEntityMeasures(h, /*cell_volume=*/0.0, facet_area);
+        context.setEntityMeasures(h, cell_volume, facet_area);
     }
 
     cached_quad_rule_ = std::move(quad_rule);

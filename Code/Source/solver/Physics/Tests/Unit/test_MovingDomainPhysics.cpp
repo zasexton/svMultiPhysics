@@ -772,6 +772,78 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfacePenaltyKinematicsRequires
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
 }
 
+TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoundaryResidual)
+{
+    constexpr int marker = 36;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.mesh_velocity_field_name = "mesh_velocity";
+    opts.nitsche_gamma = 16.0;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::FacetArea));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const FE::FieldId mesh_velocity_id = system.findFieldByName("mesh_velocity");
+    ASSERT_NE(mesh_velocity_id, FE::INVALID_FIELD_ID);
+    system.setPrescribedFieldCoefficients(
+        mesh_velocity_id,
+        constantVectorTetraCoefficients(0.25, 0.5, 0.75));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+
+    FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    EXPECT_GT(residualNorm(system, state, "equations"), 0.0);
+}
+
+TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsRejectsNonPositiveGamma)
+{
+    constexpr int marker = 38;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.nitsche_gamma = 0.0;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
 TEST(MovingDomainPhysics, FittedFreeSurfaceKinematicPolicyOptionsAreExplicit)
 {
     using FreeSurfaceBoundary = ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;

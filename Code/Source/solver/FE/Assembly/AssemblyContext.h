@@ -1857,7 +1857,9 @@ public:
     /**
      * @brief Set entity measures (cell diameter, cell volume, facet area)
      *
-     * For cell contexts, set facet_area=0. For face contexts, set cell_volume=0.
+     * For cell contexts, set facet_area=0. For face contexts, set facet_area to
+     * the active face measure and cell_volume to the adjacent cell measure when
+     * available.
      */
     void setEntityMeasures(Real cell_diameter, Real cell_volume, Real facet_area);
 

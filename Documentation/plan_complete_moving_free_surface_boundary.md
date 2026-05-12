@@ -276,7 +276,7 @@ Checklist:
   - [x] smoothing-only tangential motion
   - [x] prescribed tangential motion
 - [x] Add penalty enforcement for `(u - w_mesh) . n = 0`.
-- [ ] Add Nitsche enforcement if needed after penalty path is verified.
+- [x] Add Nitsche enforcement if needed after penalty path is verified.
 - [ ] Add fitted-surface curvature from current mesh geometry.
 - [ ] Add current-normal/current-measure support to fitted dynamic stress path.
 - [ ] Add input translation for fitted ALE free-surface kinematic options.

@@ -718,8 +718,8 @@ AssemblyContext::Vector3D AssemblyContext::normal(LocalIndex q) const
 
 Real AssemblyContext::cellVolume() const
 {
-    if (type_ != ContextType::Cell) {
-        throw std::logic_error("AssemblyContext::cellVolume: not available for face contexts");
+    if (type_ != ContextType::Cell && !(cell_volume_ > Real(0))) {
+        throw std::logic_error("AssemblyContext::cellVolume: not available for this face context");
     }
     return cell_volume_;
 }

@@ -131,11 +131,16 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
 }
 
 void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
+                              FE::forms::FormExpr& continuity_form,
                               const FreeSurfaceBoundary& bc,
                               const FE::systems::FESystem& system,
                               const FE::forms::FormExpr& u,
+                              const FE::forms::FormExpr& p,
                               const FE::forms::FormExpr& v,
+                              const FE::forms::FormExpr& q,
                               const FE::forms::FormExpr& mesh_velocity,
+                              const FE::forms::FormExpr& mu,
+                              const IncompressibleNavierStokesVMSOptions& options,
                               bool ale_enabled)
 {
     using namespace FE::forms;
@@ -180,9 +185,54 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             penalty * normal_mismatch * normalTrace(v, n), bc);
         return;
     }
-    case FreeSurfaceKinematicEnforcement::Nitsche:
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics are not implemented yet");
+    case FreeSurfaceKinematicEnforcement::Nitsche: {
+        if (isUnfittedLevelSet(bc)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics are only supported on fitted ALE boundaries");
+        }
+        if (bc.normal_kinematic_policy !=
+            FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: unsupported fitted free-surface normal kinematic policy");
+        }
+        if (!(options.nitsche_gamma > 0.0)) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics require nitsche_gamma > 0");
+        }
+
+        const auto normal_mismatch = normalTrace(u - mesh_velocity, n);
+        const auto v_normal = normalTrace(v, n);
+        const auto stress_u = FormExpr::constant(2.0) * mu * sym(grad(u));
+        const auto stress_v = FormExpr::constant(2.0) * mu * sym(grad(v));
+        const auto normal_stress_u = normalTrace(stress_u * n, n);
+        const auto normal_stress_v = normalTrace(stress_v * n, n);
+        const auto penalty = bc::buildTraceNitschePenalty(
+            mu / hNormal(),
+            u,
+            bc::TraceNitscheOptions{
+                .gamma = options.nitsche_gamma,
+                .variant = options.nitsche_symmetric
+                    ? bc::NitscheVariant::Symmetric
+                    : bc::NitscheVariant::Unsymmetric,
+                .scale_with_p = options.nitsche_scale_with_p});
+
+        momentum_form = momentum_form + integrateOnFreeSurface(
+            (p - normal_stress_u) * v_normal +
+            penalty * normal_mismatch * v_normal,
+            bc);
+        if (options.nitsche_symmetric) {
+            momentum_form = momentum_form - integrateOnFreeSurface(
+                normal_stress_v * normal_mismatch, bc);
+            continuity_form = continuity_form + integrateOnFreeSurface(
+                q * normal_mismatch, bc);
+        } else {
+            momentum_form = momentum_form + integrateOnFreeSurface(
+                normal_stress_v * normal_mismatch, bc);
+            continuity_form = continuity_form - integrateOnFreeSurface(
+                q * normal_mismatch, bc);
+        }
+        return;
+    }
     }
 
     throw std::invalid_argument(
@@ -394,7 +444,18 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(bc.boundary_marker));
         }
         applyFreeSurfaceBoundary(
-            momentum_form, bc, system, u, v, mesh_velocity, options_.enable_ale);
+            momentum_form,
+            continuity_form,
+            bc,
+            system,
+            u,
+            p,
+            v,
+            q,
+            mesh_velocity,
+            mu,
+            options_,
+            options_.enable_ale);
     }
 
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim); });
