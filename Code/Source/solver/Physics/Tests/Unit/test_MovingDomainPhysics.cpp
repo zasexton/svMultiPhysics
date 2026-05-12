@@ -1148,9 +1148,39 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionNormalConstraintAcceptsVelocityTarge
     EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
 }
 
-TEST(MovingDomainPhysics, HarmonicMeshMotionWeakBoundaryTermsOnSameMarkerAreAdditive)
+TEST(MovingDomainPhysics, HarmonicMeshMotionTangentialPoliciesSelectBoundaryTerms)
 {
     constexpr int marker = 11;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto d_space = makeVelocitySpace(mesh);
+
+    const auto registers_boundary_integral =
+        [&](mm::TangentialMeshPolicy policy) {
+            mm::HarmonicMeshMotionOptions opts;
+            opts.operator_tag = "mesh_motion";
+            mm::TangentialPolicyBC tangent;
+            tangent.boundary_marker = marker;
+            tangent.policy = policy;
+            tangent.quantity = mm::TangentialConstraintQuantity::Velocity;
+            tangent.target = {1.0, 0.5, 0.0};
+            tangent.velocity_time_scale = 0.25;
+            tangent.penalty = 8.0;
+            opts.tangential_policy.push_back(tangent);
+
+            FE::systems::FESystem system(mesh);
+            mm::HarmonicMeshMotionModule module(d_space, opts);
+            module.registerOn(system);
+            return formulationRecordsContain(system, FormExprType::BoundaryIntegral);
+        };
+
+    EXPECT_FALSE(registers_boundary_integral(mm::TangentialMeshPolicy::Free));
+    EXPECT_FALSE(registers_boundary_integral(mm::TangentialMeshPolicy::SmoothingOnly));
+    EXPECT_TRUE(registers_boundary_integral(mm::TangentialMeshPolicy::Prescribed));
+}
+
+TEST(MovingDomainPhysics, HarmonicMeshMotionWeakBoundaryTermsOnSameMarkerAreAdditive)
+{
+    constexpr int marker = 12;
     auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
     auto d_space = makeVelocitySpace(mesh);
 
@@ -1200,7 +1230,7 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionWeakBoundaryTermsOnSameMarkerAreAddi
 
 TEST(MovingDomainPhysics, HarmonicMeshMotionRobinTargetMatchesEquivalentNaturalLoad)
 {
-    constexpr int marker = 12;
+    constexpr int marker = 13;
     auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
     auto d_space = makeVelocitySpace(mesh);
 
@@ -1253,7 +1283,7 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionRobinTargetMatchesEquivalentNaturalL
 
 TEST(MovingDomainPhysics, HarmonicMeshMotionDirichletConflictsWithWeakBoundaryTerms)
 {
-    constexpr int marker = 13;
+    constexpr int marker = 14;
     auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
     auto d_space = makeVelocitySpace(mesh);
 
@@ -1293,7 +1323,7 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionDirichletConflictsWithWeakBoundaryTe
 
 TEST(MovingDomainPhysics, MeshMotionDirichletComponentCoefficientNamesUseComponentStyle)
 {
-    constexpr int marker = 14;
+    constexpr int marker = 15;
     const std::array<mm::HarmonicMeshMotionOptions::ScalarValue, 3> values = {
         mm::HarmonicMeshMotionOptions::ScalarValue{FE::forms::ScalarCoefficient(
             [](FE::Real, FE::Real, FE::Real) { return 1.0; })},

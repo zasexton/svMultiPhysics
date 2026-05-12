@@ -126,6 +126,17 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
         return Factories::toNormalConstraintBC(
             bc, "HarmonicMeshMotionModule::registerOn normal_constraint");
     });
+    for (const auto& bc : options_.tangential_policy) {
+        switch (bc.policy) {
+        case TangentialMeshPolicy::Free:
+        case TangentialMeshPolicy::SmoothingOnly:
+            break;
+        case TangentialMeshPolicy::Prescribed:
+            bc_manager.add(Factories::toTangentialConstraintBC(
+                bc, dim, "HarmonicMeshMotionModule::registerOn tangential_policy"));
+            break;
+        }
+    }
     bc_manager.install(options_.dirichlet, [&](const auto& bc) {
         return Factories::toVectorEssentialBC(
             bc, dim, "HarmonicMeshMotionModule::registerOn dirichlet", "d_mesh");

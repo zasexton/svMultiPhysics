@@ -58,6 +58,7 @@ struct HarmonicMeshMotionOptions {
     std::vector<NaturalBC> natural{};
     std::vector<RobinBC> robin{};
     std::vector<NormalConstraintBC> normal_constraint{};
+    std::vector<TangentialPolicyBC> tangential_policy{};
 };
 
 class HarmonicMeshMotionModule final : public PhysicsModule {

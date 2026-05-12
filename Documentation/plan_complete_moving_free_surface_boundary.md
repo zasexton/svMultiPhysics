@@ -271,10 +271,10 @@ Checklist:
 
 - [x] Define fitted free-surface kinematic policy options.
 - [x] Add mesh-motion BC that accepts normal velocity or displacement constraints from fluid state.
-- [ ] Add tangential mesh policy:
-  - [ ] free tangential mesh motion
-  - [ ] smoothing-only tangential motion
-  - [ ] prescribed tangential motion
+- [x] Add tangential mesh policy:
+  - [x] free tangential mesh motion
+  - [x] smoothing-only tangential motion
+  - [x] prescribed tangential motion
 - [ ] Add penalty enforcement for `(u - w_mesh) . n = 0`.
 - [ ] Add Nitsche enforcement if needed after penalty path is verified.
 - [ ] Add fitted-surface curvature from current mesh geometry.

@@ -15,6 +15,7 @@
 
 #include "FE/Forms/BoundaryConditions.h"
 
+#include <array>
 #include <cstdint>
 
 namespace svmp {
@@ -27,12 +28,34 @@ enum class NormalConstraintQuantity : std::uint8_t {
     Velocity
 };
 
+enum class TangentialMeshPolicy : std::uint8_t {
+    Free,
+    SmoothingOnly,
+    Prescribed
+};
+
+enum class TangentialConstraintQuantity : std::uint8_t {
+    Displacement,
+    Velocity
+};
+
 struct NormalConstraintBC {
     using ScalarValue = FE::forms::bc::ScalarValue;
 
     int boundary_marker{-1};
     NormalConstraintQuantity quantity{NormalConstraintQuantity::Displacement};
     ScalarValue target{0.0};
+    ScalarValue penalty{1.0};
+    ScalarValue velocity_time_scale{1.0};
+};
+
+struct TangentialPolicyBC {
+    using ScalarValue = FE::forms::bc::ScalarValue;
+
+    int boundary_marker{-1};
+    TangentialMeshPolicy policy{TangentialMeshPolicy::SmoothingOnly};
+    TangentialConstraintQuantity quantity{TangentialConstraintQuantity::Displacement};
+    std::array<ScalarValue, 3> target{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
     ScalarValue penalty{1.0};
     ScalarValue velocity_time_scale{1.0};
 };

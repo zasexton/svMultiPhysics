@@ -57,6 +57,7 @@ struct PseudoElasticMeshMotionOptions {
     std::vector<NaturalBC> natural{};
     std::vector<RobinBC> robin{};
     std::vector<NormalConstraintBC> normal_constraint{};
+    std::vector<TangentialPolicyBC> tangential_policy{};
 };
 
 class PseudoElasticMeshMotionModule final : public PhysicsModule {
