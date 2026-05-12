@@ -91,6 +91,40 @@ TEST(LevelSetInterfaceDomain, AccumulatesFragmentsAndExportsCutQuadrature)
     EXPECT_DOUBLE_EQ(rules.front().points.front().normal[1], 1.0);
 }
 
+TEST(LevelSetInterfaceDomain, IdentifiesUniqueCutCellsFromActiveFragments)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/5,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/1);
+    request.interface_marker = 12;
+
+    LevelSetInterfaceDomain domain(request);
+
+    CutInterfaceFragment fragment;
+    fragment.parent_cell = 8;
+    fragment.measure = 0.5;
+    domain.addFragment(fragment);
+
+    CutInterfaceFragment duplicate = fragment;
+    duplicate.parent_cell = 8;
+    domain.addFragment(duplicate);
+
+    CutInterfaceFragment earlier_cell = fragment;
+    earlier_cell.parent_cell = 3;
+    domain.addFragment(earlier_cell);
+
+    CutInterfaceFragment inactive;
+    inactive.parent_cell = 2;
+    inactive.degeneracy = CutInterfaceDegeneracy::NoCut;
+    domain.addFragment(inactive);
+
+    const auto cells = domain.cutCells();
+    ASSERT_EQ(cells.size(), 2u);
+    EXPECT_EQ(cells[0], 3);
+    EXPECT_EQ(cells[1], 8);
+}
+
 TEST(LevelSetInterfaceDomain, StableIdsTrackMarkerCellFragmentAndRevision)
 {
     const auto base = cutInterfaceStableId(/*interface_marker=*/3,

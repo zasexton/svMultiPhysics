@@ -16,6 +16,7 @@
 #include "Core/Types.h"
 #include "Geometry/CutQuadrature.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <stdexcept>
@@ -364,6 +365,18 @@ public:
 
     [[nodiscard]] const std::vector<CutInterfaceFragment>& fragments() const noexcept {
         return fragments_;
+    }
+
+    [[nodiscard]] std::vector<MeshIndex> cutCells() const {
+        std::vector<MeshIndex> cells;
+        for (const auto& fragment : fragments_) {
+            if (fragment.active()) {
+                cells.push_back(fragment.parent_cell);
+            }
+        }
+        std::sort(cells.begin(), cells.end());
+        cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+        return cells;
     }
 
     void clearFragments() {
