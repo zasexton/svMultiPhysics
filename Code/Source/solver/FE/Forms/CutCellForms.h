@@ -167,6 +167,31 @@ struct CutCellFormTerminals {
     return terminals;
 }
 
+[[nodiscard]] inline FormExpr cutAdjacentFacetJump(const FormExpr& expr)
+{
+    return jump(expr);
+}
+
+[[nodiscard]] inline FormExpr cutAdjacentFacetAverage(const FormExpr& expr)
+{
+    return avg(expr);
+}
+
+[[nodiscard]] inline FormExpr cutAdjacentFacetGradientJump(const FormExpr& expr)
+{
+    return jump(grad(expr));
+}
+
+[[nodiscard]] inline FormExpr cutAdjacentFacetNormalGradientJump(const FormExpr& expr)
+{
+    return inner(cutAdjacentFacetGradientJump(expr), FormExpr::normal().minus());
+}
+
+[[nodiscard]] inline FormExpr cutAdjacentFacetIntegral(const FormExpr& integrand)
+{
+    return integrand.dS();
+}
+
 } // namespace forms
 } // namespace FE
 } // namespace svmp

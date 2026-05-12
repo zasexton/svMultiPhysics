@@ -586,6 +586,29 @@ struct ManualResidualTangent {
 
 } // namespace
 
+TEST(CutCellForms, CutAdjacentFacetVocabularyReusesInteriorFaceOperators)
+{
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+
+    EXPECT_EQ(cutAdjacentFacetJump(u).toString(), jump(u).toString());
+    EXPECT_EQ(cutAdjacentFacetAverage(grad(u)).toString(), avg(grad(u)).toString());
+    EXPECT_EQ(cutAdjacentFacetGradientJump(u).toString(), jump(grad(u)).toString());
+
+    const auto residual = cutAdjacentFacetIntegral(
+        cutAdjacentFacetJump(u) * cutAdjacentFacetJump(v) +
+        cutAdjacentFacetNormalGradientJump(u) * cutAdjacentFacetJump(v));
+
+    FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+    EXPECT_TRUE(ir.hasInteriorFaceTerms());
+    ASSERT_EQ(ir.terms().size(), 2u);
+    for (const auto& term : ir.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::InteriorFace);
+    }
+}
+
 TEST(CutCellForms, BuildsParameterBackedCutMetadataTerminals)
 {
     CutCellParameterSlots slots;
