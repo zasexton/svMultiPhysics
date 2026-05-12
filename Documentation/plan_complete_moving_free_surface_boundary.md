@@ -393,7 +393,7 @@ Concrete changes:
 
 Checklist:
 
-- [ ] Define reinitialization option struct.
+- [x] Define reinitialization option struct.
 - [ ] Implement signed-distance repair path.
 - [ ] Add volume calculation from level-set/cut-cell data.
 - [ ] Implement global level-set shift correction.

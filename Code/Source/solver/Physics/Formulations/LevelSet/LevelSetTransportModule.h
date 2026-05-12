@@ -56,6 +56,22 @@ struct LevelSetSUPGOptions {
     FE::Real velocity_epsilon{1.0e-12};
 };
 
+enum class LevelSetReinitializationMethod {
+    HamiltonJacobiPDE,
+    FastMarching,
+    Projection
+};
+
+struct LevelSetReinitializationOptions {
+    bool enabled{false};
+    LevelSetReinitializationMethod method{LevelSetReinitializationMethod::HamiltonJacobiPDE};
+    int cadence_steps{1};
+    int max_iterations{10};
+    FE::Real pseudo_time_step_scale{0.3};
+    FE::Real interface_band_width{3.0};
+    FE::Real signed_distance_tolerance{1.0e-6};
+};
+
 struct LevelSetInflowBoundary {
     int boundary_marker{-1};
     ScalarValue value{0.0};
@@ -75,6 +91,7 @@ struct LevelSetTransportOptions {
     LevelSetFieldOptions level_set{};
     LevelSetVelocityOptions velocity{};
     LevelSetSUPGOptions supg{};
+    LevelSetReinitializationOptions reinitialization{};
     LevelSetBoundaryOptions boundaries{};
     core::PhysicsJITPolicy jit_policy{};
 };

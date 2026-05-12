@@ -680,6 +680,14 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_FALSE(defaults.supg.enabled);
     EXPECT_DOUBLE_EQ(defaults.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(defaults.supg.velocity_epsilon, 1.0e-12);
+    EXPECT_FALSE(defaults.reinitialization.enabled);
+    EXPECT_EQ(defaults.reinitialization.method,
+              ls::LevelSetReinitializationMethod::HamiltonJacobiPDE);
+    EXPECT_EQ(defaults.reinitialization.cadence_steps, 1);
+    EXPECT_EQ(defaults.reinitialization.max_iterations, 10);
+    EXPECT_DOUBLE_EQ(defaults.reinitialization.pseudo_time_step_scale, 0.3);
+    EXPECT_DOUBLE_EQ(defaults.reinitialization.interface_band_width, 3.0);
+    EXPECT_DOUBLE_EQ(defaults.reinitialization.signed_distance_tolerance, 1.0e-6);
     EXPECT_TRUE(defaults.boundaries.inflow.empty());
     EXPECT_TRUE(defaults.boundaries.outflow.empty());
 
@@ -694,6 +702,13 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     opts.supg.enabled = true;
     opts.supg.tau_scale = 0.25;
     opts.supg.velocity_epsilon = 1.0e-8;
+    opts.reinitialization.enabled = true;
+    opts.reinitialization.method = ls::LevelSetReinitializationMethod::Projection;
+    opts.reinitialization.cadence_steps = 4;
+    opts.reinitialization.max_iterations = 12;
+    opts.reinitialization.pseudo_time_step_scale = 0.20;
+    opts.reinitialization.interface_band_width = 2.5;
+    opts.reinitialization.signed_distance_tolerance = 1.0e-5;
     opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{
         .boundary_marker = 11,
         .value = FE::Real{2.5},
@@ -714,6 +729,13 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_TRUE(opts.supg.enabled);
     EXPECT_DOUBLE_EQ(opts.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(opts.supg.velocity_epsilon, 1.0e-8);
+    EXPECT_TRUE(opts.reinitialization.enabled);
+    EXPECT_EQ(opts.reinitialization.method, ls::LevelSetReinitializationMethod::Projection);
+    EXPECT_EQ(opts.reinitialization.cadence_steps, 4);
+    EXPECT_EQ(opts.reinitialization.max_iterations, 12);
+    EXPECT_DOUBLE_EQ(opts.reinitialization.pseudo_time_step_scale, 0.20);
+    EXPECT_DOUBLE_EQ(opts.reinitialization.interface_band_width, 2.5);
+    EXPECT_DOUBLE_EQ(opts.reinitialization.signed_distance_tolerance, 1.0e-5);
     ASSERT_EQ(opts.boundaries.inflow.size(), 1u);
     EXPECT_EQ(opts.boundaries.inflow.front().boundary_marker, 11);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(opts.boundaries.inflow.front().value), 2.5);
@@ -955,6 +977,66 @@ TEST(MovingDomainPhysics, LevelSetTransportSUPGOptionsValidatePositiveScales)
         FE::systems::FESystem system(mesh);
         ls::LevelSetTransportModule module(scalar_space, opts);
         EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportReinitializationOptionsValidatePositiveControls)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.reinitialization.enabled = true;
+
+    opts.reinitialization.cadence_steps = 0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.reinitialization.cadence_steps = 1;
+    opts.reinitialization.max_iterations = 0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.reinitialization.max_iterations = 10;
+    opts.reinitialization.pseudo_time_step_scale = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.reinitialization.pseudo_time_step_scale = 0.3;
+    opts.reinitialization.interface_band_width = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.reinitialization.interface_band_width = 3.0;
+    opts.reinitialization.signed_distance_tolerance = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.reinitialization.signed_distance_tolerance = 1.0e-6;
+    {
+        FE::systems::FESystem system(mesh);
+        system.addField(FE::systems::FieldSpec{
+            .name = "Velocity",
+            .space = makeVelocitySpace(mesh),
+            .components = 3,
+        });
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_NO_THROW(module.registerOn(system));
     }
 }
 

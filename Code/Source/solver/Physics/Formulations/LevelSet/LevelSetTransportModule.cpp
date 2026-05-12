@@ -159,6 +159,33 @@ void validateBoundaryOptions(const LevelSetBoundaryOptions& boundaries)
     }
 }
 
+void validateReinitializationOptions(const LevelSetReinitializationOptions& options)
+{
+    if (!options.enabled) {
+        return;
+    }
+    if (options.cadence_steps <= 0) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: reinitialization cadence_steps must be positive");
+    }
+    if (options.max_iterations <= 0) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: reinitialization max_iterations must be positive");
+    }
+    if (!(options.pseudo_time_step_scale > 0.0)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: reinitialization pseudo_time_step_scale must be positive");
+    }
+    if (!(options.interface_band_width > 0.0)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: reinitialization interface_band_width must be positive");
+    }
+    if (!(options.signed_distance_tolerance > 0.0)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: reinitialization signed_distance_tolerance must be positive");
+    }
+}
+
 } // namespace
 
 LevelSetTransportModule::LevelSetTransportModule(
@@ -192,6 +219,7 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: SUPG velocity_epsilon must be positive");
     }
+    validateReinitializationOptions(options_.reinitialization);
     validateBoundaryOptions(options_.boundaries);
 
     const auto phi_id = ensureLevelSetField(system, options_.level_set, level_set_space_);
