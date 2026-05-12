@@ -794,6 +794,26 @@ set(FE_GEOMETRY_SOURCES
     Geometry/GeometryQuadrature.cpp
 )
 
+set(FE_LEVELSET_HEADERS
+    LevelSet/LevelSet.h
+    LevelSet/LevelSetOptions.h
+    LevelSet/LevelSetTransport.h
+    LevelSet/LevelSetInterfaceLifecycle.h
+    LevelSet/LevelSetVolume.h
+    LevelSet/LevelSetReinitialization.h
+    LevelSet/LevelSetDiagnostics.h
+    LevelSet/LevelSetRestart.h
+)
+
+set(FE_LEVELSET_SOURCES
+    LevelSet/LevelSetTransport.cpp
+    LevelSet/LevelSetInterfaceLifecycle.cpp
+    LevelSet/LevelSetVolume.cpp
+    LevelSet/LevelSetReinitialization.cpp
+    LevelSet/LevelSetDiagnostics.cpp
+    LevelSet/LevelSetRestart.cpp
+)
+
 # Auxiliary sources (auxiliary state subsystem, extracted from Systems)
 set(FE_AUXILIARY_HEADERS
     Auxiliary/AuxiliaryState.h
@@ -1310,6 +1330,7 @@ set(FE_ALL_HEADERS
     ${FE_CONSTRAINTS_HEADERS}
     ${FE_ANALYSIS_HEADERS}
     ${FE_GEOMETRY_HEADERS}
+    ${FE_LEVELSET_HEADERS}
     ${FE_MOVINGMESH_HEADERS}
     ${FE_SPARSITY_HEADERS}
 )
@@ -1324,6 +1345,7 @@ set(FE_ALL_SOURCES
     ${FE_CONSTRAINTS_SOURCES}
     ${FE_ANALYSIS_SOURCES}
     ${FE_GEOMETRY_SOURCES}
+    ${FE_LEVELSET_SOURCES}
     ${FE_MOVINGMESH_SOURCES}
     ${FE_SPARSITY_SOURCES}
 )
@@ -2086,6 +2108,22 @@ if(FE_BUILD_TESTS)
             ${GTEST_LIBRARIES}
     )
     add_test(NAME FE_Geometry_Tests COMMAND test_fe_geometry)
+
+    # Level-set module tests
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
+        set(FE_LEVELSET_TEST_SOURCES
+            Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
+            Tests/Unit/LevelSet/test_main.cpp
+        )
+        add_executable(test_fe_levelset ${FE_LEVELSET_TEST_SOURCES})
+        _svmp_fe_target_enable_warnings(test_fe_levelset)
+        target_link_libraries(test_fe_levelset
+            PRIVATE
+                svfe
+                ${GTEST_LIBRARIES}
+        )
+        add_test(NAME FE_LevelSet_Tests COMMAND test_fe_levelset)
+    endif()
 
     # Elements module tests
     set(FE_ELEMENTS_TEST_SOURCES
