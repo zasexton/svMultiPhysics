@@ -272,15 +272,15 @@ Target files:
 
 Checklist:
 
-- [ ] Move `LevelSetFieldRestartRecord` into `FE::level_set`.
-- [ ] Move `LevelSetGeneratedInterfaceRestartRecord` into `FE::level_set`.
-- [ ] Move `LevelSetRestartSnapshot` into `FE::level_set`.
-- [ ] Move `captureLevelSetFieldRestartRecord` into FE.
-- [ ] Move `captureLevelSetGeneratedInterfaceRestartRecord` into FE.
-- [ ] Move `optionsFromLevelSetGeneratedInterfaceRestartRecord` into FE.
-- [ ] Move `levelSetGeneratedInterfaceRestartRecordMatches` into FE.
-- [ ] Ensure restart records use FE-level option enums.
-- [ ] Move restart tests from Physics to FE where practical.
+- [x] Move `LevelSetFieldRestartRecord` into `FE::level_set`.
+- [x] Move `LevelSetGeneratedInterfaceRestartRecord` into `FE::level_set`.
+- [x] Move `LevelSetRestartSnapshot` into `FE::level_set`.
+- [x] Move `captureLevelSetFieldRestartRecord` into FE.
+- [x] Move `captureLevelSetGeneratedInterfaceRestartRecord` into FE.
+- [x] Move `optionsFromLevelSetGeneratedInterfaceRestartRecord` into FE.
+- [x] Move `levelSetGeneratedInterfaceRestartRecordMatches` into FE.
+- [x] Ensure restart records use FE-level option enums.
+- [x] Move restart tests from Physics to FE where practical.
 
 Done when:
 
