@@ -1,16 +1,22 @@
 #include "LevelSet/LevelSetTransport.h"
 
 #include "Assembly/Assembler.h"
+#include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
+#include "Systems/SystemSetup.h"
+#include "Systems/TimeIntegrator.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -175,6 +181,124 @@ void addScalarAndVelocityFields(FE::systems::FESystem& system,
         .components = velocity_space->value_dimension(),
         .source_kind = velocity_source,
     });
+}
+
+[[nodiscard]] FE::systems::SetupInputs makeSingleTetraSetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 4;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 4};
+    topo.cell2vertex_data = {0, 1, 2, 3};
+    topo.vertex_gids = {0, 1, 2, 3};
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+std::vector<FE::Real> constantVectorTetraCoefficients(FE::Real x,
+                                                      FE::Real y,
+                                                      FE::Real z)
+{
+    std::vector<FE::Real> coefficients(12u, 0.0);
+    for (std::size_t node = 0; node < 4u; ++node) {
+        coefficients[node] = x;
+        coefficients[4u + node] = y;
+        coefficients[8u + node] = z;
+    }
+    return coefficients;
+}
+
+void setFieldComponentValue(std::vector<FE::Real>& solution,
+                            const FE::systems::FESystem& system,
+                            FE::FieldId field,
+                            FE::GlobalIndex vertex,
+                            int component,
+                            FE::Real value)
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto offset = system.fieldDofOffset(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error("setFieldComponentValue: field has no entity DOF map");
+    }
+    const auto dofs = entity_map->getVertexDofs(vertex);
+    if (component < 0 || static_cast<std::size_t>(component) >= dofs.size()) {
+        throw std::runtime_error("setFieldComponentValue: component is out of range");
+    }
+    const auto index = static_cast<std::size_t>(
+        dofs[static_cast<std::size_t>(component)] + offset);
+    if (index >= solution.size()) {
+        throw std::runtime_error("setFieldComponentValue: DOF index is out of range");
+    }
+    solution[index] = value;
+}
+
+void expectOperatorJacobianMatchesCentralFD(FE::systems::FESystem& system,
+                                            const FE::systems::SystemStateView& base_state,
+                                            FE::Real eps,
+                                            FE::Real rtol,
+                                            FE::Real atol)
+{
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_GT(n, 0);
+
+    const std::vector<FE::Real> base_u(base_state.u.begin(), base_state.u.end());
+    ASSERT_EQ(static_cast<FE::GlobalIndex>(base_u.size()), n);
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    {
+        FE::systems::AssemblyRequest request;
+        request.op = "level_set";
+        request.want_matrix = true;
+        const auto result = system.assemble(request, base_state, &jacobian, nullptr);
+        ASSERT_TRUE(result.success) << result.error_message;
+    }
+
+    for (FE::GlobalIndex column = 0; column < n; ++column) {
+        std::vector<FE::Real> u_plus = base_u;
+        std::vector<FE::Real> u_minus = base_u;
+        u_plus[static_cast<std::size_t>(column)] += eps;
+        u_minus[static_cast<std::size_t>(column)] -= eps;
+
+        FE::systems::SystemStateView state_plus = base_state;
+        FE::systems::SystemStateView state_minus = base_state;
+        state_plus.u = std::span<const FE::Real>(u_plus);
+        state_minus.u = std::span<const FE::Real>(u_minus);
+
+        FE::assembly::DenseVectorView r_plus(n);
+        FE::assembly::DenseVectorView r_minus(n);
+        {
+            FE::systems::AssemblyRequest request;
+            request.op = "level_set";
+            request.want_vector = true;
+            const auto result = system.assemble(request, state_plus, nullptr, &r_plus);
+            ASSERT_TRUE(result.success) << result.error_message;
+        }
+        {
+            FE::systems::AssemblyRequest request;
+            request.op = "level_set";
+            request.want_vector = true;
+            const auto result = system.assemble(request, state_minus, nullptr, &r_minus);
+            ASSERT_TRUE(result.success) << result.error_message;
+        }
+
+        for (FE::GlobalIndex row = 0; row < n; ++row) {
+            const FE::Real finite_difference = (r_plus[row] - r_minus[row]) / (2.0 * eps);
+            const FE::Real assembled = jacobian(row, column);
+            const FE::Real tolerance =
+                atol + rtol * std::max<FE::Real>(1.0, std::abs(finite_difference));
+            EXPECT_NEAR(assembled, finite_difference, tolerance)
+                << "Mismatch at (row=" << row << ", column=" << column << ")";
+        }
+    }
 }
 
 } // namespace
@@ -507,4 +631,152 @@ TEST(LevelSetTransport, ValidatesBoundaryOptions)
             phi_space,
             options),
         std::invalid_argument);
+}
+
+TEST(LevelSetTransport, PrescribedVelocityJacobianMatchesFiniteDifference)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    addScalarAndVelocityFields(system, phi_space, velocity_space);
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    system.setPrescribedFieldCoefficients(
+        velocity,
+        constantVectorTetraCoefficients(0.70, -0.15, 0.25));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(
+            solution,
+            system,
+            phi,
+            vertex,
+            0,
+            FE::Real(0.20) + FE::Real(0.035) * x);
+        setFieldComponentValue(
+            previous_solution,
+            system,
+            phi,
+            vertex,
+            0,
+            FE::Real(0.18) + FE::Real(0.025) * x);
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        1.0e-6,
+        2.0e-5,
+        1.0e-8);
+}
+
+TEST(LevelSetTransport, CoupledVelocityJacobianMatchesFiniteDifference)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    addScalarAndVelocityFields(
+        system,
+        phi_space,
+        velocity_space,
+        FE::systems::FieldSourceKind::Unknown);
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(
+            solution,
+            system,
+            phi,
+            vertex,
+            0,
+            FE::Real(0.15) + FE::Real(0.04) * x);
+        setFieldComponentValue(
+            previous_solution,
+            system,
+            phi,
+            vertex,
+            0,
+            FE::Real(0.12) + FE::Real(0.03) * x);
+        setFieldComponentValue(
+            solution,
+            system,
+            velocity,
+            vertex,
+            0,
+            FE::Real(0.40) + FE::Real(0.015) * x);
+        setFieldComponentValue(
+            solution,
+            system,
+            velocity,
+            vertex,
+            1,
+            FE::Real(-0.20) + FE::Real(0.010) * x);
+        setFieldComponentValue(
+            solution,
+            system,
+            velocity,
+            vertex,
+            2,
+            FE::Real(0.30) - FE::Real(0.005) * x);
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        1.0e-6,
+        5.0e-5,
+        1.0e-8);
 }

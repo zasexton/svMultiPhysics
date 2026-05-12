@@ -252,3 +252,51 @@ TEST(LevelSetInterfaceLifecycle, PreservesMarkerIdentity)
     EXPECT_EQ(initial.domain.marker(), updated.domain.marker());
     EXPECT_EQ(updated.value_revision, initial.value_revision + 1u);
 }
+
+TEST(LevelSetInterfaceLifecycle, UpdatesGeometryAfterFieldChange)
+{
+    constexpr int interface_marker = 74;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto make_solution = [&](FE::Real offset) {
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto x = mesh->getNodeCoordinates(vertex);
+            setFieldComponentValue(solution, system, phi, vertex,
+                                   x[0] + x[1] + x[2] - offset);
+        }
+        return solution;
+    };
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(system, options, make_solution(0.5));
+    const auto updated = lifecycle.build(system, options, make_solution(0.75));
+
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    ASSERT_TRUE(updated.success) << updated.diagnostic;
+    EXPECT_EQ(initial.value_revision, 1u);
+    EXPECT_EQ(updated.value_revision, 2u);
+    EXPECT_GT(initial.summary.measure, 0.0);
+    EXPECT_GT(updated.summary.measure, 0.0);
+    EXPECT_NE(initial.summary.measure, updated.summary.measure);
+    ASSERT_EQ(initial.domain.fragments().size(), 1u);
+    ASSERT_EQ(updated.domain.fragments().size(), 1u);
+    EXPECT_NE(initial.domain.fragments().front().stable_id,
+              updated.domain.fragments().front().stable_id);
+}

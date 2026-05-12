@@ -359,7 +359,7 @@ Checklist:
   - [x] `LevelSetInflow`
   - [x] `LevelSetOutflow`
 - [x] Keep Physics tests for input translation and module registration.
-- [ ] Move pure algorithm and FE-system behavior tests out of Physics.
+- [x] Move pure algorithm and FE-system behavior tests out of Physics.
 
 Done when:
 
