@@ -20,15 +20,18 @@
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
 #include "FE/Dofs/DofMap.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FormsInstaller.h"
 #include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
@@ -117,20 +120,25 @@ public:
     explicit SingleTetraBoundaryMeshAccess(int marker)
         : marker_(marker)
     {
-        nodes_ = {
+        reference_nodes_ = {
             {0.0, 0.0, 0.0},
             {1.0, 0.0, 0.0},
             {0.0, 1.0, 0.0},
             {0.0, 0.0, 1.0}
         };
+        current_nodes_ = reference_nodes_;
         cell_ = {0, 1, 2, 3};
     }
 
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
     [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override { return 4; }
+    [[nodiscard]] FE::GlobalIndex numOwnedVertices() const override { return 4; }
     [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 1; }
     [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
     [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return geometry_revision_; }
     [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override { return true; }
 
     [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex /*cell_id*/) const override
@@ -145,15 +153,34 @@ public:
 
     [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(FE::GlobalIndex node_id) const override
     {
-        return nodes_.at(static_cast<std::size_t>(node_id));
+        return current_nodes_.at(static_cast<std::size_t>(node_id));
     }
 
     void getCellCoordinates(FE::GlobalIndex /*cell_id*/,
                             std::vector<std::array<FE::Real, 3>>& coords) const override
     {
-        coords.resize(cell_.size());
-        for (std::size_t i = 0; i < cell_.size(); ++i) {
-            coords[i] = nodes_.at(static_cast<std::size_t>(cell_[i]));
+        coords = current_nodes_;
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(FE::assembly::CoordinateFrame frame) const override
+    {
+        return frame == FE::assembly::CoordinateFrame::Active ||
+               frame == FE::assembly::CoordinateFrame::Reference ||
+               frame == FE::assembly::CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(FE::GlobalIndex /*cell_id*/,
+                            FE::assembly::CoordinateFrame frame,
+                            std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        switch (frame) {
+            case FE::assembly::CoordinateFrame::Active:
+            case FE::assembly::CoordinateFrame::Current:
+                coords = current_nodes_;
+                return;
+            case FE::assembly::CoordinateFrame::Reference:
+                coords = reference_nodes_;
+                return;
         }
     }
 
@@ -196,9 +223,24 @@ public:
     {
     }
 
+    [[nodiscard]] const std::array<FE::Real, 3>& referenceNodeCoordinates(
+        FE::GlobalIndex node_id) const
+    {
+        return reference_nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void setCurrentNodeCoordinates(FE::GlobalIndex node_id,
+                                   std::array<FE::Real, 3> coords)
+    {
+        current_nodes_.at(static_cast<std::size_t>(node_id)) = coords;
+        ++geometry_revision_;
+    }
+
 private:
     int marker_{-1};
-    std::vector<std::array<FE::Real, 3>> nodes_{};
+    std::uint64_t geometry_revision_{1};
+    std::vector<std::array<FE::Real, 3>> reference_nodes_{};
+    std::vector<std::array<FE::Real, 3>> current_nodes_{};
     std::array<FE::GlobalIndex, 4> cell_{};
 };
 
@@ -405,6 +447,150 @@ FE::assembly::DenseVectorView assembleMovingDomainScalarResidual(
     residual.zero();
     (void)assembler.assembleVector(mesh, scalar_space, kernel, residual);
     return residual;
+}
+
+FE::Real fieldComponentValue(const std::vector<FE::Real>& solution,
+                             const FE::systems::FESystem& system,
+                             FE::FieldId field,
+                             FE::GlobalIndex vertex,
+                             int component)
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto offset = system.fieldDofOffset(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error("fieldComponentValue: field has no entity DOF map");
+    }
+    const auto dofs = entity_map->getVertexDofs(vertex);
+    if (component < 0 || static_cast<std::size_t>(component) >= dofs.size()) {
+        throw std::runtime_error("fieldComponentValue: component is out of range");
+    }
+    const auto index = static_cast<std::size_t>(
+        dofs[static_cast<std::size_t>(component)] + offset);
+    if (index >= solution.size()) {
+        throw std::runtime_error("fieldComponentValue: DOF index is out of range");
+    }
+    return solution[index];
+}
+
+void setFieldComponentValue(std::vector<FE::Real>& solution,
+                            const FE::systems::FESystem& system,
+                            FE::FieldId field,
+                            FE::GlobalIndex vertex,
+                            int component,
+                            FE::Real value)
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto offset = system.fieldDofOffset(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error("setFieldComponentValue: field has no entity DOF map");
+    }
+    const auto dofs = entity_map->getVertexDofs(vertex);
+    if (component < 0 || static_cast<std::size_t>(component) >= dofs.size()) {
+        throw std::runtime_error("setFieldComponentValue: component is out of range");
+    }
+    const auto index = static_cast<std::size_t>(
+        dofs[static_cast<std::size_t>(component)] + offset);
+    if (index >= solution.size()) {
+        throw std::runtime_error("setFieldComponentValue: DOF index is out of range");
+    }
+    solution[index] = value;
+}
+
+void updateBoundaryMeshCurrentCoordinates(SingleTetraBoundaryMeshAccess& mesh,
+                                          const FE::systems::FESystem& system,
+                                          FE::FieldId displacement,
+                                          const std::vector<FE::Real>& solution)
+{
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        auto coords = mesh.referenceNodeCoordinates(vertex);
+        for (int component = 0; component < 3; ++component) {
+            coords[static_cast<std::size_t>(component)] +=
+                fieldComponentValue(solution, system, displacement, vertex, component);
+        }
+        mesh.setCurrentNodeCoordinates(vertex, coords);
+    }
+}
+
+std::vector<FE::Real> assembleOperatorResidualWithCurrentMesh(
+    FE::systems::FESystem& system,
+    SingleTetraBoundaryMeshAccess& mesh,
+    FE::FieldId displacement,
+    const std::vector<FE::Real>& solution,
+    std::string_view op)
+{
+    updateBoundaryMeshCurrentCoordinates(mesh, system, displacement, solution);
+
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(solution);
+
+    const auto n = system.dofHandler().getNumDofs();
+    FE::assembly::DenseVectorView residual(n);
+    residual.zero();
+
+    FE::systems::AssemblyRequest req;
+    req.op = std::string(op);
+    req.want_vector = true;
+    const auto result = system.assemble(req, state, nullptr, &residual);
+    EXPECT_TRUE(result.success) << result.error_message;
+
+    std::vector<FE::Real> out(static_cast<std::size_t>(n), 0.0);
+    for (FE::GlobalIndex i = 0; i < n; ++i) {
+        out[static_cast<std::size_t>(i)] = residual.getVectorEntry(i);
+    }
+    return out;
+}
+
+void expectOperatorJacobianMatchesMovingBoundaryFD(
+    FE::systems::FESystem& system,
+    SingleTetraBoundaryMeshAccess& mesh,
+    FE::FieldId displacement,
+    const std::vector<FE::Real>& base_solution,
+    std::string_view op,
+    FE::Real eps,
+    FE::Real rtol,
+    FE::Real atol)
+{
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_EQ(static_cast<FE::GlobalIndex>(base_solution.size()), n);
+
+    updateBoundaryMeshCurrentCoordinates(mesh, system, displacement, base_solution);
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(base_solution);
+
+    FE::assembly::DenseMatrixView jacobian(n);
+    jacobian.zero();
+    {
+        FE::systems::AssemblyRequest req;
+        req.op = std::string(op);
+        req.want_matrix = true;
+        const auto result = system.assemble(req, state, &jacobian, nullptr);
+        ASSERT_TRUE(result.success) << result.error_message;
+    }
+
+    for (FE::GlobalIndex col = 0; col < n; ++col) {
+        std::vector<FE::Real> plus = base_solution;
+        std::vector<FE::Real> minus = base_solution;
+        plus[static_cast<std::size_t>(col)] += eps;
+        minus[static_cast<std::size_t>(col)] -= eps;
+
+        const auto r_plus =
+            assembleOperatorResidualWithCurrentMesh(system, mesh, displacement, plus, op);
+        const auto r_minus =
+            assembleOperatorResidualWithCurrentMesh(system, mesh, displacement, minus, op);
+
+        for (FE::GlobalIndex row = 0; row < n; ++row) {
+            const FE::Real fd =
+                (r_plus[static_cast<std::size_t>(row)] -
+                 r_minus[static_cast<std::size_t>(row)]) /
+                (FE::Real(2.0) * eps);
+            const FE::Real actual = jacobian.getMatrixEntry(row, col);
+            const FE::Real tol = atol + rtol * std::max<FE::Real>(1.0, std::abs(fd));
+            SCOPED_TRACE(::testing::Message() << "row=" << row << ", col=" << col);
+            EXPECT_NEAR(actual, fd, tol);
+        }
+    }
 }
 
 } // namespace
@@ -648,6 +834,94 @@ TEST(MovingDomainPhysics, NavierStokesCoupledALEAcceptsADReferenceTangentPathOve
     EXPECT_NE(system.findFieldByName("mesh_velocity"), FE::INVALID_FIELD_ID);
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
     EXPECT_EQ(system.dofHandler().getNumDofs(), 28);
+}
+
+TEST(MovingDomainPhysics, MixedFluidMeshBoundaryGeometryResidualMatchesFiniteDifference)
+{
+    using namespace FE::forms;
+
+    constexpr int marker = 37;
+    constexpr std::string_view op = "free_surface_boundary";
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto velocity_space = makeVelocitySpace(mesh);
+    auto displacement_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto velocity = system.addField(FE::systems::FieldSpec{
+        .name = "fluid_velocity",
+        .space = velocity_space,
+        .components = 3,
+    });
+    const auto displacement = system.addField(FE::systems::FieldSpec{
+        .name = "mesh_displacement",
+        .space = displacement_space,
+        .components = 3,
+    });
+    system.bindMeshMotionField(FE::systems::MeshMotionFieldRole::Displacement,
+                               displacement);
+    auto geometry_policy = system.geometricNonlinearityPolicy();
+    geometry_policy.enabled = true;
+    geometry_policy.update_current_coordinates_on_trial = true;
+    system.setGeometricNonlinearityPolicy(geometry_policy);
+    system.addOperator(std::string(op));
+
+    const auto u = FormExpr::stateField(velocity, *velocity_space, "u");
+    const auto v = FormExpr::testFunction(velocity, *velocity_space, "v");
+    const auto normal = currentNormal();
+    const auto residual =
+        (dot(u, normal) * dot(v, normal) * currentMeasure()).ds(marker);
+
+    FE::systems::FormInstallOptions install;
+    install.compiler_options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::MeshMotionUnknowns;
+    install.compiler_options.geometry_sensitivity.mesh_motion_field = displacement;
+    install.compiler_options.geometry_tangent_path = GeometryTangentPath::SymbolicRequired;
+    install.extra_trial_fields.push_back(displacement);
+    const auto kernels =
+        FE::systems::installFormulation(system, std::string(op), {velocity}, residual, install);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+    ASSERT_EQ(kernels.jacobian_blocks.size(), 1u);
+    ASSERT_EQ(kernels.jacobian_blocks.front().size(), 2u);
+    EXPECT_NE(kernels.jacobian_blocks.front()[0], nullptr);
+    EXPECT_NE(kernels.jacobian_blocks.front()[1], nullptr);
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    ASSERT_EQ(system.dofHandler().getNumDofs(), 24);
+
+    bool has_fluid_mesh_block = false;
+    for (const auto& record : system.formulationRecords()) {
+        for (const auto& [test_field, trial_field] : record.block_couplings) {
+            if (test_field == velocity && trial_field == displacement) {
+                has_fluid_mesh_block = true;
+            }
+        }
+    }
+    EXPECT_TRUE(has_fluid_mesh_block);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(solution, system, velocity, vertex, 0,
+                               FE::Real(0.35) + FE::Real(0.03) * x);
+        setFieldComponentValue(solution, system, velocity, vertex, 1,
+                               FE::Real(-0.20) + FE::Real(0.02) * x);
+        setFieldComponentValue(solution, system, velocity, vertex, 2,
+                               FE::Real(0.45) - FE::Real(0.015) * x);
+
+        setFieldComponentValue(solution, system, displacement, vertex, 0,
+                               FE::Real(0.04) + FE::Real(0.006) * x);
+        setFieldComponentValue(solution, system, displacement, vertex, 1,
+                               FE::Real(-0.025) + FE::Real(0.004) * x);
+        setFieldComponentValue(solution, system, displacement, vertex, 2,
+                               FE::Real(0.03) - FE::Real(0.005) * x);
+    }
+
+    expectOperatorJacobianMatchesMovingBoundaryFD(
+        system, *mesh, displacement, solution, op,
+        /*eps=*/1.0e-7, /*rtol=*/2.0e-5, /*atol=*/2.0e-7);
 }
 
 TEST(MovingDomainPhysics, NavierStokesWeakVelocityNitschePenaltyUsesTraceHeight)

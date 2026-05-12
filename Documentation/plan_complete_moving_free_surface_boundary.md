@@ -109,7 +109,7 @@ Checklist:
 - [x] Confirm derivatives of `currentMeasure()` with respect to mesh displacement are available.
 - [x] Add finite-difference tests for moving-boundary normal tangents.
 - [x] Add finite-difference tests for moving-boundary measure tangents.
-- [ ] Add mixed fluid/mesh residual tests that include boundary geometry terms.
+- [x] Add mixed fluid/mesh residual tests that include boundary geometry terms.
 - [ ] Add diagnostics for invalid or missing moving-geometry tangent paths.
 
 Done when:
