@@ -495,6 +495,53 @@ std::vector<FE::Real> residualVector(FE::systems::FESystem& system,
     return out;
 }
 
+FE::Real vectorNorm(std::span<const FE::Real> values)
+{
+    FE::Real norm2 = 0.0;
+    for (const auto value : values) {
+        norm2 += value * value;
+    }
+    return std::sqrt(norm2);
+}
+
+std::vector<FE::Real> fittedFreeSurfaceResidualVector(FE::Real external_pressure,
+                                                      FE::Real surface_tension,
+                                                      FE::Real curvature)
+{
+    constexpr int marker = 32;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .external_pressure = external_pressure,
+        .surface_tension = surface_tension,
+        .curvature = curvature,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setup({}, makeSingleTetraSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        0.0);
+    const std::vector<FE::Real> previous_solution = solution;
+    FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+    return residualVector(system, state, "equations");
+}
+
 FE::assembly::DenseVectorView assembleMovingDomainScalarResidual(
     const FE::assembly::IMeshAccess& mesh,
     const FE::spaces::FunctionSpace& scalar_space,
@@ -2250,6 +2297,43 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+}
+
+TEST(MovingDomainPhysics, ExternalPressureFreeSurfaceTractionHasExpectedSign)
+{
+    const auto external_pressure =
+        fittedFreeSurfaceResidualVector(/*external_pressure=*/1.0,
+                                        /*surface_tension=*/0.0,
+                                        /*curvature=*/0.0);
+    const auto surface_tension =
+        fittedFreeSurfaceResidualVector(/*external_pressure=*/0.0,
+                                        /*surface_tension=*/1.0,
+                                        /*curvature=*/1.0);
+
+    ASSERT_EQ(external_pressure.size(), surface_tension.size());
+    EXPECT_GT(vectorNorm(external_pressure), 1.0e-14);
+    for (std::size_t i = 0; i < external_pressure.size(); ++i) {
+        EXPECT_NEAR(external_pressure[i], -surface_tension[i], 1.0e-12);
+    }
+}
+
+TEST(MovingDomainPhysics, SurfaceTensionPressureJumpMatchesLaplaceLaw)
+{
+    constexpr FE::Real gamma = 0.072;
+
+    constexpr FE::Real circle_radius = 0.45;
+    const auto circle_jump =
+        fittedFreeSurfaceResidualVector(/*external_pressure=*/gamma / circle_radius,
+                                        /*surface_tension=*/gamma,
+                                        /*curvature=*/1.0 / circle_radius);
+    EXPECT_LT(vectorNorm(circle_jump), 1.0e-12);
+
+    constexpr FE::Real sphere_radius = 0.60;
+    const auto sphere_jump =
+        fittedFreeSurfaceResidualVector(/*external_pressure=*/2.0 * gamma / sphere_radius,
+                                        /*surface_tension=*/gamma,
+                                        /*curvature=*/2.0 / sphere_radius);
+    EXPECT_LT(vectorNorm(sphere_jump), 1.0e-12);
 }
 
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry)

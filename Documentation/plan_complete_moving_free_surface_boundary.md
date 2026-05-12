@@ -489,9 +489,9 @@ Checklist:
 
 - [ ] Static flat water surface with gravity remains at rest.
 - [ ] Hydrostatic pressure field matches analytic pressure.
-- [ ] External-pressure free-surface traction has the expected sign.
-- [ ] Surface-tension pressure jump matches Laplace law for a circular interface.
-- [ ] Surface-tension pressure jump matches Laplace law for a spherical interface.
+- [x] External-pressure free-surface traction has the expected sign.
+- [x] Surface-tension pressure jump matches Laplace law for a circular interface.
+- [x] Surface-tension pressure jump matches Laplace law for a spherical interface.
 - [ ] Fitted ALE surface moves with prescribed normal velocity.
 - [ ] Fitted ALE fluid plus mesh Jacobian matches finite differences.
 - [ ] Level-set transport preserves a translating plane.
