@@ -151,14 +151,14 @@ Target files:
 
 Checklist:
 
-- [ ] Move `LevelSetGeneratedInterfaceOptions` into `FE::level_set`.
-- [ ] Move `LevelSetGeneratedInterfaceResult` into `FE::level_set`.
-- [ ] Move `LevelSetGeneratedInterfaceLifecycle` into `FE::level_set`.
-- [ ] Keep dependence on `FE::interfaces::LevelSetInterfaceDomain`.
-- [ ] Keep generated marker assignment in FE.
-- [ ] Ensure scalar field resolution is based only on `FE::systems::FESystem`.
-- [ ] Preserve mesh geometry, topology, ownership, and value revision metadata.
-- [ ] Move generated-interface lifecycle unit tests from Physics to FE where
+- [x] Move `LevelSetGeneratedInterfaceOptions` into `FE::level_set`.
+- [x] Move `LevelSetGeneratedInterfaceResult` into `FE::level_set`.
+- [x] Move `LevelSetGeneratedInterfaceLifecycle` into `FE::level_set`.
+- [x] Keep dependence on `FE::interfaces::LevelSetInterfaceDomain`.
+- [x] Keep generated marker assignment in FE.
+- [x] Ensure scalar field resolution is based only on `FE::systems::FESystem`.
+- [x] Preserve mesh geometry, topology, ownership, and value revision metadata.
+- [x] Move generated-interface lifecycle unit tests from Physics to FE where
   practical.
 
 Done when:
