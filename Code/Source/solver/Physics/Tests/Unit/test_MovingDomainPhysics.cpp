@@ -638,15 +638,24 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(defaults.level_set.field_name, "level_set");
     EXPECT_EQ(defaults.level_set.source, ls::LevelSetFieldSource::Unknown);
     EXPECT_TRUE(defaults.level_set.auto_register_field);
+    EXPECT_EQ(defaults.velocity.field_name, "Velocity");
+    EXPECT_EQ(defaults.velocity.source, ls::LevelSetVelocitySource::CoupledField);
+    EXPECT_FALSE(defaults.velocity.auto_register_field);
 
     ls::LevelSetTransportOptions opts{};
     opts.level_set.field_name = "phi";
     opts.level_set.source = ls::LevelSetFieldSource::PrescribedData;
     opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+    opts.velocity.auto_register_field = true;
 
     EXPECT_EQ(opts.level_set.field_name, "phi");
     EXPECT_EQ(opts.level_set.source, ls::LevelSetFieldSource::PrescribedData);
     EXPECT_FALSE(opts.level_set.auto_register_field);
+    EXPECT_EQ(opts.velocity.field_name, "advecting_velocity");
+    EXPECT_EQ(opts.velocity.source, ls::LevelSetVelocitySource::PrescribedData);
+    EXPECT_TRUE(opts.velocity.auto_register_field);
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
@@ -668,6 +677,13 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
     FE::systems::FESystem empty_name_system(mesh);
     ls::LevelSetTransportModule empty_name_module(scalar_space, opts);
     EXPECT_THROW(empty_name_module.registerOn(empty_name_system), std::invalid_argument);
+
+    opts.level_set.field_name = "phi";
+    opts.velocity.field_name.clear();
+    FE::systems::FESystem empty_velocity_name_system(mesh);
+    ls::LevelSetTransportModule empty_velocity_name_module(scalar_space, opts);
+    EXPECT_THROW(empty_velocity_name_module.registerOn(empty_velocity_name_system),
+                 std::invalid_argument);
 }
 
 TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)

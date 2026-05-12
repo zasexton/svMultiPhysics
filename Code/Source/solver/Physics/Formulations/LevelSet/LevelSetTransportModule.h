@@ -24,14 +24,26 @@ enum class LevelSetFieldSource {
     PrescribedData
 };
 
+enum class LevelSetVelocitySource {
+    CoupledField,
+    PrescribedData
+};
+
 struct LevelSetFieldOptions {
     std::string field_name{"level_set"};
     LevelSetFieldSource source{LevelSetFieldSource::Unknown};
     bool auto_register_field{true};
 };
 
+struct LevelSetVelocityOptions {
+    std::string field_name{"Velocity"};
+    LevelSetVelocitySource source{LevelSetVelocitySource::CoupledField};
+    bool auto_register_field{false};
+};
+
 struct LevelSetTransportOptions {
     LevelSetFieldOptions level_set{};
+    LevelSetVelocityOptions velocity{};
     core::PhysicsJITPolicy jit_policy{};
 };
 

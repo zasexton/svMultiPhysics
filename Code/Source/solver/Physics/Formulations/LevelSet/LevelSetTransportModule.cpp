@@ -32,6 +32,10 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field name must be non-empty");
     }
+    if (options_.velocity.field_name.empty()) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: velocity field name must be non-empty");
+    }
     if (options_.level_set.auto_register_field && !level_set_space_) {
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: auto-registering the level-set field requires a function space");
