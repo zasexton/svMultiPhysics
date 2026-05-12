@@ -146,13 +146,13 @@ Checklist:
 - [x] Implement 2D cell cuts for triangles and quads.
 - [x] Implement 3D cell cuts for tetrahedra.
 - [x] Add extension points for hexes, wedges, and pyramids.
-- [ ] Handle edge cases:
-  - [ ] no cut
-  - [ ] full-cell zero field rejection or fallback
-  - [ ] vertex cuts
-  - [ ] edge cuts
-  - [ ] nearly tangent cuts
-  - [ ] very small fragments
+- [x] Handle edge cases:
+  - [x] no cut
+  - [x] full-cell zero field rejection or fallback
+  - [x] vertex cuts
+  - [x] edge cuts
+  - [x] nearly tangent cuts
+  - [x] very small fragments
 - [ ] Assign stable interface marker ids.
 - [ ] Expose generated interfaces through the same integration path used by `.dI(marker)`.
 - [ ] Add serial tests for generated interface fragment counts.

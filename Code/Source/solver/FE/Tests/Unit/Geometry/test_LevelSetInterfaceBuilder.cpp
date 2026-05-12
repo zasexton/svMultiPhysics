@@ -267,3 +267,85 @@ TEST(LevelSetInterfaceBuilder, ProvidesExtensionPointsForHexWedgeAndPyramid)
     EXPECT_FALSE(missing_result.supported);
     EXPECT_FALSE(missing_result.diagnostic.empty());
 }
+
+TEST(LevelSetInterfaceBuilder, ClassifiesCutEdgeCases)
+{
+    auto request = make_request(/*marker=*/30);
+
+    const LevelSetCellCutInput tetra_no_cut{
+        .parent_cell = 1,
+        .element_type = ElementType::Tetra4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}},
+                             {{0.0, 0.0, 1.0}}},
+        .level_set_values = {1.0, 2.0, 3.0, 4.0}};
+    const auto no_cut = cutLinearLevelSetCell3D(request, tetra_no_cut);
+    EXPECT_FALSE(no_cut.hasActiveFragments());
+    EXPECT_EQ(no_cut.degeneracy, CutInterfaceDegeneracy::NoCut);
+
+    LevelSetCellCutInput tetra_full_zero = tetra_no_cut;
+    tetra_full_zero.level_set_values = {0.0, 0.0, 0.0, 0.0};
+    const auto full_zero = cutLinearLevelSetCell3D(request, tetra_full_zero);
+    EXPECT_FALSE(full_zero.hasActiveFragments());
+    EXPECT_EQ(full_zero.degeneracy, CutInterfaceDegeneracy::FullZeroCell);
+    EXPECT_FALSE(full_zero.diagnostic.empty());
+
+    const LevelSetCellCutInput vertex_touch{
+        .parent_cell = 2,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {0.0, 1.0, 1.0}};
+    const auto vertex_touch_result = cutLinearLevelSetCell2D(request, vertex_touch);
+    EXPECT_FALSE(vertex_touch_result.hasActiveFragments());
+    EXPECT_EQ(vertex_touch_result.degeneracy, CutInterfaceDegeneracy::VertexTouch);
+
+    LevelSetCellCutInput vertex_cut = vertex_touch;
+    vertex_cut.level_set_values = {0.0, 1.0, -1.0};
+    const auto vertex_cut_result = cutLinearLevelSetCell2D(request, vertex_cut);
+    ASSERT_TRUE(vertex_cut_result.hasActiveFragments());
+    ASSERT_EQ(vertex_cut_result.fragments.size(), 1u);
+    EXPECT_EQ(vertex_cut_result.fragments.front().degeneracy,
+              CutInterfaceDegeneracy::VertexTouch);
+
+    const LevelSetCellCutInput edge_touch{
+        .parent_cell = 3,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {0.0, 0.0, 1.0, 1.0}};
+    const auto edge_touch_result = cutLinearLevelSetCell2D(request, edge_touch);
+    EXPECT_FALSE(edge_touch_result.hasActiveFragments());
+    EXPECT_EQ(edge_touch_result.degeneracy, CutInterfaceDegeneracy::EdgeTouch);
+
+    request.tolerance = 1.0e-12;
+    const LevelSetCellCutInput nearly_tangent{
+        .parent_cell = 4,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-1.0e-7, 1.0, 1.0}};
+    const auto nearly_tangent_result = cutLinearLevelSetCell2D(request, nearly_tangent);
+    ASSERT_TRUE(nearly_tangent_result.hasActiveFragments());
+    ASSERT_EQ(nearly_tangent_result.fragments.size(), 1u);
+    EXPECT_EQ(nearly_tangent_result.fragments.front().degeneracy,
+              CutInterfaceDegeneracy::NearlyTangent);
+
+    const LevelSetCellCutInput small_physical_fragment{
+        .parent_cell = 5,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0e-13, 0.0, 0.0}},
+                             {{0.0, 1.0e-13, 0.0}}},
+        .level_set_values = {-1.0, 1.0, -1.0}};
+    const auto small_fragment_result =
+        cutLinearLevelSetCell2D(request, small_physical_fragment);
+    EXPECT_FALSE(small_fragment_result.hasActiveFragments());
+    EXPECT_EQ(small_fragment_result.degeneracy, CutInterfaceDegeneracy::SmallFragment);
+    EXPECT_FALSE(small_fragment_result.diagnostic.empty());
+}

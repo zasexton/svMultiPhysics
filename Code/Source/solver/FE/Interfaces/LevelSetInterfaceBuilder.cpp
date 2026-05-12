@@ -482,9 +482,16 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
         return result;
     }
+    if (positive_count == 0u || negative_count == 0u) {
+        result.degeneracy = zero_count > 1u ? CutInterfaceDegeneracy::EdgeTouch
+                                            : CutInterfaceDegeneracy::VertexTouch;
+        result.diagnostic = "level-set isovalue touches a cell vertex or edge without crossing the cell";
+        return result;
+    }
 
     std::vector<CutPointCandidate> cut_points;
     cut_points.reserve(4u);
+    bool zero_edge = false;
     for (std::size_t i = 0; i < count; ++i) {
         const std::size_t j = (i + 1u) % count;
         const Real di = signed_values[i];
@@ -492,6 +499,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         const bool i_zero = std::abs(di) <= request.tolerance;
         const bool j_zero = std::abs(dj) <= request.tolerance;
         if (i_zero && j_zero) {
+            zero_edge = true;
             addUniqueCandidate(
                 cut_points,
                 CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0},
@@ -528,7 +536,10 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
 
     if (cut_points.size() < 2u) {
         result.degeneracy = zero_count > 0u ? CutInterfaceDegeneracy::VertexTouch
-                                            : CutInterfaceDegeneracy::NoCut;
+                                            : CutInterfaceDegeneracy::SmallFragment;
+        if (result.degeneracy == CutInterfaceDegeneracy::SmallFragment) {
+            result.diagnostic = "level-set cut produced a fragment below the point separation tolerance";
+        }
         return result;
     }
 
@@ -538,6 +549,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     const Real measure = distance2(a.point, b.point);
     if (measure <= request.tolerance) {
         result.degeneracy = CutInterfaceDegeneracy::SmallFragment;
+        result.diagnostic = "level-set cut produced a fragment below the minimum measure tolerance";
         return result;
     }
 
@@ -564,9 +576,15 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                               fragment.local_fragment_index,
                                               request.source.value_revision);
     fragment.kind = CutInterfaceFragmentKind::Segment;
-    fragment.degeneracy =
-        cut_points.size() > 2u ? CutInterfaceDegeneracy::EdgeTouch
-                               : CutInterfaceDegeneracy::None;
+    if (zero_edge || cut_points.size() > 2u) {
+        fragment.degeneracy = CutInterfaceDegeneracy::EdgeTouch;
+    } else if (zero_count > 0u) {
+        fragment.degeneracy = CutInterfaceDegeneracy::VertexTouch;
+    } else if (measure <= std::sqrt(request.tolerance)) {
+        fragment.degeneracy = CutInterfaceDegeneracy::NearlyTangent;
+    } else {
+        fragment.degeneracy = CutInterfaceDegeneracy::None;
+    }
     fragment.normal = normal;
     fragment.measure = measure;
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
@@ -649,6 +667,12 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
         return result;
     }
+    if (positive_count == 0u || negative_count == 0u) {
+        result.degeneracy = zero_count > 1u ? CutInterfaceDegeneracy::EdgeTouch
+                                            : CutInterfaceDegeneracy::VertexTouch;
+        result.diagnostic = "level-set isovalue touches a tetrahedron vertex or edge without crossing the cell";
+        return result;
+    }
 
     constexpr std::array<std::array<std::size_t, 2>, 6> edges{{
         {{0u, 1u}},
@@ -660,6 +684,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
 
     std::vector<CutPointCandidate> cut_points;
     cut_points.reserve(4u);
+    bool zero_edge = false;
     for (const auto& edge : edges) {
         const std::size_t i = edge[0];
         const std::size_t j = edge[1];
@@ -668,6 +693,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         const bool i_zero = std::abs(di) <= request.tolerance;
         const bool j_zero = std::abs(dj) <= request.tolerance;
         if (i_zero && j_zero) {
+            zero_edge = true;
             addUniqueCandidate(
                 cut_points,
                 CutPointCandidate{input.node_coordinates[i], input.node_coordinates[i], 0.0},
@@ -703,8 +729,13 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
 
     if (cut_points.size() < 3u) {
-        result.degeneracy = cut_points.size() == 2u ? CutInterfaceDegeneracy::EdgeTouch
-                                                    : CutInterfaceDegeneracy::VertexTouch;
+        if (zero_count > 0u) {
+            result.degeneracy = cut_points.size() == 2u ? CutInterfaceDegeneracy::EdgeTouch
+                                                        : CutInterfaceDegeneracy::VertexTouch;
+        } else {
+            result.degeneracy = CutInterfaceDegeneracy::SmallFragment;
+            result.diagnostic = "level-set cut produced a fragment below the point separation tolerance";
+        }
         return result;
     }
 
@@ -714,6 +745,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     const Real measure = polygonArea(cut_points, gradient_normal);
     if (measure <= request.tolerance) {
         result.degeneracy = CutInterfaceDegeneracy::SmallFragment;
+        result.diagnostic = "level-set cut produced a fragment below the minimum measure tolerance";
         return result;
     }
 
@@ -734,9 +766,15 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                               fragment.local_fragment_index,
                                               request.source.value_revision);
     fragment.kind = CutInterfaceFragmentKind::Polygon;
-    fragment.degeneracy =
-        cut_points.size() > 4u ? CutInterfaceDegeneracy::EdgeTouch
-                               : CutInterfaceDegeneracy::None;
+    if (zero_edge || cut_points.size() > 4u) {
+        fragment.degeneracy = CutInterfaceDegeneracy::EdgeTouch;
+    } else if (zero_count > 0u) {
+        fragment.degeneracy = CutInterfaceDegeneracy::VertexTouch;
+    } else if (measure <= std::sqrt(request.tolerance)) {
+        fragment.degeneracy = CutInterfaceDegeneracy::NearlyTangent;
+    } else {
+        fragment.degeneracy = CutInterfaceDegeneracy::None;
+    }
     fragment.normal = normal;
     fragment.measure = measure;
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
