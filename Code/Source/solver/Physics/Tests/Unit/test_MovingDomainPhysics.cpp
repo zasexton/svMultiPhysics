@@ -12,6 +12,7 @@
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 #include "Physics/Formulations/LevelSet/LevelSetDiagnostics.h"
+#include "Physics/Formulations/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Physics/Formulations/LevelSet/LevelSetReinitialization.h"
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
 #include "Physics/Formulations/LevelSet/LevelSetVolume.h"
@@ -1449,6 +1450,52 @@ TEST(MovingDomainPhysics, LevelSetSignedDistanceMaintenanceReducesInterfaceBandE
     EXPECT_LT(after.signed_distance_l2_error, before.signed_distance_l2_error);
     EXPECT_LT(after.signed_distance_max_error,
               FE::Real(0.05) * before.signed_distance_max_error);
+}
+
+TEST(MovingDomainPhysics, LevelSetGeneratedInterfaceLifecycleBuildsDomainFromField)
+{
+    constexpr int interface_marker = 73;
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, 0,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    ls::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.tolerance = 1.0e-12;
+
+    ls::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.value_revision, 1u);
+    EXPECT_EQ(lifecycle.valueRevision(), 1u);
+    EXPECT_EQ(result.domain.marker(), interface_marker);
+    EXPECT_EQ(result.domain.request().source.field_id, phi);
+    EXPECT_EQ(result.domain.request().source.value_revision, result.value_revision);
+    EXPECT_EQ(result.summary.interface_marker, interface_marker);
+    EXPECT_EQ(result.summary.active_fragment_count, 1u);
+    EXPECT_EQ(result.summary.quadrature_point_count, 1u);
+    EXPECT_GT(result.summary.measure, 0.0);
+    ASSERT_EQ(result.domain.fragments().size(), 1u);
+    EXPECT_EQ(result.domain.fragments().front().interface_marker, interface_marker);
 }
 
 TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)

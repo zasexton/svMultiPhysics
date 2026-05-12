@@ -420,7 +420,7 @@ Concrete changes:
 
 Checklist:
 
-- [ ] Add generated-interface lifecycle orchestration.
+- [x] Add generated-interface lifecycle orchestration.
 - [ ] Update interface geometry after level-set state changes.
 - [ ] Preserve marker identity across time steps.
 - [ ] Couple generated interface marker to Navier-Stokes free-surface options.
