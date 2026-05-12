@@ -104,10 +104,16 @@ public:
 
     void registerOn(FE::systems::FESystem& system) const override;
 
+    [[nodiscard]] const LevelSetTransportOptions& options() const noexcept { return options_; }
+
 private:
     std::shared_ptr<const FE::spaces::FunctionSpace> level_set_space_{};
     LevelSetTransportOptions options_{};
 };
+
+[[nodiscard]] bool shouldReinitializeLevelSet(
+    const LevelSetReinitializationOptions& options,
+    int completed_step_index) noexcept;
 
 } // namespace level_set
 } // namespace formulations

@@ -746,6 +746,27 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_EQ(opts.boundaries.outflow.front().boundary_marker, 12);
 }
 
+TEST(MovingDomainPhysics, LevelSetReinitializationCadenceControlsCompletedSteps)
+{
+    ls::LevelSetReinitializationOptions opts{};
+
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 1));
+
+    opts.enabled = true;
+    opts.cadence_steps = 3;
+
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, -1));
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 0));
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 1));
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 2));
+    EXPECT_TRUE(ls::shouldReinitializeLevelSet(opts, 3));
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 4));
+    EXPECT_TRUE(ls::shouldReinitializeLevelSet(opts, 6));
+
+    opts.cadence_steps = 0;
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(opts, 3));
+}
+
 TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
 {
     const auto mesh = makeMesh();
@@ -828,6 +849,16 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     input.equation_params["Velocity_source"] = ParameterValue{true, "prescribed_data"};
     input.equation_params["Enable_SUPG"] = ParameterValue{true, "true"};
     input.equation_params["SUPG_tau_scale"] = ParameterValue{true, "0.25"};
+    input.equation_params["Enable_reinitialization"] = ParameterValue{true, "true"};
+    input.equation_params["Reinitialization_method"] = ParameterValue{true, "projection"};
+    input.equation_params["Reinitialization_cadence_steps"] = ParameterValue{true, "4"};
+    input.equation_params["Reinitialization_max_iterations"] = ParameterValue{true, "8"};
+    input.equation_params["Reinitialization_pseudo_time_step_scale"] =
+        ParameterValue{true, "0.125"};
+    input.equation_params["Reinitialization_interface_band_width"] =
+        ParameterValue{true, "2.75"};
+    input.equation_params["Reinitialization_signed_distance_tolerance"] =
+        ParameterValue{true, "1.0e-4"};
 
     BoundaryConditionInput inflow{};
     inflow.name = "inlet";
@@ -847,6 +878,8 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     auto module = EquationModuleRegistry::instance().create("level_set", input, system);
 
     ASSERT_TRUE(module);
+    const auto* level_set_module = dynamic_cast<const ls::LevelSetTransportModule*>(module.get());
+    ASSERT_NE(level_set_module, nullptr);
     const auto phi = system.findFieldByName("phi");
     const auto velocity = system.findFieldByName("advecting_velocity");
     ASSERT_NE(phi, FE::INVALID_FIELD_ID);
@@ -857,6 +890,17 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     EXPECT_TRUE(system.hasOperator("level_set"));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+
+    const auto& options = level_set_module->options();
+    EXPECT_TRUE(options.reinitialization.enabled);
+    EXPECT_EQ(options.reinitialization.method, ls::LevelSetReinitializationMethod::Projection);
+    EXPECT_EQ(options.reinitialization.cadence_steps, 4);
+    EXPECT_EQ(options.reinitialization.max_iterations, 8);
+    EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.125);
+    EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 2.75);
+    EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-4);
+    EXPECT_FALSE(ls::shouldReinitializeLevelSet(options.reinitialization, 3));
+    EXPECT_TRUE(ls::shouldReinitializeLevelSet(options.reinitialization, 4));
 #endif
 }
 

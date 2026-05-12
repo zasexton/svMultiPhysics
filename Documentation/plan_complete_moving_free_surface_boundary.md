@@ -397,7 +397,7 @@ Checklist:
 - [x] Implement signed-distance repair path.
 - [x] Add volume calculation from level-set/cut-cell data.
 - [x] Implement global level-set shift correction.
-- [ ] Add reinitialization cadence controls.
+- [x] Add reinitialization cadence controls.
 - [ ] Add output diagnostics for volume and signed-distance error.
 - [ ] Add tests for volume preservation under pure advection.
 - [ ] Add tests for signed-distance maintenance near the interface.

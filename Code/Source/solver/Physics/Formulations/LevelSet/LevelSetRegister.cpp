@@ -185,6 +185,24 @@ int parse_positive_int(std::string_view raw, std::string_view context)
   }
 }
 
+std::optional<int> get_defined_positive_int(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view context)
+{
+  for (const auto key : keys) {
+    const auto* p = find_param(params, key);
+    if (!p || !p->defined) {
+      continue;
+    }
+    const auto value = trim_copy(p->value);
+    if (!value.empty()) {
+      return parse_positive_int(value, context);
+    }
+  }
+  return std::nullopt;
+}
+
 svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
 {
   if (mesh.n_cells() == 0) {
@@ -280,6 +298,22 @@ ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
       "[svMultiPhysics::Physics] Velocity_source must be one of 'coupled_field', 'prescribed_data', or 'constant'.");
 }
 
+ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
+{
+  const auto value = normalized_token(std::string(raw));
+  if (value == "hamiltonjacobi" || value == "hamiltonjacobipde" || value == "pde") {
+    return ls::LevelSetReinitializationMethod::HamiltonJacobiPDE;
+  }
+  if (value == "fastmarching" || value == "fastmarchingmethod" || value == "fmm") {
+    return ls::LevelSetReinitializationMethod::FastMarching;
+  }
+  if (value == "projection" || value == "signeddistanceprojection" || value == "repairprojection") {
+    return ls::LevelSetReinitializationMethod::Projection;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] Reinitialization_method must be one of 'HamiltonJacobiPDE', 'FastMarching', or 'Projection'.");
+}
+
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
                             ls::LevelSetTransportOptions& options)
 {
@@ -335,6 +369,50 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           {"SUPG_velocity_epsilon", "SUPGVelocityEpsilon"},
           "SUPG_velocity_epsilon")) {
     options.supg.velocity_epsilon = *value;
+  }
+
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_reinitialization", "Enable_level_set_reinitialization",
+           "Reinitialization", "Reinitialization_enabled", "Reinitialize_level_set"})) {
+    options.reinitialization.enabled = *value;
+  }
+  if (const auto value = get_defined_string(
+          params,
+          {"Reinitialization_method", "Level_set_reinitialization_method", "ReinitializationMethod"})) {
+    options.reinitialization.method = parse_reinitialization_method(*value);
+  }
+  if (const auto value = get_defined_positive_int(
+          params,
+          {"Reinitialization_cadence_steps", "Reinitialization_cadence",
+           "Level_set_reinitialization_cadence_steps", "ReinitializationCadenceSteps"},
+          "Reinitialization_cadence_steps")) {
+    options.reinitialization.cadence_steps = *value;
+  }
+  if (const auto value = get_defined_positive_int(
+          params,
+          {"Reinitialization_max_iterations", "Reinitialization_iterations",
+           "ReinitializationMaxIterations"},
+          "Reinitialization_max_iterations")) {
+    options.reinitialization.max_iterations = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Reinitialization_pseudo_time_step_scale", "ReinitializationPseudoTimeStepScale"},
+          "Reinitialization_pseudo_time_step_scale")) {
+    options.reinitialization.pseudo_time_step_scale = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Reinitialization_interface_band_width", "ReinitializationInterfaceBandWidth"},
+          "Reinitialization_interface_band_width")) {
+    options.reinitialization.interface_band_width = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Reinitialization_signed_distance_tolerance", "ReinitializationSignedDistanceTolerance"},
+          "Reinitialization_signed_distance_tolerance")) {
+    options.reinitialization.signed_distance_tolerance = *value;
   }
 }
 

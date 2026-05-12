@@ -196,6 +196,16 @@ LevelSetTransportModule::LevelSetTransportModule(
 {
 }
 
+bool shouldReinitializeLevelSet(
+    const LevelSetReinitializationOptions& options,
+    int completed_step_index) noexcept
+{
+    return options.enabled &&
+           options.cadence_steps > 0 &&
+           completed_step_index > 0 &&
+           completed_step_index % options.cadence_steps == 0;
+}
+
 void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
 {
     if (options_.level_set.field_name.empty()) {
