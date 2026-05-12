@@ -244,12 +244,12 @@ Target files:
 
 Checklist:
 
-- [ ] Move `LevelSetScalarDiagnostic` into `FE::level_set`.
-- [ ] Move `LevelSetOutputDiagnosticsOptions` into `FE::level_set`.
-- [ ] Move `LevelSetOutputDiagnostics` into `FE::level_set`.
-- [ ] Move `computeLevelSetOutputDiagnostics` overloads into FE.
-- [ ] Keep diagnostic scalar names stable unless explicitly versioned.
-- [ ] Move diagnostics tests from Physics to FE where practical.
+- [x] Move `LevelSetScalarDiagnostic` into `FE::level_set`.
+- [x] Move `LevelSetOutputDiagnosticsOptions` into `FE::level_set`.
+- [x] Move `LevelSetOutputDiagnostics` into `FE::level_set`.
+- [x] Move `computeLevelSetOutputDiagnostics` overloads into FE.
+- [x] Keep diagnostic scalar names stable unless explicitly versioned.
+- [x] Move diagnostics tests from Physics to FE where practical.
 
 Done when:
 

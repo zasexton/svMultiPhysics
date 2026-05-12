@@ -2112,6 +2112,7 @@ if(FE_BUILD_TESTS)
     # Level-set module tests
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
         set(FE_LEVELSET_TEST_SOURCES
+            Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
