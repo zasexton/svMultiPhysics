@@ -21,6 +21,7 @@
 #include "Physics/Core/PhysicsJITPolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
+#include "FE/Forms/BoundaryConditions.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <functional>
@@ -39,9 +40,9 @@ enum class NodeIdType {
 };
 
 struct PoissonOptions {
-    using SpatialFunction = std::function<FE::Real(FE::Real x, FE::Real y, FE::Real z)>;
-    using TimeFunction = std::function<FE::Real(FE::Real x, FE::Real y, FE::Real z, FE::Real t)>;
-    using ScalarValue = std::variant<FE::Real, SpatialFunction, TimeFunction>;
+    using SpatialFunction = FE::forms::ScalarCoefficient;
+    using TimeFunction = FE::forms::TimeScalarCoefficient;
+    using ScalarValue = FE::forms::bc::ScalarValue;
 
     struct DirichletBC {
         int boundary_marker{-1};

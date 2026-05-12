@@ -328,6 +328,70 @@ inline FormExpr domainId() { return FormExpr::cellDomainId(); }
 inline FormExpr hNormal() { return (2.0 * vol()) / area(); }
 
 // ---------------------------------------------------------------------------
+// Trace/projection helpers
+// ---------------------------------------------------------------------------
+
+inline FormExpr normalTrace(const FormExpr& u, const FormExpr& n)
+{
+    return inner(u, n);
+}
+
+inline FormExpr normalTrace(const FormExpr& u)
+{
+    return normalTrace(u, FormExpr::normal());
+}
+
+inline FormExpr normalProjection(const FormExpr& u, const FormExpr& n)
+{
+    return normalTrace(u, n) * n;
+}
+
+inline FormExpr normalProjection(const FormExpr& u)
+{
+    return normalProjection(u, FormExpr::normal());
+}
+
+inline FormExpr projectNormal(const FormExpr& u, const FormExpr& n)
+{
+    return normalProjection(u, n);
+}
+
+inline FormExpr projectNormal(const FormExpr& u)
+{
+    return normalProjection(u);
+}
+
+inline FormExpr tangentialProjection(const FormExpr& u, const FormExpr& n)
+{
+    return u - normalProjection(u, n);
+}
+
+inline FormExpr tangentialProjection(const FormExpr& u)
+{
+    return tangentialProjection(u, FormExpr::normal());
+}
+
+inline FormExpr projectTangent(const FormExpr& u, const FormExpr& n)
+{
+    return tangentialProjection(u, n);
+}
+
+inline FormExpr projectTangent(const FormExpr& u)
+{
+    return tangentialProjection(u);
+}
+
+inline FormExpr tangentialTrace(const FormExpr& u, const FormExpr& n)
+{
+    return tangentialProjection(u, n);
+}
+
+inline FormExpr tangentialTrace(const FormExpr& u)
+{
+    return tangentialProjection(u);
+}
+
+// ---------------------------------------------------------------------------
 // Differential operators (UFL-like shorthands)
 // ---------------------------------------------------------------------------
 
@@ -368,6 +432,16 @@ inline FormExpr surfaceGradient(const FormExpr& f, const FormExpr& n)
 inline FormExpr surfaceDivergence(const FormExpr& u, const FormExpr& n)
 {
     return div(u) - inner(grad(u) * n, n);
+}
+
+inline FormExpr meanCurvatureFromNormal(const FormExpr& n)
+{
+    return surfaceDivergence(n, n);
+}
+
+inline FormExpr curvatureVectorFromNormal(const FormExpr& n)
+{
+    return meanCurvatureFromNormal(n) * n;
 }
 
 inline FormExpr surfaceLaplacian(const FormExpr& f, const FormExpr& n)

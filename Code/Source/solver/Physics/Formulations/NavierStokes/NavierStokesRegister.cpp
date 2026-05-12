@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -138,6 +139,27 @@ std::optional<double> get_defined_double(const svmp::Physics::ParameterMap& para
     return std::nullopt;
   }
   return parse_double(p->value, key);
+}
+
+std::optional<int> get_defined_int(const svmp::Physics::ParameterMap& params, std::string_view key)
+{
+  const auto* p = find_param(params, key);
+  if (!p || !p->defined) {
+    return std::nullopt;
+  }
+
+  const auto s = trim_copy(p->value);
+  try {
+    size_t pos = 0;
+    const int v = std::stoi(s, &pos);
+    if (pos != s.size()) {
+      throw std::runtime_error("");
+    }
+    return v;
+  } catch (...) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse integer value '" +
+                             p->value + "' for " + std::string(key) + ".");
+  }
 }
 
 std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params, std::string_view key)
@@ -1544,11 +1566,192 @@ void fill_vector(std::array<ScalarValue, 3>& dst, int dim, const std::vector<int
   }
 }
 
+std::string normalized_token(std::string_view raw)
+{
+  auto out = lower_copy(trim_copy(std::string(raw)));
+  out.erase(std::remove_if(out.begin(), out.end(), [](unsigned char ch) {
+              return ch == '_' || ch == '-' || std::isspace(ch);
+            }),
+            out.end());
+  return out;
+}
+
+bool is_free_surface_type(std::string_view raw)
+{
+  return normalized_token(raw) == "freesurface";
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation
+parse_free_surface_implementation(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "fitted" || token == "fittedale" || token == "ale") {
+    return FreeSurfaceImplementation::FittedALE;
+  }
+  if (token == "unfitted" || token == "unfittedlevelset" ||
+      token == "levelset" || token == "embeddedlevelset") {
+    return FreeSurfaceImplementation::UnfittedLevelSet;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of FittedALE or UnfittedLevelSet.");
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceKinematicEnforcement
+parse_free_surface_kinematic_enforcement(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceKinematicEnforcement;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "none") {
+    return FreeSurfaceKinematicEnforcement::None;
+  }
+  if (token == "penalty") {
+    return FreeSurfaceKinematicEnforcement::Penalty;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of None or Penalty.");
+}
+
+std::optional<double> first_defined_double(const svmp::Physics::ParameterMap& params,
+                                           std::initializer_list<std::string_view> keys)
+{
+  for (const auto key : keys) {
+    if (const auto value = get_defined_double(params, key)) {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> first_defined_string(const svmp::Physics::ParameterMap& params,
+                                                std::initializer_list<std::string_view> keys)
+{
+  for (const auto key : keys) {
+    if (const auto value = get_defined_string(params, key)) {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<bool> first_defined_bool(const svmp::Physics::ParameterMap& params,
+                                       std::initializer_list<std::string_view> keys)
+{
+  for (const auto key : keys) {
+    if (const auto value = get_defined_bool(params, key)) {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<int> first_defined_int(const svmp::Physics::ParameterMap& params,
+                                     std::initializer_list<std::string_view> keys)
+{
+  for (const auto key : keys) {
+    if (const auto value = get_defined_int(params, key)) {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation
+free_surface_implementation_from_params(const svmp::Physics::ParameterMap& params)
+{
+  const auto raw = first_defined_string(
+      params,
+      {"Implementation", "Free_surface_implementation", "FreeSurfaceImplementation"});
+  return parse_free_surface_implementation(raw.value_or("FittedALE"), "Free-surface Implementation");
+}
+
+void append_free_surface_bc(
+    const svmp::Physics::BoundaryConditionInput& bc,
+    bool is_steady,
+    bool has_temp_spat,
+    bool has_other_files,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation;
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceKinematicEnforcement;
+  using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+
+  if (!is_steady) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "' currently supports only steady scalar parameters in the new solver Navier-Stokes input translator.");
+  }
+  if (has_temp_spat || has_other_files) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Free_surface BC '" + bc.name +
+        "' does not support spatial/temporal files in the new solver Navier-Stokes input translator.");
+  }
+
+  IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary fs{};
+  fs.implementation = free_surface_implementation_from_params(bc.params);
+  if (fs.implementation == FreeSurfaceImplementation::FittedALE) {
+    fs.boundary_marker = bc.boundary_marker;
+  } else {
+    const auto marker = first_defined_int(bc.params, {"Interface_marker", "InterfaceMarker"});
+    if (marker.has_value()) {
+      fs.interface_marker = *marker;
+    }
+    if (const auto field_name = first_defined_string(
+            bc.params,
+            {"Level_set_field_name", "Level_set_field", "LevelSetFieldName", "LevelSetField"})) {
+      fs.level_set_field_name = *field_name;
+    }
+  }
+
+  if (const auto pressure = first_defined_double(
+          bc.params,
+          {"External_pressure", "ExternalPressure", "Pressure", "Value"})) {
+    fs.external_pressure = IncompressibleNavierStokesVMSOptions::ScalarValue{
+        static_cast<svmp::FE::Real>(*pressure)};
+  }
+  if (const auto surface_tension = first_defined_double(
+          bc.params,
+          {"Surface_tension", "SurfaceTension"})) {
+    fs.surface_tension = IncompressibleNavierStokesVMSOptions::ScalarValue{
+        static_cast<svmp::FE::Real>(*surface_tension)};
+  }
+  if (const auto curvature = first_defined_double(bc.params, {"Curvature"})) {
+    fs.curvature = IncompressibleNavierStokesVMSOptions::ScalarValue{
+        static_cast<svmp::FE::Real>(*curvature)};
+  }
+  if (const auto use_level_set_curvature = first_defined_bool(
+          bc.params,
+          {"Use_level_set_curvature", "UseLevelSetCurvature"})) {
+    fs.use_level_set_curvature = *use_level_set_curvature;
+  }
+
+  if (const auto enforcement = first_defined_string(
+          bc.params,
+          {"Kinematic_enforcement", "KinematicEnforcement"})) {
+    fs.kinematic_enforcement =
+        parse_free_surface_kinematic_enforcement(*enforcement, "Free-surface Kinematic_enforcement");
+  }
+  if (const auto penalty = first_defined_double(
+          bc.params,
+          {"Kinematic_penalty", "KinematicPenalty"})) {
+    fs.kinematic_penalty = IncompressibleNavierStokesVMSOptions::ScalarValue{
+        static_cast<svmp::FE::Real>(*penalty)};
+    if (fs.kinematic_enforcement == FreeSurfaceKinematicEnforcement::None) {
+      fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::Penalty;
+    }
+  }
+
+  options.free_surface.push_back(std::move(fs));
+}
+
 void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
                      const svmp::Physics::DomainInput& domain,
                      svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
   using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation;
 
   if (!input.mesh) {
     throw std::runtime_error("[svMultiPhysics::Physics] Navier-Stokes BC translation received null mesh.");
@@ -1570,15 +1773,19 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
   }
 
   for (const auto& bc : input.boundary_conditions) {
-    if (bc.boundary_marker == svmp::INVALID_LABEL) {
+    const auto* bc_type_raw = find_param(bc.params, "Type");
+    const std::string bc_type = bc_type_raw ? trim_copy(bc_type_raw->value) : std::string{};
+    const std::string bc_type_lc = lower_copy(bc_type);
+    const bool free_surface_type = is_free_surface_type(bc_type);
+    const bool unfitted_free_surface =
+        free_surface_type &&
+        free_surface_implementation_from_params(bc.params) == FreeSurfaceImplementation::UnfittedLevelSet;
+
+    if (bc.boundary_marker == svmp::INVALID_LABEL && !unfitted_free_surface) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Boundary condition '" + bc.name +
           "' has invalid boundary marker; ensure <Add_face name=\"...\"> exists and is referenced correctly.");
     }
-
-    const auto* bc_type_raw = find_param(bc.params, "Type");
-    const std::string bc_type = bc_type_raw ? trim_copy(bc_type_raw->value) : std::string{};
-    const std::string bc_type_lc = lower_copy(bc_type);
 
     const auto* time_dep = find_param(bc.params, "Time_dependence");
     const std::string time_value_raw =
@@ -1602,8 +1809,13 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
 
     if (is_steady && (has_temp_spat || has_other_files)) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Spatial/temporal boundary-condition files are not supported for the new solver "
-          "Navier-Stokes module yet. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+        "[svMultiPhysics::Physics] Spatial/temporal boundary-condition files are not supported for the new solver "
+        "Navier-Stokes module yet. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+    }
+
+    if (free_surface_type) {
+      append_free_surface_bc(bc, is_steady, has_temp_spat, has_other_files, options);
+      continue;
     }
 
     const auto* value_param = find_param(bc.params, "Value");
@@ -2102,7 +2314,7 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Boundary condition type '" + bc_type +
         "' is not supported for the new solver Navier-Stokes module. Supported types: Dir, Dirichlet, Neu, Neumann, "
-        "Trac, Traction, Robin, Rbn. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+        "Trac, Traction, Robin, Rbn, Free_surface. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
   }
 }
 

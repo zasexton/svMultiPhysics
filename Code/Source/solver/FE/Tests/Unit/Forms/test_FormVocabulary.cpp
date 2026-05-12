@@ -832,6 +832,42 @@ TEST(FormVocabularyTest, AsVectorAndAsTensorConstructorsWork)
     EXPECT_THROW(zeroVector(0), std::invalid_argument);
 }
 
+TEST(FormVocabularyTest, TraceProjectionHelpersWorkWithExplicitNormals)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    const auto u = as_vector({FormExpr::constant(3.0),
+                              FormExpr::constant(4.0),
+                              FormExpr::constant(0.0)});
+    const auto n = as_vector({FormExpr::constant(1.0),
+                              FormExpr::constant(0.0),
+                              FormExpr::constant(0.0)});
+    const Real expected_integral_scale = singleTetraP1BasisIntegral();
+
+    {
+        auto vec = assembleCellLinear(normalTrace(u, n), dof_map, mesh, space);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec.getVectorEntry(i), 3.0 * expected_integral_scale, 5e-12);
+        }
+    }
+
+    {
+        auto vec = assembleCellLinear(component(normalProjection(u, n), 0), dof_map, mesh, space);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec.getVectorEntry(i), 3.0 * expected_integral_scale, 5e-12);
+        }
+    }
+
+    {
+        auto vec = assembleCellLinear(component(tangentialProjection(u, n), 1), dof_map, mesh, space);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(vec.getVectorEntry(i), 4.0 * expected_integral_scale, 5e-12);
+        }
+    }
+}
+
 TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
 {
     FormCompiler compiler;

@@ -71,9 +71,9 @@ public:
 
     // D3: Raw-pointer output API. Caller must pre-size buffers to size().
     // No vector resize cost on the hot path.
-    void evaluate_values_to(const math::Vector<Real, 3>& xi, Real* values_out) const;
-    void evaluate_gradients_to(const math::Vector<Real, 3>& xi, Real* gradients_out) const;
-    void evaluate_hessians_to(const math::Vector<Real, 3>& xi, Real* hessians_out) const;
+    void evaluate_values_to(const math::Vector<Real, 3>& xi, Real* values_out) const final;
+    void evaluate_gradients_to(const math::Vector<Real, 3>& xi, Real* gradients_out) const final;
+    void evaluate_hessians_to(const math::Vector<Real, 3>& xi, Real* hessians_out) const final;
 
 private:
     using TensorNodeIndex = std::array<std::size_t, 3>;

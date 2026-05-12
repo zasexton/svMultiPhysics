@@ -18,8 +18,10 @@
 #include "FE/Systems/FormsInstaller.h"
 
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -37,6 +39,144 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
     , options_(std::move(options))
 {
 }
+
+namespace {
+
+using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
+
+[[nodiscard]] bool isUnfittedLevelSet(const FreeSurfaceBoundary& bc) noexcept
+{
+    return bc.implementation == FreeSurfaceImplementation::UnfittedLevelSet;
+}
+
+[[nodiscard]] int freeSurfaceMarker(const FreeSurfaceBoundary& bc)
+{
+    return isUnfittedLevelSet(bc) ? bc.interface_marker : bc.boundary_marker;
+}
+
+[[nodiscard]] std::string freeSurfaceValueName(std::string_view prefix,
+                                               const FreeSurfaceBoundary& bc)
+{
+    const char* kind = isUnfittedLevelSet(bc) ? "_i" : "_b";
+    return std::string(prefix) + kind + std::to_string(freeSurfaceMarker(bc));
+}
+
+void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled)
+{
+    if (isUnfittedLevelSet(bc)) {
+        if (bc.interface_marker < 0) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: unfitted free surface requires interface_marker >= 0");
+        }
+        if (bc.level_set_field_name.empty()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: unfitted free surface requires a non-empty level_set_field_name");
+        }
+    } else {
+        if (bc.boundary_marker < 0) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: fitted free surface requires boundary_marker >= 0");
+        }
+        if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
+            !ale_enabled) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: fitted free-surface kinematics require ALE to be enabled");
+        }
+    }
+
+    if (bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Penalty &&
+        FE::forms::bc::isZeroConstantScalarValue(bc.kinematic_penalty)) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: penalty free-surface kinematics require a nonzero kinematic_penalty");
+    }
+}
+
+[[nodiscard]] FE::forms::FormExpr integrateOnFreeSurface(
+    const FE::forms::FormExpr& integrand,
+    const FreeSurfaceBoundary& bc)
+{
+    return isUnfittedLevelSet(bc)
+               ? integrand.dI(bc.interface_marker)
+               : integrand.ds(bc.boundary_marker);
+}
+
+[[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    if (!isUnfittedLevelSet(bc)) {
+        return FE::forms::FormExpr{};
+    }
+
+    const auto phi_id = system.findFieldByName(bc.level_set_field_name);
+    if (phi_id == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unfitted free surface references unknown level-set field '" +
+            bc.level_set_field_name + "'");
+    }
+
+    const auto& rec = system.fieldRecord(phi_id);
+    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: level-set field '" +
+            bc.level_set_field_name + "' must be scalar");
+    }
+
+    return FE::forms::FormExpr::discreteField(phi_id, *rec.space, bc.level_set_field_name);
+}
+
+void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
+                              const FreeSurfaceBoundary& bc,
+                              const FE::systems::FESystem& system,
+                              const FE::forms::FormExpr& u,
+                              const FE::forms::FormExpr& v,
+                              const FE::forms::FormExpr& mesh_velocity,
+                              bool ale_enabled)
+{
+    using namespace FE::forms;
+
+    validateFreeSurfaceBoundary(bc, ale_enabled);
+
+    const auto phi = freeSurfaceLevelSet(bc, system);
+    const auto n = isUnfittedLevelSet(bc) ? unitNormalFromLevelSet(phi)
+                                          : FormExpr::normal();
+    const auto p_ext = bc::toScalarExpr(
+        bc.external_pressure,
+        freeSurfaceValueName("ns_free_surface_external_pressure", bc));
+    const auto gamma = bc::toScalarExpr(
+        bc.surface_tension,
+        freeSurfaceValueName("ns_free_surface_surface_tension", bc));
+    const auto curvature =
+        bc::isZeroConstantScalarValue(bc.surface_tension)
+            ? FormExpr::constant(0.0)
+            : ((isUnfittedLevelSet(bc) && bc.use_level_set_curvature)
+                   ? meanCurvatureFromLevelSet(phi)
+                   : bc::toScalarExpr(
+                         bc.curvature,
+                         freeSurfaceValueName("ns_free_surface_curvature", bc)));
+
+    const auto traction = (-p_ext + gamma * curvature) * n;
+    momentum_form = momentum_form - integrateOnFreeSurface(inner(traction, v), bc);
+
+    switch (bc.kinematic_enforcement) {
+    case FreeSurfaceKinematicEnforcement::None:
+        return;
+    case FreeSurfaceKinematicEnforcement::Penalty: {
+        const auto penalty = bc::toScalarExpr(
+            bc.kinematic_penalty,
+            freeSurfaceValueName("ns_free_surface_kinematic_penalty", bc));
+        const auto normal_mismatch = normalTrace(u - mesh_velocity, n);
+        momentum_form = momentum_form + integrateOnFreeSurface(
+            penalty * normal_mismatch * normalTrace(v, n), bc);
+        return;
+    }
+    }
+
+    throw std::invalid_argument(
+        "IncompressibleNavierStokesVMSModule: unsupported free-surface kinematic enforcement");
+}
+
+} // namespace
 
 void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& system) const
 {
@@ -176,20 +316,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         const auto ct_m = FormExpr::constant(options_.ct_m);
         const auto ct_c = FormExpr::constant(options_.ct_c);
 
-        // Element metric tensor Kxi = J^{-T} J^{-1}.
-        //
-        // Geometry Jacobians are stored internally as 3x3 "frame" matrices so they are invertible
-        // even for dim<3 mappings. Restrict all metric contractions to the physical spatial
-        // dimension so the dummy thickness component does not contribute to trace(K) or (K:K).
+        // Element metric tensor Kxi = J^{-T} J^{-1}. FE Forms exposes Jinv()
+        // with the active physical dimension, so 2D contractions do not include
+        // a dummy frame-thickness component.
         const auto Jinv_expr = Jinv();
-        FormExpr Jinv_phys = Jinv_expr;
-        if (dim == 1) {
-            Jinv_phys = FormExpr::asTensor({{Jinv_expr.component(0, 0)}});
-        } else if (dim == 2) {
-            Jinv_phys = FormExpr::asTensor({{Jinv_expr.component(0, 0), Jinv_expr.component(0, 1)},
-                                            {Jinv_expr.component(1, 0), Jinv_expr.component(1, 1)}});
-        }
-        const auto K = transpose(Jinv_phys) * Jinv_phys;
+        const auto K = transpose(Jinv_expr) * Jinv_expr;
         const auto nu = mu / rho;
 
         // Legacy-inspired tau_M (stored here as tau_M/rho, matching legacy fluid.cpp naming).
@@ -244,6 +375,15 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // Reserve the marker here so validate() catches conflicts with other BC types.
     bc_manager.install(options_.velocity_dirichlet_weak, Factories::reserveMarker);
 
+    for (const auto& bc : options_.free_surface) {
+        validateFreeSurfaceBoundary(bc, options_.enable_ale);
+        if (bc.implementation == FreeSurfaceImplementation::FittedALE) {
+            bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(bc.boundary_marker));
+        }
+        applyFreeSurfaceBoundary(
+            momentum_form, bc, system, u, v, mesh_velocity, options_.enable_ale);
+    }
+
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim); });
     bc_manager.install(options_.traction_robin, [&](const auto& bc) { return Factories::toTractionRobinBC(bc, dim); });
     bc_manager.install(options_.pressure_outflow, [&](const auto& bc) { return Factories::toOutflowBC(bc, u, rho); });
@@ -265,7 +405,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                          [&](const auto& bc) { return Factories::toPressureEssentialBC(bc, options_.pressure_field_name); });
     p_bc_manager.applyAll(system, p_id);
 
-    Factories::applyVelocityNitscheBCs(momentum_form, continuity_form, options_, *velocity_space_, dim, u, p, v, q, mu);
+    Factories::applyVelocityNitscheBCs(momentum_form, continuity_form, options_, dim, u, p, v, q, mu);
 
     // Install the complete residual (momentum + continuity) via the unified
     // installFormulation() entry point.  It auto-detects the two-field mixed

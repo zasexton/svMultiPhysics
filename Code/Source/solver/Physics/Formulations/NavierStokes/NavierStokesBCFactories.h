@@ -13,6 +13,7 @@
 
 #include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/StandardBCs.h"
+#include "FE/Forms/Vocabulary.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryModelBuilder.h"
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
@@ -342,7 +343,6 @@ inline void applyVelocityNitscheBCs(
     FE::forms::FormExpr& momentum_form,
     FE::forms::FormExpr& continuity_form,
     const IncompressibleNavierStokesVMSOptions& options,
-    const FE::spaces::FunctionSpace& velocity_space,
     int dim,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& p,
@@ -358,18 +358,15 @@ inline void applyVelocityNitscheBCs(
     }
 
     const auto n = FE::forms::FormExpr::normal();
-    const auto h = FE::forms::FormExpr::cellDiameter();
-    const auto gamma = FE::forms::FormExpr::constant(options.nitsche_gamma);
-
-    int p_order = 1;
-    if (options.nitsche_scale_with_p) {
-        p_order = velocity_space.polynomial_order();
-        if (p_order < 1) {
-            p_order = 1;
-        }
-    }
-    const auto p2 = FE::forms::FormExpr::constant(static_cast<FE::Real>(p_order * p_order));
-    const auto penalty = gamma * mu * p2 / h;
+    const auto penalty = FE::forms::bc::buildTraceNitschePenalty(
+        mu / FE::forms::hNormal(),
+        u,
+        FE::forms::bc::TraceNitscheOptions{
+            .gamma = options.nitsche_gamma,
+            .variant = options.nitsche_symmetric
+                ? FE::forms::bc::NitscheVariant::Symmetric
+                : FE::forms::bc::NitscheVariant::Unsymmetric,
+            .scale_with_p = options.nitsche_scale_with_p});
 
     const auto stress_u = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(u));
     const auto stress_v = FE::forms::FormExpr::constant(2.0) * mu * FE::forms::sym(FE::forms::grad(v));

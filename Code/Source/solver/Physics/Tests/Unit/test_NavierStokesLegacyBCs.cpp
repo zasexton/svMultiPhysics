@@ -11,6 +11,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 
 #include "Assembly/GlobalSystemView.h"
+#include "FE/Forms/FormExpr.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
@@ -25,6 +26,7 @@
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Mesh.h"
+#  include "Mesh/Topology/CellShape.h"
 #endif
 
 namespace svmp::Physics::formulations::navier_stokes {
@@ -117,6 +119,35 @@ InletOutletMarkers labelBeamInletOutlet(svmp::Mesh& mesh_mut)
     opts.path = path.string();
 
     return svmp::load_mesh(opts, svmp::MeshComm::world());
+}
+
+[[nodiscard]] std::shared_ptr<svmp::Mesh> buildSingleTetraBoundaryMesh(int marker)
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/3, x_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    base->register_label("free_surface", marker);
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        base->set_boundary_label(f, static_cast<svmp::label_t>(marker));
+        base->add_to_set(svmp::EntityKind::Face, "free_surface", f);
+    }
+
+    return svmp::create_mesh(std::move(base));
 }
 
 #endif
@@ -303,6 +334,46 @@ void expectAdaptiveNear(const std::vector<double>& actual,
     }
 }
 
+bool containsExprType(const svmp::FE::forms::FormExprNode* node,
+                      svmp::FE::forms::FormExprType target)
+{
+    if (!node) {
+        return false;
+    }
+    if (node->type() == target) {
+        return true;
+    }
+    for (const auto* child : node->children()) {
+        if (containsExprType(child, target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool containsExprType(const svmp::FE::forms::FormExpr& expr,
+                      svmp::FE::forms::FormExprType target)
+{
+    return expr.isValid() && containsExprType(expr.node(), target);
+}
+
+bool formulationRecordsContain(const svmp::FE::systems::FESystem& system,
+                               svmp::FE::forms::FormExprType target)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (containsExprType(record.residual_expr.get(), target)) {
+            return true;
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (containsExprType(expr.get(), target)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_ResistanceOutflow_SetupSucceeds)
@@ -372,6 +443,44 @@ TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_ResistanceOutflow_SetupSucceeds)
     // Parabolic inflow should produce a non-uniform velocity component along the beam axis.
     expectParabolicInflowVaries(system, markers.axis);
 #  endif
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 77;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = marker;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("FittedALE");
+    bc.params["External_pressure"] = defined("12.5");
+    bc.params["Surface_tension"] = defined("0.0");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::BoundaryIntegral));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Normal));
+    ASSERT_NO_THROW(system.setup());
 #endif
 }
 

@@ -9,12 +9,14 @@
 
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
+#include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/FormCompiler.h"
 #include "FE/Forms/FormKernels.h"
+#include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
 #include "FE/Dofs/DofMap.h"
@@ -22,12 +24,16 @@
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -84,6 +90,26 @@ bool formulationRecordsContain(const FE::systems::FESystem& system, FormExprType
 std::shared_ptr<SingleTetraMeshAccess> makeMesh()
 {
     return std::make_shared<SingleTetraMeshAccess>();
+}
+
+FE::systems::SetupInputs makeSingleTriangleSetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 3;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 3};
+    topo.cell2vertex_data = {0, 1, 2};
+    topo.vertex_gids = {0, 1, 2};
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
 }
 
 class SingleTetraBoundaryMeshAccess final : public FE::assembly::IMeshAccess {
@@ -316,6 +342,26 @@ FE::Real residualNorm(FE::systems::FESystem& system,
     return std::sqrt(norm2);
 }
 
+std::vector<FE::Real> residualVector(FE::systems::FESystem& system,
+                                     const FE::systems::SystemStateView& state,
+                                     std::string_view op)
+{
+    const auto n = system.dofHandler().getNumDofs();
+    FE::assembly::DenseVectorView residual(n);
+    residual.zero();
+    FE::systems::AssemblyRequest req;
+    req.op = std::string(op);
+    req.want_vector = true;
+    const auto result = system.assemble(req, state, nullptr, &residual);
+    EXPECT_TRUE(result.success) << result.error_message;
+
+    std::vector<FE::Real> out(static_cast<std::size_t>(n), 0.0);
+    for (FE::GlobalIndex i = 0; i < n; ++i) {
+        out[static_cast<std::size_t>(i)] = residual[i];
+    }
+    return out;
+}
+
 FE::assembly::DenseVectorView assembleMovingDomainScalarResidual(
     const FE::assembly::IMeshAccess& mesh,
     const FE::spaces::FunctionSpace& scalar_space,
@@ -419,6 +465,107 @@ TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumes
     EXPECT_EQ(system.blockMap()->numBlocks(), 2u);
 }
 
+TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
+{
+    constexpr int marker = 31;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .external_pressure = 2.0,
+        .surface_tension = 0.5,
+        .curvature = 1.25,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+}
+
+TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
+{
+    constexpr int marker = 32;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.velocity_dirichlet.push_back(ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+        .boundary_marker = marker,
+        .value = {0.0, 0.0, 0.0},
+    });
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .external_pressure = 1.0,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesLevelSetInterfaceGeometry)
+{
+    constexpr int interface_marker = 41;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .external_pressure = 1.0,
+        .surface_tension = 0.25,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
+{
+    constexpr int interface_marker = 42;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "missing_phi",
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
 TEST(MovingDomainPhysics, NavierStokesCoupledALEDerivesMeshVelocityFromDisplacement)
 {
     const auto mesh = makeMesh();
@@ -501,6 +648,70 @@ TEST(MovingDomainPhysics, NavierStokesCoupledALEAcceptsADReferenceTangentPathOve
     EXPECT_NE(system.findFieldByName("mesh_velocity"), FE::INVALID_FIELD_ID);
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
     EXPECT_EQ(system.dofHandler().getNumDofs(), 28);
+}
+
+TEST(MovingDomainPhysics, NavierStokesWeakVelocityNitschePenaltyUsesTraceHeight)
+{
+    constexpr int marker = 21;
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Tetra4,
+        /*order=*/2,
+        /*components=*/3);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Tetra4,
+        /*order=*/1);
+
+    auto opts = baseNavierStokesOptions();
+    opts.velocity_dirichlet_weak.push_back(ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
+        .boundary_marker = marker,
+        .value = {0.0, 0.0, 0.0},
+    });
+    opts.nitsche_gamma = 8.0;
+    opts.nitsche_scale_with_p = true;
+
+    const auto u = FormExpr::trialFunction(*u_space, "u");
+    const auto p = FormExpr::trialFunction(*p_space, "p");
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    const auto q = FormExpr::testFunction(*p_space, "q");
+    const auto mu = FormExpr::constant(0.04);
+    auto momentum_form = FormExpr::constant(0.0).dx();
+    auto continuity_form = FormExpr::constant(0.0).dx();
+
+    ns::Factories::applyVelocityNitscheBCs(
+        momentum_form,
+        continuity_form,
+        opts,
+        /*dim=*/3,
+        u,
+        p,
+        v,
+        q,
+        mu);
+
+    EXPECT_TRUE(containsExprType(momentum_form, FormExprType::CellVolume));
+    EXPECT_TRUE(containsExprType(momentum_form, FormExprType::FacetArea));
+    EXPECT_FALSE(containsExprType(momentum_form, FormExprType::CellDiameter));
+}
+
+TEST(MovingDomainPhysics, NavierStokesVMS2DUsesPhysicalMetricShape)
+{
+    auto mesh = std::make_shared<FE::forms::test::SingleTriangleMeshAccess>();
+    auto u_space = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto p_space = FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_vms = true;
+    opts.enable_convection = false;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTriangleSetupInputs()));
+    ASSERT_EQ(system.dofHandler().getNumDofs(), 9);
 }
 
 TEST(MovingDomainPhysics, HarmonicMeshMotionRegistersDisplacementUnknownOnly)
@@ -616,6 +827,217 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionRobinBoundarySpringAssembles)
     EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
 }
 
+TEST(MovingDomainPhysics, HarmonicMeshMotionWeakBoundaryTermsOnSameMarkerAreAdditive)
+{
+    constexpr int marker = 11;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto d_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions::NaturalBC natural;
+    natural.boundary_marker = marker;
+    natural.value = {1.0, 0.0, 0.0};
+
+    mm::HarmonicMeshMotionOptions::RobinBC robin;
+    robin.boundary_marker = marker;
+    robin.alpha = 2.0;
+    robin.target = {0.0, 1.0, 0.0};
+
+    const auto assemble = [&](const mm::HarmonicMeshMotionOptions& opts) {
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(d_space, opts);
+        module.registerOn(system);
+        system.setup({}, makeSingleTetraSetupInputs());
+
+        std::vector<FE::Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        FE::systems::SystemStateView state;
+        state.u = std::span<const FE::Real>(u);
+        return residualVector(system, state, "mesh_motion");
+    };
+
+    mm::HarmonicMeshMotionOptions combined_opts;
+    combined_opts.operator_tag = "mesh_motion";
+    combined_opts.natural.push_back(natural);
+    combined_opts.robin.push_back(robin);
+
+    mm::HarmonicMeshMotionOptions equivalent_opts;
+    equivalent_opts.operator_tag = "mesh_motion";
+    auto equivalent_robin = robin;
+    // NaturalBC adds to RobinBC's boundary RHS, so alpha * target_x increases by 1.
+    equivalent_robin.target = {0.5, 1.0, 0.0};
+    equivalent_opts.robin.push_back(equivalent_robin);
+
+    const auto combined_residual = assemble(combined_opts);
+    const auto equivalent_residual = assemble(equivalent_opts);
+
+    ASSERT_EQ(combined_residual.size(), equivalent_residual.size());
+    for (std::size_t i = 0; i < combined_residual.size(); ++i) {
+        EXPECT_NEAR(combined_residual[i],
+                    equivalent_residual[i],
+                    1.0e-12);
+    }
+}
+
+TEST(MovingDomainPhysics, HarmonicMeshMotionRobinTargetMatchesEquivalentNaturalLoad)
+{
+    constexpr int marker = 12;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto d_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions::RobinBC robin;
+    robin.boundary_marker = marker;
+    robin.alpha = 4.0;
+    robin.target = {0.0, 1.5, -0.5};
+
+    mm::HarmonicMeshMotionOptions robin_opts;
+    robin_opts.operator_tag = "mesh_motion";
+    robin_opts.robin.push_back(robin);
+
+    mm::HarmonicMeshMotionOptions::RobinBC homogeneous_robin = robin;
+    homogeneous_robin.target = {0.0, 0.0, 0.0};
+
+    mm::HarmonicMeshMotionOptions::NaturalBC equivalent_load;
+    equivalent_load.boundary_marker = marker;
+    equivalent_load.value = {0.0, 6.0, -2.0};
+
+    mm::HarmonicMeshMotionOptions split_opts;
+    split_opts.operator_tag = "mesh_motion";
+    split_opts.robin.push_back(homogeneous_robin);
+    split_opts.natural.push_back(equivalent_load);
+
+    const auto assemble = [&](const mm::HarmonicMeshMotionOptions& opts) {
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(d_space, opts);
+        module.registerOn(system);
+        system.setup({}, makeSingleTetraSetupInputs());
+
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<FE::Real> u(static_cast<std::size_t>(n), 0.0);
+        for (std::size_t i = 0; i < u.size(); ++i) {
+            u[i] = static_cast<FE::Real>(0.01 * (static_cast<int>(i) + 1));
+        }
+
+        FE::systems::SystemStateView state;
+        state.u = std::span<const FE::Real>(u);
+        return residualVector(system, state, "mesh_motion");
+    };
+
+    const auto robin_residual = assemble(robin_opts);
+    const auto split_residual = assemble(split_opts);
+
+    ASSERT_EQ(robin_residual.size(), split_residual.size());
+    for (std::size_t i = 0; i < robin_residual.size(); ++i) {
+        EXPECT_NEAR(robin_residual[i], split_residual[i], 1.0e-12);
+    }
+}
+
+TEST(MovingDomainPhysics, HarmonicMeshMotionDirichletConflictsWithWeakBoundaryTerms)
+{
+    constexpr int marker = 13;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto d_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions::DirichletBC dirichlet;
+    dirichlet.boundary_marker = marker;
+    dirichlet.value = {0.0, 0.0, 0.0};
+
+    mm::HarmonicMeshMotionOptions::NaturalBC natural;
+    natural.boundary_marker = marker;
+    natural.value = {1.0, 0.0, 0.0};
+
+    mm::HarmonicMeshMotionOptions natural_conflict;
+    natural_conflict.operator_tag = "mesh_motion";
+    natural_conflict.dirichlet.push_back(dirichlet);
+    natural_conflict.natural.push_back(natural);
+    {
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(d_space, natural_conflict);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    mm::HarmonicMeshMotionOptions::RobinBC robin;
+    robin.boundary_marker = marker;
+    robin.alpha = 3.0;
+    robin.target = {0.0, 0.0, 0.0};
+
+    mm::HarmonicMeshMotionOptions robin_conflict;
+    robin_conflict.operator_tag = "mesh_motion";
+    robin_conflict.dirichlet.push_back(dirichlet);
+    robin_conflict.robin.push_back(robin);
+    {
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(d_space, robin_conflict);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+}
+
+TEST(MovingDomainPhysics, MeshMotionDirichletComponentCoefficientNamesUseComponentStyle)
+{
+    constexpr int marker = 14;
+    const std::array<mm::HarmonicMeshMotionOptions::ScalarValue, 3> values = {
+        mm::HarmonicMeshMotionOptions::ScalarValue{FE::forms::ScalarCoefficient(
+            [](FE::Real, FE::Real, FE::Real) { return 1.0; })},
+        mm::HarmonicMeshMotionOptions::ScalarValue{FE::forms::ScalarCoefficient(
+            [](FE::Real, FE::Real, FE::Real) { return 2.0; })},
+        mm::HarmonicMeshMotionOptions::ScalarValue{FE::forms::ScalarCoefficient(
+            [](FE::Real, FE::Real, FE::Real) { return 3.0; })},
+    };
+
+    auto components = FE::forms::bc::toVectorExpr(
+        values,
+        /*dim=*/3,
+        "mesh_displacement",
+        marker,
+        FE::forms::bc::ComponentValueNameStyle::Component);
+    FE::forms::bc::EssentialBC bc(marker, std::move(components), "d_mesh");
+    const auto strong = bc.getStrongConstraints(/*field_id=*/123);
+
+    ASSERT_EQ(strong.size(), 3u);
+    EXPECT_EQ(strong[0].value.toString(), "mesh_displacement_14_c0");
+    EXPECT_EQ(strong[1].value.toString(), "mesh_displacement_14_c1");
+    EXPECT_EQ(strong[2].value.toString(), "mesh_displacement_14_c2");
+}
+
+TEST(MovingDomainPhysics, HarmonicMeshMotionRejectsInvalidLiteralParameters)
+{
+    const auto mesh = makeMesh();
+    auto d_space = makeVelocitySpace(mesh);
+
+    const auto expect_invalid = [&](const mm::HarmonicMeshMotionOptions& opts,
+                                    std::string_view expected_message) {
+        FE::systems::FESystem system(mesh);
+        mm::HarmonicMeshMotionModule module(d_space, opts);
+        try {
+            module.registerOn(system);
+            FAIL() << "expected std::invalid_argument";
+        } catch (const std::invalid_argument& ex) {
+            EXPECT_NE(std::string(ex.what()).find(expected_message), std::string::npos)
+                << ex.what();
+        }
+    };
+
+    mm::HarmonicMeshMotionOptions zero_kappa;
+    zero_kappa.kappa = 0.0;
+    expect_invalid(zero_kappa, "kappa must be positive");
+
+    mm::HarmonicMeshMotionOptions negative_kappa;
+    negative_kappa.kappa = -1.0;
+    expect_invalid(negative_kappa, "kappa must be positive");
+
+    mm::HarmonicMeshMotionOptions zero_stiffness;
+    zero_stiffness.stiffness = 0.0;
+    expect_invalid(zero_stiffness, "stiffness must be positive");
+
+    mm::HarmonicMeshMotionOptions negative_stiffness;
+    negative_stiffness.stiffness = -1.0;
+    expect_invalid(negative_stiffness, "stiffness must be positive");
+
+    mm::HarmonicMeshMotionOptions conflicting_literals;
+    conflicting_literals.kappa = 2.0;
+    conflicting_literals.stiffness = 3.0;
+    expect_invalid(conflicting_literals,
+                   "both kappa and deprecated stiffness were set");
+}
+
 TEST(MovingDomainPhysics, PseudoElasticMeshMotionMatchesFiniteDifference)
 {
     const auto mesh = makeMesh();
@@ -647,6 +1069,149 @@ TEST(MovingDomainPhysics, PseudoElasticMeshMotionMatchesFiniteDifference)
     state.u = std::span<const FE::Real>(u);
     expectOperatorJacobianMatchesCentralFD(
         system, state, "mesh_motion", /*eps=*/1e-6, /*rtol=*/1e-6, /*atol=*/1e-10);
+}
+
+TEST(MovingDomainPhysics, PseudoElasticMeshMotionWeakBoundaryTermsOnSameMarkerAreAdditive)
+{
+    constexpr int marker = 15;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto d_space = makeVelocitySpace(mesh);
+
+    mm::PseudoElasticMeshMotionOptions::NaturalBC natural;
+    natural.boundary_marker = marker;
+    natural.value = {0.0, 2.0, 0.0};
+
+    mm::PseudoElasticMeshMotionOptions::RobinBC robin;
+    robin.boundary_marker = marker;
+    robin.alpha = 4.0;
+    robin.target = {1.0, 0.0, 0.0};
+
+    const auto assemble = [&](const mm::PseudoElasticMeshMotionOptions& opts) {
+        FE::systems::FESystem system(mesh);
+        mm::PseudoElasticMeshMotionModule module(d_space, opts);
+        module.registerOn(system);
+        system.setup({}, makeSingleTetraSetupInputs());
+
+        std::vector<FE::Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        FE::systems::SystemStateView state;
+        state.u = std::span<const FE::Real>(u);
+        return residualVector(system, state, "mesh_motion");
+    };
+
+    mm::PseudoElasticMeshMotionOptions combined_opts;
+    combined_opts.operator_tag = "mesh_motion";
+    combined_opts.natural.push_back(natural);
+    combined_opts.robin.push_back(robin);
+
+    mm::PseudoElasticMeshMotionOptions equivalent_opts;
+    equivalent_opts.operator_tag = "mesh_motion";
+    auto equivalent_robin = robin;
+    equivalent_robin.target = {1.0, 0.5, 0.0};
+    equivalent_opts.robin.push_back(equivalent_robin);
+
+    const auto combined_residual = assemble(combined_opts);
+    const auto equivalent_residual = assemble(equivalent_opts);
+
+    ASSERT_EQ(combined_residual.size(), equivalent_residual.size());
+    for (std::size_t i = 0; i < combined_residual.size(); ++i) {
+        EXPECT_NEAR(combined_residual[i],
+                    equivalent_residual[i],
+                    1.0e-12);
+    }
+}
+
+TEST(MovingDomainPhysics, MeshMotionModulesInstallEquivalentBoundaryConditionDescriptors)
+{
+    auto mesh = makeMesh();
+    auto d_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions harmonic_opts;
+    harmonic_opts.operator_tag = "mesh_motion";
+    harmonic_opts.natural.push_back(mm::HarmonicMeshMotionOptions::NaturalBC{
+        .boundary_marker = 21,
+        .value = {1.0, -2.0, 0.5},
+    });
+    harmonic_opts.robin.push_back(mm::HarmonicMeshMotionOptions::RobinBC{
+        .boundary_marker = 22,
+        .alpha = 3.0,
+        .target = {0.25, -0.5, 1.0},
+    });
+    harmonic_opts.dirichlet.push_back(mm::HarmonicMeshMotionOptions::DirichletBC{
+        .boundary_marker = 23,
+        .value = {0.0, 0.1, -0.2},
+    });
+
+    mm::PseudoElasticMeshMotionOptions pseudo_opts;
+    pseudo_opts.operator_tag = "mesh_motion";
+    pseudo_opts.natural.push_back(mm::PseudoElasticMeshMotionOptions::NaturalBC{
+        .boundary_marker = 21,
+        .value = {1.0, -2.0, 0.5},
+    });
+    pseudo_opts.robin.push_back(mm::PseudoElasticMeshMotionOptions::RobinBC{
+        .boundary_marker = 22,
+        .alpha = 3.0,
+        .target = {0.25, -0.5, 1.0},
+    });
+    pseudo_opts.dirichlet.push_back(mm::PseudoElasticMeshMotionOptions::DirichletBC{
+        .boundary_marker = 23,
+        .value = {0.0, 0.1, -0.2},
+    });
+
+    FE::systems::FESystem harmonic_system(mesh);
+    mm::HarmonicMeshMotionModule harmonic_module(d_space, harmonic_opts);
+    harmonic_module.registerOn(harmonic_system);
+
+    FE::systems::FESystem pseudo_system(mesh);
+    mm::PseudoElasticMeshMotionModule pseudo_module(d_space, pseudo_opts);
+    pseudo_module.registerOn(pseudo_system);
+
+    const auto& harmonic_desc = harmonic_system.boundaryConditionDescriptors();
+    const auto& pseudo_desc = pseudo_system.boundaryConditionDescriptors();
+    ASSERT_EQ(harmonic_desc.size(), pseudo_desc.size());
+    ASSERT_EQ(harmonic_desc.size(), 5u);
+
+    for (std::size_t i = 0; i < harmonic_desc.size(); ++i) {
+        EXPECT_EQ(harmonic_desc[i].boundary_marker, pseudo_desc[i].boundary_marker);
+        EXPECT_EQ(harmonic_desc[i].component, pseudo_desc[i].component);
+        EXPECT_EQ(harmonic_desc[i].trace_kind, pseudo_desc[i].trace_kind);
+        EXPECT_EQ(harmonic_desc[i].enforcement_kind, pseudo_desc[i].enforcement_kind);
+        EXPECT_EQ(harmonic_desc[i].source, pseudo_desc[i].source);
+    }
+}
+
+TEST(MovingDomainPhysics, PseudoElasticMeshMotionRejectsInvalidLiteralParameters)
+{
+    const auto mesh = makeMesh();
+    auto d_space = makeVelocitySpace(mesh);
+
+    const auto expect_invalid = [&](const mm::PseudoElasticMeshMotionOptions& opts,
+                                    std::string_view expected_message) {
+        FE::systems::FESystem system(mesh);
+        mm::PseudoElasticMeshMotionModule module(d_space, opts);
+        try {
+            module.registerOn(system);
+            FAIL() << "expected std::invalid_argument";
+        } catch (const std::invalid_argument& ex) {
+            EXPECT_NE(std::string(ex.what()).find(expected_message), std::string::npos)
+                << ex.what();
+        }
+    };
+
+    mm::PseudoElasticMeshMotionOptions zero_lambda;
+    zero_lambda.lambda_mesh = 0.0;
+    expect_invalid(zero_lambda, "lambda_mesh must be positive");
+
+    mm::PseudoElasticMeshMotionOptions negative_lambda;
+    negative_lambda.lambda_mesh = -1.0;
+    expect_invalid(negative_lambda, "lambda_mesh must be positive");
+
+    mm::PseudoElasticMeshMotionOptions zero_mu;
+    zero_mu.mu_mesh = 0.0;
+    expect_invalid(zero_mu, "mu_mesh must be positive");
+
+    mm::PseudoElasticMeshMotionOptions negative_mu;
+    negative_mu.mu_mesh = -1.0;
+    expect_invalid(negative_mu, "mu_mesh must be positive");
 }
 
 TEST(MovingDomainPhysics, CoupledALEAndHarmonicMeshMotionShareDisplacementUnknown)

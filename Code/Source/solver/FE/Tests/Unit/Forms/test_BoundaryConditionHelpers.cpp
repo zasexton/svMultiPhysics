@@ -8,6 +8,7 @@
 #include "Forms/BoundaryConditions.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/NitscheBC.h"
+#include "Forms/PointEvaluator.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
@@ -742,6 +743,33 @@ TEST(FormsBoundaryConditions, ApplyNitscheDirichletPoissonValue_AddsBoundaryTerm
 
     EXPECT_EQ(count_marker_4, 3);
     EXPECT_TRUE(saw_named_value);
+}
+
+TEST(FormsBoundaryConditions, BuildTraceNitschePenaltyScalesWithPolynomialOrder)
+{
+    auto p1_space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/1);
+    auto p3_space = svmp::FE::spaces::H1Space(ElementType::Tetra4, /*order=*/3);
+    const auto u_p1 = svmp::FE::forms::FormExpr::trialFunction(p1_space, "u_p1");
+    const auto u_p3 = svmp::FE::forms::FormExpr::trialFunction(p3_space, "u_p3");
+    const auto weight = svmp::FE::forms::FormExpr::constant(2.0);
+
+    svmp::FE::forms::bc::TraceNitscheOptions opts;
+    opts.gamma = 5.0;
+    opts.scale_with_p = true;
+
+    const auto p1_penalty =
+        svmp::FE::forms::bc::buildTraceNitschePenalty(weight, u_p1, opts);
+    const auto p3_penalty =
+        svmp::FE::forms::bc::buildTraceNitschePenalty(weight, u_p3, opts);
+
+    const svmp::FE::forms::PointEvalContext ctx;
+    EXPECT_DOUBLE_EQ(svmp::FE::forms::evaluateScalarAt(p1_penalty, ctx), 10.0);
+    EXPECT_DOUBLE_EQ(svmp::FE::forms::evaluateScalarAt(p3_penalty, ctx), 90.0);
+
+    opts.scale_with_p = false;
+    const auto unscaled =
+        svmp::FE::forms::bc::buildTraceNitschePenalty(weight, u_p3, opts);
+    EXPECT_DOUBLE_EQ(svmp::FE::forms::evaluateScalarAt(unscaled, ctx), 10.0);
 }
 
 TEST(FormsBoundaryConditions, ApplyNitscheDirichletPoissonValue_ThrowsOnInvalidMarker)

@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -369,6 +370,47 @@ TEST(PoissonModule, CoupledNeumannRCRUsesModernAuxiliaryPath)
 
     const auto out_slot = system.auxiliaryOutputSlotOf("poisson_rcr_7", "flux");
     EXPECT_NE(out_slot, std::string::npos);
+}
+
+TEST(PoissonModule, BoundaryScalarValueAcceptsFormExpr)
+{
+    constexpr int marker = 8;
+    auto mesh = std::make_shared<FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    FE::systems::FESystem system(mesh);
+
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, /*order=*/1);
+    formulations::poisson::PoissonOptions opts;
+    opts.field_name = "u";
+    opts.diffusion = 1.0;
+    opts.source = 0.0;
+    opts.neumann.push_back(formulations::poisson::PoissonOptions::NeumannBC{
+        .boundary_marker = marker,
+        .flux = FE::forms::FormExpr::constant(2.0),
+    });
+
+    formulations::poisson::PoissonModule module(space, opts);
+    module.registerOn(system);
+    system.setup({}, makeSingleTetraSetupInputs());
+
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_EQ(n, 4);
+    std::vector<FE::Real> u(static_cast<std::size_t>(n), 0.0);
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(u);
+
+    FE::assembly::DenseVectorView residual(n);
+    residual.zero();
+    FE::systems::AssemblyRequest req;
+    req.op = "equations";
+    req.want_vector = true;
+    const auto result = system.assemble(req, state, nullptr, &residual);
+    ASSERT_TRUE(result.success) << result.error_message;
+
+    FE::Real norm2 = 0.0;
+    for (FE::GlobalIndex i = 0; i < n; ++i) {
+        norm2 += residual[i] * residual[i];
+    }
+    EXPECT_GT(norm2, 0.0);
 }
 
 TEST(PoissonModule, OrdinaryPoissonDoesNotRegisterDarcyFluxPostprocessing)

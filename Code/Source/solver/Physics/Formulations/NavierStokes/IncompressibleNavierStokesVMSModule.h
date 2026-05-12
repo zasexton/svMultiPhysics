@@ -40,6 +40,7 @@
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -52,6 +53,16 @@ namespace navier_stokes {
 enum class ALEMeshVelocitySource {
     PrescribedData,
     CoupledDisplacement
+};
+
+enum class FreeSurfaceImplementation : std::uint8_t {
+    FittedALE,
+    UnfittedLevelSet
+};
+
+enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
+    None,
+    Penalty
 };
 
 struct IncompressibleNavierStokesVMSOptions {
@@ -94,6 +105,38 @@ struct IncompressibleNavierStokesVMSOptions {
 
         // Dimensionless backflow coefficient (0 disables the term).
         ScalarValue backflow_beta{0.0};
+    };
+
+    /**
+     * @brief Physics-side free-surface relation on a fitted or embedded interface
+     *
+     * This option only declares Navier-Stokes free-surface equations.  The FE
+     * layer remains physics-agnostic and supplies the generic form vocabulary,
+     * moving-geometry terminals, and integration domains.
+     */
+    struct FreeSurfaceBoundary {
+        FreeSurfaceImplementation implementation{FreeSurfaceImplementation::FittedALE};
+
+        // Fitted ALE free surfaces integrate on ds(boundary_marker).
+        int boundary_marker{-1};
+
+        // Unfitted/level-set free surfaces integrate on dI(interface_marker).
+        int interface_marker{-1};
+        std::string level_set_field_name{"level_set"};
+
+        // Dynamic stress balance: sigma(u,p)n = (-p_ext + gamma*kappa)n.
+        ScalarValue external_pressure{0.0};
+        ScalarValue surface_tension{0.0};
+
+        // Fitted ALE can use a supplied curvature expression/value.  Unfitted
+        // level-set surfaces use meanCurvatureFromLevelSet(phi) by default.
+        ScalarValue curvature{0.0};
+        bool use_level_set_curvature{true};
+
+        // Kinematic relation: (u - meshVelocity()) · n = 0.
+        FreeSurfaceKinematicEnforcement kinematic_enforcement{
+            FreeSurfaceKinematicEnforcement::None};
+        ScalarValue kinematic_penalty{0.0};
     };
 
     /**
@@ -214,6 +257,7 @@ struct IncompressibleNavierStokesVMSOptions {
     std::vector<TractionNeumannBC> traction_neumann{};
     std::vector<TractionRobinBC> traction_robin{};
     std::vector<PressureOutflowBC> pressure_outflow{};
+    std::vector<FreeSurfaceBoundary> free_surface{};
     std::vector<CoupledRCROutflowBC> coupled_outflow_rcr{};
     std::vector<CoupledRCRCROutflowBC> coupled_outflow_rcrcr{};
 

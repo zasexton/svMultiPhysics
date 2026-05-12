@@ -163,6 +163,23 @@ For ALE forms, spell out transport and moving-volume terms directly, such as
 `u - meshVelocity()` and `rho * div(meshVelocity()) * inner(u, v)`, so the
 mathematics remains visible in formulation modules.
 
+### Trace and Projection Helpers
+
+Status: `implemented/public`.
+
+| Vocabulary | Notes |
+|------------|-------|
+| `normalTrace(u, n)`, `normalTrace(u)` | Scalar normal component, using explicit `n` or the active facet normal |
+| `normalProjection(u, n)`, `normalProjection(u)` | Normal vector projection |
+| `projectNormal(u, n)`, `projectNormal(u)` | Alias for `normalProjection` |
+| `tangentialProjection(u, n)`, `tangentialProjection(u)` | Tangential vector projection |
+| `projectTangent(u, n)`, `projectTangent(u)` | Alias for `tangentialProjection` |
+| `tangentialTrace(u, n)`, `tangentialTrace(u)` | Tangential vector trace/projection |
+
+The default overloads use `FormExpr::normal()`. Use explicit normals for
+interface-side, level-set, or frame-specific laws where the orientation should
+be visible in the formulation.
+
 ### Measures
 
 Status: `implemented/public`.
@@ -191,6 +208,7 @@ Status: `implemented/public`.
 | `surfaceGradient(f, n)` | Projected surface gradient helper |
 | `surfaceDivergence(u, n)` | Projected surface divergence helper |
 | `surfaceLaplacian(f, n)` | Surface Laplacian helper |
+| `meanCurvatureFromNormal(n)`, `curvatureVectorFromNormal(n)` | Curvature helpers from a supplied unit normal |
 | `unitNormalFromLevelSet(phi)`, `meanCurvatureFromLevelSet(phi)` | Level-set geometry helpers |
 | `safeNorm(v)`, `safeNormalize(v)` | Regularized vector norm helpers |
 
@@ -541,15 +559,13 @@ authoring vocabulary. They are ordered by expected leverage.
 Status: `planned`.
 
 Current public pieces include side restrictions, `jump`, `avg`,
-`weightedAverage`, `normalComponent`, scalar trace BC helpers, and `.dI`.
+`weightedAverage`, `normalComponent`, normal/tangential trace-projection
+helpers, scalar trace BC helpers, and `.dI`.
 Missing vocabulary:
 
 | Planned vocabulary | Purpose |
 |--------------------|---------|
 | `facetTrace(expr, side)` | Explicit side/trace restriction distinct from tensor `trace` |
-| `normalTrace(u)` | Normal scalar/vector trace with documented orientation |
-| `tangentialTrace(u)` | Tangential trace for vector fields |
-| `projectNormal(u)`, `projectTangent(u)` | Normal/tangential projection helpers |
 | `normalJump(u)`, `tangentialJump(u)` | Orientation-aware trace jumps |
 | Side-specific normals/orientation metadata | Robust interface semantics for H(div), H(curl), slip, contact, and Nitsche laws |
 

@@ -33,16 +33,6 @@ namespace Factories {
 
 namespace detail {
 
-[[nodiscard]] inline std::string markerName(std::string_view prefix, int boundary_marker)
-{
-    std::string out;
-    out.reserve(prefix.size() + 1 + 20);
-    out.append(prefix.data(), prefix.size());
-    out.push_back('_');
-    out.append(std::to_string(boundary_marker));
-    return out;
-}
-
 [[nodiscard]] inline std::shared_ptr<FE::systems::BuiltAuxiliaryModel> rcrNeumannModel()
 {
     static const auto model = FE::systems::aux::model("poisson_rcr_neumann", [](FE::systems::ModelFacade& m) {
@@ -77,7 +67,9 @@ namespace detail {
 {
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toNaturalBC");
-    const auto flux = FE::forms::bc::toScalarExpr(bc.flux, detail::markerName("poisson_neumann", marker));
+    const auto flux = FE::forms::bc::toScalarExpr(
+        bc.flux,
+        FE::forms::bc::markerValueName("poisson_neumann", marker));
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, flux);
 }
 
@@ -85,8 +77,12 @@ namespace detail {
     const PoissonOptions::RobinBC& bc)
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toRobinBC");
-    const auto alpha = FE::forms::bc::toScalarExpr(bc.alpha, detail::markerName("poisson_robin_alpha", marker));
-    const auto rhs = FE::forms::bc::toScalarExpr(bc.rhs, detail::markerName("poisson_robin_rhs", marker));
+    const auto alpha = FE::forms::bc::toScalarExpr(
+        bc.alpha,
+        FE::forms::bc::markerValueName("poisson_robin_alpha", marker));
+    const auto rhs = FE::forms::bc::toScalarExpr(
+        bc.rhs,
+        FE::forms::bc::markerValueName("poisson_robin_rhs", marker));
     return std::make_unique<FE::forms::bc::RobinBC>(marker, alpha, rhs);
 }
 
@@ -96,7 +92,9 @@ namespace detail {
 {
     const int marker =
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toEssentialBC");
-    const auto value = FE::forms::bc::toScalarExpr(bc.value, detail::markerName("poisson_dirichlet", marker));
+    const auto value = FE::forms::bc::toScalarExpr(
+        bc.value,
+        FE::forms::bc::markerValueName("poisson_dirichlet", marker));
     return std::make_unique<FE::forms::bc::EssentialBC>(marker, value, std::string(symbol));
 }
 
@@ -109,7 +107,9 @@ namespace detail {
 {
     const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "poisson::Factories::toNitscheBC");
     const auto value =
-        FE::forms::bc::toScalarExpr(bc.value, detail::markerName("poisson_nitsche_dirichlet", marker));
+        FE::forms::bc::toScalarExpr(
+            bc.value,
+            FE::forms::bc::markerValueName("poisson_nitsche_dirichlet", marker));
     return std::make_unique<FE::forms::bc::ScalarNitscheBC>(
         marker, value, diffusion_coeff, penalty_gamma, symmetric, scale_with_p);
 }
