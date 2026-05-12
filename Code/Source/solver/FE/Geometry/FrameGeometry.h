@@ -50,6 +50,7 @@ struct FaceGeometryData {
     std::vector<Vector3D> normals{};
     std::vector<Real> surface_measures{};
     std::vector<Matrix3x3> surface_jacobians{};
+    std::vector<Real> mean_curvatures{};
 };
 
 struct SurfaceTransform {

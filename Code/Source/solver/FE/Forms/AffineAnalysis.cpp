@@ -106,6 +106,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::CurrentJacobianDeterminant:
         case FormExprType::ReferenceJacobianDeterminant:
         case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeanCurvature:
         case FormExprType::ReferenceNormal:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:

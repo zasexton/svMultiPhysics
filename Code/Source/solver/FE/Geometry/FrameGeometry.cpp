@@ -574,6 +574,105 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     return out;
 }
 
+[[nodiscard]] math::Vector<Real, 3> physicalPointOnFace(
+    const GeometryMapping& mapping,
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const math::Vector<Real, 3>& canonical_point,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    const auto facet_coords =
+        canonicalToFacetCoordinates(face_type, canonical_point, align_facet_to_reference);
+    const auto xi = elements::ElementTransform::facet_to_reference(
+        cell_type, static_cast<int>(local_face_id), facet_coords);
+    return mapping.map_to_physical(xi);
+}
+
+[[nodiscard]] math::Vector<Real, 3> surfaceJacobianColumn(
+    const Matrix3x3& surface_jacobian,
+    std::size_t column) noexcept
+{
+    return math::Vector<Real, 3>{
+        surface_jacobian[0][column],
+        surface_jacobian[1][column],
+        surface_jacobian[2][column]};
+}
+
+[[nodiscard]] Real meanCurvatureFromFaceGeometry(
+    const GeometryMapping& mapping,
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const math::Vector<Real, 3>& canonical_point,
+    const Vector3D& normal,
+    const Matrix3x3& surface_jacobian,
+    std::span<const LocalIndex> align_facet_to_reference)
+{
+    const int face_dim = (face_type == ElementType::Line2) ? 1 : 2;
+    const auto n = toMathVector(normal);
+    const Real step = Real(1e-5);
+    const Real step2 = step * step;
+
+    auto shifted = [&](int direction, Real delta) {
+        auto point = canonical_point;
+        point[static_cast<std::size_t>(direction)] += delta;
+        return physicalPointOnFace(mapping,
+                                   cell_type,
+                                   local_face_id,
+                                   face_type,
+                                   point,
+                                   align_facet_to_reference);
+    };
+
+    const auto x0 = physicalPointOnFace(mapping,
+                                        cell_type,
+                                        local_face_id,
+                                        face_type,
+                                        canonical_point,
+                                        align_facet_to_reference);
+    const auto t0 = surfaceJacobianColumn(surface_jacobian, 0u);
+    const Real E = t0.dot(t0);
+    if (E <= detail::kDegenerateTol) {
+        return Real(0);
+    }
+
+    const auto xuu = (shifted(0, step) - x0 * Real(2) + shifted(0, -step)) / step2;
+    if (face_dim == 1) {
+        return -n.dot(xuu) / E;
+    }
+
+    const auto t1 = surfaceJacobianColumn(surface_jacobian, 1u);
+    const Real F = t0.dot(t1);
+    const Real G = t1.dot(t1);
+    const Real det_first_form = E * G - F * F;
+    if (std::abs(det_first_form) <= detail::kDegenerateTol) {
+        return Real(0);
+    }
+
+    auto shifted2 = [&](Real du, Real dv) {
+        auto point = canonical_point;
+        point[0] += du;
+        point[1] += dv;
+        return physicalPointOnFace(mapping,
+                                   cell_type,
+                                   local_face_id,
+                                   face_type,
+                                   point,
+                                   align_facet_to_reference);
+    };
+
+    const auto xvv = (shifted(1, step) - x0 * Real(2) + shifted(1, -step)) / step2;
+    const auto xuv = (shifted2(step, step) - shifted2(step, -step) -
+                      shifted2(-step, step) + shifted2(-step, -step)) /
+                     (Real(4) * step2);
+
+    const Real e = n.dot(xuu);
+    const Real f = n.dot(xuv);
+    const Real g = n.dot(xvv);
+    return -(e * G - Real(2) * f * F + g * E) / det_first_form;
+}
+
 [[nodiscard]] FaceGeometryData evaluateFaceFrameImpl(
     const GeometryMapping& mapping,
     ElementType cell_type,
@@ -595,6 +694,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     data.normals.resize(static_cast<std::size_t>(n_qpts));
     data.surface_measures.resize(static_cast<std::size_t>(n_qpts));
     data.surface_jacobians.resize(static_cast<std::size_t>(n_qpts));
+    data.mean_curvatures.resize(static_cast<std::size_t>(n_qpts));
 
     const auto [unused_vertices, ref_face_coords] =
         elements::ElementTransform::facet_vertices(cell_type, static_cast<int>(local_face_id));
@@ -672,6 +772,14 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
                                                                canonical_point,
                                                                surface.normal,
                                                                align_facet_to_reference);
+        data.mean_curvatures[qidx] = meanCurvatureFromFaceGeometry(mapping,
+                                                                   cell_type,
+                                                                   local_face_id,
+                                                                   face_type,
+                                                                   canonical_point,
+                                                                   surface.normal,
+                                                                   data.surface_jacobians[qidx],
+                                                                   align_facet_to_reference);
     }
 
     return data;

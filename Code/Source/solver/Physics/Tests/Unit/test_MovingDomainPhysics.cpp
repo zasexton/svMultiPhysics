@@ -19,8 +19,12 @@
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
+#include "FE/Basis/LagrangeBasis.h"
 #include "FE/Dofs/DofMap.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/Geometry/FrameGeometry.h"
+#include "FE/Geometry/IsoparametricMapping.h"
+#include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceFactory.h"
@@ -678,6 +682,66 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+}
+
+TEST(MovingDomainPhysics, CurrentFaceGeometryMeanCurvatureTracksCurvedHexFace)
+{
+    auto basis = std::make_shared<FE::basis::LagrangeBasis>(FE::ElementType::Hex27, 2);
+    std::vector<FE::math::Vector<FE::Real, 3>> nodes;
+    nodes.reserve(basis->nodes().size());
+
+    constexpr FE::Real radius = 2.0;
+    for (const auto& xi : basis->nodes()) {
+        const FE::Real x = xi[0];
+        const FE::Real y = xi[1];
+        const FE::Real zeta = xi[2];
+        const FE::Real top_offset =
+            ((FE::Real(1) + zeta) * (x * x + y * y)) / (FE::Real(4) * radius);
+        nodes.push_back({x, y, zeta - top_offset});
+    }
+
+    FE::geometry::IsoparametricMapping mapping(basis, nodes);
+    const auto quad = FE::quadrature::QuadratureFactory::create(FE::ElementType::Quad4, 2);
+    const auto face = FE::geometry::evaluateFaceFrame(mapping,
+                                                      FE::ElementType::Hex27,
+                                                      /*local_face_id=*/1,
+                                                      FE::ElementType::Quad4,
+                                                      *quad);
+
+    ASSERT_EQ(face.mean_curvatures.size(), quad->num_points());
+    for (std::size_t q = 0; q < quad->num_points(); ++q) {
+        const auto point = quad->points()[q];
+        const FE::Real r2 = point[0] * point[0] + point[1] * point[1];
+        const FE::Real grad2 = r2 / (radius * radius);
+        const FE::Real expected =
+            FE::Real(2) * (FE::Real(2) + grad2) /
+            (radius * std::pow(FE::Real(1) + grad2, FE::Real(1.5)));
+        EXPECT_NEAR(face.mean_curvatures[q], expected, 1e-4);
+    }
+}
+
+TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceCanUseCurrentGeometryCurvature)
+{
+    constexpr int marker = 35;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .surface_tension = 0.5,
+        .use_current_geometry_curvature = true,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeanCurvature));
 }
 
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoundaryResidual)

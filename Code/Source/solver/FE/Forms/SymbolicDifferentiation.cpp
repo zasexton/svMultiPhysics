@@ -953,6 +953,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::CurrentJacobianDeterminant:
             case FormExprType::ReferenceJacobianDeterminant:
             case FormExprType::CurrentNormal:
+            case FormExprType::CurrentMeanCurvature:
             case FormExprType::ReferenceNormal:
             case FormExprType::CurrentMeasure:
             case FormExprType::ReferenceMeasure:
@@ -1900,6 +1901,7 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
             case FormExprType::CurrentJacobianDeterminant:
             case FormExprType::ReferenceJacobianDeterminant:
             case FormExprType::CurrentNormal:
+            case FormExprType::CurrentMeanCurvature:
             case FormExprType::ReferenceNormal:
             case FormExprType::CurrentMeasure:
             case FormExprType::ReferenceMeasure:

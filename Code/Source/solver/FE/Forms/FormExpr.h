@@ -285,6 +285,7 @@ struct SymbolicOptions {
         CurrentJacobianDeterminant,
         ReferenceJacobianDeterminant,
         CurrentNormal,
+        CurrentMeanCurvature,
         ReferenceNormal,
         CurrentMeasure,
         ReferenceMeasure,
@@ -582,6 +583,7 @@ public:
         static FormExpr currentJacobianDeterminant();
         static FormExpr referenceJacobianDeterminant();
         static FormExpr currentNormal();
+        static FormExpr currentMeanCurvature();
         static FormExpr referenceNormal();
         static FormExpr currentMeasure();
         static FormExpr referenceMeasure();

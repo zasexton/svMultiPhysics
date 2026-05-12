@@ -595,6 +595,7 @@ private:
         std::vector<AssemblyContext::Vector3D> normals{};
         std::vector<Real> surface_measures{};
         std::vector<AssemblyContext::Matrix3x3> surface_jacobians{};
+        std::vector<Real> mean_curvatures{};
         std::vector<std::array<Real, 3>> cell_coords{};
     };
 

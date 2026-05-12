@@ -269,6 +269,7 @@ bool isGeometrySensitivityTerminal(FormExprType type) noexcept
         case FormExprType::CurrentJacobian:
         case FormExprType::CurrentJacobianDeterminant:
         case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeanCurvature:
         case FormExprType::CurrentMeasure:
         case FormExprType::SurfaceJacobian:
         case FormExprType::MeshVelocity:
@@ -411,6 +412,9 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 required |= RequiredData::ReferenceMeasures;
                 break;
             case FormExprType::CurrentNormal:
+                required |= RequiredData::CurrentNormals;
+                break;
+            case FormExprType::CurrentMeanCurvature:
                 required |= RequiredData::CurrentNormals;
                 break;
             case FormExprType::ReferenceNormal:

@@ -277,7 +277,7 @@ Checklist:
   - [x] prescribed tangential motion
 - [x] Add penalty enforcement for `(u - w_mesh) . n = 0`.
 - [x] Add Nitsche enforcement if needed after penalty path is verified.
-- [ ] Add fitted-surface curvature from current mesh geometry.
+- [x] Add fitted-surface curvature from current mesh geometry.
 - [ ] Add current-normal/current-measure support to fitted dynamic stress path.
 - [ ] Add input translation for fitted ALE free-surface kinematic options.
 - [ ] Add coupled fluid plus mesh-motion setup tests.

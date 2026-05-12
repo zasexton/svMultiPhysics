@@ -170,6 +170,7 @@ FormExpr rebuildWithIndexSubstitution(const std::shared_ptr<FormExprNode>& node,
         case FormExprType::CurrentJacobianDeterminant:
         case FormExprType::ReferenceJacobianDeterminant:
         case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeanCurvature:
         case FormExprType::ReferenceNormal:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:

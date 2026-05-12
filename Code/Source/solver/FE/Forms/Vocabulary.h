@@ -295,6 +295,7 @@ inline FormExpr referenceJacobian() { return FormExpr::referenceJacobian(); }
 inline FormExpr currentJacobianDeterminant() { return FormExpr::currentJacobianDeterminant(); }
 inline FormExpr referenceJacobianDeterminant() { return FormExpr::referenceJacobianDeterminant(); }
 inline FormExpr currentNormal() { return FormExpr::currentNormal(); }
+inline FormExpr currentMeanCurvature() { return FormExpr::currentMeanCurvature(); }
 inline FormExpr referenceNormal() { return FormExpr::referenceNormal(); }
 inline FormExpr currentMeasure() { return FormExpr::currentMeasure(); }
 inline FormExpr referenceMeasure() { return FormExpr::referenceMeasure(); }

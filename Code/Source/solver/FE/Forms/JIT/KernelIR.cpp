@@ -74,6 +74,7 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::CurrentJacobianDeterminant: return "CurrentJacobianDeterminant";
         case FormExprType::ReferenceJacobianDeterminant: return "ReferenceJacobianDeterminant";
         case FormExprType::CurrentNormal: return "CurrentNormal";
+        case FormExprType::CurrentMeanCurvature: return "CurrentMeanCurvature";
         case FormExprType::ReferenceNormal: return "ReferenceNormal";
         case FormExprType::CurrentMeasure: return "CurrentMeasure";
         case FormExprType::ReferenceMeasure: return "ReferenceMeasure";

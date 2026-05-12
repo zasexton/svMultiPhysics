@@ -2324,6 +2324,11 @@ FormExpr FormExpr::currentNormal()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentNormal, "n_current"));
 }
 
+FormExpr FormExpr::currentMeanCurvature()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CurrentMeanCurvature, "kappa_current"));
+}
+
 FormExpr FormExpr::referenceNormal()
 {
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferenceNormal, "n_reference"));

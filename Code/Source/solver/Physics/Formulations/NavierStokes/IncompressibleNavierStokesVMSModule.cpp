@@ -156,14 +156,20 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     const auto gamma = bc::toScalarExpr(
         bc.surface_tension,
         freeSurfaceValueName("ns_free_surface_surface_tension", bc));
-    const auto curvature =
-        bc::isZeroConstantScalarValue(bc.surface_tension)
-            ? FormExpr::constant(0.0)
-            : ((isUnfittedLevelSet(bc) && bc.use_level_set_curvature)
-                   ? meanCurvatureFromLevelSet(phi)
-                   : bc::toScalarExpr(
-                         bc.curvature,
-                         freeSurfaceValueName("ns_free_surface_curvature", bc)));
+    const auto curvature = [&]() {
+        if (bc::isZeroConstantScalarValue(bc.surface_tension)) {
+            return FormExpr::constant(0.0);
+        }
+        if (isUnfittedLevelSet(bc) && bc.use_level_set_curvature) {
+            return meanCurvatureFromLevelSet(phi);
+        }
+        if (!isUnfittedLevelSet(bc) && bc.use_current_geometry_curvature) {
+            return currentMeanCurvature();
+        }
+        return bc::toScalarExpr(
+            bc.curvature,
+            freeSurfaceValueName("ns_free_surface_curvature", bc));
+    }();
 
     const auto traction = (-p_ext + gamma * curvature) * n;
     momentum_form = momentum_form - integrateOnFreeSurface(inner(traction, v), bc);

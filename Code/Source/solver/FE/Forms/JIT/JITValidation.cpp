@@ -229,6 +229,7 @@ struct ConstantMatrix {
         case FormExprType::JacobianDeterminant:
         case FormExprType::CurrentJacobianDeterminant:
         case FormExprType::ReferenceJacobianDeterminant:
+        case FormExprType::CurrentMeanCurvature:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:
         case FormExprType::CurrentMeasureVariation:

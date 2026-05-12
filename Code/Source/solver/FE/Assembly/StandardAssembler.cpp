@@ -6173,6 +6173,7 @@ void StandardAssembler::computeFaceFrameGeometry(
     scratch.normals = data.normals;
     scratch.surface_measures = data.surface_measures;
     scratch.surface_jacobians = data.surface_jacobians;
+    scratch.mean_curvatures = data.mean_curvatures;
 }
 
 void StandardAssembler::prepareFrameExplicitGeometry(
@@ -11676,6 +11677,7 @@ void StandardAssembler::prepareContextFace(
     }
     if (hasFlag(required_data, RequiredData::CurrentNormals)) {
         context.setCurrentNormals(scratch_current_face_geometry_.normals);
+        context.setCurrentMeanCurvatures(scratch_current_face_geometry_.mean_curvatures);
     }
     if (hasFlag(required_data, RequiredData::SurfaceJacobians)) {
         if (need_current_face) {

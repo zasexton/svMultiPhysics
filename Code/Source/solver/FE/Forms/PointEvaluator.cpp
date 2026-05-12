@@ -412,6 +412,7 @@ struct DualValue {
         case FormExprType::CurrentJacobianDeterminant:
         case FormExprType::ReferenceJacobianDeterminant:
         case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeanCurvature:
         case FormExprType::ReferenceNormal:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:
@@ -776,6 +777,7 @@ struct DualValue {
         case FormExprType::CurrentJacobianDeterminant:
         case FormExprType::ReferenceJacobianDeterminant:
         case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeanCurvature:
         case FormExprType::ReferenceNormal:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:

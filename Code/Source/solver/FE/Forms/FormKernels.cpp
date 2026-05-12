@@ -5144,6 +5144,12 @@ EvalValue<Real> evalRealDispatchCurrentNormal(const FormExprNode&, const EvalEnv
     return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::currentNormal);
 }
 
+EvalValue<Real> evalRealDispatchCurrentMeanCurvature(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, ctx.currentMeanCurvature(q)};
+}
+
 EvalValue<Real> evalRealDispatchReferenceNormal(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
 {
     return evalRealVectorTerminal(env, side, q, &assembly::AssemblyContext::referenceNormal);
@@ -5320,6 +5326,7 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::CurrentJacobianDeterminant)] = &evalRealDispatchCurrentMeasure;
         table[static_cast<std::size_t>(FormExprType::ReferenceJacobianDeterminant)] = &evalRealDispatchReferenceMeasure;
         table[static_cast<std::size_t>(FormExprType::CurrentNormal)] = &evalRealDispatchCurrentNormal;
+        table[static_cast<std::size_t>(FormExprType::CurrentMeanCurvature)] = &evalRealDispatchCurrentMeanCurvature;
         table[static_cast<std::size_t>(FormExprType::ReferenceNormal)] = &evalRealDispatchReferenceNormal;
         table[static_cast<std::size_t>(FormExprType::CurrentMeasure)] = &evalRealDispatchCurrentMeasure;
         table[static_cast<std::size_t>(FormExprType::ReferenceMeasure)] = &evalRealDispatchReferenceMeasure;
@@ -5413,6 +5420,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             return evalRealDispatchReferenceMeasure(node, env, side, q);
         case FormExprType::CurrentNormal:
             return evalRealDispatchCurrentNormal(node, env, side, q);
+        case FormExprType::CurrentMeanCurvature:
+            return evalRealDispatchCurrentMeanCurvature(node, env, side, q);
         case FormExprType::ReferenceNormal:
             return evalRealDispatchReferenceNormal(node, env, side, q);
         case FormExprType::SurfaceJacobian:
@@ -9249,6 +9258,11 @@ EvalValue<Dual> evalDualDispatchCurrentNormal(const FormExprNode&, const EvalEnv
     return out;
 }
 
+EvalValue<Dual> evalDualDispatchCurrentMeanCurvature(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
+{
+    return evalDualScalarTerminal(env, side, q, &assembly::AssemblyContext::currentMeanCurvature);
+}
+
 EvalValue<Dual> evalDualDispatchReferenceNormal(const FormExprNode&, const EvalEnvDual& env, Side side, LocalIndex q)
 {
     return evalDualVectorTerminal(env, side, q, &assembly::AssemblyContext::referenceNormal);
@@ -9358,6 +9372,7 @@ const std::array<EvalDualDispatchFn, kFormExprDispatchSize>& evalDualDispatchTab
         table[static_cast<std::size_t>(FormExprType::CurrentJacobianDeterminant)] = &evalDualDispatchCurrentMeasure;
         table[static_cast<std::size_t>(FormExprType::ReferenceJacobianDeterminant)] = &evalDualDispatchReferenceMeasure;
         table[static_cast<std::size_t>(FormExprType::CurrentNormal)] = &evalDualDispatchCurrentNormal;
+        table[static_cast<std::size_t>(FormExprType::CurrentMeanCurvature)] = &evalDualDispatchCurrentMeanCurvature;
         table[static_cast<std::size_t>(FormExprType::ReferenceNormal)] = &evalDualDispatchReferenceNormal;
         table[static_cast<std::size_t>(FormExprType::CurrentMeasure)] = &evalDualDispatchCurrentMeasure;
         table[static_cast<std::size_t>(FormExprType::ReferenceMeasure)] = &evalDualDispatchReferenceMeasure;
@@ -9465,6 +9480,8 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             return evalDualDispatchReferenceMeasure(node, env, side, q);
         case FormExprType::CurrentNormal:
             return evalDualDispatchCurrentNormal(node, env, side, q);
+        case FormExprType::CurrentMeanCurvature:
+            return evalDualDispatchCurrentMeanCurvature(node, env, side, q);
         case FormExprType::ReferenceNormal:
             return evalDualDispatchReferenceNormal(node, env, side, q);
         case FormExprType::SurfaceJacobian:

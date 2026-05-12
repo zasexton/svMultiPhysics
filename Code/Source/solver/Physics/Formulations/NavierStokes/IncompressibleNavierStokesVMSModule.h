@@ -140,9 +140,11 @@ struct IncompressibleNavierStokesVMSOptions {
         ScalarValue external_pressure{0.0};
         ScalarValue surface_tension{0.0};
 
-        // Fitted ALE can use a supplied curvature expression/value.  Unfitted
-        // level-set surfaces use meanCurvatureFromLevelSet(phi) by default.
+        // Fitted ALE can use current mesh geometry or a supplied curvature
+        // expression/value.  Unfitted level-set surfaces use
+        // meanCurvatureFromLevelSet(phi) by default.
         ScalarValue curvature{0.0};
+        bool use_current_geometry_curvature{false};
         bool use_level_set_curvature{true};
 
         // Fitted ALE kinematic relation: (u - meshVelocity()) · n = 0.

@@ -703,6 +703,7 @@ struct ShapeInferenceResult {
             case FormExprType::JacobianDeterminant:
             case FormExprType::CurrentJacobianDeterminant:
             case FormExprType::ReferenceJacobianDeterminant:
+            case FormExprType::CurrentMeanCurvature:
             case FormExprType::CurrentMeasure:
             case FormExprType::CurrentMeasureVariation:
             case FormExprType::ReferenceMeasure:

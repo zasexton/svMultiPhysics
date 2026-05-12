@@ -526,6 +526,7 @@ public:
 
     [[nodiscard]] Vector3D referenceNormal(LocalIndex q) const;
     [[nodiscard]] Vector3D currentNormal(LocalIndex q) const;
+    [[nodiscard]] Real currentMeanCurvature(LocalIndex q) const;
     [[nodiscard]] std::span<const Vector3D> referenceNormals() const noexcept
     {
         return reference_normals_;
@@ -533,6 +534,10 @@ public:
     [[nodiscard]] std::span<const Vector3D> currentNormals() const noexcept
     {
         return current_normals_;
+    }
+    [[nodiscard]] std::span<const Real> currentMeanCurvatures() const noexcept
+    {
+        return current_mean_curvatures_;
     }
 
     [[nodiscard]] Real referenceMeasure(LocalIndex q) const;
@@ -1815,6 +1820,7 @@ public:
                             std::span<const Real> measures);
     void setReferenceNormals(std::span<const Vector3D> normals);
     void setCurrentNormals(std::span<const Vector3D> normals);
+    void setCurrentMeanCurvatures(std::span<const Real> curvatures);
     void setSurfaceJacobians(std::span<const Matrix3x3> jacobians);
     void setConfigurationTransforms(std::span<const Matrix3x3> transforms);
     void setMeshDisplacements(std::span<const Vector3D> displacements);
@@ -2026,6 +2032,7 @@ private:
     JITAlignedVector<Matrix3x3> current_inverse_jacobians_{};
     JITAlignedVector<Vector3D> reference_normals_{};
     JITAlignedVector<Vector3D> current_normals_{};
+    JITAlignedVector<Real> current_mean_curvatures_{};
     JITAlignedVector<Real> reference_measures_{};
     JITAlignedVector<Real> current_measures_{};
     JITAlignedVector<Matrix3x3> surface_jacobians_{};

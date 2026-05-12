@@ -624,6 +624,7 @@ void AssemblyContext::clearMovingDomainData() noexcept
     current_inverse_jacobians_.clear();
     reference_normals_.clear();
     current_normals_.clear();
+    current_mean_curvatures_.clear();
     reference_measures_.clear();
     current_measures_.clear();
     surface_jacobians_.clear();
@@ -805,6 +806,12 @@ AssemblyContext::Vector3D AssemblyContext::currentNormal(LocalIndex q) const
 {
     return requireQPointData(current_normals_, q, n_qpts_,
                              "AssemblyContext::currentNormal");
+}
+
+Real AssemblyContext::currentMeanCurvature(LocalIndex q) const
+{
+    return requireQPointData(current_mean_curvatures_, q, n_qpts_,
+                             "AssemblyContext::currentMeanCurvature");
 }
 
 Real AssemblyContext::referenceMeasure(LocalIndex q) const
@@ -2721,6 +2728,7 @@ void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
     current_inverse_jacobians_ = other.current_inverse_jacobians_;
     reference_normals_ = other.reference_normals_;
     current_normals_ = other.current_normals_;
+    current_mean_curvatures_ = other.current_mean_curvatures_;
     reference_measures_ = other.reference_measures_;
     current_measures_ = other.current_measures_;
     surface_jacobians_ = other.surface_jacobians_;
@@ -3273,6 +3281,12 @@ void AssemblyContext::setCurrentNormals(std::span<const Vector3D> normals)
 {
     requireQPointSpanSize(normals.size(), n_qpts_, "AssemblyContext::setCurrentNormals");
     current_normals_.assign(normals.begin(), normals.end());
+}
+
+void AssemblyContext::setCurrentMeanCurvatures(std::span<const Real> curvatures)
+{
+    requireQPointSpanSize(curvatures.size(), n_qpts_, "AssemblyContext::setCurrentMeanCurvatures");
+    current_mean_curvatures_.assign(curvatures.begin(), curvatures.end());
 }
 
 void AssemblyContext::setSurfaceJacobians(std::span<const Matrix3x3> jacobians)
