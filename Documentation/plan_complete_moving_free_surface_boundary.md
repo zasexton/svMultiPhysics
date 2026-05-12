@@ -182,7 +182,7 @@ Checklist:
 - [x] Evaluate vector H1 fields on cut-interface quadrature points.
 - [x] Evaluate scalar gradients on cut-interface quadrature points.
 - [x] Evaluate vector gradients on cut-interface quadrature points.
-- [ ] Add integration tests for constants.
+- [x] Add integration tests for constants.
 - [ ] Add integration tests for linear fields.
 - [ ] Add integration tests for field gradients.
 - [ ] Add tests comparing generated normals with level-set-gradient normals.

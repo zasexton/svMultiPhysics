@@ -2059,6 +2059,50 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_TRUE(context.interfaceRules().empty());
 }
 
+TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/5,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/1);
+    request.interface_marker = 52;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 8,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+
+    const std::array<CutIntegrationAssemblyPath, 6> paths{{
+        CutIntegrationAssemblyPath::Standard,
+        CutIntegrationAssemblyPath::MatrixFree,
+        CutIntegrationAssemblyPath::Interpreter,
+        CutIntegrationAssemblyPath::AD,
+        CutIntegrationAssemblyPath::SymbolicTangent,
+        CutIntegrationAssemblyPath::JIT}};
+    for (const auto path : paths) {
+        const auto evaluation = context.evaluateScalarCutOperator(
+            path,
+            [](const CutScalarOperatorPoint&) { return Real{1.0}; },
+            [](const CutScalarOperatorPoint&) { return Real{1.0}; });
+
+        EXPECT_EQ(evaluation.volume_rule_count, 0u);
+        EXPECT_EQ(evaluation.interface_rule_count, 1u);
+        EXPECT_EQ(evaluation.interface_point_count, 1u);
+        EXPECT_NEAR(evaluation.interface_measure, 1.0, 1.0e-14);
+        EXPECT_NEAR(evaluation.interface_integral, 1.0, 1.0e-14);
+        EXPECT_NEAR(evaluation.totalIntegral(), 1.0, 1.0e-14);
+    }
+}
+
 TEST(CutIntegrationInfrastructure, AssemblyContextCarriesQuadratureMetadataAndHooks)
 {
     CutIntegrationContext context;
