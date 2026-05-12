@@ -126,6 +126,7 @@ public:
     {
         return options_.basis_baking;
     }
+    [[nodiscard]] const JITOptions& jitOptions() const noexcept { return options_; }
 
     [[nodiscard]] const assembly::AssemblyKernel& fallbackKernel() const noexcept { return *fallback_; }
     [[nodiscard]] std::shared_ptr<const assembly::AssemblyKernel> fallbackKernelShared() const noexcept { return fallback_; }

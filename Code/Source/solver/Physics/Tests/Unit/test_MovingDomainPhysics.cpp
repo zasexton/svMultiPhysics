@@ -18,6 +18,8 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/FormCompiler.h"
 #include "FE/Forms/FormKernels.h"
+#include "FE/Forms/JIT/JITKernelWrapper.h"
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
@@ -138,6 +140,44 @@ bool formulationRecordsContainInterfaceMarker(const FE::systems::FESystem& syste
         }
     }
     return false;
+}
+
+const FE::forms::jit::JITKernelWrapper* asJitKernel(
+    const std::shared_ptr<FE::assembly::AssemblyKernel>& kernel)
+{
+    return dynamic_cast<const FE::forms::jit::JITKernelWrapper*>(kernel.get());
+}
+
+const FE::forms::jit::JITKernelWrapper* firstJitKernelInOperator(
+    const FE::systems::FESystem& system,
+    const FE::systems::OperatorTag& op)
+{
+    if (!system.hasOperator(op)) {
+        return nullptr;
+    }
+
+    const auto& def = system.operatorDefinition(op);
+    for (const auto& term : def.cells) {
+        if (const auto* jit = asJitKernel(term.kernel)) {
+            return jit;
+        }
+    }
+    for (const auto& term : def.boundary) {
+        if (const auto* jit = asJitKernel(term.kernel)) {
+            return jit;
+        }
+    }
+    for (const auto& term : def.interior) {
+        if (const auto* jit = asJitKernel(term.kernel)) {
+            return jit;
+        }
+    }
+    for (const auto& term : def.interface_faces) {
+        if (const auto* jit = asJitKernel(term.kernel)) {
+            return jit;
+        }
+    }
+    return nullptr;
 }
 
 std::shared_ptr<SingleTetraMeshAccess> makeMesh()
@@ -983,6 +1023,61 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesConstantVelocity)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Constant));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::DiscreteField));
+#endif
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesJITPolicy)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    const auto make_input = [](const std::shared_ptr<Mesh>& mesh,
+                               std::string module_options) {
+        EquationModuleInput input{};
+        input.equation_type = "level_set";
+        input.mesh_name = "quad";
+        input.mesh = mesh->local_mesh_ptr();
+        input.module_options = std::move(module_options);
+        input.equation_params["Level_set_field_name"] = ParameterValue{true, "phi"};
+        input.equation_params["Velocity_field_name"] =
+            ParameterValue{true, "unused_velocity"};
+        input.equation_params["Velocity_source"] = ParameterValue{true, "constant"};
+        input.equation_params["Constant_velocity"] = ParameterValue{true, "1.0 0.0 0.0"};
+        return input;
+    };
+
+    {
+        auto mesh = makeRegistryQuadMesh();
+        auto input = make_input(mesh, "jit = true; jit_specialization = false");
+
+        FE::systems::FESystem system(mesh);
+        auto module = EquationModuleRegistry::instance().create("level_set", input, system);
+
+        ASSERT_TRUE(module);
+        const auto* jit = firstJitKernelInOperator(system, "level_set");
+        if (FE::forms::jit::llvmJITEnabled()) {
+            ASSERT_NE(jit, nullptr);
+            const auto& options = jit->jitOptions();
+            EXPECT_TRUE(options.enable);
+            EXPECT_EQ(options.optimization_level, 3);
+            EXPECT_FALSE(options.specialization.enable);
+            EXPECT_TRUE(options.specialization.specialize_n_qpts);
+            EXPECT_TRUE(options.specialization.specialize_dofs);
+        } else {
+            EXPECT_EQ(jit, nullptr);
+        }
+    }
+
+    {
+        auto mesh = makeRegistryQuadMesh();
+        auto input = make_input(mesh, "jit = false; jit_specialization = true");
+
+        FE::systems::FESystem system(mesh);
+        auto module = EquationModuleRegistry::instance().create("level_set", input, system);
+
+        ASSERT_TRUE(module);
+        EXPECT_EQ(firstJitKernelInOperator(system, "level_set"), nullptr);
+    }
 #endif
 }
 
