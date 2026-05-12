@@ -62,6 +62,7 @@
 #endif
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "FE/Assembly/MeshAccess.h"
 #  include "Mesh/Mesh.h"
 #  include "Mesh/Topology/CellShape.h"
 #endif
@@ -180,6 +181,66 @@ std::shared_ptr<Mesh> makeRegistryQuadMesh()
     shape.num_corners = 4;
     shape.order = 1;
     base->build_from_arrays(/*spatial_dim=*/2, x_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    return create_mesh(std::move(base));
+}
+
+std::shared_ptr<Mesh> makeStructuredQuadMesh(int cells_per_axis,
+                                             FE::Real min_coord,
+                                             FE::Real max_coord)
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const int nodes_per_axis = cells_per_axis + 1;
+    const FE::Real h = (max_coord - min_coord) /
+                       static_cast<FE::Real>(cells_per_axis);
+
+    std::vector<real_t> x_ref;
+    x_ref.reserve(static_cast<std::size_t>(nodes_per_axis * nodes_per_axis * 2));
+    for (int j = 0; j < nodes_per_axis; ++j) {
+        for (int i = 0; i < nodes_per_axis; ++i) {
+            x_ref.push_back(static_cast<real_t>(
+                min_coord + h * static_cast<FE::Real>(i)));
+            x_ref.push_back(static_cast<real_t>(
+                min_coord + h * static_cast<FE::Real>(j)));
+        }
+    }
+
+    std::vector<offset_t> cell2vertex_offsets;
+    std::vector<index_t> cell2vertex;
+    cell2vertex_offsets.reserve(
+        static_cast<std::size_t>(cells_per_axis * cells_per_axis + 1));
+    cell2vertex.reserve(
+        static_cast<std::size_t>(cells_per_axis * cells_per_axis * 4));
+    cell2vertex_offsets.push_back(0);
+    for (int j = 0; j < cells_per_axis; ++j) {
+        for (int i = 0; i < cells_per_axis; ++i) {
+            const index_t v00 = static_cast<index_t>(j * nodes_per_axis + i);
+            const index_t v10 = v00 + 1;
+            const index_t v01 = static_cast<index_t>((j + 1) * nodes_per_axis + i);
+            const index_t v11 = v01 + 1;
+            cell2vertex.push_back(v00);
+            cell2vertex.push_back(v10);
+            cell2vertex.push_back(v11);
+            cell2vertex.push_back(v01);
+            cell2vertex_offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
+        }
+    }
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    const std::vector<CellShape> cell_shapes(
+        static_cast<std::size_t>(cells_per_axis * cells_per_axis),
+        shape);
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        cell_shapes);
     base->finalize();
 
     return create_mesh(std::move(base));
@@ -1541,6 +1602,94 @@ TEST(MovingDomainPhysics, LevelSetPureTangentialAdvectionPreservesVolumeDiagnost
         findScalarDiagnostic(diagnostics.scalars, "level_set.negative_volume_loss");
     ASSERT_NE(volume_loss, nullptr);
     EXPECT_NEAR(*volume_loss, 0.0, 1.0e-12);
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportPreservesTranslatingCircleArea)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = makeStructuredQuadMesh(/*cells_per_axis=*/40,
+                                       /*min_coord=*/-1.0,
+                                       /*max_coord=*/1.0);
+    auto mesh_access = std::make_shared<FE::assembly::MeshAccess>(*mesh);
+    auto scalar_space = FE::spaces::Space(FE::spaces::SpaceType::H1,
+                                          mesh_access,
+                                          /*order=*/1,
+                                          /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto phi_offset = system.fieldDofOffset(phi);
+
+    std::vector<FE::GlobalIndex> vertex_dofs(mesh->n_vertices(), 0);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < static_cast<FE::GlobalIndex>(mesh->n_vertices());
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        vertex_dofs[static_cast<std::size_t>(vertex)] = dofs.front();
+    }
+
+    constexpr FE::Real radius = 0.35;
+    constexpr std::array<FE::Real, 2> center0{{-0.20, -0.10}};
+    constexpr std::array<FE::Real, 2> velocity{{0.25, 0.15}};
+    constexpr FE::Real final_time = 0.50;
+
+    const auto exact_circle = [&](FE::Real time) -> std::vector<FE::Real> {
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+            0.0);
+        const std::array<FE::Real, 2> center{{
+            center0[0] + velocity[0] * time,
+            center0[1] + velocity[1] * time,
+        }};
+        for (FE::GlobalIndex vertex = 0;
+             vertex < static_cast<FE::GlobalIndex>(mesh->n_vertices());
+             ++vertex) {
+            const auto x = mesh->get_vertex_coords(static_cast<index_t>(vertex));
+            const FE::Real dx = x[0] - center[0];
+            const FE::Real dy = x[1] - center[1];
+            const auto dof = vertex_dofs[static_cast<std::size_t>(vertex)];
+            solution[static_cast<std::size_t>(phi_offset + dof)] =
+                std::sqrt(dx * dx + dy * dy) - radius;
+        }
+        return solution;
+    };
+
+    const auto initial = exact_circle(0.0);
+    const auto translated = exact_circle(final_time);
+    const auto initial_volume = ls::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        ls::LevelSetVolumeOptions{},
+        initial);
+    const auto translated_volume = ls::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        ls::LevelSetVolumeOptions{},
+        translated);
+
+    ASSERT_TRUE(initial_volume.success) << initial_volume.diagnostic;
+    ASSERT_TRUE(translated_volume.success) << translated_volume.diagnostic;
+
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const FE::Real exact_area = pi * radius * radius;
+    EXPECT_NEAR(initial_volume.negative_volume, exact_area, 4.0e-3);
+    EXPECT_NEAR(translated_volume.negative_volume, exact_area, 4.0e-3);
+    EXPECT_NEAR(translated_volume.negative_volume,
+                initial_volume.negative_volume,
+                2.0e-3);
+#endif
 }
 
 TEST(MovingDomainPhysics, LevelSetSignedDistanceMaintenanceReducesInterfaceBandError)

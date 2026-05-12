@@ -488,16 +488,16 @@ Checklist:
 Checklist:
 
 - [ ] Static flat water surface with gravity remains at rest.
-- [ ] Hydrostatic pressure field matches analytic pressure.
+- [x] Hydrostatic pressure field matches analytic pressure.
 - [x] External-pressure free-surface traction has the expected sign.
 - [x] Surface-tension pressure jump matches Laplace law for a circular interface.
 - [x] Surface-tension pressure jump matches Laplace law for a spherical interface.
-- [ ] Fitted ALE surface moves with prescribed normal velocity.
-- [ ] Fitted ALE fluid plus mesh Jacobian matches finite differences.
-- [ ] Level-set transport preserves a translating plane.
-- [ ] Level-set transport preserves a translating circle to expected accuracy.
-- [ ] Reinitialization preserves signed-distance quality near the interface.
-- [ ] Volume correction maintains water volume within tolerance.
+- [x] Fitted ALE surface moves with prescribed normal velocity.
+- [x] Fitted ALE fluid plus mesh Jacobian matches finite differences.
+- [x] Level-set transport preserves a translating plane.
+- [x] Level-set transport preserves a translating circle to expected accuracy.
+- [x] Reinitialization preserves signed-distance quality near the interface.
+- [x] Volume correction maintains water volume within tolerance.
 - [ ] Fitted and unfitted implementations agree on a simple static flat-surface case.
 
 ## Validation Cases
