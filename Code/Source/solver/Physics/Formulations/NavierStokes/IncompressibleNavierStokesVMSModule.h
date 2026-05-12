@@ -62,7 +62,19 @@ enum class FreeSurfaceImplementation : std::uint8_t {
 
 enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
     None,
-    Penalty
+    Penalty,
+    Nitsche
+};
+
+enum class FreeSurfaceNormalKinematicPolicy : std::uint8_t {
+    None,
+    MatchFluidNormalVelocity
+};
+
+enum class FreeSurfaceTangentialMeshPolicy : std::uint8_t {
+    Free,
+    SmoothingOnly,
+    Prescribed
 };
 
 struct IncompressibleNavierStokesVMSOptions {
@@ -133,7 +145,13 @@ struct IncompressibleNavierStokesVMSOptions {
         ScalarValue curvature{0.0};
         bool use_level_set_curvature{true};
 
-        // Kinematic relation: (u - meshVelocity()) · n = 0.
+        // Fitted ALE kinematic relation: (u - meshVelocity()) · n = 0.
+        FreeSurfaceNormalKinematicPolicy normal_kinematic_policy{
+            FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity};
+        FreeSurfaceTangentialMeshPolicy tangential_mesh_policy{
+            FreeSurfaceTangentialMeshPolicy::SmoothingOnly};
+        std::array<ScalarValue, 3> prescribed_tangential_mesh_velocity{
+            ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
         FreeSurfaceKinematicEnforcement kinematic_enforcement{
             FreeSurfaceKinematicEnforcement::None};
         ScalarValue kinematic_penalty{0.0};

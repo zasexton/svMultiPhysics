@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -676,6 +677,23 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+}
+
+TEST(MovingDomainPhysics, FittedFreeSurfaceKinematicPolicyOptionsAreExplicit)
+{
+    using FreeSurfaceBoundary = ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
+
+    const FreeSurfaceBoundary bc{};
+
+    EXPECT_EQ(bc.normal_kinematic_policy,
+              ns::FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity);
+    EXPECT_EQ(bc.tangential_mesh_policy,
+              ns::FreeSurfaceTangentialMeshPolicy::SmoothingOnly);
+    EXPECT_EQ(bc.kinematic_enforcement,
+              ns::FreeSurfaceKinematicEnforcement::None);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[0]), 0.0);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[1]), 0.0);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[2]), 0.0);
 }
 
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)

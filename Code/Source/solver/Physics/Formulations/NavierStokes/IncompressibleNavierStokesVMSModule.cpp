@@ -82,6 +82,11 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: fitted free-surface kinematics require ALE to be enabled");
         }
+        if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
+            bc.normal_kinematic_policy == FreeSurfaceNormalKinematicPolicy::None) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: fitted free-surface kinematic enforcement requires a normal kinematic policy");
+        }
     }
 
     if (bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Penalty &&
@@ -162,6 +167,11 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     case FreeSurfaceKinematicEnforcement::None:
         return;
     case FreeSurfaceKinematicEnforcement::Penalty: {
+        if (bc.normal_kinematic_policy !=
+            FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: unsupported fitted free-surface normal kinematic policy");
+        }
         const auto penalty = bc::toScalarExpr(
             bc.kinematic_penalty,
             freeSurfaceValueName("ns_free_surface_kinematic_penalty", bc));
@@ -170,6 +180,9 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             penalty * normal_mismatch * normalTrace(v, n), bc);
         return;
     }
+    case FreeSurfaceKinematicEnforcement::Nitsche:
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: Nitsche free-surface kinematics are not implemented yet");
     }
 
     throw std::invalid_argument(
