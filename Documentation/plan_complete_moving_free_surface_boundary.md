@@ -306,9 +306,36 @@ Checklist:
 - [x] Add parser/input options for contact-line model.
 - [x] Implement pinned contact line for fitted ALE.
 - [x] Implement prescribed contact angle for fitted ALE.
-- [ ] Define unfitted wall-contact detection requirements.
+- [x] Define unfitted wall-contact detection requirements.
 - [ ] Implement prescribed contact angle for unfitted level-set surfaces.
 - [ ] Add tests for static meniscus/contact-angle geometry where practical.
+
+Unfitted wall-contact detection requirements:
+
+- Each unfitted contact-line option must identify the generated free-surface
+  interface marker, the level-set field, and either a wall boundary marker or a
+  supplied wall normal.
+- FE must remain physics-agnostic: it exposes generated-interface fragments,
+  parent cell ids, quadrature points, interface normals, side tags, degeneracy
+  flags, boundary-face geometry by marker, and deterministic ownership metadata.
+- Physics owns contact classification. A contact is active where a generated
+  `phi = 0` interface fragment intersects or approaches a requested wall marker
+  within a configurable physical tolerance.
+- In 2D the contact set is a collection of points. In 3D the contact set is a
+  collection of interface-wall line segments. Degenerate vertex, edge, nearly
+  tangent, and very small contacts must be classified explicitly so they can be
+  either skipped with diagnostics or retained by policy.
+- The wall normal used by a contact-angle law must come from current wall
+  boundary geometry when available, or from the supplied contact-line
+  `wall_normal`. Zero or ambiguous wall normals are invalid.
+- The free-surface normal must use the generated-interface orientation already
+  consumed by `.dI(interface_marker)`, with documented sign convention for
+  `cos(theta)` measured through the fluid phase.
+- MPI handling must assign each contact contribution to a single owning rank and
+  reduce diagnostic totals globally, so contact length or contact-point counts do
+  not depend on partitioning.
+- Diagnostics must report active contact measure, skipped degeneracies, missing
+  wall markers, normal-orientation failures, and tolerance-driven contacts.
 
 Done when:
 
