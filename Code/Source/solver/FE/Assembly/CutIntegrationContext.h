@@ -15,6 +15,7 @@
 
 #include "Core/Types.h"
 #include "Geometry/CutQuadrature.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Mesh/Search/CutCell.h"
@@ -151,6 +152,8 @@ public:
         metadata_.clear();
         volume_rules_.clear();
         interface_rules_.clear();
+        generated_interface_rule_indices_by_marker_.clear();
+        generated_interface_markers_.clear();
         kinematic_data_.clear();
         stabilization_hooks_.clear();
         bindings_.clear();
@@ -165,6 +168,25 @@ public:
 
     void addInterfaceRule(geometry::CutQuadratureRule rule) {
         interface_rules_.push_back(std::move(rule));
+    }
+
+    void addGeneratedInterfaceDomain(const interfaces::LevelSetInterfaceDomain& domain) {
+        const int marker = domain.marker();
+        if (marker < 0) {
+            return;
+        }
+        auto rules = domain.interfaceQuadratureRules();
+        if (rules.empty()) {
+            return;
+        }
+        auto& indices = generated_interface_rule_indices_by_marker_[marker];
+        if (indices.empty()) {
+            generated_interface_markers_.push_back(marker);
+        }
+        for (auto& rule : rules) {
+            indices.push_back(interface_rules_.size());
+            interface_rules_.push_back(std::move(rule));
+        }
     }
 
     void addKinematicData(EmbeddedBoundaryKinematicData data) {
@@ -193,6 +215,31 @@ public:
 
     [[nodiscard]] const std::vector<geometry::CutQuadratureRule>& interfaceRules() const noexcept {
         return interface_rules_;
+    }
+
+    [[nodiscard]] bool hasGeneratedInterfaceMarker(int marker) const {
+        return generated_interface_rule_indices_by_marker_.find(marker) !=
+               generated_interface_rule_indices_by_marker_.end();
+    }
+
+    [[nodiscard]] const std::vector<int>& generatedInterfaceMarkers() const noexcept {
+        return generated_interface_markers_;
+    }
+
+    [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
+    interfaceRulesForMarker(int marker) const {
+        std::vector<const geometry::CutQuadratureRule*> rules;
+        const auto it = generated_interface_rule_indices_by_marker_.find(marker);
+        if (it == generated_interface_rule_indices_by_marker_.end()) {
+            return rules;
+        }
+        rules.reserve(it->second.size());
+        for (const auto index : it->second) {
+            if (index < interface_rules_.size()) {
+                rules.push_back(&interface_rules_[index]);
+            }
+        }
+        return rules;
     }
 
     [[nodiscard]] const std::vector<EmbeddedBoundaryKinematicData>& kinematicData() const noexcept {
@@ -599,6 +646,9 @@ private:
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};
     std::vector<geometry::CutQuadratureRule> interface_rules_{};
+    std::unordered_map<int, std::vector<std::size_t>>
+        generated_interface_rule_indices_by_marker_{};
+    std::vector<int> generated_interface_markers_{};
     std::vector<EmbeddedBoundaryKinematicData> kinematic_data_{};
     std::vector<CutStabilizationHook> stabilization_hooks_{};
     std::vector<CutIntegrationBinding> bindings_{};

@@ -1,5 +1,6 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Geometry/CutQuadrature.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Systems/CutIntegrationInvalidation.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -22,6 +23,7 @@
 using namespace svmp::FE;
 using namespace svmp::FE::assembly;
 using namespace svmp::FE::geometry;
+using namespace svmp::FE::interfaces;
 using namespace svmp::FE::systems;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -2006,6 +2008,56 @@ void expect_linearized_sensitivity_path_visibility(
 
 } // namespace
 #endif
+
+TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMarker)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.interface_marker = 51;
+    request.quadrature_policy_key = 19;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 7,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+
+    EXPECT_TRUE(context.hasGeneratedInterfaceMarker(51));
+    ASSERT_EQ(context.generatedInterfaceMarkers().size(), 1u);
+    EXPECT_EQ(context.generatedInterfaceMarkers().front(), 51);
+    ASSERT_EQ(context.interfaceRules().size(), 1u);
+
+    const auto marker_rules = context.interfaceRulesForMarker(51);
+    ASSERT_EQ(marker_rules.size(), 1u);
+    ASSERT_NE(marker_rules.front(), nullptr);
+    EXPECT_EQ(marker_rules.front()->provenance.parent_entity, 7);
+    EXPECT_EQ(marker_rules.front()->provenance.predicate_policy_key, 19u);
+    EXPECT_TRUE(context.interfaceRulesForMarker(52).empty());
+
+    const auto evaluation = context.evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath::Standard,
+        [](const CutScalarOperatorPoint&) { return 0.0; },
+        [](const CutScalarOperatorPoint&) { return 2.0; });
+    EXPECT_EQ(evaluation.interface_rule_count, 1u);
+    EXPECT_EQ(evaluation.interface_point_count, 1u);
+    EXPECT_DOUBLE_EQ(evaluation.interface_measure, 1.0);
+    EXPECT_DOUBLE_EQ(evaluation.interface_integral, 2.0);
+
+    context.clear();
+    EXPECT_FALSE(context.hasGeneratedInterfaceMarker(51));
+    EXPECT_TRUE(context.generatedInterfaceMarkers().empty());
+    EXPECT_TRUE(context.interfaceRules().empty());
+}
 
 TEST(CutIntegrationInfrastructure, AssemblyContextCarriesQuadratureMetadataAndHooks)
 {
