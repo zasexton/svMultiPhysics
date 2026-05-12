@@ -216,13 +216,13 @@ Target files:
 
 Checklist:
 
-- [ ] Move `LevelSetSignedDistanceRepairResult` into `FE::level_set`.
-- [ ] Move `repairLevelSetSignedDistanceByProjection` overloads into FE.
-- [ ] Keep repair implementation independent of physics equations.
-- [ ] Keep support for `IMeshAccess` plus scalar `DofHandler`.
-- [ ] Keep support for `FESystem` plus `FieldId`.
-- [ ] Move signed-distance repair tests from Physics to FE where practical.
-- [ ] Document unsupported element types and current projection limitations.
+- [x] Move `LevelSetSignedDistanceRepairResult` into `FE::level_set`.
+- [x] Move `repairLevelSetSignedDistanceByProjection` overloads into FE.
+- [x] Keep repair implementation independent of physics equations.
+- [x] Keep support for `IMeshAccess` plus scalar `DofHandler`.
+- [x] Keep support for `FESystem` plus `FieldId`.
+- [x] Move signed-distance repair tests from Physics to FE where practical.
+- [x] Document unsupported element types and current projection limitations.
 
 Done when:
 
