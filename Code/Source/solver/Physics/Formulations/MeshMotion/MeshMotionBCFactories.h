@@ -57,10 +57,11 @@ public:
                               const FE::forms::FormExpr& v) const override
     {
         const auto n = FE::forms::FormExpr::normal();
-        const auto tangent_gap = FE::forms::tangentialTrace(u - target_, n);
-        const auto tangent_test = FE::forms::tangentialTrace(v, n);
-        residual = residual + (penalty_ * FE::forms::inner(tangent_gap, tangent_test))
-                                  .ds(boundary_marker_);
+        const auto gap = u - target_;
+        const auto tangential_work =
+            FE::forms::inner(gap, v) -
+            FE::forms::normalTrace(gap, n) * FE::forms::normalTrace(v, n);
+        residual = residual + (penalty_ * tangential_work).ds(boundary_marker_);
     }
 
     [[nodiscard]] std::vector<FE::forms::bc::StrongDirichlet>

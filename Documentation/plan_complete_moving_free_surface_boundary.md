@@ -280,7 +280,7 @@ Checklist:
 - [x] Add fitted-surface curvature from current mesh geometry.
 - [x] Add current-normal/current-measure support to fitted dynamic stress path.
 - [x] Add input translation for fitted ALE free-surface kinematic options.
-- [ ] Add coupled fluid plus mesh-motion setup tests.
+- [x] Add coupled fluid plus mesh-motion setup tests.
 
 Done when:
 

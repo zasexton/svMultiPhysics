@@ -1879,6 +1879,133 @@ TEST(MovingDomainPhysics, CoupledALEAndHarmonicMeshMotionShareDisplacementUnknow
     EXPECT_TRUE(has_fluid_mesh_columns);
 }
 
+TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
+{
+    constexpr int marker = 39;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+
+    mm::HarmonicMeshMotionOptions mesh_opts;
+    mesh_opts.field_name = "mesh_displacement";
+    mesh_opts.operator_tag = "mesh_motion";
+    mesh_opts.kappa = 1.5;
+
+    mm::NormalConstraintBC normal;
+    normal.boundary_marker = marker;
+    normal.quantity = mm::NormalConstraintQuantity::Velocity;
+    normal.target = 0.15;
+    normal.penalty = 6.0;
+    normal.velocity_time_scale = 1.0;
+    mesh_opts.normal_constraint.push_back(normal);
+
+    mm::TangentialPolicyBC tangent;
+    tangent.boundary_marker = marker;
+    tangent.policy = mm::TangentialMeshPolicy::Prescribed;
+    tangent.quantity = mm::TangentialConstraintQuantity::Velocity;
+    tangent.target = {0.05, -0.02, 0.01};
+    tangent.penalty = 5.0;
+    tangent.velocity_time_scale = 1.0;
+    mesh_opts.tangential_policy.push_back(tangent);
+
+    mm::HarmonicMeshMotionModule mesh_module(u_space, mesh_opts);
+    mesh_module.registerOn(system);
+    const auto displacement = system.findFieldByName("mesh_displacement");
+    ASSERT_NE(displacement, FE::INVALID_FIELD_ID);
+
+    auto ns_opts = baseNavierStokesOptions();
+    ns_opts.enable_ale = true;
+    ns_opts.enable_convection = false;
+    ns_opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    ns_opts.mesh_displacement_field_name = "mesh_displacement";
+    ns_opts.mesh_velocity_field_name = "mesh_velocity";
+
+    ns_opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .external_pressure = 1.25,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Penalty,
+        .kinematic_penalty = 9.0,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule ns_module(u_space, p_space, ns_opts);
+    ns_module.registerOn(system);
+
+    const auto mesh_velocity = system.findFieldByName("mesh_velocity");
+    ASSERT_NE(mesh_velocity, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Displacement),
+              displacement);
+    EXPECT_EQ(system.meshMotionField(FE::systems::MeshMotionFieldRole::Velocity),
+              mesh_velocity);
+    EXPECT_EQ(system.fieldRecord(mesh_velocity).source_kind,
+              FE::systems::FieldSourceKind::DerivedFromUnknown);
+    EXPECT_EQ(system.fieldRecord(mesh_velocity).derived.source_field, displacement);
+    EXPECT_FALSE(system.fieldParticipatesInUnknownVector(mesh_velocity));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    EXPECT_EQ(system.dofHandler().getNumDofs(), 28);
+    EXPECT_EQ(system.fieldMap().numFields(), 3u);
+    ASSERT_NE(system.blockMap(), nullptr);
+    EXPECT_EQ(system.blockMap()->numBlocks(), 3u);
+
+    const auto u = system.findFieldByName(ns_opts.velocity_field_name);
+    const auto p = system.findFieldByName(ns_opts.pressure_field_name);
+    bool has_mesh_rows = false;
+    bool has_fluid_mesh_columns = false;
+    for (const auto& record : system.formulationRecords()) {
+        for (const auto& [test_field, trial_field] : record.block_couplings) {
+            if (test_field == displacement && trial_field == displacement) {
+                has_mesh_rows = true;
+            }
+            if (trial_field == displacement && (test_field == u || test_field == p)) {
+                has_fluid_mesh_columns = true;
+            }
+        }
+    }
+    EXPECT_TRUE(has_mesh_rows);
+    EXPECT_TRUE(has_fluid_mesh_columns);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = static_cast<FE::Real>(vertex);
+        setFieldComponentValue(solution, system, u, vertex, 0,
+                               FE::Real(0.30) + FE::Real(0.01) * x);
+        setFieldComponentValue(solution, system, u, vertex, 1,
+                               FE::Real(-0.10) + FE::Real(0.015) * x);
+        setFieldComponentValue(solution, system, u, vertex, 2,
+                               FE::Real(0.20) - FE::Real(0.005) * x);
+        setFieldComponentValue(solution, system, p, vertex, 0,
+                               FE::Real(0.05) + FE::Real(0.02) * x);
+
+        setFieldComponentValue(solution, system, displacement, vertex, 0,
+                               FE::Real(0.02) + FE::Real(0.004) * x);
+        setFieldComponentValue(solution, system, displacement, vertex, 1,
+                               FE::Real(-0.015) + FE::Real(0.003) * x);
+        setFieldComponentValue(solution, system, displacement, vertex, 2,
+                               FE::Real(0.01) - FE::Real(0.002) * x);
+    }
+    updateBoundaryMeshCurrentCoordinates(*mesh, system, displacement, solution);
+
+    FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
+    EXPECT_GT(residualNorm(system, state, "equations"), 0.0);
+}
+
 TEST(MovingDomainPhysics, ALEAdvectionDiffusionManufacturedResidualUsesPhysicalMinusMeshVelocity)
 {
     using namespace FE::forms;
