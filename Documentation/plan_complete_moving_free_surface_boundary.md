@@ -155,7 +155,7 @@ Checklist:
   - [x] very small fragments
 - [x] Assign stable interface marker ids.
 - [x] Expose generated interfaces through the same integration path used by `.dI(marker)`.
-- [ ] Add serial tests for generated interface fragment counts.
+- [x] Add serial tests for generated interface fragment counts.
 - [ ] Add MPI tests for ownership and global area consistency.
 
 Done when:

@@ -349,3 +349,79 @@ TEST(LevelSetInterfaceBuilder, ClassifiesCutEdgeCases)
     EXPECT_EQ(small_fragment_result.degeneracy, CutInterfaceDegeneracy::SmallFragment);
     EXPECT_FALSE(small_fragment_result.diagnostic.empty());
 }
+
+TEST(LevelSetInterfaceBuilder, SerialGeneratedInterfaceFragmentCounts)
+{
+    LevelSetInterfaceDomain triangle_domain(make_request(/*marker=*/60));
+    appendLinearLevelSetCellCut2D(
+        triangle_domain,
+        LevelSetCellCutInput{.parent_cell = 1,
+                             .element_type = ElementType::Triangle3,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.25, 0.75, -0.25}});
+    appendLinearLevelSetCellCut2D(
+        triangle_domain,
+        LevelSetCellCutInput{.parent_cell = 2,
+                             .element_type = ElementType::Triangle3,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {1.0, 1.0, 1.0}});
+    auto summary = triangle_domain.summary();
+    EXPECT_EQ(summary.fragment_count, 1u);
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.quadrature_point_count, 1u);
+    EXPECT_NEAR(summary.measure, 0.75, 1.0e-14);
+
+    LevelSetInterfaceDomain quad_domain(make_request(/*marker=*/61));
+    appendLinearLevelSetCellCut2D(
+        quad_domain,
+        LevelSetCellCutInput{.parent_cell = 3,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
+    appendLinearLevelSetCellCut2D(
+        quad_domain,
+        LevelSetCellCutInput{.parent_cell = 4,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.25, 0.75, 0.75, -0.25}});
+    summary = quad_domain.summary();
+    EXPECT_EQ(summary.fragment_count, 2u);
+    EXPECT_EQ(summary.active_fragment_count, 2u);
+    EXPECT_EQ(summary.quadrature_point_count, 2u);
+    EXPECT_NEAR(summary.measure, 2.0, 1.0e-14);
+
+    LevelSetInterfaceDomain tetra_domain(make_request(/*marker=*/62));
+    appendLinearLevelSetCellCut3D(
+        tetra_domain,
+        LevelSetCellCutInput{.parent_cell = 5,
+                             .element_type = ElementType::Tetra4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}},
+                                                  {{0.0, 0.0, 1.0}}},
+                             .level_set_values = {-0.25, 0.75, -0.25, -0.25}});
+    appendLinearLevelSetCellCut3D(
+        tetra_domain,
+        LevelSetCellCutInput{.parent_cell = 6,
+                             .element_type = ElementType::Tetra4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}},
+                                                  {{0.0, 0.0, 1.0}}},
+                             .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
+    summary = tetra_domain.summary();
+    EXPECT_EQ(summary.fragment_count, 2u);
+    EXPECT_EQ(summary.active_fragment_count, 2u);
+    EXPECT_EQ(summary.quadrature_point_count, 2u);
+    EXPECT_NEAR(summary.measure, 0.28125 + std::sqrt(0.125), 1.0e-14);
+}
