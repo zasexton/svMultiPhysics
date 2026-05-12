@@ -9,6 +9,7 @@
 
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
+#include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
@@ -57,6 +58,7 @@ using FE::forms::FormExprNode;
 using FE::forms::FormExprType;
 constexpr FE::FieldId kMeshVelocityField = 907;
 namespace mm = formulations::mesh_motion;
+namespace ls = formulations::level_set;
 namespace ns = formulations::navier_stokes;
 
 bool containsExprType(const FormExprNode* node, FormExprType target)
@@ -627,6 +629,45 @@ TEST(MovingDomainPhysics, MovingMeshTangentPathDefaultsToSymbolicRequired)
               FE::forms::GeometryTangentPath::SymbolicRequired);
     EXPECT_EQ(ns::IncompressibleNavierStokesVMSOptions{}.moving_mesh_tangent_path,
               FE::forms::GeometryTangentPath::SymbolicRequired);
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
+{
+    const ls::LevelSetTransportOptions defaults{};
+
+    EXPECT_EQ(defaults.level_set.field_name, "level_set");
+    EXPECT_EQ(defaults.level_set.source, ls::LevelSetFieldSource::Unknown);
+    EXPECT_TRUE(defaults.level_set.auto_register_field);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.source = ls::LevelSetFieldSource::PrescribedData;
+    opts.level_set.auto_register_field = false;
+
+    EXPECT_EQ(opts.level_set.field_name, "phi");
+    EXPECT_EQ(opts.level_set.source, ls::LevelSetFieldSource::PrescribedData);
+    EXPECT_FALSE(opts.level_set.auto_register_field);
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem scalar_system(mesh);
+    ls::LevelSetTransportModule scalar_module(scalar_space);
+    EXPECT_NO_THROW(scalar_module.registerOn(scalar_system));
+
+    FE::systems::FESystem vector_system(mesh);
+    ls::LevelSetTransportModule vector_module(vector_space);
+    EXPECT_THROW(vector_module.registerOn(vector_system), std::invalid_argument);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name.clear();
+    FE::systems::FESystem empty_name_system(mesh);
+    ls::LevelSetTransportModule empty_name_module(scalar_space, opts);
+    EXPECT_THROW(empty_name_module.registerOn(empty_name_system), std::invalid_argument);
 }
 
 TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)

@@ -359,7 +359,7 @@ Concrete changes:
 
 Checklist:
 
-- [ ] Add level-set field options.
+- [x] Add level-set field options.
 - [ ] Add velocity source options.
 - [ ] Add residual form for transient advection.
 - [ ] Add SUPG stabilization.
