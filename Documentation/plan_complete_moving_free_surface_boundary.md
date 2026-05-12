@@ -425,7 +425,7 @@ Checklist:
 - [x] Preserve marker identity across time steps.
 - [x] Couple generated interface marker to Navier-Stokes free-surface options.
 - [x] Add optional cut-cell stabilization options to Navier-Stokes.
-- [ ] Add restart data for level-set fields and generated-interface metadata as needed.
+- [x] Add restart data for level-set fields and generated-interface metadata as needed.
 - [ ] Add MPI tests for generated interface consistency.
 
 Done when:

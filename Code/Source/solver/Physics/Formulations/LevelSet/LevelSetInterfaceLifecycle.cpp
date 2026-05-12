@@ -129,6 +129,12 @@ LevelSetGeneratedInterfaceLifecycle::LevelSetGeneratedInterfaceLifecycle(
 {
 }
 
+void LevelSetGeneratedInterfaceLifecycle::restoreValueRevision(
+    std::uint64_t value_revision) noexcept
+{
+    value_revision_ = value_revision;
+}
+
 LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     const FE::systems::FESystem& system,
     const LevelSetGeneratedInterfaceOptions& options,

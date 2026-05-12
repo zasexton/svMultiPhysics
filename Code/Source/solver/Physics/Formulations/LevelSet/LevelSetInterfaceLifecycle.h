@@ -49,6 +49,7 @@ public:
         std::span<const FE::Real> solution);
 
     [[nodiscard]] std::uint64_t valueRevision() const noexcept { return value_revision_; }
+    void restoreValueRevision(std::uint64_t value_revision) noexcept;
 
 private:
     FE::interfaces::GeneratedInterfaceMarkerRegistry marker_registry_;

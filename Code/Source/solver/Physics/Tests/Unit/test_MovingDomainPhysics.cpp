@@ -14,6 +14,7 @@
 #include "Physics/Formulations/LevelSet/LevelSetDiagnostics.h"
 #include "Physics/Formulations/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Physics/Formulations/LevelSet/LevelSetReinitialization.h"
+#include "Physics/Formulations/LevelSet/LevelSetRestart.h"
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
 #include "Physics/Formulations/LevelSet/LevelSetVolume.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
@@ -1613,6 +1614,90 @@ TEST(MovingDomainPhysics, LevelSetGeneratedInterfaceLifecyclePreservesMarkerIden
     EXPECT_EQ(initial.interface_marker, updated.interface_marker);
     EXPECT_EQ(initial.domain.marker(), updated.domain.marker());
     EXPECT_EQ(updated.value_revision, initial.value_revision + 1u);
+}
+
+TEST(MovingDomainPhysics, LevelSetRestartRecordsPreserveGeneratedInterfaceMetadata)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, 0,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    ls::LevelSetTransportOptions transport_options{};
+    transport_options.level_set.field_name = "phi";
+    transport_options.level_set.source = ls::LevelSetFieldSource::PrescribedData;
+    transport_options.level_set.auto_register_field = false;
+
+    const auto field_record =
+        ls::captureLevelSetFieldRestartRecord(system, transport_options, 6u);
+    EXPECT_EQ(field_record.field_name, "phi");
+    EXPECT_EQ(field_record.field_id, phi);
+    EXPECT_EQ(field_record.source, ls::LevelSetFieldSource::PrescribedData);
+    EXPECT_FALSE(field_record.auto_register_field);
+    EXPECT_EQ(field_record.components, 1);
+    EXPECT_GT(field_record.dof_count, 0);
+    EXPECT_EQ(field_record.value_revision, 6u);
+
+    ls::LevelSetGeneratedInterfaceOptions interface_options{};
+    interface_options.level_set_field_name = "phi";
+    interface_options.domain_id = "water-air";
+    interface_options.isovalue = 0.0;
+    interface_options.tolerance = 1.0e-12;
+    interface_options.quadrature_order = 1;
+
+    ls::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto built = lifecycle.build(system, interface_options, solution);
+    ASSERT_TRUE(built.success) << built.diagnostic;
+
+    const auto interface_record =
+        ls::captureLevelSetGeneratedInterfaceRestartRecord(
+            system, interface_options, built);
+    EXPECT_EQ(interface_record.level_set_field_name, "phi");
+    EXPECT_EQ(interface_record.level_set_field_id, phi);
+    EXPECT_EQ(interface_record.domain_id, "water-air");
+    EXPECT_EQ(interface_record.interface_marker, built.interface_marker);
+    EXPECT_EQ(interface_record.value_revision, built.value_revision);
+    EXPECT_EQ(interface_record.summary.active_fragment_count,
+              built.summary.active_fragment_count);
+
+    std::string diagnostic;
+    EXPECT_TRUE(ls::levelSetGeneratedInterfaceRestartRecordMatches(
+        system, interface_record, &diagnostic)) << diagnostic;
+    EXPECT_TRUE(diagnostic.empty());
+
+    auto mismatch = interface_record;
+    ++mismatch.mesh_geometry_revision;
+    EXPECT_FALSE(ls::levelSetGeneratedInterfaceRestartRecordMatches(
+        system, mismatch, &diagnostic));
+    EXPECT_NE(diagnostic.find("geometry revision"), std::string::npos);
+
+    const auto restored_options =
+        ls::optionsFromLevelSetGeneratedInterfaceRestartRecord(interface_record);
+    EXPECT_EQ(restored_options.requested_interface_marker,
+              built.interface_marker);
+    EXPECT_EQ(restored_options.domain_id, interface_options.domain_id);
+
+    ls::LevelSetGeneratedInterfaceLifecycle restored_lifecycle;
+    restored_lifecycle.restoreValueRevision(interface_record.value_revision);
+    const auto rebuilt = restored_lifecycle.build(
+        system, restored_options, solution);
+    ASSERT_TRUE(rebuilt.success) << rebuilt.diagnostic;
+    EXPECT_EQ(rebuilt.interface_marker, built.interface_marker);
+    EXPECT_EQ(rebuilt.value_revision, interface_record.value_revision + 1u);
 }
 
 TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)
