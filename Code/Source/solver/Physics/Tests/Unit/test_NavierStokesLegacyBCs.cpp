@@ -534,6 +534,87 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, FittedFreeSurfaceContactLineBCTranslation_AcceptsModelParams)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 79;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = marker;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("FittedALE");
+    bc.params["External_pressure"] = defined("0.0");
+    bc.params["Contact_line_model"] = defined("PrescribedContactAngle");
+    bc.params["Contact_line_wall_marker"] = defined("88");
+    bc.params["Contact_line_marker"] = defined("89");
+    bc.params["Contact_angle_degrees"] = defined("60.0");
+    bc.params["Contact_line_mobility"] = defined("0.25");
+    bc.params["Wall_slip_model"] = defined("Navier");
+    bc.params["Wall_slip_length"] = defined("0.01");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_NO_THROW(system.setup());
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, FittedFreeSurfaceContactLineBCTranslation_RejectsBadModel)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 80;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = marker;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("FittedALE");
+    bc.params["Contact_line_model"] = defined("Rolling");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    EXPECT_THROW(
+        {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+            (void)module;
+        },
+        std::runtime_error);
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_RCROutflow_SetupSucceeds)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

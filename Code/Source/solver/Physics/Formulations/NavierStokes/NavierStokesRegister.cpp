@@ -1655,6 +1655,43 @@ parse_free_surface_tangential_mesh_policy(std::string_view raw, std::string_view
       " must be one of Free, SmoothingOnly, or Prescribed.");
 }
 
+svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineModel
+parse_free_surface_contact_line_model(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineModel;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "none" || token == "disabled" || token == "off") {
+    return FreeSurfaceContactLineModel::None;
+  }
+  if (token == "pinned" || token == "fixed" || token == "fixedposition") {
+    return FreeSurfaceContactLineModel::Pinned;
+  }
+  if (token == "prescribedcontactangle" || token == "contactangle" ||
+      token == "prescribedangle") {
+    return FreeSurfaceContactLineModel::PrescribedContactAngle;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of None, Pinned, or PrescribedContactAngle.");
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceWallSlipModel
+parse_free_surface_wall_slip_model(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceWallSlipModel;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "none" || token == "noslip" ||
+      token == "disabled" || token == "off") {
+    return FreeSurfaceWallSlipModel::None;
+  }
+  if (token == "navier" || token == "navierslip" || token == "slip") {
+    return FreeSurfaceWallSlipModel::Navier;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of None or Navier.");
+}
+
 std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
                                                  std::string_view context)
 {
@@ -1731,6 +1768,81 @@ free_surface_implementation_from_params(const svmp::Physics::ParameterMap& param
       params,
       {"Implementation", "Free_surface_implementation", "FreeSurfaceImplementation"});
   return parse_free_surface_implementation(raw.value_or("FittedALE"), "Free-surface Implementation");
+}
+
+void append_free_surface_contact_line(
+    const svmp::Physics::ParameterMap& params,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary& fs)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceContactLineModel;
+  using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+
+  const auto model = first_defined_string(
+      params,
+      {"Contact_line_model", "ContactLineModel",
+       "Free_surface_contact_line_model", "FreeSurfaceContactLineModel"});
+  const auto angle_radians = first_defined_double(
+      params,
+      {"Contact_angle_radians", "ContactAngleRadians",
+       "Prescribed_contact_angle_radians", "PrescribedContactAngleRadians"});
+  const auto angle_degrees = first_defined_double(
+      params,
+      {"Contact_angle_degrees", "ContactAngleDegrees",
+       "Prescribed_contact_angle_degrees", "PrescribedContactAngleDegrees"});
+
+  if (!model.has_value() && !angle_radians.has_value() && !angle_degrees.has_value()) {
+    return;
+  }
+
+  IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine contact_line{};
+  contact_line.model = model.has_value()
+      ? parse_free_surface_contact_line_model(*model, "Free-surface Contact_line_model")
+      : FreeSurfaceContactLineModel::PrescribedContactAngle;
+
+  if (const auto marker = first_defined_int(
+          params,
+          {"Contact_line_wall_marker", "ContactLineWallMarker",
+           "Wall_boundary_marker", "WallBoundaryMarker"})) {
+    contact_line.wall_boundary_marker = *marker;
+  }
+  if (const auto marker = first_defined_int(
+          params,
+          {"Contact_line_marker", "ContactLineMarker"})) {
+    contact_line.contact_line_marker = *marker;
+  }
+  if (angle_radians.has_value()) {
+    contact_line.contact_angle_radians =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*angle_radians)};
+  } else if (angle_degrees.has_value()) {
+    constexpr double pi = 3.14159265358979323846;
+    contact_line.contact_angle_radians =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>((*angle_degrees) * pi / 180.0)};
+  }
+  if (const auto mobility = first_defined_double(
+          params,
+          {"Contact_line_mobility", "ContactLineMobility", "Mobility"})) {
+    contact_line.mobility =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*mobility)};
+  }
+  if (const auto slip_model = first_defined_string(
+          params,
+          {"Wall_slip_model", "WallSlipModel", "Contact_line_wall_slip_model",
+           "ContactLineWallSlipModel"})) {
+    contact_line.wall_slip_model =
+        parse_free_surface_wall_slip_model(*slip_model, "Free-surface Wall_slip_model");
+  }
+  if (const auto slip_length = first_defined_double(
+          params,
+          {"Wall_slip_length", "WallSlipLength", "Slip_length", "SlipLength"})) {
+    contact_line.slip_length =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*slip_length)};
+  }
+
+  fs.contact_lines.push_back(std::move(contact_line));
 }
 
 void append_free_surface_bc(
@@ -1864,6 +1976,7 @@ void append_free_surface_bc(
     options.nitsche_scale_with_p = *scale_with_p;
   }
 
+  append_free_surface_contact_line(bc.params, fs);
   options.free_surface.push_back(std::move(fs));
 }
 
