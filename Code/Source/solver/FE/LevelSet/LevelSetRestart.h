@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Restart records for level-set fields and generated interfaces.
+ */
+
 #include "Core/Types.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"

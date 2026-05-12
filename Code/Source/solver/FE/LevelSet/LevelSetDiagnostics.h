@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Scalar diagnostics for level-set volume and signed-distance quality.
+ */
+
 #include "Assembly/Assembler.h"
 #include "Core/Types.h"
 #include "Dofs/DofHandler.h"

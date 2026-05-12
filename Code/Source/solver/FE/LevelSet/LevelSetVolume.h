@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Cut-cell volume measurement and global-shift correction utilities.
+ */
+
 #include "Assembly/Assembler.h"
 #include "Core/Types.h"
 #include "Dofs/DofHandler.h"

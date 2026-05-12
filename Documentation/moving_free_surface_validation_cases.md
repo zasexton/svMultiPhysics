@@ -16,6 +16,16 @@ Common reported quantities:
 - generated-interface measure and normals for level-set runs
 - mesh quality metrics for fitted ALE runs
 
+## Implementation Ownership
+
+Navier-Stokes owns free-surface boundary semantics for both fitted ALE and
+unfitted level-set cases. For unfitted cases, Navier-Stokes consumes
+`FE::level_set` generated interface domains, curvature helpers, cut-cell
+metadata, and level-set diagnostics, then installs the free-surface pressure
+jump, surface-tension, kinematic, and stabilization terms. Reusable level-set
+transport, volume, reinitialization, diagnostics, restart, and generated
+interface lifecycle code belongs in `Code/Source/solver/FE/LevelSet`.
+
 ## Open Tank At Rest
 
 Purpose: verify that the half-filled open-vessel examples remain in hydrostatic

@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief FE-system installer for level-set transport residuals.
+ */
+
 #include "LevelSet/LevelSetOptions.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"

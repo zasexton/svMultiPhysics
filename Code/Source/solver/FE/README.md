@@ -29,6 +29,7 @@ FE/
 ├── Forms/          # Symbolic weak-form expressions and JIT compilation
 ├── Constraints/    # Boundary conditions and constraints
 ├── Systems/        # High-level FE system orchestration
+├── LevelSet/       # Level-set transport, generated interfaces, and diagnostics
 ├── TimeStepping/   # Time integration schemes
 ├── Constitutive/   # Material model infrastructure
 └── Backends/       # Linear solver backends (FSILS)
@@ -50,13 +51,15 @@ FE/
 | **One-sided trace laws** | `TraceInequalityBC` | `Forms/StandardBCs.h` |
 | **H(div) periodic/MPC trace relations** | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `Constraints/ConstraintTools.h` |
 | **Mixed-dimensional interface fields** | `FESystem::addInterfaceField()` | `Systems/FESystem.h` |
+| **Level-set transport and generated interfaces** | `level_set::installLevelSetTransport()` and lifecycle utilities | `LevelSet/LevelSet.h` |
 | **Mortar/hybrid facet fields** | `MortarSpace` + `FESystem::addInterfaceFaceKernel()` | `Spaces/MortarSpace.h` / `Systems/FESystem.h` |
 | **Compile without installing** | `FormCompiler::compile(form, kind)` | `Forms/FormCompiler.h` |
 | **Auxiliary state models** | `AuxiliaryModelBuilder("name")` | `Auxiliary/AuxiliaryModelBuilder.h` |
 | **Deploy auxiliary models** | `use(model).name(...).scope(...)` | `Auxiliary/AuxiliaryBindings.h` |
 | **Auxiliary inputs** | `AuxiliaryInputRegistry` | `Auxiliary/AuxiliaryInputRegistry.h` |
 
-See `Docs/AuxiliaryState/README.md` for the full auxiliary state architecture guide.
+See `Docs/AuxiliaryState/README.md` for the full auxiliary state architecture
+guide and `Docs/LevelSet.md` for the level-set service ownership model.
 
 Most physics modules need only two includes:
 

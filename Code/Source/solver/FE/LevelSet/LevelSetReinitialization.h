@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Signed-distance repair utilities for level-set fields.
+ */
+
 #include "Assembly/Assembler.h"
 #include "Core/Types.h"
 #include "Dofs/DofHandler.h"

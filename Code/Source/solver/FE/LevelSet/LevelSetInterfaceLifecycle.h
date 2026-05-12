@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Generated interface domain lifecycle for level-set fields.
+ */
+
 #include "Core/Types.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Systems/FESystem.h"

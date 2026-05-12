@@ -449,13 +449,13 @@ Goal: document the new ownership model and migration contract.
 
 Checklist:
 
-- [ ] Update FE documentation to describe `FE::level_set` services.
-- [ ] Update free-surface documentation to say Navier-Stokes consumes FE
+- [x] Update FE documentation to describe `FE::level_set` services.
+- [x] Update free-surface documentation to say Navier-Stokes consumes FE
   level-set interfaces.
-- [ ] Document which level-set APIs are stable public FE APIs.
-- [ ] Document which compatibility aliases, if any, are temporary.
-- [ ] Update Doxygen grouping for `FE/LevelSet`.
-- [ ] Add a short module-authoring note explaining how other Physics modules
+- [x] Document which level-set APIs are stable public FE APIs.
+- [x] Document which compatibility aliases, if any, are temporary.
+- [x] Update Doxygen grouping for `FE/LevelSet`.
+- [x] Add a short module-authoring note explaining how other Physics modules
   can use FE level-set services.
 
 Done when:

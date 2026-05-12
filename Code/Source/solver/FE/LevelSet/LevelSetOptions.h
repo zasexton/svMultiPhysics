@@ -1,5 +1,11 @@
 #pragma once
 
+/**
+ * @file
+ * @ingroup fe_level_set
+ * @brief Public level-set option structs, source enums, and cadence helpers.
+ */
+
 #include "Core/Types.h"
 #include "Forms/BoundaryConditions.h"
 #include "Spaces/FunctionSpace.h"
