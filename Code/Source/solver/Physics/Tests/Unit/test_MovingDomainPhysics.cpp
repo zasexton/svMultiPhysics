@@ -966,6 +966,10 @@ TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
     EXPECT_EQ(contact_line.contact_line_marker, -1);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.contact_angle_radians),
                      1.57079632679489661923);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.wall_normal[0]), 0.0);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.wall_normal[1]), 0.0);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.wall_normal[2]), 0.0);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.contact_angle_penalty), 1.0);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.mobility), 0.0);
     EXPECT_EQ(contact_line.wall_slip_model, ns::FreeSurfaceWallSlipModel::None);
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.slip_length), 0.0);
@@ -978,6 +982,8 @@ TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
         .wall_boundary_marker = 7,
         .contact_line_marker = 8,
         .contact_angle_radians = 0.78539816339744830962,
+        .wall_normal = {0.0, 1.0, 0.0},
+        .contact_angle_penalty = 12.0,
         .mobility = 0.25,
         .wall_slip_model = ns::FreeSurfaceWallSlipModel::Navier,
         .slip_length = 0.01,
@@ -1059,6 +1065,83 @@ TEST(MovingDomainPhysics, FittedPinnedContactLineRequiresALE)
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
                 .model = ns::FreeSurfaceContactLineModel::Pinned,
                 .contact_line_marker = marker,
+            },
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics, FittedPrescribedContactAngleAddsMeshMotionResidual)
+{
+    constexpr int marker = 42;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addOperator("mesh_motion");
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "mesh_displacement",
+        .space = u_space,
+        .components = 3,
+    });
+
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.mesh_displacement_field_name = "mesh_displacement";
+    opts.mesh_velocity_field_name = "mesh_velocity";
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
+                .contact_angle_radians = 0.0,
+                .wall_normal = {1.0, 0.0, 0.0},
+                .contact_angle_penalty = 5.0,
+            },
+        },
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(system.hasOperator("mesh_motion"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(system.dofHandler().getNumDofs(), 0.0);
+    FE::systems::SystemStateView state;
+    state.u = solution;
+    EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
+}
+
+TEST(MovingDomainPhysics, FittedPrescribedContactAngleRequiresALE)
+{
+    constexpr int marker = 43;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = false;
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
+                .contact_angle_radians = 0.0,
+                .wall_normal = {1.0, 0.0, 0.0},
             },
         },
     });

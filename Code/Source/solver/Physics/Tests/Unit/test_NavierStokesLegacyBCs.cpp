@@ -550,6 +550,9 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceContactLineBCTranslation_AcceptsMod
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
 
+    input.equation_params["Enable_ALE"] = defined("true");
+    input.equation_params["Mesh_velocity_source"] = defined("coupled_displacement");
+    input.equation_params["Auto_register_mesh_displacement_field"] = defined("true");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
     input.default_domain.params["Viscosity.Value"] = defined("0.01");
@@ -564,6 +567,8 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceContactLineBCTranslation_AcceptsMod
     bc.params["Contact_line_wall_marker"] = defined("88");
     bc.params["Contact_line_marker"] = defined("89");
     bc.params["Contact_angle_degrees"] = defined("60.0");
+    bc.params["Contact_line_wall_normal"] = defined("1.0, 0.0, 0.0");
+    bc.params["Contact_angle_penalty"] = defined("7.5");
     bc.params["Contact_line_mobility"] = defined("0.25");
     bc.params["Wall_slip_model"] = defined("Navier");
     bc.params["Wall_slip_length"] = defined("0.01");
@@ -572,7 +577,9 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceContactLineBCTranslation_AcceptsMod
     svmp::FE::systems::FESystem system(mesh);
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
-    ASSERT_NO_THROW(system.setup());
+    ASSERT_TRUE(system.hasOperator("mesh_motion"));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentNormal));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
 #endif
 }
 

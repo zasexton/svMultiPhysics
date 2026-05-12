@@ -18,11 +18,13 @@
 #include "FE/Systems/FormsInstaller.h"
 
 #include <cstddef>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -75,6 +77,39 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
                : contact_line.wall_boundary_marker;
 }
 
+[[nodiscard]] FE::Real constantScalarValueOrThrow(
+    const IncompressibleNavierStokesVMSOptions::ScalarValue& value,
+    std::string_view context)
+{
+    const auto* real = std::get_if<FE::Real>(&value);
+    if (real == nullptr) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+            " currently requires a literal scalar value");
+    }
+    return *real;
+}
+
+[[nodiscard]] std::array<FE::Real, 3> normalizedWallNormal(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line)
+{
+    std::array<FE::Real, 3> normal{
+        constantScalarValueOrThrow(contact_line.wall_normal[0], "contact-line wall_normal"),
+        constantScalarValueOrThrow(contact_line.wall_normal[1], "contact-line wall_normal"),
+        constantScalarValueOrThrow(contact_line.wall_normal[2], "contact-line wall_normal")};
+    const auto norm = std::sqrt(normal[0] * normal[0] +
+                                normal[1] * normal[1] +
+                                normal[2] * normal[2]);
+    if (!(norm > FE::Real{0.0})) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: prescribed contact angle requires a nonzero wall_normal");
+    }
+    for (auto& component : normal) {
+        component /= norm;
+    }
+    return normal;
+}
+
 void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled)
 {
     if (isUnfittedLevelSet(bc)) {
@@ -122,6 +157,16 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             if (contactLineConstraintMarker(contact_line) < 0) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: pinned contact line requires contact_line_marker or wall_boundary_marker >= 0");
+            }
+        }
+        if (contact_line.model == FreeSurfaceContactLineModel::PrescribedContactAngle) {
+            if (isUnfittedLevelSet(bc)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed contact angles are currently supported only for fitted ALE free surfaces");
+            }
+            if (!ale_enabled) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles require ALE to be enabled");
             }
         }
     }
@@ -200,6 +245,75 @@ void applyFreeSurfaceContactLineConstraints(
             });
         }
         FE::systems::installStrongDirichlet(system, constraints);
+    }
+}
+
+void applyFreeSurfaceContactAngleResidual(
+    FE::systems::FESystem& system,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::ALEBinding& ale_binding,
+    const IncompressibleNavierStokesVMSOptions& options,
+    const FE::systems::FormInstallOptions& base_install_options,
+    int dim)
+{
+    for (const auto& contact_line : bc.contact_lines) {
+        if (contact_line.model != FreeSurfaceContactLineModel::PrescribedContactAngle) {
+            continue;
+        }
+        if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles require a coupled mesh displacement unknown");
+        }
+
+        const auto& rec = system.fieldRecord(ale_binding.mesh_displacement_field);
+        if (!rec.space) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: mesh displacement field for prescribed contact angle has no function space");
+        }
+
+        const auto wall_normal = normalizedWallNormal(contact_line);
+        std::vector<FE::forms::FormExpr> wall_components;
+        wall_components.reserve(static_cast<std::size_t>(dim));
+        for (int d = 0; d < dim; ++d) {
+            wall_components.push_back(FE::forms::FormExpr::constant(
+                wall_normal[static_cast<std::size_t>(d)]));
+        }
+        const auto wall_n = FE::forms::FormExpr::asVector(std::move(wall_components));
+        const auto desired = FE::forms::FormExpr::constant(std::cos(
+            constantScalarValueOrThrow(
+                contact_line.contact_angle_radians,
+                "contact-line contact_angle_radians")));
+        const auto penalty = FE::forms::bc::toScalarExpr(
+            contact_line.contact_angle_penalty,
+            freeSurfaceValueName("ns_free_surface_contact_angle_penalty", bc));
+
+        const auto psi = FE::forms::FormExpr::testFunction(
+            ale_binding.mesh_displacement_field,
+            *rec.space,
+            "psi_contact_angle");
+        const auto n = FE::forms::currentNormal();
+        const auto angle_gap = FE::forms::dot(n, wall_n) - desired;
+        const auto residual =
+            (penalty * angle_gap * FE::forms::normalTrace(psi, n) *
+             FE::forms::currentMeasure()).ds(bc.boundary_marker);
+
+        if (!system.hasOperator("mesh_motion")) {
+            system.addOperator("mesh_motion");
+        }
+        auto install = base_install_options;
+        install.compiler_options.geometry_sensitivity.mode =
+            FE::forms::GeometrySensitivityMode::MeshMotionUnknowns;
+        install.compiler_options.geometry_sensitivity.mesh_motion_field =
+            ale_binding.mesh_displacement_field;
+        install.compiler_options.geometry_tangent_path = options.moving_mesh_tangent_path;
+        install.compiler_options.use_symbolic_tangent =
+            options.moving_mesh_tangent_path != FE::forms::GeometryTangentPath::ADReference;
+        (void)FE::systems::installFormulation(
+            system,
+            "mesh_motion",
+            {ale_binding.mesh_displacement_field},
+            residual,
+            install);
     }
 }
 
@@ -522,9 +636,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // Reserve the marker here so validate() catches conflicts with other BC types.
     bc_manager.install(options_.velocity_dirichlet_weak, Factories::reserveMarker);
 
+    auto free_surface_contact_angle_install = physicsInstallOptions(options_.jit_policy);
     for (const auto& bc : options_.free_surface) {
         validateFreeSurfaceBoundary(bc, options_.enable_ale);
         applyFreeSurfaceContactLineConstraints(system, bc, ale_binding, dim);
+        applyFreeSurfaceContactAngleResidual(
+            system,
+            bc,
+            ale_binding,
+            options_,
+            free_surface_contact_angle_install,
+            dim);
         if (bc.implementation == FreeSurfaceImplementation::FittedALE) {
             bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(bc.boundary_marker));
         }

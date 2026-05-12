@@ -1820,6 +1820,26 @@ void append_free_surface_contact_line(
         IncompressibleNavierStokesVMSOptions::ScalarValue{
             static_cast<svmp::FE::Real>((*angle_degrees) * pi / 180.0)};
   }
+  if (const auto wall_normal = first_defined_string(
+          params,
+          {"Contact_line_wall_normal", "ContactLineWallNormal",
+           "Contact_angle_wall_normal", "ContactAngleWallNormal",
+           "Wall_normal", "WallNormal"})) {
+    const auto normal =
+        parse_real_vector3(*wall_normal, "Free-surface Contact_line_wall_normal");
+    contact_line.wall_normal = {
+        IncompressibleNavierStokesVMSOptions::ScalarValue{normal[0]},
+        IncompressibleNavierStokesVMSOptions::ScalarValue{normal[1]},
+        IncompressibleNavierStokesVMSOptions::ScalarValue{normal[2]}};
+  }
+  if (const auto penalty = first_defined_double(
+          params,
+          {"Contact_angle_penalty", "ContactAnglePenalty",
+           "Contact_line_angle_penalty", "ContactLineAnglePenalty"})) {
+    contact_line.contact_angle_penalty =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*penalty)};
+  }
   if (const auto mobility = first_defined_double(
           params,
           {"Contact_line_mobility", "ContactLineMobility", "Mobility"})) {
