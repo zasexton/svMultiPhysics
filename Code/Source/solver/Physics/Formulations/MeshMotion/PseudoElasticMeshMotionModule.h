@@ -8,6 +8,7 @@
 
 #include "Physics/Core/PhysicsJITPolicy.h"
 #include "Physics/Core/PhysicsModule.h"
+#include "Physics/Formulations/MeshMotion/MeshMotionBoundaryOptions.h"
 
 #include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/FormExpr.h"
@@ -55,6 +56,7 @@ struct PseudoElasticMeshMotionOptions {
     std::vector<DirichletBC> dirichlet{};
     std::vector<NaturalBC> natural{};
     std::vector<RobinBC> robin{};
+    std::vector<NormalConstraintBC> normal_constraint{};
 };
 
 class PseudoElasticMeshMotionModule final : public PhysicsModule {

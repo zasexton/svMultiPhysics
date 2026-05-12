@@ -1119,6 +1119,35 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionRobinBoundarySpringAssembles)
     EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
 }
 
+TEST(MovingDomainPhysics, HarmonicMeshMotionNormalConstraintAcceptsVelocityTarget)
+{
+    constexpr int marker = 10;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto d_space = makeVelocitySpace(mesh);
+
+    mm::HarmonicMeshMotionOptions opts;
+    opts.operator_tag = "mesh_motion";
+    mm::NormalConstraintBC normal;
+    normal.boundary_marker = marker;
+    normal.quantity = mm::NormalConstraintQuantity::Velocity;
+    normal.target = 2.0;
+    normal.velocity_time_scale = 0.25;
+    normal.penalty = 6.0;
+    opts.normal_constraint.push_back(normal);
+
+    FE::systems::FESystem system(mesh);
+    mm::HarmonicMeshMotionModule module(d_space, opts);
+    module.registerOn(system);
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+    system.setup({}, makeSingleTetraSetupInputs());
+
+    std::vector<FE::Real> u(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(u);
+    EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
+}
+
 TEST(MovingDomainPhysics, HarmonicMeshMotionWeakBoundaryTermsOnSameMarkerAreAdditive)
 {
     constexpr int marker = 11;

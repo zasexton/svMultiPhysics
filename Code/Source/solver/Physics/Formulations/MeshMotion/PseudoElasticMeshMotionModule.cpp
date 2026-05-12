@@ -102,6 +102,10 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
         return Factories::toVectorRobinBC(
             bc, dim, "PseudoElasticMeshMotionModule::registerOn robin");
     });
+    bc_manager.install(options_.normal_constraint, [&](const auto& bc) {
+        return Factories::toNormalConstraintBC(
+            bc, "PseudoElasticMeshMotionModule::registerOn normal_constraint");
+    });
     bc_manager.install(options_.dirichlet, [&](const auto& bc) {
         return Factories::toVectorEssentialBC(
             bc, dim, "PseudoElasticMeshMotionModule::registerOn dirichlet", "d_mesh");

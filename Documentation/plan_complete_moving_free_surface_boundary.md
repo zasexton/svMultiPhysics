@@ -270,7 +270,7 @@ Concrete changes:
 Checklist:
 
 - [x] Define fitted free-surface kinematic policy options.
-- [ ] Add mesh-motion BC that accepts normal velocity or displacement constraints from fluid state.
+- [x] Add mesh-motion BC that accepts normal velocity or displacement constraints from fluid state.
 - [ ] Add tangential mesh policy:
   - [ ] free tangential mesh motion
   - [ ] smoothing-only tangential motion

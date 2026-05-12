@@ -6,6 +6,9 @@
  * @brief Shared mesh-motion boundary-condition translation helpers.
  */
 
+#include "Physics/Formulations/MeshMotion/MeshMotionBoundaryOptions.h"
+
+#include "FE/Forms/BoundaryConditions.h"
 #include "FE/Forms/StandardBCs.h"
 
 #include <memory>
@@ -79,6 +82,40 @@ toVectorEssentialBC(const DirichletBC& bc,
         marker,
         std::move(values),
         std::string(field_symbol));
+}
+
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>
+toNormalConstraintBC(const NormalConstraintBC& bc,
+                     std::string_view context,
+                     std::string_view penalty_prefix = "mesh_motion_normal_penalty",
+                     std::string_view target_prefix = "mesh_motion_normal_target",
+                     std::string_view time_scale_prefix = "mesh_motion_normal_time_scale")
+{
+    const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(bc, context);
+    const auto penalty = FE::forms::bc::toScalarExpr(
+        bc.penalty,
+        FE::forms::bc::markerValueName(penalty_prefix, marker));
+    auto target = FE::forms::bc::toScalarExpr(
+        bc.target,
+        FE::forms::bc::markerValueName(target_prefix, marker));
+
+    switch (bc.quantity) {
+    case NormalConstraintQuantity::Displacement:
+        break;
+    case NormalConstraintQuantity::Velocity: {
+        const auto time_scale = FE::forms::bc::toScalarExpr(
+            bc.velocity_time_scale,
+            FE::forms::bc::markerValueName(time_scale_prefix, marker));
+        target = time_scale * target;
+        break;
+    }
+    }
+
+    return FE::forms::bc::makeTraceRobinBC(
+        marker,
+        penalty,
+        penalty * target,
+        FE::forms::bc::ScalarTraceOperator::NormalComponent);
 }
 
 } // namespace Factories
