@@ -239,7 +239,7 @@ Concrete changes:
 
 Checklist:
 
-- [ ] Add interface geometry writer.
+- [x] Add interface geometry writer.
 - [ ] Add interface summary statistics.
 - [ ] Add output for interface normals.
 - [ ] Add output for curvature estimates.

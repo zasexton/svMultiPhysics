@@ -748,6 +748,7 @@ set(FE_GEOMETRY_HEADERS
     Geometry/GeometryFrameUtils.h
     Geometry/CutQuadrature.h
     Interfaces/CutInterfaceFieldEvaluation.h
+    Interfaces/LevelSetInterfaceGeometryWriter.h
     Interfaces/LevelSetInterfaceBuilder.h
     Interfaces/LevelSetInterfaceDomain.h
     Geometry/FrameAwareTransform.h
@@ -773,6 +774,7 @@ set(FE_GEOMETRY_SOURCES
     Geometry/FrameGeometry.cpp
     Geometry/CutQuadrature.cpp
     Interfaces/CutInterfaceFieldEvaluation.cpp
+    Interfaces/LevelSetInterfaceGeometryWriter.cpp
     Interfaces/LevelSetInterfaceBuilder.cpp
     Geometry/FrameAwareTransform.cpp
     Geometry/MovingFrame.cpp
@@ -2060,6 +2062,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Geometry/test_CutInterfaceFieldEvaluation.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceBuilder.cpp
         Tests/Unit/Geometry/test_LevelSetInterfaceDomain.cpp
+        Tests/Unit/Geometry/test_LevelSetInterfaceGeometryWriter.cpp
         Tests/Unit/Geometry/test_FrameAwareTransform.cpp
         Tests/Unit/Geometry/test_MovingFrame.cpp
         Tests/Unit/Geometry/test_FiniteDeformationKinematics.cpp
