@@ -2007,6 +2007,37 @@ void append_free_surface_bc(
     options.nitsche_scale_with_p = *scale_with_p;
   }
 
+  if (const auto enabled = first_defined_bool(
+          bc.params,
+          {"Enable_cut_cell_stabilization", "EnableCutCellStabilization",
+           "Cut_cell_stabilization", "CutCellStabilization"})) {
+    fs.cut_cell_stabilization.enabled = *enabled;
+  }
+  if (const auto velocity_penalty = first_defined_double(
+          bc.params,
+          {"Cut_cell_velocity_gradient_penalty", "CutCellVelocityGradientPenalty",
+           "Velocity_gradient_ghost_penalty", "VelocityGradientGhostPenalty"})) {
+    fs.cut_cell_stabilization.velocity_gradient_penalty =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*velocity_penalty)};
+    fs.cut_cell_stabilization.enabled = true;
+  }
+  if (const auto pressure_penalty = first_defined_double(
+          bc.params,
+          {"Cut_cell_pressure_gradient_penalty", "CutCellPressureGradientPenalty",
+           "Pressure_gradient_ghost_penalty", "PressureGradientGhostPenalty"})) {
+    fs.cut_cell_stabilization.pressure_gradient_penalty =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*pressure_penalty)};
+    fs.cut_cell_stabilization.enabled = true;
+  }
+  if (const auto use_cut_scale = first_defined_bool(
+          bc.params,
+          {"Use_cut_metadata_scale", "UseCutMetadataScale",
+           "Use_cut_stabilization_scale", "UseCutStabilizationScale"})) {
+    fs.cut_cell_stabilization.use_cut_metadata_scale = *use_cut_scale;
+  }
+
   append_free_surface_contact_line(bc.params, fs);
   options.free_surface.push_back(std::move(fs));
 }

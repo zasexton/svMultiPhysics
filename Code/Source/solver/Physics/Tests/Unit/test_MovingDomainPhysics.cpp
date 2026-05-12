@@ -2597,6 +2597,63 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesGeneratedInterfaceM
     EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, expected_marker));
 }
 
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilization)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .external_pressure = 1.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
+}
+
+TEST(MovingDomainPhysics, NavierStokesRejectsCutCellStabilizationOnFittedSurface)
+{
+    constexpr int marker = 45;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .cut_cell_stabilization = {
+            .enabled = true,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
 {
     constexpr int interface_marker = 42;

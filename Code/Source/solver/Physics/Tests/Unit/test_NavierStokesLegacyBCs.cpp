@@ -12,6 +12,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
@@ -619,6 +620,57 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceContactLineBCTranslation_RejectsBad
             (void)module;
         },
         std::runtime_error);
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_AddsFacetTerms)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 81;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = svmp::INVALID_LABEL;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("UnfittedLevelSet");
+    bc.params["Level_set_field_name"] = defined("phi");
+    bc.params["External_pressure"] = defined("1.0");
+    bc.params["Enable_cut_cell_stabilization"] = defined("true");
+    bc.params["Cut_cell_velocity_gradient_penalty"] = defined("1.5");
+    bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto phi_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InteriorFaceIntegral));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Jump));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::ParameterRef));
 #endif
 }
 

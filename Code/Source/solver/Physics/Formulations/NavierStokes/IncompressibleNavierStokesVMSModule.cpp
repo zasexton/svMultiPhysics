@@ -11,6 +11,7 @@
 #include "Physics/Materials/Fluid/NewtonianViscosity.h"
 
 #include "FE/Constitutive/MetadataTaggedModel.h"
+#include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/ALEBinding.h"
@@ -187,10 +188,34 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted free surface requires a non-empty level_set_field_name");
         }
+        const auto& cut = bc.cut_cell_stabilization;
+        if (cut.enabled) {
+            const auto* velocity_penalty =
+                std::get_if<FE::Real>(&cut.velocity_gradient_penalty);
+            if (velocity_penalty && *velocity_penalty < FE::Real{0.0}) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: cut-cell velocity-gradient penalty must be nonnegative");
+            }
+            const auto* pressure_penalty =
+                std::get_if<FE::Real>(&cut.pressure_gradient_penalty);
+            if (pressure_penalty && *pressure_penalty < FE::Real{0.0}) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: cut-cell pressure-gradient penalty must be nonnegative");
+            }
+            if (FE::forms::bc::isZeroConstantScalarValue(cut.velocity_gradient_penalty) &&
+                FE::forms::bc::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: enabled cut-cell stabilization requires a nonzero penalty");
+            }
+        }
     } else {
         if (bc.boundary_marker < 0) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: fitted free surface requires boundary_marker >= 0");
+        }
+        if (bc.cut_cell_stabilization.enabled) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: cut-cell stabilization is only valid for unfitted level-set free surfaces");
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
             !ale_enabled) {
@@ -231,6 +256,61 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
                     "IncompressibleNavierStokesVMSModule: prescribed fitted contact angles require ALE to be enabled");
             }
         }
+    }
+}
+
+void applyFreeSurfaceCutCellStabilization(
+    FE::forms::FormExpr& momentum_form,
+    FE::forms::FormExpr& continuity_form,
+    const FreeSurfaceBoundary& bc,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& p,
+    const FE::forms::FormExpr& v,
+    const FE::forms::FormExpr& q,
+    const FE::forms::FormExpr& mu,
+    FE::Real stabilization_epsilon)
+{
+    if (!isUnfittedLevelSet(bc) || !bc.cut_cell_stabilization.enabled) {
+        return;
+    }
+
+    namespace bc_forms = FE::forms::bc;
+    const auto& cut = bc.cut_cell_stabilization;
+    const auto cut_scale = cut.use_cut_metadata_scale
+        ? FE::forms::cutStabilizationScale()
+        : FE::forms::FormExpr::constant(1.0);
+    const auto h_f = FE::forms::avg(FE::forms::hNormal());
+
+    if (!bc_forms::isZeroConstantScalarValue(cut.velocity_gradient_penalty)) {
+        const auto velocity_penalty = bc_forms::toScalarExpr(
+            cut.velocity_gradient_penalty,
+            freeSurfaceValueName("ns_free_surface_cut_velocity_penalty", bc));
+        const auto velocity_jump_u =
+            FE::forms::cutAdjacentFacetGradientJump(u);
+        const auto velocity_jump_v =
+            FE::forms::cutAdjacentFacetGradientJump(v);
+        momentum_form =
+            momentum_form +
+            FE::forms::cutAdjacentFacetIntegral(
+                cut_scale * velocity_penalty * mu * h_f *
+                FE::forms::doubleContraction(velocity_jump_u, velocity_jump_v));
+    }
+
+    if (!bc_forms::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
+        const auto pressure_penalty = bc_forms::toScalarExpr(
+            cut.pressure_gradient_penalty,
+            freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", bc));
+        const auto h3 = h_f * h_f * h_f;
+        const auto pressure_jump_p =
+            FE::forms::cutAdjacentFacetGradientJump(p);
+        const auto pressure_jump_q =
+            FE::forms::cutAdjacentFacetGradientJump(q);
+        continuity_form =
+            continuity_form +
+            FE::forms::cutAdjacentFacetIntegral(
+                cut_scale * pressure_penalty * h3 /
+                (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                FE::forms::inner(pressure_jump_p, pressure_jump_q));
     }
 }
 
@@ -750,6 +830,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             mu,
             options_,
             options_.enable_ale);
+        applyFreeSurfaceCutCellStabilization(
+            momentum_form,
+            continuity_form,
+            effective_bc,
+            u,
+            p,
+            v,
+            q,
+            mu,
+            options_.stabilization_epsilon);
     }
 
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim); });

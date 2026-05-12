@@ -155,6 +155,13 @@ struct IncompressibleNavierStokesVMSOptions {
         ScalarValue slip_length{0.0};
     };
 
+    struct FreeSurfaceCutCellStabilization {
+        bool enabled{false};
+        ScalarValue velocity_gradient_penalty{1.0};
+        ScalarValue pressure_gradient_penalty{1.0};
+        bool use_cut_metadata_scale{true};
+    };
+
     /**
      * @brief Physics-side free-surface relation on a fitted or embedded interface
      *
@@ -196,6 +203,7 @@ struct IncompressibleNavierStokesVMSOptions {
             FreeSurfaceKinematicEnforcement::None};
         ScalarValue kinematic_penalty{0.0};
 
+        FreeSurfaceCutCellStabilization cut_cell_stabilization{};
         std::vector<FreeSurfaceContactLine> contact_lines{};
     };
 
