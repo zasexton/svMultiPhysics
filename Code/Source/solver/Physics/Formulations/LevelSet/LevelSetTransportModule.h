@@ -10,15 +10,19 @@
 #include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Core/Types.h"
+#include "FE/Forms/BoundaryConditions.h"
 #include "FE/Spaces/FunctionSpace.h"
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace level_set {
+
+using ScalarValue = FE::forms::bc::ScalarValue;
 
 enum class LevelSetFieldSource {
     Unknown,
@@ -48,10 +52,26 @@ struct LevelSetSUPGOptions {
     FE::Real velocity_epsilon{1.0e-12};
 };
 
+struct LevelSetInflowBoundary {
+    int boundary_marker{-1};
+    ScalarValue value{0.0};
+    FE::Real penalty_scale{1.0};
+};
+
+struct LevelSetOutflowBoundary {
+    int boundary_marker{-1};
+};
+
+struct LevelSetBoundaryOptions {
+    std::vector<LevelSetInflowBoundary> inflow{};
+    std::vector<LevelSetOutflowBoundary> outflow{};
+};
+
 struct LevelSetTransportOptions {
     LevelSetFieldOptions level_set{};
     LevelSetVelocityOptions velocity{};
     LevelSetSUPGOptions supg{};
+    LevelSetBoundaryOptions boundaries{};
     core::PhysicsJITPolicy jit_policy{};
 };
 

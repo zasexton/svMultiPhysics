@@ -12,6 +12,7 @@
 #include "FE/Systems/FormsInstaller.h"
 
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace svmp {
@@ -58,6 +59,36 @@ void validateVelocityField(const FE::systems::FESystem& system,
     }
 }
 
+void validateBoundaryOptions(const LevelSetBoundaryOptions& boundaries)
+{
+    std::unordered_set<int> markers;
+    markers.reserve(boundaries.inflow.size() + boundaries.outflow.size());
+
+    for (const auto& bc : boundaries.inflow) {
+        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+            bc,
+            "LevelSetTransportModule::registerOn: inflow boundary");
+        if (!markers.insert(marker).second) {
+            throw std::invalid_argument(
+                "LevelSetTransportModule::registerOn: duplicate level-set boundary marker");
+        }
+        if (!(bc.penalty_scale > 0.0)) {
+            throw std::invalid_argument(
+                "LevelSetTransportModule::registerOn: inflow boundary penalty_scale must be positive");
+        }
+    }
+
+    for (const auto& bc : boundaries.outflow) {
+        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+            bc,
+            "LevelSetTransportModule::registerOn: outflow boundary");
+        if (!markers.insert(marker).second) {
+            throw std::invalid_argument(
+                "LevelSetTransportModule::registerOn: duplicate level-set boundary marker");
+        }
+    }
+}
+
 } // namespace
 
 LevelSetTransportModule::LevelSetTransportModule(
@@ -70,7 +101,6 @@ LevelSetTransportModule::LevelSetTransportModule(
 
 void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
 {
-    (void)system;
     if (options_.level_set.field_name.empty()) {
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field name must be non-empty");
@@ -95,6 +125,7 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: SUPG velocity_epsilon must be positive");
     }
+    validateBoundaryOptions(options_.boundaries);
 
     const auto phi_id = resolveNamedField(
         system,
@@ -146,6 +177,20 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
             FormExpr::constant(options_.supg.tau_scale) * h() / velocity_norm;
         residual = residual +
                    (tau * dot(velocity, grad(eta)) * strong_residual).dx();
+    }
+
+    for (const auto& bc : options_.boundaries.inflow) {
+        const int marker = FE::forms::bc::detail::boundaryMarkerOrThrow(
+            bc,
+            "LevelSetTransportModule::registerOn: inflow boundary");
+        const auto normal_velocity = dot(velocity, FormExpr::normal());
+        const auto inflow_speed =
+            FormExpr::constant(0.5) * (abs(normal_velocity) - normal_velocity);
+        const auto target = FE::forms::bc::toScalarExpr(
+            bc.value,
+            FE::forms::bc::markerValueName("level_set_inflow", marker));
+        const auto penalty = FormExpr::constant(bc.penalty_scale) * inflow_speed;
+        residual = residual + (penalty * (phi - target) * eta).ds(marker);
     }
 
     if (!system.hasOperator("level_set")) {

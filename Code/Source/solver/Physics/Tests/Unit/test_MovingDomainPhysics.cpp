@@ -644,6 +644,8 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_FALSE(defaults.supg.enabled);
     EXPECT_DOUBLE_EQ(defaults.supg.tau_scale, 0.5);
     EXPECT_DOUBLE_EQ(defaults.supg.velocity_epsilon, 1.0e-12);
+    EXPECT_TRUE(defaults.boundaries.inflow.empty());
+    EXPECT_TRUE(defaults.boundaries.outflow.empty());
 
     ls::LevelSetTransportOptions opts{};
     opts.level_set.field_name = "phi";
@@ -655,6 +657,12 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     opts.supg.enabled = true;
     opts.supg.tau_scale = 0.25;
     opts.supg.velocity_epsilon = 1.0e-8;
+    opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{
+        .boundary_marker = 11,
+        .value = FE::Real{2.5},
+        .penalty_scale = 3.0,
+    });
+    opts.boundaries.outflow.push_back(ls::LevelSetOutflowBoundary{.boundary_marker = 12});
 
     EXPECT_EQ(opts.level_set.field_name, "phi");
     EXPECT_EQ(opts.level_set.source, ls::LevelSetFieldSource::PrescribedData);
@@ -665,6 +673,12 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsAreExplicit)
     EXPECT_TRUE(opts.supg.enabled);
     EXPECT_DOUBLE_EQ(opts.supg.tau_scale, 0.25);
     EXPECT_DOUBLE_EQ(opts.supg.velocity_epsilon, 1.0e-8);
+    ASSERT_EQ(opts.boundaries.inflow.size(), 1u);
+    EXPECT_EQ(opts.boundaries.inflow.front().boundary_marker, 11);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(opts.boundaries.inflow.front().value), 2.5);
+    EXPECT_DOUBLE_EQ(opts.boundaries.inflow.front().penalty_scale, 3.0);
+    ASSERT_EQ(opts.boundaries.outflow.size(), 1u);
+    EXPECT_EQ(opts.boundaries.outflow.front().boundary_marker, 12);
 }
 
 TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
@@ -791,6 +805,110 @@ TEST(MovingDomainPhysics, LevelSetTransportSUPGOptionsValidatePositiveScales)
 
     opts.supg.tau_scale = 0.5;
     opts.supg.velocity_epsilon = 0.0;
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportInflowBoundaryAddsUpwindPenalty)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+    opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{
+        .boundary_marker = 4,
+        .value = FE::Real{1.25},
+        .penalty_scale = 2.0,
+    });
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::AbsoluteValue));
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportOutflowBoundaryIsNatural)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+    opts.boundaries.outflow.push_back(ls::LevelSetOutflowBoundary{.boundary_marker = 5});
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportBoundaryOptionsValidateMarkers)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    ls::LevelSetTransportOptions opts{};
+    opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{});
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.boundaries.inflow.clear();
+    opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{
+        .boundary_marker = 4,
+        .penalty_scale = 0.0,
+    });
+    {
+        FE::systems::FESystem system(mesh);
+        ls::LevelSetTransportModule module(scalar_space, opts);
+        EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+    }
+
+    opts.boundaries.inflow.clear();
+    opts.boundaries.inflow.push_back(ls::LevelSetInflowBoundary{.boundary_marker = 4});
+    opts.boundaries.outflow.push_back(ls::LevelSetOutflowBoundary{.boundary_marker = 4});
     {
         FE::systems::FESystem system(mesh);
         ls::LevelSetTransportModule module(scalar_space, opts);
