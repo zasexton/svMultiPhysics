@@ -243,7 +243,7 @@ Checklist:
 - [x] Add interface summary statistics.
 - [x] Add output for interface normals.
 - [x] Add output for curvature estimates.
-- [ ] Add output for cut-cell volume fractions.
+- [x] Add output for cut-cell volume fractions.
 - [ ] Add test output for plane, circle, and sphere cuts.
 
 Done when:

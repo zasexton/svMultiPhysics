@@ -26,12 +26,16 @@ struct InterfaceGeometryVtpData {
     std::vector<std::size_t> line_offsets{};
     std::vector<std::array<Real, 3>> line_normals{};
     std::vector<Real> line_curvature_estimates{};
+    std::vector<Real> line_negative_volume_fractions{};
+    std::vector<Real> line_positive_volume_fractions{};
     std::vector<std::int64_t> line_interface_markers{};
     std::vector<std::int64_t> line_parent_cells{};
     std::vector<std::size_t> polygon_connectivity{};
     std::vector<std::size_t> polygon_offsets{};
     std::vector<std::array<Real, 3>> polygon_normals{};
     std::vector<Real> polygon_curvature_estimates{};
+    std::vector<Real> polygon_negative_volume_fractions{};
+    std::vector<Real> polygon_positive_volume_fractions{};
     std::vector<std::int64_t> polygon_interface_markers{};
     std::vector<std::int64_t> polygon_parent_cells{};
 };
@@ -39,11 +43,15 @@ struct InterfaceGeometryVtpData {
 void appendFragmentCellData(const CutInterfaceFragment& fragment,
                             std::vector<std::array<Real, 3>>& normals,
                             std::vector<Real>& curvature_estimates,
+                            std::vector<Real>& negative_volume_fractions,
+                            std::vector<Real>& positive_volume_fractions,
                             std::vector<std::int64_t>& interface_markers,
                             std::vector<std::int64_t>& parent_cells)
 {
     normals.push_back(fragment.normal);
     curvature_estimates.push_back(fragment.curvature_estimate);
+    negative_volume_fractions.push_back(fragment.negative_volume_fraction);
+    positive_volume_fractions.push_back(fragment.positive_volume_fraction);
     interface_markers.push_back(static_cast<std::int64_t>(fragment.interface_marker));
     parent_cells.push_back(static_cast<std::int64_t>(fragment.parent_cell));
 }
@@ -70,6 +78,8 @@ void appendFragmentCellData(const CutInterfaceFragment& fragment,
             appendFragmentCellData(fragment,
                                    data.line_normals,
                                    data.line_curvature_estimates,
+                                   data.line_negative_volume_fractions,
+                                   data.line_positive_volume_fractions,
                                    data.line_interface_markers,
                                    data.line_parent_cells);
         } else {
@@ -80,6 +90,8 @@ void appendFragmentCellData(const CutInterfaceFragment& fragment,
             appendFragmentCellData(fragment,
                                    data.polygon_normals,
                                    data.polygon_curvature_estimates,
+                                   data.polygon_negative_volume_fractions,
+                                   data.polygon_positive_volume_fractions,
                                    data.polygon_interface_markers,
                                    data.polygon_parent_cells);
         }
@@ -170,6 +182,14 @@ void writeLevelSetInterfaceGeometryVtp(const LevelSetInterfaceDomain& domain,
                    "curvature_estimate",
                    concatenate(data.line_curvature_estimates,
                                data.polygon_curvature_estimates));
+    writeRealArray(out,
+                   "negative_volume_fraction",
+                   concatenate(data.line_negative_volume_fractions,
+                               data.polygon_negative_volume_fractions));
+    writeRealArray(out,
+                   "positive_volume_fraction",
+                   concatenate(data.line_positive_volume_fractions,
+                               data.polygon_positive_volume_fractions));
     writeSignedIndexArray(out,
                           "interface_marker",
                           concatenate(data.line_interface_markers,

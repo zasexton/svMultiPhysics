@@ -24,6 +24,11 @@ struct CutPointCandidate {
     Real level_set_value{0.0};
 };
 
+struct SignedPoint {
+    std::array<Real, 3> point{{0.0, 0.0, 0.0}};
+    Real value{0.0};
+};
+
 [[nodiscard]] Real dot2(const std::array<Real, 3>& a,
                         const std::array<Real, 3>& b) noexcept {
     return a[0] * b[0] + a[1] * b[1];
@@ -332,6 +337,186 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     return area;
 }
 
+[[nodiscard]] Real clampFraction(Real value) noexcept {
+    return std::max(Real{0.0}, std::min(Real{1.0}, value));
+}
+
+[[nodiscard]] SignedPoint interpolateSignedPoint(const SignedPoint& a,
+                                                 const SignedPoint& b) noexcept {
+    const Real denominator = a.value - b.value;
+    Real t = Real{0.0};
+    if (std::abs(denominator) > Real{1.0e-30}) {
+        t = clampFraction(a.value / denominator);
+    }
+    return SignedPoint{interpolate(a.point, b.point, t), Real{0.0}};
+}
+
+[[nodiscard]] std::vector<SignedPoint> clipPolygonToNegativeLevelSet(
+    const std::vector<SignedPoint>& polygon,
+    Real tolerance)
+{
+    std::vector<SignedPoint> clipped;
+    if (polygon.empty()) {
+        return clipped;
+    }
+
+    const auto inside = [tolerance](const SignedPoint& point) noexcept {
+        return point.value <= tolerance;
+    };
+    SignedPoint previous = polygon.back();
+    bool previous_inside = inside(previous);
+    for (const auto& current : polygon) {
+        const bool current_inside = inside(current);
+        if (previous_inside && current_inside) {
+            clipped.push_back(current);
+        } else if (previous_inside && !current_inside) {
+            clipped.push_back(interpolateSignedPoint(previous, current));
+        } else if (!previous_inside && current_inside) {
+            clipped.push_back(interpolateSignedPoint(previous, current));
+            clipped.push_back(current);
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+    return clipped;
+}
+
+[[nodiscard]] Real polygonArea2D(const std::vector<SignedPoint>& polygon) noexcept {
+    if (polygon.size() < 3u) {
+        return Real{0.0};
+    }
+    Real twice_area = Real{0.0};
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto& a = polygon[i].point;
+        const auto& b = polygon[(i + 1u) % polygon.size()].point;
+        twice_area += a[0] * b[1] - a[1] * b[0];
+    }
+    return Real{0.5} * std::abs(twice_area);
+}
+
+[[nodiscard]] Real negativeVolumeFraction2D(
+    const std::vector<std::array<Real, 3>>& points,
+    const std::vector<Real>& signed_values,
+    std::size_t count,
+    Real tolerance)
+{
+    std::vector<SignedPoint> polygon;
+    polygon.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        polygon.push_back(SignedPoint{points[i], signed_values[i]});
+    }
+    const Real parent_area = polygonArea2D(polygon);
+    if (parent_area <= Real{0.0}) {
+        return Real{0.0};
+    }
+    const auto clipped = clipPolygonToNegativeLevelSet(polygon, tolerance);
+    return clampFraction(polygonArea2D(clipped) / parent_area);
+}
+
+void addUniquePoint(std::vector<std::array<Real, 3>>& points,
+                    const std::array<Real, 3>& point,
+                    Real tolerance)
+{
+    const auto duplicate = std::find_if(
+        points.begin(),
+        points.end(),
+        [&](const std::array<Real, 3>& existing) {
+            return nearlySamePoint(existing, point, tolerance);
+        });
+    if (duplicate == points.end()) {
+        points.push_back(point);
+    }
+}
+
+[[nodiscard]] Real tetraVolume(const std::array<Real, 3>& a,
+                               const std::array<Real, 3>& b,
+                               const std::array<Real, 3>& c,
+                               const std::array<Real, 3>& d) noexcept {
+    return std::abs(dot3(sub(b, a), cross(sub(c, a), sub(d, a)))) / Real{6.0};
+}
+
+[[nodiscard]] Real polyhedronVolumeFromFaces(
+    const std::vector<std::vector<std::array<Real, 3>>>& faces,
+    Real tolerance)
+{
+    std::vector<std::array<Real, 3>> unique_points;
+    for (const auto& face : faces) {
+        for (const auto& point : face) {
+            addUniquePoint(unique_points, point, tolerance);
+        }
+    }
+    if (unique_points.empty()) {
+        return Real{0.0};
+    }
+
+    std::array<Real, 3> center{{0.0, 0.0, 0.0}};
+    for (const auto& point : unique_points) {
+        center = add(center, point);
+    }
+    center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
+
+    Real volume = Real{0.0};
+    for (const auto& face : faces) {
+        if (face.size() < 3u) {
+            continue;
+        }
+        for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
+            volume += std::abs(dot3(sub(face[0], center),
+                                    cross(sub(face[i], center),
+                                          sub(face[i + 1u], center)))) /
+                      Real{6.0};
+        }
+    }
+    return volume;
+}
+
+[[nodiscard]] Real negativeVolumeFractionTetrahedron(
+    const std::vector<std::array<Real, 3>>& points,
+    const std::vector<Real>& signed_values,
+    const std::vector<CutPointCandidate>& ordered_cut_points,
+    Real tolerance)
+{
+    const Real parent_volume = tetraVolume(points[0], points[1], points[2], points[3]);
+    if (parent_volume <= Real{0.0}) {
+        return Real{0.0};
+    }
+
+    constexpr std::array<std::array<std::size_t, 3>, 4> faces{{
+        {{0u, 1u, 2u}},
+        {{0u, 1u, 3u}},
+        {{0u, 2u, 3u}},
+        {{1u, 2u, 3u}}}};
+    std::vector<std::vector<std::array<Real, 3>>> clipped_faces;
+    clipped_faces.reserve(5u);
+    for (const auto& face : faces) {
+        std::vector<SignedPoint> signed_face;
+        signed_face.reserve(3u);
+        for (const auto index : face) {
+            signed_face.push_back(SignedPoint{points[index], signed_values[index]});
+        }
+        const auto clipped = clipPolygonToNegativeLevelSet(signed_face, tolerance);
+        if (clipped.size() >= 3u) {
+            std::vector<std::array<Real, 3>> face_points;
+            face_points.reserve(clipped.size());
+            for (const auto& point : clipped) {
+                face_points.push_back(point.point);
+            }
+            clipped_faces.push_back(std::move(face_points));
+        }
+    }
+    if (ordered_cut_points.size() >= 3u) {
+        std::vector<std::array<Real, 3>> cut_face;
+        cut_face.reserve(ordered_cut_points.size());
+        for (const auto& point : ordered_cut_points) {
+            cut_face.push_back(point.point);
+        }
+        clipped_faces.push_back(std::move(cut_face));
+    }
+
+    return clampFraction(polyhedronVolumeFromFaces(clipped_faces, tolerance) /
+                         parent_volume);
+}
+
 } // namespace
 
 bool supportsLinearLevelSetCellCut2D(ElementType element_type) noexcept
@@ -587,6 +772,12 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
+    fragment.negative_volume_fraction =
+        negativeVolumeFraction2D(input.node_coordinates,
+                                 signed_values,
+                                 count,
+                                 request.tolerance);
+    fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-segment-0";
@@ -777,6 +968,12 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
+    fragment.negative_volume_fraction =
+        negativeVolumeFractionTetrahedron(input.node_coordinates,
+                                          signed_values,
+                                          cut_points,
+                                          request.tolerance);
+    fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-polygon-0";

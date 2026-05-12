@@ -59,6 +59,8 @@ TEST(LevelSetInterfaceBuilder, CutsLinearTriangleWithSingleSegment)
     ASSERT_EQ(fragment.vertices.size(), 2u);
     ASSERT_EQ(fragment.quadrature_points.size(), 1u);
     EXPECT_NEAR(fragment.measure, 0.75, 1.0e-14);
+    EXPECT_NEAR(fragment.negative_volume_fraction, 0.4375, 1.0e-14);
+    EXPECT_NEAR(fragment.positive_volume_fraction, 0.5625, 1.0e-14);
     EXPECT_NEAR(fragment.quadrature_points.front().point[0], 0.25, 1.0e-14);
     EXPECT_NEAR(fragment.quadrature_points.front().point[1], 0.375, 1.0e-14);
     EXPECT_NEAR(fragment.quadrature_points.front().normal[0], 1.0, 1.0e-14);
@@ -85,6 +87,9 @@ TEST(LevelSetInterfaceBuilder, CutsLinearQuadWithSingleSegment)
     EXPECT_EQ(summary.active_fragment_count, 1u);
     EXPECT_EQ(summary.quadrature_point_count, 1u);
     EXPECT_NEAR(summary.measure, 1.0, 1.0e-14);
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    EXPECT_NEAR(domain.fragments().front().negative_volume_fraction, 0.5, 1.0e-14);
+    EXPECT_NEAR(domain.fragments().front().positive_volume_fraction, 0.5, 1.0e-14);
 
     const auto rules = domain.interfaceQuadratureRules();
     ASSERT_EQ(rules.size(), 1u);
@@ -146,6 +151,8 @@ TEST(LevelSetInterfaceBuilder, CutsLinearTetrahedronWithTriangularPatch)
     ASSERT_EQ(fragment.vertices.size(), 3u);
     ASSERT_EQ(fragment.quadrature_points.size(), 1u);
     EXPECT_NEAR(fragment.measure, 0.28125, 1.0e-14);
+    EXPECT_NEAR(fragment.negative_volume_fraction, 0.578125, 1.0e-14);
+    EXPECT_NEAR(fragment.positive_volume_fraction, 0.421875, 1.0e-14);
     EXPECT_NEAR(fragment.quadrature_points.front().point[0], 0.25, 1.0e-14);
     EXPECT_NEAR(fragment.quadrature_points.front().point[1], 0.25, 1.0e-14);
     EXPECT_NEAR(fragment.quadrature_points.front().point[2], 0.25, 1.0e-14);
@@ -174,6 +181,9 @@ TEST(LevelSetInterfaceBuilder, CutsLinearTetrahedronWithQuadrilateralPatch)
     EXPECT_EQ(summary.active_fragment_count, 1u);
     EXPECT_EQ(summary.quadrature_point_count, 1u);
     EXPECT_NEAR(summary.measure, std::sqrt(0.125), 1.0e-14);
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    EXPECT_NEAR(domain.fragments().front().negative_volume_fraction, 0.5, 1.0e-14);
+    EXPECT_NEAR(domain.fragments().front().positive_volume_fraction, 0.5, 1.0e-14);
 
     const auto rules = domain.interfaceQuadratureRules();
     ASSERT_EQ(rules.size(), 1u);

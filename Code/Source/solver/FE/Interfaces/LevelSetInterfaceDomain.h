@@ -250,6 +250,8 @@ struct CutInterfaceFragment {
     std::array<Real, 3> normal{{1.0, 0.0, 0.0}};
     Real measure{0.0};
     Real curvature_estimate{0.0};
+    Real negative_volume_fraction{0.0};
+    Real positive_volume_fraction{0.0};
     Real min_level_set_value{0.0};
     Real max_level_set_value{0.0};
     std::string topology_id{};
