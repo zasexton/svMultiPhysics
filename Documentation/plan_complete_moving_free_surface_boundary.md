@@ -502,15 +502,18 @@ Checklist:
 
 ## Validation Cases
 
+Specifications and acceptance criteria are recorded in
+`Documentation/moving_free_surface_validation_cases.md`.
+
 Checklist:
 
-- [ ] Open tank at rest, half-filled with water.
-- [ ] Small-amplitude sloshing frequency compared with analytic theory.
-- [ ] Capillary wave oscillation benchmark.
-- [ ] Capillary wave decay benchmark if viscosity is included.
-- [ ] Dam-break or water-column collapse benchmark after stability is mature.
-- [ ] Long transient volume conservation benchmark.
-- [ ] Contact-angle static meniscus benchmark after contact-line support is added.
+- [x] Open tank at rest, half-filled with water.
+- [x] Small-amplitude sloshing frequency compared with analytic theory.
+- [x] Capillary wave oscillation benchmark.
+- [x] Capillary wave decay benchmark if viscosity is included.
+- [x] Dam-break or water-column collapse benchmark after stability is mature.
+- [x] Long transient volume conservation benchmark.
+- [x] Contact-angle static meniscus benchmark after contact-line support is added.
 
 ## Required Example Cases
 
