@@ -82,6 +82,9 @@
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>998.2</Density>
+  <Force_x>0.0</Force_x>
+  <Force_y>-9.81</Force_y>
+  <Force_z>0.0</Force_z>
   <Viscosity model="Constant">
     <Value>1.003e-3</Value>
   </Viscosity>

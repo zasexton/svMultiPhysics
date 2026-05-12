@@ -209,6 +209,31 @@ TEST(EquationTranslatorOutputs, BuildInputCopiesOutputBlocks)
   EXPECT_TRUE(input.outputs.front().params.at("Cauchy_stress").defined);
 }
 
+TEST(EquationTranslatorDomainDefaults, BuildInputCopiesGravityForceComponents)
+{
+  auto mesh = buildTranslatorMesh();
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Density>998.2</Density>
+  <Force_x>0.0</Force_x>
+  <Force_y>-9.81</Force_y>
+  <Force_z>0.0</Force_z>
+  <Viscosity model="Constant">
+    <Value>1.003e-3</Value>
+  </Viscosity>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  ASSERT_TRUE(input.default_domain.params.at("Force_x").defined);
+  ASSERT_TRUE(input.default_domain.params.at("Force_y").defined);
+  ASSERT_TRUE(input.default_domain.params.at("Force_z").defined);
+  EXPECT_DOUBLE_EQ(std::stod(input.default_domain.params.at("Force_x").value), 0.0);
+  EXPECT_DOUBLE_EQ(std::stod(input.default_domain.params.at("Force_y").value), -9.81);
+  EXPECT_DOUBLE_EQ(std::stod(input.default_domain.params.at("Force_z").value), 0.0);
+}
+
 TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
 {
   auto mesh = buildTranslatorMesh();
