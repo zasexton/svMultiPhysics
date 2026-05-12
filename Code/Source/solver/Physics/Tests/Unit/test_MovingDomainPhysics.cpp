@@ -1390,6 +1390,67 @@ TEST(MovingDomainPhysics, LevelSetPureTangentialAdvectionPreservesVolumeDiagnost
     EXPECT_NEAR(*volume_loss, 0.0, 1.0e-12);
 }
 
+TEST(MovingDomainPhysics, LevelSetSignedDistanceMaintenanceReducesInterfaceBandError)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> distorted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = mesh->getNodeCoordinates(vertex);
+        distorted[static_cast<std::size_t>(dofs.front())] =
+            FE::Real(4.0) * (x[0] - FE::Real(0.25));
+    }
+
+    ls::LevelSetOutputDiagnosticsOptions diagnostics_opts{};
+    diagnostics_opts.signed_distance.signed_distance_tolerance = 1.0e-12;
+    diagnostics_opts.signed_distance.interface_band_width = 2.0;
+
+    const auto before = ls::computeLevelSetOutputDiagnostics(
+        *mesh,
+        field_dofs,
+        diagnostics_opts,
+        distorted);
+    ASSERT_TRUE(before.success) << before.diagnostic;
+    EXPECT_EQ(before.signed_distance_samples, 4u);
+    EXPECT_GT(before.signed_distance_max_error, 1.0);
+
+    std::vector<FE::Real> repaired;
+    const auto repair = ls::repairLevelSetSignedDistanceByProjection(
+        *mesh,
+        field_dofs,
+        diagnostics_opts.signed_distance,
+        distorted,
+        repaired);
+    ASSERT_TRUE(repair.success) << repair.diagnostic;
+
+    const auto after = ls::computeLevelSetOutputDiagnostics(
+        *mesh,
+        field_dofs,
+        diagnostics_opts,
+        repaired);
+    ASSERT_TRUE(after.success) << after.diagnostic;
+    EXPECT_LT(after.signed_distance_max_error, before.signed_distance_max_error);
+    EXPECT_LT(after.signed_distance_l2_error, before.signed_distance_l2_error);
+    EXPECT_LT(after.signed_distance_max_error,
+              FE::Real(0.05) * before.signed_distance_max_error);
+}
+
 TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)
 {
     const auto mesh = makeMesh();

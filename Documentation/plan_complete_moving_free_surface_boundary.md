@@ -400,7 +400,7 @@ Checklist:
 - [x] Add reinitialization cadence controls.
 - [x] Add output diagnostics for volume and signed-distance error.
 - [x] Add tests for volume preservation under pure advection.
-- [ ] Add tests for signed-distance maintenance near the interface.
+- [x] Add tests for signed-distance maintenance near the interface.
 
 Done when:
 
