@@ -665,6 +665,16 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
     auto vector_space = makeVelocitySpace(mesh);
 
     FE::systems::FESystem scalar_system(mesh);
+    scalar_system.addField(FE::systems::FieldSpec{
+        .name = "level_set",
+        .space = scalar_space,
+        .components = 1,
+    });
+    scalar_system.addField(FE::systems::FieldSpec{
+        .name = "Velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+    });
     ls::LevelSetTransportModule scalar_module(scalar_space);
     EXPECT_NO_THROW(scalar_module.registerOn(scalar_system));
 
@@ -684,6 +694,40 @@ TEST(MovingDomainPhysics, LevelSetTransportFieldOptionsValidateScalarSpace)
     ls::LevelSetTransportModule empty_velocity_name_module(scalar_space, opts);
     EXPECT_THROW(empty_velocity_name_module.registerOn(empty_velocity_name_system),
                  std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics, LevelSetTransportResidualUsesTransientAdvectionForm)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+    auto vector_space = makeVelocitySpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.addField(FE::systems::FieldSpec{
+        .name = "advecting_velocity",
+        .space = vector_space,
+        .components = vector_space->value_dimension(),
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ls::LevelSetTransportOptions opts{};
+    opts.level_set.field_name = "phi";
+    opts.level_set.auto_register_field = false;
+    opts.velocity.field_name = "advecting_velocity";
+    opts.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+
+    ls::LevelSetTransportModule module(scalar_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(system.hasOperator("level_set"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
 }
 
 TEST(MovingDomainPhysics, NavierStokesALEEnabledRegistersMeshVelocityAndConsumesMeshVelocity)

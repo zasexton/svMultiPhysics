@@ -7,7 +7,9 @@
 
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
 
+#include "FE/Forms/Vocabulary.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FormsInstaller.h"
 
 #include <stdexcept>
 #include <utility>
@@ -16,6 +18,47 @@ namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace level_set {
+namespace {
+
+[[nodiscard]] FE::FieldId resolveNamedField(
+    const FE::systems::FESystem& system,
+    const std::string& field_name,
+    const char* context)
+{
+    const auto field = system.findFieldByName(field_name);
+    if (field == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            std::string("LevelSetTransportModule::registerOn: missing ") +
+            context + " field '" + field_name + "'");
+    }
+    return field;
+}
+
+void validateScalarField(const FE::systems::FESystem& system,
+                         FE::FieldId field,
+                         const std::string& field_name)
+{
+    const auto& rec = system.fieldRecord(field);
+    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: level-set field '" +
+            field_name + "' must be scalar");
+    }
+}
+
+void validateVelocityField(const FE::systems::FESystem& system,
+                           FE::FieldId field,
+                           const std::string& field_name)
+{
+    const auto& rec = system.fieldRecord(field);
+    if (!rec.space || rec.space->value_dimension() < 1) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: velocity field '" +
+            field_name + "' must have a vector function space");
+    }
+}
+
+} // namespace
 
 LevelSetTransportModule::LevelSetTransportModule(
     std::shared_ptr<const FE::spaces::FunctionSpace> level_set_space,
@@ -44,6 +87,65 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         throw std::invalid_argument(
             "LevelSetTransportModule::registerOn: level-set field space must be scalar");
     }
+
+    const auto phi_id = resolveNamedField(
+        system,
+        options_.level_set.field_name,
+        "level-set");
+    validateScalarField(system, phi_id, options_.level_set.field_name);
+    if (!system.fieldParticipatesInUnknownVector(phi_id)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: level-set field must be an unknown for transport residual assembly");
+    }
+
+    const auto velocity_id = resolveNamedField(
+        system,
+        options_.velocity.field_name,
+        "velocity");
+    validateVelocityField(system, velocity_id, options_.velocity.field_name);
+    if (options_.velocity.source == LevelSetVelocitySource::CoupledField &&
+        !system.fieldParticipatesInUnknownVector(velocity_id)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: coupled velocity source must be an unknown field");
+    }
+    if (options_.velocity.source == LevelSetVelocitySource::PrescribedData &&
+        system.fieldParticipatesInUnknownVector(velocity_id)) {
+        throw std::invalid_argument(
+            "LevelSetTransportModule::registerOn: prescribed velocity source must not be an unknown field");
+    }
+
+    const auto& phi_rec = system.fieldRecord(phi_id);
+    const auto& velocity_rec = system.fieldRecord(velocity_id);
+
+    using namespace FE::forms;
+    const auto phi = StateField(phi_id, *phi_rec.space, options_.level_set.field_name);
+    const auto eta = TestField(phi_id, *phi_rec.space, "eta");
+    const auto velocity =
+        options_.velocity.source == LevelSetVelocitySource::CoupledField
+            ? StateField(velocity_id, *velocity_rec.space, options_.velocity.field_name)
+            : FormExpr::discreteField(
+                  velocity_id,
+                  *velocity_rec.space,
+                  options_.velocity.field_name);
+
+    const auto residual =
+        (dt(phi) * eta + dot(velocity, grad(phi)) * eta).dx();
+
+    if (!system.hasOperator("level_set")) {
+        system.addOperator("level_set");
+    }
+
+    auto install = physicsInstallOptions(options_.jit_policy);
+    install.compiler_options.use_symbolic_tangent = true;
+    if (options_.velocity.source == LevelSetVelocitySource::CoupledField) {
+        install.extra_trial_fields.push_back(velocity_id);
+    }
+    (void)FE::systems::installFormulation(
+        system,
+        "level_set",
+        {phi_id},
+        residual,
+        install);
 }
 
 } // namespace level_set
