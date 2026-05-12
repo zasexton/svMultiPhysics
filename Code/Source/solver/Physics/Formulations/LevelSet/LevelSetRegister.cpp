@@ -589,8 +589,8 @@ SVMP_REGISTER_EQUATION("level_set", &create_level_set_transport_from_input);
 SVMP_REGISTER_EQUATION("levelSet", &create_level_set_transport_from_input);
 SVMP_REGISTER_EQUATION("level_set_transport", &create_level_set_transport_from_input);
 
-namespace svmp::Physics::formulations::level_set {
+namespace svmp::Physics::formulations {
 
 void forceLink_LevelSetRegister() {}
 
-} // namespace svmp::Physics::formulations::level_set
+} // namespace svmp::Physics::formulations

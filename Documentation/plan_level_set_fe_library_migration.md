@@ -426,18 +426,18 @@ Goal: eliminate duplicate implementation and stale includes.
 
 Checklist:
 
-- [ ] Remove moved headers from `Physics/Formulations/LevelSet`.
-- [ ] Remove moved sources from `Physics/Formulations/LevelSet`.
-- [ ] Remove moved files from `Code/Source/solver/Physics/CMakeLists.txt`.
-- [ ] Keep only the registration adapter if Physics still needs a
+- [x] Remove moved headers from `Physics/Formulations/LevelSet`.
+- [x] Remove moved sources from `Physics/Formulations/LevelSet`.
+- [x] Remove moved files from `Code/Source/solver/Physics/CMakeLists.txt`.
+- [x] Keep only the registration adapter if Physics still needs a
   level-set equation module entry point.
-- [ ] Update all include paths across the repository.
-- [ ] Confirm no stale include references remain:
-  - [ ] `rg 'Physics/Formulations/LevelSet' Code Documentation tests`
-- [ ] Confirm FE has no forbidden Physics dependency:
-  - [ ] `rg '#include "Physics/' Code/Source/solver/FE/LevelSet`
-- [ ] Confirm the old namespace is gone from migrated code:
-  - [ ] `rg 'Physics::formulations::level_set' Code/Source/solver`
+- [x] Update all include paths across the repository.
+- [x] Confirm no stale code/test include references remain:
+  - [x] `rg 'Physics/Formulations/LevelSet' Code tests`
+- [x] Confirm FE has no forbidden Physics dependency:
+  - [x] `rg '#include "Physics/' Code/Source/solver/FE/LevelSet`
+- [x] Confirm the old namespace is gone from migrated code:
+  - [x] `rg 'Physics::formulations::level_set' Code/Source/solver`
 
 Done when:
 

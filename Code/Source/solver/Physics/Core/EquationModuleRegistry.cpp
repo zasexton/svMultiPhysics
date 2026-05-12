@@ -12,7 +12,7 @@ namespace svmp::Physics::formulations::poisson {
 void forceLink_PoissonRegister();
 }
 
-namespace svmp::Physics::formulations::level_set {
+namespace svmp::Physics::formulations {
 void forceLink_LevelSetRegister();
 }
 
@@ -32,7 +32,7 @@ void forceLinkBuiltInEquationRegistrations()
 {
   formulations::navier_stokes::forceLink_NavierStokesRegister();
   formulations::poisson::forceLink_PoissonRegister();
-  formulations::level_set::forceLink_LevelSetRegister();
+  formulations::forceLink_LevelSetRegister();
   formulations::mesh_motion::forceLink_MeshMotionRegister();
   formulations::ustruct::forceLink_UstructRegister();
 }
