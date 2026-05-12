@@ -178,7 +178,7 @@ Checklist:
 
 - [x] Add cut-interface quadrature rules for linear fragments.
 - [x] Add configurable quadrature order.
-- [ ] Evaluate scalar H1 fields on cut-interface quadrature points.
+- [x] Evaluate scalar H1 fields on cut-interface quadrature points.
 - [ ] Evaluate vector H1 fields on cut-interface quadrature points.
 - [ ] Evaluate scalar gradients on cut-interface quadrature points.
 - [ ] Evaluate vector gradients on cut-interface quadrature points.
