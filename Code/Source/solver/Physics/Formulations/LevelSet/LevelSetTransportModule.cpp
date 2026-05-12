@@ -214,30 +214,12 @@ void validateVolumeCorrectionOptions(const LevelSetVolumeCorrectionOptions& opti
 
 LevelSetTransportModule::LevelSetTransportModule(
     std::shared_ptr<const FE::spaces::FunctionSpace> level_set_space,
-    LevelSetTransportOptions options)
+    LevelSetTransportOptions options,
+    FE::systems::FormInstallOptions install_options)
     : level_set_space_(std::move(level_set_space))
     , options_(std::move(options))
+    , install_options_(std::move(install_options))
 {
-}
-
-bool shouldReinitializeLevelSet(
-    const LevelSetReinitializationOptions& options,
-    int completed_step_index) noexcept
-{
-    return options.enabled &&
-           options.cadence_steps > 0 &&
-           completed_step_index > 0 &&
-           completed_step_index % options.cadence_steps == 0;
-}
-
-bool shouldApplyLevelSetVolumeCorrection(
-    const LevelSetVolumeCorrectionOptions& options,
-    int completed_step_index) noexcept
-{
-    return options.enabled &&
-           options.cadence_steps > 0 &&
-           completed_step_index > 0 &&
-           completed_step_index % options.cadence_steps == 0;
 }
 
 void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
@@ -349,7 +331,7 @@ void LevelSetTransportModule::registerOn(FE::systems::FESystem& system) const
         system.addOperator("level_set");
     }
 
-    auto install = physicsInstallOptions(options_.jit_policy);
+    auto install = install_options_;
     install.compiler_options.use_symbolic_tangent = true;
     if (options_.velocity.source == LevelSetVelocitySource::CoupledField) {
         install.extra_trial_fields.push_back(velocity_id);

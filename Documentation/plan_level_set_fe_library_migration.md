@@ -120,14 +120,14 @@ Target content:
 
 Checklist:
 
-- [ ] Move option structs and enums into `FE/LevelSet/LevelSetOptions.h`.
-- [ ] Remove `PhysicsJITPolicy` from `LevelSetTransportOptions`.
-- [ ] Represent JIT/compiler behavior through `FE::systems::FormInstallOptions`.
-- [ ] Move cadence helper declarations into `FE/LevelSet/LevelSetOptions.h`.
-- [ ] Move cadence helper definitions into `FE/LevelSet/LevelSetTransport.cpp` or
+- [x] Move option structs and enums into `FE/LevelSet/LevelSetOptions.h`.
+- [x] Remove `PhysicsJITPolicy` from `LevelSetTransportOptions`.
+- [x] Represent JIT/compiler behavior through `FE::systems::FormInstallOptions`.
+- [x] Move cadence helper declarations into `FE/LevelSet/LevelSetOptions.h`.
+- [x] Move cadence helper definitions into `FE/LevelSet/LevelSetTransport.cpp` or
   a dedicated utility source.
-- [ ] Update all users to refer to `svmp::FE::level_set`.
-- [ ] Keep any required compatibility aliases temporary and clearly marked for
+- [x] Update all users to refer to `svmp::FE::level_set`.
+- [x] Keep any required compatibility aliases temporary and clearly marked for
   removal.
 
 Done when:

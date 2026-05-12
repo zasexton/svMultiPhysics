@@ -4,6 +4,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
 
@@ -22,7 +23,8 @@
 
 namespace {
 
-namespace ls = svmp::Physics::formulations::level_set;
+namespace ls = svmp::FE::level_set;
+namespace ls_module = svmp::Physics::formulations::level_set;
 
 std::string trim_copy(std::string s)
 {
@@ -201,6 +203,19 @@ std::optional<int> get_defined_positive_int(
     }
   }
   return std::nullopt;
+}
+
+svmp::FE::systems::FormInstallOptions level_set_install_options(
+    const svmp::Physics::core::PhysicsJITPolicy& policy)
+{
+  svmp::FE::systems::FormInstallOptions options{};
+  options.compiler_options.jit.enable =
+      policy.enable && svmp::FE::forms::jit::llvmJITEnabled();
+  options.compiler_options.jit.optimization_level = policy.optimization_level;
+  options.compiler_options.jit.specialization.enable = policy.specialization;
+  options.compiler_options.jit.specialization.specialize_n_qpts = policy.specialize_n_qpts;
+  options.compiler_options.jit.specialization.specialize_dofs = policy.specialize_dofs;
+  return options;
 }
 
 svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
@@ -518,7 +533,8 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
   auto velocity_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(element_type, order, dim);
 
   ls::LevelSetTransportOptions options{};
-  options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
+  const auto install_options =
+      level_set_install_options(svmp::Physics::core::resolveOopJitPolicy(input));
 
   apply_level_set_params(input.equation_params, options);
   apply_level_set_params(input.default_domain.params, options);
@@ -533,8 +549,10 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
 
   options.velocity.space = velocity_space;
 
-  auto module = std::make_unique<ls::LevelSetTransportModule>(std::move(level_set_space),
-                                                              std::move(options));
+  auto module = std::make_unique<ls_module::LevelSetTransportModule>(
+      std::move(level_set_space),
+      std::move(options),
+      install_options);
   module->registerOn(system);
   return module;
 }
