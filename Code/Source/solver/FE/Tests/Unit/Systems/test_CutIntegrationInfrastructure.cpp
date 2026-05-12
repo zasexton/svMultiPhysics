@@ -2322,6 +2322,54 @@ TEST(CutIntegrationInfrastructure, BuildsMarkerBackedCutAdjacentFacetSetHandle)
     EXPECT_NE(handle.stable_id, 0u);
 }
 
+TEST(CutIntegrationInfrastructure, IntegratesScalarOperatorsOverCutAdjacentFacetSet)
+{
+    CutIntegrationContext context;
+
+    CutQuadratureRule rule;
+    rule.kind = CutQuadratureKind::Face;
+    rule.side = CutIntegrationSide::Interface;
+    rule.measure = 2.0;
+    rule.provenance.parent_entity = 20;
+    rule.provenance.predicate_policy_key = 77;
+    rule.points = {
+        CutQuadraturePoint{.point = {{0.0, 0.0, 0.0}},
+                           .normal = {{1.0, 0.0, 0.0}},
+                           .weight = 1.0},
+        CutQuadraturePoint{.point = {{2.0, 0.0, 0.0}},
+                           .normal = {{1.0, 0.0, 0.0}},
+                           .weight = 1.0}};
+    context.addFacetSetRule(/*marker=*/130, rule);
+
+    EXPECT_TRUE(context.hasFacetSetMarker(130));
+    ASSERT_EQ(context.facetSetMarkers().size(), 1u);
+    EXPECT_EQ(context.facetSetMarkers().front(), 130);
+    ASSERT_EQ(context.facetSetRulesForMarker(130).size(), 1u);
+    EXPECT_TRUE(context.facetSetRulesForMarker(131).empty());
+
+    const auto evaluation = context.evaluateScalarFacetSetOperator(
+        /*marker=*/130,
+        CutIntegrationAssemblyPath::Standard,
+        [](const CutScalarOperatorPoint& point) {
+            return Real{1.0} + point.point[0];
+        });
+
+    EXPECT_EQ(evaluation.marker, 130);
+    EXPECT_EQ(evaluation.facet_rule_count, 1u);
+    EXPECT_EQ(evaluation.facet_point_count, 2u);
+    EXPECT_NEAR(evaluation.measure, 2.0, 1.0e-14);
+    EXPECT_NEAR(evaluation.integral, 4.0, 1.0e-14);
+
+    const auto empty_evaluation = context.evaluateScalarFacetSetOperator(
+        /*marker=*/131,
+        CutIntegrationAssemblyPath::Standard,
+        [](const CutScalarOperatorPoint&) {
+            return Real{1.0};
+        });
+    EXPECT_EQ(empty_evaluation.facet_rule_count, 0u);
+    EXPECT_NEAR(empty_evaluation.integral, 0.0, 1.0e-14);
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 TEST(CutIntegrationInfrastructure, ImportsClosedCutTopologyIntoAllAssemblyPathBindings)
 {

@@ -207,7 +207,7 @@ Checklist:
 - [x] Identify cut cells from a generated interface domain.
 - [x] Identify interior facets adjacent to cut cells.
 - [x] Expose a marker or facet-set handle for cut-adjacent facets.
-- [ ] Support integration over that facet set.
+- [x] Support integration over that facet set.
 - [ ] Reuse existing jump/average operators where valid.
 - [ ] Add tests for facet-set construction.
 - [ ] Add tests for ghost-penalty residual assembly.

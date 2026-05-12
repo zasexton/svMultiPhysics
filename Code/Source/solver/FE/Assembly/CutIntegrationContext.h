@@ -146,14 +146,26 @@ struct CutScalarOperatorEvaluation {
     }
 };
 
+struct CutFacetSetOperatorEvaluation {
+    CutIntegrationAssemblyPath path = CutIntegrationAssemblyPath::Standard;
+    int marker = -1;
+    std::size_t facet_rule_count = 0;
+    std::size_t facet_point_count = 0;
+    Real measure = 0.0;
+    Real integral = 0.0;
+};
+
 class CutIntegrationContext {
 public:
     void clear() {
         metadata_.clear();
         volume_rules_.clear();
         interface_rules_.clear();
+        facet_set_rules_.clear();
         generated_interface_rule_indices_by_marker_.clear();
         generated_interface_markers_.clear();
+        facet_set_rule_indices_by_marker_.clear();
+        facet_set_markers_.clear();
         kinematic_data_.clear();
         stabilization_hooks_.clear();
         bindings_.clear();
@@ -168,6 +180,15 @@ public:
 
     void addInterfaceRule(geometry::CutQuadratureRule rule) {
         interface_rules_.push_back(std::move(rule));
+    }
+
+    void addFacetSetRule(int marker, geometry::CutQuadratureRule rule) {
+        auto& indices = facet_set_rule_indices_by_marker_[marker];
+        if (indices.empty()) {
+            facet_set_markers_.push_back(marker);
+        }
+        indices.push_back(facet_set_rules_.size());
+        facet_set_rules_.push_back(std::move(rule));
     }
 
     void addGeneratedInterfaceDomain(const interfaces::LevelSetInterfaceDomain& domain) {
@@ -217,6 +238,10 @@ public:
         return interface_rules_;
     }
 
+    [[nodiscard]] const std::vector<geometry::CutQuadratureRule>& facetSetRules() const noexcept {
+        return facet_set_rules_;
+    }
+
     [[nodiscard]] bool hasGeneratedInterfaceMarker(int marker) const {
         return generated_interface_rule_indices_by_marker_.find(marker) !=
                generated_interface_rule_indices_by_marker_.end();
@@ -224,6 +249,15 @@ public:
 
     [[nodiscard]] const std::vector<int>& generatedInterfaceMarkers() const noexcept {
         return generated_interface_markers_;
+    }
+
+    [[nodiscard]] bool hasFacetSetMarker(int marker) const {
+        return facet_set_rule_indices_by_marker_.find(marker) !=
+               facet_set_rule_indices_by_marker_.end();
+    }
+
+    [[nodiscard]] const std::vector<int>& facetSetMarkers() const noexcept {
+        return facet_set_markers_;
     }
 
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
@@ -237,6 +271,22 @@ public:
         for (const auto index : it->second) {
             if (index < interface_rules_.size()) {
                 rules.push_back(&interface_rules_[index]);
+            }
+        }
+        return rules;
+    }
+
+    [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
+    facetSetRulesForMarker(int marker) const {
+        std::vector<const geometry::CutQuadratureRule*> rules;
+        const auto it = facet_set_rule_indices_by_marker_.find(marker);
+        if (it == facet_set_rule_indices_by_marker_.end()) {
+            return rules;
+        }
+        rules.reserve(it->second.size());
+        for (const auto index : it->second) {
+            if (index < facet_set_rules_.size()) {
+                rules.push_back(&facet_set_rules_[index]);
             }
         }
         return rules;
@@ -345,6 +395,49 @@ public:
                 point.frame = rule.frame;
                 evaluation.interface_integral +=
                     qp.weight * static_cast<Real>(interface_integrand(point));
+            }
+        }
+
+        return evaluation;
+    }
+
+    template <typename FacetIntegrand>
+    [[nodiscard]] CutFacetSetOperatorEvaluation evaluateScalarFacetSetOperator(
+        int marker,
+        CutIntegrationAssemblyPath path,
+        FacetIntegrand&& integrand) const {
+        CutFacetSetOperatorEvaluation evaluation;
+        evaluation.path = path;
+        evaluation.marker = marker;
+
+        const auto it = facet_set_rule_indices_by_marker_.find(marker);
+        if (it == facet_set_rule_indices_by_marker_.end()) {
+            return evaluation;
+        }
+
+        for (const auto index : it->second) {
+            if (index >= facet_set_rules_.size()) {
+                continue;
+            }
+            const auto& rule = facet_set_rules_[index];
+            ++evaluation.facet_rule_count;
+            evaluation.measure += rule.measure;
+            for (const auto& qp : rule.points) {
+                ++evaluation.facet_point_count;
+                CutScalarOperatorPoint point;
+                point.kind = rule.kind;
+                point.side = rule.side;
+                point.parent_entity = rule.provenance.parent_entity;
+                point.point = qp.point;
+                point.normal = qp.normal;
+                point.weight = qp.weight;
+                point.volume_fraction = rule.volume_fraction;
+                point.cut_topology_revision = rule.provenance.cut_topology_revision;
+                point.quadrature_policy_key = rule.provenance.predicate_policy_key;
+                point.construction = rule.policy.kind;
+                point.frame = rule.frame;
+                evaluation.integral +=
+                    qp.weight * static_cast<Real>(integrand(point));
             }
         }
 
@@ -646,9 +739,12 @@ private:
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};
     std::vector<geometry::CutQuadratureRule> interface_rules_{};
+    std::vector<geometry::CutQuadratureRule> facet_set_rules_{};
     std::unordered_map<int, std::vector<std::size_t>>
         generated_interface_rule_indices_by_marker_{};
     std::vector<int> generated_interface_markers_{};
+    std::unordered_map<int, std::vector<std::size_t>> facet_set_rule_indices_by_marker_{};
+    std::vector<int> facet_set_markers_{};
     std::vector<EmbeddedBoundaryKinematicData> kinematic_data_{};
     std::vector<CutStabilizationHook> stabilization_hooks_{};
     std::vector<CutIntegrationBinding> bindings_{};
