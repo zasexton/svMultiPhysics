@@ -76,6 +76,13 @@
     <Velocity>true</Velocity>
     <Pressure>true</Pressure>
     <Divergence>true</Divergence>
+    <Mesh_displacement>true</Mesh_displacement>
+    <Mesh_velocity>true</Mesh_velocity>
+    <Surface_position>true</Surface_position>
+  </Output>
+
+  <Output type="Volume_integral">
+    <Volume>true</Volume>
   </Output>
 
   <LS type="GMRES">

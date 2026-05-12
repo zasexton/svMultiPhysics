@@ -62,6 +62,12 @@
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
+    <Generated_interface>true</Generated_interface>
+    <Surface_position>true</Surface_position>
+  </Output>
+
+  <Output type="Volume_integral">
+    <Volume>true</Volume>
   </Output>
 
   <LS type="GMRES">
@@ -100,6 +106,10 @@
     <Velocity>true</Velocity>
     <Pressure>true</Pressure>
     <Divergence>true</Divergence>
+  </Output>
+
+  <Output type="Volume_integral">
+    <Volume>true</Volume>
   </Output>
 
   <LS type="GMRES">

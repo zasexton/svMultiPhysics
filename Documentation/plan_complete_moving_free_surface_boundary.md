@@ -458,7 +458,7 @@ Checklist:
 - [x] Add gravity/body-force setup.
 - [x] Add hydrostatic initialization helper.
 - [x] Add pressure gauge/nullspace configuration.
-- [ ] Add output requests for surface position, volume, pressure, and velocity.
+- [x] Add output requests for surface position, volume, pressure, and velocity.
 
 Done when:
 
