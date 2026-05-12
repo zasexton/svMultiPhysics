@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+
 using namespace svmp::FE;
 using namespace svmp::FE::interfaces;
 
@@ -149,4 +151,50 @@ TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1GradientOnCutInterfacePoints)
     EXPECT_NEAR(gradients.front().components[1][0], 3.0, 1.0e-14);
     EXPECT_NEAR(gradients.front().components[1][1], -1.0, 1.0e-14);
     EXPECT_NEAR(gradients.front().components[1][2], 0.0, 1.0e-14);
+}
+
+TEST(CutInterfaceFieldEvaluation, IntegratesScalarH1GradientsOnCutInterfaceQuadrature)
+{
+    LevelSetInterfaceDomain domain(field_eval_request());
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 5,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    const auto& fragment = domain.fragments().front();
+
+    H1NodalFieldData field;
+    field.element_type = ElementType::Quad4;
+    field.components = 1;
+    field.node_coordinates = {{{0.0, 0.0, 0.0}},
+                              {{1.0, 0.0, 0.0}},
+                              {{1.0, 1.0, 0.0}},
+                              {{0.0, 1.0, 0.0}}};
+    field.nodal_values = {
+        4.0,
+        6.0,
+        3.0,
+        1.0};
+
+    const auto gradients = evaluateH1FieldGradientsOnFragment(field, fragment);
+    ASSERT_EQ(gradients.size(), fragment.quadrature_points.size());
+
+    std::array<Real, 3> integral{{0.0, 0.0, 0.0}};
+    for (std::size_t q = 0; q < gradients.size(); ++q) {
+        ASSERT_EQ(gradients[q].components.size(), 1u);
+        for (std::size_t d = 0; d < integral.size(); ++d) {
+            integral[d] +=
+                fragment.quadrature_points[q].weight * gradients[q].components.front()[d];
+        }
+    }
+
+    EXPECT_NEAR(fragment.measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(integral[0], 2.0, 1.0e-14);
+    EXPECT_NEAR(integral[1], -3.0, 1.0e-14);
+    EXPECT_NEAR(integral[2], 0.0, 1.0e-14);
 }

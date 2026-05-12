@@ -184,7 +184,7 @@ Checklist:
 - [x] Evaluate vector gradients on cut-interface quadrature points.
 - [x] Add integration tests for constants.
 - [x] Add integration tests for linear fields.
-- [ ] Add integration tests for field gradients.
+- [x] Add integration tests for field gradients.
 - [ ] Add tests comparing generated normals with level-set-gradient normals.
 
 Done when:
