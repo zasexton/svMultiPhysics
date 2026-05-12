@@ -297,6 +297,47 @@ TEST(NavierStokesInitialConditions, HydrostaticPressureInitializationFillsPressu
 #endif
 }
 
+TEST(NavierStokesPressureGauge, NodePressureConstraintPinsSelectedPressureVertex)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+
+    auto u_space = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto p_space = FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.001;
+    opts.node_pressure_constraints.id_type =
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraintIdType::LocalVertexId;
+    opts.node_pressure_constraints.values = {
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraint{.node_id = 4, .pressure = 2.5}};
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = makeTwoQuadStripTopology();
+    system.setup({}, inputs);
+
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    const auto* entity_map = system.fieldDofHandler(p_id).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto vertex_dofs = entity_map->getVertexDofs(4);
+    ASSERT_EQ(vertex_dofs.size(), 1u);
+
+    const auto dof = system.fieldDofOffset(p_id) + vertex_dofs.front();
+    EXPECT_TRUE(system.constraints().isConstrained(dof));
+    EXPECT_NEAR(system.constraints().getInhomogeneity(dof), 2.5, 1.0e-12);
+}
+
 TEST(NavierStokesPressureGauge, PublishesDynamicViscosityConstitutiveMetadata)
 {
     auto mesh = std::make_shared<TwoQuadStripMeshAccess>();

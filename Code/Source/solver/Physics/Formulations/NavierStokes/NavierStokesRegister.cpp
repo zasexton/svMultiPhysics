@@ -690,6 +690,176 @@ const svmp::Physics::DomainInput& select_single_domain(const svmp::Physics::Equa
   return input.default_domain;
 }
 
+std::vector<std::string> split_csv_line(std::string_view line)
+{
+  std::vector<std::string> fields;
+  std::string field;
+  for (const char ch : line) {
+    if (ch == ',') {
+      fields.push_back(trim_copy(field));
+      field.clear();
+      continue;
+    }
+    field.push_back(ch);
+  }
+  fields.push_back(trim_copy(field));
+  return fields;
+}
+
+svmp::FE::GlobalIndex parse_global_index(std::string_view raw, std::string_view context)
+{
+  const auto s = trim_copy(std::string(raw));
+  try {
+    size_t pos = 0;
+    const long long value = std::stoll(s, &pos);
+    if (pos != s.size() || value < 0) {
+      throw std::runtime_error("");
+    }
+    return static_cast<svmp::FE::GlobalIndex>(value);
+  } catch (...) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse non-negative integer value '" +
+                             std::string(raw) + "' for " + std::string(context) + ".");
+  }
+}
+
+bool values_match(svmp::FE::Real a, svmp::FE::Real b)
+{
+  const double da = static_cast<double>(a);
+  const double db = static_cast<double>(b);
+  const double scale = 1.0 + std::max(std::abs(da), std::abs(db));
+  return std::abs(da - db) <= 1e-12 * scale;
+}
+
+svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType
+parse_node_pressure_constraint_id_type(std::string_view raw)
+{
+  using Options = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+
+  const auto value = trim_copy(std::string(raw));
+  if (value == "Global_vertex_gid") {
+    return Options::NodePressureConstraintIdType::GlobalVertexGid;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] Unsupported <Node_pressure_constraints><Id_type> '" + value +
+      "'. Supported value: Global_vertex_gid.");
+}
+
+std::vector<svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::NodePressureConstraint>
+read_node_pressure_constraints_csv(const std::string& path)
+{
+  using Options = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+
+  std::ifstream file(path);
+  if (!file) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Failed to open node pressure constraints CSV file '" +
+                             path + "'.");
+  }
+
+  std::vector<Options::NodePressureConstraint> out;
+  std::unordered_map<svmp::FE::GlobalIndex, svmp::FE::Real> seen;
+
+  bool header_seen = false;
+  bool data_seen = false;
+  int node_col = 0;
+  int pressure_col = 1;
+
+  std::string line;
+  int line_number = 0;
+  while (std::getline(file, line)) {
+    ++line_number;
+    const auto trimmed = trim_copy(line);
+    if (trimmed.empty() || trimmed.front() == '#') {
+      continue;
+    }
+
+    const auto fields = split_csv_line(trimmed);
+    if (fields.size() < 2u) {
+      throw std::runtime_error("[svMultiPhysics::Physics] Malformed node pressure CSV row in '" + path +
+                               "' at line " + std::to_string(line_number) +
+                               ": expected at least two comma-separated fields.");
+    }
+
+    if (!header_seen) {
+      const auto c0 = lower_copy(fields[0]);
+      const auto c1 = lower_copy(fields[1]);
+      if (c0 == "node_id" || c0 == "pressure" || c1 == "node_id" || c1 == "pressure") {
+        if (c0 == "node_id") {
+          node_col = 0;
+        } else if (c1 == "node_id") {
+          node_col = 1;
+        } else {
+          throw std::runtime_error("[svMultiPhysics::Physics] Node pressure CSV header in '" + path +
+                                   "' must contain a node_id column.");
+        }
+
+        if (c0 == "pressure") {
+          pressure_col = 0;
+        } else if (c1 == "pressure") {
+          pressure_col = 1;
+        } else {
+          throw std::runtime_error("[svMultiPhysics::Physics] Node pressure CSV header in '" + path +
+                                   "' must contain a pressure column.");
+        }
+
+        header_seen = true;
+        continue;
+      }
+      header_seen = true;
+    }
+
+    const auto max_col = static_cast<std::size_t>(std::max(node_col, pressure_col));
+    if (fields.size() <= max_col) {
+      throw std::runtime_error("[svMultiPhysics::Physics] Malformed node pressure CSV row in '" + path +
+                               "' at line " + std::to_string(line_number) +
+                               ": missing node_id or pressure field.");
+    }
+
+    const auto context = std::string("node pressure CSV '") + path + "' line " + std::to_string(line_number);
+    const auto node_id = parse_global_index(fields[static_cast<std::size_t>(node_col)], context + " node_id");
+    const auto pressure_value = parse_double(fields[static_cast<std::size_t>(pressure_col)], context + " pressure");
+    if (!std::isfinite(pressure_value)) {
+      throw std::runtime_error("[svMultiPhysics::Physics] Non-finite pressure value in '" + path +
+                               "' at line " + std::to_string(line_number) + ".");
+    }
+    const auto pressure = static_cast<svmp::FE::Real>(pressure_value);
+
+    const auto it = seen.find(node_id);
+    if (it != seen.end()) {
+      if (!values_match(it->second, pressure)) {
+        throw std::runtime_error("[svMultiPhysics::Physics] Conflicting duplicate node pressure value for node_id " +
+                                 std::to_string(node_id) + " in '" + path + "'.");
+      }
+      continue;
+    }
+
+    seen.emplace(node_id, pressure);
+    out.push_back(Options::NodePressureConstraint{node_id, pressure});
+    data_seen = true;
+  }
+
+  if (!data_seen) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Node pressure constraints CSV file '" + path +
+                             "' did not contain any node pressure values.");
+  }
+
+  return out;
+}
+
+void apply_node_pressure_constraints(
+    const svmp::Physics::EquationModuleInput& input,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  if (!input.node_pressure_constraints.has_value()) {
+    return;
+  }
+
+  const auto& node_constraints = *input.node_pressure_constraints;
+  options.node_pressure_constraints.id_type =
+      parse_node_pressure_constraint_id_type(node_constraints.id_type);
+  options.node_pressure_constraints.values =
+      read_node_pressure_constraints_csv(node_constraints.values_file_path);
+}
+
 void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
                             svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
@@ -2668,6 +2838,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
 
   apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_properties(domain, options);
+  apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, options);
 
   auto module = std::make_unique<svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule>(

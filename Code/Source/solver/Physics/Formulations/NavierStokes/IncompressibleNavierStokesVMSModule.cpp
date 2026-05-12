@@ -11,6 +11,7 @@
 #include "Physics/Materials/Fluid/NewtonianViscosity.h"
 
 #include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/CutCellForms.h"
@@ -710,6 +711,27 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     p_spec.space = pressure_space_;
     p_spec.components = 1;
     const FE::FieldId p_id = system.addField(std::move(p_spec));
+
+    if (!options_.node_pressure_constraints.values.empty()) {
+        std::vector<FE::constraints::VertexDirichletValue> values;
+        values.reserve(options_.node_pressure_constraints.values.size());
+        for (const auto& in : options_.node_pressure_constraints.values) {
+            values.push_back(FE::constraints::VertexDirichletValue{in.node_id, in.pressure});
+        }
+
+        FE::constraints::VertexIdMode mode = FE::constraints::VertexIdMode::GlobalVertexGid;
+        switch (options_.node_pressure_constraints.id_type) {
+        case IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::GlobalVertexGid:
+            mode = FE::constraints::VertexIdMode::GlobalVertexGid;
+            break;
+        case IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::LocalVertexId:
+            mode = FE::constraints::VertexIdMode::LocalVertexId;
+            break;
+        }
+
+        system.addSystemConstraint(
+            std::make_unique<FE::constraints::VertexDirichletConstraint>(p_id, std::move(values), mode));
+    }
 
     const auto ale_binding = FE::systems::resolveALEBinding(
         system,

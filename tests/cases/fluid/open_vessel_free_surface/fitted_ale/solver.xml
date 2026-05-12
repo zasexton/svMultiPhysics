@@ -64,6 +64,10 @@
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 0.5 0.0</Hydrostatic_pressure_reference_point>
+  <Node_pressure_constraints>
+    <Id_type>Global_vertex_gid</Id_type>
+    <Values_file_path>pressure_gauge.csv</Values_file_path>
+  </Node_pressure_constraints>
   <Viscosity model="Constant">
     <Value>1.003e-3</Value>
   </Viscosity>

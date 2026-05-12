@@ -457,7 +457,7 @@ Checklist:
 - [x] Add mesh and initial conditions for half-filled vessel.
 - [x] Add gravity/body-force setup.
 - [x] Add hydrostatic initialization helper.
-- [ ] Add pressure gauge/nullspace configuration.
+- [x] Add pressure gauge/nullspace configuration.
 - [ ] Add output requests for surface position, volume, pressure, and velocity.
 
 Done when:

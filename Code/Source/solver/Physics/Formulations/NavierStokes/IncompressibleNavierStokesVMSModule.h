@@ -291,6 +291,22 @@ struct IncompressibleNavierStokesVMSOptions {
     };
     HydrostaticPressureInitialization hydrostatic_pressure_initialization{};
 
+    enum class NodePressureConstraintIdType : std::uint8_t {
+        GlobalVertexGid,
+        LocalVertexId
+    };
+
+    struct NodePressureConstraint {
+        FE::GlobalIndex node_id{FE::INVALID_GLOBAL_INDEX};
+        FE::Real pressure{0.0};
+    };
+
+    struct NodePressureConstraintOptions {
+        NodePressureConstraintIdType id_type{NodePressureConstraintIdType::GlobalVertexGid};
+        std::vector<NodePressureConstraint> values{};
+    };
+    NodePressureConstraintOptions node_pressure_constraints{};
+
     // Enable the convective term rho * (u · ∇) u.
     //
     // This can be disabled to recover a (possibly unsteady) Stokes formulation.

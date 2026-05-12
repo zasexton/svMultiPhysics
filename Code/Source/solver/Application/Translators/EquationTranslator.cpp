@@ -194,7 +194,7 @@ svmp::Physics::EquationModuleInput EquationTranslator::buildInput(
     if (id_type != "Global_vertex_gid") {
       throw std::runtime_error(
           "[svMultiPhysics::Application] <Node_pressure_constraints><Id_type> must be 'Global_vertex_gid' "
-          "for the new OOP solver Darcy/Poisson node pressure constraint path.");
+          "for the new OOP solver Darcy/Poisson/Navier-Stokes node pressure constraint path.");
     }
     if (values_file_path.empty()) {
       throw std::runtime_error(
