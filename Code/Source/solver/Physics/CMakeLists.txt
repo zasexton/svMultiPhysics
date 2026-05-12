@@ -166,7 +166,9 @@ set(PHYSICS_PUBLIC_HEADERS
     Core/Domain.h
     Core/EquationModuleInput.h
     Core/EquationModuleRegistry.h
+    Core/JITRuntimePolicy.h
     Core/ParameterSchema.h
+    Core/PhysicsJITPolicy.h
     Core/PhysicsModule.h
     Core/TemporalValues.h
 )
@@ -175,6 +177,7 @@ set(PHYSICS_SOURCES
     Physics.cpp
     Core/EquationModuleRegistry.cpp
     Core/ParameterSchema.cpp
+    Core/PhysicsModule.cpp
     Core/TemporalValues.cpp
 )
 

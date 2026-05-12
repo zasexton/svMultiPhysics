@@ -6,6 +6,7 @@
  * @brief Baseline coupled-ALE mesh-displacement equation using FE/Forms.
  */
 
+#include "Physics/Core/PhysicsJITPolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Forms/BoundaryConditions.h"
@@ -17,10 +18,6 @@
 #include <optional>
 #include <string>
 #include <vector>
-
-#ifndef SVMP_FE_ENABLE_LLVM_JIT
-#define SVMP_FE_ENABLE_LLVM_JIT 0
-#endif
 
 namespace svmp {
 namespace Physics {
@@ -54,8 +51,7 @@ struct HarmonicMeshMotionOptions {
     bool auto_register_field{true};
     bool bind_as_mesh_displacement{true};
     FE::forms::GeometryTangentPath tangent_path{FE::forms::GeometryTangentPath::SymbolicRequired};
-    bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};
-    bool enable_jit_specialization{true};
+    core::PhysicsJITPolicy jit_policy{};
 
     std::vector<DirichletBC> dirichlet{};
     std::vector<NaturalBC> natural{};

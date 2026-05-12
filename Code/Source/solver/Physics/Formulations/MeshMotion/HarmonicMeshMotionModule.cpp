@@ -176,21 +176,10 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
     });
     bc_manager.applyAll(system, residual, d_mesh, psi, d_id);
 
-    FE::systems::FormInstallOptions install{};
+    auto install = physicsInstallOptions(options_.jit_policy);
     install.compiler_options.geometry_tangent_path = options_.tangent_path;
     install.compiler_options.use_symbolic_tangent =
         options_.tangent_path != FE::forms::GeometryTangentPath::ADReference;
-#if SVMP_FE_ENABLE_LLVM_JIT
-    install.compiler_options.jit.enable = options_.enable_jit;
-    if (install.compiler_options.jit.enable) {
-        install.compiler_options.jit.optimization_level = 3;
-        install.compiler_options.jit.specialization.enable = options_.enable_jit_specialization;
-        install.compiler_options.jit.specialization.specialize_n_qpts =
-            options_.enable_jit_specialization;
-        install.compiler_options.jit.specialization.specialize_dofs =
-            options_.enable_jit_specialization;
-    }
-#endif
 
     (void)FE::systems::installFormulation(system, options_.operator_tag, {d_id}, residual, install);
 }

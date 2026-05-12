@@ -60,7 +60,8 @@ option(FE_ENABLE_EIGEN "Enable Eigen3 for optimized Math operations" OFF)
 option(FE_ENABLE_TRILINOS "Enable Trilinos backend support" OFF)
 option(FE_ENABLE_PETSC "Enable PETSc backend support" OFF)
 option(FE_ENABLE_ASSEMBLY "Enable Assembly module (work-in-progress)" OFF)
-option(FE_ENABLE_LLVM_JIT "Enable LLVM OrcJIT backend for FE/Forms" OFF)
+set(FE_ENABLE_LLVM_JIT "AUTO" CACHE STRING "LLVM OrcJIT backend for FE/Forms: AUTO, ON, or OFF")
+set_property(CACHE FE_ENABLE_LLVM_JIT PROPERTY STRINGS AUTO ON OFF)
 option(FE_WITH_MESH "Enable Mesh integration convenience APIs (requires linking Mesh)" OFF)
 option(FE_ENABLE_METIS "Enable METIS reorderings (internal ThirdParty)" ON)
 option(FE_ENABLE_PARMETIS "Enable ParMETIS reorderings (internal ThirdParty, requires MPI)" ON)
@@ -76,6 +77,27 @@ option(FE_USE_MPI_WRAPPERS "Use MPI compiler wrappers" OFF)
 option(FE_ENABLE_WARNINGS "Enable additional compiler warnings" ON)
 option(FE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(FE_ENABLE_SANITIZERS "Enable address/undefined sanitizers" OFF)
+
+string(TOUPPER "${FE_ENABLE_LLVM_JIT}" _SVMP_FE_ENABLE_LLVM_JIT_MODE)
+if("${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "TRUE" OR
+   "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "YES" OR
+   "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "1")
+    set(_SVMP_FE_ENABLE_LLVM_JIT_MODE "ON")
+elseif("${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "FALSE" OR
+       "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "NO" OR
+       "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "0")
+    set(_SVMP_FE_ENABLE_LLVM_JIT_MODE "OFF")
+endif()
+
+if(NOT "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "AUTO" AND
+   NOT "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "ON" AND
+   NOT "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "OFF")
+    message(FATAL_ERROR
+        "FE_ENABLE_LLVM_JIT must be AUTO, ON, or OFF; got '${FE_ENABLE_LLVM_JIT}'")
+endif()
+set(FE_ENABLE_LLVM_JIT_MODE "${_SVMP_FE_ENABLE_LLVM_JIT_MODE}")
+set(FE_ENABLE_LLVM_JIT_RESOLVED OFF CACHE BOOL
+    "Resolved LLVM OrcJIT availability for FE/Forms" FORCE)
 
 #------------------------------------------------------------------------------
 # Compiler flags
@@ -1335,16 +1357,23 @@ if(FE_ENABLE_EIGEN)
 endif()
 
 
-# Configure LLVM for the Forms OrcJIT backend if enabled.
+# Configure LLVM for the Forms OrcJIT backend when requested or auto-detected.
 #
 # Note: Forms/JIT sources are only built when FE_ENABLE_ASSEMBLY is enabled.
-if(FE_ENABLE_LLVM_JIT)
-    if(FE_ENABLE_ASSEMBLY)
-        include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableLLVMJIT.cmake)
-    else()
-        message(WARNING "FE: FE_ENABLE_LLVM_JIT is ON but FE_ENABLE_ASSEMBLY is OFF; Forms/JIT is not built, so LLVM will not be searched/linked.")
+set(FE_LLVM_JIT_AVAILABLE OFF CACHE INTERNAL "Resolved FE LLVM JIT availability" FORCE)
+if("${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "OFF")
+    message(STATUS "FE: LLVM OrcJIT support disabled (FE_ENABLE_LLVM_JIT=OFF)")
+elseif(FE_ENABLE_ASSEMBLY)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableLLVMJIT.cmake)
+else()
+    if("${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "ON")
+        message(FATAL_ERROR
+            "FE_ENABLE_LLVM_JIT=ON requires FE_ENABLE_ASSEMBLY=ON because Forms/JIT is part of FE/Assembly.")
     endif()
+    message(STATUS "FE: LLVM OrcJIT auto-detection skipped because FE_ENABLE_ASSEMBLY is OFF")
 endif()
+set(FE_ENABLE_LLVM_JIT_RESOLVED ${FE_LLVM_JIT_AVAILABLE} CACHE BOOL
+    "Resolved LLVM OrcJIT availability for FE/Forms" FORCE)
 
 # Configure Google Test if tests are enabled
 if(FE_BUILD_TESTS)
@@ -1470,7 +1499,7 @@ target_include_directories(svfe
 )
 
 target_compile_definitions(svfe PUBLIC SVMP_FE_WITH_MESH=$<BOOL:${FE_WITH_MESH}>)
-target_compile_definitions(svfe PUBLIC SVMP_FE_ENABLE_LLVM_JIT=$<BOOL:${FE_ENABLE_LLVM_JIT}>)
+target_compile_definitions(svfe PUBLIC SVMP_FE_ENABLE_LLVM_JIT=$<BOOL:${FE_ENABLE_LLVM_JIT_RESOLVED}>)
 target_compile_definitions(svfe PRIVATE SVMP_FE_ASSEMBLY_TIMING)
 
 if(FE_WITH_MESH)
@@ -1508,7 +1537,7 @@ endif()
 
 # LLVM is configured before the `svfe` target exists (EnableLLVMJIT.cmake), so
 # apply the discovered include directories + link libraries here.
-if(FE_ENABLE_LLVM_JIT AND FE_ENABLE_ASSEMBLY)
+if(FE_ENABLE_LLVM_JIT_RESOLVED AND FE_ENABLE_ASSEMBLY)
     if(DEFINED FE_LLVM_INCLUDE_DIRS AND NOT FE_LLVM_INCLUDE_DIRS STREQUAL "")
         target_include_directories(svfe SYSTEM PUBLIC ${FE_LLVM_INCLUDE_DIRS})
     endif()

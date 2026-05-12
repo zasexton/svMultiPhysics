@@ -2,6 +2,7 @@
 #define SVMP_PHYSICS_CORE_JIT_RUNTIME_POLICY_H
 
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/PhysicsJITPolicy.h"
 
 #include <algorithm>
 #include <cctype>
@@ -197,6 +198,16 @@ inline bool resolveOopJitSpecializationEnable(const EquationModuleInput& input, 
     }
 
     return default_enabled;
+}
+
+inline PhysicsJITPolicy resolveOopJitPolicy(const EquationModuleInput& input,
+                                            PhysicsJITPolicy default_policy = {})
+{
+    PhysicsJITPolicy policy = default_policy;
+    policy.enable = resolveOopJitEnable(input, default_policy.enable);
+    policy.specialization =
+        resolveOopJitSpecializationEnable(input, default_policy.specialization);
+    return policy;
 }
 
 } // namespace svmp::Physics::core

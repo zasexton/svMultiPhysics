@@ -476,7 +476,7 @@ ModuleAssemblySnapshot assembleTransientNavierStokesModuleWithResistiveOutlet(bo
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = enable_jit;
+    opts.jit_policy.enable = enable_jit;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;
@@ -569,7 +569,7 @@ ModuleAssemblySnapshot assembleTransientNavierStokesModuleWithDirichletAndResist
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = enable_jit;
+    opts.jit_policy.enable = enable_jit;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;
@@ -1521,7 +1521,7 @@ TEST(NavierStokesOutletFactory, ResistiveOutletFsilsTimeLoopTracksLinearToleranc
         auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
         Opts opts;
-        opts.enable_jit = false;
+        opts.jit_policy.enable = false;
         opts.enable_convection = true;
         opts.enable_vms = true;
         opts.density = 1.06;
@@ -1687,7 +1687,7 @@ TEST(NavierStokesOutletFactory, DISABLED_LegacyResistiveOutflowBoundaryMeshJacob
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = false;
+    opts.jit_policy.enable = false;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;
@@ -1861,7 +1861,7 @@ TEST(NavierStokesOutletFactory, ResistiveOutflowBoundaryReductionIgnoresPressure
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = false;
+    opts.jit_policy.enable = false;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;
@@ -1968,7 +1968,7 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowResidualDoesNotTouchPressu
         auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
         Opts opts;
-        opts.enable_jit = false;
+        opts.jit_policy.enable = false;
         opts.enable_convection = true;
         opts.enable_vms = true;
         opts.density = 1.06;
@@ -2091,7 +2091,7 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowPressurePerturbationDoesNo
         auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
         Opts opts;
-        opts.enable_jit = false;
+        opts.jit_policy.enable = false;
         opts.enable_convection = true;
         opts.enable_vms = true;
         opts.density = 1.06;
@@ -2254,7 +2254,7 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowDoesNotChangePressureJacob
         auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
         Opts opts;
-        opts.enable_jit = false;
+        opts.jit_policy.enable = false;
         opts.enable_convection = true;
         opts.enable_vms = true;
         opts.density = 1.06;
@@ -2397,7 +2397,7 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowRankOneUpdateAvoidsPressur
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = false;
+    opts.jit_policy.enable = false;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;
@@ -2519,7 +2519,7 @@ TEST(NavierStokesOutletFactory, LegacyResistiveOutflowMatrixVectorResidualMatche
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = false;
+    opts.jit_policy.enable = false;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;
@@ -2642,7 +2642,7 @@ TEST(NavierStokesOutletFactory, BoundaryMeshDirichletJacobianMatchesFDWithoutRes
     auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
 
     Opts opts;
-    opts.enable_jit = false;
+    opts.jit_policy.enable = false;
     opts.enable_convection = true;
     opts.enable_vms = true;
     opts.density = 1.06;

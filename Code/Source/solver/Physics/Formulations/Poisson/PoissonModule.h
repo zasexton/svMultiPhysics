@@ -18,6 +18,7 @@
  * - Dirichlet (weak): u = uD    imposed weakly via Nitsche boundary terms
  */
 
+#include "Physics/Core/PhysicsJITPolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Spaces/FunctionSpace.h"
@@ -27,10 +28,6 @@
 #include <string>
 #include <variant>
 #include <vector>
-
-#ifndef SVMP_FE_ENABLE_LLVM_JIT
-#define SVMP_FE_ENABLE_LLVM_JIT 0
-#endif
 
 namespace svmp {
 namespace Physics {
@@ -100,8 +97,7 @@ struct PoissonOptions {
     std::string field_name{"u"};
     FE::Real diffusion{1.0};
     FE::Real source{0.0};
-    bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};
-    bool enable_jit_specialization{true};
+    core::PhysicsJITPolicy jit_policy{};
     bool register_darcy_flux_output{false};
 
     // Boundary conditions.

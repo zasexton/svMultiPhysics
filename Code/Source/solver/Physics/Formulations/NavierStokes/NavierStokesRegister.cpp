@@ -2140,9 +2140,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   options.velocity_field_name = "Velocity";
   options.pressure_field_name = "Pressure";
   options.enable_convection = (input.equation_type != "stokes");
-  options.enable_jit = svmp::Physics::core::resolveOopJitEnable(input, options.enable_jit);
-  options.enable_jit_specialization =
-      svmp::Physics::core::resolveOopJitSpecializationEnable(input, options.enable_jit_specialization);
+  options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
 
   apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_properties(domain, options);

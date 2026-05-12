@@ -31,6 +31,7 @@
  *   `FE::systems::TransientSystem` or set `SystemStateView::time_integration`).
  */
 
+#include "Physics/Core/PhysicsJITPolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Forms/BoundaryConditions.h"
@@ -42,10 +43,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-#ifndef SVMP_FE_ENABLE_LLVM_JIT
-#define SVMP_FE_ENABLE_LLVM_JIT 0
-#endif
 
 namespace svmp {
 namespace Physics {
@@ -199,8 +196,7 @@ struct IncompressibleNavierStokesVMSOptions {
 
     // Enable residual-based VMS stabilization (static subscales u', p').
     bool enable_vms{true};
-    bool enable_jit{SVMP_FE_ENABLE_LLVM_JIT != 0};
-    bool enable_jit_specialization{true};
+    core::PhysicsJITPolicy jit_policy{};
 
     // Legacy-inspired tuning constants used in tau_M (metric-based):
     //   tau_M/rho = 1 / (rho * sqrt( 4*(ct_m/dt)^2 + u^T Kxi u + ct_c * ||Kxi||_F^2 * nu^2 ))

@@ -10,13 +10,18 @@
  */
 
 #include "FE/Core/Types.h"
+#include "Physics/Core/PhysicsJITPolicy.h"
 
 #include <span>
 
 namespace svmp {
 namespace FE {
+namespace forms {
+struct SymbolicOptions;
+} // namespace forms
 namespace systems {
 class FESystem;
+struct FormInstallOptions;
 } // namespace systems
 } // namespace FE
 
@@ -48,10 +53,24 @@ public:
      * @brief Optional quantities-of-interest (QoI) registration hook
      */
     virtual void registerFunctionals(FE::systems::FESystem& /*system*/) const {}
+
+protected:
+    [[nodiscard]] FE::forms::SymbolicOptions
+    physicsCompilerOptions(const core::PhysicsJITPolicy& policy = {}) const;
+
+    [[nodiscard]] FE::systems::FormInstallOptions
+    physicsInstallOptions(const core::PhysicsJITPolicy& policy = {}) const;
+
+    void applyPhysicsJITOptions(FE::forms::SymbolicOptions& options,
+                                const core::PhysicsJITPolicy& policy = {}) const;
+
+    void setBoundaryReductionCompilerOptions(
+        FE::systems::FESystem& system,
+        FE::FieldId field,
+        const core::PhysicsJITPolicy& policy = {}) const;
 };
 
 } // namespace Physics
 } // namespace svmp
 
 #endif // SVMP_PHYSICS_CORE_PHYSICS_MODULE_H
-

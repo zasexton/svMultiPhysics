@@ -20,30 +20,10 @@
 #include <string>
 #include <utility>
 
-#ifndef SVMP_FE_ENABLE_LLVM_JIT
-#define SVMP_FE_ENABLE_LLVM_JIT 0
-#endif
-
 namespace svmp {
 namespace Physics {
 namespace formulations {
 namespace poisson {
-
-namespace {
-FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enable_jit,
-                                                                 bool enable_jit_specialization)
-{
-    FE::forms::SymbolicOptions options{};
-#if SVMP_FE_ENABLE_LLVM_JIT
-    options.jit.enable = enable_jit;
-    options.jit.specialization.enable = enable_jit_specialization;
-#else
-    (void)enable_jit;
-    (void)enable_jit_specialization;
-#endif
-    return options;
-}
-} // namespace
 
 PoissonModule::PoissonModule(std::shared_ptr<const FE::spaces::FunctionSpace> space,
                              PoissonOptions options)
@@ -98,9 +78,7 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
     auto residual = integrand.dx();
 
     if (!options_.coupled_neumann_rcr.empty()) {
-        const auto compiler_options =
-            makeBoundaryFunctionalCompilerOptions(options_.enable_jit, options_.enable_jit_specialization);
-        system.boundaryReductionService(u_id).setCompilerOptions(compiler_options);
+        setBoundaryReductionCompilerOptions(system, u_id, options_.jit_policy);
     }
 
     FE::systems::BoundaryConditionManager bc_manager;
@@ -120,12 +98,8 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
 
     bc_manager.applyAll(system, residual, u, v, u_id);
 
-    FE::systems::FormInstallOptions install_opts{};
-#if SVMP_FE_ENABLE_LLVM_JIT
-    install_opts.compiler_options.jit.enable = options_.enable_jit;
-    install_opts.compiler_options.jit.specialization.enable = options_.enable_jit_specialization;
+    auto install_opts = physicsInstallOptions(options_.jit_policy);
     install_opts.compiler_options.use_symbolic_tangent = true;
-#endif
 
     (void)FE::systems::installFormulation(system, "equations", {u_id}, residual, install_opts);
 }

@@ -23,32 +23,6 @@
 #include <utility>
 #include <vector>
 
-#ifndef SVMP_FE_ENABLE_LLVM_JIT
-#define SVMP_FE_ENABLE_LLVM_JIT 0
-#endif
-
-namespace {
-svmp::FE::forms::SymbolicOptions makeBoundaryFunctionalCompilerOptions(bool enable_jit,
-                                                                       bool enable_jit_specialization)
-{
-    svmp::FE::forms::SymbolicOptions options{};
-#if SVMP_FE_ENABLE_LLVM_JIT
-    options.jit.enable = enable_jit;
-    if (options.jit.enable) {
-        options.jit.optimization_level = 3;
-        options.jit.specialization.enable = enable_jit_specialization;
-        options.jit.specialization.specialize_n_qpts = enable_jit_specialization;
-        options.jit.specialization.specialize_dofs = enable_jit_specialization;
-    }
-#else
-    (void)enable_jit;
-    (void)enable_jit_specialization;
-#endif
-    return options;
-}
-
-} // namespace
-
 namespace svmp {
 namespace Physics {
 namespace formulations {
@@ -261,9 +235,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // ---------------------------------------------------------------------
 
     if (!options_.coupled_outflow_rcr.empty() || !options_.coupled_outflow_rcrcr.empty()) {
-        const auto compiler_options =
-            makeBoundaryFunctionalCompilerOptions(options_.enable_jit, options_.enable_jit_specialization);
-        system.boundaryReductionService(u_id).setCompilerOptions(compiler_options);
+        setBoundaryReductionCompilerOptions(system, u_id, options_.jit_policy);
     }
 
     FE::systems::BoundaryConditionManager bc_manager;
@@ -300,18 +272,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     // structure and sets up per-block Jacobian kernels with optimal assembly.
     const auto residual = momentum_form + continuity_form;
 
-    FE::systems::FormInstallOptions install{};
+    auto install = physicsInstallOptions(options_.jit_policy);
     install.compiler_options.use_symbolic_tangent = true;
     ale_binding.configureInstallOptions(install);
-#if SVMP_FE_ENABLE_LLVM_JIT
-    install.compiler_options.jit.enable = options_.enable_jit;
-    if (install.compiler_options.jit.enable) {
-        install.compiler_options.jit.optimization_level = 3;
-        install.compiler_options.jit.specialization.enable = options_.enable_jit_specialization;
-        install.compiler_options.jit.specialization.specialize_n_qpts = options_.enable_jit_specialization;
-        install.compiler_options.jit.specialization.specialize_dofs = options_.enable_jit_specialization;
-    }
-#endif
     (void)FE::systems::installFormulation(system, "equations", {u_id, p_id}, residual, install);
 }
 

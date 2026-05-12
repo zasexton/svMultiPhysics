@@ -10,9 +10,12 @@
 #include "Physics/Core/Domain.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/ParameterSchema.h"
+#include "Physics/Core/PhysicsModule.h"
 #include "Physics/Core/TemporalValues.h"
 
 #include "FE/Core/FEException.h"
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
+#include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/SystemState.h"
 
 #include <cstdlib>
@@ -52,6 +55,15 @@ private:
 
     const char* key_{nullptr};
     std::optional<std::string> original_{};
+};
+
+class ExposedPhysicsModule final : public PhysicsModule {
+public:
+    using PhysicsModule::applyPhysicsJITOptions;
+    using PhysicsModule::physicsCompilerOptions;
+    using PhysicsModule::physicsInstallOptions;
+
+    void registerOn(FE::systems::FESystem& /*system*/) const override {}
 };
 
 } // namespace
@@ -203,6 +215,58 @@ TEST(JitRuntimePolicy, EnvironmentOverridesDefaultWhenNoEquationOverrideExists)
     EXPECT_FALSE(core::resolveOopJitEnable(input, true));
 }
 
+TEST(JitRuntimePolicy, PolicyDefaultsToLLVMAvailability)
+{
+    const core::PhysicsJITPolicy policy{};
+
+    EXPECT_EQ(policy.enable, FE::forms::jit::llvmJITEnabled());
+    EXPECT_TRUE(policy.specialization);
+    EXPECT_EQ(policy.optimization_level, 3);
+    EXPECT_TRUE(policy.specialize_n_qpts);
+    EXPECT_TRUE(policy.specialize_dofs);
+}
+
+TEST(JitRuntimePolicy, PolicyModuleOptionsOverrideEnvironment)
+{
+    ScopedEnvVar env("SVMP_OOP_JIT_ENABLE", std::string("1"));
+    ScopedEnvVar specialization_env("SVMP_OOP_JIT_SPECIALIZATION_ENABLE", std::string("1"));
+
+    EquationModuleInput input;
+    input.module_options = "jit = false; jit_specialization = false";
+
+    const auto policy = core::resolveOopJitPolicy(input);
+    EXPECT_FALSE(policy.enable);
+    EXPECT_FALSE(policy.specialization);
+}
+
+TEST(JitRuntimePolicy, PolicyEquationParamsOverrideEnvironment)
+{
+    ScopedEnvVar env("SVMP_OOP_JIT_ENABLE", std::string("1"));
+    ScopedEnvVar specialization_env("SVMP_OOP_JIT_SPECIALIZATION_ENABLE", std::string("1"));
+
+    EquationModuleInput input;
+    input.equation_params["Enable_jit"] = ParameterValue{true, "off"};
+    input.equation_params["Enable_jit_specialization"] = ParameterValue{true, "off"};
+
+    const auto policy = core::resolveOopJitPolicy(input);
+    EXPECT_FALSE(policy.enable);
+    EXPECT_FALSE(policy.specialization);
+}
+
+TEST(JitRuntimePolicy, PolicyEnvironmentOverridesDefault)
+{
+    ScopedEnvVar env("SVMP_OOP_JIT_ENABLE", std::string("0"));
+    ScopedEnvVar specialization_env("SVMP_OOP_JIT_SPECIALIZATION_ENABLE", std::string("0"));
+
+    EquationModuleInput input;
+
+    const auto policy = core::resolveOopJitPolicy(input, core::PhysicsJITPolicy{
+                                                            .enable = true,
+                                                            .specialization = true});
+    EXPECT_FALSE(policy.enable);
+    EXPECT_FALSE(policy.specialization);
+}
+
 TEST(JitRuntimePolicy, SpecializationModuleOptionsOverrideEnvironment)
 {
     ScopedEnvVar env("SVMP_OOP_JIT_SPECIALIZATION_ENABLE", std::string("1"));
@@ -230,6 +294,58 @@ TEST(JitRuntimePolicy, SpecializationEnvironmentOverridesDefaultWhenNoEquationOv
     EquationModuleInput input;
 
     EXPECT_FALSE(core::resolveOopJitSpecializationEnable(input, true));
+}
+
+TEST(PhysicsModuleJITOptions, CompilerOptionsMaskJITWhenUnavailable)
+{
+    ExposedPhysicsModule module;
+    core::PhysicsJITPolicy policy{};
+    policy.enable = true;
+
+    const auto options = module.physicsCompilerOptions(policy);
+
+    EXPECT_EQ(options.jit.enable, FE::forms::jit::llvmJITEnabled());
+    EXPECT_EQ(options.jit.optimization_level, 3);
+    EXPECT_TRUE(options.jit.specialization.enable);
+    EXPECT_TRUE(options.jit.specialization.specialize_n_qpts);
+    EXPECT_TRUE(options.jit.specialization.specialize_dofs);
+}
+
+TEST(PhysicsModuleJITOptions, CompilerOptionsHonorDisabledPolicy)
+{
+    ExposedPhysicsModule module;
+    core::PhysicsJITPolicy policy{};
+    policy.enable = false;
+    policy.specialization = false;
+    policy.specialize_n_qpts = false;
+    policy.specialize_dofs = false;
+
+    auto options = module.physicsCompilerOptions(policy);
+
+    EXPECT_FALSE(options.jit.enable);
+    EXPECT_EQ(options.jit.optimization_level, 3);
+    EXPECT_FALSE(options.jit.specialization.enable);
+    EXPECT_FALSE(options.jit.specialization.specialize_n_qpts);
+    EXPECT_FALSE(options.jit.specialization.specialize_dofs);
+
+    policy.optimization_level = 1;
+    module.applyPhysicsJITOptions(options, policy);
+    EXPECT_EQ(options.jit.optimization_level, 1);
+}
+
+TEST(PhysicsModuleJITOptions, InstallOptionsUseSharedCompilerPolicy)
+{
+    ExposedPhysicsModule module;
+    core::PhysicsJITPolicy policy{};
+    policy.enable = true;
+    policy.optimization_level = 3;
+    policy.specialization = false;
+
+    const auto install = module.physicsInstallOptions(policy);
+
+    EXPECT_EQ(install.compiler_options.jit.enable, FE::forms::jit::llvmJITEnabled());
+    EXPECT_EQ(install.compiler_options.jit.optimization_level, 3);
+    EXPECT_FALSE(install.compiler_options.jit.specialization.enable);
 }
 
 } // namespace test

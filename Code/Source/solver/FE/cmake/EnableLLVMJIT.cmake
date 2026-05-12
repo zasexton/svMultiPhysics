@@ -2,13 +2,23 @@
 #
 # This module discovers an LLVM installation and records the include
 # directories, compile definitions, and libraries needed to build/link the
-# FE/Forms OrcJIT backend when FE_ENABLE_LLVM_JIT=ON.
+# FE/Forms OrcJIT backend when FE_ENABLE_LLVM_JIT is ON or AUTO.
 #
 # This module is intentionally side-effect free: it does not modify any targets
 # directly because it is typically included before the `svfe` target is created.
 
-if(FE_ENABLE_LLVM_JIT)
-    message(STATUS "FE: Configuring LLVM OrcJIT support for Forms")
+if(NOT DEFINED FE_ENABLE_LLVM_JIT_MODE)
+    string(TOUPPER "${FE_ENABLE_LLVM_JIT}" FE_ENABLE_LLVM_JIT_MODE)
+endif()
+
+set(FE_LLVM_JIT_AVAILABLE OFF CACHE INTERNAL "Resolved FE LLVM JIT availability" FORCE)
+
+if(NOT "${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "OFF")
+    if("${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "AUTO")
+        message(STATUS "FE: Auto-detecting LLVM OrcJIT support for Forms")
+    else()
+        message(STATUS "FE: Configuring LLVM OrcJIT support for Forms")
+    endif()
 
     # LLVM's CMake package runs C feature checks (e.g., for libffi/terminfo),
     # so ensure the C language is enabled even if FE is built as a C++-only
@@ -25,16 +35,38 @@ if(FE_ENABLE_LLVM_JIT)
     # LLVMConfigVersion.cmake uses exact-major-version matching, which
     # rejects any major version other than the one requested.  Instead we
     # find any LLVM and check the version manually below.
-    find_package(LLVM CONFIG REQUIRED)
-
-    if(LLVM_PACKAGE_VERSION VERSION_LESS _SVMP_FE_LLVM_JIT_MIN_VERSION)
-        message(FATAL_ERROR
-            "FE: LLVM >= ${_SVMP_FE_LLVM_JIT_MIN_VERSION} required, "
-            "found ${LLVM_PACKAGE_VERSION}")
+    if("${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "ON")
+        find_package(LLVM CONFIG REQUIRED)
+    else()
+        find_package(LLVM CONFIG QUIET)
+        if(NOT LLVM_FOUND)
+            message(STATUS "FE: LLVM package config not found; Forms OrcJIT support disabled")
+            return()
+        endif()
     endif()
 
     if(NOT LLVM_PACKAGE_VERSION AND LLVM_VERSION_MAJOR)
         set(LLVM_PACKAGE_VERSION "${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}.${LLVM_VERSION_PATCH}")
+    endif()
+
+    if(NOT LLVM_PACKAGE_VERSION)
+        if("${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "ON")
+            message(FATAL_ERROR "FE: LLVM package did not report a version")
+        endif()
+        message(STATUS "FE: LLVM package did not report a version; Forms OrcJIT support disabled")
+        return()
+    endif()
+
+    if(LLVM_PACKAGE_VERSION VERSION_LESS _SVMP_FE_LLVM_JIT_MIN_VERSION)
+        if("${FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "ON")
+            message(FATAL_ERROR
+                "FE: LLVM >= ${_SVMP_FE_LLVM_JIT_MIN_VERSION} required, "
+                "found ${LLVM_PACKAGE_VERSION}")
+        endif()
+        message(STATUS
+            "FE: LLVM ${LLVM_PACKAGE_VERSION} is older than required "
+            "${_SVMP_FE_LLVM_JIT_MIN_VERSION}; Forms OrcJIT support disabled")
+        return()
     endif()
 
     message(STATUS "FE: Found LLVM ${LLVM_PACKAGE_VERSION} (LLVM_DIR='${LLVM_DIR}')")
@@ -88,6 +120,7 @@ if(FE_ENABLE_LLVM_JIT)
 
     list(REMOVE_DUPLICATES _svmp_fe_llvm_jit_compile_defs)
     set(FE_LLVM_JIT_COMPILE_DEFINITIONS "${_svmp_fe_llvm_jit_compile_defs}" CACHE INTERNAL "FE compile definitions for LLVM JIT")
+    set(FE_LLVM_JIT_AVAILABLE ON CACHE INTERNAL "Resolved FE LLVM JIT availability" FORCE)
 
     message(STATUS "FE: LLVM JIT configuration complete")
 endif()

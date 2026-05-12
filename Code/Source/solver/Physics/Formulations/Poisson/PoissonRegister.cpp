@@ -467,9 +467,7 @@ create_poisson_with_field_name(const svmp::Physics::EquationModuleInput& input,
   svmp::Physics::formulations::poisson::PoissonOptions options{};
   options.field_name = std::move(field_name);
   options.register_darcy_flux_output = register_darcy_flux_output;
-  options.enable_jit = svmp::Physics::core::resolveOopJitEnable(input, options.enable_jit);
-  options.enable_jit_specialization =
-      svmp::Physics::core::resolveOopJitSpecializationEnable(input, options.enable_jit_specialization);
+  options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
 
   apply_thermal_properties(input, options);
   apply_scalar_bcs(input, options);
