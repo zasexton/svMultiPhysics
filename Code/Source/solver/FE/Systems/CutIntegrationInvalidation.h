@@ -98,6 +98,21 @@ struct CutConditioningNeighborhood {
     std::uint64_t stable_id{0};
 };
 
+struct CutInteriorFacetAdjacency {
+    MeshIndex facet{static_cast<MeshIndex>(-1)};
+    MeshIndex first_cell{static_cast<MeshIndex>(-1)};
+    MeshIndex second_cell{static_cast<MeshIndex>(-1)};
+};
+
+struct CutAdjacentInteriorFacet {
+    MeshIndex facet{static_cast<MeshIndex>(-1)};
+    MeshIndex first_cell{static_cast<MeshIndex>(-1)};
+    MeshIndex second_cell{static_cast<MeshIndex>(-1)};
+    bool first_cell_cut{false};
+    bool second_cell_cut{false};
+    std::uint64_t stable_id{0};
+};
+
 [[nodiscard]] CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
     const CutIntegrationRevisionSnapshot& cached,
     const CutIntegrationRevisionSnapshot& current) noexcept;
@@ -112,6 +127,10 @@ struct CutConditioningNeighborhood {
     const std::vector<Real>& volume_fractions,
     const std::vector<std::pair<MeshIndex, MeshIndex>>& adjacency,
     Real small_fraction_threshold = 1.0e-8);
+
+[[nodiscard]] std::vector<CutAdjacentInteriorFacet> identifyCutAdjacentInteriorFacets(
+    const std::vector<MeshIndex>& cut_cells,
+    const std::vector<CutInteriorFacetAdjacency>& interior_facets);
 
 } // namespace systems
 } // namespace FE

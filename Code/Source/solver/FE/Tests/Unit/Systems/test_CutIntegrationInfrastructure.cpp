@@ -2277,6 +2277,29 @@ TEST(CutIntegrationInfrastructure, SmallCutNeighborhoodsAreDeterministicPhysicsN
     EXPECT_EQ(neighborhoods[1].cut_cell, 6);
 }
 
+TEST(CutIntegrationInfrastructure, IdentifiesInteriorFacetsAdjacentToCutCells)
+{
+    const auto facets = identifyCutAdjacentInteriorFacets(
+        {6, 2, 6},
+        {CutInteriorFacetAdjacency{.facet = 20, .first_cell = 1, .second_cell = 2},
+         CutInteriorFacetAdjacency{.facet = 21, .first_cell = 2, .second_cell = 6},
+         CutInteriorFacetAdjacency{.facet = 22, .first_cell = 3, .second_cell = 4},
+         CutInteriorFacetAdjacency{.facet = 23, .first_cell = 6, .second_cell = 8},
+         CutInteriorFacetAdjacency{.facet = 24, .first_cell = 6, .second_cell = -1}});
+
+    ASSERT_EQ(facets.size(), 3u);
+    EXPECT_EQ(facets[0].facet, 20);
+    EXPECT_FALSE(facets[0].first_cell_cut);
+    EXPECT_TRUE(facets[0].second_cell_cut);
+    EXPECT_EQ(facets[1].facet, 21);
+    EXPECT_TRUE(facets[1].first_cell_cut);
+    EXPECT_TRUE(facets[1].second_cell_cut);
+    EXPECT_EQ(facets[2].facet, 23);
+    EXPECT_TRUE(facets[2].first_cell_cut);
+    EXPECT_FALSE(facets[2].second_cell_cut);
+    EXPECT_NE(facets[2].stable_id, 0u);
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 TEST(CutIntegrationInfrastructure, ImportsClosedCutTopologyIntoAllAssemblyPathBindings)
 {

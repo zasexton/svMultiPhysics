@@ -205,7 +205,7 @@ Concrete changes:
 Checklist:
 
 - [x] Identify cut cells from a generated interface domain.
-- [ ] Identify interior facets adjacent to cut cells.
+- [x] Identify interior facets adjacent to cut cells.
 - [ ] Expose a marker or facet-set handle for cut-adjacent facets.
 - [ ] Support integration over that facet set.
 - [ ] Reuse existing jump/average operators where valid.

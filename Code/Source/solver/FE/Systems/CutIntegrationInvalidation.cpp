@@ -14,6 +14,25 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
+namespace {
+
+[[nodiscard]] std::uint64_t cutFacetStableId(MeshIndex facet,
+                                             MeshIndex first_cell,
+                                             MeshIndex second_cell) noexcept
+{
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](std::uint64_t value) noexcept {
+        h ^= value;
+        h *= 1099511628211ull;
+    };
+    mix(static_cast<std::uint64_t>(facet));
+    mix(static_cast<std::uint64_t>(first_cell));
+    mix(static_cast<std::uint64_t>(second_cell));
+    return h;
+}
+
+} // namespace
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 CutIntegrationRevisionSnapshot CutIntegrationRevisionSnapshot::capture(
     const svmp::search::CutClassificationMap& map,
@@ -186,6 +205,59 @@ std::vector<CutConditioningNeighborhood> buildCutConditioningNeighborhoods(
         neighborhoods.push_back(std::move(n));
     }
     return neighborhoods;
+}
+
+std::vector<CutAdjacentInteriorFacet> identifyCutAdjacentInteriorFacets(
+    const std::vector<MeshIndex>& cut_cells,
+    const std::vector<CutInteriorFacetAdjacency>& interior_facets) {
+    std::vector<MeshIndex> sorted_cut_cells = cut_cells;
+    std::sort(sorted_cut_cells.begin(), sorted_cut_cells.end());
+    sorted_cut_cells.erase(std::unique(sorted_cut_cells.begin(), sorted_cut_cells.end()),
+                           sorted_cut_cells.end());
+
+    const auto is_cut_cell = [&sorted_cut_cells](MeshIndex cell) {
+        return std::binary_search(sorted_cut_cells.begin(), sorted_cut_cells.end(), cell);
+    };
+
+    std::vector<CutAdjacentInteriorFacet> facets;
+    for (const auto& adjacency : interior_facets) {
+        if (adjacency.facet < 0 || adjacency.first_cell < 0 || adjacency.second_cell < 0) {
+            continue;
+        }
+        const bool first_cut = is_cut_cell(adjacency.first_cell);
+        const bool second_cut = is_cut_cell(adjacency.second_cell);
+        if (!first_cut && !second_cut) {
+            continue;
+        }
+
+        CutAdjacentInteriorFacet facet;
+        facet.facet = adjacency.facet;
+        facet.first_cell = adjacency.first_cell;
+        facet.second_cell = adjacency.second_cell;
+        facet.first_cell_cut = first_cut;
+        facet.second_cell_cut = second_cut;
+        facet.stable_id = cutFacetStableId(facet.facet, facet.first_cell, facet.second_cell);
+        facets.push_back(facet);
+    }
+
+    std::sort(facets.begin(), facets.end(), [](const auto& a, const auto& b) {
+        if (a.facet != b.facet) {
+            return a.facet < b.facet;
+        }
+        if (a.first_cell != b.first_cell) {
+            return a.first_cell < b.first_cell;
+        }
+        return a.second_cell < b.second_cell;
+    });
+    facets.erase(std::unique(facets.begin(),
+                             facets.end(),
+                             [](const auto& a, const auto& b) {
+                                 return a.facet == b.facet &&
+                                        a.first_cell == b.first_cell &&
+                                        a.second_cell == b.second_cell;
+                             }),
+                 facets.end());
+    return facets;
 }
 
 } // namespace systems
