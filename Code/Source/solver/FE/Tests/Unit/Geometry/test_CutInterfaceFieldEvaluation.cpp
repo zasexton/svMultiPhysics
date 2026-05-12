@@ -111,3 +111,42 @@ TEST(CutInterfaceFieldEvaluation, EvaluatesScalarH1GradientOnCutInterfacePoints)
     EXPECT_NEAR(gradients.front().components.front()[1], 3.0, 1.0e-14);
     EXPECT_NEAR(gradients.front().components.front()[2], 0.0, 1.0e-14);
 }
+
+TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1GradientOnCutInterfacePoints)
+{
+    LevelSetInterfaceDomain domain(field_eval_request());
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 4,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
+    ASSERT_EQ(domain.fragments().size(), 1u);
+
+    H1NodalFieldData field;
+    field.element_type = ElementType::Quad4;
+    field.components = 2;
+    field.node_coordinates = {{{0.0, 0.0, 0.0}},
+                              {{1.0, 0.0, 0.0}},
+                              {{1.0, 1.0, 0.0}},
+                              {{0.0, 1.0, 0.0}}};
+    field.nodal_values = {
+        0.0, 10.0,
+        1.0, 13.0,
+        3.0, 12.0,
+        2.0, 9.0};
+
+    const auto gradients =
+        evaluateH1FieldGradientsOnFragment(field, domain.fragments().front());
+    ASSERT_EQ(gradients.size(), 1u);
+    ASSERT_EQ(gradients.front().components.size(), 2u);
+    EXPECT_NEAR(gradients.front().components[0][0], 1.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components[0][1], 2.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components[0][2], 0.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components[1][0], 3.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components[1][1], -1.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components[1][2], 0.0, 1.0e-14);
+}

@@ -181,7 +181,7 @@ Checklist:
 - [x] Evaluate scalar H1 fields on cut-interface quadrature points.
 - [x] Evaluate vector H1 fields on cut-interface quadrature points.
 - [x] Evaluate scalar gradients on cut-interface quadrature points.
-- [ ] Evaluate vector gradients on cut-interface quadrature points.
+- [x] Evaluate vector gradients on cut-interface quadrature points.
 - [ ] Add integration tests for constants.
 - [ ] Add integration tests for linear fields.
 - [ ] Add integration tests for field gradients.
