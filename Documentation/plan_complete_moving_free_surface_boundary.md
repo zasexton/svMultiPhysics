@@ -304,7 +304,7 @@ Checklist:
 
 - [x] Add free-surface contact-line option struct.
 - [x] Add parser/input options for contact-line model.
-- [ ] Implement pinned contact line for fitted ALE.
+- [x] Implement pinned contact line for fitted ALE.
 - [ ] Implement prescribed contact angle for fitted ALE.
 - [ ] Define unfitted wall-contact detection requirements.
 - [ ] Implement prescribed contact angle for unfitted level-set surfaces.

@@ -992,6 +992,82 @@ TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
               ns::FreeSurfaceWallSlipModel::Navier);
 }
 
+TEST(MovingDomainPhysics, FittedPinnedContactLineConstrainsMeshDisplacement)
+{
+    constexpr int marker = 40;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto displacement = system.addField(FE::systems::FieldSpec{
+        .name = "mesh_displacement",
+        .space = u_space,
+        .components = 3,
+    });
+
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.mesh_displacement_field_name = "mesh_displacement";
+    opts.mesh_velocity_field_name = "mesh_velocity";
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::Pinned,
+                .contact_line_marker = marker,
+            },
+        },
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto offset = system.fieldDofOffset(displacement);
+    const auto n_displacement_dofs = system.fieldDofHandler(displacement).getNumDofs();
+    std::size_t constrained_displacement_dofs = 0;
+    for (FE::GlobalIndex local_dof = 0; local_dof < n_displacement_dofs; ++local_dof) {
+        const auto global_dof = offset + local_dof;
+        if (!system.constraints().isConstrained(global_dof)) {
+            continue;
+        }
+        ++constrained_displacement_dofs;
+        EXPECT_NEAR(system.constraints().getInhomogeneity(global_dof), 0.0, 1.0e-15);
+    }
+    EXPECT_GT(constrained_displacement_dofs, 0u);
+}
+
+TEST(MovingDomainPhysics, FittedPinnedContactLineRequiresALE)
+{
+    constexpr int marker = 41;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = false;
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::Pinned,
+                .contact_line_marker = marker,
+            },
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
 {
     constexpr int marker = 32;

@@ -67,6 +67,14 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
     return std::string(prefix) + kind + std::to_string(freeSurfaceMarker(bc));
 }
 
+[[nodiscard]] int contactLineConstraintMarker(
+    const IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine& contact_line)
+{
+    return contact_line.contact_line_marker >= 0
+               ? contact_line.contact_line_marker
+               : contact_line.wall_boundary_marker;
+}
+
 void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled)
 {
     if (isUnfittedLevelSet(bc)) {
@@ -99,6 +107,23 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
         FE::forms::bc::isZeroConstantScalarValue(bc.kinematic_penalty)) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: penalty free-surface kinematics require a nonzero kinematic_penalty");
+    }
+
+    for (const auto& contact_line : bc.contact_lines) {
+        if (contact_line.model == FreeSurfaceContactLineModel::Pinned) {
+            if (isUnfittedLevelSet(bc)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: pinned contact lines are currently supported only for fitted ALE free surfaces");
+            }
+            if (!ale_enabled) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: pinned fitted contact lines require ALE to be enabled");
+            }
+            if (contactLineConstraintMarker(contact_line) < 0) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: pinned contact line requires contact_line_marker or wall_boundary_marker >= 0");
+            }
+        }
     }
 }
 
@@ -140,6 +165,42 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
     }
 
     return FE::forms::FormExpr::discreteField(phi_id, *rec.space, bc.level_set_field_name);
+}
+
+void applyFreeSurfaceContactLineConstraints(
+    FE::systems::FESystem& system,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::ALEBinding& ale_binding,
+    int dim)
+{
+    for (const auto& contact_line : bc.contact_lines) {
+        switch (contact_line.model) {
+        case FreeSurfaceContactLineModel::None:
+        case FreeSurfaceContactLineModel::PrescribedContactAngle:
+            continue;
+        case FreeSurfaceContactLineModel::Pinned:
+            break;
+        }
+
+        if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: pinned fitted contact lines require a coupled mesh displacement unknown");
+        }
+
+        const int marker = contactLineConstraintMarker(contact_line);
+        std::vector<FE::forms::bc::StrongDirichlet> constraints;
+        constraints.reserve(static_cast<std::size_t>(dim));
+        for (int component = 0; component < dim; ++component) {
+            constraints.push_back(FE::forms::bc::StrongDirichlet{
+                .field = ale_binding.mesh_displacement_field,
+                .boundary_marker = marker,
+                .component = component,
+                .value = FE::forms::FormExpr::constant(0.0),
+                .symbol = "mesh_displacement",
+            });
+        }
+        FE::systems::installStrongDirichlet(system, constraints);
+    }
 }
 
 void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
@@ -463,6 +524,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     for (const auto& bc : options_.free_surface) {
         validateFreeSurfaceBoundary(bc, options_.enable_ale);
+        applyFreeSurfaceContactLineConstraints(system, bc, ale_binding, dim);
         if (bc.implementation == FreeSurfaceImplementation::FittedALE) {
             bc_manager.add(std::make_unique<FE::forms::bc::ReservedBC>(bc.boundary_marker));
         }
