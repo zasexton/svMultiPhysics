@@ -183,17 +183,17 @@ Target files:
 
 Checklist:
 
-- [ ] Move `LevelSetVolumeOptions` into `FE::level_set`.
-- [ ] Move `LevelSetVolumeResult` into `FE::level_set`.
-- [ ] Move `LevelSetGlobalShiftCorrectionOptions` into `FE::level_set`.
-- [ ] Move `LevelSetGlobalShiftCorrectionResult` into `FE::level_set`.
-- [ ] Move `computeLevelSetCutCellVolume` overloads into FE.
-- [ ] Move `applyGlobalLevelSetShiftCorrection` overloads into FE.
-- [ ] Keep APIs accepting `FE::assembly::IMeshAccess` and
+- [x] Move `LevelSetVolumeOptions` into `FE::level_set`.
+- [x] Move `LevelSetVolumeResult` into `FE::level_set`.
+- [x] Move `LevelSetGlobalShiftCorrectionOptions` into `FE::level_set`.
+- [x] Move `LevelSetGlobalShiftCorrectionResult` into `FE::level_set`.
+- [x] Move `computeLevelSetCutCellVolume` overloads into FE.
+- [x] Move `applyGlobalLevelSetShiftCorrection` overloads into FE.
+- [x] Keep APIs accepting `FE::assembly::IMeshAccess` and
   `FE::dofs::DofHandler`.
-- [ ] Keep convenience APIs accepting `FE::systems::FESystem` and
+- [x] Keep convenience APIs accepting `FE::systems::FESystem` and
   `FE::FieldId`.
-- [ ] Move cut-cell volume tests from Physics to FE where practical.
+- [x] Move cut-cell volume tests from Physics to FE where practical.
 
 Done when:
 

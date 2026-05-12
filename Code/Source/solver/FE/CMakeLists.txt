@@ -2115,6 +2115,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
+            Tests/Unit/LevelSet/test_LevelSetVolume.cpp
             Tests/Unit/LevelSet/test_main.cpp
         )
         add_executable(test_fe_levelset ${FE_LEVELSET_TEST_SOURCES})
