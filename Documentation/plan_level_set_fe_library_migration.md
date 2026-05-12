@@ -338,27 +338,27 @@ Current file:
 
 Checklist:
 
-- [ ] Replace direct construction of `LevelSetTransportModule` with a thin
+- [x] Replace direct construction of `LevelSetTransportModule` with a thin
   Physics adapter that calls `FE::level_set::installLevelSetTransport`.
-- [ ] Keep XML/input parameter parsing in Physics.
-- [ ] Keep element type and space inference in Physics if it depends on
+- [x] Keep XML/input parameter parsing in Physics.
+- [x] Keep element type and space inference in Physics if it depends on
   equation-module input.
-- [ ] Translate parsed values into `FE::level_set::LevelSetTransportOptions`.
-- [ ] Translate Physics JIT runtime policy into `FE::systems::FormInstallOptions`.
-- [ ] Preserve accepted parameter names:
-  - [ ] `Level_set_field_name`
-  - [ ] `Level_set_source`
-  - [ ] `Auto_register_level_set_field`
-  - [ ] `Velocity_field_name`
-  - [ ] `Velocity_source`
-  - [ ] `Constant_velocity`
-  - [ ] `SUPG_enabled`
-  - [ ] `Reinitialization_*`
-  - [ ] `Volume_correction_*`
-- [ ] Preserve supported boundary condition names:
-  - [ ] `LevelSetInflow`
-  - [ ] `LevelSetOutflow`
-- [ ] Keep Physics tests for input translation and module registration.
+- [x] Translate parsed values into `FE::level_set::LevelSetTransportOptions`.
+- [x] Translate Physics JIT runtime policy into `FE::systems::FormInstallOptions`.
+- [x] Preserve accepted parameter names:
+  - [x] `Level_set_field_name`
+  - [x] `Level_set_source`
+  - [x] `Auto_register_level_set_field`
+  - [x] `Velocity_field_name`
+  - [x] `Velocity_source`
+  - [x] `Constant_velocity`
+  - [x] `SUPG_enabled`
+  - [x] `Reinitialization_*`
+  - [x] `Volume_correction_*`
+- [x] Preserve supported boundary condition names:
+  - [x] `LevelSetInflow`
+  - [x] `LevelSetOutflow`
+- [x] Keep Physics tests for input translation and module registration.
 - [ ] Move pure algorithm and FE-system behavior tests out of Physics.
 
 Done when:

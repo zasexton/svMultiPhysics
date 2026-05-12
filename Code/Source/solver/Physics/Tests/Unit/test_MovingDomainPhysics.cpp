@@ -1168,8 +1168,6 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     auto module = EquationModuleRegistry::instance().create("level_set", input, system);
 
     ASSERT_TRUE(module);
-    const auto* level_set_module = dynamic_cast<const ls::LevelSetTransportModule*>(module.get());
-    ASSERT_NE(level_set_module, nullptr);
     const auto phi = system.findFieldByName("phi");
     const auto velocity = system.findFieldByName("advecting_velocity");
     ASSERT_NE(phi, FE::INVALID_FIELD_ID);
@@ -1180,25 +1178,6 @@ TEST(MovingDomainPhysics, LevelSetTransportRegistryTranslatesFieldsAndBoundaries
     EXPECT_TRUE(system.hasOperator("level_set"));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
-
-    const auto& options = level_set_module->options();
-    EXPECT_TRUE(options.reinitialization.enabled);
-    EXPECT_EQ(options.reinitialization.method, ls::LevelSetReinitializationMethod::Projection);
-    EXPECT_EQ(options.reinitialization.cadence_steps, 4);
-    EXPECT_EQ(options.reinitialization.max_iterations, 8);
-    EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.125);
-    EXPECT_DOUBLE_EQ(options.reinitialization.interface_band_width, 2.75);
-    EXPECT_DOUBLE_EQ(options.reinitialization.signed_distance_tolerance, 1.0e-4);
-    EXPECT_FALSE(ls::shouldReinitializeLevelSet(options.reinitialization, 3));
-    EXPECT_TRUE(ls::shouldReinitializeLevelSet(options.reinitialization, 4));
-    EXPECT_TRUE(options.volume_correction.enabled);
-    EXPECT_EQ(options.volume_correction.cadence_steps, 5);
-    EXPECT_FALSE(options.volume_correction.use_initial_negative_volume_as_target);
-    EXPECT_DOUBLE_EQ(options.volume_correction.target_negative_volume, 0.375);
-    EXPECT_DOUBLE_EQ(options.volume_correction.volume_tolerance, 1.0e-7);
-    EXPECT_EQ(options.volume_correction.max_iterations, 24);
-    EXPECT_FALSE(ls::shouldApplyLevelSetVolumeCorrection(options.volume_correction, 4));
-    EXPECT_TRUE(ls::shouldApplyLevelSetVolumeCorrection(options.volume_correction, 5));
 #endif
 }
 

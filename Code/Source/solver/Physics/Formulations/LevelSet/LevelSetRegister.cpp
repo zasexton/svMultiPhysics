@@ -1,10 +1,10 @@
-#include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
-
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Core/JITRuntimePolicy.h"
+#include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
+#include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
 
@@ -24,7 +24,33 @@
 namespace {
 
 namespace ls = svmp::FE::level_set;
-namespace ls_module = svmp::Physics::formulations::level_set;
+
+class LevelSetTransportInputAdapter final : public svmp::Physics::PhysicsModule {
+public:
+  LevelSetTransportInputAdapter(
+      std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space,
+      ls::LevelSetTransportOptions options,
+      svmp::FE::systems::FormInstallOptions install_options)
+      : level_set_space_(std::move(level_set_space)),
+        options_(std::move(options)),
+        install_options_(std::move(install_options))
+  {
+  }
+
+  void registerOn(svmp::FE::systems::FESystem& system) const override
+  {
+    (void)ls::installLevelSetTransport(
+        system,
+        level_set_space_,
+        options_,
+        install_options_);
+  }
+
+private:
+  std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space_{};
+  ls::LevelSetTransportOptions options_{};
+  svmp::FE::systems::FormInstallOptions install_options_{};
+};
 
 std::string trim_copy(std::string s)
 {
@@ -549,7 +575,7 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
 
   options.velocity.space = velocity_space;
 
-  auto module = std::make_unique<ls_module::LevelSetTransportModule>(
+  auto module = std::make_unique<LevelSetTransportInputAdapter>(
       std::move(level_set_space),
       std::move(options),
       install_options);
