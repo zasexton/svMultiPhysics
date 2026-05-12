@@ -26,13 +26,22 @@ struct H1NodalFieldData {
     ElementType element_type{ElementType::Unknown};
     int components{1};
     std::vector<Real> nodal_values{};
+    std::vector<std::array<Real, 3>> node_coordinates{};
 };
 
 struct CutInterfaceFieldValue {
     std::vector<Real> components{};
 };
 
+struct CutInterfaceFieldGradient {
+    std::vector<std::array<Real, 3>> components{};
+};
+
 [[nodiscard]] std::vector<Real> linearH1ShapeValues(
+    ElementType element_type,
+    const std::array<Real, 3>& parent_coordinate);
+
+[[nodiscard]] std::vector<std::array<Real, 3>> linearH1ShapeGradients(
     ElementType element_type,
     const std::array<Real, 3>& parent_coordinate);
 
@@ -41,6 +50,14 @@ struct CutInterfaceFieldValue {
     const std::array<Real, 3>& parent_coordinate);
 
 [[nodiscard]] std::vector<CutInterfaceFieldValue> evaluateH1FieldValuesOnFragment(
+    const H1NodalFieldData& field,
+    const CutInterfaceFragment& fragment);
+
+[[nodiscard]] CutInterfaceFieldGradient evaluateH1FieldGradientAtPoint(
+    const H1NodalFieldData& field,
+    const std::array<Real, 3>& parent_coordinate);
+
+[[nodiscard]] std::vector<CutInterfaceFieldGradient> evaluateH1FieldGradientsOnFragment(
     const H1NodalFieldData& field,
     const CutInterfaceFragment& fragment);
 

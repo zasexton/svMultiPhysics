@@ -78,3 +78,36 @@ TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1FieldOnCutInterfacePoints)
     EXPECT_NEAR(values.front().components[0], 0.5, 1.0e-14);
     EXPECT_NEAR(values.front().components[1], 10.5, 1.0e-14);
 }
+
+TEST(CutInterfaceFieldEvaluation, EvaluatesScalarH1GradientOnCutInterfacePoints)
+{
+    LevelSetInterfaceDomain domain(field_eval_request());
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 3,
+                             .element_type = ElementType::Triangle3,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.25, 0.75, -0.25}});
+    ASSERT_EQ(domain.fragments().size(), 1u);
+
+    H1NodalFieldData field;
+    field.element_type = ElementType::Triangle3;
+    field.components = 1;
+    field.node_coordinates = {{{0.0, 0.0, 0.0}},
+                              {{1.0, 0.0, 0.0}},
+                              {{0.0, 1.0, 0.0}}};
+    field.nodal_values = {
+        2.0,
+        3.0,
+        5.0};
+
+    const auto gradients =
+        evaluateH1FieldGradientsOnFragment(field, domain.fragments().front());
+    ASSERT_EQ(gradients.size(), 1u);
+    ASSERT_EQ(gradients.front().components.size(), 1u);
+    EXPECT_NEAR(gradients.front().components.front()[0], 1.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components.front()[1], 3.0, 1.0e-14);
+    EXPECT_NEAR(gradients.front().components.front()[2], 0.0, 1.0e-14);
+}
