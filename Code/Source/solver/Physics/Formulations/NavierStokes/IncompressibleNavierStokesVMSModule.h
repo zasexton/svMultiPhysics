@@ -77,6 +77,17 @@ enum class FreeSurfaceTangentialMeshPolicy : std::uint8_t {
     Prescribed
 };
 
+enum class FreeSurfaceContactLineModel : std::uint8_t {
+    None,
+    Pinned,
+    PrescribedContactAngle
+};
+
+enum class FreeSurfaceWallSlipModel : std::uint8_t {
+    None,
+    Navier
+};
+
 struct IncompressibleNavierStokesVMSOptions {
     using ScalarValue = FE::forms::bc::ScalarValue;
 
@@ -120,6 +131,28 @@ struct IncompressibleNavierStokesVMSOptions {
     };
 
     /**
+     * @brief Physics-side model for the wall intersection of one free surface
+     *
+     * The free-surface boundary owns these declarations.  FE geometry remains
+     * generic: later fitted and unfitted implementations can use the wall marker,
+     * optional contact-line marker, and scalar model parameters to install the
+     * appropriate Physics residuals or constraints.
+     */
+    struct FreeSurfaceContactLine {
+        FreeSurfaceContactLineModel model{FreeSurfaceContactLineModel::None};
+        int wall_boundary_marker{-1};
+        int contact_line_marker{-1};
+
+        // Internal contact-angle value is in radians, measured through the
+        // fluid phase.  The parser may translate user-facing units later.
+        ScalarValue contact_angle_radians{1.57079632679489661923};
+        ScalarValue mobility{0.0};
+
+        FreeSurfaceWallSlipModel wall_slip_model{FreeSurfaceWallSlipModel::None};
+        ScalarValue slip_length{0.0};
+    };
+
+    /**
      * @brief Physics-side free-surface relation on a fitted or embedded interface
      *
      * This option only declares Navier-Stokes free-surface equations.  The FE
@@ -157,6 +190,8 @@ struct IncompressibleNavierStokesVMSOptions {
         FreeSurfaceKinematicEnforcement kinematic_enforcement{
             FreeSurfaceKinematicEnforcement::None};
         ScalarValue kinematic_penalty{0.0};
+
+        std::vector<FreeSurfaceContactLine> contact_lines{};
     };
 
     /**

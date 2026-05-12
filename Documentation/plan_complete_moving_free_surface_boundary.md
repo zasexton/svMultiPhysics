@@ -302,7 +302,7 @@ Concrete changes:
 
 Checklist:
 
-- [ ] Add free-surface contact-line option struct.
+- [x] Add free-surface contact-line option struct.
 - [ ] Add parser/input options for contact-line model.
 - [ ] Implement pinned contact line for fitted ALE.
 - [ ] Implement prescribed contact angle for fitted ALE.

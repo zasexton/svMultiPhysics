@@ -955,6 +955,43 @@ TEST(MovingDomainPhysics, FittedFreeSurfaceKinematicPolicyOptionsAreExplicit)
     EXPECT_DOUBLE_EQ(std::get<FE::Real>(bc.prescribed_tangential_mesh_velocity[2]), 0.0);
 }
 
+TEST(MovingDomainPhysics, FreeSurfaceContactLineOptionsAreExplicit)
+{
+    using ContactLine = ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine;
+    using FreeSurfaceBoundary = ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
+
+    const ContactLine contact_line{};
+    EXPECT_EQ(contact_line.model, ns::FreeSurfaceContactLineModel::None);
+    EXPECT_EQ(contact_line.wall_boundary_marker, -1);
+    EXPECT_EQ(contact_line.contact_line_marker, -1);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.contact_angle_radians),
+                     1.57079632679489661923);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.mobility), 0.0);
+    EXPECT_EQ(contact_line.wall_slip_model, ns::FreeSurfaceWallSlipModel::None);
+    EXPECT_DOUBLE_EQ(std::get<FE::Real>(contact_line.slip_length), 0.0);
+
+    FreeSurfaceBoundary free_surface{};
+    EXPECT_TRUE(free_surface.contact_lines.empty());
+
+    free_surface.contact_lines.push_back(ContactLine{
+        .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
+        .wall_boundary_marker = 7,
+        .contact_line_marker = 8,
+        .contact_angle_radians = 0.78539816339744830962,
+        .mobility = 0.25,
+        .wall_slip_model = ns::FreeSurfaceWallSlipModel::Navier,
+        .slip_length = 0.01,
+    });
+
+    ASSERT_EQ(free_surface.contact_lines.size(), 1u);
+    EXPECT_EQ(free_surface.contact_lines.front().model,
+              ns::FreeSurfaceContactLineModel::PrescribedContactAngle);
+    EXPECT_EQ(free_surface.contact_lines.front().wall_boundary_marker, 7);
+    EXPECT_EQ(free_surface.contact_lines.front().contact_line_marker, 8);
+    EXPECT_EQ(free_surface.contact_lines.front().wall_slip_model,
+              ns::FreeSurfaceWallSlipModel::Navier);
+}
+
 TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
 {
     constexpr int marker = 32;
