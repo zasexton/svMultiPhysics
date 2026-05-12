@@ -18,6 +18,8 @@
 
 #include <array>
 #include <string>
+#include <functional>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -47,9 +49,37 @@ struct LevelSetCellCutResult {
     }
 };
 
+using LevelSetCellCutFunction =
+    std::function<LevelSetCellCutResult(const CutInterfaceDomainRequest&,
+                                        const LevelSetCellCutInput&)>;
+
+struct LevelSetCellCutExtension {
+    ElementType element_type{ElementType::Unknown};
+    int dimension{0};
+    std::string name{};
+    LevelSetCellCutFunction cutter{};
+};
+
+class LevelSetCellCutExtensionRegistry {
+public:
+    void registerCutter(LevelSetCellCutExtension extension);
+
+    [[nodiscard]] bool hasCutter(ElementType element_type) const noexcept;
+
+    [[nodiscard]] std::vector<ElementType> registeredElementTypes() const;
+
+    [[nodiscard]] LevelSetCellCutResult cut(const CutInterfaceDomainRequest& request,
+                                            const LevelSetCellCutInput& input) const;
+
+private:
+    std::unordered_map<std::uint8_t, LevelSetCellCutExtension> extensions_{};
+};
+
 [[nodiscard]] bool supportsLinearLevelSetCellCut2D(ElementType element_type) noexcept;
 
 [[nodiscard]] bool supportsLinearLevelSetCellCut3D(ElementType element_type) noexcept;
+
+[[nodiscard]] bool isLevelSetCellCutExtensionElement(ElementType element_type) noexcept;
 
 [[nodiscard]] LevelSetCellCutResult cutLinearLevelSetCell2D(
     const CutInterfaceDomainRequest& request,

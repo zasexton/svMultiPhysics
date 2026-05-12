@@ -197,3 +197,73 @@ TEST(LevelSetInterfaceBuilder, RejectsFullZeroCellAsDegenerate)
     EXPECT_EQ(result.degeneracy, CutInterfaceDegeneracy::FullZeroCell);
     EXPECT_FALSE(result.diagnostic.empty());
 }
+
+TEST(LevelSetInterfaceBuilder, ProvidesExtensionPointsForHexWedgeAndPyramid)
+{
+    EXPECT_TRUE(isLevelSetCellCutExtensionElement(ElementType::Hex8));
+    EXPECT_TRUE(isLevelSetCellCutExtensionElement(ElementType::Hex20));
+    EXPECT_TRUE(isLevelSetCellCutExtensionElement(ElementType::Wedge6));
+    EXPECT_TRUE(isLevelSetCellCutExtensionElement(ElementType::Pyramid5));
+    EXPECT_FALSE(isLevelSetCellCutExtensionElement(ElementType::Tetra4));
+
+    LevelSetCellCutExtensionRegistry registry;
+    const auto make_extension = [](ElementType type, const char* name) {
+        LevelSetCellCutExtension extension;
+        extension.element_type = type;
+        extension.dimension = 3;
+        extension.name = name;
+        extension.cutter = [](const CutInterfaceDomainRequest& request,
+                              const LevelSetCellCutInput& input) {
+            LevelSetCellCutResult result;
+            CutInterfaceFragment fragment;
+            fragment.interface_marker = request.interface_marker;
+            fragment.parent_cell = input.parent_cell;
+            fragment.kind = CutInterfaceFragmentKind::Polygon;
+            fragment.measure = 2.0;
+            fragment.quadrature_points = {
+                CutInterfaceQuadraturePoint{.point = {{0.0, 0.0, 0.0}},
+                                            .parent_coordinate = {{0.0, 0.0, 0.0}},
+                                            .normal = {{1.0, 0.0, 0.0}},
+                                            .weight = 2.0}};
+            result.fragments.push_back(fragment);
+            return result;
+        };
+        return extension;
+    };
+
+    registry.registerCutter(make_extension(ElementType::Hex8, "hex-cutter"));
+    registry.registerCutter(make_extension(ElementType::Wedge6, "wedge-cutter"));
+    registry.registerCutter(make_extension(ElementType::Pyramid5, "pyramid-cutter"));
+
+    EXPECT_TRUE(registry.hasCutter(ElementType::Hex8));
+    EXPECT_TRUE(registry.hasCutter(ElementType::Wedge6));
+    EXPECT_TRUE(registry.hasCutter(ElementType::Pyramid5));
+    EXPECT_FALSE(registry.hasCutter(ElementType::Tetra4));
+
+    const auto types = registry.registeredElementTypes();
+    ASSERT_EQ(types.size(), 3u);
+    EXPECT_EQ(types[0], ElementType::Hex8);
+    EXPECT_EQ(types[1], ElementType::Wedge6);
+    EXPECT_EQ(types[2], ElementType::Pyramid5);
+
+    const LevelSetCellCutInput input{
+        .parent_cell = 99,
+        .element_type = ElementType::Hex8,
+        .node_coordinates = {},
+        .level_set_values = {}};
+    const auto result = registry.cut(make_request(/*marker=*/44), input);
+    ASSERT_TRUE(result.supported);
+    ASSERT_EQ(result.fragments.size(), 1u);
+    EXPECT_EQ(result.fragments.front().interface_marker, 44);
+    EXPECT_EQ(result.fragments.front().parent_cell, 99);
+    EXPECT_DOUBLE_EQ(result.fragments.front().measure, 2.0);
+
+    const LevelSetCellCutInput missing{
+        .parent_cell = 100,
+        .element_type = ElementType::Hex27,
+        .node_coordinates = {},
+        .level_set_values = {}};
+    const auto missing_result = registry.cut(make_request(/*marker=*/45), missing);
+    EXPECT_FALSE(missing_result.supported);
+    EXPECT_FALSE(missing_result.diagnostic.empty());
+}

@@ -359,6 +359,80 @@ bool supportsLinearLevelSetCellCut3D(ElementType element_type) noexcept
     }
 }
 
+bool isLevelSetCellCutExtensionElement(ElementType element_type) noexcept
+{
+    switch (element_type) {
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void LevelSetCellCutExtensionRegistry::registerCutter(
+    LevelSetCellCutExtension extension)
+{
+    if (!isLevelSetCellCutExtensionElement(extension.element_type)) {
+        throw std::invalid_argument("level-set cell cut extension requires hex, wedge, or pyramid element type");
+    }
+    if (extension.dimension != 3) {
+        throw std::invalid_argument("level-set cell cut extension requires dimension 3");
+    }
+    if (extension.name.empty()) {
+        throw std::invalid_argument("level-set cell cut extension requires a nonempty name");
+    }
+    if (!extension.cutter) {
+        throw std::invalid_argument("level-set cell cut extension requires a cutter callback");
+    }
+    const auto key = static_cast<std::uint8_t>(extension.element_type);
+    extensions_[key] = std::move(extension);
+}
+
+bool LevelSetCellCutExtensionRegistry::hasCutter(ElementType element_type) const noexcept
+{
+    const auto key = static_cast<std::uint8_t>(element_type);
+    return extensions_.find(key) != extensions_.end();
+}
+
+std::vector<ElementType> LevelSetCellCutExtensionRegistry::registeredElementTypes() const
+{
+    std::vector<ElementType> types;
+    types.reserve(extensions_.size());
+    for (const auto& entry : extensions_) {
+        types.push_back(entry.second.element_type);
+    }
+    std::sort(types.begin(),
+              types.end(),
+              [](ElementType a, ElementType b) {
+                  return static_cast<std::uint8_t>(a) < static_cast<std::uint8_t>(b);
+              });
+    return types;
+}
+
+LevelSetCellCutResult LevelSetCellCutExtensionRegistry::cut(
+    const CutInterfaceDomainRequest& request,
+    const LevelSetCellCutInput& input) const
+{
+    const auto key = static_cast<std::uint8_t>(input.element_type);
+    const auto it = extensions_.find(key);
+    if (it == extensions_.end()) {
+        LevelSetCellCutResult result;
+        result.supported = false;
+        result.degeneracy = CutInterfaceDegeneracy::NoCut;
+        result.diagnostic = "no registered level-set cell cut extension for element type";
+        return result;
+    }
+    return it->second.cutter(request, input);
+}
+
 LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& request,
                                               const LevelSetCellCutInput& input)
 {
