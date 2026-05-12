@@ -9,7 +9,7 @@
 #include "Physics/Core/PhysicsModule.h"
 
 #include "FE/Core/Types.h"
-#include "FE/LevelSet/LevelSetOptions.h"
+#include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Systems/FormsInstaller.h"
 

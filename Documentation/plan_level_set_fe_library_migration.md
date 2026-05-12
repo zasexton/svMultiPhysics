@@ -308,19 +308,19 @@ FE::systems::CoupledResidualKernels installLevelSetTransport(
 
 Checklist:
 
-- [ ] Move level-set field validation into FE.
-- [ ] Move velocity field validation into FE.
-- [ ] Move boundary option validation into FE.
-- [ ] Move reinitialization option validation into FE.
-- [ ] Move volume correction option validation into FE.
-- [ ] Move field auto-registration helpers into FE.
-- [ ] Move residual construction into `FE::level_set::installLevelSetTransport`.
-- [ ] Move SUPG residual construction into FE.
-- [ ] Move inflow boundary residual construction into FE.
-- [ ] Keep operator tag stable as `"level_set"` unless a compatibility plan
+- [x] Move level-set field validation into FE.
+- [x] Move velocity field validation into FE.
+- [x] Move boundary option validation into FE.
+- [x] Move reinitialization option validation into FE.
+- [x] Move volume correction option validation into FE.
+- [x] Move field auto-registration helpers into FE.
+- [x] Move residual construction into `FE::level_set::installLevelSetTransport`.
+- [x] Move SUPG residual construction into FE.
+- [x] Move inflow boundary residual construction into FE.
+- [x] Keep operator tag stable as `"level_set"` unless a compatibility plan
   changes it.
-- [ ] Return FE kernel installation metadata from the FE API.
-- [ ] Update tests for residual form structure and SUPG behavior to call the FE
+- [x] Return FE kernel installation metadata from the FE API.
+- [x] Update tests for residual form structure and SUPG behavior to call the FE
   API directly.
 
 Done when:

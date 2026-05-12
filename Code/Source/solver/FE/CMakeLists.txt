@@ -2118,6 +2118,7 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp
             Tests/Unit/LevelSet/test_LevelSetReinitialization.cpp
             Tests/Unit/LevelSet/test_LevelSetRestart.cpp
+            Tests/Unit/LevelSet/test_LevelSetTransport.cpp
             Tests/Unit/LevelSet/test_LevelSetVolume.cpp
             Tests/Unit/LevelSet/test_main.cpp
         )
