@@ -47,3 +47,34 @@ TEST(CutInterfaceFieldEvaluation, EvaluatesScalarH1FieldOnCutInterfacePoints)
     ASSERT_EQ(values.front().components.size(), 1u);
     EXPECT_NEAR(values.front().components.front(), 3.375, 1.0e-14);
 }
+
+TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1FieldOnCutInterfacePoints)
+{
+    LevelSetInterfaceDomain domain(field_eval_request());
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 2,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
+    ASSERT_EQ(domain.fragments().size(), 1u);
+
+    H1NodalFieldData field;
+    field.element_type = ElementType::Quad4;
+    field.components = 2;
+    field.nodal_values = {
+        0.0, 10.0,
+        1.0, 10.0,
+        1.0, 11.0,
+        0.0, 11.0};
+
+    const auto values =
+        evaluateH1FieldValuesOnFragment(field, domain.fragments().front());
+    ASSERT_EQ(values.size(), 1u);
+    ASSERT_EQ(values.front().components.size(), 2u);
+    EXPECT_NEAR(values.front().components[0], 0.5, 1.0e-14);
+    EXPECT_NEAR(values.front().components[1], 10.5, 1.0e-14);
+}
