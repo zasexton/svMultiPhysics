@@ -14,6 +14,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Forms/CutCellForms.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
@@ -135,8 +136,33 @@ TEST(NonlinearFormKernelDGHelpersTest, HarmonicAverageJacobianMatchesCentralDiff
                                               U, /*eps=*/1e-6, /*tol=*/5e-7);
 }
 
+TEST(NonlinearFormKernelDGHelpersTest, CutAdjacentGhostPenaltyJacobianMatchesCentralDifferences)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    FormCompiler compiler;
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+
+    const auto residual = cutAdjacentFacetIntegral(
+        FormExpr::constant(Real{2.5}) *
+        cutAdjacentFacetNormalGradientJump(u) *
+        cutAdjacentFacetNormalGradientJump(v));
+
+    auto ir = compiler.compileResidual(residual);
+    auto ir_vec = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel_both(std::move(ir), ADMode::Forward, NonlinearKernelOutput::Both);
+    NonlinearFormKernel kernel_vec(std::move(ir_vec), ADMode::Forward, NonlinearKernelOutput::VectorOnly);
+
+    std::vector<Real> U = {0.12, -0.05, 0.08, 0.02, -0.07, 0.2, 0.05, -0.15};
+    expectInteriorFaceJacobianMatchesCentralFD(mesh, dof_map, space,
+                                              kernel_both, kernel_vec,
+                                              U, /*eps=*/1e-6, /*tol=*/5e-7);
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-
