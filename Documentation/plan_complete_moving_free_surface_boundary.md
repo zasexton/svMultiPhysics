@@ -177,7 +177,7 @@ Concrete changes:
 Checklist:
 
 - [x] Add cut-interface quadrature rules for linear fragments.
-- [ ] Add configurable quadrature order.
+- [x] Add configurable quadrature order.
 - [ ] Evaluate scalar H1 fields on cut-interface quadrature points.
 - [ ] Evaluate vector H1 fields on cut-interface quadrature points.
 - [ ] Evaluate scalar gradients on cut-interface quadrature points.

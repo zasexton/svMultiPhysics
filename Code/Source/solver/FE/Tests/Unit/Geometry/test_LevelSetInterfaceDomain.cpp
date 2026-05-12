@@ -263,3 +263,42 @@ TEST(LevelSetInterfaceDomain, LinearFragmentQuadratureRulesCarryCentroidWeightsA
     EXPECT_DOUBLE_EQ(rules[1].points.front().weight, 0.5);
     EXPECT_DOUBLE_EQ(rules[1].points.front().normal[2], 1.0);
 }
+
+TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("quadrature-order-source");
+    request.interface_marker = 82;
+    request.quadrature_order = 0;
+
+    LevelSetInterfaceDomain domain(request);
+    CutInterfaceFragment segment;
+    segment.parent_cell = 3;
+    segment.kind = CutInterfaceFragmentKind::Segment;
+    segment.measure = 1.0;
+    segment.topology_id = "constant-order-segment";
+    segment.quadrature_points = {
+        CutInterfaceQuadraturePoint{.point = {{0.5, 0.0, 0.0}},
+                                    .parent_coordinate = {{0.5, 0.0, 0.0}},
+                                    .normal = {{1.0, 0.0, 0.0}},
+                                    .weight = 1.0}};
+    domain.addFragment(segment);
+
+    const auto constant_rules = domain.interfaceQuadratureRules();
+    ASSERT_EQ(constant_rules.size(), 1u);
+    EXPECT_EQ(constant_rules.front().exact_polynomial_order, 0);
+    EXPECT_EQ(constant_rules.front().policy.polynomial_order, 0);
+    EXPECT_EQ(constant_rules.front().policy.name, "constant-level-set-interface");
+
+    CutInterfaceDomainRequest linear_request = request;
+    linear_request.quadrature_order = 1;
+    const auto linear_rule = domain.fragments().front().toCutQuadratureRule(linear_request);
+    EXPECT_EQ(linear_rule.exact_polynomial_order, 1);
+    EXPECT_EQ(linear_rule.policy.polynomial_order, 1);
+    EXPECT_EQ(linear_rule.policy.name, "linear-level-set-interface");
+
+    CutInterfaceDomainRequest unsupported_request = request;
+    unsupported_request.quadrature_order = 2;
+    EXPECT_THROW((void)domain.fragments().front().toCutQuadratureRule(unsupported_request),
+                 std::invalid_argument);
+}

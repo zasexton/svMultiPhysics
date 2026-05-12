@@ -106,6 +106,7 @@ struct CutInterfaceDomainRequest {
     int interface_marker{-1};
     Real isovalue{0.0};
     Real tolerance{1.0e-12};
+    int quadrature_order{1};
     geometry::CutGeometryFrame frame{geometry::CutGeometryFrame::Reference};
     std::uint64_t mesh_geometry_revision{0};
     std::uint64_t mesh_topology_revision{0};
@@ -114,7 +115,8 @@ struct CutInterfaceDomainRequest {
     bool keep_degenerate_fragments{false};
 
     [[nodiscard]] bool valid() const noexcept {
-        return interface_marker >= 0 && source.valid() && tolerance > Real{0.0};
+        return interface_marker >= 0 && source.valid() && tolerance > Real{0.0} &&
+               quadrature_order >= 0;
     }
 };
 
@@ -266,6 +268,14 @@ struct CutInterfaceFragment {
 
     [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRule(
         const CutInterfaceDomainRequest& request) const {
+        const int supported_order = kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1;
+        if (request.quadrature_order < 0) {
+            throw std::invalid_argument("cut-interface quadrature order must be nonnegative");
+        }
+        if (request.quadrature_order > supported_order) {
+            throw std::invalid_argument("cut-interface quadrature order is not supported for this fragment");
+        }
+
         geometry::CutQuadratureRule rule;
         rule.kind = geometry::CutQuadratureKind::Interface;
         rule.side = geometry::CutIntegrationSide::Interface;
@@ -273,14 +283,16 @@ struct CutInterfaceFragment {
         rule.parent_measure = Real{0.0};
         rule.volume_fraction = Real{0.0};
         rule.exact_for_constants = true;
-        rule.exact_polynomial_order = kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1;
+        rule.exact_polynomial_order = request.quadrature_order;
         rule.policy.kind = kind == CutInterfaceFragmentKind::CurvedPatch
                                ? geometry::CutQuadratureConstructionKind::CurvedTopologySubdivision
                                : geometry::CutQuadratureConstructionKind::TopologySubdivision;
-        rule.policy.polynomial_order = rule.exact_polynomial_order;
+        rule.policy.polynomial_order = request.quadrature_order;
         rule.policy.name = kind == CutInterfaceFragmentKind::CurvedPatch
                                ? "curved-level-set-interface"
-                               : "linear-level-set-interface";
+                               : (request.quadrature_order == 0
+                                      ? "constant-level-set-interface"
+                                      : "linear-level-set-interface");
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;
