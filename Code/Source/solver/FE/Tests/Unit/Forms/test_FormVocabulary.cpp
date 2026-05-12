@@ -356,6 +356,11 @@ public:
     {
     }
 
+    void perturbCurrentNodeComponent(GlobalIndex node_id, int component, Real delta)
+    {
+        current_nodes_.at(static_cast<std::size_t>(node_id)).at(static_cast<std::size_t>(component)) += delta;
+    }
+
 private:
     std::array<Real, 3> scale_{};
     int boundary_marker_{-1};
@@ -1448,6 +1453,148 @@ TEST(FormVocabularyTest, CurrentGeometrySensitivityJacobianMatchesFiniteDifferen
                             (Real(2.0) * eps);
             SCOPED_TRACE(::testing::Message() << "row=" << row << ", col=" << col);
             EXPECT_NEAR(J.getMatrixEntry(row, col), fd, 2.0e-6);
+        }
+    }
+}
+
+TEST(FormVocabularyTest, MovingBoundaryNormalTangentMatchesFiniteDifference)
+{
+    constexpr int marker = 2;
+    FrameChangedSingleTetraMeshAccess mesh({Real(1.15), Real(0.85), Real(1.25)}, marker);
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (inner(currentNormal(), v) +
+         FormExpr::constant(0.0) * inner(u, v)).ds(marker);
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler(options);
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    const std::vector<Real> zero_solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+
+    auto assemble = [&](const FrameChangedSingleTetraMeshAccess& mesh_access,
+                        assembly::DenseMatrixView* J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, zero_solution);
+        R.zero();
+        if (J != nullptr) {
+            J->zero();
+            (void)assembler.assembleBoundaryFaces(mesh_access, marker, vector_space, kernel, J, &R);
+        } else {
+            (void)assembler.assembleBoundaryFaces(mesh_access, marker, vector_space, kernel, nullptr, &R);
+        }
+    };
+
+    assembly::DenseMatrixView J(dof_map.getNumDofs());
+    assembly::DenseVectorView R(dof_map.getNumDofs());
+    assemble(mesh, &J, R);
+
+    const Real eps = 1.0e-7;
+    constexpr GlobalIndex nodes_per_component = 4;
+    for (GlobalIndex col = 0; col < dof_map.getNumDofs(); ++col) {
+        const auto node = static_cast<GlobalIndex>(col % nodes_per_component);
+        const int component = static_cast<int>(col / nodes_per_component);
+
+        auto mesh_plus = mesh;
+        mesh_plus.perturbCurrentNodeComponent(node, component, eps);
+        assembly::DenseVectorView R_plus(dof_map.getNumDofs());
+        assemble(mesh_plus, nullptr, R_plus);
+
+        auto mesh_minus = mesh;
+        mesh_minus.perturbCurrentNodeComponent(node, component, -eps);
+        assembly::DenseVectorView R_minus(dof_map.getNumDofs());
+        assemble(mesh_minus, nullptr, R_minus);
+
+        for (GlobalIndex row = 0; row < dof_map.getNumDofs(); ++row) {
+            const Real fd = (R_plus.getVectorEntry(row) - R_minus.getVectorEntry(row)) /
+                            (Real(2.0) * eps);
+            SCOPED_TRACE(::testing::Message() << "row=" << row << ", col=" << col);
+            EXPECT_NEAR(J.getMatrixEntry(row, col), fd, 3.0e-6);
+        }
+    }
+}
+
+TEST(FormVocabularyTest, MovingBoundaryMeasureTangentMatchesFiniteDifference)
+{
+    constexpr int marker = 2;
+    FrameChangedSingleTetraMeshAccess mesh({Real(1.15), Real(0.85), Real(1.25)}, marker);
+    auto base_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector_space(base_space, /*components=*/3);
+    auto dof_map =
+        createSingleTetraDenseDofMap(static_cast<LocalIndex>(vector_space.dofs_per_element()));
+
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = FormExpr::trialFunction(vector_space, "mesh_displacement");
+    const auto v = FormExpr::testFunction(vector_space, "v");
+    const auto residual =
+        (currentMeasure() * v.component(0) +
+         FormExpr::constant(0.0) * inner(u, v)).ds(marker);
+
+    SymbolicOptions options;
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = kMeshMotionField;
+
+    FormCompiler compiler(options);
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
+
+    const std::vector<Real> zero_solution(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+
+    auto assemble = [&](const FrameChangedSingleTetraMeshAccess& mesh_access,
+                        assembly::DenseMatrixView* J,
+                        assembly::DenseVectorView& R) {
+        assembly::StandardAssembler assembler;
+        configureGeometrySensitivityAssembler(
+            assembler, dof_map, vector_space, kMeshMotionField, zero_solution);
+        R.zero();
+        if (J != nullptr) {
+            J->zero();
+            (void)assembler.assembleBoundaryFaces(mesh_access, marker, vector_space, kernel, J, &R);
+        } else {
+            (void)assembler.assembleBoundaryFaces(mesh_access, marker, vector_space, kernel, nullptr, &R);
+        }
+    };
+
+    assembly::DenseMatrixView J(dof_map.getNumDofs());
+    assembly::DenseVectorView R(dof_map.getNumDofs());
+    assemble(mesh, &J, R);
+
+    const Real eps = 1.0e-7;
+    constexpr GlobalIndex nodes_per_component = 4;
+    for (GlobalIndex col = 0; col < dof_map.getNumDofs(); ++col) {
+        const auto node = static_cast<GlobalIndex>(col % nodes_per_component);
+        const int component = static_cast<int>(col / nodes_per_component);
+
+        auto mesh_plus = mesh;
+        mesh_plus.perturbCurrentNodeComponent(node, component, eps);
+        assembly::DenseVectorView R_plus(dof_map.getNumDofs());
+        assemble(mesh_plus, nullptr, R_plus);
+
+        auto mesh_minus = mesh;
+        mesh_minus.perturbCurrentNodeComponent(node, component, -eps);
+        assembly::DenseVectorView R_minus(dof_map.getNumDofs());
+        assemble(mesh_minus, nullptr, R_minus);
+
+        for (GlobalIndex row = 0; row < dof_map.getNumDofs(); ++row) {
+            const Real fd = (R_plus.getVectorEntry(row) - R_minus.getVectorEntry(row)) /
+                            (Real(2.0) * eps);
+            SCOPED_TRACE(::testing::Message() << "row=" << row << ", col=" << col);
+            EXPECT_NEAR(J.getMatrixEntry(row, col), fd, 3.0e-6);
         }
     }
 }

@@ -5599,6 +5599,24 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             return mul(grad_current, tangent);
         };
 
+        auto loadFaceTangentOrientationSign =
+            [&](const SideView& side,
+                llvm::Value* q,
+                std::uint32_t dim_u32) -> llvm::Value* {
+            const auto normal = loadXYZDim(side.current_normals_xyz, q, dim_u32);
+            llvm::Value* alignment = rc(1.0);
+            if (dim_u32 == 3u) {
+                const auto t0 = loadSurfaceJacobianColumn(side, q, matrixShape(3u, 3u), 0u);
+                const auto t1 = loadSurfaceJacobianColumn(side, q, matrixShape(3u, 3u), 1u);
+                alignment = inner(cross(t0, t1), normal).elems[0];
+            } else if (dim_u32 == 2u) {
+                const auto t0 = loadSurfaceJacobianColumn(side, q, matrixShape(2u, 2u), 0u);
+                const auto tangent_normal = makeVector(2u, builder.CreateFNeg(t0.elems[1]), t0.elems[0], rc(0.0));
+                alignment = inner(tangent_normal, normal).elems[0];
+            }
+            return builder.CreateSelect(builder.CreateFCmpOLT(alignment, rc(0.0)), rc(-1.0), rc(1.0));
+        };
+
         auto loadCurrentNormalVariation =
             [&](const SideView& side,
                 llvm::Value* dof_index,
@@ -5616,7 +5634,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const auto dt0 = loadSurfaceTangentVariation(side, dof_index, q, shape, 0u, std::string(name) + ".dt0");
                 const auto dt1 = loadSurfaceTangentVariation(side, dof_index, q, shape, 1u, std::string(name) + ".dt1");
                 const auto normal = loadXYZDim(side.current_normals_xyz, q, 3u);
-                const auto da = add(cross(dt0, t1), cross(t0, dt1));
+                const auto da = mul(makeScalar(loadFaceTangentOrientationSign(side, q, 3u)),
+                                    add(cross(dt0, t1), cross(t0, dt1)));
                 auto* normal_part = inner(normal, da).elems[0];
                 for (std::uint32_t d = 0; d < 3u; ++d) {
                     auto* numerator =
@@ -5641,8 +5660,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 auto* duy = builder.CreateFDiv(
                     builder.CreateFSub(dt0.elems[1], builder.CreateFMul(unit_ty, dmeasure)),
                     measure);
-                out.elems[0] = builder.CreateSelect(positive, builder.CreateFNeg(duy), rc(0.0));
-                out.elems[1] = builder.CreateSelect(positive, dux, rc(0.0));
+                auto* orientation = loadFaceTangentOrientationSign(side, q, 2u);
+                out.elems[0] = builder.CreateSelect(
+                    positive, builder.CreateFMul(orientation, builder.CreateFNeg(duy)), rc(0.0));
+                out.elems[1] = builder.CreateSelect(
+                    positive, builder.CreateFMul(orientation, dux), rc(0.0));
                 return out;
             }
 
@@ -5673,7 +5695,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const auto dt1 = loadSurfaceTangentVariation(
                     side, dof_index, q, vectorShape(3u), 1u, std::string(name) + ".dt1");
                 const auto normal = loadXYZDim(side.current_normals_xyz, q, 3u);
-                const auto da = add(cross(dt0, t1), cross(t0, dt1));
+                const auto da = mul(makeScalar(loadFaceTangentOrientationSign(side, q, 3u)),
+                                    add(cross(dt0, t1), cross(t0, dt1)));
                 return inner(normal, da);
             }
 

@@ -55,6 +55,26 @@ namespace {
     return {A[0][c], A[1][c], A[2][c]};
 }
 
+[[nodiscard]] Real faceTangentOrientationSign(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex q) noexcept
+{
+    const int dim = ctx.dimension();
+    const auto normal = ctx.currentNormal(q);
+    if (dim == 3) {
+        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
+        const auto t1 = column3(ctx.surfaceJacobian(q), 1);
+        const auto area_vec = cross3(t0, t1);
+        return dot3(area_vec, normal) < 0.0 ? -1.0 : 1.0;
+    }
+    if (dim == 2) {
+        const auto t0 = column3(ctx.surfaceJacobian(q), 0);
+        const std::array<Real, 3> tangent_normal{-t0[1], t0[0], 0.0};
+        return dot3(tangent_normal, normal) < 0.0 ? -1.0 : 1.0;
+    }
+    return 1.0;
+}
+
 [[nodiscard]] LocalIndex dofsPerComponentOrThrow(const assembly::AssemblyContext& ctx,
                                                  const char* label)
 {
@@ -215,7 +235,9 @@ Real currentFaceMeasureDerivative(
         const auto d_area_vec_a = cross3(dt0, t1);
         const auto d_area_vec_b = cross3(t0, dt1);
         const auto normal = ctx.currentNormal(q);
-        return dot3(normal, {d_area_vec_a[0] + d_area_vec_b[0],
+        const Real orientation = faceTangentOrientationSign(ctx, q);
+        return orientation *
+               dot3(normal, {d_area_vec_a[0] + d_area_vec_b[0],
                              d_area_vec_a[1] + d_area_vec_b[1],
                              d_area_vec_a[2] + d_area_vec_b[2]});
     }
@@ -244,10 +266,11 @@ std::array<Real, 3> currentFaceNormalDerivative(
         const auto dt1 = surfaceTangentDerivative(ctx, q, j, 1);
         const auto d_area_vec_a = cross3(dt0, t1);
         const auto d_area_vec_b = cross3(t0, dt1);
+        const Real orientation = faceTangentOrientationSign(ctx, q);
         const std::array<Real, 3> d_area_vec{
-            d_area_vec_a[0] + d_area_vec_b[0],
-            d_area_vec_a[1] + d_area_vec_b[1],
-            d_area_vec_a[2] + d_area_vec_b[2]};
+            orientation * (d_area_vec_a[0] + d_area_vec_b[0]),
+            orientation * (d_area_vec_a[1] + d_area_vec_b[1]),
+            orientation * (d_area_vec_a[2] + d_area_vec_b[2])};
         const auto normal = ctx.currentNormal(q);
         const Real normal_part = dot3(normal, d_area_vec);
         std::array<Real, 3> out{};
@@ -276,6 +299,9 @@ std::array<Real, 3> currentFaceNormalDerivative(
             0.0};
         out[0] = -dunit_t[1];
         out[1] = dunit_t[0];
+        const Real orientation = faceTangentOrientationSign(ctx, q);
+        out[0] *= orientation;
+        out[1] *= orientation;
         return out;
     }
     return {0.0, 0.0, 0.0};
