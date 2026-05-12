@@ -454,7 +454,7 @@ Checklist:
 
 - [x] Add example fitted ALE input file.
 - [x] Add example unfitted level-set input file.
-- [ ] Add mesh and initial conditions for half-filled vessel.
+- [x] Add mesh and initial conditions for half-filled vessel.
 - [ ] Add gravity/body-force setup.
 - [ ] Add hydrostatic initialization helper.
 - [ ] Add pressure gauge/nullspace configuration.
