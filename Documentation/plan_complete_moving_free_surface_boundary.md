@@ -470,18 +470,18 @@ Done when:
 
 Checklist:
 
-- [ ] Plane level set cuts triangles exactly in 2D.
-- [ ] Plane level set cuts tetrahedra exactly in 3D.
-- [ ] Circle interface length converges under mesh refinement.
-- [ ] Sphere interface area converges under mesh refinement.
-- [ ] Level-set normal matches analytic normal for plane, circle, and sphere.
+- [x] Plane level set cuts triangles exactly in 2D.
+- [x] Plane level set cuts tetrahedra exactly in 3D.
+- [x] Circle interface length converges under mesh refinement.
+- [x] Sphere interface area converges under mesh refinement.
+- [x] Level-set normal matches analytic normal for plane, circle, and sphere.
 - [ ] Curvature converges for circle and sphere.
-- [ ] `.dI(marker)` integrates constants over generated interfaces.
-- [ ] `.dI(marker)` integrates linear fields over generated interfaces.
-- [ ] Field gradients evaluate correctly at cut-interface quadrature points.
-- [ ] Moving-boundary normal tangent matches finite differences.
-- [ ] Moving-boundary measure tangent matches finite differences.
-- [ ] Parallel interface generation produces consistent global area and fragment counts.
+- [x] `.dI(marker)` integrates constants over generated interfaces.
+- [x] `.dI(marker)` integrates linear fields over generated interfaces.
+- [x] Field gradients evaluate correctly at cut-interface quadrature points.
+- [x] Moving-boundary normal tangent matches finite differences.
+- [x] Moving-boundary measure tangent matches finite differences.
+- [x] Parallel interface generation produces consistent global area and fragment counts.
 
 ### Physics Verification
 

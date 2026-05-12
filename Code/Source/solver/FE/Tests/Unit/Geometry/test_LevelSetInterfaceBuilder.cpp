@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::interfaces;
@@ -30,6 +31,158 @@ void expect_normal_near(const std::array<Real, 3>& actual,
     EXPECT_NEAR(actual[0], expected[0], tolerance);
     EXPECT_NEAR(actual[1], expected[1], tolerance);
     EXPECT_NEAR(actual[2], expected[2], tolerance);
+}
+
+Real circle_phi(const std::array<Real, 3>& p, Real radius)
+{
+    return std::sqrt(p[0] * p[0] + p[1] * p[1]) - radius;
+}
+
+Real sphere_phi(const std::array<Real, 3>& p, Real radius)
+{
+    return std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]) - radius;
+}
+
+std::array<Real, 3> normalized_position(const std::array<Real, 3>& p)
+{
+    const Real norm = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    return {{p[0] / norm, p[1] / norm, p[2] / norm}};
+}
+
+Real vector_error(const std::array<Real, 3>& a, const std::array<Real, 3>& b)
+{
+    const Real dx = a[0] - b[0];
+    const Real dy = a[1] - b[1];
+    const Real dz = a[2] - b[2];
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+struct InterfaceApproximation {
+    Real measure{0.0};
+    Real weighted_normal_error{0.0};
+    std::size_t active_fragments{0};
+};
+
+void accumulate_fragment_metrics(InterfaceApproximation& metrics,
+                                 const CutInterfaceFragment& fragment)
+{
+    if (!fragment.active()) {
+        return;
+    }
+    metrics.measure += fragment.measure;
+    ++metrics.active_fragments;
+    for (const auto& qp : fragment.quadrature_points) {
+        metrics.weighted_normal_error +=
+            qp.weight * vector_error(qp.normal, normalized_position(qp.point));
+    }
+}
+
+InterfaceApproximation approximate_circle(int cells_per_axis, Real radius)
+{
+    const auto request = make_request(/*marker=*/70);
+    const Real min_coord = -1.0;
+    const Real h = 2.0 / static_cast<Real>(cells_per_axis);
+    InterfaceApproximation metrics;
+    MeshIndex parent_cell = 0;
+
+    const auto append_triangle = [&](const std::array<Real, 3>& a,
+                                     const std::array<Real, 3>& b,
+                                     const std::array<Real, 3>& c) {
+        const LevelSetCellCutInput input{
+            .parent_cell = parent_cell++,
+            .element_type = ElementType::Triangle3,
+            .node_coordinates = {a, b, c},
+            .level_set_values = {
+                circle_phi(a, radius),
+                circle_phi(b, radius),
+                circle_phi(c, radius)}};
+        const auto result = cutLinearLevelSetCell2D(request, input);
+        for (const auto& fragment : result.fragments) {
+            accumulate_fragment_metrics(metrics, fragment);
+        }
+    };
+
+    for (int j = 0; j < cells_per_axis; ++j) {
+        for (int i = 0; i < cells_per_axis; ++i) {
+            const Real x0 = min_coord + h * static_cast<Real>(i);
+            const Real y0 = min_coord + h * static_cast<Real>(j);
+            const Real x1 = x0 + h;
+            const Real y1 = y0 + h;
+            const std::array<Real, 3> p00{{x0, y0, 0.0}};
+            const std::array<Real, 3> p10{{x1, y0, 0.0}};
+            const std::array<Real, 3> p11{{x1, y1, 0.0}};
+            const std::array<Real, 3> p01{{x0, y1, 0.0}};
+            append_triangle(p00, p10, p11);
+            append_triangle(p00, p11, p01);
+        }
+    }
+
+    if (metrics.measure > 0.0) {
+        metrics.weighted_normal_error /= metrics.measure;
+    }
+    return metrics;
+}
+
+InterfaceApproximation approximate_sphere(int cells_per_axis, Real radius)
+{
+    const auto request = make_request(/*marker=*/71);
+    const Real min_coord = -1.0;
+    const Real h = 2.0 / static_cast<Real>(cells_per_axis);
+    InterfaceApproximation metrics;
+    MeshIndex parent_cell = 0;
+
+    const auto append_tetra = [&](const std::array<Real, 3>& a,
+                                  const std::array<Real, 3>& b,
+                                  const std::array<Real, 3>& c,
+                                  const std::array<Real, 3>& d) {
+        const LevelSetCellCutInput input{
+            .parent_cell = parent_cell++,
+            .element_type = ElementType::Tetra4,
+            .node_coordinates = {a, b, c, d},
+            .level_set_values = {
+                sphere_phi(a, radius),
+                sphere_phi(b, radius),
+                sphere_phi(c, radius),
+                sphere_phi(d, radius)}};
+        const auto result = cutLinearLevelSetCell3D(request, input);
+        for (const auto& fragment : result.fragments) {
+            accumulate_fragment_metrics(metrics, fragment);
+        }
+    };
+
+    for (int k = 0; k < cells_per_axis; ++k) {
+        for (int j = 0; j < cells_per_axis; ++j) {
+            for (int i = 0; i < cells_per_axis; ++i) {
+                const Real x0 = min_coord + h * static_cast<Real>(i);
+                const Real y0 = min_coord + h * static_cast<Real>(j);
+                const Real z0 = min_coord + h * static_cast<Real>(k);
+                const Real x1 = x0 + h;
+                const Real y1 = y0 + h;
+                const Real z1 = z0 + h;
+
+                const std::array<Real, 3> v000{{x0, y0, z0}};
+                const std::array<Real, 3> v100{{x1, y0, z0}};
+                const std::array<Real, 3> v010{{x0, y1, z0}};
+                const std::array<Real, 3> v110{{x1, y1, z0}};
+                const std::array<Real, 3> v001{{x0, y0, z1}};
+                const std::array<Real, 3> v101{{x1, y0, z1}};
+                const std::array<Real, 3> v011{{x0, y1, z1}};
+                const std::array<Real, 3> v111{{x1, y1, z1}};
+
+                append_tetra(v000, v100, v110, v111);
+                append_tetra(v000, v110, v010, v111);
+                append_tetra(v000, v010, v011, v111);
+                append_tetra(v000, v011, v001, v111);
+                append_tetra(v000, v001, v101, v111);
+                append_tetra(v000, v101, v100, v111);
+            }
+        }
+    }
+
+    if (metrics.measure > 0.0) {
+        metrics.weighted_normal_error /= metrics.measure;
+    }
+    return metrics;
 }
 
 } // namespace
@@ -243,6 +396,52 @@ TEST(LevelSetInterfaceBuilder, GeneratedNormalsMatchLinearLevelSetGradients)
     expect_normal_near(tetra_result.fragments.front().quadrature_points.front().normal,
                        expected_tetra_normal,
                        1.0e-14);
+}
+
+TEST(LevelSetInterfaceBuilder, CircleInterfaceLengthConvergesUnderRefinement)
+{
+    const Real radius = 0.53;
+    const Real exact_length = 2.0 * M_PI * radius;
+    const auto coarse = approximate_circle(/*cells_per_axis=*/16, radius);
+    const auto fine = approximate_circle(/*cells_per_axis=*/32, radius);
+
+    ASSERT_GT(coarse.active_fragments, 0u);
+    ASSERT_GT(fine.active_fragments, coarse.active_fragments);
+    const Real coarse_error = std::abs(coarse.measure - exact_length);
+    const Real fine_error = std::abs(fine.measure - exact_length);
+    EXPECT_LT(fine_error, 0.65 * coarse_error);
+    EXPECT_LT(fine_error / exact_length, 0.015);
+}
+
+TEST(LevelSetInterfaceBuilder, SphereInterfaceAreaConvergesUnderRefinement)
+{
+    const Real radius = 0.53;
+    const Real exact_area = 4.0 * M_PI * radius * radius;
+    const auto coarse = approximate_sphere(/*cells_per_axis=*/8, radius);
+    const auto fine = approximate_sphere(/*cells_per_axis=*/12, radius);
+
+    ASSERT_GT(coarse.active_fragments, 0u);
+    ASSERT_GT(fine.active_fragments, coarse.active_fragments);
+    const Real coarse_error = std::abs(coarse.measure - exact_area);
+    const Real fine_error = std::abs(fine.measure - exact_area);
+    EXPECT_LT(fine_error, 0.85 * coarse_error);
+    EXPECT_LT(fine_error / exact_area, 0.05);
+}
+
+TEST(LevelSetInterfaceBuilder, CurvedInterfaceNormalsConvergeToAnalyticNormals)
+{
+    const Real radius = 0.53;
+    const auto circle_coarse = approximate_circle(/*cells_per_axis=*/16, radius);
+    const auto circle_fine = approximate_circle(/*cells_per_axis=*/32, radius);
+    const auto sphere_coarse = approximate_sphere(/*cells_per_axis=*/8, radius);
+    const auto sphere_fine = approximate_sphere(/*cells_per_axis=*/12, radius);
+
+    EXPECT_LT(circle_fine.weighted_normal_error,
+              0.70 * circle_coarse.weighted_normal_error);
+    EXPECT_LT(circle_fine.weighted_normal_error, 0.035);
+    EXPECT_LT(sphere_fine.weighted_normal_error,
+              0.90 * sphere_coarse.weighted_normal_error);
+    EXPECT_LT(sphere_fine.weighted_normal_error, 0.09);
 }
 
 TEST(LevelSetInterfaceBuilder, RejectsFullZeroCellAsDegenerate)
