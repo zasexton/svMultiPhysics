@@ -211,7 +211,7 @@ Checklist:
 - [x] Reuse existing jump/average operators where valid.
 - [x] Add tests for facet-set construction.
 - [x] Add tests for ghost-penalty residual assembly.
-- [ ] Add conditioning-oriented regression tests for small cut fragments.
+- [x] Add conditioning-oriented regression tests for small cut fragments.
 
 Done when:
 

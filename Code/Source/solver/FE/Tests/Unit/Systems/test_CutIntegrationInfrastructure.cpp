@@ -2361,6 +2361,44 @@ TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfa
     EXPECT_EQ(handle.facets[2], 23);
 }
 
+TEST(CutIntegrationInfrastructure, SmallGeneratedCutFragmentsFeedConditioningNeighborhoods)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/11,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/1);
+    request.interface_marker = 55;
+    request.tolerance = 1.0e-12;
+
+    LevelSetInterfaceDomain domain(request);
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 4,
+                             .element_type = ElementType::Triangle3,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-1.0e-7, 1.0, 1.0}});
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    const auto& fragment = domain.fragments().front();
+    EXPECT_EQ(fragment.degeneracy, CutInterfaceDegeneracy::NearlyTangent);
+
+    const auto diagnostic =
+        diagnoseCutConditioning({fragment.measure}, 1.0e-5, 1.0e-14);
+    EXPECT_TRUE(diagnostic.ok);
+    EXPECT_EQ(diagnostic.small_cut_cell_count, 1u);
+
+    const auto neighborhoods = buildCutConditioningNeighborhoods(
+        domain.cutCells(),
+        {fragment.measure},
+        {{4, 2}, {4, 6}},
+        1.0e-5);
+    ASSERT_EQ(neighborhoods.size(), 1u);
+    EXPECT_EQ(neighborhoods.front().cut_cell, 4);
+    EXPECT_EQ(neighborhoods.front().adjacent_cells.size(), 2u);
+    EXPECT_GT(neighborhoods.front().conditioning_indicator, 1.0e5);
+}
+
 TEST(CutIntegrationInfrastructure, IntegratesScalarOperatorsOverCutAdjacentFacetSet)
 {
     CutIntegrationContext context;
