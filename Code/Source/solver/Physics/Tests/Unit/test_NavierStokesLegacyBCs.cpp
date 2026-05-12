@@ -484,6 +484,56 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentGeometry)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 78;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.equation_params["Enable_ALE"] = defined("true");
+    input.equation_params["Mesh_velocity_source"] = defined("prescribed_data");
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = marker;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("FittedALE");
+    bc.params["External_pressure"] = defined("12.5");
+    bc.params["Surface_tension"] = defined("0.25");
+    bc.params["Use_current_geometry_curvature"] = defined("true");
+    bc.params["Kinematic_enforcement"] = defined("Nitsche");
+    bc.params["Normal_kinematic_policy"] = defined("MatchFluidNormalVelocity");
+    bc.params["Tangential_mesh_policy"] = defined("Prescribed");
+    bc.params["Prescribed_tangential_mesh_velocity"] = defined("0.1, 0.2, 0.3");
+    bc.params["Kinematic_nitsche_gamma"] = defined("18.0");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::BoundaryIntegral));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::MeshVelocity));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentNormal));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeasure));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::CurrentMeanCurvature));
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::FacetArea));
+    ASSERT_NO_THROW(system.setup());
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, ParabolicFluxInflow_RCROutflow_SetupSucceeds)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

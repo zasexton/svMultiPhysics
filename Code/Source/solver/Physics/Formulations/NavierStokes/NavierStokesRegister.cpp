@@ -1609,9 +1609,75 @@ parse_free_surface_kinematic_enforcement(std::string_view raw, std::string_view 
   if (token == "penalty") {
     return FreeSurfaceKinematicEnforcement::Penalty;
   }
+  if (token == "nitsche") {
+    return FreeSurfaceKinematicEnforcement::Nitsche;
+  }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of None or Penalty.");
+      " must be one of None, Penalty, or Nitsche.");
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy
+parse_free_surface_normal_kinematic_policy(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "matchfluidnormalvelocity" ||
+      token == "matchfluid" || token == "fluidnormalvelocity") {
+    return FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity;
+  }
+  if (token == "none" || token == "disabled" || token == "off") {
+    return FreeSurfaceNormalKinematicPolicy::None;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of MatchFluidNormalVelocity or None.");
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceTangentialMeshPolicy
+parse_free_surface_tangential_mesh_policy(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceTangentialMeshPolicy;
+  const auto token = normalized_token(raw);
+  if (token == "free" || token == "freetangential" || token == "unconstrained") {
+    return FreeSurfaceTangentialMeshPolicy::Free;
+  }
+  if (token.empty() || token == "smoothing" || token == "smoothingonly" ||
+      token == "meshsmoothing" || token == "smooth") {
+    return FreeSurfaceTangentialMeshPolicy::SmoothingOnly;
+  }
+  if (token == "prescribed" || token == "prescribedtangential" ||
+      token == "prescribedvelocity") {
+    return FreeSurfaceTangentialMeshPolicy::Prescribed;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of Free, SmoothingOnly, or Prescribed.");
+}
+
+std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
+                                                 std::string_view context)
+{
+  auto s = trim_copy(std::string(raw));
+  std::replace(s.begin(), s.end(), ',', ' ');
+  std::istringstream iss{s};
+  std::array<svmp::FE::Real, 3> out{0.0, 0.0, 0.0};
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    double value = 0.0;
+    if (!(iss >> value)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Failed to parse three numeric components for " +
+          std::string(context) + ".");
+    }
+    out[i] = static_cast<svmp::FE::Real>(value);
+  }
+  double extra = 0.0;
+  if (iss >> extra) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Expected exactly three numeric components for " +
+        std::string(context) + ".");
+  }
+  return out;
 }
 
 std::optional<double> first_defined_double(const svmp::Physics::ParameterMap& params,
@@ -1676,6 +1742,7 @@ void append_free_surface_bc(
 {
   using svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation;
   using svmp::Physics::formulations::navier_stokes::FreeSurfaceKinematicEnforcement;
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceTangentialMeshPolicy;
   using svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
 
   if (!is_steady) {
@@ -1726,6 +1793,41 @@ void append_free_surface_bc(
           {"Use_level_set_curvature", "UseLevelSetCurvature"})) {
     fs.use_level_set_curvature = *use_level_set_curvature;
   }
+  if (const auto use_current_geometry_curvature = first_defined_bool(
+          bc.params,
+          {"Use_current_geometry_curvature", "UseCurrentGeometryCurvature",
+           "Use_fitted_current_geometry_curvature", "UseFittedCurrentGeometryCurvature"})) {
+    fs.use_current_geometry_curvature = *use_current_geometry_curvature;
+  }
+
+  if (const auto normal_policy = first_defined_string(
+          bc.params,
+          {"Normal_kinematic_policy", "NormalKinematicPolicy",
+           "Free_surface_normal_kinematic_policy", "FreeSurfaceNormalKinematicPolicy"})) {
+    fs.normal_kinematic_policy = parse_free_surface_normal_kinematic_policy(
+        *normal_policy, "Free-surface Normal_kinematic_policy");
+  }
+  if (const auto tangential_policy = first_defined_string(
+          bc.params,
+          {"Tangential_mesh_policy", "TangentialMeshPolicy",
+           "Free_surface_tangential_mesh_policy", "FreeSurfaceTangentialMeshPolicy"})) {
+    fs.tangential_mesh_policy = parse_free_surface_tangential_mesh_policy(
+        *tangential_policy, "Free-surface Tangential_mesh_policy");
+  }
+  if (const auto tangential_velocity = first_defined_string(
+          bc.params,
+          {"Prescribed_tangential_mesh_velocity", "PrescribedTangentialMeshVelocity",
+           "Tangential_mesh_velocity", "TangentialMeshVelocity"})) {
+    const auto v = parse_real_vector3(
+        *tangential_velocity, "Free-surface Prescribed_tangential_mesh_velocity");
+    fs.prescribed_tangential_mesh_velocity = {
+        IncompressibleNavierStokesVMSOptions::ScalarValue{v[0]},
+        IncompressibleNavierStokesVMSOptions::ScalarValue{v[1]},
+        IncompressibleNavierStokesVMSOptions::ScalarValue{v[2]}};
+    if (fs.tangential_mesh_policy != FreeSurfaceTangentialMeshPolicy::Prescribed) {
+      fs.tangential_mesh_policy = FreeSurfaceTangentialMeshPolicy::Prescribed;
+    }
+  }
 
   if (const auto enforcement = first_defined_string(
           bc.params,
@@ -1741,6 +1843,25 @@ void append_free_surface_bc(
     if (fs.kinematic_enforcement == FreeSurfaceKinematicEnforcement::None) {
       fs.kinematic_enforcement = FreeSurfaceKinematicEnforcement::Penalty;
     }
+  }
+  if (const auto gamma = first_defined_double(
+          bc.params,
+          {"Kinematic_nitsche_gamma", "KinematicNitscheGamma",
+           "Free_surface_nitsche_gamma", "FreeSurfaceNitscheGamma",
+           "Nitsche_gamma", "NitscheGamma"})) {
+    options.nitsche_gamma = static_cast<svmp::FE::Real>(*gamma);
+  }
+  if (const auto symmetric = first_defined_bool(
+          bc.params,
+          {"Kinematic_nitsche_symmetric", "KinematicNitscheSymmetric",
+           "Nitsche_symmetric", "NitscheSymmetric"})) {
+    options.nitsche_symmetric = *symmetric;
+  }
+  if (const auto scale_with_p = first_defined_bool(
+          bc.params,
+          {"Kinematic_nitsche_scale_with_p", "KinematicNitscheScaleWithP",
+           "Nitsche_scale_with_p", "NitscheScaleWithP"})) {
+    options.nitsche_scale_with_p = *scale_with_p;
   }
 
   options.free_surface.push_back(std::move(fs));

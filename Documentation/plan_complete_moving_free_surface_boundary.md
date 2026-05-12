@@ -279,7 +279,7 @@ Checklist:
 - [x] Add Nitsche enforcement if needed after penalty path is verified.
 - [x] Add fitted-surface curvature from current mesh geometry.
 - [x] Add current-normal/current-measure support to fitted dynamic stress path.
-- [ ] Add input translation for fitted ALE free-surface kinematic options.
+- [x] Add input translation for fitted ALE free-surface kinematic options.
 - [ ] Add coupled fluid plus mesh-motion setup tests.
 
 Done when:
