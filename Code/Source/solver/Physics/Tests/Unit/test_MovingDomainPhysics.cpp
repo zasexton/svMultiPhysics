@@ -1125,6 +1125,52 @@ TEST(MovingDomainPhysics, FittedPrescribedContactAngleAddsMeshMotionResidual)
     EXPECT_GT(residualNorm(system, state, "mesh_motion"), 0.0);
 }
 
+TEST(MovingDomainPhysics, FittedPrescribedContactAngleResidualVanishesForMatchedFlatSurface)
+{
+    constexpr int marker = 46;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    system.addOperator("mesh_motion");
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "mesh_displacement",
+        .space = u_space,
+        .components = 3,
+    });
+
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
+    opts.mesh_displacement_field_name = "mesh_displacement";
+    opts.mesh_velocity_field_name = "mesh_velocity";
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .contact_lines = {
+            ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
+                .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
+                .contact_angle_radians = 0.0,
+                .wall_normal = {0.0, 0.0, -1.0},
+                .contact_angle_penalty = 5.0,
+            },
+        },
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(system.dofHandler().getNumDofs(), 0.0);
+    FE::systems::SystemStateView state;
+    state.u = solution;
+    EXPECT_NEAR(residualNorm(system, state, "mesh_motion"), 0.0, 1.0e-12);
+}
+
 TEST(MovingDomainPhysics, FittedPrescribedContactAngleRequiresALE)
 {
     constexpr int marker = 43;

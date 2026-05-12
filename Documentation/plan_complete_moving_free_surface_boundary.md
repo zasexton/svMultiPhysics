@@ -308,7 +308,7 @@ Checklist:
 - [x] Implement prescribed contact angle for fitted ALE.
 - [x] Define unfitted wall-contact detection requirements.
 - [x] Implement prescribed contact angle for unfitted level-set surfaces.
-- [ ] Add tests for static meniscus/contact-angle geometry where practical.
+- [x] Add tests for static meniscus/contact-angle geometry where practical.
 
 Unfitted wall-contact detection requirements:
 
