@@ -25,21 +25,25 @@ struct InterfaceGeometryVtpData {
     std::vector<std::size_t> line_connectivity{};
     std::vector<std::size_t> line_offsets{};
     std::vector<std::array<Real, 3>> line_normals{};
+    std::vector<Real> line_curvature_estimates{};
     std::vector<std::int64_t> line_interface_markers{};
     std::vector<std::int64_t> line_parent_cells{};
     std::vector<std::size_t> polygon_connectivity{};
     std::vector<std::size_t> polygon_offsets{};
     std::vector<std::array<Real, 3>> polygon_normals{};
+    std::vector<Real> polygon_curvature_estimates{};
     std::vector<std::int64_t> polygon_interface_markers{};
     std::vector<std::int64_t> polygon_parent_cells{};
 };
 
 void appendFragmentCellData(const CutInterfaceFragment& fragment,
                             std::vector<std::array<Real, 3>>& normals,
+                            std::vector<Real>& curvature_estimates,
                             std::vector<std::int64_t>& interface_markers,
                             std::vector<std::int64_t>& parent_cells)
 {
     normals.push_back(fragment.normal);
+    curvature_estimates.push_back(fragment.curvature_estimate);
     interface_markers.push_back(static_cast<std::int64_t>(fragment.interface_marker));
     parent_cells.push_back(static_cast<std::int64_t>(fragment.parent_cell));
 }
@@ -65,6 +69,7 @@ void appendFragmentCellData(const CutInterfaceFragment& fragment,
             data.line_offsets.push_back(data.line_connectivity.size());
             appendFragmentCellData(fragment,
                                    data.line_normals,
+                                   data.line_curvature_estimates,
                                    data.line_interface_markers,
                                    data.line_parent_cells);
         } else {
@@ -74,6 +79,7 @@ void appendFragmentCellData(const CutInterfaceFragment& fragment,
             data.polygon_offsets.push_back(data.polygon_connectivity.size());
             appendFragmentCellData(fragment,
                                    data.polygon_normals,
+                                   data.polygon_curvature_estimates,
                                    data.polygon_interface_markers,
                                    data.polygon_parent_cells);
         }
@@ -160,6 +166,10 @@ void writeLevelSetInterfaceGeometryVtp(const LevelSetInterfaceDomain& domain,
     writeVectorArray(out,
                      "interface_normal",
                      concatenate(data.line_normals, data.polygon_normals));
+    writeRealArray(out,
+                   "curvature_estimate",
+                   concatenate(data.line_curvature_estimates,
+                               data.polygon_curvature_estimates));
     writeSignedIndexArray(out,
                           "interface_marker",
                           concatenate(data.line_interface_markers,
