@@ -1323,6 +1323,73 @@ TEST(MovingDomainPhysics, LevelSetOutputDiagnosticsReportVolumeAndSignedDistance
     EXPECT_NEAR(*signed_distance_error, result.signed_distance_max_error, 1.0e-12);
 }
 
+TEST(MovingDomainPhysics, LevelSetPureTangentialAdvectionPreservesVolumeDiagnostics)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    const std::array<FE::Real, 3> velocity{0.0, 0.35, -0.20};
+    const auto exact_advected_plane = [&](FE::Real time) {
+        std::vector<FE::Real> coefficients(
+            static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            const auto x = mesh->getNodeCoordinates(vertex);
+            const std::array<FE::Real, 3> departure{
+                x[0] - velocity[0] * time,
+                x[1] - velocity[1] * time,
+                x[2] - velocity[2] * time,
+            };
+            coefficients[static_cast<std::size_t>(dofs.front())] =
+                departure[0] - FE::Real(0.25);
+        }
+        return coefficients;
+    };
+
+    const auto initial = exact_advected_plane(0.0);
+    const auto advected = exact_advected_plane(2.0);
+    const auto initial_volume = ls::computeLevelSetCutCellVolume(
+        *mesh,
+        field_dofs,
+        ls::LevelSetVolumeOptions{},
+        initial);
+    ASSERT_TRUE(initial_volume.success) << initial_volume.diagnostic;
+
+    ls::LevelSetOutputDiagnosticsOptions diagnostics_opts{};
+    diagnostics_opts.compute_signed_distance_error = false;
+    diagnostics_opts.has_reference_negative_volume = true;
+    diagnostics_opts.reference_negative_volume = initial_volume.negative_volume;
+
+    const auto diagnostics = ls::computeLevelSetOutputDiagnostics(
+        *mesh,
+        field_dofs,
+        diagnostics_opts,
+        advected);
+
+    ASSERT_TRUE(diagnostics.success) << diagnostics.diagnostic;
+    EXPECT_NEAR(diagnostics.volume.negative_volume,
+                initial_volume.negative_volume,
+                1.0e-12);
+    EXPECT_NEAR(diagnostics.negative_volume_loss, 0.0, 1.0e-12);
+    EXPECT_NEAR(diagnostics.relative_negative_volume_loss, 0.0, 1.0e-12);
+    const auto* volume_loss =
+        findScalarDiagnostic(diagnostics.scalars, "level_set.negative_volume_loss");
+    ASSERT_NE(volume_loss, nullptr);
+    EXPECT_NEAR(*volume_loss, 0.0, 1.0e-12);
+}
+
 TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)
 {
     const auto mesh = makeMesh();
