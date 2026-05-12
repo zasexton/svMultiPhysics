@@ -372,14 +372,14 @@ Goal: update other physics modules to use FE-level level-set services directly.
 
 Checklist:
 
-- [ ] Update Navier-Stokes free-surface includes from
+- [x] Update Navier-Stokes free-surface includes from
   `Physics/Formulations/LevelSet/...` to `FE/LevelSet/...`.
-- [ ] Keep `UnfittedLevelSet` as a Navier-Stokes free-surface implementation
+- [x] Keep `UnfittedLevelSet` as a Navier-Stokes free-surface implementation
   name.
-- [ ] Ensure free-surface generated interface markers still bind to `.dI(marker)`.
-- [ ] Ensure curvature helpers remain FE Forms helpers, not Physics helpers.
-- [ ] Verify fitted ALE paths are unaffected.
-- [ ] Verify unfitted level-set paths still assemble pressure jump and surface
+- [x] Ensure free-surface generated interface markers still bind to `.dI(marker)`.
+- [x] Ensure curvature helpers remain FE Forms helpers, not Physics helpers.
+- [x] Verify fitted ALE paths are unaffected.
+- [x] Verify unfitted level-set paths still assemble pressure jump and surface
   tension terms.
 
 Done when:
