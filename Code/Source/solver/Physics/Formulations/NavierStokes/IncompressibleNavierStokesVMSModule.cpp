@@ -54,6 +54,12 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
     return isUnfittedLevelSet(bc) ? bc.interface_marker : bc.boundary_marker;
 }
 
+[[nodiscard]] bool useFittedCurrentGeometry(const FreeSurfaceBoundary& bc,
+                                            bool ale_enabled) noexcept
+{
+    return ale_enabled && !isUnfittedLevelSet(bc);
+}
+
 [[nodiscard]] std::string freeSurfaceValueName(std::string_view prefix,
                                                const FreeSurfaceBoundary& bc)
 {
@@ -98,11 +104,17 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
 
 [[nodiscard]] FE::forms::FormExpr integrateOnFreeSurface(
     const FE::forms::FormExpr& integrand,
-    const FreeSurfaceBoundary& bc)
+    const FreeSurfaceBoundary& bc,
+    bool ale_enabled)
 {
-    return isUnfittedLevelSet(bc)
-               ? integrand.dI(bc.interface_marker)
-               : integrand.ds(bc.boundary_marker);
+    if (isUnfittedLevelSet(bc)) {
+        return integrand.dI(bc.interface_marker);
+    }
+    const auto weighted_integrand =
+        useFittedCurrentGeometry(bc, ale_enabled)
+            ? integrand * FE::forms::currentMeasure()
+            : integrand;
+    return weighted_integrand.ds(bc.boundary_marker);
 }
 
 [[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
@@ -148,8 +160,11 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     validateFreeSurfaceBoundary(bc, ale_enabled);
 
     const auto phi = freeSurfaceLevelSet(bc, system);
-    const auto n = isUnfittedLevelSet(bc) ? unitNormalFromLevelSet(phi)
-                                          : FormExpr::normal();
+    const auto n = isUnfittedLevelSet(bc)
+                       ? unitNormalFromLevelSet(phi)
+                       : (useFittedCurrentGeometry(bc, ale_enabled)
+                              ? currentNormal()
+                              : FormExpr::normal());
     const auto p_ext = bc::toScalarExpr(
         bc.external_pressure,
         freeSurfaceValueName("ns_free_surface_external_pressure", bc));
@@ -172,7 +187,8 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     }();
 
     const auto traction = (-p_ext + gamma * curvature) * n;
-    momentum_form = momentum_form - integrateOnFreeSurface(inner(traction, v), bc);
+    momentum_form = momentum_form -
+                    integrateOnFreeSurface(inner(traction, v), bc, ale_enabled);
 
     switch (bc.kinematic_enforcement) {
     case FreeSurfaceKinematicEnforcement::None:
@@ -188,7 +204,7 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             freeSurfaceValueName("ns_free_surface_kinematic_penalty", bc));
         const auto normal_mismatch = normalTrace(u - mesh_velocity, n);
         momentum_form = momentum_form + integrateOnFreeSurface(
-            penalty * normal_mismatch * normalTrace(v, n), bc);
+            penalty * normal_mismatch * normalTrace(v, n), bc, ale_enabled);
         return;
     }
     case FreeSurfaceKinematicEnforcement::Nitsche: {
@@ -225,17 +241,18 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         momentum_form = momentum_form + integrateOnFreeSurface(
             (p - normal_stress_u) * v_normal +
             penalty * normal_mismatch * v_normal,
-            bc);
+            bc,
+            ale_enabled);
         if (options.nitsche_symmetric) {
             momentum_form = momentum_form - integrateOnFreeSurface(
-                normal_stress_v * normal_mismatch, bc);
+                normal_stress_v * normal_mismatch, bc, ale_enabled);
             continuity_form = continuity_form + integrateOnFreeSurface(
-                q * normal_mismatch, bc);
+                q * normal_mismatch, bc, ale_enabled);
         } else {
             momentum_form = momentum_form + integrateOnFreeSurface(
-                normal_stress_v * normal_mismatch, bc);
+                normal_stress_v * normal_mismatch, bc, ale_enabled);
             continuity_form = continuity_form - integrateOnFreeSurface(
-                q * normal_mismatch, bc);
+                q * normal_mismatch, bc, ale_enabled);
         }
         return;
     }

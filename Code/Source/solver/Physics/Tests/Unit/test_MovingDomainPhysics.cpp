@@ -684,6 +684,34 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceAddsBoundaryResidual)
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 }
 
+TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeometry)
+{
+    constexpr int marker = 34;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_ale = true;
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .external_pressure = 2.0,
+        .surface_tension = 0.5,
+        .curvature = 1.25,
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
+
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+}
+
 TEST(MovingDomainPhysics, CurrentFaceGeometryMeanCurvatureTracksCurvedHexFace)
 {
     auto basis = std::make_shared<FE::basis::LagrangeBasis>(FE::ElementType::Hex27, 2);
@@ -768,7 +796,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfacePenaltyKinematicsAddsBoun
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
@@ -861,7 +890,8 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceNitscheKinematicsAddsBoun
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::FacetArea));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::MeshVelocity));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentNormal));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CurrentMeasure));
 
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
