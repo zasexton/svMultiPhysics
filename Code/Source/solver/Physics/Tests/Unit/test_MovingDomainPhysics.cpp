@@ -11,6 +11,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
+#include "Physics/Formulations/LevelSet/LevelSetDiagnostics.h"
 #include "Physics/Formulations/LevelSet/LevelSetReinitialization.h"
 #include "Physics/Formulations/LevelSet/LevelSetTransportModule.h"
 #include "Physics/Formulations/LevelSet/LevelSetVolume.h"
@@ -105,6 +106,18 @@ bool formulationRecordsContain(const FE::systems::FESystem& system, FormExprType
         }
     }
     return false;
+}
+
+const FE::Real* findScalarDiagnostic(
+    const std::vector<ls::LevelSetScalarDiagnostic>& scalars,
+    std::string_view name)
+{
+    for (const auto& scalar : scalars) {
+        if (scalar.name == name) {
+            return &scalar.value;
+        }
+    }
+    return nullptr;
 }
 
 std::shared_ptr<SingleTetraMeshAccess> makeMesh()
@@ -1245,6 +1258,69 @@ TEST(MovingDomainPhysics, LevelSetCutCellVolumeHandlesUncutCells)
     EXPECT_NEAR(result.total_volume, 1.0 / 6.0, 1.0e-12);
     EXPECT_NEAR(result.negative_volume, 1.0 / 6.0, 1.0e-12);
     EXPECT_NEAR(result.positive_volume, 0.0, 1.0e-12);
+}
+
+TEST(MovingDomainPhysics, LevelSetOutputDiagnosticsReportVolumeAndSignedDistanceError)
+{
+    const auto mesh = makeMesh();
+    auto scalar_space = makePressureSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> distorted(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = mesh->getNodeCoordinates(vertex);
+        distorted[static_cast<std::size_t>(dofs.front())] =
+            FE::Real(4.0) * (x[0] - FE::Real(0.25));
+    }
+
+    ls::LevelSetOutputDiagnosticsOptions diagnostics_opts{};
+    diagnostics_opts.signed_distance.signed_distance_tolerance = 1.0e-12;
+    diagnostics_opts.has_reference_negative_volume = true;
+    diagnostics_opts.reference_negative_volume = 0.125;
+
+    const auto result = ls::computeLevelSetOutputDiagnostics(
+        *mesh,
+        field_dofs,
+        diagnostics_opts,
+        distorted);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.volume.success) << result.volume.diagnostic;
+    ASSERT_TRUE(result.signed_distance.success) << result.signed_distance.diagnostic;
+    EXPECT_EQ(result.signed_distance_samples, 4u);
+    EXPECT_NEAR(result.signed_distance_max_error, result.signed_distance.max_abs_update, 1.0e-12);
+    EXPECT_NEAR(result.signed_distance_max_error, 2.25, 1.0e-12);
+    EXPECT_GT(result.signed_distance_l2_error, 0.0);
+    EXPECT_NEAR(result.negative_volume_loss,
+                diagnostics_opts.reference_negative_volume - result.volume.negative_volume,
+                1.0e-12);
+
+    const auto* negative_volume =
+        findScalarDiagnostic(result.scalars, "level_set.negative_volume");
+    const auto* volume_loss =
+        findScalarDiagnostic(result.scalars, "level_set.negative_volume_loss");
+    const auto* signed_distance_error =
+        findScalarDiagnostic(result.scalars, "level_set.signed_distance_max_error");
+    ASSERT_NE(negative_volume, nullptr);
+    ASSERT_NE(volume_loss, nullptr);
+    ASSERT_NE(signed_distance_error, nullptr);
+    EXPECT_NEAR(*negative_volume, result.volume.negative_volume, 1.0e-12);
+    EXPECT_NEAR(*volume_loss, result.negative_volume_loss, 1.0e-12);
+    EXPECT_NEAR(*signed_distance_error, result.signed_distance_max_error, 1.0e-12);
 }
 
 TEST(MovingDomainPhysics, LevelSetGlobalShiftCorrectionMatchesTargetVolume)
