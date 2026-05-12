@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 using namespace svmp::FE;
 using namespace svmp::FE::interfaces;
 
@@ -134,4 +136,76 @@ TEST(LevelSetInterfaceDomain, SummaryCountsDegenerateInactiveFragments)
     EXPECT_EQ(summary.degenerate_fragment_count, 2u);
     EXPECT_EQ(summary.quadrature_point_count, 1u);
     EXPECT_DOUBLE_EQ(summary.measure, 1.0e-16);
+}
+
+TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkersAreStable)
+{
+    GeneratedInterfaceMarkerKey key;
+    key.source = LevelSetInterfaceSource::fromField(/*field_id=*/8,
+                                                    /*layout_revision=*/1,
+                                                    /*value_revision=*/11);
+    key.domain_id = "fluid-interface";
+    key.isovalue = 0.0;
+
+    GeneratedInterfaceMarkerKey same_domain_new_values = key;
+    same_domain_new_values.source = LevelSetInterfaceSource::fromField(
+        /*field_id=*/8,
+        /*layout_revision=*/1,
+        /*value_revision=*/12);
+
+    EXPECT_EQ(stableGeneratedInterfaceMarker(key),
+              stableGeneratedInterfaceMarker(same_domain_new_values));
+
+    GeneratedInterfaceMarkerRegistry registry;
+    const int marker = registry.assign(key);
+    EXPECT_EQ(registry.assign(same_domain_new_values), marker);
+    EXPECT_TRUE(registry.contains(key));
+    EXPECT_TRUE(registry.containsMarker(marker));
+    EXPECT_EQ(registry.size(), 1u);
+
+    GeneratedInterfaceMarkerKey other_domain = key;
+    other_domain.domain_id = "secondary-interface";
+    const int other_marker = registry.assign(other_domain);
+    EXPECT_NE(other_marker, marker);
+    EXPECT_EQ(registry.size(), 2u);
+}
+
+TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryHonorsExplicitMarkers)
+{
+    GeneratedInterfaceMarkerKey key;
+    key.source = LevelSetInterfaceSource::fromEvaluator("phi-evaluator");
+    key.domain_id = "explicit-interface";
+    key.isovalue = 0.0;
+    key.requested_marker = 17;
+
+    GeneratedInterfaceMarkerRegistry registry;
+    EXPECT_EQ(registry.assign(key), 17);
+    EXPECT_EQ(registry.assign(key), 17);
+
+    GeneratedInterfaceMarkerKey colliding = key;
+    colliding.domain_id = "different-interface";
+    EXPECT_THROW((void)registry.assign(colliding), std::invalid_argument);
+}
+
+TEST(LevelSetInterfaceDomain, GeneratedInterfaceMarkerRegistryResolvesHashCollisions)
+{
+    GeneratedInterfaceMarkerRegistry registry(/*marker_base=*/200,
+                                             /*marker_range=*/2);
+
+    GeneratedInterfaceMarkerKey first;
+    first.source = LevelSetInterfaceSource::fromEvaluator("first");
+    first.domain_id = "interface";
+
+    GeneratedInterfaceMarkerKey second;
+    second.source = LevelSetInterfaceSource::fromEvaluator("second");
+    second.domain_id = "interface";
+
+    const int first_marker = registry.assign(first);
+    const int second_marker = registry.assign(second);
+    EXPECT_NE(first_marker, second_marker);
+    EXPECT_GE(first_marker, 200);
+    EXPECT_LT(first_marker, 202);
+    EXPECT_GE(second_marker, 200);
+    EXPECT_LT(second_marker, 202);
+    EXPECT_EQ(registry.size(), 2u);
 }

@@ -153,7 +153,7 @@ Checklist:
   - [x] edge cuts
   - [x] nearly tangent cuts
   - [x] very small fragments
-- [ ] Assign stable interface marker ids.
+- [x] Assign stable interface marker ids.
 - [ ] Expose generated interfaces through the same integration path used by `.dI(marker)`.
 - [ ] Add serial tests for generated interface fragment counts.
 - [ ] Add MPI tests for ownership and global area consistency.

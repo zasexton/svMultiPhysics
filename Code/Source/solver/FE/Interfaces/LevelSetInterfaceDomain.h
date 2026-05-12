@@ -18,7 +18,9 @@
 
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -114,6 +116,109 @@ struct CutInterfaceDomainRequest {
     [[nodiscard]] bool valid() const noexcept {
         return interface_marker >= 0 && source.valid() && tolerance > Real{0.0};
     }
+};
+
+struct GeneratedInterfaceMarkerKey {
+    LevelSetInterfaceSource source{};
+    std::string domain_id{};
+    Real isovalue{0.0};
+    int requested_marker{-1};
+
+    [[nodiscard]] std::string stableKey() const {
+        return source.identifier() + "|" + domain_id + "|" + std::to_string(isovalue);
+    }
+};
+
+[[nodiscard]] inline std::uint64_t stableMarkerHash(
+    const GeneratedInterfaceMarkerKey& key) {
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](std::uint64_t value) noexcept {
+        h ^= value;
+        h *= 1099511628211ull;
+    };
+    const auto stable_key = key.stableKey();
+    for (const char c : stable_key) {
+        mix(static_cast<unsigned char>(c));
+    }
+    return h;
+}
+
+[[nodiscard]] inline int stableGeneratedInterfaceMarker(
+    const GeneratedInterfaceMarkerKey& key,
+    int marker_base = 1000000,
+    int marker_range = 1000000) {
+    if (key.requested_marker >= 0) {
+        return key.requested_marker;
+    }
+    if (marker_base < 0 || marker_range <= 0) {
+        throw std::invalid_argument("generated interface marker range must be positive");
+    }
+    const auto offset =
+        static_cast<int>(stableMarkerHash(key) % static_cast<std::uint64_t>(marker_range));
+    return marker_base + offset;
+}
+
+class GeneratedInterfaceMarkerRegistry {
+public:
+    explicit GeneratedInterfaceMarkerRegistry(int marker_base = 1000000,
+                                              int marker_range = 1000000)
+        : marker_base_(marker_base)
+        , marker_range_(marker_range)
+    {
+        if (marker_base_ < 0 || marker_range_ <= 0) {
+            throw std::invalid_argument("generated interface marker registry requires a positive marker range");
+        }
+    }
+
+    [[nodiscard]] int assign(const GeneratedInterfaceMarkerKey& key) {
+        const auto stable_key = key.stableKey();
+        const auto found = key_to_marker_.find(stable_key);
+        if (found != key_to_marker_.end()) {
+            return found->second;
+        }
+
+        int marker = stableGeneratedInterfaceMarker(key, marker_base_, marker_range_);
+        if (key.requested_marker >= 0) {
+            const auto owner = marker_to_key_.find(marker);
+            if (owner != marker_to_key_.end() && owner->second != stable_key) {
+                throw std::invalid_argument("generated interface marker is already assigned to another domain");
+            }
+        } else {
+            const int start = marker;
+            while (true) {
+                const auto owner = marker_to_key_.find(marker);
+                if (owner == marker_to_key_.end() || owner->second == stable_key) {
+                    break;
+                }
+                marker = marker_base_ + ((marker - marker_base_ + 1) % marker_range_);
+                if (marker == start) {
+                    throw std::invalid_argument("generated interface marker registry is full");
+                }
+            }
+        }
+
+        key_to_marker_[stable_key] = marker;
+        marker_to_key_[marker] = stable_key;
+        return marker;
+    }
+
+    [[nodiscard]] bool contains(const GeneratedInterfaceMarkerKey& key) const {
+        return key_to_marker_.find(key.stableKey()) != key_to_marker_.end();
+    }
+
+    [[nodiscard]] bool containsMarker(int marker) const {
+        return marker_to_key_.find(marker) != marker_to_key_.end();
+    }
+
+    [[nodiscard]] std::size_t size() const noexcept {
+        return key_to_marker_.size();
+    }
+
+private:
+    int marker_base_{1000000};
+    int marker_range_{1000000};
+    std::unordered_map<std::string, int> key_to_marker_{};
+    std::unordered_map<int, std::string> marker_to_key_{};
 };
 
 struct CutInterfaceVertex {
