@@ -184,6 +184,9 @@ std::optional<std::string> get_defined_string(const svmp::Physics::ParameterMap&
   return value;
 }
 
+std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
+                                                 std::string_view context);
+
 svmp::FE::forms::GeometryTangentPath parse_geometry_tangent_path(std::string_view raw,
                                                                  std::string_view context)
 {
@@ -706,6 +709,19 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
   }
   if (const auto fz = get_defined_double(domain.params, "Force_z")) {
     options.body_force[2] = static_cast<svmp::FE::Real>(*fz);
+  }
+
+  if (const auto enabled = get_defined_bool(domain.params, "Hydrostatic_pressure_initialization")) {
+    options.hydrostatic_pressure_initialization.enabled = *enabled;
+  }
+  if (const auto reference = get_defined_double(domain.params, "Hydrostatic_pressure_reference")) {
+    options.hydrostatic_pressure_initialization.reference_pressure =
+        static_cast<svmp::FE::Real>(*reference);
+  }
+  if (const auto reference_point =
+          get_defined_string(domain.params, "Hydrostatic_pressure_reference_point")) {
+    options.hydrostatic_pressure_initialization.reference_point =
+        parse_real_vector3(*reference_point, "Hydrostatic_pressure_reference_point");
   }
 
   const auto* model_param = find_param(domain.params, "Viscosity.model");

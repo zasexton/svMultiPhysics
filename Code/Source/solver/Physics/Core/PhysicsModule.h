@@ -10,6 +10,7 @@
  */
 
 #include "FE/Core/Types.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
 #include "Physics/Core/PhysicsJITPolicy.h"
 
 #include <span>
@@ -47,6 +48,12 @@ public:
     virtual void applyInitialConditions(const FE::systems::FESystem& /*system*/,
                                         std::span<FE::Real> /*u0*/) const
     {
+    }
+
+    virtual void applyInitialConditions(const FE::systems::FESystem& system,
+                                        FE::backends::GenericVector& u0) const
+    {
+        applyInitialConditions(system, u0.localSpan());
     }
 
     /**

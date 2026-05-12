@@ -255,6 +255,8 @@ class VectorParameter
       if (str_value == "") {
         return;
       }
+      value_.clear();
+      value_set_ = true;
 
       std::string error_msg = "Improper vector format '" + str_value + "' found in '" + name_ + "'." + " Vector format is: (x,y,z)";
       std::regex sep("\\(|\\)|\\,");
@@ -1287,6 +1289,9 @@ class DomainParameters : public ParameterLists
     Parameter<double> force_x;
     Parameter<double> force_y;
     Parameter<double> force_z;
+    Parameter<bool> hydrostatic_pressure_initialization;
+    Parameter<double> hydrostatic_pressure_reference;
+    VectorParameter<double> hydrostatic_pressure_reference_point;
 
     Parameter<double> isotropic_conductivity;
 

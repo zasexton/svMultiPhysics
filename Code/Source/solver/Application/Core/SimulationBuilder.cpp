@@ -987,6 +987,16 @@ void SimulationBuilder::allocateHistory()
   history.setStepIndex(0);
   history.primeDtHistory(dt);
 
+  for (const auto& module : components_.physics_modules) {
+    if (module) {
+      module->applyInitialConditions(*components_.fe_system, history.u());
+    }
+  }
+  for (int k = 1; k <= history.historyDepth(); ++k) {
+    history.uPrevK(k).copyFrom(history.u());
+  }
+  history.updateGhosts();
+
   components_.time_history = std::make_unique<svmp::FE::timestepping::TimeHistory>(std::move(history));
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time="
             << components_.time_history->time() << " dt=" << components_.time_history->dt()

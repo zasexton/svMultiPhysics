@@ -456,7 +456,7 @@ Checklist:
 - [x] Add example unfitted level-set input file.
 - [x] Add mesh and initial conditions for half-filled vessel.
 - [x] Add gravity/body-force setup.
-- [ ] Add hydrostatic initialization helper.
+- [x] Add hydrostatic initialization helper.
 - [ ] Add pressure gauge/nullspace configuration.
 - [ ] Add output requests for surface position, volume, pressure, and velocity.
 

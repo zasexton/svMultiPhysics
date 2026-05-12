@@ -284,6 +284,13 @@ struct IncompressibleNavierStokesVMSOptions {
     // Constant body force (length-3; only first dim components are used).
     std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
 
+    struct HydrostaticPressureInitialization {
+        bool enabled{false};
+        std::array<FE::Real, 3> reference_point{0.0, 0.0, 0.0};
+        FE::Real reference_pressure{0.0};
+    };
+    HydrostaticPressureInitialization hydrostatic_pressure_initialization{};
+
     // Enable the convective term rho * (u · ∇) u.
     //
     // This can be disabled to recover a (possibly unsteady) Stokes formulation.
@@ -342,6 +349,8 @@ public:
                                         IncompressibleNavierStokesVMSOptions options = {});
 
     void registerOn(FE::systems::FESystem& system) const override;
+    void applyInitialConditions(const FE::systems::FESystem& system,
+                                FE::backends::GenericVector& u0) const override;
 
 private:
     std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space_{};

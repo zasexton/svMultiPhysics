@@ -10,9 +10,12 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Materials/Fluid/NewtonianViscosity.h"
 
+#include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
@@ -20,6 +23,7 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include <cstddef>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <stdexcept>
@@ -42,6 +46,70 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
     , pressure_space_(std::move(pressure_space))
     , options_(std::move(options))
 {
+}
+
+void IncompressibleNavierStokesVMSModule::applyInitialConditions(
+    const FE::systems::FESystem& system,
+    FE::backends::GenericVector& u0) const
+{
+    const auto& init = options_.hydrostatic_pressure_initialization;
+    if (!init.enabled) {
+        return;
+    }
+
+    const auto p_id = system.findFieldByName(options_.pressure_field_name);
+    if (p_id == FE::INVALID_FIELD_ID) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization could not find pressure field '" +
+            options_.pressure_field_name + "'");
+    }
+
+    const auto& pressure_dofs = system.fieldDofHandler(p_id);
+    const auto* entity_map = pressure_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization requires vertex DOF metadata");
+    }
+
+    const auto& mesh = system.meshAccess();
+    const auto pressure_offset = system.fieldDofOffset(p_id);
+    std::vector<FE::GlobalIndex> dofs;
+    std::vector<FE::Real> values;
+
+    const auto n_vertices = mesh.numVertices();
+    for (FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        if (vertex_dofs.empty()) {
+            continue;
+        }
+
+        const auto x = mesh.getNodeCoordinates(vertex);
+        FE::Real pressure = init.reference_pressure;
+        for (std::size_t d = 0; d < options_.body_force.size(); ++d) {
+            pressure += options_.density * options_.body_force[d] *
+                        (x[d] - init.reference_point[d]);
+        }
+
+        for (const auto local_dof : vertex_dofs) {
+            dofs.push_back(pressure_offset + local_dof);
+            values.push_back(pressure);
+        }
+    }
+
+    if (dofs.empty()) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization found no pressure vertex DOFs");
+    }
+
+    auto view = u0.createAssemblyView();
+    if (!view) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization could not create a vector view");
+    }
+    view->beginAssemblyPhase();
+    view->setVectorEntries(dofs, values);
+    view->endAssemblyPhase();
+    view->finalizeAssembly();
 }
 
 namespace {

@@ -1944,6 +1944,10 @@ DomainParameters::DomainParameters()
   set_parameter("Force_x", 0.0, !required, force_x);
   set_parameter("Force_y", 0.0, !required, force_y);
   set_parameter("Force_z", 0.0, !required, force_z);
+  set_parameter("Hydrostatic_pressure_initialization", false, !required, hydrostatic_pressure_initialization);
+  set_parameter("Hydrostatic_pressure_reference", 0.0, !required, hydrostatic_pressure_reference);
+  set_parameter("Hydrostatic_pressure_reference_point", {0.0, 0.0, 0.0}, !required,
+                hydrostatic_pressure_reference_point);
 
   set_parameter("Isotropic_conductivity", 0.0, !required, isotropic_conductivity);
 

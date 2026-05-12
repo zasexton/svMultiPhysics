@@ -218,6 +218,9 @@ TEST(EquationTranslatorDomainDefaults, BuildInputCopiesGravityForceComponents)
   <Force_x>0.0</Force_x>
   <Force_y>-9.81</Force_y>
   <Force_z>0.0</Force_z>
+  <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
+  <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
+  <Hydrostatic_pressure_reference_point>0.0 0.5 0.0</Hydrostatic_pressure_reference_point>
   <Viscosity model="Constant">
     <Value>1.003e-3</Value>
   </Viscosity>
@@ -232,6 +235,10 @@ TEST(EquationTranslatorDomainDefaults, BuildInputCopiesGravityForceComponents)
   EXPECT_DOUBLE_EQ(std::stod(input.default_domain.params.at("Force_x").value), 0.0);
   EXPECT_DOUBLE_EQ(std::stod(input.default_domain.params.at("Force_y").value), -9.81);
   EXPECT_DOUBLE_EQ(std::stod(input.default_domain.params.at("Force_z").value), 0.0);
+  EXPECT_EQ(input.default_domain.params.at("Hydrostatic_pressure_initialization").value, "1");
+  EXPECT_TRUE(input.default_domain.params.at("Hydrostatic_pressure_initialization").defined);
+  EXPECT_EQ(input.default_domain.params.at("Hydrostatic_pressure_reference_point").value, " 0 0.5 0");
+  EXPECT_TRUE(input.default_domain.params.at("Hydrostatic_pressure_reference_point").defined);
 }
 
 TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)

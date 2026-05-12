@@ -11,6 +11,9 @@
 #include "Physics/Materials/Fluid/CarreauYasudaViscosity.h"
 
 #include "Analysis/ConstitutiveLawMetadata.h"
+#include "FE/Backends/Interfaces/BackendFactory.h"
+#include "FE/Backends/Interfaces/BackendKind.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Assembly/Assembler.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
@@ -236,6 +239,62 @@ TEST(NavierStokesPressureGauge, PressureNotPinnedWhenUnconstrainedBoundaryExists
     system.setup({}, inputs);
 
     EXPECT_EQ(countConstrainedPressureDofs(system, /*pressure_field_name=*/"p"), 0u);
+}
+
+TEST(NavierStokesInitialConditions, HydrostaticPressureInitializationFillsPressureVertices)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "Hydrostatic initialization test requires the Eigen backend.";
+#else
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+
+    auto u_space = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/2);
+    auto p_space = FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 2.0;
+    opts.viscosity = 0.001;
+    opts.body_force = {0.0, -9.81, 0.0};
+    opts.hydrostatic_pressure_initialization.enabled = true;
+    opts.hydrostatic_pressure_initialization.reference_point = {0.0, 1.0, 0.0};
+    opts.hydrostatic_pressure_initialization.reference_pressure = 100.0;
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = makeTwoQuadStripTopology();
+    system.setup({}, inputs);
+
+    auto factory = FE::backends::BackendFactory::create(FE::backends::BackendKind::Eigen);
+    auto state = factory->createVector(system.dofHandler().getNumDofs());
+    state->zero();
+
+    module.applyInitialConditions(system, *state);
+    const auto values = state->localSpan();
+
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    const auto* entity_map = system.fieldDofHandler(p_id).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto pressure_offset = system.fieldDofOffset(p_id);
+
+    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(vertex_dofs.size(), 1u);
+        const auto x = mesh->getNodeCoordinates(vertex);
+        const auto expected = 100.0 + 2.0 * (-9.81) * (x[1] - 1.0);
+        const auto dof = pressure_offset + vertex_dofs.front();
+        ASSERT_GE(dof, 0);
+        ASSERT_LT(static_cast<std::size_t>(dof), values.size());
+        EXPECT_NEAR(values[static_cast<std::size_t>(dof)], expected, 1.0e-12);
+    }
+#endif
 }
 
 TEST(NavierStokesPressureGauge, PublishesDynamicViscosityConstitutiveMetadata)
