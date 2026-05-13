@@ -152,6 +152,15 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Tighten D18 linear relative tolerance to `1e-6`.
 - [ ] Use an absolute linear tolerance no looser than `1e-10` for the
       qualification run, unless solver logs show a documented scaling issue.
+- [x] Record the D18 strict-tolerance solver floor in
+      `Documentation/qualification_logs/dam_break_d18_solver_tolerance_runs_20260513.md`.
+- [ ] Add a robust solver path for the coupled `phi`, `Velocity`, and
+      `Pressure` D18 layout, or restructure D18 so the Navier-Stokes solve can
+      use a velocity-pressure solver block without the level-set field in the
+      same linear system.
+- [ ] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
+      using metadata-scaled cut-cell stabilization for D18.
+- [ ] Re-run D18 strict tolerance after the solver path is corrected.
 - [ ] Record nonlinear iteration counts, linear iteration counts, and residual
       norms for each D18/D38 qualification attempt.
 - [ ] If active-domain cut cells introduce solver instability, tune
