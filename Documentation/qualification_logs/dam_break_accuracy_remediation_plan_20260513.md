@@ -105,8 +105,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Keep zero-surface-tension, zero-external-pressure cases from adding a
       false interface traction.
 - [x] Keep D18 kinematic enforcement disabled for the first corrected path.
-- [ ] Add diagnostics showing which active-domain side and method were used.
-- [ ] Add diagnostics showing total wet volume and cut-cell volume contribution.
+- [x] Add diagnostics showing which active-domain side and method were used.
+- [x] Add diagnostics showing total wet volume and cut-cell volume contribution.
 
 ## Material-Weighting Fallback Checklist
 

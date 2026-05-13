@@ -13,6 +13,7 @@
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
+#include "FE/Core/Logger.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/Vocabulary.h"
@@ -28,6 +29,7 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -460,6 +462,36 @@ struct ActiveVolumeDomain {
     FE::forms::CutVolumeSide side{FE::forms::CutVolumeSide::Negative};
 };
 
+[[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept
+{
+    switch (domain) {
+    case FreeSurfaceActiveDomain::None:
+        return "None";
+    case FreeSurfaceActiveDomain::LevelSetNegative:
+        return "LevelSetNegative";
+    case FreeSurfaceActiveDomain::LevelSetPositive:
+        return "LevelSetPositive";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* activeDomainMethodName(
+    FreeSurfaceActiveDomainMethod method) noexcept
+{
+    switch (method) {
+    case FreeSurfaceActiveDomainMethod::CutVolume:
+        return "CutVolume";
+    case FreeSurfaceActiveDomainMethod::SmoothedIndicator:
+        return "SmoothedIndicator";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* cutVolumeSideName(FE::forms::CutVolumeSide side) noexcept
+{
+    return side == FE::forms::CutVolumeSide::Negative ? "Negative" : "Positive";
+}
+
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces)
 {
@@ -489,6 +521,15 @@ struct ActiveVolumeDomain {
             break;
         }
         active_domain = ActiveVolumeDomain{bc.interface_marker, side};
+
+        std::ostringstream oss;
+        oss << "IncompressibleNavierStokesVMSModule: active-domain free surface "
+            << "marker=" << bc.interface_marker
+            << " Active_domain=" << activeDomainName(bc.active_domain)
+            << " Active_domain_method="
+            << activeDomainMethodName(bc.active_domain_method)
+            << " side=" << cutVolumeSideName(side);
+        FE_LOG_INFO(oss.str());
     }
     return active_domain;
 }

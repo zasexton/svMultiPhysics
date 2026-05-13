@@ -217,6 +217,62 @@ private:
     const MeshParticipantInfo& participant_;
 };
 
+[[nodiscard]] const char* cutIntegrationSideName(geometry::CutIntegrationSide side) noexcept
+{
+    switch (side) {
+    case geometry::CutIntegrationSide::Negative:
+        return "Negative";
+    case geometry::CutIntegrationSide::Positive:
+        return "Positive";
+    case geometry::CutIntegrationSide::Interface:
+        return "Interface";
+    }
+    return "Unknown";
+}
+
+void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_context,
+                                     int marker,
+                                     geometry::CutIntegrationSide side)
+{
+    const auto rules = cut_context.generatedVolumeRulesForMarkerAndSide(marker, side);
+    Real active_volume = 0.0;
+    Real cut_cell_active_volume = 0.0;
+    Real full_cell_active_volume = 0.0;
+    std::size_t cut_cell_rules = 0u;
+    std::size_t full_cell_rules = 0u;
+    std::size_t quadrature_points = 0u;
+    constexpr Real full_cell_tol = Real{1.0e-12};
+
+    for (const auto* rule : rules) {
+        if (rule == nullptr) {
+            continue;
+        }
+        active_volume += rule->measure;
+        quadrature_points += rule->points.size();
+        if (rule->volume_fraction > full_cell_tol &&
+            rule->volume_fraction < Real{1.0} - full_cell_tol) {
+            cut_cell_active_volume += rule->measure;
+            ++cut_cell_rules;
+        } else {
+            full_cell_active_volume += rule->measure;
+            ++full_cell_rules;
+        }
+    }
+
+    std::ostringstream oss;
+    oss << "assembleOperator: cut-volume active-domain diagnostics marker="
+        << marker
+        << " side=" << cutIntegrationSideName(side)
+        << " active_wet_volume=" << active_volume
+        << " cut_cell_active_wet_volume=" << cut_cell_active_volume
+        << " full_cell_active_wet_volume=" << full_cell_active_volume
+        << " rules=" << rules.size()
+        << " cut_cell_rules=" << cut_cell_rules
+        << " full_cell_rules=" << full_cell_rules
+        << " quadrature_points=" << quadrature_points;
+    FE_LOG_INFO(oss.str());
+}
+
 #if FE_HAS_MPI
 constexpr std::uint64_t kBorderedConsistencyHashSeed = 1469598103934665603ULL;
 
@@ -1370,12 +1426,20 @@ assembly::AssemblyResult assembleOperator(
         FE_THROW_IF(cut_context == nullptr, InvalidArgumentException,
                     "assembleOperator: cut-volume terms require a registered CutIntegrationContext");
 
+        std::unordered_set<std::string> logged_cut_volume_diagnostics;
         for (const auto& term : plan.cut_volume_terms) {
             FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: cut-volume term kernel");
             const bool want_matrix = request.want_matrix && term.matrix_capable;
             const bool want_vector = request.want_vector && term.vector_capable;
             if (!want_matrix && !want_vector) {
                 continue;
+            }
+
+            const auto diagnostics_key =
+                std::to_string(term.marker) + ":" +
+                std::to_string(static_cast<int>(term.side));
+            if (logged_cut_volume_diagnostics.insert(diagnostics_key).second) {
+                logCutVolumeAssemblyDiagnostics(*cut_context, term.marker, term.side);
             }
 
             assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
