@@ -223,6 +223,12 @@ bool fileContains(const fs::path& path, std::string_view needle)
   return contents.find(needle) != std::string::npos;
 }
 
+bool startsWith(std::string_view value, std::string_view prefix)
+{
+  return value.size() >= prefix.size() &&
+         value.substr(0, prefix.size()) == prefix;
+}
+
 } // namespace
 
 TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
@@ -409,4 +415,119 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
   EXPECT_EQ(free_surface->params.at("Level_set_field_name").value, "phi");
   EXPECT_EQ(free_surface->params.at("Generated_interface_domain_id").value,
             "open_vessel_surface");
+}
+
+TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
+{
+  struct CaseExpectation {
+    std::string representation_dir;
+    std::string case_name;
+    bool fitted;
+    bool top_wall_bc;
+    bool obstacle_bc;
+    std::vector<std::string> faces;
+  };
+
+  const std::vector<CaseExpectation> cases = {
+      {"fitted_ale",
+       "spheric_test10_lateral_water_1x",
+       true,
+       false,
+       false,
+       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
+        "free_surface"}},
+      {"unfitted_level_set",
+       "spheric_test10_lateral_water_1x",
+       false,
+       true,
+       false,
+       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
+        "wall_top"}},
+      {"unfitted_level_set",
+       "spheric_test05_wet_bed_d18",
+       false,
+       false,
+       false,
+       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
+        "wall_top"}},
+      {"unfitted_level_set",
+       "spheric_test05_wet_bed_d38",
+       false,
+       false,
+       false,
+       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
+        "wall_top"}},
+      {"unfitted_level_set",
+       "spheric_test02_dambreak_obstacle",
+       false,
+       false,
+       true,
+       {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
+        "wall_top", "obstacle"}},
+  };
+
+  for (const auto& expected : cases) {
+    SCOPED_TRACE(expected.representation_dir + "/" + expected.case_name);
+    const auto case_dir =
+        openVesselCaseDir(expected.representation_dir) / expected.case_name;
+    tinyxml2::XMLDocument doc;
+    ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
+    const auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+    ASSERT_NE(root, nullptr);
+    EXPECT_TRUE(fs::exists(case_dir / "benchmark.json"));
+
+    const auto& general = child(*root, "GeneralSimulationParameters");
+    expectText(general, "Use_new_OOP_solver", "true");
+    expectText(general, "Number_of_spatial_dimensions", "3");
+
+    const auto& mesh = childWithAttribute(*root, "Add_mesh", "name", "tank");
+    expectReferencedFileExists(case_dir, mesh, "Mesh_file_path");
+    for (const auto& face : expected.faces) {
+      expectFace(case_dir, mesh, face);
+    }
+
+    const auto mesh_path = case_dir / text(mesh, "Mesh_file_path");
+    EXPECT_TRUE(fileContains(mesh_path, "Name=\"GlobalNodeID\""));
+    EXPECT_TRUE(fileContains(mesh_path, "Name=\"Pressure\""));
+    EXPECT_TRUE(fileContains(mesh_path, "Name=\"Velocity\""));
+    if (expected.fitted) {
+      EXPECT_TRUE(fileContains(mesh_path, "Name=\"mesh_displacement\""));
+      EXPECT_TRUE(fileContains(mesh_path, "Name=\"mesh_velocity\""));
+    } else {
+      EXPECT_TRUE(fileContains(mesh_path, "Name=\"phi\""));
+    }
+
+    const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
+    expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
+                               "Values_file_path");
+    for (const auto& face : expected.faces) {
+      if (startsWith(face, "wall_") &&
+          (expected.top_wall_bc || face != "wall_top")) {
+        expectBoundaryCondition(fluid, face, "Dir");
+      }
+    }
+    if (expected.obstacle_bc) {
+      expectBoundaryCondition(fluid, "obstacle", "Dir");
+    }
+
+    const auto& free_surface =
+        expectBoundaryCondition(fluid, "free_surface", "Free_surface");
+    expectText(free_surface,
+               "Implementation",
+               expected.fitted ? "FittedALE" : "UnfittedLevelSet");
+
+    if (expected.fitted) {
+      expectText(fluid, "Enable_ALE", "true");
+      const auto& mesh_motion =
+          childWithAttribute(*root, "Add_equation", "type", "mesh_motion");
+      expectText(mesh_motion, "Model", "Harmonic");
+    } else {
+      const auto& level_set =
+          childWithAttribute(*root, "Add_equation", "type", "level_set");
+      expectText(level_set, "Level_set_field_name", "phi");
+      expectText(level_set, "Velocity_source", "coupled_field");
+      expectText(free_surface, "Generated_interface_domain_id",
+                 "open_vessel_surface");
+    }
+  }
 }

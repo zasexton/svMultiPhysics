@@ -1,0 +1,25 @@
+{
+  "benchmark": "SPHERIC Test 05 wet-bed dam break d=18 mm",
+  "dimensions_m": {
+    "computational_height": 0.18,
+    "computational_length": 1.2,
+    "extrusion_breadth": 0.03,
+    "initial_column_height": 0.15,
+    "profile_window_x_max": 1.04,
+    "profile_window_x_min": 0.38,
+    "wet_bed_depth": 0.018
+  },
+  "mesh_tools": [
+    "PyVista",
+    "TetGen",
+    "MMG"
+  ],
+  "notes": [
+    "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
+    "The initial level-set field is the union of the wet bed and the retained water column."
+  ],
+  "representation": "unfitted_level_set",
+  "source_urls": [
+    "https://www.spheric-sph.org/tests/test-05"
+  ]
+}

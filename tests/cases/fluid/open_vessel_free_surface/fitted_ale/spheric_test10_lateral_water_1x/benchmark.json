@@ -1,0 +1,22 @@
+{
+  "benchmark": "SPHERIC Test 10 lateral water 1x",
+  "dimensions_m": {
+    "initial_fill_height": 0.093,
+    "tank_breadth_1x": 0.062,
+    "tank_height": 0.508,
+    "tank_length": 0.9
+  },
+  "mesh_tools": [
+    "PyVista",
+    "TetGen",
+    "MMG"
+  ],
+  "notes": [
+    "The mesh encodes the 1x rectangular tank and still-water fill level.",
+    "The published roll-angle history and pressure records are external benchmark data."
+  ],
+  "representation": "fitted_ale",
+  "source_urls": [
+    "https://www.spheric-sph.org/tests/test-10"
+  ]
+}

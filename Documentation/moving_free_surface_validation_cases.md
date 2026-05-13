@@ -16,6 +16,38 @@ Common reported quantities:
 - generated-interface measure and normals for level-set runs
 - mesh quality metrics for fitted ALE runs
 
+## Generated Literature Geometry Fixtures
+
+The following mesh fixtures expand the open-vessel coverage beyond the small
+analytic examples. They are generated with PyVista, TetGen, and the MMG
+executables bundled with the `svv2` environment:
+
+```bash
+conda run -n svv2 python tests/cases/fluid/open_vessel_free_surface/generate_validation_meshes.py
+```
+
+Generated fitted ALE fixtures:
+
+- `tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x`
+
+Generated unfitted level-set fixtures:
+
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test10_lateral_water_1x`
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test05_wet_bed_d18`
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test05_wet_bed_d38`
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test02_dambreak_obstacle`
+
+Each generated case includes:
+
+- `solver.xml`
+- `pressure_gauge.csv`
+- `benchmark.json`
+- `mesh/.../mesh-complete.mesh.vtu`
+- `mesh/.../mesh-surfaces/*.vtp`
+
+The benchmark metadata records the published dimensions and source URLs so the
+meshes can be regenerated without searching through the literature again.
+
 ## Implementation Ownership
 
 Navier-Stokes owns free-surface boundary semantics for both fitted ALE and
@@ -97,6 +129,39 @@ Acceptance criteria:
   mesh
 - frequency converges toward the analytic value with refinement
 - no secular mean-surface drift beyond the volume-conservation tolerance
+
+## SPHERIC Test 10 Sloshing Wave Impact
+
+Purpose: add a published sloshing tank geometry with pressure-gauge data and
+large free-surface motion.
+
+Starting points:
+
+- fitted ALE: `tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x/solver.xml`
+- unfitted level set: `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test10_lateral_water_1x/solver.xml`
+
+Setup:
+
+- rectangular tank length `0.900 m`
+- 1x tank breadth `0.062 m`
+- lateral-water fill height `0.093 m`
+- water at `19 C`
+- published roll-angle history and pressure records from SPHERIC Test 10
+
+Reference behavior:
+
+- lateral wave impact timing and pressure history at the reported side-wall
+  sensor
+- overturning and breaking-wave onset for the low-fill water case
+- volume conservation across repeated sloshing periods
+
+Acceptance criteria:
+
+- impact timing follows the published pressure trace after tank-motion forcing
+  is wired into the executable case
+- pressure peaks converge toward the experimental envelope under refinement
+- fitted ALE is restricted to pre-breaking or non-overturning comparisons;
+  unfitted level set owns the breaking-wave comparison
 
 ## Capillary Wave Oscillation
 
@@ -195,6 +260,47 @@ Acceptance criteria:
 - nondimensional front-position curve follows the selected benchmark envelope
 - qualitative splash timing is stable under refinement
 - no negative volume or interface loss occurs in the level-set representation
+
+### SPHERIC Test 05 Wet-Bed Dam Break
+
+Starting points:
+
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test05_wet_bed_d18/solver.xml`
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test05_wet_bed_d38/solver.xml`
+
+Setup:
+
+- initial dam height `d0 = 0.15 m`
+- wet-bed depths `d = 0.018 m` and `d = 0.038 m`
+- thin three-dimensional extrusion of the published two-dimensional setup
+- level-set field initialized as the union of the wet bed and retained water
+  column
+
+Reference behavior:
+
+- leading-front velocity over the first meters of travel
+- free-surface profiles in the published digitized snapshot window
+
+### SPHERIC Test 02 Three-Dimensional Dam Break With Obstacle
+
+Starting point:
+
+- `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test02_dambreak_obstacle/solver.xml`
+
+Setup:
+
+- tank `3.22 m x 1.00 m x 1.00 m`
+- initial water column length `0.58 m`, height `0.55 m`, width `1.00 m`
+  at the right end of the tank
+- fixed obstacle `0.40 m x 0.16 m x 0.16 m`
+- obstacle centered at `x = 0.82 m`, `z = 0.50 m`
+
+Reference behavior:
+
+- impact time near the obstacle
+- water-height gauge histories
+- pressure response on the obstacle face
+- splash height and reflected-wave timing
 
 ## Long Transient Volume Conservation
 

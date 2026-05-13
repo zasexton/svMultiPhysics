@@ -516,6 +516,28 @@ Done when:
 - All migrated behavior passes in FE and Physics test suites.
 - Dependency guard checks show no forbidden FE-to-Physics includes.
 
+## Phase 15 - Literature Geometry Validation Fixtures
+
+Goal: extend free-surface validation inputs beyond the minimal open-vessel
+smoke cases.
+
+Checklist:
+
+- [x] Add a reproducible PyVista, TetGen, and MMG mesh-generation workflow for
+  open-vessel free-surface benchmark geometries.
+- [x] Add a fitted ALE SPHERIC Test 10 sloshing tank fixture.
+- [x] Add unfitted level-set SPHERIC Test 10, Test 05, and Test 02 fixtures.
+- [x] Record benchmark dimensions and source URLs with each generated case.
+- [x] Add application coverage for generated solver XML, mesh fields, side
+  sets, and pressure-gauge files.
+- [x] Update the moving free-surface validation notes with generated fixture
+  paths and intended benchmark comparisons.
+
+Done when:
+
+- The generated fixtures live under the existing fitted and unfitted
+  open-vessel folders and can be regenerated from the repository script.
+
 ## Completion Criteria
 
 - [x] `Code/Source/solver/FE/LevelSet` contains all reusable level-set
