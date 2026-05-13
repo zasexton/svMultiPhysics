@@ -1069,7 +1069,8 @@ struct GmresLaunchConfig {
     return limit;
 }
 
-[[nodiscard]] int fsilsBlockSchurOuterIterationCap(bool has_coupled_updates) noexcept
+[[nodiscard]] int fsilsBlockSchurOuterIterationCap(bool has_coupled_updates,
+                                                   bool configured_coupled_outer) noexcept
 {
     if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_OUTER_CAP")) {
         std::string value(env);
@@ -1094,11 +1095,14 @@ struct GmresLaunchConfig {
     }
 
     // BlockSchur uses RI.mItr as an outer basis/workspace dimension. Keep a
-    // conservative cap for ordinary fractional-step solves, but allow larger
-    // explicit budgets for coupled/reduced update solves where tight true
-    // residual validation is required. Override with
-    // SVMP_FSILS_BLOCKSCHUR_OUTER_CAP when a case needs a different workspace
-    // policy.
+    // conservative cap for ordinary fractional-step solves and automatic
+    // reduced-update routes. When the XML explicitly selects the coupled outer
+    // path, the XML Max_iterations value is the case-specific workspace
+    // budget. Override with SVMP_FSILS_BLOCKSCHUR_OUTER_CAP when a run needs a
+    // different workspace policy.
+    if (configured_coupled_outer) {
+        return std::numeric_limits<int>::max();
+    }
     return has_coupled_updates ? 200 : 50;
 }
 
@@ -1545,7 +1549,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             con_ncomp == 1;
         const int requested_max_iter = std::max(1, options_.max_iter);
         const int outer_cap =
-            fsilsBlockSchurOuterIterationCap(has_native_rank_one_updates || configured_coupled_outer);
+            fsilsBlockSchurOuterIterationCap(has_native_rank_one_updates || configured_coupled_outer,
+                                             configured_coupled_outer);
         const int effective_max_iter = std::min(requested_max_iter, outer_cap);
         if (oopTraceEnabled()) {
             std::ostringstream cap_oss;

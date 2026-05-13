@@ -33,6 +33,11 @@ LINEAR_SOLVER_TOLERANCE = "1.0e-6"
 LINEAR_SOLVER_ABSOLUTE_TOLERANCE = "1.0e-10"
 FLUID_NONLINEAR_TOLERANCE = "1.0e-6"
 LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-6"
+TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE = "1.0e-7"
+TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE = "5.0e-6"
+TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "12"
+TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS = "800"
+TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION = "800"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
     "initial_phi": -0.001806,
@@ -433,6 +438,25 @@ def write_solver_xml(
     <Active_domain_method>CutVolume</Active_domain_method>"""
     cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
     unfitted_fluid_solver_type = "NS" if use_blockschur_solver else "GMRES"
+    unfitted_fluid_nonlinear_tolerance = (
+        TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE
+        if use_blockschur_solver
+        else FLUID_NONLINEAR_TOLERANCE
+    )
+    unfitted_fluid_max_iterations = (
+        TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS if use_blockschur_solver else "8"
+    )
+    unfitted_linear_max_iterations = (
+        TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS if use_blockschur_solver else "100"
+    )
+    unfitted_krylov_space_dimension = (
+        TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION if use_blockschur_solver else "80"
+    )
+    unfitted_linear_absolute_tolerance = (
+        TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE
+        if use_blockschur_solver
+        else LINEAR_SOLVER_ABSOLUTE_TOLERANCE
+    )
     unfitted_blockschur_controls = ""
     if use_blockschur_solver:
         unfitted_blockschur_controls = f"""
@@ -449,8 +473,8 @@ def write_solver_xml(
 <Add_equation type="fluid">
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
-  <Max_iterations>8</Max_iterations>
-  <Tolerance>{FLUID_NONLINEAR_TOLERANCE}</Tolerance>
+  <Max_iterations>{unfitted_fluid_max_iterations}</Max_iterations>
+  <Tolerance>{unfitted_fluid_nonlinear_tolerance}</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Enable_ALE>true</Enable_ALE>
@@ -606,10 +630,10 @@ def write_solver_xml(
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>100</Max_iterations>
-    <Krylov_space_dimension>80</Krylov_space_dimension>
+    <Max_iterations>{unfitted_linear_max_iterations}</Max_iterations>
+    <Krylov_space_dimension>{unfitted_krylov_space_dimension}</Krylov_space_dimension>
     <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
-    <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>{unfitted_blockschur_controls}
+    <Absolute_tolerance>{unfitted_linear_absolute_tolerance}</Absolute_tolerance>{unfitted_blockschur_controls}
   </LS>
 
 {wall_bc_blocks}
