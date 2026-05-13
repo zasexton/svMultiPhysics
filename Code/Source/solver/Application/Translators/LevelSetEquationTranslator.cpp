@@ -1,5 +1,6 @@
+#include "Application/Translators/LevelSetEquationTranslator.h"
+
 #include "Physics/Core/EquationModuleInput.h"
-#include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
@@ -20,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -134,7 +136,7 @@ double parse_double(std::string_view raw, std::string_view context)
     }
     return v;
   } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse numeric value '" + std::string(raw) +
+    throw std::runtime_error("[svMultiPhysics::Application] Failed to parse numeric value '" + std::string(raw) +
                              "' for " + std::string(context) + ".");
   }
 }
@@ -165,7 +167,7 @@ std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw, std::stri
     double value = 0.0;
     if (!(in >> value) || !std::isfinite(value)) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Failed to parse three numeric components for " +
+          "[svMultiPhysics::Application] Failed to parse three numeric components for " +
           std::string(context) + ".");
     }
     out[i] = static_cast<svmp::FE::Real>(value);
@@ -173,7 +175,7 @@ std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw, std::stri
   std::string extra;
   if (in >> extra) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Failed to parse three numeric components for " +
+        "[svMultiPhysics::Application] Failed to parse three numeric components for " +
         std::string(context) + ".");
   }
   return out;
@@ -208,7 +210,7 @@ int parse_positive_int(std::string_view raw, std::string_view context)
     }
     return v;
   } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse positive integer value '" +
+    throw std::runtime_error("[svMultiPhysics::Application] Failed to parse positive integer value '" +
                              std::string(raw) + "' for " + std::string(context) + ".");
   }
 }
@@ -247,24 +249,24 @@ svmp::FE::systems::FormInstallOptions level_set_install_options(
 svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
 {
   if (mesh.n_cells() == 0) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cells; cannot infer FE element type.");
+    throw std::runtime_error("[svMultiPhysics::Application] Mesh has no cells; cannot infer FE element type.");
   }
 
   const auto& shapes = mesh.cell_shapes();
   if (shapes.empty()) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cell shapes; cannot infer FE element type.");
+    throw std::runtime_error("[svMultiPhysics::Application] Mesh has no cell shapes; cannot infer FE element type.");
   }
 
   if (shapes.front().is_mixed_order) {
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Mixed-order meshes are not supported by the level-set transport module.");
+        "[svMultiPhysics::Application] Mixed-order meshes are not supported by the level-set transport module.");
   }
 
   const auto family = shapes.front().family;
   for (const auto& s : shapes) {
     if (s.family != family) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Mixed cell families are not supported by the level-set transport module.");
+          "[svMultiPhysics::Application] Mixed cell families are not supported by the level-set transport module.");
     }
   }
 
@@ -280,7 +282,7 @@ svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
       break;
   }
 
-  throw std::runtime_error("[svMultiPhysics::Physics] Unsupported mesh cell family for level-set transport.");
+  throw std::runtime_error("[svMultiPhysics::Application] Unsupported mesh cell family for level-set transport.");
 }
 
 int infer_polynomial_order(const svmp::MeshBase& mesh)
@@ -295,7 +297,7 @@ int infer_polynomial_order(const svmp::MeshBase& mesh)
     const int s_order = s.order > 0 ? s.order : 1;
     if (s_order != order) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Mixed polynomial orders are not supported by the level-set transport module.");
+          "[svMultiPhysics::Application] Mixed polynomial orders are not supported by the level-set transport module.");
     }
   }
 
@@ -320,7 +322,7 @@ ls::LevelSetFieldSource parse_level_set_source(std::string_view raw)
     return ls::LevelSetFieldSource::PrescribedData;
   }
   throw std::runtime_error(
-      "[svMultiPhysics::Physics] Level_set_source must be one of 'unknown' or 'prescribed_data'.");
+      "[svMultiPhysics::Application] Level_set_source must be one of 'unknown' or 'prescribed_data'.");
 }
 
 ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
@@ -336,7 +338,7 @@ ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
     return ls::LevelSetVelocitySource::ConstantVector;
   }
   throw std::runtime_error(
-      "[svMultiPhysics::Physics] Velocity_source must be one of 'coupled_field', 'prescribed_data', or 'constant'.");
+      "[svMultiPhysics::Application] Velocity_source must be one of 'coupled_field', 'prescribed_data', or 'constant'.");
 }
 
 ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
@@ -352,7 +354,7 @@ ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_vie
     return ls::LevelSetReinitializationMethod::Projection;
   }
   throw std::runtime_error(
-      "[svMultiPhysics::Physics] Reinitialization_method must be one of 'HamiltonJacobiPDE', 'FastMarching', or 'Projection'.");
+      "[svMultiPhysics::Application] Reinitialization_method must be one of 'HamiltonJacobiPDE', 'FastMarching', or 'Projection'.");
 }
 
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
@@ -505,7 +507,7 @@ void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
   for (const auto& bc : input.boundary_conditions) {
     if (bc.boundary_marker == svmp::INVALID_LABEL) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Level-set boundary condition '" + bc.name +
+          "[svMultiPhysics::Application] Level-set boundary condition '" + bc.name +
           "' has invalid boundary marker; ensure <Add_face name=\"...\"> exists and is referenced correctly.");
     }
 
@@ -534,7 +536,7 @@ void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
     }
 
     throw std::runtime_error(
-        "[svMultiPhysics::Physics] Boundary condition type '" +
+        "[svMultiPhysics::Application] Boundary condition type '" +
         (type_param ? trim_copy(type_param->value) : std::string{}) +
         "' is not supported for the level-set transport module. Supported types: LevelSetInflow, LevelSetOutflow.");
   }
@@ -545,14 +547,14 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
                                       svmp::FE::systems::FESystem& system)
 {
   if (!input.mesh) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Level-set transport module factory received null mesh.");
+    throw std::runtime_error("[svMultiPhysics::Application] Level-set transport module factory received null mesh.");
   }
 
   const auto element_type = infer_base_element_type(*input.mesh);
   const int order = resolve_element_order(input, infer_polynomial_order(*input.mesh));
   const int dim = input.mesh->dim();
   if (dim < 1 || dim > 3) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Level-set transport requires a mesh dimension in [1, 3].");
+    throw std::runtime_error("[svMultiPhysics::Application] Level-set transport requires a mesh dimension in [1, 3].");
   }
 
   auto level_set_space = svmp::FE::spaces::SpaceFactory::create_h1(element_type, order);
@@ -567,7 +569,7 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
   if (!input.domains.empty()) {
     if (input.domains.size() != 1u) {
       throw std::runtime_error(
-          "[svMultiPhysics::Physics] Multiple <Domain> blocks are not supported by the level-set transport module.");
+          "[svMultiPhysics::Application] Multiple <Domain> blocks are not supported by the level-set transport module.");
     }
     apply_level_set_params(input.domains.front().params, options);
   }
@@ -585,12 +587,29 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
 
 } // namespace
 
-SVMP_REGISTER_EQUATION("level_set", &create_level_set_transport_from_input);
-SVMP_REGISTER_EQUATION("levelSet", &create_level_set_transport_from_input);
-SVMP_REGISTER_EQUATION("level_set_transport", &create_level_set_transport_from_input);
+namespace application {
+namespace translators {
+namespace level_set {
 
-namespace svmp::Physics::formulations {
+bool isEquationType(std::string_view type)
+{
+  return type == "level_set" ||
+         type == "levelSet" ||
+         type == "level_set_transport";
+}
 
-void forceLink_LevelSetRegister() {}
+std::vector<std::string> equationTypes()
+{
+  return {"level_set", "levelSet", "level_set_transport"};
+}
 
-} // namespace svmp::Physics::formulations
+std::unique_ptr<svmp::Physics::PhysicsModule>
+createModule(const svmp::Physics::EquationModuleInput& input,
+             svmp::FE::systems::FESystem& system)
+{
+  return create_level_set_transport_from_input(input, system);
+}
+
+} // namespace level_set
+} // namespace translators
+} // namespace application

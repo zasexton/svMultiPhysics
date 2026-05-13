@@ -8,8 +8,9 @@ level-set field transport, generated interface construction, cut-cell volume
 diagnostics, signed-distance repair, volume correction, diagnostics, and restart
 metadata physics-agnostic.
 
-Physics modules should own only input translation and equation-specific coupling.
-FE should own reusable level-set algorithms and FE-system integration services.
+Application translators and Physics modules should own only input translation
+and equation-specific coupling. FE should own reusable level-set algorithms and
+FE-system integration services.
 
 ## Target Architecture
 
@@ -40,12 +41,12 @@ Forbidden dependencies for `FE/LevelSet`:
 - `Physics/Formulations`
 - any other `Physics/...` include
 
-Physics should retain a thin adapter that:
+The application layer should retain a thin compatibility adapter that:
 
 - Parses equation-module input.
 - Infers or constructs FE function spaces.
 - Translates input parameters into `FE::level_set` option structs.
-- Translates Physics runtime policy into FE form-install options.
+- Translates runtime policy into FE form-install options.
 - Calls FE-level installation and diagnostic APIs.
 
 ## Non-Goals
@@ -328,23 +329,28 @@ Done when:
 - Level-set transport residual assembly can be installed from FE without a
   `PhysicsModule`.
 
-## Phase 9 - Reduce Physics Level-Set Code To Input Adapter
+## Phase 9 - Reduce Level-Set Code To An Application Input Adapter
 
-Goal: leave Physics with only equation-module factory glue.
+Goal: leave no Physics formulation code for level-set transport while
+preserving legacy equation input compatibility in the application layer.
 
-Current file:
+Previous file:
 
 - `Physics/Formulations/LevelSet/LevelSetRegister.cpp`
+
+Current compatibility adapter:
+
+- `Application/Translators/LevelSetEquationTranslator.cpp`
 
 Checklist:
 
 - [x] Replace direct construction of `LevelSetTransportModule` with a thin
-  Physics adapter that calls `FE::level_set::installLevelSetTransport`.
-- [x] Keep XML/input parameter parsing in Physics.
-- [x] Keep element type and space inference in Physics if it depends on
-  equation-module input.
+  application adapter that calls `FE::level_set::installLevelSetTransport`.
+- [x] Keep XML/input parameter parsing in the application translator.
+- [x] Keep element type and space inference in the application translator if it
+  depends on equation-module input.
 - [x] Translate parsed values into `FE::level_set::LevelSetTransportOptions`.
-- [x] Translate Physics JIT runtime policy into `FE::systems::FormInstallOptions`.
+- [x] Translate runtime JIT policy into `FE::systems::FormInstallOptions`.
 - [x] Preserve accepted parameter names:
   - [x] `Level_set_field_name`
   - [x] `Level_set_source`
@@ -358,13 +364,15 @@ Checklist:
 - [x] Preserve supported boundary condition names:
   - [x] `LevelSetInflow`
   - [x] `LevelSetOutflow`
-- [x] Keep Physics tests for input translation and module registration.
+- [x] Keep application tests for input translation and module creation.
 - [x] Move pure algorithm and FE-system behavior tests out of Physics.
 
 Done when:
 
-- Physics contains no reusable level-set algorithms.
-- Physics remains backward compatible for existing level-set equation inputs.
+- Physics contains no reusable level-set algorithms or level-set equation
+  registrar.
+- Application translation remains backward compatible for existing level-set
+  equation inputs.
 
 ## Phase 10 - Update Navier-Stokes And Free-Surface Consumers
 
@@ -406,19 +414,24 @@ FE tests to add or move:
 - [x] Restart record capture and validation.
 - [x] Header compile tests for `FE/LevelSet`.
 
-Physics tests to keep:
+Application tests to keep:
 
-- [x] Equation-module factory registration.
+- [x] Level-set equation-module creation.
 - [x] Input parameter translation.
 - [x] Boundary condition translation.
 - [x] Constant velocity input translation.
 - [x] JIT option translation into FE install options.
 - [x] Compatibility of existing open-vessel example input files.
 
+Physics tests to keep:
+
+- [x] Downstream Navier-Stokes free-surface consumption of FE level-set services.
+
 Done when:
 
 - FE tests cover reusable level-set behavior.
-- Physics tests cover only Physics input glue and downstream compatibility.
+- Application tests cover level-set input glue.
+- Physics tests cover only downstream Physics compatibility.
 
 ## Phase 12 - Remove Old Physics Level-Set Implementation
 
@@ -429,9 +442,11 @@ Checklist:
 - [x] Remove moved headers from `Physics/Formulations/LevelSet`.
 - [x] Remove moved sources from `Physics/Formulations/LevelSet`.
 - [x] Remove moved files from `Code/Source/solver/Physics/CMakeLists.txt`.
-- [x] Keep only the registration adapter if Physics still needs a
-  level-set equation module entry point.
+- [x] Move the legacy level-set equation input adapter to Application
+  translators.
 - [x] Update all include paths across the repository.
+- [x] Confirm no files remain in `Physics/Formulations/LevelSet`:
+  - [x] `find Code/Source/solver/Physics/Formulations/LevelSet -maxdepth 1 -type f`
 - [x] Confirm no stale code/test include references remain:
   - [x] `rg 'Physics/Formulations/LevelSet' Code tests`
 - [x] Confirm FE has no forbidden Physics dependency:
@@ -487,11 +502,12 @@ Verification notes:
 - `svfe` and FE geometry, level-set, and targeted generated-interface systems
   tests pass. The full FE systems target still has unrelated Stokes coupling
   and pressure-gauge failures.
-- `svphysics` builds, and targeted level-set registration and free-surface
-  Physics tests pass. The full serial Physics test target still has an
+- `svphysics` builds, and targeted free-surface Physics tests pass. The full
+  serial Physics test target still has an
   unrelated mesh-motion coefficient naming failure.
-- Application translation and open-vessel compatibility tests pass with
-  `test_application --gtest_filter='EquationTranslator*.*:OpenVesselExamples.*'`.
+- Application level-set translator, translation, and open-vessel compatibility
+  tests pass with
+  `test_application --gtest_filter='LevelSetEquationTranslator.*:EquationTranslator*.*:OpenVesselExamples.*'`.
 - Moving free-surface coverage passes through the targeted fitted, unfitted,
   cut-cell, generated-interface, and coupled ALE free-surface Physics tests.
 
@@ -504,14 +520,14 @@ Done when:
 
 - [x] `Code/Source/solver/FE/LevelSet` contains all reusable level-set
   implementation.
-- [x] `Code/Source/solver/Physics/Formulations/LevelSet` contains no reusable
-  algorithms.
+- [x] `Code/Source/solver/Physics/Formulations/LevelSet` contains no files.
 - [x] `FE::level_set` exposes generated interface, transport, volume,
   reinitialization, diagnostics, and restart APIs.
-- [x] Physics level-set registration is an adapter over `FE::level_set`.
+- [x] Application level-set translation is an adapter over `FE::level_set`.
 - [x] Navier-Stokes free-surface code uses FE level-set services directly.
 - [x] Existing level-set input files remain compatible.
 - [x] FE tests own reusable level-set behavior.
-- [x] Physics tests own only input and registration behavior.
+- [x] Application tests own level-set input and compatibility behavior.
+- [x] Physics tests own downstream free-surface behavior.
 - [x] No `Physics/...` include appears under `FE/LevelSet`.
 - [x] No stale `Physics/Formulations/LevelSet` include remains after removal.

@@ -1,6 +1,7 @@
 #include "Application/Translators/EquationTranslator.h"
 
 #include "Application/Core/OopMpiLog.h"
+#include "Application/Translators/LevelSetEquationTranslator.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
@@ -292,8 +293,17 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
   application::core::oopCout() << "[svMultiPhysics::Application] EquationTranslator: createModule(type='" << eq_type
                                << "')" << std::endl;
 
+  if (level_set::isEquationType(eq_type)) {
+    return level_set::createModule(input, system);
+  }
+
   auto& registry = svmp::Physics::EquationModuleRegistry::instance();
-  const auto types = registry.registeredTypes();
+  auto types = registry.registeredTypes();
+  for (auto type : level_set::equationTypes()) {
+    if (std::find(types.begin(), types.end(), type) == types.end()) {
+      types.push_back(std::move(type));
+    }
+  }
   const auto supported = std::find(types.begin(), types.end(), eq_type) != types.end();
   if (!supported) {
     std::string supported_list = types.empty() ? "(none)" : types.front();

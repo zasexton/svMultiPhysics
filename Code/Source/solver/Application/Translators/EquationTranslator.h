@@ -6,6 +6,7 @@
 
 #include "Mesh/Mesh.h"
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Core/PhysicsModule.h"
 
 class EquationParameters;
 
@@ -18,9 +19,6 @@ namespace spaces {
 class FunctionSpace;
 }
 } // namespace FE
-namespace Physics {
-class PhysicsModule;
-}
 } // namespace svmp
 
 namespace application {

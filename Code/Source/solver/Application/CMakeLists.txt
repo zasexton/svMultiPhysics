@@ -10,6 +10,7 @@ add_library(svapplication STATIC
   Core/SimulationBuilder.cpp
   Translators/MeshTranslator.cpp
   Translators/EquationTranslator.cpp
+  Translators/LevelSetEquationTranslator.cpp
 )
 
 set_target_properties(svapplication PROPERTIES

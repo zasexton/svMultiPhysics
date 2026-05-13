@@ -6,7 +6,6 @@
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
-#include "Physics/Core/EquationModuleRegistry.h"
 #include "tinyxml2.h"
 
 #include <algorithm>
@@ -381,10 +380,10 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
             "prescribed_data");
 
   svmp::FE::systems::FESystem system(mesh);
-  auto module = svmp::Physics::EquationModuleRegistry::instance().create(
-      "level_set",
-      level_set_input,
-      system);
+  auto module = application::translators::EquationTranslator::createModule(
+      *level_set_params,
+      system,
+      meshes);
   ASSERT_TRUE(module);
   const auto phi = system.findFieldByName("phi");
   ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
