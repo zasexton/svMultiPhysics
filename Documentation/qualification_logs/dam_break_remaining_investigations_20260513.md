@@ -45,6 +45,50 @@ interface-extraction diagnostic, not as benchmark validation.
 - The level set can move while the momentum field remains physically
   inconsistent with the dam-break benchmark.
 
+## Investigation Findings
+
+Code inspection and targeted data checks on 2026-05-13 confirmed the accuracy
+error comes from the current unfitted formulation, not from the profile
+comparison alone.
+
+- In `IncompressibleNavierStokesVMSModule.cpp`, the momentum and continuity
+  residuals are formed on whole-cell `.dx()` measures before any free-surface
+  branch is applied. There is no level-set-side or wet-region cell measure in
+  this residual path.
+- The D18 fixture sets `External_pressure = 0.0`, `Surface_tension = 0.0`, and
+  no `Kinematic_enforcement` for the unfitted free surface. The
+  `applyFreeSurfaceBoundary()` branch returns before adding interface terms when
+  dynamic stress and kinematic enforcement are both inactive.
+- The generated-interface lifecycle currently imports interface quadrature into
+  `CutIntegrationContext` through `addGeneratedInterfaceDomain()`, but that path
+  only populates `interfaceRules()`. It does not create negative-side volume
+  rules that Navier-Stokes `.dx()` assembly could consume.
+- `LevelSetInterfaceDomain` does carry per-fragment negative and positive volume
+  fractions, and `LevelSetVolume` uses those fractions for diagnostics and
+  global-shift correction. Those fractions are not connected to Navier-Stokes
+  residual or tangent assembly.
+- The public Forms vocabulary still exposes only `.dx()`, `.ds(marker)`,
+  `.dS()`, and `.dI(marker)` measures. There is no public form measure for
+  "integrate this cell residual over the level-set-negative side".
+- The D18 pressure gauge is node `279`, located at approximately
+  `(0.375565, 0.148194, 0.013150)` with initial `phi = -0.001806`. The
+  full-volume hydrostatic initializer would give this node `17.6869 Pa`, so the
+  zero gauge shifts the full hydrostatic field down by that amount. This matches
+  the observed hydrostatic error range `[-17.6869, 0.0] Pa`.
+- The initial D18 wet-bed level set already spans the tank in the comparison
+  window. A front metric based on the top extracted `phi = 0` contour can
+  therefore land near the reference front even when the released column does not
+  generate the expected high free-surface profile. The near-front agreement is a
+  wet-bed/interface-extraction artifact, while the peak-height error reflects
+  the missing collapse dynamics.
+
+The immediate implementation gap is therefore an active-domain definition shared
+by Navier-Stokes volume forms, VMS terms, pressure coupling, level-set transport
+diagnostics, and generated interface metadata. A smoothed material indicator can
+be a short-term approximation, but it must replace the current constant
+single-material full-tank momentum balance rather than only modifying boundary
+terms.
+
 ## Investigation Areas
 
 ### Wet-Side Active-Domain Integration
