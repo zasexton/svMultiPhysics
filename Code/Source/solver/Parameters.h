@@ -1147,6 +1147,7 @@ class LinearSolverParameters : public ParameterLists
     Parameter<double> ns_gm_tolerance;
     Parameter<std::string> ns_schur_preconditioner;
     Parameter<std::string> ns_momentum_approximation;
+    Parameter<bool> ns_use_coupled_outer_fgmres;
 
     //Parameter<std::string> preconditioner;
 

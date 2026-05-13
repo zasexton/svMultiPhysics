@@ -358,6 +358,8 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
         toFsilsBlockSchurPreconditioner(eq->linear_solver.ns_schur_preconditioner.value());
     opts.fsils_blockschur_momentum_approximation =
         toFsilsBlockSchurMomentumApproximation(eq->linear_solver.ns_momentum_approximation.value());
+    opts.fsils_blockschur_use_coupled_outer_fgmres =
+        eq->linear_solver.ns_use_coupled_outer_fgmres.value();
 
     const char* schur_pc_env = std::getenv("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC");
     if (schur_pc_env && schur_pc_env[0]) {

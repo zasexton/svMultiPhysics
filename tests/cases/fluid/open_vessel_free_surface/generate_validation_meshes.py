@@ -437,7 +437,8 @@ def write_solver_xml(
     <NS_CG_max_iterations>1000</NS_CG_max_iterations>
     <NS_CG_tolerance>{LINEAR_SOLVER_TOLERANCE}</NS_CG_tolerance>
     <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
-    <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>"""
+    <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
+    <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>"""
 
     if fitted:
         equations = f"""
@@ -487,7 +488,7 @@ def write_solver_xml(
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>100</Max_iterations>
+    <Max_iterations>200</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>

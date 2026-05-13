@@ -1049,8 +1049,11 @@ bool ns_solver_coupled_fgmres_scalar(
   const int pressure_ncomp = 1;
   const int default_outer_krylov_dim =
       std::max(ls.RI.mItr, ls.RI.mItr * std::max(1, ls.GM.mItr));
+  const int requested_outer_iterations = std::max(1, ls.RI.mItr);
+  const int requested_krylov_dim =
+      (ls.RI.sD > 0) ? ls.RI.sD : default_outer_krylov_dim;
   const int outer_krylov_dim =
-      std::max(1, (ls.RI.sD > 0) ? ls.RI.sD : default_outer_krylov_dim);
+      std::max(requested_outer_iterations, requested_krylov_dim);
 
   ls.RI.ws.ensure_gmres_v(dof, nNo, outer_krylov_dim);
   auto& h = ls.RI.ws.h;
@@ -2013,21 +2016,25 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   const auto strategy =
       fe_fsi_linear_solver::BlockSchurStrategySelector::select(
           lhs, explicit_low_rank_correction.profile, /*con_ncomp=*/1);
+  const bool use_coupled_outer_fgmres =
+      strategy.use_coupled_outer_fgmres_scalar ||
+      ls.use_coupled_outer_fgmres_scalar;
   if (lhs.commu.masF && fsilsTraceEnabled()) {
     std::fprintf(stderr,
-                 "[NS_SOLVER] explicit_block_modes=%zu coupled_face_modes=%zu native_face_rank_one_count=%d native_face_duplicate_modes=%zu auto_outer_fgmres=%d force_outer_fgmres=%d\n",
+                 "[NS_SOLVER] explicit_block_modes=%zu coupled_face_modes=%zu native_face_rank_one_count=%d native_face_duplicate_modes=%zu auto_outer_fgmres=%d force_outer_fgmres=%d configured_outer_fgmres=%d\n",
                  static_cast<std::size_t>(explicit_low_rank_correction.profile.projected_mode_count),
                  static_cast<std::size_t>(explicit_low_rank_correction.profile.active_face_corrections),
                  lhs.native_face_rank_one_count,
                  static_cast<std::size_t>(
                      explicit_low_rank_correction.profile.active_duplicate_reduced_corrections),
                  strategy.auto_enable_coupled_outer_fgmres_scalar ? 1 : 0,
-                 strategy.force_enable_coupled_outer_fgmres_scalar ? 1 : 0);
+                 strategy.force_enable_coupled_outer_fgmres_scalar ? 1 : 0,
+                 ls.use_coupled_outer_fgmres_scalar ? 1 : 0);
   }
-  if (strategy.use_coupled_outer_fgmres_scalar) {
+  if (use_coupled_outer_fgmres) {
     if (lhs.commu.masF && fsilsTraceEnabled()) {
       std::fprintf(stderr,
-                   "[NS_SOLVER] attempting coupled outer FGMRES for block-corrected scalar system\n");
+                   "[NS_SOLVER] attempting coupled outer FGMRES for scalar constraint system\n");
     }
     Array<double> coupled_solution = Ri;
     bool coupled_fgmres_succeeded = false;

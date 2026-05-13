@@ -162,18 +162,16 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       controls through the fluid equation for D18-style equation ordering.
       Evidence:
       `Documentation/qualification_logs/dam_break_d18_solver_routing_strict_tolerance_attempts_20260513.md`.
-- [ ] Add a robust solver path for the coupled `phi`, `Velocity`, and
+- [x] Add a robust solver path for the coupled `phi`, `Velocity`, and
       `Pressure` D18 layout, or restructure D18 so the Navier-Stokes solve can
       use a velocity-pressure solver block without the level-set field in the
       same linear system.
-      Current finding: solver-control routing is corrected and D18 now has a
-      concrete FSILS BlockSchur route with
-      `block_layout=[LevelSetVelocity(0:4), Pressure(4:1)]`. A larger
-      BlockSchur budget can let some strict linear solves reach the requested
-      tolerance, but the strict one-step case then fails nonlinear convergence;
-      transient line search rejects the accepted PTC direction because every
-      tested step increases the residual. Evidence:
-      `Documentation/qualification_logs/dam_break_d18_strict_blockschur_budget_linesearch_20260513.md`.
+      Current finding: D18 now has an explicit coupled outer FGMRES route for
+      the FSILS BlockSchur
+      `block_layout=[LevelSetVelocity(0:4), Pressure(4:1)]` split. The strict
+      one-step D18 probe completed with three fluid Newton iterations and
+      `success=1`. Evidence:
+      `Documentation/qualification_logs/dam_break_d18_coupled_outer_fgmres_20260513.md`.
 - [x] Add explicit D18/D38 FSILS BlockSchur layout grouping and solver XML
       controls for the `phi`, `Velocity`, and `Pressure` field order.
       Evidence:
@@ -189,7 +187,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       fixtures.
       Evidence:
       `Documentation/qualification_logs/dam_break_cut_metadata_scale_20260513.md`.
-- [ ] Re-run D18 strict tolerance after the solver path is corrected.
+- [x] Re-run D18 strict tolerance after the solver path is corrected.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_coupled_outer_fgmres_20260513.md`.
 - [x] Record nonlinear iteration counts, linear iteration counts, and residual
       norms for each D18/D38 qualification attempt.
 - [ ] If active-domain cut cells introduce solver instability, tune

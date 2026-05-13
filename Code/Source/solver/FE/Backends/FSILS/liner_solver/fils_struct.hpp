@@ -766,6 +766,7 @@ class FSILS_lsType
     int mom_ncomp{0};    ///< Number of field-A components (0 = use legacy nsd = dof-1)
     int con_start{0};    ///< First per-node component of field-B (constraint) block
     int con_ncomp{0};    ///< Number of field-B components (typically 1)
+    bool use_coupled_outer_fgmres_scalar{false};
 };
 
 

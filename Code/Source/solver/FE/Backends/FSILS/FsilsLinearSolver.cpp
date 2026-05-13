@@ -1539,8 +1539,13 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     auto& ls = ls_;
     if (use_blockschur) {
+        const bool configured_coupled_outer =
+            options_.fsils_blockschur_use_coupled_outer_fgmres &&
+            has_saddle_point &&
+            con_ncomp == 1;
         const int requested_max_iter = std::max(1, options_.max_iter);
-        const int outer_cap = fsilsBlockSchurOuterIterationCap(has_native_rank_one_updates);
+        const int outer_cap =
+            fsilsBlockSchurOuterIterationCap(has_native_rank_one_updates || configured_coupled_outer);
         const int effective_max_iter = std::min(requested_max_iter, outer_cap);
         if (oopTraceEnabled()) {
             std::ostringstream cap_oss;
@@ -1548,7 +1553,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     << " requested=" << requested_max_iter
                     << " cap=" << outer_cap
                     << " effective=" << effective_max_iter
-                    << " coupled_updates=" << (has_native_rank_one_updates ? 1 : 0);
+                    << " coupled_updates=" << (has_native_rank_one_updates ? 1 : 0)
+                    << " coupled_outer=" << (configured_coupled_outer ? 1 : 0);
             traceLog(cap_oss.str());
         }
         if (options_.krylov_dim > 0) {
@@ -1604,6 +1610,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             to_fsils_blockschur_preconditioner(options_.fsils_blockschur_schur_preconditioner);
         ls.CG.schur_momentum_approximation =
             to_fsils_blockschur_momentum_approximation(options_.fsils_blockschur_momentum_approximation);
+        ls.use_coupled_outer_fgmres_scalar =
+            options_.fsils_blockschur_use_coupled_outer_fgmres;
 
         if (has_saddle_point) {
             ls.mom_start = mom_start;
@@ -1612,6 +1620,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             ls.con_ncomp = con_ncomp;
         }
     } else {
+        ls.use_coupled_outer_fgmres_scalar = false;
         const auto method = to_fsils_solver(options_.method);
         if (method == fe_fsi_linear_solver::LS_TYPE_GMRES) {
             const int gmres_total_iters = gmres_total_iteration_budget(options_, /*legacy_restart_budget=*/false);

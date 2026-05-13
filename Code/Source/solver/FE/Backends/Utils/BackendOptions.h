@@ -619,6 +619,11 @@ struct SolverOptions {
     std::optional<int> fsils_blockschur_cg_max_iter{};
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
     std::optional<Real> fsils_blockschur_cg_rel_tol{};
+    /// Use a full-system FGMRES outer iteration preconditioned by the
+    /// BlockSchur split. This helps grouped primary blocks whose native
+    /// fractional-step direction is not a descent direction for the coupled
+    /// residual.
+    bool fsils_blockschur_use_coupled_outer_fgmres{false};
     /// `Auto` resolves to the strongest FSILS-native algebraic Schur
     /// approximation unless the user requests a cheaper concrete option.
     FsilsBlockSchurSchurPreconditioner fsils_blockschur_schur_preconditioner{

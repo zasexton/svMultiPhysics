@@ -127,7 +127,7 @@
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>100</Max_iterations>
+    <Max_iterations>200</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-4</Absolute_tolerance>
@@ -137,6 +137,7 @@
     <NS_CG_tolerance>1.0e-4</NS_CG_tolerance>
     <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
+    <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>
   </LS>
 
   <Add_BC name="wall_left">
