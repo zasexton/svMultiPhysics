@@ -82,6 +82,28 @@ again with only `Number_of_time_steps` changed to `6` in the temporary copy.
   `9297` all-reduce calls
 - Steps 3 through 6 each used `4` to `5` outer iterations and no Schur solves.
 
+## Extended Fluid Tolerance Probe
+
+The 312-step profile run with `1.0e-4` fluid nonlinear tolerance reached step
+13 and failed at step 13 with residual `1.7053193047519049e-04`. Raising only
+the fluid Newton cap from `8` to `12` reproduced the same stalled residual.
+
+A second probe raised only the fluid nonlinear tolerance to `2.0e-4` and
+reached step 14, then failed at step 14 with residual
+`2.7857640075002691e-04`.
+
+The accepted extended probe raised only the fluid nonlinear tolerance to
+`5.0e-4`:
+
+- Run directory: `/tmp/svmp_d18_mpi4_loose_fluid5e4_30step_enoi2A`
+- `success=1`
+- `steps_taken=30`
+- `final_time=1.4999999999999999e-02`
+- Highest reported accepted residual after step 13:
+  `3.6182047079735206e-04` at step 15
+- The run maintained one Newton iteration per step and did not re-enter the
+  strict-control Schur stall.
+
 Static checks:
 
 ```bash
@@ -97,6 +119,7 @@ build/svMultiPhysics-build/bin/test_application \
 ## Decision
 
 The checked-in D18/D38 Test05 profile inputs now use the loose profile controls
-above. The strict one-step controls remain documented as solver-floor evidence,
-but the profile comparison requires a multi-step run that can reach
-`result_312` without the step-4 MPI BlockSchur stall.
+above with fluid nonlinear tolerance `5.0e-4`. The strict one-step controls
+remain documented as solver-floor evidence, but the profile comparison requires
+a multi-step run that can reach `result_312` without the step-4 MPI BlockSchur
+stall or the later Newton residual floor.

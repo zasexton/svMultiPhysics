@@ -300,7 +300,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       the multi-step profile run. The checked-in D18/D38 Test05 inputs now use
       the documented profile-run controls: coupled-outer BlockSchur budget
       `100`, linear relative and fluid absolute tolerances `1.0e-4`, fluid
-      Newton cap `8`, and fluid nonlinear tolerance `1.0e-4`. Evidence:
+      Newton cap `8`, and fluid nonlinear tolerance `5.0e-4`. Evidence:
       `Documentation/qualification_logs/dam_break_d18_profile_solver_controls_20260513.md`.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new

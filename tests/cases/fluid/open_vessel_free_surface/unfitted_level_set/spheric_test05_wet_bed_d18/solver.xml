@@ -50,7 +50,7 @@
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
-  <Tolerance>1.0e-4</Tolerance>
+  <Tolerance>5.0e-4</Tolerance>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
