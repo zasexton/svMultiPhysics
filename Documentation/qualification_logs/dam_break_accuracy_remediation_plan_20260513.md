@@ -300,8 +300,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       the multi-step profile run. The checked-in D18/D38 Test05 inputs now use
       the documented profile-run controls: coupled-outer BlockSchur budget
       `100`, linear relative and fluid absolute tolerances `1.0e-4`, fluid
-      Newton cap `8`, and fluid nonlinear tolerance `5.0e-4`. Evidence:
+      Newton cap `9`, and fluid nonlinear tolerance `6.0e-4`. Evidence:
       `Documentation/qualification_logs/dam_break_d18_profile_solver_controls_20260513.md`.
+      Follow-up finding: the corrected `5.0e-4` D18 MPI-4 profile run stopped
+      at step `50` with residual `5.1076666039798896e-04`. A 60-step MPI-4
+      probe using fluid tolerance `6.0e-4` and fluid Newton cap `9` crossed
+      that point, reached `result_060.pvtu`, and ended with `success=1`.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.

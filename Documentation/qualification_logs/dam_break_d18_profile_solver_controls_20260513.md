@@ -104,6 +104,37 @@ The accepted extended probe raised only the fluid nonlinear tolerance to
 - The run maintained one Newton iteration per step and did not re-enter the
   strict-control Schur stall.
 
+## Step 50 Residual Floor Follow-Up
+
+The corrected 312-step D18 MPI-4 profile run with fluid nonlinear tolerance
+`5.0e-4` advanced through `result_050.pvtu` and then stopped at the start of
+step 50:
+
+- Run directory: `/tmp/svmp_d18_mpi4_profile_5e4_fixed_oq4p8M`
+- Stop point: step `50`, time `2.5000000000000019e-02`
+- Final reported nonlinear residual:
+  `5.1076666039798896e-04`
+- Fluid Newton cap: `8`
+
+A follow-up 60-step probe raised the fluid nonlinear tolerance to `6.0e-4`
+and raised the fluid Newton cap to `9`:
+
+- Run directory: `/tmp/svmp_d18_mpi4_fluid6e4_max9_60step_zWqx9W`
+- Command: `mpirun -np 4 /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics solver.xml`
+- Result: `success=1`
+- `steps_taken=60`
+- `final_time=2.9999999999999999e-02`
+- Step 50 residual:
+  `5.1076639678221175e-04`
+- Step 50 acceptance: `converged=1`, `iters=1`
+- Highest residual after the step-50 floor in the 60-step probe:
+  `5.1076639678221175e-04`
+
+This confirms the previous `5.0e-4` setting was just below the observed
+profile-run residual floor at step 50. The `6.0e-4` setting keeps the accepted
+residual below `1.0e-3` while allowing the run to move beyond the first
+profile-run obstruction.
+
 Static checks:
 
 ```bash
@@ -119,7 +150,7 @@ build/svMultiPhysics-build/bin/test_application \
 ## Decision
 
 The checked-in D18/D38 Test05 profile inputs now use the loose profile controls
-above with fluid nonlinear tolerance `5.0e-4`. The strict one-step controls
-remain documented as solver-floor evidence, but the profile comparison requires
-a multi-step run that can reach `result_312` without the step-4 MPI BlockSchur
-stall or the later Newton residual floor.
+above with fluid nonlinear tolerance `6.0e-4` and fluid Newton cap `9`. The
+strict one-step controls remain documented as solver-floor evidence, but the
+profile comparison requires a multi-step run that can reach `result_312`
+without the step-4 MPI BlockSchur stall or the later Newton residual floor.

@@ -94,8 +94,8 @@
 <Add_equation type="fluid">
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
-  <Max_iterations>8</Max_iterations>
-  <Tolerance>5.0e-4</Tolerance>
+  <Max_iterations>9</Max_iterations>
+  <Tolerance>6.0e-4</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>998.2</Density>
