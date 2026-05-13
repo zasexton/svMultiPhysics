@@ -594,6 +594,10 @@ Checklist:
   operator so the level-set field advances with the fluid solve.
 - [x] Run the Test05 D18 wet-bed case to the first published profile time and
   compare the extracted level-set interface against the reference data.
+- [x] Double-check the MPI-4 D18 step-312 pressure and velocity fields and
+  record the hydrostatic full-volume consistency gap.
+- [ ] Add wet-side active-domain integration or equivalent material weighting
+  for unfitted level-set free-surface Navier-Stokes benchmark cases.
 - [ ] Repeat benchmark-relevant transient checks across serial, MPI-2, and
   MPI-4 where wall time and solver robustness allow.
 - [x] Record fitted ALE free-surface transient root-cause findings and required

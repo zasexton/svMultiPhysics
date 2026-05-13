@@ -62,17 +62,43 @@ Profile comparison against `d18_1`:
 | MAE | 0.032967 m |
 | Max absolute error | 0.103043 m |
 
+Field consistency check at step 312:
+
+- Pressure range: `[-2.937703e+02, 1.468851e+03] Pa`.
+- Pressure is nearly identical to the hydrostatic reference
+  `rho * 9.81 * (0.15 - y)`, with global error range
+  `[-1.76869e+01, 0.0] Pa` and `L2 = 7.894e-01 Pa`.
+- Velocity magnitude has maximum `4.034e-02 m/s` and mean
+  `1.029e-03 m/s`.
+- The level-set-negative side has velocity-magnitude mean
+  `6.13e-04 m/s`; the largest speeds occur near the top
+  level-set-positive region instead of in the released water column.
+
 Interpretation:
 
 - The corrected monolithic operator advances the level-set field and produces a
-  front location close to the published profile at `0.156 s`.
-- The vertical profile remains far below the benchmark profile. The generated
-  D18 case is therefore not yet a full quantitative validation case for the
-  free-surface shape, even though front propagation is now comparable.
-- The next accuracy investigation should focus on vertical free-surface motion:
-  pressure/free-surface forcing, vertical velocity magnitude, contact with the
-  thin wet bed, and whether the generated coarse mesh can resolve the D18
-  run-up profile.
+  measurable interface displacement at `0.156 s`.
+- The velocity and pressure fields show that this is not a valid dam-break
+  benchmark solution. The pressure remains almost exactly hydrostatic across
+  the full computational volume, and the velocity field is too small and too
+  weakly localized to represent the published Test05 transient.
+- The profile comparison is therefore only an interface-extraction diagnostic.
+  It must not be treated as quantitative free-surface validation until the
+  unfitted Navier-Stokes volume terms are restricted or weighted by the
+  level-set water region.
+
+Current root-cause finding:
+
+- The unfitted Navier-Stokes residual assembles inertia, convection, viscous,
+  pressure, forcing, continuity, and VMS terms on `.dx()` over the full
+  computational volume.
+- The generated D18 fixture sets external pressure and surface tension to zero
+  and leaves kinematic enforcement disabled, so the unfitted free-surface
+  boundary branch adds no dynamic or kinematic surface contribution.
+- With hydrostatic pressure initialization and a pressure gauge, the current
+  system can remain close to a full-volume hydrostatic state while the level
+  set moves. A wet-side active-domain integration or material weighting path is
+  required before this fixture can be used for benchmark accuracy.
 
 ## Fitted ALE Test10 Follow-Up
 
@@ -95,9 +121,12 @@ Current finding:
 
 ## Remaining Qualification Work
 
-- Repeat the D18 benchmark-horizon check in serial and MPI-2.
-- Decide whether the D38 wet-bed case should be run after the D18 vertical
-  profile gap is understood.
+- Implement wet-side active-domain integration or equivalent material weighting
+  for unfitted level-set free-surface Navier-Stokes forms.
+- After that implementation is available, repeat the D18 benchmark-horizon
+  check in serial, MPI-2, and MPI-4.
+- Decide whether the D38 wet-bed case should be run after the D18 field
+  consistency gap is resolved.
 - Extend Test02 only after the generated case reaches the published gauge-data
   time window.
 - Use Test10 benchmark comparisons only after the lateral tank-motion forcing
