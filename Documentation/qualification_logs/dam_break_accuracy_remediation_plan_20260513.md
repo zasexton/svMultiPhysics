@@ -74,6 +74,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Update Forms vocabulary/documentation to include the new cut-volume
       measure.
 - [x] Route cut-volume kernels through `CutDomainAssembler`.
+- [x] Route cut-volume kernels through `ParallelAssembler` for MPI
+      active-domain assembly.
 - [x] Execute registered cut-volume operator terms from `FESystem::assemble(...)`
       using a registered `CutIntegrationContext`.
 - [x] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
@@ -239,7 +241,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       dry region.
 - [x] Confirm a D18 `Use_cut_metadata_scale=true` smoke case stops with setup
       validation instead of an assembly crash.
-- [ ] Run the same one-step D18 test with 2 MPI ranks.
+- [x] Run the same one-step D18 test with 2 MPI ranks.
 - [ ] Run the same one-step D18 test with 4 MPI ranks.
 - [ ] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge
       pressure.
