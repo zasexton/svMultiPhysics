@@ -1122,6 +1122,7 @@ TEST(FormVocabularyTest, MovingDomainVolumeTerminalsMatchInterpreterAndJIT)
         component(meshDisplacement(), 0) +
         component(meshVelocity(), 1) +
         component(meshAcceleration(), 2) +
+        div(meshVelocity()) +
         component(currentCoordinate() - referenceCoordinatePhysical(), 0) +
         trace(currentJacobian() - referenceJacobian()) +
         currentJacobianDeterminant() +
@@ -1262,7 +1263,8 @@ TEST(FormVocabularyTest, MovingDomainBoundaryTerminalsMatchInterpreterAndJIT)
     const auto v = FormExpr::testFunction(space, "v");
     const auto scalar = component(currentNormal(), 0) +
                         component(referenceNormal(), 1) +
-                        component(surfaceJacobian(), 0, 0);
+                        component(surfaceJacobian(), 0, 0) +
+                        currentMeanCurvature();
     const auto form = (scalar * v).ds(marker);
 
     auto interp_kernel = std::make_shared<FormKernel>(compiler.compileLinear(form));

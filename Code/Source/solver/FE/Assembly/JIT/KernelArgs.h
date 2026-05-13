@@ -40,7 +40,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
 inline constexpr std::uint32_t kCellKernelBatchArgsABIV1 = 0xCB01'0001u;
 // Bump whenever any V6 argument/view struct layout changes. This is mixed into
 // JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
-inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 5u;
+inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 7u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -976,12 +976,14 @@ struct KernelSideArgsV6 {
     const Real* current_jacobians{nullptr};              // [n_qpts * 9]
     const Real* reference_normals_xyz{nullptr};          // [n_qpts * 3]
     const Real* current_normals_xyz{nullptr};            // [n_qpts * 3]
+    const Real* current_mean_curvatures{nullptr};        // [n_qpts]
     const Real* reference_measures{nullptr};             // [n_qpts]
     const Real* current_measures{nullptr};               // [n_qpts]
     const Real* surface_jacobians{nullptr};              // [n_qpts * 9]
     const Real* configuration_transforms{nullptr};       // [n_qpts * 9]
     const Real* mesh_displacements_xyz{nullptr};         // [n_qpts * 3]
     const Real* mesh_velocities_xyz{nullptr};            // [n_qpts * 3]
+    const Real* mesh_velocity_jacobians{nullptr};        // [n_qpts * 9]
     const Real* mesh_accelerations_xyz{nullptr};         // [n_qpts * 3]
     const Real* previous_physical_points_xyz{nullptr};   // [n_qpts * 3]
     const Real* previous_mesh_velocities_xyz{nullptr};   // [n_qpts * 3]
@@ -1190,7 +1192,7 @@ namespace detail {
     out.dt = ctx.timeStep();
 
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
 
     out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
@@ -1295,7 +1297,7 @@ namespace detail {
     out.dt = ctx.timeStep();
 
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
 
     out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
@@ -1440,7 +1442,7 @@ namespace detail {
     out.dt = ctx.timeStep();
 
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
 
     out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
@@ -1632,7 +1634,7 @@ namespace detail {
     out.dt = ctx.timeStep();
 
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
 
     out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
@@ -1833,7 +1835,7 @@ namespace detail {
     out.dt = ctx.timeStep();
 
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
 
     out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
@@ -2051,7 +2053,7 @@ namespace detail {
     out.dt = ctx.timeStep();
 
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.facet_area = (ctx.contextType() == ContextType::Cell) ? Real(0.0) : ctx.facetArea();
 
     out.quad_weights = ctx.quadratureWeights().empty() ? nullptr : ctx.quadratureWeights().data();
@@ -2141,12 +2143,15 @@ namespace detail {
     out.current_jacobians = detail::flattenMat3(ctx.currentJacobians());
     out.reference_normals_xyz = detail::flattenXYZ(ctx.referenceNormals());
     out.current_normals_xyz = detail::flattenXYZ(ctx.currentNormals());
+    out.current_mean_curvatures =
+        ctx.currentMeanCurvatures().empty() ? nullptr : ctx.currentMeanCurvatures().data();
     out.reference_measures = ctx.referenceMeasures().empty() ? nullptr : ctx.referenceMeasures().data();
     out.current_measures = ctx.currentMeasures().empty() ? nullptr : ctx.currentMeasures().data();
     out.surface_jacobians = detail::flattenMat3(ctx.surfaceJacobians());
     out.configuration_transforms = detail::flattenMat3(ctx.configurationTransforms());
     out.mesh_displacements_xyz = detail::flattenXYZ(ctx.meshDisplacements());
     out.mesh_velocities_xyz = detail::flattenXYZ(ctx.meshVelocities());
+    out.mesh_velocity_jacobians = detail::flattenMat3(ctx.meshVelocityJacobians());
     out.mesh_accelerations_xyz = detail::flattenXYZ(ctx.meshAccelerations());
     out.previous_physical_points_xyz = detail::flattenXYZ(ctx.previousCoordinates());
     out.previous_mesh_velocities_xyz = detail::flattenXYZ(ctx.previousMeshVelocities());
@@ -2246,12 +2251,14 @@ namespace detail {
         assertAligned(out.current_jacobians, "KernelArgsV6: current_jacobians not aligned");
         assertAligned(out.reference_normals_xyz, "KernelArgsV6: reference_normals_xyz not aligned");
         assertAligned(out.current_normals_xyz, "KernelArgsV6: current_normals_xyz not aligned");
+        assertAligned(out.current_mean_curvatures, "KernelArgsV6: current_mean_curvatures not aligned");
         assertAligned(out.reference_measures, "KernelArgsV6: reference_measures not aligned");
         assertAligned(out.current_measures, "KernelArgsV6: current_measures not aligned");
         assertAligned(out.surface_jacobians, "KernelArgsV6: surface_jacobians not aligned");
         assertAligned(out.configuration_transforms, "KernelArgsV6: configuration_transforms not aligned");
         assertAligned(out.mesh_displacements_xyz, "KernelArgsV6: mesh_displacements_xyz not aligned");
         assertAligned(out.mesh_velocities_xyz, "KernelArgsV6: mesh_velocities_xyz not aligned");
+        assertAligned(out.mesh_velocity_jacobians, "KernelArgsV6: mesh_velocity_jacobians not aligned");
         assertAligned(out.mesh_accelerations_xyz, "KernelArgsV6: mesh_accelerations_xyz not aligned");
         assertAligned(out.previous_physical_points_xyz, "KernelArgsV6: previous_physical_points_xyz not aligned");
         assertAligned(out.previous_mesh_velocities_xyz, "KernelArgsV6: previous_mesh_velocities_xyz not aligned");
@@ -2681,7 +2688,7 @@ namespace detail {
     out.jacobian_dets = ctx.jacobianDets().empty() ? nullptr : ctx.jacobianDets().data();
     out.physical_points_xyz = detail::flattenXYZ(ctx.physicalPoints());
     out.cell_diameter = ctx.cellDiameter();
-    out.cell_volume = (ctx.contextType() == ContextType::Cell) ? ctx.cellVolume() : Real(0.0);
+    out.cell_volume = ctx.associatedCellVolume();
     out.time = ctx.time();
     out.dt = ctx.timeStep();
 

@@ -547,6 +547,9 @@ Checklist:
 
 - [x] Fix generated fitted ALE startup blockers in equation translation and
   symbolic tangent setup.
+- [x] Fix moving-boundary JIT packing for fitted ALE free-surface Nitsche
+  terms, including boundary current curvature, mesh-velocity divergence, and
+  adjacent cell measure.
 - [x] Verify targeted parser, translator, tangent, and moving-domain tests
   after the startup fixes.
 - [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated

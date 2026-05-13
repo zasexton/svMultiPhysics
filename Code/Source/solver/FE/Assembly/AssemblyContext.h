@@ -655,9 +655,18 @@ public:
     /**
      * @brief Cell volume/measure
      *
-     * Defined for cell contexts. Using this for face contexts is an error.
+     * Defined for cell contexts. Face contexts may expose this only when the
+     * adjacent cell measure was prepared by the assembler.
      */
     [[nodiscard]] Real cellVolume() const;
+
+    /**
+     * @brief Stored adjacent cell measure for packing and diagnostics.
+     *
+     * For face contexts this is the adjacent cell measure when available, or
+     * zero when entity measures were not prepared.
+     */
+    [[nodiscard]] Real associatedCellVolume() const noexcept { return cell_volume_; }
 
     /**
      * @brief Facet area/measure

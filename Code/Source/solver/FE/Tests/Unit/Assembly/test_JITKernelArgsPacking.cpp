@@ -8,6 +8,7 @@
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/JIT/KernelArgs.h"
 #include "Spaces/HCurlSpace.h"
+#include "Spaces/H1Space.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -315,6 +316,10 @@ TEST(JITKernelArgsPacking, PacksInterleavedGeometryV6)
         AssemblyContext::Vector3D{Real(0.0), Real(1.0), Real(0.0)}};
     ctx.setNormals(std::span<const AssemblyContext::Vector3D>(normals.data(), normals.size()));
 
+    std::vector<Real> current_curvatures = {Real(1.25), Real(-0.5)};
+    ctx.setCurrentMeanCurvatures(std::span<const Real>(current_curvatures.data(), current_curvatures.size()));
+    ctx.setMeshVelocityJacobians(std::span<const AssemblyContext::Matrix3x3>(J.data(), J.size()));
+
     KernelOutput out;
     out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
 
@@ -325,6 +330,14 @@ TEST(JITKernelArgsPacking, PacksInterleavedGeometryV6)
     EXPECT_NE(args6.side.interleaved_qpoint_geometry, nullptr);
     EXPECT_EQ(args6.side.interleaved_qpoint_geometry_stride_reals,
               AssemblyContext::kInterleavedQPointGeometryStride);
+    ASSERT_NE(args6.side.current_mean_curvatures, nullptr);
+    EXPECT_EQ(args6.side.current_mean_curvatures, ctx.currentMeanCurvatures().data());
+    EXPECT_DOUBLE_EQ(args6.side.current_mean_curvatures[0], 1.25);
+    EXPECT_DOUBLE_EQ(args6.side.current_mean_curvatures[1], -0.5);
+    ASSERT_NE(args6.side.mesh_velocity_jacobians, nullptr);
+    EXPECT_EQ(args6.side.mesh_velocity_jacobians, &(*ctx.meshVelocityJacobians().data())[0][0]);
+    EXPECT_DOUBLE_EQ(args6.side.mesh_velocity_jacobians[0], 2.0);
+    EXPECT_DOUBLE_EQ(args6.side.mesh_velocity_jacobians[9], 1.5);
 
     const std::size_t stride = static_cast<std::size_t>(args6.side.interleaved_qpoint_geometry_stride_reals);
     const Real* g = args6.side.interleaved_qpoint_geometry;
@@ -345,6 +358,31 @@ TEST(JITKernelArgsPacking, PacksInterleavedGeometryV6)
     EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointInverseJacobianOffset + 0u], 2.0 / 3.0);
     EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointDetOffset], 13.125);
     EXPECT_DOUBLE_EQ(g[q1 + AssemblyContext::kInterleavedQPointNormalOffset + 1u], 1.0);
+}
+
+TEST(JITKernelArgsPacking, PacksFaceAdjacentCellVolumeV6)
+{
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    AssemblyContext ctx;
+    ctx.reserve(/*max_dofs=*/8, /*max_qpts=*/8, /*dim=*/3);
+    ctx.configureFace(/*face_id=*/7, /*cell_id=*/3, /*local_face_id=*/1,
+                      space, space, RequiredData::EntityMeasures, ContextType::BoundaryFace);
+    setupTwoDofTwoQptScalarContext(ctx);
+    ctx.setEntityMeasures(/*cell_diameter=*/Real(0.25),
+                          /*cell_volume=*/Real(0.125),
+                          /*facet_area=*/Real(0.5));
+
+    KernelOutput out;
+    out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+
+    const auto args6 = jit::packBoundaryFaceKernelArgsV6(ctx, /*boundary_marker=*/11, out);
+    EXPECT_EQ(args6.abi_version, jit::kKernelArgsABIVersionV6);
+    EXPECT_EQ(args6.side.context_type, static_cast<std::uint32_t>(ContextType::BoundaryFace));
+    EXPECT_EQ(args6.side.boundary_marker, 11);
+    EXPECT_DOUBLE_EQ(args6.side.cell_diameter, 0.25);
+    EXPECT_DOUBLE_EQ(args6.side.cell_volume, 0.125);
+    EXPECT_DOUBLE_EQ(args6.side.facet_area, 0.5);
 }
 
 TEST(JITKernelArgsPacking, PacksVectorBasisJacobiansV6)

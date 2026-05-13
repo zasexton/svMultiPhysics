@@ -348,6 +348,8 @@ struct ABIV3 {
         offsetof(assembly::jit::KernelSideArgsV6, reference_normals_xyz);
     static constexpr std::size_t side_current_normals_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, current_normals_xyz);
+    static constexpr std::size_t side_current_mean_curvatures_off =
+        offsetof(assembly::jit::KernelSideArgsV6, current_mean_curvatures);
     static constexpr std::size_t side_reference_measures_off =
         offsetof(assembly::jit::KernelSideArgsV6, reference_measures);
     static constexpr std::size_t side_current_measures_off =
@@ -360,6 +362,8 @@ struct ABIV3 {
         offsetof(assembly::jit::KernelSideArgsV6, mesh_displacements_xyz);
     static constexpr std::size_t side_mesh_velocities_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, mesh_velocities_xyz);
+    static constexpr std::size_t side_mesh_velocity_jacobians_off =
+        offsetof(assembly::jit::KernelSideArgsV6, mesh_velocity_jacobians);
     static constexpr std::size_t side_mesh_accelerations_xyz_off =
         offsetof(assembly::jit::KernelSideArgsV6, mesh_accelerations_xyz);
     static constexpr std::size_t side_previous_physical_points_xyz_off =
@@ -2364,12 +2368,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* current_jacobians{nullptr};
             llvm::Value* reference_normals_xyz{nullptr};
             llvm::Value* current_normals_xyz{nullptr};
+            llvm::Value* current_mean_curvatures{nullptr};
             llvm::Value* reference_measures{nullptr};
             llvm::Value* current_measures{nullptr};
             llvm::Value* surface_jacobians{nullptr};
             llvm::Value* configuration_transforms{nullptr};
             llvm::Value* mesh_displacements_xyz{nullptr};
             llvm::Value* mesh_velocities_xyz{nullptr};
+            llvm::Value* mesh_velocity_jacobians{nullptr};
             llvm::Value* mesh_accelerations_xyz{nullptr};
             llvm::Value* previous_physical_points_xyz{nullptr};
             llvm::Value* previous_mesh_velocities_xyz{nullptr};
@@ -2468,12 +2474,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.current_jacobians = null_f64_ptr;
             s.reference_normals_xyz = null_f64_ptr;
             s.current_normals_xyz = null_f64_ptr;
+            s.current_mean_curvatures = null_f64_ptr;
             s.reference_measures = null_f64_ptr;
             s.current_measures = null_f64_ptr;
             s.surface_jacobians = null_f64_ptr;
             s.configuration_transforms = null_f64_ptr;
             s.mesh_displacements_xyz = null_f64_ptr;
             s.mesh_velocities_xyz = null_f64_ptr;
+            s.mesh_velocity_jacobians = null_f64_ptr;
             s.mesh_accelerations_xyz = null_f64_ptr;
             s.previous_physical_points_xyz = null_f64_ptr;
             s.previous_mesh_velocities_xyz = null_f64_ptr;
@@ -2747,12 +2755,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             s.current_jacobians = loadPtr(side_ptr, ABIV3::side_current_jacobians_off);
             s.reference_normals_xyz = loadPtr(side_ptr, ABIV3::side_reference_normals_xyz_off);
             s.current_normals_xyz = loadPtr(side_ptr, ABIV3::side_current_normals_xyz_off);
+            s.current_mean_curvatures = loadPtr(side_ptr, ABIV3::side_current_mean_curvatures_off);
             s.reference_measures = loadPtr(side_ptr, ABIV3::side_reference_measures_off);
             s.current_measures = loadPtr(side_ptr, ABIV3::side_current_measures_off);
             s.surface_jacobians = loadPtr(side_ptr, ABIV3::side_surface_jacobians_off);
             s.configuration_transforms = loadPtr(side_ptr, ABIV3::side_configuration_transforms_off);
             s.mesh_displacements_xyz = loadPtr(side_ptr, ABIV3::side_mesh_displacements_xyz_off);
             s.mesh_velocities_xyz = loadPtr(side_ptr, ABIV3::side_mesh_velocities_xyz_off);
+            s.mesh_velocity_jacobians = loadPtr(side_ptr, ABIV3::side_mesh_velocity_jacobians_off);
             s.mesh_accelerations_xyz = loadPtr(side_ptr, ABIV3::side_mesh_accelerations_xyz_off);
             s.previous_physical_points_xyz = loadPtr(side_ptr, ABIV3::side_previous_physical_points_xyz_off);
             s.previous_mesh_velocities_xyz = loadPtr(side_ptr, ABIV3::side_previous_mesh_velocities_xyz_off);
@@ -3128,12 +3138,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         side_single.current_jacobians = null_f64_ptr;
                         side_single.reference_normals_xyz = null_f64_ptr;
                         side_single.current_normals_xyz = null_f64_ptr;
+                        side_single.current_mean_curvatures = null_f64_ptr;
                         side_single.reference_measures = null_f64_ptr;
                         side_single.current_measures = null_f64_ptr;
                         side_single.surface_jacobians = null_f64_ptr;
                         side_single.configuration_transforms = null_f64_ptr;
                         side_single.mesh_displacements_xyz = null_f64_ptr;
                         side_single.mesh_velocities_xyz = null_f64_ptr;
+                        side_single.mesh_velocity_jacobians = null_f64_ptr;
                         side_single.mesh_accelerations_xyz = null_f64_ptr;
                         side_single.previous_physical_points_xyz = null_f64_ptr;
                         side_single.previous_mesh_velocities_xyz = null_f64_ptr;
@@ -3261,12 +3273,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             registerSimdPtr(side_single.current_jacobians, ABIV3::side_current_jacobians_off);
                             registerSimdPtr(side_single.reference_normals_xyz, ABIV3::side_reference_normals_xyz_off);
                             registerSimdPtr(side_single.current_normals_xyz, ABIV3::side_current_normals_xyz_off);
+                            registerSimdPtr(side_single.current_mean_curvatures, ABIV3::side_current_mean_curvatures_off);
                             registerSimdPtr(side_single.reference_measures, ABIV3::side_reference_measures_off);
                             registerSimdPtr(side_single.current_measures, ABIV3::side_current_measures_off);
                             registerSimdPtr(side_single.surface_jacobians, ABIV3::side_surface_jacobians_off);
                             registerSimdPtr(side_single.configuration_transforms, ABIV3::side_configuration_transforms_off);
                             registerSimdPtr(side_single.mesh_displacements_xyz, ABIV3::side_mesh_displacements_xyz_off);
                             registerSimdPtr(side_single.mesh_velocities_xyz, ABIV3::side_mesh_velocities_xyz_off);
+                            registerSimdPtr(side_single.mesh_velocity_jacobians, ABIV3::side_mesh_velocity_jacobians_off);
                             registerSimdPtr(side_single.mesh_accelerations_xyz, ABIV3::side_mesh_accelerations_xyz_off);
                             registerSimdPtr(side_single.previous_physical_points_xyz, ABIV3::side_previous_physical_points_xyz_off);
                             registerSimdPtr(side_single.previous_mesh_velocities_xyz, ABIV3::side_previous_mesh_velocities_xyz_off);
@@ -6731,6 +6745,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = makeScalar(loadRealPtrAt(side.current_measures, q_index));
                         break;
 
+                    case FormExprType::CurrentMeanCurvature:
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.current_mean_curvatures, q_index));
+                        break;
+
                     case FormExprType::GeometryTrialVectorVariation:
                         values[op_idx] = loadTrialGeometryVectorVariation(
                             side, j_index, q_index, shape, "geom_trial_vector");
@@ -7838,6 +7856,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             values[op_idx] = makeScalar(phi);
                             break;
                         }
+                        if (kid.type == FormExprType::MeshVelocity) {
+                            const auto div_dim = std::min(codegen_dim, term.shapes[child_idx].dims[0]);
+                            values[op_idx] = trace(loadMatDimFromQ(side.mesh_velocity_jacobians, q_index, div_dim));
+                            break;
+                        }
+                        if (kid.type == FormExprType::MeshVelocityVariation) {
+                            values[op_idx] = makeScalar(builder.CreateFMul(loadDtCoeff0(side, 1), divTrial()));
+                            break;
+                        }
                         if (kid.type == FormExprType::TimeDerivative) {
                             const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
                             auto* coeff0 = loadDtCoeff0(side, order);
@@ -7928,7 +7955,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
                         }
-	                        throw std::runtime_error("LLVMGen: Divergence operand not supported");
+	                        throw std::runtime_error(
+                                "LLVMGen: Divergence operand not supported type=" +
+                                std::to_string(static_cast<unsigned>(kid.type)));
 	                    }
 
                     case FormExprType::Curl: {
@@ -9656,6 +9685,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::CurrentMeasure:
                         values[op_idx] = makeScalar(loadRealPtrAt(side.current_measures, q_index));
                         break;
+                    case FormExprType::CurrentMeanCurvature:
+                        values[op_idx] = makeScalar(loadRealPtrAt(side.current_mean_curvatures, q_index));
+                        break;
                     case FormExprType::ReferenceJacobianDeterminant:
                     case FormExprType::ReferenceMeasure:
                         values[op_idx] = makeScalar(loadRealPtrAt(side.reference_measures, q_index));
@@ -10417,9 +10449,142 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                    });
 		                                div = builder.CreateFAdd(div, acc);
 		                            }
-		                            values[op_idx] = makeScalar(div);
-		                            break;
+	                            values[op_idx] = makeScalar(div);
+	                            break;
 	                        }
+
+                        if (kid.type == FormExprType::MeshVelocity) {
+                            const auto div_dim = std::min(codegen_dim, term.shapes[child_idx].dims[0]);
+                            values[op_idx] = trace(loadMatDimFromQ(side.mesh_velocity_jacobians, q_index, div_dim));
+                            break;
+                        }
+
+                        if (kid.type == FormExprType::TimeDerivative) {
+                            const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+                            auto* coeff0 = loadDtCoeff0(side, order);
+                            const auto dt_child_idx =
+                                term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                            const auto& dt_child = term.ir.ops[dt_child_idx];
+
+                            auto divCurrentSolutionCached = [&]() -> llvm::Value* {
+                                auto* coeffs = side.solution_coefficients;
+                                auto* uses_vec_basis =
+                                    builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
+                                auto* vb = llvm::BasicBlock::Create(*ctx, "div.dt_state_u.vec_basis", fn);
+                                auto* sb = llvm::BasicBlock::Create(*ctx, "div.dt_state_u.scalar_basis", fn);
+                                auto* merge = llvm::BasicBlock::Create(*ctx, "div.dt_state_u.merge", fn);
+
+                                builder.CreateCondBr(uses_vec_basis, vb, sb);
+
+                                llvm::Value* div_vb = rc(0.0);
+                                builder.SetInsertPoint(vb);
+                                div_vb = emitReduceSumScalar(
+                                    side.n_trial_dofs, "div_dt_state_u_vb", [&](llvm::Value* j) -> llvm::Value* {
+                                        auto* j64 = builder.CreateZExt(j, i64);
+                                        auto* cj = loadRealPtrAt(coeffs, j64);
+                                        auto* div_phi = loadBasisScalar(side.trial_basis_divs, side.n_trial_dofs, j, q_index);
+                                        return builder.CreateFMul(cj, div_phi);
+                                    });
+                                builder.CreateBr(merge);
+                                auto* vb_block = builder.GetInsertBlock();
+
+                                llvm::Value* div_sb = rc(0.0);
+                                builder.SetInsertPoint(sb);
+                                auto* dofs_per_comp =
+                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
+                                llvm::Value* div_sum = rc(0.0);
+                                for (std::size_t comp = 0; comp < vd; ++comp) {
+                                    auto* acc = emitReduceSumScalar(
+                                        dofs_per_comp,
+                                        "div_dt_state_u_c" + std::to_string(comp),
+                                        [&](llvm::Value* jj) -> llvm::Value* {
+                                            auto* base = builder.CreateMul(
+                                                builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+                                            auto* j = builder.CreateAdd(base, jj);
+                                            auto* j64 = builder.CreateZExt(j, i64);
+                                            auto* cj = loadRealPtrAt(coeffs, j64);
+                                            const auto g =
+                                                loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                            return builder.CreateFMul(cj, g[comp]);
+                                        });
+                                    div_sum = builder.CreateFAdd(div_sum, acc);
+                                }
+                                div_sb = div_sum;
+                                builder.CreateBr(merge);
+                                auto* sb_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(merge);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "div.dt_state_u");
+                                phi->addIncoming(div_vb, vb_block);
+                                phi->addIncoming(div_sb, sb_block);
+                                return phi;
+                            };
+
+                            if (dt_child.type == FormExprType::TrialFunction) {
+                                if (!is_residual) {
+                                    throw std::runtime_error(
+                                        "LLVMGen: cached div(dt(TrialFunction)) only supports residual");
+                                }
+                                values[op_idx] =
+                                    makeScalar(builder.CreateFMul(coeff0, divCurrentSolutionCached()));
+                                break;
+                            }
+
+                            if (dt_child.type == FormExprType::DiscreteField ||
+                                dt_child.type == FormExprType::StateField) {
+                                const int fid = unpackFieldIdImm1(dt_child.imm1);
+                                if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
+                                    values[op_idx] =
+                                        makeScalar(builder.CreateFMul(coeff0, divCurrentSolutionCached()));
+                                    break;
+                                }
+
+                                auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+                                auto* entry_is_null =
+                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok = llvm::BasicBlock::Create(*ctx, "field_dt_div.ok", fn);
+                                auto* zero = llvm::BasicBlock::Create(*ctx, "field_dt_div.zero", fn);
+                                auto* merge = llvm::BasicBlock::Create(*ctx, "field_dt_div.merge", fn);
+
+                                builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                llvm::Value* div = rc(0.0);
+                                builder.SetInsertPoint(ok);
+                                auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                                auto* base_is_null =
+                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_dt_div.mat.ok", fn);
+                                builder.CreateCondBr(base_is_null, zero, ok2);
+
+                                builder.SetInsertPoint(ok2);
+                                const auto J = loadMat3FromQ(base, q_index);
+                                div = J.elems[0];
+                                if (vd >= 2) div = builder.CreateFAdd(div, J.elems[4]);
+                                if (vd >= 3) div = builder.CreateFAdd(div, J.elems[8]);
+                                div = builder.CreateFMul(coeff0, div);
+                                builder.CreateBr(merge);
+                                auto* ok2_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(zero);
+                                builder.CreateBr(merge);
+                                auto* zero_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(merge);
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_div");
+                                phi->addIncoming(rc(0.0), zero_block);
+                                phi->addIncoming(div, ok2_block);
+                                values[op_idx] = makeScalar(phi);
+                                break;
+                            }
+
+                            if (dt_child.type == FormExprType::Constant ||
+                                dt_child.type == FormExprType::TypedZero) {
+                                values[op_idx] = makeScalar(rc(0.0));
+                                break;
+                            }
+
+                            throw std::runtime_error("LLVMGen: cached div(dt(...)) operand not supported");
+                        }
 
 	                        if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                            const int fid = unpackFieldIdImm1(kid.imm1);
@@ -10542,7 +10707,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            break;
 	                        }
 
-                        throw std::runtime_error("LLVMGen: cached Divergence operand not supported");
+                        throw std::runtime_error(
+                            "LLVMGen: cached Divergence operand not supported type=" +
+                            std::to_string(static_cast<unsigned>(kid.type)));
                     }
 
                     case FormExprType::Curl: {
@@ -11481,6 +11648,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.current_measures, q_index));
                         break;
 
+                    case FormExprType::CurrentMeanCurvature:
+                        values_minus[op_idx] =
+                            makeScalar(loadRealPtrAt(side_minus.current_mean_curvatures, q_index));
+                        values_plus[op_idx] =
+                            makeScalar(loadRealPtrAt(side_plus.current_mean_curvatures, q_index));
+                        break;
+
                     case FormExprType::ReferenceJacobianDeterminant:
                     case FormExprType::ReferenceMeasure:
                         values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.reference_measures, q_index));
@@ -11701,6 +11875,119 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                return makeScalar(div);
 		                            }
 
+                            if (kid.type == FormExprType::MeshVelocity) {
+                                const auto div_dim = std::min(codegen_dim, term.shapes[child_idx].dims[0]);
+                                return trace(loadMatDimFromQ(side.mesh_velocity_jacobians, q_index, div_dim));
+                            }
+
+                            if (kid.type == FormExprType::TimeDerivative) {
+                                const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+                                auto* coeff0 = loadDtCoeff0(side, order);
+                                const auto dt_child_idx =
+                                    term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                                const auto& dt_child = term.ir.ops[dt_child_idx];
+
+                                if (dt_child.type == FormExprType::TrialFunction) {
+                                    if (!is_residual) {
+                                        throw std::runtime_error(
+                                            "LLVMGen: cached face div(dt(TrialFunction)) only supports residual");
+                                    }
+                                    auto* coeffs = side.solution_coefficients;
+                                    auto* dofs_per_comp =
+                                        builder.CreateUDiv(side.n_trial_dofs,
+                                                           builder.getInt32(static_cast<std::uint32_t>(vd)));
+                                    llvm::Value* div = rc(0.0);
+                                    for (std::size_t comp = 0; comp < vd; ++comp) {
+                                        auto* acc = emitReduceSumScalar(
+                                            dofs_per_comp,
+                                            "dt_div_state_u_c" + std::to_string(comp),
+                                            [&](llvm::Value* jj) -> llvm::Value* {
+                                                auto* base = builder.CreateMul(
+                                                    builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+                                                auto* j = builder.CreateAdd(base, jj);
+                                                auto* j64 = builder.CreateZExt(j, i64);
+                                                auto* cj = loadRealPtrAt(coeffs, j64);
+                                                const auto g = loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                                return builder.CreateFMul(cj, g[comp]);
+                                            });
+                                        div = builder.CreateFAdd(div, acc);
+                                    }
+                                    return makeScalar(builder.CreateFMul(coeff0, div));
+                                }
+
+                                if (dt_child.type == FormExprType::DiscreteField ||
+                                    dt_child.type == FormExprType::StateField) {
+                                    const int fid = unpackFieldIdImm1(dt_child.imm1);
+                                    if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
+                                        auto* coeffs = side.solution_coefficients;
+                                        auto* dofs_per_comp =
+                                            builder.CreateUDiv(side.n_trial_dofs,
+                                                               builder.getInt32(static_cast<std::uint32_t>(vd)));
+                                        llvm::Value* div = rc(0.0);
+                                        for (std::size_t comp = 0; comp < vd; ++comp) {
+                                            auto* acc = emitReduceSumScalar(
+                                                dofs_per_comp,
+                                                "dt_div_state_u_c" + std::to_string(comp),
+                                                [&](llvm::Value* jj) -> llvm::Value* {
+                                                    auto* base = builder.CreateMul(
+                                                        builder.getInt32(static_cast<std::uint32_t>(comp)), dofs_per_comp);
+                                                    auto* j = builder.CreateAdd(base, jj);
+                                                    auto* j64 = builder.CreateZExt(j, i64);
+                                                    auto* cj = loadRealPtrAt(coeffs, j64);
+                                                    const auto g =
+                                                        loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                                    return builder.CreateFMul(cj, g[comp]);
+                                                });
+                                            div = builder.CreateFAdd(div, acc);
+                                        }
+                                        return makeScalar(builder.CreateFMul(coeff0, div));
+                                    }
+
+                                    auto* entry = fieldEntryPtrFor(plus_side, fid);
+                                    auto* entry_is_null =
+                                        builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                    auto* ok = llvm::BasicBlock::Create(*ctx, "field_dt_div.ok", fn);
+                                    auto* zero = llvm::BasicBlock::Create(*ctx, "field_dt_div.zero", fn);
+                                    auto* merge = llvm::BasicBlock::Create(*ctx, "field_dt_div.merge", fn);
+
+                                    builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                    llvm::Value* div = rc(0.0);
+                                    builder.SetInsertPoint(ok);
+                                    auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                                    auto* base_is_null =
+                                        builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                    auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_dt_div.mat.ok", fn);
+                                    builder.CreateCondBr(base_is_null, zero, ok2);
+
+                                    builder.SetInsertPoint(ok2);
+                                    const auto J = loadMat3FromQ(base, q_index);
+                                    div = J.elems[0];
+                                    if (vd >= 2) div = builder.CreateFAdd(div, J.elems[4]);
+                                    if (vd >= 3) div = builder.CreateFAdd(div, J.elems[8]);
+                                    div = builder.CreateFMul(coeff0, div);
+                                    builder.CreateBr(merge);
+                                    auto* ok2_block = builder.GetInsertBlock();
+
+                                    builder.SetInsertPoint(zero);
+                                    builder.CreateBr(merge);
+                                    auto* zero_block = builder.GetInsertBlock();
+
+                                    builder.SetInsertPoint(merge);
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "field_dt_div");
+                                    phi->addIncoming(rc(0.0), zero_block);
+                                    phi->addIncoming(div, ok2_block);
+                                    return makeScalar(phi);
+                                }
+
+                                if (dt_child.type == FormExprType::Constant ||
+                                    dt_child.type == FormExprType::TypedZero) {
+                                    return makeScalar(rc(0.0));
+                                }
+
+                                throw std::runtime_error("LLVMGen: cached face div(dt(...)) operand not supported");
+                            }
+
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
                                 auto* entry = fieldEntryPtrFor(plus_side, fid);
@@ -11743,7 +12030,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 return makeScalar(rc(0.0));
                             }
 
-                            throw std::runtime_error("LLVMGen: cached Divergence operand not supported");
+                            throw std::runtime_error(
+                                "LLVMGen: cached Divergence operand not supported type=" +
+                                std::to_string(static_cast<unsigned>(kid.type)));
                         };
 
                         values_minus[op_idx] = evalSide(side_minus, /*plus_side=*/false);
@@ -12491,6 +12780,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::CurrentJacobianDeterminant:
                     case FormExprType::ReferenceJacobianDeterminant:
                     case FormExprType::CurrentNormal:
+                    case FormExprType::CurrentMeanCurvature:
                     case FormExprType::ReferenceNormal:
                     case FormExprType::CurrentMeasure:
                     case FormExprType::ReferenceMeasure:
@@ -15679,8 +15969,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                });
 		                            div = builder.CreateFAdd(div, acc);
 		                        }
-		                        return makeScalar(div);
-		                    }
+		                            return makeScalar(div);
+		                        }
+
+                    if (kid.type == FormExprType::MeshVelocity) {
+                        const auto div_dim = std::min(codegen_dim, term.shapes[child_idx].dims[0]);
+                        return trace(loadMatDimFromQ(side.mesh_velocity_jacobians, q_index, div_dim));
+                    }
+                    if (kid.type == FormExprType::MeshVelocityVariation) {
+                        return makeScalar(builder.CreateFMul(loadDtCoeff0(side, 1), divTrial()));
+                    }
                     if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                         const int fid = unpackFieldIdImm1(kid.imm1);
                         if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
@@ -15784,7 +16082,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
                         return makeScalar(rc(0.0));
                     }
-                    throw std::runtime_error("LLVMGen: Divergence operand not supported");
+                    throw std::runtime_error(
+                        "LLVMGen: Divergence operand not supported type=" +
+                        std::to_string(static_cast<unsigned>(kid.type)));
                 };
 
                 auto evalCurl = [&](const SideView& side, bool is_plus, const KernelIROp& op) -> CodeValue {
@@ -16573,6 +16873,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         case FormExprType::CurrentMeasure:
                             values_minus[op_idx] = makeScalar(loadRealPtrAt(side_minus.current_measures, q_index));
                             values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.current_measures, q_index));
+                            break;
+
+                        case FormExprType::CurrentMeanCurvature:
+                            values_minus[op_idx] =
+                                makeScalar(loadRealPtrAt(side_minus.current_mean_curvatures, q_index));
+                            values_plus[op_idx] =
+                                makeScalar(loadRealPtrAt(side_plus.current_mean_curvatures, q_index));
                             break;
 
                         case FormExprType::ReferenceJacobianDeterminant:
