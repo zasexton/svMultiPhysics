@@ -2059,6 +2059,138 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_TRUE(context.interfaceRules().empty());
 }
 
+TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide)
+{
+    CutIntegrationContext context;
+
+    auto negative_rule = makeAxisAlignedBoxCutVolumeQuadrature(
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 1.0, 1.0}},
+        0,
+        0.25,
+        CutIntegrationSide::Negative,
+        "level-set-water");
+    negative_rule.provenance.parent_entity = 7;
+    negative_rule.provenance.cut_topology_revision = 31;
+    negative_rule.provenance.predicate_policy_key = 19;
+
+    CutCellAssemblyMetadata negative_metadata;
+    negative_metadata.cell = 7;
+    negative_metadata.parent_entity = 7;
+    negative_metadata.volume_fraction = negative_rule.volume_fraction;
+    negative_metadata.side = CutIntegrationSide::Negative;
+    negative_metadata.provenance_id = "level-set-water";
+    negative_metadata.cut_topology_id = "generated-7-negative";
+    negative_metadata.revision_key = 31;
+    negative_metadata.cut_topology_revision = 31;
+    negative_metadata.quadrature_policy_key = 19;
+    context.addGeneratedVolumeRule(51, negative_metadata, negative_rule);
+
+    auto positive_rule = makeAxisAlignedBoxCutVolumeQuadrature(
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 1.0, 1.0}},
+        0,
+        0.25,
+        CutIntegrationSide::Positive,
+        "level-set-air");
+    positive_rule.provenance.parent_entity = 7;
+    positive_rule.provenance.cut_topology_revision = 31;
+    positive_rule.provenance.predicate_policy_key = 19;
+
+    CutCellAssemblyMetadata positive_metadata;
+    positive_metadata.cell = 7;
+    positive_metadata.parent_entity = 7;
+    positive_metadata.volume_fraction = positive_rule.volume_fraction;
+    positive_metadata.side = CutIntegrationSide::Positive;
+    positive_metadata.provenance_id = "level-set-air";
+    positive_metadata.cut_topology_id = "generated-7-positive";
+    positive_metadata.revision_key = 31;
+    positive_metadata.cut_topology_revision = 31;
+    positive_metadata.quadrature_policy_key = 19;
+    context.addGeneratedVolumeRule(51, positive_metadata, positive_rule);
+
+    auto other_rule = makeAxisAlignedBoxCutVolumeQuadrature(
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 1.0, 1.0}},
+        1,
+        0.5,
+        CutIntegrationSide::Negative,
+        "other-interface");
+    other_rule.provenance.parent_entity = 8;
+    CutCellAssemblyMetadata other_metadata;
+    other_metadata.cell = 8;
+    other_metadata.parent_entity = 8;
+    other_metadata.volume_fraction = other_rule.volume_fraction;
+    other_metadata.side = CutIntegrationSide::Negative;
+    other_metadata.provenance_id = "other-interface";
+    other_metadata.cut_topology_id = "generated-8-negative";
+    context.addGeneratedVolumeRule(52, other_metadata, other_rule);
+
+    EXPECT_TRUE(context.hasGeneratedVolumeMarker(51));
+    EXPECT_TRUE(context.hasGeneratedVolumeMarker(52));
+    EXPECT_FALSE(context.hasGeneratedVolumeMarker(53));
+    ASSERT_EQ(context.generatedVolumeMarkers().size(), 2u);
+    EXPECT_EQ(context.generatedVolumeMarkers()[0], 51);
+    EXPECT_EQ(context.generatedVolumeMarkers()[1], 52);
+    ASSERT_EQ(context.volumeRules().size(), 3u);
+    ASSERT_EQ(context.metadata().size(), 3u);
+    ASSERT_EQ(context.bindings().size(), context.volumeRules().size());
+    EXPECT_TRUE(context.interfaceRules().empty());
+    EXPECT_TRUE(context.generatedInterfaceMarkers().empty());
+
+    const auto marker_rules = context.generatedVolumeRulesForMarker(51);
+    ASSERT_EQ(marker_rules.size(), 2u);
+    EXPECT_EQ(marker_rules[0]->side, CutIntegrationSide::Negative);
+    EXPECT_EQ(marker_rules[1]->side, CutIntegrationSide::Positive);
+
+    const auto negative_rules =
+        context.generatedVolumeRulesForMarkerAndSide(51, CutIntegrationSide::Negative);
+    ASSERT_EQ(negative_rules.size(), 1u);
+    ASSERT_NE(negative_rules.front(), nullptr);
+    EXPECT_EQ(negative_rules.front()->provenance.parent_entity, 7);
+    EXPECT_EQ(negative_rules.front()->provenance.predicate_policy_key, 19u);
+    EXPECT_NEAR(negative_rules.front()->measure, 0.25, 1.0e-14);
+
+    const auto positive_rules =
+        context.generatedVolumeRulesForMarkerAndSide(51, CutIntegrationSide::Positive);
+    ASSERT_EQ(positive_rules.size(), 1u);
+    ASSERT_NE(positive_rules.front(), nullptr);
+    EXPECT_EQ(positive_rules.front()->side, CutIntegrationSide::Positive);
+    EXPECT_NEAR(positive_rules.front()->measure, 0.75, 1.0e-14);
+
+    EXPECT_TRUE(context.generatedVolumeRulesForMarkerAndSide(
+                           51, CutIntegrationSide::Interface)
+                    .empty());
+    EXPECT_TRUE(context.generatedVolumeRulesForMarkerAndSide(
+                           53, CutIntegrationSide::Negative)
+                    .empty());
+
+    const auto negative_indices =
+        context.generatedVolumeRuleIndicesForMarkerAndSide(51, CutIntegrationSide::Negative);
+    ASSERT_EQ(negative_indices.size(), 1u);
+    EXPECT_EQ(context.metadata()[negative_indices.front()].parent_entity, 7);
+    EXPECT_EQ(context.metadata()[negative_indices.front()].side, CutIntegrationSide::Negative);
+
+    const auto negative_metadata_view =
+        context.generatedVolumeMetadataForMarkerAndSide(51, CutIntegrationSide::Negative);
+    ASSERT_EQ(negative_metadata_view.size(), 1u);
+    ASSERT_NE(negative_metadata_view.front(), nullptr);
+    EXPECT_DOUBLE_EQ(negative_metadata_view.front()->volume_fraction, 0.25);
+    EXPECT_EQ(negative_metadata_view.front()->cut_topology_id, "generated-7-negative");
+
+    CutCellAssemblyMetadata mismatched_metadata = negative_metadata;
+    mismatched_metadata.side = CutIntegrationSide::Positive;
+    EXPECT_THROW(context.addGeneratedVolumeRule(51, mismatched_metadata, negative_rule),
+                 std::invalid_argument);
+
+    context.clear();
+    EXPECT_FALSE(context.hasGeneratedVolumeMarker(51));
+    EXPECT_TRUE(context.generatedVolumeMarkers().empty());
+    EXPECT_TRUE(context.generatedVolumeRulesForMarker(51).empty());
+    EXPECT_TRUE(context.volumeRules().empty());
+    EXPECT_TRUE(context.metadata().empty());
+}
+
 TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths)
 {
     CutInterfaceDomainRequest request;

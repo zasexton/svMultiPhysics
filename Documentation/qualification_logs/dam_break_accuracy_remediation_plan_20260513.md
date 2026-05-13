@@ -62,9 +62,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       negative and positive level-set regions.
 - [ ] Carry parent cell id, interface marker, integration side, and volume
       fraction on each generated volume rule.
-- [ ] Extend `CutIntegrationContext` so generated volume rules are indexed by
+- [x] Extend `CutIntegrationContext` so generated volume rules are indexed by
       interface marker and side.
-- [ ] Keep generated interface surface rules separate from generated volume
+- [x] Keep generated interface surface rules separate from generated volume
       rules.
 - [x] Add a Forms integral domain for cut-volume integration, for example
       `IntegralDomain::CutVolume`.

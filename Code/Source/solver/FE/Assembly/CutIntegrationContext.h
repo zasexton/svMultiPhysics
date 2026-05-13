@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -162,6 +163,9 @@ public:
         volume_rules_.clear();
         interface_rules_.clear();
         facet_set_rules_.clear();
+        generated_volume_rule_indices_by_marker_.clear();
+        generated_volume_rule_indices_by_marker_and_side_.clear();
+        generated_volume_markers_.clear();
         generated_interface_rule_indices_by_marker_.clear();
         generated_interface_markers_.clear();
         facet_set_rule_indices_by_marker_.clear();
@@ -189,6 +193,58 @@ public:
         }
         indices.push_back(facet_set_rules_.size());
         facet_set_rules_.push_back(std::move(rule));
+    }
+
+    void addGeneratedVolumeRule(int marker,
+                                CutCellAssemblyMetadata metadata,
+                                geometry::CutQuadratureRule rule) {
+        if (marker < 0) {
+            return;
+        }
+        if (rule.kind != geometry::CutQuadratureKind::Volume) {
+            throw std::invalid_argument("generated level-set volume rule must be a volume rule");
+        }
+        if (rule.side == geometry::CutIntegrationSide::Interface) {
+            throw std::invalid_argument("generated level-set volume rule requires Negative or Positive side");
+        }
+        if (metadata.side != rule.side) {
+            throw std::invalid_argument("generated level-set volume metadata side must match the rule side");
+        }
+
+        const bool keep_binding_alignment = bindings_.size() == volume_rules_.size();
+        const auto index = volume_rules_.size();
+        const bool new_marker =
+            generated_volume_rule_indices_by_marker_.find(marker) ==
+            generated_volume_rule_indices_by_marker_.end();
+        if (new_marker) {
+            generated_volume_markers_.push_back(marker);
+        }
+
+        generated_volume_rule_indices_by_marker_[marker].push_back(index);
+        generated_volume_rule_indices_by_marker_and_side_[marker]
+            [volumeSideIndex(rule.side)].push_back(index);
+        metadata_.push_back(std::move(metadata));
+        volume_rules_.push_back(std::move(rule));
+
+        if (keep_binding_alignment) {
+            const auto& stored_metadata = metadata_.back();
+            const auto& stored_rule = volume_rules_.back();
+            CutIntegrationBinding binding;
+            binding.parent_entity = stored_metadata.parent_entity;
+            binding.kind = geometry::CutQuadratureKind::Volume;
+            binding.side = stored_rule.side;
+            binding.cut_revision_key = stored_metadata.revision_key;
+            binding.cut_topology_revision = stored_metadata.cut_topology_revision;
+            binding.quadrature_policy_key = stored_metadata.quadrature_policy_key;
+            binding.visible_to_paths = {
+                CutIntegrationAssemblyPath::Standard,
+                CutIntegrationAssemblyPath::MatrixFree,
+                CutIntegrationAssemblyPath::Interpreter,
+                CutIntegrationAssemblyPath::AD,
+                CutIntegrationAssemblyPath::SymbolicTangent,
+                CutIntegrationAssemblyPath::JIT};
+            bindings_.push_back(std::move(binding));
+        }
     }
 
     void addGeneratedInterfaceDomain(const interfaces::LevelSetInterfaceDomain& domain) {
@@ -242,6 +298,15 @@ public:
         return facet_set_rules_;
     }
 
+    [[nodiscard]] bool hasGeneratedVolumeMarker(int marker) const {
+        return generated_volume_rule_indices_by_marker_.find(marker) !=
+               generated_volume_rule_indices_by_marker_.end();
+    }
+
+    [[nodiscard]] const std::vector<int>& generatedVolumeMarkers() const noexcept {
+        return generated_volume_markers_;
+    }
+
     [[nodiscard]] bool hasGeneratedInterfaceMarker(int marker) const {
         return generated_interface_rule_indices_by_marker_.find(marker) !=
                generated_interface_rule_indices_by_marker_.end();
@@ -274,6 +339,79 @@ public:
             }
         }
         return rules;
+    }
+
+    [[nodiscard]] std::vector<std::size_t>
+    generatedVolumeRuleIndicesForMarkerAndSide(int marker,
+                                               geometry::CutIntegrationSide side) const {
+        std::vector<std::size_t> indices;
+        if (side == geometry::CutIntegrationSide::Interface) {
+            return indices;
+        }
+        const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
+        if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
+            return indices;
+        }
+        indices = it->second[volumeSideIndex(side)];
+        return indices;
+    }
+
+    [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
+    generatedVolumeRulesForMarker(int marker) const {
+        std::vector<const geometry::CutQuadratureRule*> rules;
+        const auto it = generated_volume_rule_indices_by_marker_.find(marker);
+        if (it == generated_volume_rule_indices_by_marker_.end()) {
+            return rules;
+        }
+        rules.reserve(it->second.size());
+        for (const auto index : it->second) {
+            if (index < volume_rules_.size()) {
+                rules.push_back(&volume_rules_[index]);
+            }
+        }
+        return rules;
+    }
+
+    [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
+    generatedVolumeRulesForMarkerAndSide(int marker,
+                                         geometry::CutIntegrationSide side) const {
+        std::vector<const geometry::CutQuadratureRule*> rules;
+        if (side == geometry::CutIntegrationSide::Interface) {
+            return rules;
+        }
+        const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
+        if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
+            return rules;
+        }
+        const auto& indices = it->second[volumeSideIndex(side)];
+        rules.reserve(indices.size());
+        for (const auto index : indices) {
+            if (index < volume_rules_.size()) {
+                rules.push_back(&volume_rules_[index]);
+            }
+        }
+        return rules;
+    }
+
+    [[nodiscard]] std::vector<const CutCellAssemblyMetadata*>
+    generatedVolumeMetadataForMarkerAndSide(int marker,
+                                            geometry::CutIntegrationSide side) const {
+        std::vector<const CutCellAssemblyMetadata*> metadata;
+        if (side == geometry::CutIntegrationSide::Interface) {
+            return metadata;
+        }
+        const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
+        if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
+            return metadata;
+        }
+        const auto& indices = it->second[volumeSideIndex(side)];
+        metadata.reserve(indices.size());
+        for (const auto index : indices) {
+            if (index < metadata_.size()) {
+                metadata.push_back(&metadata_[index]);
+            }
+        }
+        return metadata;
     }
 
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
@@ -736,10 +874,29 @@ private:
                          path) != binding.visible_to_paths.end();
     }
 
+    [[nodiscard]] static std::size_t volumeSideIndex(geometry::CutIntegrationSide side) {
+        switch (side) {
+            case geometry::CutIntegrationSide::Negative:
+                return 0u;
+            case geometry::CutIntegrationSide::Positive:
+                return 1u;
+            case geometry::CutIntegrationSide::Interface:
+                break;
+        }
+        throw std::invalid_argument("generated level-set volume side must be Negative or Positive");
+    }
+
+    using VolumeRuleSideIndex = std::array<std::vector<std::size_t>, 2>;
+
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};
     std::vector<geometry::CutQuadratureRule> interface_rules_{};
     std::vector<geometry::CutQuadratureRule> facet_set_rules_{};
+    std::unordered_map<int, std::vector<std::size_t>>
+        generated_volume_rule_indices_by_marker_{};
+    std::unordered_map<int, VolumeRuleSideIndex>
+        generated_volume_rule_indices_by_marker_and_side_{};
+    std::vector<int> generated_volume_markers_{};
     std::unordered_map<int, std::vector<std::size_t>>
         generated_interface_rule_indices_by_marker_{};
     std::vector<int> generated_interface_markers_{};
