@@ -84,19 +84,19 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Navier-Stokes Assembly Checklist
 
-- [ ] Factor the existing Navier-Stokes cell integrands before attaching a
+- [x] Factor the existing Navier-Stokes cell integrands before attaching a
       measure.
-- [ ] When active domain is disabled, preserve the current full-cell `.dx()`
+- [x] When active domain is disabled, preserve the current full-cell `.dx()`
       assembly path.
-- [ ] When `Active_domain=LevelSetNegative`, assemble the water-side residual
+- [x] When `Active_domain=LevelSetNegative`, assemble the water-side residual
       over `dCutVolume(free_surface_marker, Negative)`.
-- [ ] Apply the active-domain measure to inertia terms.
-- [ ] Apply the active-domain measure to convection terms.
-- [ ] Apply the active-domain measure to viscous terms.
-- [ ] Apply the active-domain measure to pressure-gradient terms.
-- [ ] Apply the active-domain measure to body-force terms.
-- [ ] Apply the active-domain measure to continuity terms.
-- [ ] Apply the active-domain measure to all VMS residual and stabilization
+- [x] Apply the active-domain measure to inertia terms.
+- [x] Apply the active-domain measure to convection terms.
+- [x] Apply the active-domain measure to viscous terms.
+- [x] Apply the active-domain measure to pressure-gradient terms.
+- [x] Apply the active-domain measure to body-force terms.
+- [x] Apply the active-domain measure to continuity terms.
+- [x] Apply the active-domain measure to all VMS residual and stabilization
       terms.
 - [ ] Keep pressure constraints/gauges compatible with the active wet region.
 - [ ] Keep zero-surface-tension, zero-external-pressure cases from adding a
@@ -190,9 +190,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
 - [x] Add Forms tests for cut-volume tangent/Jacobian assembly.
 - [x] Add Forms tests covering JIT-enabled cut-volume wrapper fallback.
-- [ ] Add Navier-Stokes installation tests proving active-domain cases install
+- [x] Add Navier-Stokes installation tests proving active-domain cases install
       cut-volume kernels.
-- [ ] Add Navier-Stokes installation tests proving active-domain cases do not
+- [x] Add Navier-Stokes installation tests proving active-domain cases do not
       install duplicate full `.dx()` kernels for the same terms.
 - [ ] Add hydrostatic initialization tests for wet-side-only pressure.
 - [ ] Add gauge validation tests for dry and near-interface nodes.

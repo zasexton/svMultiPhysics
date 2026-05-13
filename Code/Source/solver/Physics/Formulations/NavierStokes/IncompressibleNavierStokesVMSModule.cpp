@@ -27,6 +27,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -452,6 +453,55 @@ void applyFreeSurfaceCutCellStabilization(
             ? integrand * FE::forms::currentMeasure()
             : integrand;
     return weighted_integrand.ds(bc.boundary_marker);
+}
+
+struct ActiveVolumeDomain {
+    int interface_marker{-1};
+    FE::forms::CutVolumeSide side{FE::forms::CutVolumeSide::Negative};
+};
+
+[[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces)
+{
+    std::optional<ActiveVolumeDomain> active_domain;
+    for (const auto& bc : free_surfaces) {
+        if (bc.active_domain == FreeSurfaceActiveDomain::None) {
+            continue;
+        }
+        if (bc.active_domain_method != FreeSurfaceActiveDomainMethod::CutVolume) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: active-domain free-surface volume integration currently requires Active_domain_method=CutVolume");
+        }
+        if (active_domain.has_value()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: at most one active-domain free surface may restrict Navier-Stokes volume integration");
+        }
+
+        FE::forms::CutVolumeSide side = FE::forms::CutVolumeSide::Negative;
+        switch (bc.active_domain) {
+        case FreeSurfaceActiveDomain::None:
+            break;
+        case FreeSurfaceActiveDomain::LevelSetNegative:
+            side = FE::forms::CutVolumeSide::Negative;
+            break;
+        case FreeSurfaceActiveDomain::LevelSetPositive:
+            side = FE::forms::CutVolumeSide::Positive;
+            break;
+        }
+        active_domain = ActiveVolumeDomain{bc.interface_marker, side};
+    }
+    return active_domain;
+}
+
+[[nodiscard]] FE::forms::FormExpr integrateOnActiveVolume(
+    const FE::forms::FormExpr& integrand,
+    const std::optional<ActiveVolumeDomain>& active_domain)
+{
+    if (!active_domain.has_value()) {
+        return integrand.dx();
+    }
+    return integrand.dCutVolume(active_domain->interface_marker,
+                                active_domain->side);
 }
 
 [[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
@@ -913,6 +963,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     const auto v = TestField(u_id, *velocity_space_, "v");
     const auto q = TestField(p_id, *pressure_space_, "q");
 
+    std::vector<FreeSurfaceBoundary> effective_free_surfaces;
+    effective_free_surfaces.reserve(options_.free_surface.size());
+    for (const auto& bc : options_.free_surface) {
+        auto effective_bc = withResolvedInterfaceMarker(bc, system);
+        validateFreeSurfaceBoundary(effective_bc, options_.enable_ale);
+        effective_free_surfaces.push_back(std::move(effective_bc));
+    }
+    const auto active_volume_domain =
+        activeVolumeDomainFor(effective_free_surfaces);
+
     const auto rho = FormExpr::constant(options_.density);
 
     // Body force (constant vector).
@@ -971,8 +1031,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     const auto pressure = -p * div(v);
     const auto forcing = -rho * inner(f, v);
 
-    FormExpr momentum_form = (inertia + moving_volume + convection + viscous + pressure + forcing).dx();
-    FormExpr continuity_form = (q * div(u)).dx();
+    const auto galerkin_momentum_integrand =
+        inertia + moving_volume + convection + viscous + pressure + forcing;
+    const auto galerkin_continuity_integrand = q * div(u);
+
+    FormExpr momentum_form =
+        integrateOnActiveVolume(galerkin_momentum_integrand, active_volume_domain);
+    FormExpr continuity_form =
+        integrateOnActiveVolume(galerkin_continuity_integrand, active_volume_domain);
 
     if (options_.enable_vms) {
         // Residual-based VMS with static subscales:
@@ -1023,10 +1089,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             cross_stress = inner(grad(v) * u_sub, rV_tau);
         }
 
-        momentum_form = (inertia + moving_volume + convection_adv + viscous + pressure_adv + forcing + supg + cross_stress).dx();
+        const auto vms_momentum_integrand =
+            inertia + moving_volume + convection_adv + viscous + pressure_adv +
+            forcing + supg + cross_stress;
+        momentum_form =
+            integrateOnActiveVolume(vms_momentum_integrand, active_volume_domain);
 
         // Continuity: Galerkin + VMS (PSPG-like).
-        continuity_form = (q * div(u) - inner(grad(q), u_sub)).dx();
+        const auto vms_continuity_integrand = q * div(u) - inner(grad(q), u_sub);
+        continuity_form =
+            integrateOnActiveVolume(vms_continuity_integrand, active_volume_domain);
     }
 
     // ---------------------------------------------------------------------
@@ -1044,9 +1116,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     bc_manager.install(options_.velocity_dirichlet_weak, Factories::reserveMarker);
 
     auto free_surface_contact_angle_install = physicsInstallOptions(options_.jit_policy);
-    for (const auto& bc : options_.free_surface) {
-        const auto effective_bc = withResolvedInterfaceMarker(bc, system);
-        validateFreeSurfaceBoundary(effective_bc, options_.enable_ale);
+    for (const auto& effective_bc : effective_free_surfaces) {
         applyFreeSurfaceContactLineConstraints(system, effective_bc, ale_binding, dim);
         applyFreeSurfaceContactAngleResidual(
             system,

@@ -2028,6 +2028,113 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInter
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
 }
 
+TEST(MovingDomainPhysics, NavierStokesInactiveActiveDomainKeepsFullCellVolumeKernels)
+{
+    constexpr int interface_marker = 47;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_vms = true;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    const auto& equations = system.operatorDefinition("equations");
+    EXPECT_FALSE(equations.cells.empty());
+    EXPECT_TRUE(equations.cut_volumes.empty());
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
+}
+
+TEST(MovingDomainPhysics, NavierStokesActiveDomainInstallsCutVolumeKernels)
+{
+    constexpr int interface_marker = 48;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_vms = true;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    const auto& equations = system.operatorDefinition("equations");
+    EXPECT_TRUE(equations.cells.empty());
+    ASSERT_FALSE(equations.cut_volumes.empty());
+    for (const auto& term : equations.cut_volumes) {
+        EXPECT_EQ(term.marker, interface_marker);
+        EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Negative);
+    }
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellIntegral));
+}
+
+TEST(MovingDomainPhysics, NavierStokesActiveDomainPositiveUsesPositiveCutVolumeSide)
+{
+    constexpr int interface_marker = 49;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_vms = true;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetPositive,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    const auto& equations = system.operatorDefinition("equations");
+    EXPECT_TRUE(equations.cells.empty());
+    ASSERT_FALSE(equations.cut_volumes.empty());
+    for (const auto& term : equations.cut_volumes) {
+        EXPECT_EQ(term.marker, interface_marker);
+        EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Positive);
+    }
+}
+
 TEST(MovingDomainPhysics, NavierStokesRejectsCutCellStabilizationOnFittedSurface)
 {
     constexpr int marker = 45;
