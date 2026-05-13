@@ -355,6 +355,7 @@ bool decomposeAffineInTrial(const FormExpr& expr, Decomp& out, std::string* reas
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
         case FormExprType::InterfaceIntegral:
+        case FormExprType::CutVolumeIntegral:
         case FormExprType::AsVector:
         case FormExprType::AsTensor:
         default:

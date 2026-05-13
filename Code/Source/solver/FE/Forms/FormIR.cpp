@@ -82,6 +82,14 @@ bool FormIR::hasInterfaceFaceTerms() const noexcept
     return false;
 }
 
+bool FormIR::hasCutVolumeTerms() const noexcept
+{
+    for (const auto& t : impl_->terms) {
+        if (t.domain == IntegralDomain::CutVolume) return true;
+    }
+    return false;
+}
+
 const std::vector<IntegralTerm>& FormIR::terms() const noexcept { return impl_->terms; }
 std::string FormIR::dump() const { return impl_->dump; }
 

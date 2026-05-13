@@ -1599,6 +1599,7 @@ struct ShapeInferenceResult {
         case IntegralDomain::Boundary: return "Boundary";
         case IntegralDomain::InteriorFace: return "InteriorFace";
         case IntegralDomain::InterfaceFace: return "InterfaceFace";
+        case IntegralDomain::CutVolume: return "CutVolume";
     }
     return "<unknown>";
 }

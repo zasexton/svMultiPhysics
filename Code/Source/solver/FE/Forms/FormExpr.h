@@ -97,6 +97,11 @@ enum class GeometryTangentPath : std::uint8_t {
     SymbolicWithADCheck
 };
 
+enum class CutVolumeSide : std::uint8_t {
+    Negative,
+    Positive
+};
+
 struct GeometrySensitivityOptions {
     GeometrySensitivityMode mode{GeometrySensitivityMode::GeometryConstant};
     FieldId mesh_motion_field{INVALID_FIELD_ID};
@@ -385,6 +390,7 @@ struct SymbolicOptions {
 		    BoundaryIntegral,
 		    InteriorFaceIntegral,
 		    InterfaceIntegral,
+            CutVolumeIntegral,
 
 	    // Spectral / eigen (symmetric tensors)
 	    SymmetricEigenvalue,
@@ -464,6 +470,7 @@ public:
 	    [[nodiscard]] virtual std::optional<int> identityDim() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> boundaryMarker() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> interfaceMarker() const { return std::nullopt; }
+        [[nodiscard]] virtual std::optional<CutVolumeSide> cutVolumeSide() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> componentIndex0() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> componentIndex1() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> tensorRows() const { return std::nullopt; }
@@ -757,6 +764,8 @@ public:
 	    [[nodiscard]] FormExpr ds(int boundary_marker = -1) const;
 	    [[nodiscard]] FormExpr dS() const;
 	    [[nodiscard]] FormExpr dI(int interface_marker = -1) const;
+        [[nodiscard]] FormExpr dCutVolume(int interface_marker,
+                                          CutVolumeSide side) const;
 
     // ---- Query ----
     [[nodiscard]] bool isValid() const noexcept { return node_ != nullptr; }

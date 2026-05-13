@@ -918,26 +918,32 @@ void collectIntegralTerms(
                                              int integrand_sign,
                                              IntegralDomain domain,
                                              int boundary_marker,
-                                             int interface_marker) -> void {
+                                             int interface_marker,
+                                             CutVolumeSide cut_volume_side) -> void {
         const auto& in = *integrand_expr.node();
         const auto kids = in.childrenShared();
 
         switch (in.type()) {
             case FormExprType::Add: {
                 if (kids.size() != 2) throw std::logic_error("Add node must have 2 children");
-                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker, interface_marker);
-                self(self, makeExprFromNode(kids[1]), integrand_sign, domain, boundary_marker, interface_marker);
+                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker,
+                     interface_marker, cut_volume_side);
+                self(self, makeExprFromNode(kids[1]), integrand_sign, domain, boundary_marker,
+                     interface_marker, cut_volume_side);
                 return;
             }
             case FormExprType::Subtract: {
                 if (kids.size() != 2) throw std::logic_error("Subtract node must have 2 children");
-                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker, interface_marker);
-                self(self, makeExprFromNode(kids[1]), -integrand_sign, domain, boundary_marker, interface_marker);
+                self(self, makeExprFromNode(kids[0]), integrand_sign, domain, boundary_marker,
+                     interface_marker, cut_volume_side);
+                self(self, makeExprFromNode(kids[1]), -integrand_sign, domain, boundary_marker,
+                     interface_marker, cut_volume_side);
                 return;
             }
             case FormExprType::Negate: {
                 if (kids.size() != 1) throw std::logic_error("Negate node must have 1 child");
-                self(self, makeExprFromNode(kids[0]), -integrand_sign, domain, boundary_marker, interface_marker);
+                self(self, makeExprFromNode(kids[0]), -integrand_sign, domain, boundary_marker,
+                     interface_marker, cut_volume_side);
                 return;
             }
             default:
@@ -953,6 +959,7 @@ void collectIntegralTerms(
         term.domain = domain;
         term.boundary_marker = boundary_marker;
         term.interface_marker = interface_marker;
+        term.cut_volume_side = cut_volume_side;
         term.integrand = std::move(integrand);
         term.debug_string = term.integrand.toString();
         out_terms.push_back(std::move(term));
@@ -983,7 +990,8 @@ void collectIntegralTerms(
                                     sign,
                                     IntegralDomain::Cell,
                                     /*boundary_marker=*/-1,
-                                    /*interface_marker=*/-1);
+                                    /*interface_marker=*/-1,
+                                    CutVolumeSide::Negative);
             return;
         }
         case FormExprType::BoundaryIntegral: {
@@ -994,7 +1002,8 @@ void collectIntegralTerms(
                                     sign,
                                     IntegralDomain::Boundary,
                                     /*boundary_marker=*/marker,
-                                    /*interface_marker=*/-1);
+                                    /*interface_marker=*/-1,
+                                    CutVolumeSide::Negative);
             return;
         }
         case FormExprType::InteriorFaceIntegral: {
@@ -1004,7 +1013,8 @@ void collectIntegralTerms(
                                     sign,
                                     IntegralDomain::InteriorFace,
                                     /*boundary_marker=*/-1,
-                                    /*interface_marker=*/-1);
+                                    /*interface_marker=*/-1,
+                                    CutVolumeSide::Negative);
             return;
         }
         case FormExprType::InterfaceIntegral: {
@@ -1015,7 +1025,21 @@ void collectIntegralTerms(
                                     sign,
                                     IntegralDomain::InterfaceFace,
                                     /*boundary_marker=*/-1,
-                                    /*interface_marker=*/marker);
+                                    /*interface_marker=*/marker,
+                                    CutVolumeSide::Negative);
+            return;
+        }
+        case FormExprType::CutVolumeIntegral: {
+            if (children.size() != 1) throw std::logic_error("CutVolumeIntegral node must have 1 child");
+            const int marker = n.interfaceMarker().value_or(-1);
+            const auto side = n.cutVolumeSide().value_or(CutVolumeSide::Negative);
+            collect_integrand_terms(collect_integrand_terms,
+                                    makeExprFromNode(children[0]),
+                                    sign,
+                                    IntegralDomain::CutVolume,
+                                    /*boundary_marker=*/-1,
+                                    /*interface_marker=*/marker,
+                                    side);
             return;
         }
         default:
@@ -1142,6 +1166,10 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
             case IntegralDomain::Boundary: oss << "ds(" << t.boundary_marker << ")"; break;
             case IntegralDomain::InteriorFace: oss << "dS"; break;
             case IntegralDomain::InterfaceFace: oss << "dI(" << t.interface_marker << ")"; break;
+            case IntegralDomain::CutVolume:
+                oss << "dCutVolume(" << t.interface_marker << ","
+                    << (t.cut_volume_side == CutVolumeSide::Negative ? "Negative" : "Positive") << ")";
+                break;
         }
         if (t.time_derivative_order > 0) {
             oss << " [dt^" << t.time_derivative_order << "]";
@@ -1431,6 +1459,11 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                     case IntegralDomain::InterfaceFace:
                         term_with_measure = block_terms[k].integrand.dI(block_terms[k].interface_marker);
                         break;
+                    case IntegralDomain::CutVolume:
+                        term_with_measure = block_terms[k].integrand.dCutVolume(
+                            block_terms[k].interface_marker,
+                            block_terms[k].cut_volume_side);
+                        break;
                 }
                 if (!block_expr.isValid()) {
                     block_expr = term_with_measure;
@@ -1486,6 +1519,11 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                         break;
                     case IntegralDomain::InterfaceFace:
                         term_with_measure = block_terms[k].integrand.dI(block_terms[k].interface_marker);
+                        break;
+                    case IntegralDomain::CutVolume:
+                        term_with_measure = block_terms[k].integrand.dCutVolume(
+                            block_terms[k].interface_marker,
+                            block_terms[k].cut_volume_side);
                         break;
                 }
 

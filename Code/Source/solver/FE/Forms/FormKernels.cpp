@@ -8627,6 +8627,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
         case FormExprType::InterfaceIntegral:
+        case FormExprType::CutVolumeIntegral:
             break;
     }
 
@@ -12590,6 +12591,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
         case FormExprType::BoundaryIntegral:
         case FormExprType::InteriorFaceIntegral:
         case FormExprType::InterfaceIntegral:
+        case FormExprType::CutVolumeIntegral:
             break;
     }
 

@@ -190,9 +190,10 @@ Status: `implemented/public`.
 | `.ds(marker)` | Boundary integral; `marker = -1` means default/all as supported by assembly |
 | `.dS()` | Interior facet integral |
 | `.dI(interface_marker)` | Registered interface-face integral |
+| `.dCutVolume(interface_marker, side)` | Generated cut-volume integral over the selected interface side |
 
-The compiler/IR distinguishes `Cell`, `Boundary`, `InteriorFace`, and
-`InterfaceFace` terms.
+The compiler/IR distinguishes `Cell`, `Boundary`, `InteriorFace`,
+`InterfaceFace`, and `CutVolume` terms.
 
 ### Differential Operators
 
@@ -595,8 +596,9 @@ with named field/state concepts instead of slot or byte-offset references.
 
 Status: `planned`.
 
-Current public measures are `.dx()`, `.ds(marker)`, `.dS()`, and
-`.dI(marker)`. Missing vocabulary:
+Current public measures are `.dx()`, `.ds(marker)`, `.dS()`,
+`.dI(marker)`, and `.dCutVolume(interface_marker, side)`. Missing
+vocabulary:
 
 | Planned vocabulary | Purpose |
 |--------------------|---------|

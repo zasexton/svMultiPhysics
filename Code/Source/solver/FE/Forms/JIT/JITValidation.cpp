@@ -686,8 +686,9 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
             case FormExprType::BoundaryIntegral:
             case FormExprType::InteriorFaceIntegral:
             case FormExprType::InterfaceIntegral:
+            case FormExprType::CutVolumeIntegral:
                 out.ok = false;
-                out.first_issue = issue(n, "JIT: measure nodes (dx/ds/dS/dI) are not valid in integrands");
+                out.first_issue = issue(n, "JIT: measure nodes are not valid in integrands");
                 return;
 
             case FormExprType::IndexedAccess:

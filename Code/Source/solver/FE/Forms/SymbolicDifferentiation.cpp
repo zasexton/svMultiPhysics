@@ -464,6 +464,7 @@ void markZeros(const FormExprNode& node,
             case FormExprType::BoundaryIntegral:
             case FormExprType::InteriorFaceIntegral:
             case FormExprType::InterfaceIntegral:
+            case FormExprType::CutVolumeIntegral:
                 z = true;
                 break;
             default: break;
@@ -734,7 +735,8 @@ FormExpr simplify(const FormExpr& expr)
             if (n.type() == FormExprType::CellIntegral ||
                 n.type() == FormExprType::BoundaryIntegral ||
                 n.type() == FormExprType::InteriorFaceIntegral ||
-                n.type() == FormExprType::InterfaceIntegral) {
+                n.type() == FormExprType::InterfaceIntegral ||
+                n.type() == FormExprType::CutVolumeIntegral) {
                 if (kids.size() >= 1u && kids[0] && isZeroLike(*kids[0])) {
                     changed = true;
                     return FormExpr::constant(0.0);
@@ -1690,6 +1692,14 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 out.deriv = deriv_integrand.dI(marker);
                 break;
             }
+            case FormExprType::CutVolumeIntegral: {
+                const int marker = node->interfaceMarker().value_or(-1);
+                const auto side = node->cutVolumeSide().value_or(CutVolumeSide::Negative);
+                const auto a = diff1(0);
+                out.primal = a.primal.dCutVolume(marker, side);
+                out.deriv = a.deriv.dCutVolume(marker, side);
+                break;
+            }
 
             default:
                 throw std::invalid_argument("differentiateResidual: unsupported FormExprType " +
@@ -2542,6 +2552,14 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const auto a = diff1(0);
                 out.primal = a.primal.dI(marker);
                 out.deriv = a.deriv.dI(marker);
+                break;
+            }
+            case FormExprType::CutVolumeIntegral: {
+                const int marker = node->interfaceMarker().value_or(-1);
+                const auto side = node->cutVolumeSide().value_or(CutVolumeSide::Negative);
+                const auto a = diff1(0);
+                out.primal = a.primal.dCutVolume(marker, side);
+                out.deriv = a.deriv.dCutVolume(marker, side);
                 break;
             }
 

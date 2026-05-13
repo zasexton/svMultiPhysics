@@ -66,11 +66,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       interface marker and side.
 - [ ] Keep generated interface surface rules separate from generated volume
       rules.
-- [ ] Add a Forms integral domain for cut-volume integration, for example
+- [x] Add a Forms integral domain for cut-volume integration, for example
       `IntegralDomain::CutVolume`.
-- [ ] Add a public Forms measure for the new domain, for example
+- [x] Add a public Forms measure for the new domain, for example
       `dCutVolume(marker, side)`.
-- [ ] Update Forms vocabulary/documentation to include the new cut-volume
+- [x] Update Forms vocabulary/documentation to include the new cut-volume
       measure.
 - [ ] Route cut-volume kernels through `CutDomainAssembler`.
 - [ ] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`

@@ -14,6 +14,7 @@
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Forms/Vocabulary.h"
+#include "FE/Forms/FormCompiler.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
@@ -190,6 +191,28 @@ TEST(FormIntegrationJacobian, SolidFiniteDeformationHelpersBuildFollowerAndGeome
 
     EXPECT_TRUE(follower.isValid());
     EXPECT_TRUE(geometric_stiffness.isValid());
+}
+
+TEST(FormIntegrationJacobian, CutVolumeMeasureCompilesToCutVolumeIRTerm)
+{
+    auto space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Tetra4, /*order=*/1);
+
+    using namespace svmp::FE::forms;
+
+    auto v = FormExpr::testFunction(*space, "v");
+    const auto form =
+        (FormExpr::constant(2.0) * v).dCutVolume(17, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    auto ir = compiler.compileLinear(form);
+
+    ASSERT_TRUE(ir.isCompiled());
+    ASSERT_EQ(ir.terms().size(), 1u);
+    EXPECT_TRUE(ir.hasCutVolumeTerms());
+    EXPECT_EQ(ir.terms().front().domain, IntegralDomain::CutVolume);
+    EXPECT_EQ(ir.terms().front().interface_marker, 17);
+    EXPECT_EQ(ir.terms().front().cut_volume_side, CutVolumeSide::Negative);
 }
 
 } // namespace test

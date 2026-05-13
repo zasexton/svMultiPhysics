@@ -1991,6 +1991,32 @@ private:
     int interface_marker_{-1};
 };
 
+class CutVolumeIntegralNode final : public UnaryNode {
+public:
+    CutVolumeIntegralNode(std::shared_ptr<FormExprNode> child,
+                          int interface_marker,
+                          CutVolumeSide side)
+        : UnaryNode(std::move(child))
+        , interface_marker_(interface_marker)
+        , side_(side)
+    {
+    }
+
+    [[nodiscard]] FormExprType type() const noexcept override { return FormExprType::CutVolumeIntegral; }
+    [[nodiscard]] std::string toString() const override {
+        std::string marker_str = interface_marker_ >= 0 ? std::to_string(interface_marker_) : "all";
+        const char* side_str = side_ == CutVolumeSide::Negative ? "negative" : "positive";
+        return "integral_cut_" + marker_str + "_" + side_str + "(" + child_->toString() + ") dCutVolume";
+    }
+
+    [[nodiscard]] std::optional<int> interfaceMarker() const override { return interface_marker_; }
+    [[nodiscard]] std::optional<CutVolumeSide> cutVolumeSide() const override { return side_; }
+
+private:
+    int interface_marker_{-1};
+    CutVolumeSide side_{CutVolumeSide::Negative};
+};
+
 } // namespace
 
 // ============================================================================
@@ -3221,6 +3247,12 @@ FormExpr FormExpr::dI(int interface_marker) const
     return FormExpr(std::make_shared<InterfaceIntegralNode>(node_, interface_marker));
 }
 
+FormExpr FormExpr::dCutVolume(int interface_marker, CutVolumeSide side) const
+{
+    if (!node_) return {};
+    return FormExpr(std::make_shared<CutVolumeIntegralNode>(node_, interface_marker, side));
+}
+
 namespace {
 
 std::shared_ptr<FormExprNode> transformNodeShared(
@@ -3396,6 +3428,11 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         case FormExprType::InterfaceIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);
             return std::make_shared<InterfaceIntegralNode>(new_kids[0], marker);
+        }
+        case FormExprType::CutVolumeIntegral: {
+            const int marker = node->interfaceMarker().value_or(-1);
+            const auto side = node->cutVolumeSide().value_or(CutVolumeSide::Negative);
+            return std::make_shared<CutVolumeIntegralNode>(new_kids[0], marker, side);
         }
 
         case FormExprType::Constitutive: {

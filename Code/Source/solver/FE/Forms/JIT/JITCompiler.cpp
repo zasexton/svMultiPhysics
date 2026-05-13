@@ -133,6 +133,8 @@ inferFunctionalReferenceSpaceSignature(const FormExprNode& node,
             return "InteriorFace";
         case IntegralDomain::InterfaceFace:
             return "InterfaceFace";
+        case IntegralDomain::CutVolume:
+            return "CutVolume";
         default:
             return "Unknown";
     }
