@@ -166,9 +166,14 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       `Pressure` D18 layout, or restructure D18 so the Navier-Stokes solve can
       use a velocity-pressure solver block without the level-set field in the
       same linear system.
-      Current finding: solver-control routing is corrected, but strict
-      one-step runs still stop on a true-residual floor or pseudo-transient
-      nonlinear stagnation.
+      Current finding: solver-control routing is corrected and D18 now has a
+      concrete FSILS BlockSchur route with
+      `block_layout=[LevelSetVelocity(0:4), Pressure(4:1)]`, but strict
+      one-step runs still stop on a BlockSchur true-residual floor.
+- [x] Add explicit D18/D38 FSILS BlockSchur layout grouping and solver XML
+      controls for the `phi`, `Velocity`, and `Pressure` field order.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_blockschur_layout_20260513.md`.
 - [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
 - [x] Implement per-face metadata-scale constants for cut-adjacent facet

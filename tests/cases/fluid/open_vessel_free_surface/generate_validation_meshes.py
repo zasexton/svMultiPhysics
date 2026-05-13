@@ -400,6 +400,7 @@ def write_solver_xml(
     include_obstacle_bc: bool = False,
     active_domain: str | None = None,
     use_cut_metadata_scale: bool = False,
+    use_blockschur_solver: bool = False,
 ) -> None:
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
@@ -427,6 +428,16 @@ def write_solver_xml(
     <Active_domain>{active_domain}</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>"""
     cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
+    unfitted_fluid_solver_type = "NS" if use_blockschur_solver else "GMRES"
+    unfitted_blockschur_controls = ""
+    if use_blockschur_solver:
+        unfitted_blockschur_controls = f"""
+    <NS_GM_max_iterations>1000</NS_GM_max_iterations>
+    <NS_GM_tolerance>{LINEAR_SOLVER_TOLERANCE}</NS_GM_tolerance>
+    <NS_CG_max_iterations>1000</NS_CG_max_iterations>
+    <NS_CG_tolerance>{LINEAR_SOLVER_TOLERANCE}</NS_CG_tolerance>
+    <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
+    <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>"""
 
     if fitted:
         equations = f"""
@@ -586,14 +597,14 @@ def write_solver_xml(
     <Volume>true</Volume>
   </Output>
 
-  <LS type="GMRES">
+  <LS type="{unfitted_fluid_solver_type}">
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
-    <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
+    <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>{unfitted_blockschur_controls}
   </LS>
 
 {wall_bc_blocks}
@@ -688,6 +699,7 @@ def write_case(
     include_top_wall_bc: bool = False,
     active_domain: str | None = None,
     use_cut_metadata_scale: bool = False,
+    use_blockschur_solver: bool = False,
     gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
     record_gauge_metadata: bool = False,
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
@@ -732,6 +744,7 @@ def write_case(
         include_obstacle_bc=bool(obstacles),
         active_domain=active_domain,
         use_cut_metadata_scale=use_cut_metadata_scale,
+        use_blockschur_solver=use_blockschur_solver,
     )
 
     print(
@@ -866,6 +879,7 @@ def generate_spheric_test05() -> None:
             time_steps=80,
             active_domain="LevelSetNegative",
             use_cut_metadata_scale=True,
+            use_blockschur_solver=True,
         )
 
 

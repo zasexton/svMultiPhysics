@@ -123,7 +123,7 @@
     <Volume>true</Volume>
   </Output>
 
-  <LS type="GMRES">
+  <LS type="NS">
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
@@ -131,6 +131,12 @@
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-4</Absolute_tolerance>
+    <NS_GM_max_iterations>1000</NS_GM_max_iterations>
+    <NS_GM_tolerance>1.0e-4</NS_GM_tolerance>
+    <NS_CG_max_iterations>1000</NS_CG_max_iterations>
+    <NS_CG_tolerance>1.0e-4</NS_CG_tolerance>
+    <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
+    <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
   </LS>
 
   <Add_BC name="wall_left">

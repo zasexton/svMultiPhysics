@@ -873,6 +873,38 @@ void SimulationBuilder::createSolvers()
         }
       }
 
+      const bool is_level_set_fluid_blockschur =
+          backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+          solver_options.method == svmp::FE::backends::SolverMethod::BlockSchur &&
+          firstEquationTypeIs(params_, "level_set");
+      if (is_level_set_fluid_blockschur) {
+        const auto* level_set = layout.findBlock("phi");
+        const auto* velocity = layout.findBlock("Velocity");
+        const auto* pressure = layout.findBlock("Pressure");
+        if (level_set && velocity && pressure &&
+            level_set->n_components == 1 &&
+            velocity->n_components > 1 &&
+            pressure->n_components == 1 &&
+            level_set->start_component == 0 &&
+            velocity->start_component == level_set->n_components &&
+            pressure->start_component == level_set->n_components + velocity->n_components) {
+          svmp::FE::backends::BlockLayout grouped_layout{};
+          grouped_layout.blocks.push_back({
+              "LevelSetVelocity",
+              level_set->start_component,
+              level_set->n_components + velocity->n_components,
+              svmp::FE::backends::BlockRole::PrimaryField});
+          grouped_layout.blocks.push_back({
+              pressure->name,
+              pressure->start_component,
+              pressure->n_components,
+              svmp::FE::backends::BlockRole::ConstraintField});
+          grouped_layout.momentum_block = 0;
+          grouped_layout.constraint_block = 1;
+          layout = std::move(grouped_layout);
+        }
+      }
+
       // Identify saddle-point block pair when the solver/backend can benefit from
       // explicit momentum/constraint roles.  For FSILS this is also required by
       // native outlet-coupled GMRES solves, not just the BlockSchur path.

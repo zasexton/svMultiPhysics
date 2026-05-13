@@ -212,6 +212,20 @@ void expectGmresSolver(const tinyxml2::XMLElement& equation)
   EXPECT_FALSE(text(solver, "Tolerance").empty());
 }
 
+void expectBlockSchurSolver(const tinyxml2::XMLElement& equation)
+{
+  const auto& solver = childWithAttribute(equation, "LS", "type", "NS");
+  EXPECT_FALSE(text(solver, "Max_iterations").empty());
+  EXPECT_FALSE(text(solver, "Krylov_space_dimension").empty());
+  EXPECT_FALSE(text(solver, "Tolerance").empty());
+  expectText(solver, "NS_GM_max_iterations", "1000");
+  expectText(solver, "NS_GM_tolerance", "1.0e-4");
+  expectText(solver, "NS_CG_max_iterations", "1000");
+  expectText(solver, "NS_CG_tolerance", "1.0e-4");
+  expectText(solver, "NS_Schur_preconditioner", "algebraic-shat");
+  expectText(solver, "NS_Momentum_approximation", "ilu-k");
+}
+
 bool fileContains(const fs::path& path, std::string_view needle)
 {
   std::ifstream input(path);
@@ -549,6 +563,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     if (is_test05) {
       expectText(free_surface, "Active_domain", "LevelSetNegative");
       expectText(free_surface, "Active_domain_method", "CutVolume");
+      expectBlockSchurSolver(fluid);
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
       EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
