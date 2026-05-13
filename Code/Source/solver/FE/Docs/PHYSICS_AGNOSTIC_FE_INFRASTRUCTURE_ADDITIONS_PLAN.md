@@ -328,21 +328,21 @@ Implementation notes:
 
 ## Documentation Checklist
 
-- [ ] Update FE developer docs to state the FE/Physics boundary for these
+- [x] Update FE developer docs to state the FE/Physics boundary for these
       additions.
-- [ ] Add examples using neutral names:
-  - [ ] bounded concentration-like scalar
-  - [ ] generic two-field exchange
-  - [ ] threshold volume of an arbitrary scalar
-  - [ ] accumulated exposure of an arbitrary field
-- [ ] Add a "Do not put in FE" note listing examples:
-  - [ ] oxygen transfer laws
-  - [ ] bubble breakup/coalescence laws
-  - [ ] gas-liquid drag laws
-  - [ ] RANS closures
-  - [ ] MRF source terms
-  - [ ] cell damage models
-  - [ ] bioreactor-specific metrics
+- [x] Add examples using neutral names:
+  - [x] bounded concentration-like scalar
+  - [x] generic two-field exchange
+  - [x] threshold volume of an arbitrary scalar
+  - [x] accumulated exposure of an arbitrary field
+- [x] Add a "Do not put in FE" note listing examples:
+  - [x] oxygen transfer laws
+  - [x] bubble breakup/coalescence laws
+  - [x] gas-liquid drag laws
+  - [x] RANS closures
+  - [x] MRF source terms
+  - [x] cell damage models
+  - [x] bioreactor-specific metrics
 
 ## Test Plan
 
