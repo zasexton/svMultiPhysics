@@ -190,7 +190,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       hydrostatic state.
 - [x] Add a validation failure if velocity remains near-static at the D18
       comparison time.
-- [ ] Keep the extracted `phi=0` front/profile plot, but label it as an
+- [x] Keep the extracted `phi=0` front/profile plot, but label it as an
       interface diagnostic until field checks pass.
 
 ## Unit Test Checklist

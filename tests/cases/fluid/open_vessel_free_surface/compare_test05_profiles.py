@@ -255,6 +255,33 @@ def _validation_status(
     }
 
 
+def _write_profile_plot(
+    output_path: Path,
+    reference_x: np.ndarray,
+    reference_y: np.ndarray,
+    simulated_y: np.ndarray,
+    front_position_role: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.0))
+    ax.plot(reference_x, reference_y, "k-", linewidth=1.5, label="reference profile")
+    ax.plot(reference_x, simulated_y, "o-", linewidth=1.0, markersize=3.0,
+            label="extracted phi=0 profile")
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("height [m]")
+    ax.set_title(
+        "SPHERIC Test05 interface profile"
+        + ("; front position diagnostic only"
+           if front_position_role == "diagnostic_only" else "")
+    )
+    ax.grid(True, linewidth=0.3, alpha=0.5)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
 def compare(args: argparse.Namespace) -> dict[str, object]:
     benchmark = _load_benchmark(args.benchmark_json)
     report: dict[str, object] = {
@@ -313,22 +340,35 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
             "simulated_front_x_m": float(selected[:, 0].max()),
             "reference_front_x_m": float(reference_x.max()),
             "front_error_m": float(selected[:, 0].max() - reference_x.max()),
-            "front_position_role": (
-                "diagnostic_only"
-                if args.front_diagnostic_only or "wet_bed_depth" in benchmark.get("dimensions_m", {})
-                else "validation"
-            ),
             "simulated_peak_y_m": float(np.nanmax(sim_y)),
             "reference_peak_y_m": float(np.max(reference_y)),
             "peak_y_error_m": float(np.nanmax(sim_y) - np.max(reference_y)),
         }
     )
+    dimensions = benchmark.get("dimensions_m", {})
+    front_position_role = (
+        "diagnostic_only"
+        if args.front_diagnostic_only or (
+            isinstance(dimensions, dict) and "wet_bed_depth" in dimensions
+        )
+        else "validation"
+    )
+    metric_values["front_position_role"] = front_position_role
 
     report["profile_comparison"] = {
         "reference_profile": str(args.reference_profile),
         "x_window_m": [x_min, x_max],
         "metrics": metric_values,
     }
+    if args.plot_output:
+        _write_profile_plot(
+            args.plot_output,
+            reference_x,
+            reference_y,
+            sim_y,
+            front_position_role,
+        )
+        report["profile_comparison"]["plot_output"] = str(args.plot_output)
     return report
 
 
@@ -349,6 +389,7 @@ def main() -> None:
     parser.add_argument("--x-min", type=float)
     parser.add_argument("--x-max", type=float)
     parser.add_argument("--sample-radius", type=float)
+    parser.add_argument("--plot-output", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
