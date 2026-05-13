@@ -72,7 +72,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       `dCutVolume(marker, side)`.
 - [x] Update Forms vocabulary/documentation to include the new cut-volume
       measure.
-- [ ] Route cut-volume kernels through `CutDomainAssembler`.
+- [x] Route cut-volume kernels through `CutDomainAssembler`.
 - [ ] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
       kernels for the same residual terms.
 - [ ] Add interpreter and compiled/JIT support for the new integral domain.

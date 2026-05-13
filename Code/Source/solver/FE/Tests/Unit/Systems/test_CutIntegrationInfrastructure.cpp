@@ -1,4 +1,5 @@
 #include "Assembly/CutIntegrationContext.h"
+#include "Assembly/CutDomainAssembler.h"
 #include "Geometry/CutQuadrature.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Systems/CutIntegrationInvalidation.h"
@@ -2204,6 +2205,84 @@ TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAn
     EXPECT_TRUE(context.generatedVolumeRulesForMarker(51).empty());
     EXPECT_TRUE(context.volumeRules().empty());
     EXPECT_TRUE(context.metadata().empty());
+}
+
+TEST(CutIntegrationInfrastructure, CutDomainAssemblerFiltersGeneratedVolumeMarkerAndSide)
+{
+    class CountingCellKernel final : public AssemblyKernel {
+    public:
+        [[nodiscard]] RequiredData getRequiredData() const override {
+            return RequiredData::None;
+        }
+
+        void computeCell(const AssemblyContext&, KernelOutput& output) override {
+            output.reserve(/*n_test=*/1, /*n_trial=*/1,
+                           /*need_matrix=*/false,
+                           /*need_vector=*/true);
+            output.vectorEntry(0) = Real{1.0};
+        }
+    };
+
+    auto make_domain = [](int marker, MeshIndex parent_cell) {
+        CutInterfaceDomainRequest request;
+        request.source = LevelSetInterfaceSource::fromField(
+            /*field_id=*/static_cast<FieldId>(marker),
+            /*layout_revision=*/1,
+            /*value_revision=*/1);
+        request.interface_marker = marker;
+
+        LevelSetInterfaceDomain domain(request);
+        const LevelSetCellCutInput input{
+            .parent_cell = parent_cell,
+            .element_type = ElementType::Quad4,
+            .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                 {{1.0, 0.0, 0.0}},
+                                 {{1.0, 1.0, 0.0}},
+                                 {{0.0, 1.0, 0.0}}},
+            .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+        appendLinearLevelSetCellCut2D(domain, input);
+        return domain;
+    };
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(make_domain(51, 7));
+    context.addGeneratedInterfaceDomain(make_domain(52, 8));
+
+    CountingCellKernel kernel;
+    std::vector<std::size_t> seen_indices;
+    std::vector<int> seen_markers;
+    std::vector<CutIntegrationSide> seen_sides;
+
+    CutDomainAssemblyOptions options;
+    options.include_interface_rules = false;
+    options.volume_marker = 51;
+    options.volume_side = CutIntegrationSide::Negative;
+
+    const auto summary = assembleCutDomains(
+        context,
+        kernel,
+        [&](const CutRuleAssemblyRequest& request, AssemblyContext&) {
+            ASSERT_NE(request.rule, nullptr);
+            seen_indices.push_back(request.rule_index);
+            seen_markers.push_back(request.marker);
+            seen_sides.push_back(request.rule->side);
+        },
+        options);
+
+    EXPECT_EQ(summary.volume_rule_count, 1u);
+    EXPECT_EQ(summary.interface_rule_count, 0u);
+    EXPECT_EQ(summary.skipped_rule_count, 3u);
+    ASSERT_TRUE(summary.hasVector());
+    ASSERT_EQ(summary.total_output.local_vector.size(), 1u);
+    EXPECT_DOUBLE_EQ(summary.total_output.local_vector[0], 1.0);
+
+    ASSERT_EQ(seen_indices.size(), 1u);
+    ASSERT_EQ(seen_markers.size(), 1u);
+    ASSERT_EQ(seen_sides.size(), 1u);
+    EXPECT_EQ(seen_markers.front(), 51);
+    EXPECT_EQ(seen_sides.front(), CutIntegrationSide::Negative);
+    EXPECT_EQ(context.volumeRules()[seen_indices.front()].provenance.marker, 51);
+    EXPECT_EQ(context.volumeRules()[seen_indices.front()].side, CutIntegrationSide::Negative);
 }
 
 TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesConstantsAcrossPaths)

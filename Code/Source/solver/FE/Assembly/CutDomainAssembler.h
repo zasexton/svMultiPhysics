@@ -52,6 +52,8 @@ struct CutDomainAssemblyOptions {
     CutIntegrationAssemblyPath path{CutIntegrationAssemblyPath::Standard};
     bool include_volume_rules{true};
     bool include_interface_rules{true};
+    int volume_marker{-1};
+    geometry::CutIntegrationSide volume_side{geometry::CutIntegrationSide::Interface};
     int interface_marker{-1};
 };
 
@@ -81,6 +83,20 @@ using CutRuleContextBuilder =
     return binding.visible_to_paths.empty() ||
            std::find(binding.visible_to_paths.begin(), binding.visible_to_paths.end(), path) !=
                binding.visible_to_paths.end();
+}
+
+[[nodiscard]] inline bool cutVolumeRuleMatchesOptions(
+    const geometry::CutQuadratureRule& rule,
+    const CutDomainAssemblyOptions& options) noexcept
+{
+    if (options.volume_marker >= 0 && rule.provenance.marker != options.volume_marker) {
+        return false;
+    }
+    if (options.volume_side != geometry::CutIntegrationSide::Interface &&
+        rule.side != options.volume_side) {
+        return false;
+    }
+    return true;
 }
 
 inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src)
@@ -147,6 +163,10 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
         const auto& metadata = context.metadata();
         const auto& bindings = context.bindings();
         for (std::size_t i = 0u; i < volume_rules.size(); ++i) {
+            if (!cutVolumeRuleMatchesOptions(volume_rules[i], options)) {
+                ++summary.skipped_rule_count;
+                continue;
+            }
             const auto* binding = has_explicit_bindings && i < bindings.size() ? &bindings[i] : nullptr;
             if (binding != nullptr && !cutBindingVisibleToPath(*binding, options.path)) {
                 ++summary.skipped_rule_count;
@@ -164,6 +184,8 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
             request.metadata = i < metadata.size() ? &metadata[i] : nullptr;
             request.binding = binding;
             request.rule_index = i;
+            request.marker = options.volume_marker >= 0 ? options.volume_marker
+                                                        : volume_rules[i].provenance.marker;
 
             AssemblyContext rule_context;
             context_builder(request, rule_context);
