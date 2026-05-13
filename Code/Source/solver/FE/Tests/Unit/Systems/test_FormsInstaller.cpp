@@ -630,6 +630,39 @@ TEST(FormsInstaller, FormsInstaller_InstallFormulation_RegistersKernel)
     }
 }
 
+TEST(FormsInstaller, FormsInstaller_RegistersCutVolumeKernel)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const int marker = 77;
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto residual_form =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {u_field}, residual_form);
+    ASSERT_FALSE(installed.residual.empty());
+    ASSERT_NE(installed.residual[0], nullptr);
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+    ASSERT_EQ(def.cut_volumes.size(), 1u);
+    EXPECT_EQ(def.cut_volumes.front().marker, marker);
+    EXPECT_EQ(def.cut_volumes.front().side,
+              svmp::FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(def.cut_volumes.front().test_field, u_field);
+    EXPECT_EQ(def.cut_volumes.front().trial_field, u_field);
+    EXPECT_NE(def.cut_volumes.front().kernel, nullptr);
+}
+
 TEST(FormsInstaller, InstallFormulationWithMetadata_CapturesInstalledRecord)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();

@@ -8,6 +8,7 @@
 #include "Systems/FormsInstaller.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 
 #include "Core/FEException.h"
@@ -78,7 +79,19 @@ struct DomainDispatch {
     bool has_interface{false};
     std::vector<int> boundary_markers{};
     std::vector<int> interface_markers{};
+    struct CutVolumeRegion {
+        int marker{-1};
+        forms::CutVolumeSide side{forms::CutVolumeSide::Negative};
+    };
+    std::vector<CutVolumeRegion> cut_volume_regions{};
 };
+
+[[nodiscard]] geometry::CutIntegrationSide toGeometrySide(forms::CutVolumeSide side) noexcept
+{
+    return side == forms::CutVolumeSide::Negative
+               ? geometry::CutIntegrationSide::Negative
+               : geometry::CutIntegrationSide::Positive;
+}
 
 DomainDispatch analyzeDispatch(const forms::FormIR& ir)
 {
@@ -133,6 +146,35 @@ DomainDispatch analyzeDispatch(const forms::FormIR& ir)
         }
     }
 
+    if (!ir.hasCutVolumeTerms()) {
+        out.cut_volume_regions.clear();
+    } else {
+        std::vector<DomainDispatch::CutVolumeRegion> regions;
+        for (const auto& term : ir.terms()) {
+            if (term.domain != forms::IntegralDomain::CutVolume) continue;
+            regions.push_back(DomainDispatch::CutVolumeRegion{
+                term.interface_marker,
+                term.cut_volume_side});
+        }
+        std::sort(regions.begin(),
+                  regions.end(),
+                  [](const auto& a, const auto& b) {
+                      if (a.marker != b.marker) {
+                          return a.marker < b.marker;
+                      }
+                      return static_cast<std::uint8_t>(a.side) <
+                             static_cast<std::uint8_t>(b.side);
+                  });
+        regions.erase(
+            std::unique(regions.begin(),
+                        regions.end(),
+                        [](const auto& a, const auto& b) {
+                            return a.marker == b.marker && a.side == b.side;
+                        }),
+            regions.end());
+        out.cut_volume_regions = std::move(regions);
+    }
+
     return out;
 }
 
@@ -155,6 +197,10 @@ void registerKernel(
     }
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
+    }
+    for (const auto& region : dispatch.cut_volume_regions) {
+        system.addCutVolumeKernel(
+            op, region.marker, toGeometrySide(region.side), test_field, trial_field, kernel);
     }
 }
 
@@ -179,12 +225,17 @@ void registerKernelDomains(
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
     }
+    for (const auto& region : dispatch.cut_volume_regions) {
+        system.addCutVolumeKernel(
+            op, region.marker, toGeometrySide(region.side), test_field, trial_field, kernel);
+    }
 }
 
 [[nodiscard]] bool dispatchHasAnyTerm(const DomainDispatch& dispatch) noexcept
 {
     return dispatch.has_cell || dispatch.has_interior || dispatch.has_interface ||
-           !dispatch.boundary_markers.empty() || !dispatch.interface_markers.empty();
+           !dispatch.boundary_markers.empty() || !dispatch.interface_markers.empty() ||
+           !dispatch.cut_volume_regions.empty();
 }
 
 KernelPtr maybeWrapForJIT(KernelPtr kernel, const FormInstallOptions& options)
@@ -243,6 +294,9 @@ KernelPtr maybeWrapForJIT(KernelPtr kernel, const FormInstallOptions& options)
     }
     if (dispatch.has_interface || !dispatch.interface_markers.empty()) {
         append("interface-face");
+    }
+    if (!dispatch.cut_volume_regions.empty()) {
+        append("cut-volume");
     }
     if (first) {
         oss << "none";
@@ -1036,8 +1090,7 @@ KernelPtr installResidualForm(
                 "installResidualForm: TrialFunction space does not match registered trial_field space");
 
     const auto dispatch = analyzeDispatch(ir);
-    FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                    dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+    FE_THROW_IF(!dispatchHasAnyTerm(dispatch),
                 InvalidArgumentException,
                 "installResidualForm: compiled residual has no integral terms");
 
@@ -1192,8 +1245,7 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
 
             auto ir = std::move(compiled[i][j].value());
             const auto dispatch = analyzeDispatch(ir);
-            FE_THROW_IF(!dispatch.has_cell && !dispatch.has_interior && !dispatch.has_interface &&
-                            dispatch.boundary_markers.empty() && dispatch.interface_markers.empty(),
+            FE_THROW_IF(!dispatchHasAnyTerm(dispatch),
                         InvalidArgumentException,
                         "installResidualBlocks: compiled residual block has no integral terms");
 

@@ -17,6 +17,7 @@
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <span>
 #include <stdexcept>
@@ -853,6 +854,119 @@ TEST(CutCellForms, CutDomainAssemblerUsesCutRulesForResidualAndTangentKernels)
     EXPECT_EQ(skipped_summary.skipped_rule_count, cut_context.volumeRules().size());
     EXPECT_FALSE(skipped_summary.hasMatrix());
     EXPECT_FALSE(skipped_summary.hasVector());
+}
+
+TEST(CutCellForms, CutVolumeFormTermsFilterByMarkerAndSide)
+{
+    using svmp::FE::assembly::CutCellAssemblyMetadata;
+    using svmp::FE::assembly::CutDomainAssemblyOptions;
+    using svmp::FE::assembly::CutIntegrationContext;
+
+    CutIntegrationContext cut_context;
+    auto add_volume_rule =
+        [&](int marker, CutIntegrationSide side, CutQuadratureRule rule) {
+            rule.side = side;
+            rule.provenance.marker = marker;
+            rule.provenance.parent_entity = 0;
+
+            CutCellAssemblyMetadata metadata;
+            metadata.parent_entity = 0;
+            metadata.volume_fraction = rule.volume_fraction;
+            metadata.side = side;
+            cut_context.addVolumeRule(std::move(metadata), std::move(rule));
+        };
+
+    auto negative_rule = makeReferenceTetraCutRule(
+        CutIntegrationSide::Negative,
+        {
+            {{{0.10, 0.20, 0.15}}, {{1.0, 0.0, 0.0}}, Real(0.018)},
+            {{{0.24, 0.12, 0.18}}, {{1.0, 0.0, 0.0}}, Real(0.027)}
+        });
+    auto positive_rule = makeReferenceTetraCutRule(
+        CutIntegrationSide::Positive,
+        {
+            {{{0.18, 0.16, 0.20}}, {{-1.0, 0.0, 0.0}}, Real(0.015)},
+            {{{0.12, 0.28, 0.10}}, {{-1.0, 0.0, 0.0}}, Real(0.020)}
+        });
+    auto other_marker_rule = makeReferenceTetraCutRule(
+        CutIntegrationSide::Negative,
+        {
+            {{{0.20, 0.10, 0.15}}, {{1.0, 0.0, 0.0}}, Real(0.050)}
+        });
+
+    add_volume_rule(51, CutIntegrationSide::Negative, std::move(negative_rule));
+    add_volume_rule(51, CutIntegrationSide::Positive, std::move(positive_rule));
+    add_volume_rule(52, CutIntegrationSide::Negative, std::move(other_marker_rule));
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual =
+        (Real(2.0) * u * v).dCutVolume(51, CutVolumeSide::Negative) +
+        (Real(3.0) * u * v).dCutVolume(51, CutVolumeSide::Positive) +
+        (Real(11.0) * u * v).dCutVolume(52, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    auto ir = compiler.compileResidual(residual);
+    NonlinearFormKernel kernel(std::move(ir), ADMode::Forward, NonlinearKernelOutput::Both);
+
+    const std::vector<Real> solution = {Real(0.16), Real(-0.04), Real(0.09), Real(0.02)};
+    const JITConstants constants;
+    CutDomainAssemblyOptions options;
+    options.include_interface_rules = false;
+    options.volume_marker = 51;
+
+    const auto summary = svmp::FE::assembly::assembleCutDomains(
+        cut_context,
+        kernel,
+        [&](const svmp::FE::assembly::CutRuleAssemblyRequest& request,
+            AssemblyContext& ctx) {
+            ASSERT_NE(request.rule, nullptr);
+            populateP1ReferenceTetraCutContext(
+                ctx, *request.rule, space, kernel.getRequiredData(), constants, solution);
+        },
+        options);
+
+    ASSERT_EQ(summary.volume_rule_count, std::size_t{2});
+    EXPECT_EQ(summary.skipped_rule_count, std::size_t{1});
+    ASSERT_TRUE(summary.hasVector());
+    ASSERT_TRUE(summary.hasMatrix());
+
+    std::vector<Real> expected_vector(4u, Real(0.0));
+    std::vector<Real> expected_matrix(16u, Real(0.0));
+    auto accumulate_expected = [&](const CutQuadratureRule& rule, Real coefficient) {
+        for (const auto& qp : rule.points) {
+            const Real xi = qp.point[0];
+            const Real eta = qp.point[1];
+            const Real zeta = qp.point[2];
+            const std::array<Real, 4> phi{{Real(1.0) - xi - eta - zeta,
+                                           xi,
+                                           eta,
+                                           zeta}};
+            Real u_q = Real(0.0);
+            for (std::size_t j = 0u; j < phi.size(); ++j) {
+                u_q += phi[j] * solution[j];
+            }
+            for (std::size_t i = 0u; i < phi.size(); ++i) {
+                expected_vector[i] += coefficient * qp.weight * phi[i] * u_q;
+                for (std::size_t j = 0u; j < phi.size(); ++j) {
+                    expected_matrix[i * phi.size() + j] +=
+                        coefficient * qp.weight * phi[i] * phi[j];
+                }
+            }
+        }
+    };
+    accumulate_expected(cut_context.volumeRules()[0], Real(2.0));
+    accumulate_expected(cut_context.volumeRules()[1], Real(3.0));
+
+    ASSERT_EQ(summary.total_output.local_vector.size(), expected_vector.size());
+    ASSERT_EQ(summary.total_output.local_matrix.size(), expected_matrix.size());
+    for (std::size_t i = 0u; i < expected_vector.size(); ++i) {
+        EXPECT_NEAR(summary.total_output.local_vector[i], expected_vector[i], Real(1.0e-13));
+    }
+    for (std::size_t i = 0u; i < expected_matrix.size(); ++i) {
+        EXPECT_NEAR(summary.total_output.local_matrix[i], expected_matrix[i], Real(1.0e-13));
+    }
 }
 
 TEST(CutCellForms, CutSensitivityTerminalsDriveSymbolicNewtonTangentConvergence)

@@ -4724,6 +4724,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     term.kernel->resolveParameterSlots(slot_of_real_param);
                 }
             }
+            for (const auto& term : def.cut_volumes) {
+                if (term.kernel) {
+                    term.kernel->resolveParameterSlots(slot_of_real_param);
+                }
+            }
         }
 
 	    }
@@ -4736,7 +4741,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         for (const auto& tag : operator_registry_.list()) {
             const auto& def = operator_registry_.get(tag);
 
-            form_chars.has_cell_terms = form_chars.has_cell_terms || !def.cells.empty();
+            form_chars.has_cell_terms = form_chars.has_cell_terms ||
+                                        !def.cells.empty() ||
+                                        !def.cut_volumes.empty();
             form_chars.has_boundary_terms = form_chars.has_boundary_terms || !def.boundary.empty();
             form_chars.has_interior_face_terms = form_chars.has_interior_face_terms || !def.interior.empty();
             form_chars.has_interface_face_terms = form_chars.has_interface_face_terms || !def.interface_faces.empty();
@@ -4763,6 +4770,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 mergeKernelMeta(term.kernel);
             }
             for (const auto& term : def.interface_faces) {
+                mergeKernelMeta(term.kernel);
+            }
+            for (const auto& term : def.cut_volumes) {
                 mergeKernelMeta(term.kernel);
             }
             for (const auto& k : def.global) {
@@ -5748,6 +5758,39 @@ void FESystem::buildAssemblyPlans()
 
             plan.interface_terms.push_back(PlannedInterfaceFaceTerm{
                 term.marker,
+                term.test_field,
+                term.trial_field,
+                test_field.space.get(),
+                trial_field.space.get(),
+                term.kernel.get(),
+                &field_dof_handlers_[test_idx].getDofMap(),
+                &field_dof_handlers_[trial_idx].getDofMap(),
+                field_dof_offsets_[test_idx],
+                field_dof_offsets_[trial_idx],
+                !term.kernel->isVectorOnly(),
+                !term.kernel->isMatrixOnly()});
+        }
+
+        plan.cut_volume_terms.reserve(def.cut_volumes.size());
+        for (const auto& term : def.cut_volumes) {
+            FE_CHECK_NOT_NULL(term.kernel.get(), "FESystem::buildAssemblyPlans: cut-volume kernel");
+            const auto& test_field = field_registry_.get(term.test_field);
+            const auto& trial_field = field_registry_.get(term.trial_field);
+            FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::buildAssemblyPlans: cut-volume test space");
+            FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::buildAssemblyPlans: cut-volume trial space");
+
+            const auto test_idx = static_cast<std::size_t>(test_field.id);
+            const auto trial_idx = static_cast<std::size_t>(trial_field.id);
+            FE_THROW_IF(test_field.id < 0 || test_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid cut-volume test field");
+            FE_THROW_IF(trial_field.id < 0 || trial_idx >= field_dof_handlers_.size(),
+                        InvalidStateException,
+                        "FESystem::buildAssemblyPlans: invalid cut-volume trial field");
+
+            plan.cut_volume_terms.push_back(PlannedCutVolumeTerm{
+                term.marker,
+                term.side,
                 term.test_field,
                 term.trial_field,
                 test_field.space.get(),

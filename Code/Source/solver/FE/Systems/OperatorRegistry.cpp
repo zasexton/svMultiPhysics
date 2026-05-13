@@ -66,6 +66,7 @@ OperatorRegistry::Snapshot OperatorRegistry::snapshot() const
             def.boundary.size(),
             def.interior.size(),
             def.interface_faces.size(),
+            def.cut_volumes.size(),
             def.global.size()
         });
     }
@@ -98,6 +99,7 @@ void OperatorRegistry::rollback(const Snapshot& snap)
         if (def.boundary.size() > os.boundary) def.boundary.resize(os.boundary);
         if (def.interior.size() > os.interior) def.interior.resize(os.interior);
         if (def.interface_faces.size() > os.interface_faces) def.interface_faces.resize(os.interface_faces);
+        if (def.cut_volumes.size() > os.cut_volumes) def.cut_volumes.resize(os.cut_volumes);
         if (def.global.size() > os.global) def.global.resize(os.global);
     }
 }

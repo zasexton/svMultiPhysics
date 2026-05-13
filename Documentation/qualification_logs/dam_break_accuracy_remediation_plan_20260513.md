@@ -73,7 +73,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Update Forms vocabulary/documentation to include the new cut-volume
       measure.
 - [x] Route cut-volume kernels through `CutDomainAssembler`.
-- [ ] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
+- [x] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
       kernels for the same residual terms.
 - [ ] Add interpreter and compiled/JIT support for the new integral domain.
 - [x] Add tests proving constant-field cut-volume integrals match expected
@@ -184,8 +184,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add cut-volume classification tests for partially cut cells.
 - [x] Add constant-integral tests for negative-side volume rules.
 - [x] Add constant-integral tests for positive-side volume rules.
-- [ ] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
-- [ ] Add Forms tests for cut-volume tangent/Jacobian assembly.
+- [x] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
+- [x] Add Forms tests for cut-volume tangent/Jacobian assembly.
 - [ ] Add Navier-Stokes installation tests proving active-domain cases install
       cut-volume kernels.
 - [ ] Add Navier-Stokes installation tests proving active-domain cases do not

@@ -352,6 +352,18 @@ public:
     void addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId test_field, FieldId trial_field,
                                 std::shared_ptr<assembly::AssemblyKernel> kernel);
 
+    void addCutVolumeKernel(OperatorTag op,
+                            InterfaceId interface_marker,
+                            geometry::CutIntegrationSide side,
+                            FieldId field,
+                            std::shared_ptr<assembly::AssemblyKernel> kernel);
+    void addCutVolumeKernel(OperatorTag op,
+                            InterfaceId interface_marker,
+                            geometry::CutIntegrationSide side,
+                            FieldId test_field,
+                            FieldId trial_field,
+                            std::shared_ptr<assembly::AssemblyKernel> kernel);
+
     void addGlobalKernel(OperatorTag op,
                          std::shared_ptr<GlobalKernel> kernel);
 
@@ -1475,11 +1487,28 @@ private:
         bool vector_capable{false};
     };
 
+    struct PlannedCutVolumeTerm {
+        int marker{0};
+        geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
+        FieldId test_field{INVALID_FIELD_ID};
+        FieldId trial_field{INVALID_FIELD_ID};
+        const spaces::FunctionSpace* test_space{nullptr};
+        const spaces::FunctionSpace* trial_space{nullptr};
+        assembly::AssemblyKernel* kernel{nullptr};
+        const dofs::DofMap* row_dof_map{nullptr};
+        const dofs::DofMap* col_dof_map{nullptr};
+        GlobalIndex row_dof_offset{0};
+        GlobalIndex col_dof_offset{0};
+        bool matrix_capable{false};
+        bool vector_capable{false};
+    };
+
     struct OperatorAssemblyPlan {
         std::vector<PlannedCellTerm> cell_terms{};
         std::vector<PlannedBoundaryTerm> boundary_terms{};
         std::vector<PlannedInteriorFaceTerm> interior_terms{};
         std::vector<PlannedInterfaceFaceTerm> interface_terms{};
+        std::vector<PlannedCutVolumeTerm> cut_volume_terms{};
         std::vector<GlobalKernel*> global_terms{};
         bool matrix_state_independent{false};
     };

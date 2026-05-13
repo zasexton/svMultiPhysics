@@ -189,6 +189,7 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
 
             AssemblyContext rule_context;
             context_builder(request, rule_context);
+            rule_context.setCutVolumeDomain(request.marker, volume_rules[i].side);
 
             KernelOutput output;
             kernel.computeCell(rule_context, output);

@@ -7563,6 +7563,40 @@ void FESystem::addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_mark
     def.interface_faces.push_back(InterfaceFaceTerm{interface_marker, test_field, trial_field, std::move(kernel)});
 }
 
+void FESystem::addCutVolumeKernel(OperatorTag op,
+                                  InterfaceId interface_marker,
+                                  geometry::CutIntegrationSide side,
+                                  FieldId field,
+                                  std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    addCutVolumeKernel(std::move(op), interface_marker, side, field, field, std::move(kernel));
+}
+
+void FESystem::addCutVolumeKernel(OperatorTag op,
+                                  InterfaceId interface_marker,
+                                  geometry::CutIntegrationSide side,
+                                  FieldId test_field,
+                                  FieldId trial_field,
+                                  std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    invalidateSetup();
+    FE_THROW_IF(side == geometry::CutIntegrationSide::Interface,
+                InvalidArgumentException,
+                "FESystem::addCutVolumeKernel: side must be Negative or Positive");
+    validateKernelFieldScopes(field_registry_, test_field, trial_field,
+                              analysis::DomainKind::Cell,
+                              "FESystem::addCutVolumeKernel");
+    if (!operator_registry_.has(op)) {
+        operator_registry_.addOperator(op);
+    }
+    auto& def = operator_registry_.get(op);
+    if (kernel) {
+        field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
+    }
+    def.cut_volumes.push_back(CutVolumeTerm{
+        interface_marker, side, test_field, trial_field, std::move(kernel)});
+}
+
 void FESystem::addGlobalKernel(OperatorTag op, std::shared_ptr<GlobalKernel> kernel)
 {
     invalidateSetup();

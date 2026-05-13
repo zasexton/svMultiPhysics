@@ -65,6 +65,7 @@
 #include "Core/StateVariableMetadata.h"
 #include "AssemblyKernel.h"
 #include "Assembly/JIT/FieldSolutions.h"
+#include "Geometry/CutQuadrature.h"
 #include "TimeIntegrationContext.h"
 
 #include <vector>
@@ -1565,6 +1566,34 @@ public:
     void setBoundaryMarker(int marker) { boundary_marker_ = marker; }
 
     /**
+     * @brief Get active cut-volume marker for cut-domain cell-style assembly
+     */
+    [[nodiscard]] int cutVolumeMarker() const noexcept { return cut_volume_marker_; }
+
+    /**
+     * @brief Get active cut-volume side for cut-domain cell-style assembly
+     */
+    [[nodiscard]] geometry::CutIntegrationSide cutVolumeSide() const noexcept {
+        return cut_volume_side_;
+    }
+
+    /**
+     * @brief Set active cut-volume marker and side
+     */
+    void setCutVolumeDomain(int marker, geometry::CutIntegrationSide side) noexcept {
+        cut_volume_marker_ = marker;
+        cut_volume_side_ = side;
+    }
+
+    /**
+     * @brief Clear active cut-volume marker and side
+     */
+    void clearCutVolumeDomain() noexcept {
+        cut_volume_marker_ = -1;
+        cut_volume_side_ = geometry::CutIntegrationSide::Interface;
+    }
+
+    /**
      * @brief Set cell domain/subdomain ID (for multi-domain coefficients/materials)
      */
     void setCellDomainId(int domain_id) noexcept { cell_domain_id_ = domain_id; }
@@ -1995,6 +2024,8 @@ private:
     GlobalIndex face_id_{-1};
     LocalIndex local_face_id_{0};
     int boundary_marker_{-1};
+    int cut_volume_marker_{-1};
+    geometry::CutIntegrationSide cut_volume_side_{geometry::CutIntegrationSide::Interface};
     int dim_{3};
 
     // DOF counts

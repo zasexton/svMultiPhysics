@@ -171,6 +171,26 @@ void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const>
     return time_ctx->non_time_derivative_term_weight;
 }
 
+[[nodiscard]] bool cellLikeTermMatchesContext(const IntegralTerm& term,
+                                              const assembly::AssemblyContext& ctx) noexcept
+{
+    if (term.domain == IntegralDomain::Cell) {
+        return true;
+    }
+    if (term.domain != IntegralDomain::CutVolume) {
+        return false;
+    }
+    if (term.interface_marker >= 0 && term.interface_marker != ctx.cutVolumeMarker()) {
+        return false;
+    }
+
+    const auto expected_side =
+        (term.cut_volume_side == CutVolumeSide::Negative)
+            ? geometry::CutIntegrationSide::Negative
+            : geometry::CutIntegrationSide::Positive;
+    return ctx.cutVolumeSide() == expected_side;
+}
+
 template<typename Scalar>
 using EvalValue = Value<Scalar>;
 
@@ -12844,7 +12864,10 @@ void FormKernel::setTensorInterpreterOptions(TensorJITOptions options)
     tensor_term_fallback_.clear();
 }
 
-bool FormKernel::hasCell() const noexcept { return ir_.hasCellTerms(); }
+bool FormKernel::hasCell() const noexcept
+{
+    return ir_.hasCellTerms() || ir_.hasCutVolumeTerms();
+}
 bool FormKernel::hasBoundaryFace() const noexcept { return ir_.hasBoundaryTerms(); }
 bool FormKernel::hasInteriorFace() const noexcept { return ir_.hasInteriorFaceTerms(); }
 bool FormKernel::hasInterfaceFace() const noexcept { return ir_.hasInterfaceFaceTerms(); }
@@ -13041,7 +13064,7 @@ void FormKernel::computeCell(const assembly::AssemblyContext& ctx, assembly::Ker
     const auto& terms = ir_.terms();
     for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
         const auto& term = terms[term_index];
-        if (term.domain != IntegralDomain::Cell) continue;
+        if (!cellLikeTermMatchesContext(term, ctx)) continue;
         const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
         if (term_weight == 0.0) continue;
 
@@ -13129,7 +13152,6 @@ void FormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* con
             const auto& terms = ir_.terms();
             for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
                 const auto& term = terms[term_index];
-                if (term.domain != IntegralDomain::Cell) continue;
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     for (LocalIndex i = 0; i < n_test; ++i) {
@@ -13140,6 +13162,9 @@ void FormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* con
                         if (want_matrix) {
                             for (LocalIndex j = 0; j < n_trial; ++j) {
                                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                        continue;
+                                    }
                                     auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                                     const Real term_weight =
                                         termWeightFor(time_ctx, term.time_derivative_order);
@@ -13160,6 +13185,9 @@ void FormKernel::computeCellBatch(std::span<const assembly::AssemblyContext* con
                             }
                         } else if (want_vector) {
                             for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                    continue;
+                                }
                                 auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                                 const Real term_weight =
                                     termWeightFor(time_ctx, term.time_derivative_order);
@@ -14017,7 +14045,10 @@ bool LinearFormKernel::hasExplicitTimeDependency() const noexcept
 
 bool LinearFormKernel::hasCell() const noexcept
 {
-    return bilinear_ir_.hasCellTerms() || (linear_ir_.has_value() && linear_ir_->hasCellTerms());
+    return bilinear_ir_.hasCellTerms() ||
+           bilinear_ir_.hasCutVolumeTerms() ||
+           (linear_ir_.has_value() &&
+            (linear_ir_->hasCellTerms() || linear_ir_->hasCutVolumeTerms()));
 }
 
 bool LinearFormKernel::hasBoundaryFace() const noexcept
@@ -14087,7 +14118,7 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
                             constitutive_state_.get(), &constitutive_cache};
 
             for (const auto& term : bilinear_ir_.terms()) {
-                if (term.domain != IntegralDomain::Cell) continue;
+                if (!cellLikeTermMatchesContext(term, ctx)) continue;
 
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
@@ -14123,7 +14154,7 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
                             constitutive_state_.get(), &constitutive_cache};
 
             for (const auto& term : linear_ir_->terms()) {
-                if (term.domain != IntegralDomain::Cell) continue;
+                if (!cellLikeTermMatchesContext(term, ctx)) continue;
 
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
@@ -14163,7 +14194,7 @@ void LinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, assembl
                             constitutive_state_.get(), &constitutive_cache};
 
             for (const auto& term : bilinear_ir_.terms()) {
-                if (term.domain != IntegralDomain::Cell) continue;
+                if (!cellLikeTermMatchesContext(term, ctx)) continue;
 
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
@@ -14247,8 +14278,6 @@ void LinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContex
                 }
 
                 for (const auto& term : bilinear_ir_.terms()) {
-                    if (term.domain != IntegralDomain::Cell) continue;
-
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
                         for (LocalIndex i = 0; i < n_test; ++i) {
                             for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
@@ -14256,6 +14285,9 @@ void LinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContex
                             }
                             for (LocalIndex j = 0; j < n_trial; ++j) {
                                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                        continue;
+                                    }
                                     const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                                     const Real term_weight =
                                         termWeightFor(time_ctx, term.time_derivative_order);
@@ -14298,10 +14330,12 @@ void LinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContex
                     }
 
                     for (const auto& term : linear_ir_->terms()) {
-                        if (term.domain != IntegralDomain::Cell) continue;
                         for (LocalIndex q = 0; q < n_qpts; ++q) {
                             for (LocalIndex i = 0; i < n_test; ++i) {
                                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                        continue;
+                                    }
                                     const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                                     const Real term_weight =
                                         termWeightFor(time_ctx, term.time_derivative_order);
@@ -14343,10 +14377,12 @@ void LinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyContex
                     }
 
                     for (const auto& term : bilinear_ir_.terms()) {
-                        if (term.domain != IntegralDomain::Cell) continue;
                         for (LocalIndex q = 0; q < n_qpts; ++q) {
                             for (LocalIndex i = 0; i < n_test; ++i) {
                                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                        continue;
+                                    }
                                     const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                                     const Real term_weight =
                                         termWeightFor(time_ctx, term.time_derivative_order);
@@ -14650,7 +14686,10 @@ void NonlinearFormKernel::resolveParameterSlots(
     rewrite_updates(inlined_state_updates_.interface_face);
 }
 
-bool NonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
+bool NonlinearFormKernel::hasCell() const noexcept
+{
+    return residual_ir_.hasCellTerms() || residual_ir_.hasCutVolumeTerms();
+}
 bool NonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
 bool NonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
 bool NonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
@@ -14717,7 +14756,7 @@ void NonlinearFormKernel::computeCell(const assembly::AssemblyContext& ctx, asse
             Dual sum_q = makeDualConstant(0.0, ws.alloc());
 
             for (const auto& term : residual_ir_.terms()) {
-                if (term.domain != IntegralDomain::Cell) continue;
+                if (!cellLikeTermMatchesContext(term, ctx)) continue;
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
                 const auto val = evalDual(*term.integrand.node(), env, Side::Minus, q);
@@ -14819,9 +14858,10 @@ void NonlinearFormKernel::computeCellBatch(std::span<const assembly::AssemblyCon
                     }
 
                     for (const auto& term : residual_ir_.terms()) {
-                        if (term.domain != IntegralDomain::Cell) continue;
-
                         for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                            if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                continue;
+                            }
                             const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                             const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                             if (term_weight == 0.0) {
@@ -15919,7 +15959,10 @@ void SymbolicNonlinearFormKernel::resolveParameterSlots(
     rewrite_updates(inlined_state_updates_.interface_face);
 }
 
-bool SymbolicNonlinearFormKernel::hasCell() const noexcept { return residual_ir_.hasCellTerms(); }
+bool SymbolicNonlinearFormKernel::hasCell() const noexcept
+{
+    return residual_ir_.hasCellTerms() || residual_ir_.hasCutVolumeTerms();
+}
 bool SymbolicNonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
 bool SymbolicNonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
 bool SymbolicNonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
@@ -15983,7 +16026,7 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
                 env.i = i;
                 Real sum_q = 0.0;
                 for (const auto& term : residual_ir_.terms()) {
-                    if (term.domain != IntegralDomain::Cell) continue;
+                    if (!cellLikeTermMatchesContext(term, ctx)) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
 
@@ -16005,7 +16048,7 @@ void SymbolicNonlinearFormKernel::computeCell(const assembly::AssemblyContext& c
                         constitutive_state_.get(), &constitutive_cache};
 
         for (const auto& term : tangent_ir_.terms()) {
-            if (term.domain != IntegralDomain::Cell) continue;
+            if (!cellLikeTermMatchesContext(term, ctx)) continue;
             const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
             if (term_weight == 0.0) continue;
 
@@ -16095,7 +16138,7 @@ void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::Ass
                             Real sum_q = 0.0;
                             const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                             for (const auto& term : residual_ir_.terms()) {
-                                if (term.domain != IntegralDomain::Cell) continue;
+                                if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) continue;
                                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                                 if (term_weight == 0.0) continue;
 
@@ -16124,8 +16167,6 @@ void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::Ass
                 }
 
                 for (const auto& term : tangent_ir_.terms()) {
-                    if (term.domain != IntegralDomain::Cell) continue;
-
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
                         for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
                             constitutive_cache[lane].values.clear();
@@ -16136,6 +16177,9 @@ void SymbolicNonlinearFormKernel::computeCellBatch(std::span<const assembly::Ass
                             }
                             for (LocalIndex j = 0; j < n_trial; ++j) {
                                 for (std::size_t lane = 0u; lane < lane_ctx.size(); ++lane) {
+                                    if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) {
+                                        continue;
+                                    }
                                     const auto* time_ctx = lane_ctx[lane]->timeIntegrationContext();
                                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                                     if (term_weight == 0.0) continue;
@@ -16966,7 +17010,7 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
         for (std::size_t t = 0u; t < terms.size(); ++t) {
             if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
             const auto& term = terms[t];
-            if (term.domain != IntegralDomain::Cell) continue;
+            if (!cellLikeTermMatchesContext(term, ctx)) continue;
             if (term.integrand.node()) {
                 markTestDependentNodes(*term.integrand.node(), test_dep_nodes);
             }
@@ -16990,7 +17034,7 @@ void CoupledResidualSensitivityKernel::computeCell(const assembly::AssemblyConte
             for (std::size_t t = 0u; t < terms.size(); ++t) {
                 if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
                 const auto& term = terms[t];
-                if (term.domain != IntegralDomain::Cell) continue;
+                if (!cellLikeTermMatchesContext(term, ctx)) continue;
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                 if (term_weight == 0.0) continue;
 
@@ -17077,7 +17121,7 @@ void CoupledResidualSensitivityKernel::computeCellBatch(
 	                        for (std::size_t t = 0u; t < terms.size(); ++t) {
 	                            if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
 	                            const auto& term = terms[t];
-	                            if (term.domain != IntegralDomain::Cell) continue;
+	                            if (!cellLikeTermMatchesContext(term, *lane_ctx[lane])) continue;
 	                            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
 	                            if (term_weight == 0.0) continue;
 

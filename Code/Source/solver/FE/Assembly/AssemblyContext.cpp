@@ -281,6 +281,7 @@ void AssemblyContext::configure(
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
+    clearCutVolumeDomain();
     required_data_ = required_data;
 
     n_test_dofs_ = static_cast<LocalIndex>(test_element.num_dofs());
@@ -340,6 +341,7 @@ void AssemblyContext::configure(
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
+    clearCutVolumeDomain();
     required_data_ = required_data;
 
     test_field_type_ = test_space.field_type();
@@ -3159,6 +3161,7 @@ void AssemblyContext::configureForCoupledBlock(
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
+    clearCutVolumeDomain();
     required_data_ = meta.required_data;
 
     test_field_type_ = meta.test_field_type;

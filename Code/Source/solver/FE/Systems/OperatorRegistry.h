@@ -10,6 +10,7 @@
 
 #include "Core/Types.h"
 #include "Core/FEException.h"
+#include "Geometry/CutQuadrature.h"
 
 #include <memory>
 #include <string>
@@ -54,12 +55,21 @@ struct InterfaceFaceTerm {
     std::shared_ptr<assembly::AssemblyKernel> kernel;
 };
 
+struct CutVolumeTerm {
+    int marker{0};
+    geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
+    FieldId test_field{INVALID_FIELD_ID};
+    FieldId trial_field{INVALID_FIELD_ID};
+    std::shared_ptr<assembly::AssemblyKernel> kernel;
+};
+
 struct OperatorDefinition {
     OperatorTag tag;
     std::vector<CellTerm> cells;
     std::vector<BoundaryTerm> boundary;
     std::vector<InteriorFaceTerm> interior;
     std::vector<InterfaceFaceTerm> interface_faces;
+    std::vector<CutVolumeTerm> cut_volumes;
     std::vector<std::shared_ptr<GlobalKernel>> global;
 };
 
@@ -82,6 +92,7 @@ public:
             std::size_t boundary{0};
             std::size_t interior{0};
             std::size_t interface_faces{0};
+            std::size_t cut_volumes{0};
             std::size_t global{0};
         };
         std::vector<OpSizes> ops;
