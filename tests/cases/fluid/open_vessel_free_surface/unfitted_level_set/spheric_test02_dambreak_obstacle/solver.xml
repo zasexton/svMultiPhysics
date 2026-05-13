@@ -59,6 +59,7 @@
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>
+  <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Enable_reinitialization>true</Enable_reinitialization>

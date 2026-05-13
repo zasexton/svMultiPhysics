@@ -49,6 +49,52 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
 {
 }
 
+namespace {
+
+[[nodiscard]] bool spacesCompatible(const FE::spaces::FunctionSpace& lhs,
+                                    const FE::spaces::FunctionSpace& rhs) noexcept
+{
+    return lhs.space_type() == rhs.space_type() &&
+           lhs.field_type() == rhs.field_type() &&
+           lhs.value_dimension() == rhs.value_dimension() &&
+           lhs.topological_dimension() == rhs.topological_dimension() &&
+           lhs.polynomial_order() == rhs.polynomial_order() &&
+           lhs.element_type() == rhs.element_type();
+}
+
+[[nodiscard]] FE::FieldId ensureCompatibleUnknownField(
+    FE::systems::FESystem& system,
+    FE::systems::FieldSpec spec,
+    const char* context)
+{
+    const auto existing = system.findFieldByName(spec.name);
+    if (existing == FE::INVALID_FIELD_ID) {
+        return system.addField(std::move(spec));
+    }
+
+    const auto& rec = system.fieldRecord(existing);
+    if (rec.source_kind != FE::systems::FieldSourceKind::Unknown) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name +
+            "' must be an unknown field");
+    }
+    if (rec.components != spec.components) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name +
+            "' has component count " + std::to_string(rec.components) +
+            ", expected " + std::to_string(spec.components));
+    }
+    if (!rec.space || !spec.space || !spacesCompatible(*rec.space, *spec.space)) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name +
+            "' uses an incompatible function space");
+    }
+
+    return existing;
+}
+
+} // namespace
+
 void IncompressibleNavierStokesVMSModule::applyInitialConditions(
     const FE::systems::FESystem& system,
     FE::backends::GenericVector& u0) const
@@ -704,13 +750,19 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     u_spec.name = options_.velocity_field_name;
     u_spec.space = velocity_space_;
     u_spec.components = dim;
-    const FE::FieldId u_id = system.addField(std::move(u_spec));
+    const FE::FieldId u_id = ensureCompatibleUnknownField(
+        system,
+        std::move(u_spec),
+        "IncompressibleNavierStokesVMSModule::registerOn velocity");
 
     FE::systems::FieldSpec p_spec;
     p_spec.name = options_.pressure_field_name;
     p_spec.space = pressure_space_;
     p_spec.components = 1;
-    const FE::FieldId p_id = system.addField(std::move(p_spec));
+    const FE::FieldId p_id = ensureCompatibleUnknownField(
+        system,
+        std::move(p_spec),
+        "IncompressibleNavierStokesVMSModule::registerOn pressure");
 
     if (!options_.node_pressure_constraints.values.empty()) {
         std::vector<FE::constraints::VertexDirichletValue> values;

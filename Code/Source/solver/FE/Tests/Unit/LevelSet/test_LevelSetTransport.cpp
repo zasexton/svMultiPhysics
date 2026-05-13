@@ -375,6 +375,35 @@ TEST(LevelSetTransport, AutoRegistersConfiguredFields)
     EXPECT_FALSE(kernels.residual.empty());
 }
 
+TEST(LevelSetTransport, AutoRegistersCoupledVelocityAsUnknownWhenRequested)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.source = level_set::LevelSetFieldSource::PrescribedData;
+    options.velocity.field_name = "Velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = velocity_space;
+
+    const auto kernels = level_set::installLevelSetTransport(system, phi_space, options);
+
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("Velocity");
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.fieldRecord(phi).source_kind, FE::systems::FieldSourceKind::Unknown);
+    EXPECT_EQ(system.fieldRecord(velocity).source_kind,
+              FE::systems::FieldSourceKind::Unknown);
+    EXPECT_TRUE(system.hasOperator("level_set"));
+    EXPECT_FALSE(kernels.residual.empty());
+}
+
 TEST(LevelSetTransport, InstallsResidualFormStructure)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();

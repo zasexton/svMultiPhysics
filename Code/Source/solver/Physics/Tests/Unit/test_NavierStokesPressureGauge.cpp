@@ -241,6 +241,40 @@ TEST(NavierStokesPressureGauge, PressureNotPinnedWhenUnconstrainedBoundaryExists
     EXPECT_EQ(countConstrainedPressureDofs(system, /*pressure_field_name=*/"p"), 0u);
 }
 
+TEST(NavierStokesFieldRegistration, ReusesCompatiblePredeclaredVelocityField)
+{
+    auto mesh = std::make_shared<TwoQuadStripMeshAccess>();
+    auto u_space = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1,
+                                           FE::ElementType::Quad4,
+                                           1,
+                                           2);
+    auto p_space = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Quad4, 1);
+
+    FE::systems::FESystem system(mesh);
+    const auto predeclared_velocity = system.addField(FE::systems::FieldSpec{
+        .name = "Velocity",
+        .space = u_space,
+        .components = 2,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "Velocity";
+    opts.pressure_field_name = "Pressure";
+    opts.density = 1.0;
+    opts.viscosity = 0.01;
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    module.registerOn(system);
+
+    EXPECT_EQ(system.findFieldByName("Velocity"), predeclared_velocity);
+    EXPECT_NE(system.findFieldByName("Pressure"), FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(system.hasOperator("equations"));
+}
+
 TEST(NavierStokesInitialConditions, HydrostaticPressureInitializationFillsPressureVertices)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

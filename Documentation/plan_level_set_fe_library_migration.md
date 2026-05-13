@@ -550,6 +550,8 @@ Checklist:
 - [x] Fix moving-boundary JIT packing for fitted ALE free-surface Nitsche
   terms, including boundary current curvature, mesh-velocity divergence, and
   adjacent cell measure.
+- [x] Fix unfitted level-set/fluid registration ordering for coupled velocity
+  transport.
 - [x] Verify targeted parser, translator, tangent, and moving-domain tests
   after the startup fixes.
 - [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated
