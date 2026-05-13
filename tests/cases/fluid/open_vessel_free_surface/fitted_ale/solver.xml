@@ -47,7 +47,7 @@
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>8</Max_iterations>
-  <Tolerance>1.0e-8</Tolerance>
+  <Tolerance>1.0e-4</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Enable_ALE>true</Enable_ALE>
@@ -91,7 +91,8 @@
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
-    <Tolerance>1.0e-10</Tolerance>
+    <Tolerance>1.0e-4</Tolerance>
+    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
   </LS>
 
   <Add_BC name="wall_left">

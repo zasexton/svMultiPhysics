@@ -54,6 +54,7 @@
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/Casting.h>
 #include <llvm/Support/raw_ostream.h>
 #endif
 
@@ -655,6 +656,58 @@ struct ShapeInferenceResult {
         return out;
     };
 
+    auto isZeroLikeExpr = [&](auto&& self, std::size_t op_index) -> bool {
+        const auto& op = ir.ops[op_index];
+        if (isScalarZeroLikeOp(op)) {
+            return true;
+        }
+        switch (op.type) {
+            case FormExprType::Negate:
+            case FormExprType::RestrictPlus:
+            case FormExprType::RestrictMinus:
+            case FormExprType::Jump:
+            case FormExprType::Average:
+            case FormExprType::Component:
+            case FormExprType::Gradient:
+            case FormExprType::TimeDerivative: {
+                if (op.child_count != 1u) {
+                    return false;
+                }
+                const auto child = ir.children[static_cast<std::size_t>(op.first_child)];
+                return self(self, child);
+            }
+            case FormExprType::Add:
+            case FormExprType::Subtract: {
+                if (op.child_count != 2u) {
+                    return false;
+                }
+                const auto a = ir.children[static_cast<std::size_t>(op.first_child)];
+                const auto b = ir.children[static_cast<std::size_t>(op.first_child) + 1u];
+                return self(self, a) && self(self, b);
+            }
+            case FormExprType::Multiply:
+            case FormExprType::Divide: {
+                if (op.child_count < 1u) {
+                    return false;
+                }
+                const auto a = ir.children[static_cast<std::size_t>(op.first_child)];
+                return self(self, a);
+            }
+            case FormExprType::AsVector:
+            case FormExprType::AsTensor: {
+                for (std::size_t k = 0; k < static_cast<std::size_t>(op.child_count); ++k) {
+                    const auto child = ir.children[static_cast<std::size_t>(op.first_child) + k];
+                    if (!self(self, child)) {
+                        return false;
+                    }
+                }
+                return op.child_count > 0u;
+            }
+            default:
+                return false;
+        }
+    };
+
     for (std::size_t idx = 0; idx < ir.ops.size(); ++idx) {
         const auto& op = ir.ops[idx];
         auto childAt = [&](std::size_t i) -> const Shape& {
@@ -1026,10 +1079,11 @@ struct ShapeInferenceResult {
                 const auto& a = childAt(0);
                 const auto& b = childAt(1);
                 if (a.kind != b.kind || a.dims != b.dims) {
-                    // TypedZero (scalar) is compatible — inner(0,X)=0, inner(X,0)=0
-                    const auto& op_a = ir.ops[ir.children[op.first_child]];
-                    const auto& op_b = ir.ops[ir.children[op.first_child + 1]];
-                    if (op_a.type != FormExprType::TypedZero && op_b.type != FormExprType::TypedZero) {
+                    // Scalar zero is compatible: inner(0, X) = inner(X, 0) = 0.
+                    const auto a_idx = ir.children[static_cast<std::size_t>(op.first_child)];
+                    const auto b_idx = ir.children[static_cast<std::size_t>(op.first_child) + 1u];
+                    if (!isZeroLikeExpr(isZeroLikeExpr, a_idx) &&
+                        !isZeroLikeExpr(isZeroLikeExpr, b_idx)) {
                         return fail("LLVMGen: InnerProduct requires matching operand shapes");
                     }
                 }
@@ -1049,9 +1103,10 @@ struct ShapeInferenceResult {
                     break;
                 }
                 if (a.kind != b.kind || a.dims != b.dims) {
-                    const auto& op_a = ir.ops[ir.children[op.first_child]];
-                    const auto& op_b = ir.ops[ir.children[op.first_child + 1]];
-                    if (op_a.type != FormExprType::TypedZero && op_b.type != FormExprType::TypedZero) {
+                    const auto a_idx = ir.children[static_cast<std::size_t>(op.first_child)];
+                    const auto b_idx = ir.children[static_cast<std::size_t>(op.first_child) + 1u];
+                    if (!isZeroLikeExpr(isZeroLikeExpr, a_idx) &&
+                        !isZeroLikeExpr(isZeroLikeExpr, b_idx)) {
                         return fail("LLVMGen: DoubleContraction requires matching operand shapes");
                     }
                 }
@@ -4069,6 +4124,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         auto inner = [&](const CodeValue& a, const CodeValue& b) -> CodeValue {
             if (a.shape.kind != b.shape.kind || a.shape.dims != b.shape.dims) {
+                auto isScalarZero = [](const CodeValue& v) -> bool {
+                    if (!v.shape.isScalar() || v.elems[0] == nullptr) {
+                        return false;
+                    }
+                    const auto* c = llvm::dyn_cast<llvm::ConstantFP>(v.elems[0]);
+                    return c != nullptr && c->isZero();
+                };
+                if ((isScalarZero(a) && !b.shape.isScalar()) ||
+                    (isScalarZero(b) && !a.shape.isScalar())) {
+                    return makeScalar(rc(0.0));
+                }
                 throw std::runtime_error("LLVMGen: InnerProduct requires matching shapes");
             }
             llvm::Value* sumv = rc(0.0);
@@ -9758,6 +9824,142 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            throw std::runtime_error("LLVMGen: cached grad(u) unsupported shape");
 	                        };
 
+                            auto gradComponentFromCoeffs =
+                                [&](llvm::Value* coeffs_ptr,
+                                    std::size_t component,
+                                    std::size_t value_dim,
+                                    const std::string& loop_base) -> CodeValue {
+                                if (shape.kind != Shape::Kind::Vector) {
+                                    throw std::runtime_error("LLVMGen: cached grad(component(u)) expects vector gradient shape");
+                                }
+                                if (component >= value_dim) {
+                                    return makeZero(shape);
+                                }
+                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                auto* dofs_per_comp = builder.CreateUDiv(
+                                    side.n_trial_dofs,
+                                    builder.getInt32(static_cast<std::uint32_t>(value_dim)));
+                                const auto sums =
+                                    emitReduceSum(dofs_per_comp, loop_base, dim, [&](llvm::Value* jj) {
+                                        auto* base = builder.CreateMul(
+                                            builder.getInt32(static_cast<std::uint32_t>(component)),
+                                            dofs_per_comp);
+                                        auto* j = builder.CreateAdd(base, jj);
+                                        auto* j64 = builder.CreateZExt(j, i64);
+                                        auto* cj = loadRealPtrAt(coeffs_ptr, j64);
+                                        const auto g =
+                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                        std::vector<llvm::Value*> terms;
+                                        terms.reserve(dim);
+                                        for (std::size_t d = 0; d < dim; ++d) {
+                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+                                        }
+                                        return terms;
+                                    });
+                                auto* x = sums[0];
+                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
+                                return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+                            };
+
+                            auto gradComponentFromField = [&](int fid, std::size_t component) -> CodeValue {
+                                if (shape.kind != Shape::Kind::Vector) {
+                                    throw std::runtime_error("LLVMGen: cached grad(component(field)) expects vector gradient shape");
+                                }
+                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+                                auto* entry_is_null =
+                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok = llvm::BasicBlock::Create(*ctx, "field_comp_grad.ok", fn);
+                                auto* zero = llvm::BasicBlock::Create(*ctx, "field_comp_grad.zero", fn);
+                                auto* merge = llvm::BasicBlock::Create(*ctx, "field_comp_grad.merge", fn);
+
+                                builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+                                builder.SetInsertPoint(ok);
+                                auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                                auto* base_is_null =
+                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok2 = llvm::BasicBlock::Create(*ctx, "field_comp_grad.mat.ok", fn);
+                                builder.CreateCondBr(base_is_null, zero, ok2);
+
+                                builder.SetInsertPoint(ok2);
+                                const auto jac = loadMat3FromQ(base, q_index);
+                                for (std::size_t d = 0; d < dim; ++d) {
+                                    loaded[d] = (component < 3u && d < 3u)
+                                        ? jac.elems[component * 3u + d]
+                                        : rc(0.0);
+                                }
+                                builder.CreateBr(merge);
+                                auto* ok2_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(zero);
+                                builder.CreateBr(merge);
+                                auto* zero_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(merge);
+                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                for (std::size_t d = 0; d < dim; ++d) {
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                  "field_comp_grad.v" + std::to_string(d));
+                                    phi->addIncoming(rc(0.0), zero_block);
+                                    phi->addIncoming(loaded[d], ok2_block);
+                                    outv[d] = phi;
+                                }
+                                return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+                            };
+
+                            if (kid.type == FormExprType::Component) {
+                                const auto component =
+                                    static_cast<std::size_t>(static_cast<std::uint32_t>(unpackU32Lo(kid.imm0)));
+                                const auto base_idx =
+                                    term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                                const auto& base_op = term.ir.ops[base_idx];
+                                const auto& base_shape = term.shapes[base_idx];
+                                const auto value_dim = base_shape.kind == Shape::Kind::Vector
+                                    ? static_cast<std::size_t>(base_shape.dims[0])
+                                    : std::size_t{1u};
+
+                                if (base_op.type == FormExprType::TrialFunction) {
+                                    if (!is_residual) {
+                                        throw std::runtime_error(
+                                            "LLVMGen: cached grad(component(TrialFunction)) only supports residual");
+                                    }
+                                    values[op_idx] = gradComponentFromCoeffs(
+                                        side.solution_coefficients, component, value_dim, "grad_u_comp");
+                                    break;
+                                }
+                                if (base_op.type == FormExprType::StateField) {
+                                    const int fid = unpackFieldIdImm1(base_op.imm1);
+                                    if (fid == kCurrentSolutionFid) {
+                                        values[op_idx] = gradComponentFromCoeffs(
+                                            side.solution_coefficients, component, value_dim, "grad_state_comp");
+                                    } else {
+                                        values[op_idx] = gradComponentFromField(fid, component);
+                                    }
+                                    break;
+                                }
+                                if (base_op.type == FormExprType::DiscreteField) {
+                                    const int fid = unpackFieldIdImm1(base_op.imm1);
+                                    values[op_idx] = gradComponentFromField(fid, component);
+                                    break;
+                                }
+                                if (base_op.type == FormExprType::PreviousSolutionRef) {
+                                    const int k = static_cast<int>(static_cast<std::int64_t>(base_op.imm0));
+                                    auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
+                                    values[op_idx] = gradComponentFromCoeffs(
+                                        coeffs_ptr, component, value_dim, "prev_grad_comp" + std::to_string(k));
+                                    break;
+                                }
+                                if (base_op.type == FormExprType::Constant ||
+                                    base_op.type == FormExprType::TypedZero) {
+                                    values[op_idx] = makeZero(shape);
+                                    break;
+                                }
+                                throw std::runtime_error("LLVMGen: cached grad(component(...)) operand not supported");
+                            }
+
 	                        if (kid.type == FormExprType::TrialFunction) {
 	                            if (!is_residual) {
 	                                throw std::runtime_error(
@@ -11689,6 +11891,128 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
 
                         auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
+                            auto gradComponentFromCoeffs =
+                                [&](llvm::Value* coeffs,
+                                    std::size_t component,
+                                    std::size_t value_dim,
+                                    const std::string& loop_base) -> CodeValue {
+                                if (shape.kind != Shape::Kind::Vector) {
+                                    throw std::runtime_error("LLVMGen: cached face grad(component(u)) expects vector gradient shape");
+                                }
+                                if (component >= value_dim) {
+                                    return makeZero(shape);
+                                }
+                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                auto* dofs_per_comp = builder.CreateUDiv(
+                                    side.n_trial_dofs,
+                                    builder.getInt32(static_cast<std::uint32_t>(value_dim)));
+                                const auto sums =
+                                    emitReduceSum(dofs_per_comp, loop_base, dim, [&](llvm::Value* jj) {
+                                        auto* base = builder.CreateMul(
+                                            builder.getInt32(static_cast<std::uint32_t>(component)),
+                                            dofs_per_comp);
+                                        auto* j = builder.CreateAdd(base, jj);
+                                        auto* j64 = builder.CreateZExt(j, i64);
+                                        auto* cj = loadRealPtrAt(coeffs, j64);
+                                        const auto g =
+                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                        std::vector<llvm::Value*> terms;
+                                        terms.reserve(dim);
+                                        for (std::size_t d = 0; d < dim; ++d) {
+                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+                                        }
+                                        return terms;
+                                    });
+                                auto* x = sums[0];
+                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
+                                return makeVector(shape.dims[0], x, y, z);
+                            };
+
+                            auto gradComponentFromField = [&](int fid, std::size_t component) -> CodeValue {
+                                if (shape.kind != Shape::Kind::Vector) {
+                                    throw std::runtime_error("LLVMGen: cached face grad(component(field)) expects vector gradient shape");
+                                }
+                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                auto* entry = fieldEntryPtrFor(plus_side, fid);
+                                auto* entry_is_null =
+                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok = llvm::BasicBlock::Create(*ctx, "face_field_comp_grad.ok", fn);
+                                auto* zero = llvm::BasicBlock::Create(*ctx, "face_field_comp_grad.zero", fn);
+                                auto* merge = llvm::BasicBlock::Create(*ctx, "face_field_comp_grad.merge", fn);
+
+                                builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+                                builder.SetInsertPoint(ok);
+                                auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                                auto* base_is_null =
+                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* ok2 = llvm::BasicBlock::Create(*ctx, "face_field_comp_grad.mat.ok", fn);
+                                builder.CreateCondBr(base_is_null, zero, ok2);
+
+                                builder.SetInsertPoint(ok2);
+                                const auto jac = loadMat3FromQ(base, q_index);
+                                for (std::size_t d = 0; d < dim; ++d) {
+                                    loaded[d] = (component < 3u && d < 3u)
+                                        ? jac.elems[component * 3u + d]
+                                        : rc(0.0);
+                                }
+                                builder.CreateBr(merge);
+                                auto* ok2_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(zero);
+                                builder.CreateBr(merge);
+                                auto* zero_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(merge);
+                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                for (std::size_t d = 0; d < dim; ++d) {
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                  "face_field_comp_grad.v" + std::to_string(d));
+                                    phi->addIncoming(rc(0.0), zero_block);
+                                    phi->addIncoming(loaded[d], ok2_block);
+                                    outv[d] = phi;
+                                }
+                                return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+                            };
+
+                            if (kid.type == FormExprType::Component) {
+                                const auto component =
+                                    static_cast<std::size_t>(static_cast<std::uint32_t>(unpackU32Lo(kid.imm0)));
+                                const auto base_idx =
+                                    term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                                const auto& base_op = term.ir.ops[base_idx];
+                                const auto& base_shape = term.shapes[base_idx];
+                                const auto value_dim = base_shape.kind == Shape::Kind::Vector
+                                    ? static_cast<std::size_t>(base_shape.dims[0])
+                                    : std::size_t{1u};
+
+                                if (base_op.type == FormExprType::StateField) {
+                                    const int fid = unpackFieldIdImm1(base_op.imm1);
+                                    if (fid == kCurrentSolutionFid) {
+                                        return gradComponentFromCoeffs(
+                                            side.solution_coefficients, component, value_dim, "face_grad_state_comp");
+                                    }
+                                    return gradComponentFromField(fid, component);
+                                }
+                                if (base_op.type == FormExprType::DiscreteField) {
+                                    const int fid = unpackFieldIdImm1(base_op.imm1);
+                                    return gradComponentFromField(fid, component);
+                                }
+                                if (base_op.type == FormExprType::PreviousSolutionRef) {
+                                    const int k = static_cast<int>(static_cast<std::int64_t>(base_op.imm0));
+                                    auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+                                    return gradComponentFromCoeffs(
+                                        coeffs, component, value_dim, "face_prev_grad_comp" + std::to_string(k));
+                                }
+                                if (base_op.type == FormExprType::Constant ||
+                                    base_op.type == FormExprType::TypedZero) {
+                                    return makeZero(shape);
+                                }
+                                throw std::runtime_error("LLVMGen: cached face grad(component(...)) operand not supported");
+                            }
+
 		                            if (kid.type == FormExprType::PreviousSolutionRef) {
 		                                const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
 		                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
@@ -15452,6 +15776,175 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 auto evalGradient = [&](const SideView& side, bool is_plus, const KernelIROp& op, const Shape& shape) -> CodeValue {
                     const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                     const auto& kid = term.ir.ops[child_idx];
+
+                    auto gradComponentBasis =
+                        [&](bool test_basis,
+                            llvm::Value* dof_index,
+                            llvm::Value* n_dofs,
+                            bool active_plus,
+                            std::size_t component,
+                            std::size_t value_dim) -> CodeValue {
+                        if (shape.kind != Shape::Kind::Vector) {
+                            throw std::runtime_error("LLVMGen: grad(component(basis)) expects vector gradient shape");
+                        }
+                        if (is_plus != active_plus || component >= value_dim) {
+                            return makeZero(shape);
+                        }
+                        const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                        auto* dofs_per_comp =
+                            builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(value_dim)));
+                        auto* active_comp = builder.CreateUDiv(dof_index, dofs_per_comp);
+                        auto* selected = builder.CreateICmpEQ(
+                            active_comp, builder.getInt32(static_cast<std::uint32_t>(component)));
+                        const auto g =
+                            loadScalarPhysicalGradientMaybeBaked(side, test_basis, dof_index, q_index);
+                        std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                        for (std::size_t d = 0; d < dim; ++d) {
+                            outv[d] = builder.CreateSelect(selected, g[d], rc(0.0));
+                        }
+                        return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+                    };
+
+                    auto gradComponentFromCoeffs =
+                        [&](llvm::Value* coeffs,
+                            std::size_t component,
+                            std::size_t value_dim,
+                            const std::string& loop_base) -> CodeValue {
+                        if (shape.kind != Shape::Kind::Vector) {
+                            throw std::runtime_error("LLVMGen: grad(component(u_h)) expects vector gradient shape");
+                        }
+                        if (component >= value_dim) {
+                            return makeZero(shape);
+                        }
+                        const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                        auto* dofs_per_comp =
+                            builder.CreateUDiv(side.n_trial_dofs,
+                                               builder.getInt32(static_cast<std::uint32_t>(value_dim)));
+                        const auto sums =
+                            emitReduceSum(dofs_per_comp, loop_base, dim, [&](llvm::Value* jj) {
+                                auto* base = builder.CreateMul(
+                                    builder.getInt32(static_cast<std::uint32_t>(component)),
+                                    dofs_per_comp);
+                                auto* j = builder.CreateAdd(base, jj);
+                                auto* j64 = builder.CreateZExt(j, i64);
+                                auto* cj = loadRealPtrAt(coeffs, j64);
+                                const auto g =
+                                    loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                std::vector<llvm::Value*> terms;
+                                terms.reserve(dim);
+                                for (std::size_t d = 0; d < dim; ++d) {
+                                    terms.push_back(builder.CreateFMul(cj, g[d]));
+                                }
+                                return terms;
+                            });
+                        auto* x = sums[0];
+                        auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+                        auto* z = (dim > 2u) ? sums[2] : rc(0.0);
+                        return makeVector(shape.dims[0], x, y, z);
+                    };
+
+                    auto gradComponentFromField = [&](int fid, std::size_t component) -> CodeValue {
+                        if (shape.kind != Shape::Kind::Vector) {
+                            throw std::runtime_error("LLVMGen: grad(component(field)) expects vector gradient shape");
+                        }
+                        const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                        auto* entry = fieldEntryPtrFor(is_plus, fid);
+                        auto* entry_is_null =
+                            builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                        auto* ok = llvm::BasicBlock::Create(*ctx, "face_eval_field_comp_grad.ok", fn);
+                        auto* zero = llvm::BasicBlock::Create(*ctx, "face_eval_field_comp_grad.zero", fn);
+                        auto* merge = llvm::BasicBlock::Create(*ctx, "face_eval_field_comp_grad.merge", fn);
+
+                        builder.CreateCondBr(entry_is_null, zero, ok);
+
+                        std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+                        builder.SetInsertPoint(ok);
+                        auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                        auto* base_is_null =
+                            builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                        auto* ok2 = llvm::BasicBlock::Create(*ctx, "face_eval_field_comp_grad.mat.ok", fn);
+                        builder.CreateCondBr(base_is_null, zero, ok2);
+
+                        builder.SetInsertPoint(ok2);
+                        const auto jac = loadMat3FromQ(base, q_index);
+                        for (std::size_t d = 0; d < dim; ++d) {
+                            loaded[d] = (component < 3u && d < 3u)
+                                ? jac.elems[component * 3u + d]
+                                : rc(0.0);
+                        }
+                        builder.CreateBr(merge);
+                        auto* ok2_block = builder.GetInsertBlock();
+
+                        builder.SetInsertPoint(zero);
+                        builder.CreateBr(merge);
+                        auto* zero_block = builder.GetInsertBlock();
+
+                        builder.SetInsertPoint(merge);
+                        std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                        for (std::size_t d = 0; d < dim; ++d) {
+                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                          "face_eval_field_comp_grad.v" + std::to_string(d));
+                            phi->addIncoming(rc(0.0), zero_block);
+                            phi->addIncoming(loaded[d], ok2_block);
+                            outv[d] = phi;
+                        }
+                        return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+                    };
+
+                    if (kid.type == FormExprType::Component) {
+                        const auto component =
+                            static_cast<std::size_t>(static_cast<std::uint32_t>(unpackU32Lo(kid.imm0)));
+                        const auto base_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                        const auto& base_op = term.ir.ops[base_idx];
+                        const auto& base_shape = term.shapes[base_idx];
+                        const auto value_dim = base_shape.kind == Shape::Kind::Vector
+                            ? static_cast<std::size_t>(base_shape.dims[0])
+                            : std::size_t{1u};
+
+                        if (base_op.type == FormExprType::TestFunction) {
+                            return gradComponentBasis(/*test_basis=*/true,
+                                                      i_index,
+                                                      side.n_test_dofs,
+                                                      test_active_plus,
+                                                      component,
+                                                      value_dim);
+                        }
+                        if (base_op.type == FormExprType::TrialFunction) {
+                            if (is_residual) {
+                                return gradComponentFromCoeffs(
+                                    side.solution_coefficients, component, value_dim, "face_grad_u_comp");
+                            }
+                            return gradComponentBasis(/*test_basis=*/false,
+                                                      j_index,
+                                                      side.n_trial_dofs,
+                                                      trial_active_plus,
+                                                      component,
+                                                      value_dim);
+                        }
+                        if (base_op.type == FormExprType::StateField) {
+                            const int fid = unpackFieldIdImm1(base_op.imm1);
+                            if (fid == kCurrentSolutionFid) {
+                                return gradComponentFromCoeffs(
+                                    side.solution_coefficients, component, value_dim, "face_grad_state_comp");
+                            }
+                            return gradComponentFromField(fid, component);
+                        }
+                        if (base_op.type == FormExprType::DiscreteField) {
+                            const int fid = unpackFieldIdImm1(base_op.imm1);
+                            return gradComponentFromField(fid, component);
+                        }
+                        if (base_op.type == FormExprType::PreviousSolutionRef) {
+                            const int k = static_cast<int>(static_cast<std::int64_t>(base_op.imm0));
+                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+                            return gradComponentFromCoeffs(
+                                coeffs, component, value_dim, "face_prev_grad_comp" + std::to_string(k));
+                        }
+                        if (base_op.type == FormExprType::Constant ||
+                            base_op.type == FormExprType::TypedZero) {
+                            return makeZero(shape);
+                        }
+                        throw std::runtime_error("LLVMGen: grad(component(...)) operand not supported");
+                    }
 
 	                    if (kid.type == FormExprType::TestFunction) {
 	                        if (is_plus != test_active_plus) return makeZero(shape);

@@ -554,6 +554,15 @@ Checklist:
   transport.
 - [x] Upgrade boundary-only face topology to full face topology during FE setup
   when unfitted cut-cell or interface terms require interior faces.
+- [x] Avoid zero-stress unfitted free-surface interface integration when no
+  external pressure, surface tension, or kinematic free-surface enforcement is
+  active.
+- [x] Use component-wise unfitted velocity cut-cell stabilization and support
+  scalar zero forms in interpreted and JIT symbolic kernels.
+- [x] Initialize prescribed level-set fields from mesh vertex data before
+  coupled free-surface transport.
+- [x] Apply bounded nonlinear and linear solver tolerances to the coarse
+  generated validation fixtures.
 - [x] Verify targeted parser, translator, tangent, and moving-domain tests
   after the startup fixes.
 - [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated

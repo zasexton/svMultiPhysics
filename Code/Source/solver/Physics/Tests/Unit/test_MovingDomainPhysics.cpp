@@ -1985,6 +1985,41 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
 }
 
+TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInterfaceIntegral)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .external_pressure = 0.0,
+        .surface_tension = 0.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+}
+
 TEST(MovingDomainPhysics, NavierStokesRejectsCutCellStabilizationOnFittedSurface)
 {
     constexpr int marker = 45;

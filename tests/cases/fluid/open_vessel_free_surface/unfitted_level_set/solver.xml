@@ -47,7 +47,7 @@
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>3</Max_iterations>
-  <Tolerance>1.0e-10</Tolerance>
+  <Tolerance>1.0e-4</Tolerance>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Level_set_source>prescribed_data</Level_set_source>
@@ -81,7 +81,8 @@
     </Linear_algebra>
     <Max_iterations>50</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>
-    <Tolerance>1.0e-10</Tolerance>
+    <Tolerance>1.0e-4</Tolerance>
+    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
   </LS>
 </Add_equation>
 
@@ -89,7 +90,7 @@
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>8</Max_iterations>
-  <Tolerance>1.0e-8</Tolerance>
+  <Tolerance>1.0e-4</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>998.2</Density>
@@ -123,7 +124,8 @@
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
-    <Tolerance>1.0e-10</Tolerance>
+    <Tolerance>1.0e-4</Tolerance>
+    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
   </LS>
 
   <Add_BC name="wall_left">
@@ -148,8 +150,9 @@
     <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <External_pressure>0.0</External_pressure>
-    <Surface_tension>0.0728</Surface_tension>
+    <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
+    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
     <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>

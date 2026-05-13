@@ -27,6 +27,11 @@ ROOT = Path(__file__).resolve().parent
 WATER_DENSITY = 998.2
 WATER_VISCOSITY = 1.003e-3
 SURFACE_TENSION = 0.0728
+UNFITTED_SURFACE_TENSION = 0.0
+LINEAR_SOLVER_TOLERANCE = "1.0e-4"
+LINEAR_SOLVER_ABSOLUTE_TOLERANCE = "1.0e-4"
+FLUID_NONLINEAR_TOLERANCE = "1.0e-4"
+LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-4"
 
 warnings.filterwarnings("ignore", message="Meshio doesn't know keyword.*")
 
@@ -394,7 +399,7 @@ def write_solver_xml(
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>8</Max_iterations>
-  <Tolerance>1.0e-8</Tolerance>
+  <Tolerance>{FLUID_NONLINEAR_TOLERANCE}</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Enable_ALE>true</Enable_ALE>
@@ -438,7 +443,8 @@ def write_solver_xml(
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
-    <Tolerance>1.0e-10</Tolerance>
+    <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
+    <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
 
 {wall_bc_blocks}
@@ -472,12 +478,13 @@ def write_solver_xml(
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
-  <Tolerance>1.0e-10</Tolerance>
+  <Tolerance>{LEVEL_SET_NONLINEAR_TOLERANCE}</Tolerance>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Level_set_source>prescribed_data</Level_set_source>
   <Velocity_source>coupled_field</Velocity_source>
   <Velocity_field_name>Velocity</Velocity_field_name>
+  <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Enable_reinitialization>true</Enable_reinitialization>
@@ -506,7 +513,8 @@ def write_solver_xml(
     </Linear_algebra>
     <Max_iterations>50</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>
-    <Tolerance>1.0e-10</Tolerance>
+    <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
+    <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
 </Add_equation>
 
@@ -514,7 +522,7 @@ def write_solver_xml(
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>8</Max_iterations>
-  <Tolerance>1.0e-8</Tolerance>
+  <Tolerance>{FLUID_NONLINEAR_TOLERANCE}</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>{WATER_DENSITY}</Density>
@@ -548,7 +556,8 @@ def write_solver_xml(
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
-    <Tolerance>1.0e-10</Tolerance>
+    <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
+    <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
 
 {wall_bc_blocks}
@@ -560,8 +569,9 @@ def write_solver_xml(
     <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <External_pressure>0.0</External_pressure>
-    <Surface_tension>{SURFACE_TENSION}</Surface_tension>
+    <Surface_tension>{UNFITTED_SURFACE_TENSION}</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
+    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
     <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>

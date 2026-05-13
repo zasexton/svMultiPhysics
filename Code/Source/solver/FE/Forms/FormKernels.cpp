@@ -310,6 +310,19 @@ constexpr bool isTensor3Kind(typename EvalValue<Scalar>::Kind k) noexcept
     return k == EvalValue<Scalar>::Kind::Tensor3;
 }
 
+[[nodiscard]] bool isZeroDual(const Dual& value) noexcept
+{
+    if (value.value != 0.0) {
+        return false;
+    }
+    for (const auto deriv : value.deriv) {
+        if (deriv != 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 template<typename Scalar>
 constexpr bool sameCategory(typename EvalValue<Scalar>::Kind a,
                             typename EvalValue<Scalar>::Kind b) noexcept
@@ -8232,6 +8245,12 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             }
 
             if (node.type() == FormExprType::InnerProduct) {
+                const bool a_is_scalar_zero = isScalarKind<Real>(a.kind) && a.s == Real(0.0);
+                const bool b_is_scalar_zero = isScalarKind<Real>(b.kind) && b.s == Real(0.0);
+                if ((a_is_scalar_zero && !isScalarKind<Real>(b.kind)) ||
+                    (b_is_scalar_zero && !isScalarKind<Real>(a.kind))) {
+                    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+                }
                 if (isScalarKind<Real>(a.kind) && isScalarKind<Real>(b.kind)) {
                     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, a.s * b.s};
                 }
@@ -8288,6 +8307,12 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             }
 
 	            if (node.type() == FormExprType::DoubleContraction) {
+                    const bool a_is_scalar_zero = isScalarKind<Real>(a.kind) && a.s == Real(0.0);
+                    const bool b_is_scalar_zero = isScalarKind<Real>(b.kind) && b.s == Real(0.0);
+                    if ((a_is_scalar_zero && !isScalarKind<Real>(b.kind)) ||
+                        (b_is_scalar_zero && !isScalarKind<Real>(a.kind))) {
+                        return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, 0.0};
+                    }
 	                if (isTensor4Kind<Real>(a.kind) && isMatrixKind<Real>(b.kind)) {
 	                    EvalValue<Real> out;
 	                    out.kind = EvalValue<Real>::Kind::Matrix;
@@ -12130,6 +12155,15 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             }
 
             if (node.type() == FormExprType::InnerProduct) {
+                const bool a_is_scalar_zero = isScalarKind<Dual>(a.kind) && isZeroDual(a.s);
+                const bool b_is_scalar_zero = isScalarKind<Dual>(b.kind) && isZeroDual(b.s);
+                if ((a_is_scalar_zero && !isScalarKind<Dual>(b.kind)) ||
+                    (b_is_scalar_zero && !isScalarKind<Dual>(a.kind))) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = makeDualConstant(0.0, env.ws->alloc());
+                    return out;
+                }
                 if (isScalarKind<Dual>(a.kind) && isScalarKind<Dual>(b.kind)) {
                     EvalValue<Dual> out;
                     out.kind = EvalValue<Dual>::Kind::Scalar;
@@ -12211,6 +12245,15 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             }
 
             if (node.type() == FormExprType::DoubleContraction) {
+                const bool a_is_scalar_zero = isScalarKind<Dual>(a.kind) && isZeroDual(a.s);
+                const bool b_is_scalar_zero = isScalarKind<Dual>(b.kind) && isZeroDual(b.s);
+                if ((a_is_scalar_zero && !isScalarKind<Dual>(b.kind)) ||
+                    (b_is_scalar_zero && !isScalarKind<Dual>(a.kind))) {
+                    EvalValue<Dual> out;
+                    out.kind = EvalValue<Dual>::Kind::Scalar;
+                    out.s = makeDualConstant(0.0, env.ws->alloc());
+                    return out;
+                }
                 if (isTensor4Kind<Dual>(a.kind) && isMatrixKind<Dual>(b.kind)) {
                     EvalValue<Dual> out;
                     out.kind = EvalValue<Dual>::Kind::Matrix;
@@ -16318,7 +16361,14 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                         const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                         if (term_weight == 0.0) continue;
 
-                        const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                        EvalValue<Real> val;
+                        try {
+                            val = evalReal(*term.integrand.node(), env, eval_side, q);
+                        } catch (const FEException& e) {
+                            throw FEException(std::string(e.what()) +
+                                                  "\nIntegrand: " + term.debug_string,
+                                              __FILE__, __LINE__, __func__, e.status());
+                        }
                         if (val.kind != EvalValue<Real>::Kind::Scalar) {
                             throw FEException("Forms: residual interior-face integrand did not evaluate to scalar (symbolic kernel)",
                                               __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
@@ -16359,7 +16409,14 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                         env.i = i;
                         for (LocalIndex j = 0; j < n_trial; ++j) {
                             env.j = j;
-                            const auto val = evalReal(*term.integrand.node(), env, eval_side, q);
+                            EvalValue<Real> val;
+                            try {
+                                val = evalReal(*term.integrand.node(), env, eval_side, q);
+                            } catch (const FEException& e) {
+                                throw FEException(std::string(e.what()) +
+                                                      "\nIntegrand: " + term.debug_string,
+                                                  __FILE__, __LINE__, __func__, e.status());
+                            }
                             if (val.kind != EvalValue<Real>::Kind::Scalar) {
                                 throw FEException("Forms: tangent interior-face integrand did not evaluate to scalar (symbolic kernel)",
                                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);

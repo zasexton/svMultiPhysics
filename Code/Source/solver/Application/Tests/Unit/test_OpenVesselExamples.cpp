@@ -355,8 +355,9 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
   expectText(free_surface, "Level_set_isovalue", "0.0");
   expectText(free_surface, "External_pressure", "0.0");
-  expectText(free_surface, "Surface_tension", "0.0728");
+  expectText(free_surface, "Surface_tension", "0.0");
   expectText(free_surface, "Enable_cut_cell_stabilization", "true");
+  expectText(free_surface, "Use_cut_metadata_scale", "false");
   expectText(free_surface, "Cut_cell_velocity_gradient_penalty", "1.0");
   expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
 }

@@ -150,6 +150,25 @@ void compareADAndSymbolic(const assembly::IMeshAccess& mesh,
     return dof_map;
 }
 
+[[nodiscard]] dofs::DofMap makeTwoCellDGDofMap(LocalIndex n_dofs_per_cell)
+{
+    dofs::DofMap dof_map(2,
+                         static_cast<GlobalIndex>(2 * n_dofs_per_cell),
+                         n_dofs_per_cell);
+    for (GlobalIndex cell = 0; cell < 2; ++cell) {
+        std::vector<GlobalIndex> cell_dofs(static_cast<std::size_t>(n_dofs_per_cell));
+        for (LocalIndex i = 0; i < n_dofs_per_cell; ++i) {
+            cell_dofs[static_cast<std::size_t>(i)] =
+                cell * static_cast<GlobalIndex>(n_dofs_per_cell) + i;
+        }
+        dof_map.setCellDofs(cell, cell_dofs);
+    }
+    dof_map.setNumDofs(static_cast<GlobalIndex>(2 * n_dofs_per_cell));
+    dof_map.setNumLocalDofs(static_cast<GlobalIndex>(2 * n_dofs_per_cell));
+    dof_map.finalize();
+    return dof_map;
+}
+
 [[nodiscard]] std::size_t countNodes(const FormExpr& expr,
                                      FormExprType type,
                                      std::optional<std::string_view> name = std::nullopt)
@@ -682,6 +701,31 @@ TEST(SymbolicNonlinearFormKernelTest, DGInteriorPenaltyJacobianMatchesAD)
 
     const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1, 0.05, -0.07, 0.08, -0.09};
     compareADAndSymbolic(mesh, dof_map, space, space, sipg, U);
+}
+
+TEST(SymbolicNonlinearFormKernelTest, ComponentWiseInteriorFaceGradientPenaltyJacobianMatchesAD)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+
+    auto base = std::make_shared<spaces::L2Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace space(base, 3);
+    auto dof_map = makeTwoCellDGDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+
+    const auto u = FormExpr::trialFunction(space, "Velocity");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    auto penalty = FormExpr::constant(0.0);
+    for (int comp = 0; comp < 3; ++comp) {
+        penalty = penalty +
+                  inner(jump(grad(component(u, comp))),
+                        jump(grad(component(v, comp))));
+    }
+
+    std::vector<Real> U(static_cast<std::size_t>(dof_map.getNumDofs()), 0.0);
+    for (GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
+        U[static_cast<std::size_t>(i)] = 0.01 * static_cast<Real>(i + 1);
+    }
+    compareADAndSymbolic(mesh, dof_map, space, space, penalty.dS(), U);
 }
 
 TEST(SymbolicNonlinearFormKernelTest, TraceNitscheBoundaryJacobianMatchesAD)

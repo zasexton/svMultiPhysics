@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 
 #include "Application/Translators/LevelSetEquationTranslator.h"
+#include "FE/Backends/Interfaces/BackendFactory.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/JIT/JITKernelWrapper.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Physics/Core/EquationModuleInput.h"
@@ -215,6 +218,72 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
   EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+#endif
+}
+
+TEST(LevelSetEquationTranslator, InitializesPrescribedLevelSetFromMeshVertexField)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+  auto& local_mesh = mesh->local_mesh();
+  const auto field = svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* phi_values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, field);
+  ASSERT_NE(phi_values, nullptr);
+  for (svmp::index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+    const auto x = local_mesh.get_vertex_coords(vertex);
+    phi_values[vertex] = x[0] + x[1] - 0.25;
+  }
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Level_set_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+  ASSERT_TRUE(module);
+  ASSERT_NO_THROW(system.setup({}));
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  auto state = factory->createVector(system.dofHandler().getNumDofs());
+  state->zero();
+
+  module->applyInitialConditions(system, *state);
+  const auto values = state->localSpan();
+
+  const auto phi = system.findFieldByName("phi");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+  const auto* entity_map = system.fieldDofHandler(phi).getEntityDofMap();
+  ASSERT_NE(entity_map, nullptr);
+  const auto offset = system.fieldDofOffset(phi);
+
+  for (svmp::FE::GlobalIndex vertex = 0;
+       vertex < static_cast<svmp::FE::GlobalIndex>(local_mesh.n_vertices());
+       ++vertex) {
+    const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+    ASSERT_EQ(vertex_dofs.size(), 1u);
+    const auto dof = offset + vertex_dofs.front();
+    ASSERT_GE(dof, 0);
+    ASSERT_LT(static_cast<std::size_t>(dof), values.size());
+    EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(dof)],
+                     phi_values[static_cast<std::size_t>(vertex)]);
+  }
 #endif
 }
 

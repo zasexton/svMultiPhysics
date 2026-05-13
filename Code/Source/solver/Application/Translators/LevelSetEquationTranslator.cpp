@@ -4,10 +4,13 @@
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/LevelSet/LevelSetTransport.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
+#include "Mesh/Mesh.h"
 
 #include <algorithm>
 #include <array>
@@ -46,6 +49,111 @@ public:
         level_set_space_,
         options_,
         install_options_);
+  }
+
+  void applyInitialConditions(const svmp::FE::systems::FESystem& system,
+                              svmp::FE::backends::GenericVector& u0) const override
+  {
+    if (options_.level_set.source != ls::LevelSetFieldSource::PrescribedData) {
+      return;
+    }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto phi_id = system.findFieldByName(options_.level_set.field_name);
+    if (phi_id == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition could not find field '" +
+          options_.level_set.field_name + "'.");
+    }
+
+    const auto& rec = system.fieldRecord(phi_id);
+    if (rec.components != 1) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition field '" +
+          rec.name + "' must be scalar.");
+    }
+
+    const auto& field_dofs = system.fieldDofHandler(phi_id);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition requires vertex DOF metadata.");
+    }
+
+    const auto& mesh = system.singleMesh("Level-set initial condition");
+    const auto& local_mesh = mesh.local_mesh();
+    const auto mesh_field = svmp::MeshFields::get_field_handle(
+        local_mesh,
+        svmp::EntityKind::Vertex,
+        options_.level_set.field_name);
+    if (mesh_field.id == 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition requires vertex field '" +
+          options_.level_set.field_name + "' in the input mesh.");
+    }
+
+    const auto mesh_components = svmp::MeshFields::field_components(local_mesh, mesh_field);
+    if (mesh_components < 1u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set input mesh field '" +
+          options_.level_set.field_name + "' has no components.");
+    }
+
+    const auto* mesh_values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
+    if (mesh_values == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set input mesh field '" +
+          options_.level_set.field_name + "' has no data.");
+    }
+
+    const auto n_vertices = static_cast<svmp::FE::GlobalIndex>(mesh.n_vertices());
+    if (entity_map->numVertices() < n_vertices) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition field '" +
+          rec.name + "' does not cover every mesh vertex.");
+    }
+
+    const auto phi_offset = system.fieldDofOffset(phi_id);
+    std::vector<svmp::FE::GlobalIndex> dofs;
+    std::vector<svmp::FE::Real> values;
+    dofs.reserve(static_cast<std::size_t>(n_vertices));
+    values.reserve(static_cast<std::size_t>(n_vertices));
+
+    for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+      const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+      if (vertex_dofs.empty()) {
+        continue;
+      }
+      if (vertex_dofs.size() != 1u) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set initial condition expects one scalar vertex DOF.");
+      }
+
+      dofs.push_back(phi_offset + vertex_dofs.front());
+      values.push_back(static_cast<svmp::FE::Real>(
+          mesh_values[static_cast<std::size_t>(vertex) * mesh_components]));
+    }
+
+    if (dofs.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition found no vertex DOFs.");
+    }
+
+    auto view = u0.createAssemblyView();
+    if (!view) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set initial condition could not create a vector view.");
+    }
+    view->beginAssemblyPhase();
+    view->setVectorEntries(dofs, values);
+    view->endAssemblyPhase();
+    view->finalizeAssembly();
+#else
+    (void)system;
+    (void)u0;
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Level-set prescribed-data initialization requires mesh support.");
+#endif
   }
 
 private:

@@ -383,7 +383,8 @@ void applyFreeSurfaceCutCellStabilization(
     const FE::forms::FormExpr& v,
     const FE::forms::FormExpr& q,
     const FE::forms::FormExpr& mu,
-    FE::Real stabilization_epsilon)
+    FE::Real stabilization_epsilon,
+    int velocity_components)
 {
     if (!isUnfittedLevelSet(bc) || !bc.cut_cell_stabilization.enabled) {
         return;
@@ -400,15 +401,20 @@ void applyFreeSurfaceCutCellStabilization(
         const auto velocity_penalty = bc_forms::toScalarExpr(
             cut.velocity_gradient_penalty,
             freeSurfaceValueName("ns_free_surface_cut_velocity_penalty", bc));
-        const auto velocity_jump_u =
-            FE::forms::cutAdjacentFacetGradientJump(u);
-        const auto velocity_jump_v =
-            FE::forms::cutAdjacentFacetGradientJump(v);
+        auto velocity_jump_term = FE::forms::FormExpr::constant(0.0);
+        for (int component = 0; component < velocity_components; ++component) {
+            const auto velocity_jump_u =
+                FE::forms::cutAdjacentFacetGradientJump(FE::forms::component(u, component));
+            const auto velocity_jump_v =
+                FE::forms::cutAdjacentFacetGradientJump(FE::forms::component(v, component));
+            velocity_jump_term =
+                velocity_jump_term + FE::forms::inner(velocity_jump_u, velocity_jump_v);
+        }
         momentum_form =
             momentum_form +
             FE::forms::cutAdjacentFacetIntegral(
                 cut_scale * velocity_penalty * mu * h_f *
-                FE::forms::doubleContraction(velocity_jump_u, velocity_jump_v));
+                velocity_jump_term);
     }
 
     if (!bc_forms::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
@@ -615,6 +621,16 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
 
     validateFreeSurfaceBoundary(bc, ale_enabled);
 
+    const bool has_dynamic_stress =
+        !bc::isZeroConstantScalarValue(bc.external_pressure) ||
+        !bc::isZeroConstantScalarValue(bc.surface_tension);
+    const bool needs_surface_normal =
+        has_dynamic_stress ||
+        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None;
+    if (!needs_surface_normal) {
+        return;
+    }
+
     const auto phi = freeSurfaceLevelSet(bc, system);
     const auto n = isUnfittedLevelSet(bc)
                        ? unitNormalFromLevelSet(phi)
@@ -642,9 +658,11 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             freeSurfaceValueName("ns_free_surface_curvature", bc));
     }();
 
-    const auto traction = (-p_ext + gamma * curvature) * n;
-    momentum_form = momentum_form -
-                    integrateOnFreeSurface(inner(traction, v), bc, ale_enabled);
+    if (has_dynamic_stress) {
+        const auto traction = (-p_ext + gamma * curvature) * n;
+        momentum_form = momentum_form -
+                        integrateOnFreeSurface(inner(traction, v), bc, ale_enabled);
+    }
 
     switch (bc.kinematic_enforcement) {
     case FreeSurfaceKinematicEnforcement::None:
@@ -981,7 +999,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             v,
             q,
             mu,
-            options_.stabilization_epsilon);
+            options_.stabilization_epsilon,
+            dim);
     }
 
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim); });
