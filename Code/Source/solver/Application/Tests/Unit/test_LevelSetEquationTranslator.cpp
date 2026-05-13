@@ -158,6 +158,8 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "advecting_velocity"};
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Operator_tag"] =
+      svmp::Physics::ParameterValue{true, "transport"};
   input.equation_params["Enable_SUPG"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["SUPG_tau_scale"] =
@@ -215,7 +217,7 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
             svmp::FE::systems::FieldSourceKind::Unknown);
   EXPECT_EQ(system.fieldRecord(velocity).source_kind,
             svmp::FE::systems::FieldSourceKind::PrescribedData);
-  EXPECT_TRUE(system.hasOperator("level_set"));
+  EXPECT_TRUE(system.hasOperator("transport"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
 #endif
@@ -317,6 +319,37 @@ TEST(LevelSetEquationTranslator, TranslatesConstantVelocity)
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Constant));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
   EXPECT_FALSE(formulationRecordsContain(system, FormExprType::DiscreteField));
+#endif
+}
+
+TEST(LevelSetEquationTranslator, RoutesCoupledTransportToEquationsOperator)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Coupled"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_field_name"] =
+      svmp::Physics::ParameterValue{true, "Velocity"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "coupled_field"};
+  input.equation_params["Auto_register_velocity_field"] =
+      svmp::Physics::ParameterValue{true, "true"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+
+  ASSERT_TRUE(module);
+  EXPECT_TRUE(system.hasOperator("equations"));
+  EXPECT_FALSE(system.hasOperator("level_set"));
 #endif
 }
 

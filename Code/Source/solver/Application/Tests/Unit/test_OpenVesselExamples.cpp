@@ -395,7 +395,8 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
   const auto phi = system.findFieldByName("phi");
   ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
   EXPECT_TRUE(system.fieldParticipatesInUnknownVector(phi));
-  EXPECT_TRUE(system.hasOperator("level_set"));
+  EXPECT_TRUE(system.hasOperator("equations"));
+  EXPECT_FALSE(system.hasOperator("level_set"));
 
   auto fluid_params = equationParametersFromElement(
       mutableChildWithAttribute(*root, "Add_equation", "type", "fluid"));

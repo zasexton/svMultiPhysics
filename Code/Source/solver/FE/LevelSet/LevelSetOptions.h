@@ -91,6 +91,7 @@ struct LevelSetBoundaryOptions {
 };
 
 struct LevelSetTransportOptions {
+    std::string operator_tag{"level_set"};
     LevelSetFieldOptions level_set{};
     LevelSetVelocityOptions velocity{};
     LevelSetSUPGOptions supg{};

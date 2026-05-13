@@ -468,6 +468,15 @@ ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_vie
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
                             ls::LevelSetTransportOptions& options)
 {
+  if (const auto value = get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
+    options.operator_tag = *value;
+  }
+  if (const auto value = get_defined_bool(params, {"Coupled"})) {
+    if (*value && !get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
+      options.operator_tag = "equations";
+    }
+  }
+
   if (const auto value = get_defined_string(
           params,
           {"Level_set_field_name", "LevelSetFieldName", "Level_set_field", "LevelSetField", "Field_name"})) {

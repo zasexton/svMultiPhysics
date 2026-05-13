@@ -590,6 +590,8 @@ Checklist:
   digitized free-surface benchmark profiles.
 - [x] Install the fitted ALE mesh-motion normal kinematic residual so the
   free-surface mesh displacement is coupled to fluid normal velocity.
+- [x] Route coupled unfitted level-set transport onto the unified transient
+  operator so the level-set field advances with the fluid solve.
 - [ ] Run the Test05 D18 wet-bed case to the first published profile time and
   compare the extracted level-set interface against the reference data.
 - [ ] Repeat benchmark-relevant transient checks across serial, MPI-2, and

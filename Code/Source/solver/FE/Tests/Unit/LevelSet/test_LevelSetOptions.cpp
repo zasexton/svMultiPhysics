@@ -10,6 +10,7 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
 {
     const level_set::LevelSetTransportOptions options{};
 
+    EXPECT_EQ(options.operator_tag, "level_set");
     EXPECT_EQ(options.level_set.field_name, "level_set");
     EXPECT_EQ(options.level_set.source, level_set::LevelSetFieldSource::Unknown);
     EXPECT_TRUE(options.level_set.auto_register_field);

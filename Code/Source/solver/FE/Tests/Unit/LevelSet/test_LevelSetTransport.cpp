@@ -375,6 +375,30 @@ TEST(LevelSetTransport, AutoRegistersConfiguredFields)
     EXPECT_FALSE(kernels.residual.empty());
 }
 
+TEST(LevelSetTransport, InstallsOnConfiguredOperatorTag)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+
+    level_set::LevelSetTransportOptions options{};
+    options.operator_tag = "equations";
+    options.level_set.field_name = "phi";
+    options.level_set.source = level_set::LevelSetFieldSource::PrescribedData;
+    options.velocity.field_name = "Velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = velocity_space;
+
+    const auto kernels = level_set::installLevelSetTransport(system, phi_space, options);
+
+    EXPECT_TRUE(system.hasOperator("equations"));
+    EXPECT_FALSE(system.hasOperator("level_set"));
+    EXPECT_FALSE(kernels.residual.empty());
+}
+
 TEST(LevelSetTransport, AutoRegistersCoupledVelocityAsUnknownWhenRequested)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();

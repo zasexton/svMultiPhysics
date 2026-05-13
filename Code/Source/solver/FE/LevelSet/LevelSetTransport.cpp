@@ -253,6 +253,10 @@ systems::CoupledResidualKernels installLevelSetTransport(
     validateReinitializationOptions(options.reinitialization);
     validateVolumeCorrectionOptions(options.volume_correction);
     validateBoundaryOptions(options.boundaries);
+    if (options.operator_tag.empty()) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: operator_tag must be non-empty");
+    }
 
     const auto phi_id = ensureLevelSetField(system, options.level_set, std::move(level_set_space));
     validateScalarField(system, phi_id, options.level_set.field_name);
@@ -332,8 +336,8 @@ systems::CoupledResidualKernels installLevelSetTransport(
         residual = residual + (penalty * (phi - target) * eta).ds(marker);
     }
 
-    if (!system.hasOperator("level_set")) {
-        system.addOperator("level_set");
+    if (!system.hasOperator(options.operator_tag)) {
+        system.addOperator(options.operator_tag);
     }
 
     auto install = install_options;
@@ -343,7 +347,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
     return systems::installFormulation(
         system,
-        "level_set",
+        options.operator_tag,
         {phi_id},
         residual,
         install);

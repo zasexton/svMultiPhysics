@@ -897,7 +897,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 options_.auto_register_mesh_displacement_field,
         });
 
-    system.addOperator("equations");
+    if (!system.hasOperator("equations")) {
+        system.addOperator("equations");
+    }
 
     using namespace svmp::FE::forms;
 
