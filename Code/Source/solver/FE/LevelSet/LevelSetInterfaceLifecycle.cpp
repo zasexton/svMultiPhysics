@@ -203,9 +203,11 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     result.value_revision = revision;
     result.domain = std::move(domain);
     result.summary = result.domain.summary();
-    result.success = result.summary.active_fragment_count > 0u;
+    result.success =
+        result.summary.active_fragment_count > 0u ||
+        result.summary.active_volume_region_count > 0u;
     if (!result.success) {
-        result.diagnostic = "generated level-set interface has no active fragments";
+        result.diagnostic = "generated level-set interface has no active fragments or volume regions";
     }
     return result;
 }

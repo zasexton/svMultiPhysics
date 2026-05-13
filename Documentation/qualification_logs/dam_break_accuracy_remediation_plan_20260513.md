@@ -59,6 +59,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       cell as full-negative, full-positive, or cut.
 - [x] For full-negative and full-positive cells, preserve the selected side as
       normal cell-volume quadrature for the active-domain measure.
+- [x] Allow generated level-set domains with full-side volume regions but no
+      rank-local interface fragments.
 - [x] For cut cells, generate side-specific volume quadrature rules for both
       negative and positive level-set regions.
 - [x] Carry parent cell id, interface marker, integration side, and volume
@@ -242,7 +244,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Confirm a D18 `Use_cut_metadata_scale=true` smoke case stops with setup
       validation instead of an assembly crash.
 - [x] Run the same one-step D18 test with 2 MPI ranks.
-- [ ] Run the same one-step D18 test with 4 MPI ranks.
+- [x] Run the same one-step D18 test with 4 MPI ranks.
 - [ ] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge
       pressure.
 - [ ] Run D18 to the current comparison time after one-step checks pass.

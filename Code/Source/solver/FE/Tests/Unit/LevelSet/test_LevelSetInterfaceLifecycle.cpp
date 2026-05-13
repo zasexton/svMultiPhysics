@@ -217,6 +217,44 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(result.domain.volumeRegions().front().interface_marker, interface_marker);
 }
 
+TEST(LevelSetInterfaceLifecycle, FullSideVolumeRegionSucceedsWithoutInterfaceFragment)
+{
+    constexpr int interface_marker = 76;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        setFieldComponentValue(solution, system, phi, vertex, FE::Real(-1.0));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water";
+    options.tolerance = 1.0e-12;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.summary.active_fragment_count, 0u);
+    EXPECT_EQ(result.summary.active_volume_region_count, 1u);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.0);
+    EXPECT_EQ(result.summary.positive_volume_measure, 0.0);
+}
+
 TEST(LevelSetInterfaceLifecycle, PreservesMarkerIdentity)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
