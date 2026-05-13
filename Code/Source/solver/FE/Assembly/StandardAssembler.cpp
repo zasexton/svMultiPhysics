@@ -122,6 +122,23 @@ public:
     }
 };
 
+[[nodiscard]] bool isFullSideVolumeRule(const geometry::CutQuadratureRule& rule) noexcept
+{
+    if (rule.kind != geometry::CutQuadratureKind::Volume ||
+        !std::isfinite(rule.measure) ||
+        !std::isfinite(rule.parent_measure) ||
+        !std::isfinite(rule.volume_fraction) ||
+        rule.parent_measure <= Real{0.0}) {
+        return false;
+    }
+
+    const Real fraction_tol = std::numeric_limits<Real>::epsilon() * Real{128.0};
+    const Real measure_scale = std::max<Real>(Real{1.0}, std::abs(rule.parent_measure));
+    const Real measure_tol = std::numeric_limits<Real>::epsilon() * Real{128.0} * measure_scale;
+    return std::abs(rule.volume_fraction - Real{1.0}) <= fraction_tol &&
+           std::abs(rule.measure - rule.parent_measure) <= measure_tol;
+}
+
 [[nodiscard]] inline double assemblyTimeNow() noexcept {
     if (!assemblyTimingEnabled()) return 0.0;
     return std::chrono::duration<double>(
@@ -6401,12 +6418,20 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
 
         const auto cell_type = mesh.getCellType(cell_id);
-        CutVolumeQuadratureRule cut_rule(
-            rule,
-            to_mesh_family(cell_type),
-            mesh.dimension());
-        prepareGeometry(context_, mesh, cell_id, cut_rule);
-        prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
+        std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
+        std::optional<CutVolumeQuadratureRule> cut_rule;
+        const quadrature::QuadratureRule* active_rule = nullptr;
+        if (isFullSideVolumeRule(rule)) {
+            full_cell_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+            active_rule = full_cell_rule.get();
+        } else {
+            cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
+            active_rule = &*cut_rule;
+        }
+        FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumes: active quadrature rule");
+        prepareGeometry(context_, mesh, cell_id, *active_rule);
+        prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, *active_rule);
+        prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, *active_rule, required_data);
 
         context_.setCutVolumeDomain(interface_marker, rule.side);
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);

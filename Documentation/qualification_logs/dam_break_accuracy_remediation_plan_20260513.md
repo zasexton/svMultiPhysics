@@ -56,7 +56,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 - [x] Extend generated level-set interface processing to classify every owned
       cell as full-negative, full-positive, or cut.
-- [ ] For full-negative and full-positive cells, preserve the selected side as
+- [x] For full-negative and full-positive cells, preserve the selected side as
       normal cell-volume quadrature for the active-domain measure.
 - [x] For cut cells, generate side-specific volume quadrature rules for both
       negative and positive level-set regions.
@@ -194,6 +194,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add Forms tests covering JIT-enabled cut-volume wrapper fallback.
 - [x] Add system-level Forms tests proving cut-volume residual and tangent
       insertion through `FESystem::assemble(...)`.
+- [x] Add Forms tests proving full-side cut-volume rules reuse normal
+      cell-volume quadrature.
 - [x] Add Navier-Stokes installation tests proving active-domain cases install
       cut-volume kernels.
 - [x] Add Navier-Stokes installation tests proving active-domain cases do not
