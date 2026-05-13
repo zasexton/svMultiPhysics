@@ -191,32 +191,32 @@ Goal: support generic reporting such as "volume below threshold",
 
 Checklist:
 
-- [ ] Extend derived result / quantity infrastructure with generic reduction
+- [x] Extend derived result / quantity infrastructure with generic reduction
       types:
-  - [ ] `ThresholdMeasure`
-  - [ ] `ThresholdIntegral`
-  - [ ] `Histogram`
-  - [ ] `Percentile`
-  - [ ] `MinMaxPercentileSummary`
-- [ ] Support reductions over:
-  - [ ] whole domain
-  - [ ] named region
-  - [ ] boundary
-  - [ ] cell set
-- [ ] Allow reduction inputs from:
-  - [ ] FE fields
-  - [ ] derived fields
-  - [ ] auxiliary fields
-  - [ ] expression/form-evaluated quantities
-- [ ] Define deterministic binning and tie handling for histograms/percentiles.
-- [ ] Support volume-weighted and unweighted modes.
-- [ ] Add unit tests for:
-  - [ ] thresholded area/volume
-  - [ ] weighted percentile
-  - [ ] histogram bin counts
-  - [ ] empty-region behavior
-  - [ ] parallel/reduction consistency if MPI tests exist
-  - [ ] compatibility with existing derived result output
+  - [x] `ThresholdMeasure`
+  - [x] `ThresholdIntegral`
+  - [x] `Histogram`
+  - [x] `Percentile`
+  - [x] `MinMaxPercentileSummary`
+- [x] Support reductions over:
+  - [x] whole domain
+  - [x] named region
+  - [x] boundary
+  - [x] cell set
+- [x] Allow reduction inputs from:
+  - [x] FE fields
+  - [x] derived fields
+  - [x] auxiliary fields
+  - [x] expression/form-evaluated quantities
+- [x] Define deterministic binning and tie handling for histograms/percentiles.
+- [x] Support volume-weighted and unweighted modes.
+- [x] Add unit tests for:
+  - [x] thresholded area/volume
+  - [x] weighted percentile
+  - [x] histogram bin counts
+  - [x] empty-region behavior
+  - [x] parallel/reduction consistency if MPI tests exist
+  - [x] compatibility with existing derived result output
 
 Implementation notes:
 
