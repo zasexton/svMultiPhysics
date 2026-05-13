@@ -102,7 +102,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Apply the active-domain measure to all VMS residual and stabilization
       terms.
 - [x] Keep pressure constraints/gauges compatible with the active wet region.
-- [ ] Keep zero-surface-tension, zero-external-pressure cases from adding a
+- [x] Keep zero-surface-tension, zero-external-pressure cases from adding a
       false interface traction.
 - [x] Keep D18 kinematic enforcement disabled for the first corrected path.
 - [x] Add diagnostics showing which active-domain side and method were used.
@@ -250,7 +250,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Exact cut-volume integration is the required acceptance path.
 - [ ] Smoothed material weighting is a fallback diagnostic, not final benchmark
       qualification.
-- [ ] Open-atmosphere D18 should not add artificial interface traction when
+- [x] Open-atmosphere D18 should not add artificial interface traction when
       external pressure and surface tension are zero.
 - [ ] D18 kinematic enforcement remains off until wet-side Navier-Stokes
       assembly, initialization, and validation have been corrected.
