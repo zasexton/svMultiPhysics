@@ -543,6 +543,7 @@ public:
         const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
     void setUserData(const void* user_data) noexcept override;
     void setJITConstants(std::span<const Real> constants) noexcept override;
+    void setCutIntegrationContext(const CutIntegrationContext* context) noexcept override;
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept override;
     void setMaterialStateProvider(IMaterialStateProvider* provider) noexcept override;

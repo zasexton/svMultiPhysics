@@ -79,5 +79,7 @@ remains on the wet side and stays at the expected initial hydrostatic reference.
   Test05 D18 profile data file was found in the repository.
 - D38 should remain deferred until the D18 profile comparison and strict
   tolerance solver path are completed.
-- Metadata-scaled cut-adjacent facet stabilization remains disabled until
-  per-face metadata-scale constants are implemented.
+- This full-run evidence used `Use_cut_metadata_scale=false`. A later one-step
+  smoke check enabled metadata scaling after per-face constants were
+  implemented; a full rerun with that option remains pending for final
+  benchmark acceptance.

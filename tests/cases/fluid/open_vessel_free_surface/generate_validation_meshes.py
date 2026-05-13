@@ -399,6 +399,7 @@ def write_solver_xml(
     include_top_wall_bc: bool = False,
     include_obstacle_bc: bool = False,
     active_domain: str | None = None,
+    use_cut_metadata_scale: bool = False,
 ) -> None:
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
@@ -425,6 +426,7 @@ def write_solver_xml(
         active_domain_block = f"""
     <Active_domain>{active_domain}</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>"""
+    cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
 
     if fitted:
         equations = f"""
@@ -605,7 +607,7 @@ def write_solver_xml(
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{UNFITTED_SURFACE_TENSION}</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
+    <Use_cut_metadata_scale>{cut_metadata_scale_text}</Use_cut_metadata_scale>
     <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
@@ -685,6 +687,7 @@ def write_case(
     obstacles: list[Box] | None = None,
     include_top_wall_bc: bool = False,
     active_domain: str | None = None,
+    use_cut_metadata_scale: bool = False,
     gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
     record_gauge_metadata: bool = False,
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
@@ -728,6 +731,7 @@ def write_case(
         include_top_wall_bc=include_top_wall_bc,
         include_obstacle_bc=bool(obstacles),
         active_domain=active_domain,
+        use_cut_metadata_scale=use_cut_metadata_scale,
     )
 
     print(
@@ -861,6 +865,7 @@ def generate_spheric_test05() -> None:
             time_step=0.0005,
             time_steps=80,
             active_domain="LevelSetNegative",
+            use_cut_metadata_scale=True,
         )
 
 

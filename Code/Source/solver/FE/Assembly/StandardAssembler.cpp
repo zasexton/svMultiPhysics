@@ -139,6 +139,68 @@ public:
            std::abs(rule.measure - rule.parent_measure) <= measure_tol;
 }
 
+using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
+
+[[nodiscard]] CutStabilizationCellScales buildCutStabilizationCellScales(
+    const CutIntegrationContext* cut_context)
+{
+    CutStabilizationCellScales scales;
+    if (cut_context == nullptr) {
+        return scales;
+    }
+
+    constexpr Real fraction_floor = Real{1.0e-12};
+    constexpr Real full_fraction_tol = Real{1.0e-12};
+    for (const auto& metadata : cut_context->metadata()) {
+        const MeshIndex parent =
+            metadata.parent_entity >= 0 ? metadata.parent_entity : metadata.cell;
+        if (parent < 0 ||
+            !std::isfinite(metadata.volume_fraction) ||
+            metadata.volume_fraction <= fraction_floor ||
+            metadata.volume_fraction >= Real{1.0} - full_fraction_tol) {
+            continue;
+        }
+
+        const auto cell = static_cast<GlobalIndex>(parent);
+        const Real scale = Real{1.0} / std::max(metadata.volume_fraction, fraction_floor);
+        auto [it, inserted] = scales.emplace(cell, scale);
+        if (!inserted) {
+            it->second = std::max(it->second, scale);
+        }
+    }
+    return scales;
+}
+
+[[nodiscard]] Real cutStabilizationScaleForInteriorFace(
+    const CutStabilizationCellScales& scales,
+    GlobalIndex cell_minus,
+    GlobalIndex cell_plus)
+{
+    Real scale = Real{0.0};
+    if (const auto it = scales.find(cell_minus); it != scales.end()) {
+        scale = std::max(scale, it->second);
+    }
+    if (const auto it = scales.find(cell_plus); it != scales.end()) {
+        scale = std::max(scale, it->second);
+    }
+    return scale;
+}
+
+void bindCutStabilizationScaleConstants(AssemblyContext& context,
+                                        std::span<const Real> base_constants,
+                                        Real scale,
+                                        std::vector<Real>& scratch)
+{
+    const forms::CutCellParameterSlots slots;
+    const auto required_size = static_cast<std::size_t>(forms::cutCellParameterCount(slots));
+    scratch.assign(base_constants.begin(), base_constants.end());
+    if (scratch.size() < required_size) {
+        scratch.resize(required_size, Real{0.0});
+    }
+    scratch[slots.stabilization_scale] = scale;
+    context.setJITConstants(scratch);
+}
+
 [[nodiscard]] inline double assemblyTimeNow() noexcept {
     if (!assemblyTimingEnabled()) return 0.0;
     return std::chrono::duration<double>(
@@ -1563,6 +1625,11 @@ void StandardAssembler::setUserData(const void* user_data) noexcept
 void StandardAssembler::setJITConstants(std::span<const Real> constants) noexcept
 {
     jit_constants_ = constants;
+}
+
+void StandardAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
+{
+    cut_integration_context_ = context;
 }
 
 void StandardAssembler::setCoupledValues(std::span<const Real> integrals,
@@ -3162,6 +3229,9 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     std::vector<std::vector<Real>> plus_prev_solution_coeffs;
     std::vector<GlobalIndex> cell_nodes_minus;
     std::vector<GlobalIndex> cell_nodes_plus;
+    std::vector<Real> cut_face_jit_constants;
+    const auto cut_stabilization_cell_scales =
+        buildCutStabilizationCellScales(cut_integration_context_);
 
     withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
         mesh.forEachInteriorFace(
@@ -3250,6 +3320,14 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
             context_plus.clearAllPreviousSolutionData();
+
+            if (cut_integration_context_ != nullptr) {
+                const auto cut_scale = cutStabilizationScaleForInteriorFace(
+                    cut_stabilization_cell_scales, cell_minus, cell_plus);
+                bindCutStabilizationScaleConstants(
+                    context_, jit_constants_, cut_scale, cut_face_jit_constants);
+                context_plus.setJITConstants(cut_face_jit_constants);
+            }
 
 		            if (need_solution) {
 		                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,

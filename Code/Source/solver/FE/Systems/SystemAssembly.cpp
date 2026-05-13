@@ -1106,6 +1106,7 @@ assembly::AssemblyResult assembleOperator(
     } else {
         assembler.setJITConstants({});
     }
+    assembler.setCutIntegrationContext(system.cutIntegrationContext());
 
     assembler.setCoupledValues({}, {});
 

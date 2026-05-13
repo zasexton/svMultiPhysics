@@ -802,6 +802,11 @@ void ParallelAssembler::setJITConstants(std::span<const Real> constants) noexcep
     local_assembler_.setJITConstants(constants);
 }
 
+void ParallelAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
+{
+    local_assembler_.setCutIntegrationContext(context);
+}
+
 void ParallelAssembler::setCoupledValues(std::span<const Real> integrals,
                                          std::span<const Real> aux_state) noexcept
 {

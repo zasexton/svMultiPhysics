@@ -902,6 +902,14 @@ public:
     virtual void setJITConstants(std::span<const Real> /*constants*/) noexcept {}
 
     /**
+     * @brief Provide cut-integration metadata for face-local cut terminals.
+     *
+     * Assemblers that support cut-aware interior-face terms use this to bind
+     * per-face constants such as cut-cell stabilization scales.
+     */
+    virtual void setCutIntegrationContext(const CutIntegrationContext* /*context*/) noexcept {}
+
+    /**
      * @brief Bind coupled boundary-condition scalar arrays (integrals + auxiliary state).
      *
      * Default implementation is a no-op.

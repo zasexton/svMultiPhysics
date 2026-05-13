@@ -1993,7 +1993,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsCutMetadataScale)
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesCutMetadataScale)
 {
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
@@ -2022,14 +2022,10 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsCutMetadataScale
     });
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
-    try {
-        module.registerOn(system);
-        FAIL() << "expected std::invalid_argument";
-    } catch (const std::invalid_argument& ex) {
-        EXPECT_NE(std::string(ex.what()).find("cut metadata scaling is not supported"),
-                  std::string::npos)
-            << ex.what();
-    }
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInterfaceIntegral)

@@ -171,9 +171,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       nonlinear stagnation.
 - [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
-- [ ] Implement per-face metadata-scale constants for cut-adjacent facet
+- [x] Implement per-face metadata-scale constants for cut-adjacent facet
       stabilization before enabling `Use_cut_metadata_scale=true` in D18/D38
       fixtures.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_cut_metadata_scale_20260513.md`.
 - [ ] Re-run D18 strict tolerance after the solver path is corrected.
 - [x] Record nonlinear iteration counts, linear iteration counts, and residual
       norms for each D18/D38 qualification attempt.
@@ -250,6 +252,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       dry region.
 - [x] Confirm a D18 `Use_cut_metadata_scale=true` smoke case stops with setup
       validation instead of an assembly crash.
+- [x] Confirm a D18 `Use_cut_metadata_scale=true` one-step smoke case completes
+      after per-face metadata-scale constants are implemented.
 - [x] Run the same one-step D18 test with 2 MPI ranks.
 - [x] Run the same one-step D18 test with 4 MPI ranks.
 - [x] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge

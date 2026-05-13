@@ -614,10 +614,6 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: enabled cut-cell stabilization requires a nonzero penalty");
             }
-            if (cut.use_cut_metadata_scale) {
-                throw std::invalid_argument(
-                    "IncompressibleNavierStokesVMSModule: cut metadata scaling is not supported for cut-adjacent facet stabilization; set Use_cut_metadata_scale=false");
-            }
         }
     } else {
         if (bc.boundary_marker < 0) {

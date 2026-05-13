@@ -309,6 +309,11 @@ void DeviceAssembler::setJITConstants(std::span<const Real> constants) noexcept
     impl_->cpu_assembler->setJITConstants(constants);
 }
 
+void DeviceAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
+{
+    impl_->cpu_assembler->setCutIntegrationContext(context);
+}
+
 void DeviceAssembler::setCoupledValues(std::span<const Real> integrals,
                                       std::span<const Real> aux_state) noexcept
 {
