@@ -13,7 +13,7 @@ absolute linear residual floor as the remaining D18 one-step blocker.
 - Automatic BlockSchur routes keep the previous conservative default caps.
 - The environment override `SVMP_FSILS_BLOCKSCHUR_OUTER_CAP` still has
   precedence when it is set for a diagnostic run.
-- Generated and checked-in SPHERIC Test05 D18/D38 inputs now use:
+- The initial generated and checked-in SPHERIC Test05 D18/D38 profile used:
   - Fluid Newton cap: `12`
   - Fluid nonlinear tolerance: `5.0e-6`
   - Coupled outer BlockSchur `Max_iterations`: `800`
@@ -65,5 +65,7 @@ Key log entries:
 
 ## Next Step
 
-Run the checked-in D18 input to `result_312` and compare it against the
-digitized `d18_1.dat` profile.
+The strict profile controls passed the MPI-4 one-step probe but later exposed a
+step-4 profile-run solver-depth blocker. Current profile-run controls and
+evidence are recorded in
+`Documentation/qualification_logs/dam_break_d18_profile_solver_controls_20260513.md`.

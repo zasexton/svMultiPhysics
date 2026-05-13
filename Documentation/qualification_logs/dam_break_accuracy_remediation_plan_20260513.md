@@ -296,11 +296,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       small-RHS true-residual target below the useful MPI D18 solver floor.
       Evidence:
       `Documentation/qualification_logs/dam_break_d18_mpi_solver_scaling_20260513.md`.
-      The checked-in D18/D38 Test05 inputs now use the documented MPI solver
-      profile: coupled-outer BlockSchur budget `800`, linear absolute
-      tolerance `1.0e-7`, fluid Newton cap `12`, and fluid nonlinear tolerance
-      `5.0e-6`. Evidence:
-      `Documentation/qualification_logs/dam_break_d18_mpi_solver_controls_20260513.md`.
+      The strict MPI solver controls passed a one-step probe but stalled during
+      the multi-step profile run. The checked-in D18/D38 Test05 inputs now use
+      the documented profile-run controls: coupled-outer BlockSchur budget
+      `100`, linear relative and fluid absolute tolerances `1.0e-4`, fluid
+      Newton cap `8`, and fluid nonlinear tolerance `1.0e-4`. Evidence:
+      `Documentation/qualification_logs/dam_break_d18_profile_solver_controls_20260513.md`.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.

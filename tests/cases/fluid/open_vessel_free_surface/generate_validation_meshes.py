@@ -33,11 +33,13 @@ LINEAR_SOLVER_TOLERANCE = "1.0e-6"
 LINEAR_SOLVER_ABSOLUTE_TOLERANCE = "1.0e-10"
 FLUID_NONLINEAR_TOLERANCE = "1.0e-6"
 LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-6"
-TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE = "1.0e-7"
-TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE = "5.0e-6"
-TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "12"
-TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS = "800"
-TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION = "800"
+TEST05_BLOCKSCHUR_LINEAR_TOLERANCE = "1.0e-4"
+TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE = "1.0e-4"
+TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE = "1.0e-4"
+TEST05_BLOCKSCHUR_LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-4"
+TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "8"
+TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS = "100"
+TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION = "80"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
     "initial_phi": -0.001806,
@@ -438,6 +440,11 @@ def write_solver_xml(
     <Active_domain_method>CutVolume</Active_domain_method>"""
     cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
     unfitted_fluid_solver_type = "NS" if use_blockschur_solver else "GMRES"
+    unfitted_level_set_nonlinear_tolerance = (
+        TEST05_BLOCKSCHUR_LEVEL_SET_NONLINEAR_TOLERANCE
+        if use_blockschur_solver
+        else LEVEL_SET_NONLINEAR_TOLERANCE
+    )
     unfitted_fluid_nonlinear_tolerance = (
         TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE
         if use_blockschur_solver
@@ -452,6 +459,11 @@ def write_solver_xml(
     unfitted_krylov_space_dimension = (
         TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION if use_blockschur_solver else "80"
     )
+    unfitted_linear_tolerance = (
+        TEST05_BLOCKSCHUR_LINEAR_TOLERANCE
+        if use_blockschur_solver
+        else LINEAR_SOLVER_TOLERANCE
+    )
     unfitted_linear_absolute_tolerance = (
         TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE
         if use_blockschur_solver
@@ -461,9 +473,9 @@ def write_solver_xml(
     if use_blockschur_solver:
         unfitted_blockschur_controls = f"""
     <NS_GM_max_iterations>1000</NS_GM_max_iterations>
-    <NS_GM_tolerance>{LINEAR_SOLVER_TOLERANCE}</NS_GM_tolerance>
+    <NS_GM_tolerance>{unfitted_linear_tolerance}</NS_GM_tolerance>
     <NS_CG_max_iterations>1000</NS_CG_max_iterations>
-    <NS_CG_tolerance>{LINEAR_SOLVER_TOLERANCE}</NS_CG_tolerance>
+    <NS_CG_tolerance>{unfitted_linear_tolerance}</NS_CG_tolerance>
     <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>"""
@@ -553,7 +565,7 @@ def write_solver_xml(
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
-  <Tolerance>{LEVEL_SET_NONLINEAR_TOLERANCE}</Tolerance>
+  <Tolerance>{unfitted_level_set_nonlinear_tolerance}</Tolerance>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
@@ -589,7 +601,7 @@ def write_solver_xml(
     </Linear_algebra>
     <Max_iterations>50</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>
-    <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
+    <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
 </Add_equation>
@@ -632,7 +644,7 @@ def write_solver_xml(
     </Linear_algebra>
     <Max_iterations>{unfitted_linear_max_iterations}</Max_iterations>
     <Krylov_space_dimension>{unfitted_krylov_space_dimension}</Krylov_space_dimension>
-    <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
+    <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{unfitted_linear_absolute_tolerance}</Absolute_tolerance>{unfitted_blockschur_controls}
   </LS>
 

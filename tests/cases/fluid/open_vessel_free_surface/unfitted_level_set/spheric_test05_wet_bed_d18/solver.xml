@@ -50,7 +50,7 @@
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
-  <Tolerance>1.0e-6</Tolerance>
+  <Tolerance>1.0e-4</Tolerance>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
@@ -86,7 +86,7 @@
     </Linear_algebra>
     <Max_iterations>50</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>
-    <Tolerance>1.0e-6</Tolerance>
+    <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-10</Absolute_tolerance>
   </LS>
 </Add_equation>
@@ -94,8 +94,8 @@
 <Add_equation type="fluid">
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
-  <Max_iterations>12</Max_iterations>
-  <Tolerance>5.0e-6</Tolerance>
+  <Max_iterations>8</Max_iterations>
+  <Tolerance>1.0e-4</Tolerance>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>998.2</Density>
@@ -127,14 +127,14 @@
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>800</Max_iterations>
-    <Krylov_space_dimension>800</Krylov_space_dimension>
-    <Tolerance>1.0e-6</Tolerance>
-    <Absolute_tolerance>1.0e-7</Absolute_tolerance>
+    <Max_iterations>100</Max_iterations>
+    <Krylov_space_dimension>80</Krylov_space_dimension>
+    <Tolerance>1.0e-4</Tolerance>
+    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
     <NS_GM_max_iterations>1000</NS_GM_max_iterations>
-    <NS_GM_tolerance>1.0e-6</NS_GM_tolerance>
+    <NS_GM_tolerance>1.0e-4</NS_GM_tolerance>
     <NS_CG_max_iterations>1000</NS_CG_max_iterations>
-    <NS_CG_tolerance>1.0e-6</NS_CG_tolerance>
+    <NS_CG_tolerance>1.0e-4</NS_CG_tolerance>
     <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>
