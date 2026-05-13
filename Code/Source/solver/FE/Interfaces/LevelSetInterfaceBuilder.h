@@ -35,6 +35,7 @@ struct LevelSetCellCutInput {
 
 struct LevelSetCellCutResult {
     std::vector<CutInterfaceFragment> fragments{};
+    std::vector<CutInterfaceVolumeRegion> volume_regions{};
     CutInterfaceDegeneracy degeneracy{CutInterfaceDegeneracy::None};
     bool supported{true};
     std::string diagnostic{};

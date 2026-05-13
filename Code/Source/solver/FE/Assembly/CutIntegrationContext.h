@@ -252,17 +252,33 @@ public:
         if (marker < 0) {
             return;
         }
+        auto volume_rules = domain.volumeQuadratureRules();
+        for (auto& rule : volume_rules) {
+            CutCellAssemblyMetadata metadata;
+            metadata.cell = rule.provenance.parent_entity;
+            metadata.parent_entity = rule.provenance.parent_entity;
+            metadata.volume_fraction = rule.volume_fraction;
+            metadata.side = rule.side;
+            metadata.embedded_normal =
+                rule.points.empty() ? std::array<Real, 3>{{0.0, 0.0, 0.0}}
+                                    : rule.points.front().normal;
+            metadata.provenance_id = rule.provenance.embedded_geometry_id;
+            metadata.cut_topology_id = rule.provenance.cut_topology_id;
+            metadata.revision_key = rule.provenance.cut_topology_revision;
+            metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+            metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
+            addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+        }
         auto rules = domain.interfaceQuadratureRules();
-        if (rules.empty()) {
-            return;
-        }
-        auto& indices = generated_interface_rule_indices_by_marker_[marker];
-        if (indices.empty()) {
-            generated_interface_markers_.push_back(marker);
-        }
-        for (auto& rule : rules) {
-            indices.push_back(interface_rules_.size());
-            interface_rules_.push_back(std::move(rule));
+        if (!rules.empty()) {
+            auto& indices = generated_interface_rule_indices_by_marker_[marker];
+            if (indices.empty()) {
+                generated_interface_markers_.push_back(marker);
+            }
+            for (auto& rule : rules) {
+                indices.push_back(interface_rules_.size());
+                interface_rules_.push_back(std::move(rule));
+            }
         }
     }
 

@@ -517,6 +517,81 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
                          parent_volume);
 }
 
+[[nodiscard]] Real parentMeasure2D(
+    const std::vector<std::array<Real, 3>>& points,
+    std::size_t count)
+{
+    std::vector<SignedPoint> polygon;
+    polygon.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        polygon.push_back(SignedPoint{points[i], Real{0.0}});
+    }
+    return polygonArea2D(polygon);
+}
+
+[[nodiscard]] Real parentMeasure3D(
+    const std::vector<std::array<Real, 3>>& points)
+{
+    return tetraVolume(points[0], points[1], points[2], points[3]);
+}
+
+[[nodiscard]] std::array<Real, 3> cellCentroid(
+    const std::vector<std::array<Real, 3>>& points,
+    std::size_t count) noexcept
+{
+    std::array<Real, 3> c{{0.0, 0.0, 0.0}};
+    if (count == 0u) {
+        return c;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        c = add(c, points[i]);
+    }
+    return scale(c, Real{1.0} / static_cast<Real>(count));
+}
+
+[[nodiscard]] CutInterfaceVolumeRegion makeVolumeRegion(
+    const CutInterfaceDomainRequest& request,
+    const LevelSetCellCutInput& input,
+    geometry::CutIntegrationSide side,
+    Real parent_measure,
+    Real volume_fraction,
+    const std::array<Real, 3>& centroid,
+    const std::array<Real, 3>& interface_normal,
+    const std::vector<Real>& signed_values,
+    LocalIndex local_region_index,
+    const std::string& suffix)
+{
+    CutInterfaceVolumeRegion region;
+    region.interface_marker = request.interface_marker;
+    region.parent_cell = input.parent_cell;
+    region.local_region_index = local_region_index;
+    region.side = side;
+    region.centroid = centroid;
+    region.normal = side == geometry::CutIntegrationSide::Negative
+                        ? interface_normal
+                        : scale(interface_normal, Real{-1.0});
+    region.parent_measure = parent_measure;
+    region.volume_fraction = clampFraction(volume_fraction);
+    region.measure = parent_measure * region.volume_fraction;
+    region.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
+    region.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
+    region.topology_id = "cell-" + std::to_string(input.parent_cell) + "-" + suffix;
+    region.stable_id = cutVolumeStableId(request.interface_marker,
+                                         input.parent_cell,
+                                         local_region_index,
+                                         side,
+                                         request.source.value_revision);
+    return region;
+}
+
+void appendSideVolumeRegion(LevelSetCellCutResult& result,
+                            CutInterfaceVolumeRegion region)
+{
+    if (region.measure > Real{0.0}) {
+        result.volume_regions.push_back(std::move(region));
+    }
+}
+
 } // namespace
 
 bool supportsLinearLevelSetCellCut2D(ElementType element_type) noexcept
@@ -654,23 +729,46 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         }
     }
 
+    const Real parent_measure = parentMeasure2D(input.node_coordinates, count);
+    const auto parent_centroid = cellCentroid(input.node_coordinates, count);
+    const auto gradient_normal =
+        estimateGradient2D(input.node_coordinates, signed_values, count);
+
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
         result.diagnostic = "all corner level-set values are on the requested isovalue";
         return result;
     }
-    if (positive_count == 0u && zero_count == 0u) {
+    if (positive_count == 0u) {
+        appendSideVolumeRegion(
+            result,
+            makeVolumeRegion(request,
+                             input,
+                             geometry::CutIntegrationSide::Negative,
+                             parent_measure,
+                             Real{1.0},
+                             parent_centroid,
+                             gradient_normal,
+                             signed_values,
+                             0u,
+                             "full-negative-volume"));
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
         return result;
     }
-    if (negative_count == 0u && zero_count == 0u) {
+    if (negative_count == 0u) {
+        appendSideVolumeRegion(
+            result,
+            makeVolumeRegion(request,
+                             input,
+                             geometry::CutIntegrationSide::Positive,
+                             parent_measure,
+                             Real{1.0},
+                             parent_centroid,
+                             gradient_normal,
+                             signed_values,
+                             0u,
+                             "full-positive-volume"));
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
-        return result;
-    }
-    if (positive_count == 0u || negative_count == 0u) {
-        result.degeneracy = zero_count > 1u ? CutInterfaceDegeneracy::EdgeTouch
-                                            : CutInterfaceDegeneracy::VertexTouch;
-        result.diagnostic = "level-set isovalue touches a cell vertex or edge without crossing the cell";
         return result;
     }
 
@@ -738,8 +836,6 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         return result;
     }
 
-    const auto gradient_normal =
-        estimateGradient2D(input.node_coordinates, signed_values, count);
     const auto tangent = sub(b.point, a.point);
     std::array<Real, 3> normal{{tangent[1], -tangent[0], 0.0}};
     const Real normal_length = norm2(normal);
@@ -805,6 +901,30 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                     .weight = measure}};
 
     result.degeneracy = fragment.degeneracy;
+    appendSideVolumeRegion(
+        result,
+        makeVolumeRegion(request,
+                         input,
+                         geometry::CutIntegrationSide::Negative,
+                         parent_measure,
+                         fragment.negative_volume_fraction,
+                         parent_centroid,
+                         normal,
+                         signed_values,
+                         0u,
+                         "cut-negative-volume"));
+    appendSideVolumeRegion(
+        result,
+        makeVolumeRegion(request,
+                         input,
+                         geometry::CutIntegrationSide::Positive,
+                         parent_measure,
+                         fragment.positive_volume_fraction,
+                         parent_centroid,
+                         normal,
+                         signed_values,
+                         1u,
+                         "cut-positive-volume"));
     result.fragments.push_back(std::move(fragment));
     return result;
 }
@@ -845,23 +965,46 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         }
     }
 
+    const Real parent_measure = parentMeasure3D(input.node_coordinates);
+    const auto parent_centroid = cellCentroid(input.node_coordinates, count);
+    const auto gradient_normal =
+        estimateGradient3D(input.node_coordinates, signed_values, count);
+
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
         result.diagnostic = "all tetrahedron corner level-set values are on the requested isovalue";
         return result;
     }
-    if (positive_count == 0u && zero_count == 0u) {
+    if (positive_count == 0u) {
+        appendSideVolumeRegion(
+            result,
+            makeVolumeRegion(request,
+                             input,
+                             geometry::CutIntegrationSide::Negative,
+                             parent_measure,
+                             Real{1.0},
+                             parent_centroid,
+                             gradient_normal,
+                             signed_values,
+                             0u,
+                             "full-negative-volume"));
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
         return result;
     }
-    if (negative_count == 0u && zero_count == 0u) {
+    if (negative_count == 0u) {
+        appendSideVolumeRegion(
+            result,
+            makeVolumeRegion(request,
+                             input,
+                             geometry::CutIntegrationSide::Positive,
+                             parent_measure,
+                             Real{1.0},
+                             parent_centroid,
+                             gradient_normal,
+                             signed_values,
+                             0u,
+                             "full-positive-volume"));
         result.degeneracy = CutInterfaceDegeneracy::NoCut;
-        return result;
-    }
-    if (positive_count == 0u || negative_count == 0u) {
-        result.degeneracy = zero_count > 1u ? CutInterfaceDegeneracy::EdgeTouch
-                                            : CutInterfaceDegeneracy::VertexTouch;
-        result.diagnostic = "level-set isovalue touches a tetrahedron vertex or edge without crossing the cell";
         return result;
     }
 
@@ -930,8 +1073,6 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         return result;
     }
 
-    const auto gradient_normal =
-        estimateGradient3D(input.node_coordinates, signed_values, count);
     orderPolygonPoints(cut_points, gradient_normal);
     const Real measure = polygonArea(cut_points, gradient_normal);
     if (measure <= request.tolerance) {
@@ -997,6 +1138,30 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                                     .weight = measure}};
 
     result.degeneracy = fragment.degeneracy;
+    appendSideVolumeRegion(
+        result,
+        makeVolumeRegion(request,
+                         input,
+                         geometry::CutIntegrationSide::Negative,
+                         parent_measure,
+                         fragment.negative_volume_fraction,
+                         parent_centroid,
+                         normal,
+                         signed_values,
+                         0u,
+                         "cut-negative-volume"));
+    appendSideVolumeRegion(
+        result,
+        makeVolumeRegion(request,
+                         input,
+                         geometry::CutIntegrationSide::Positive,
+                         parent_measure,
+                         fragment.positive_volume_fraction,
+                         parent_centroid,
+                         normal,
+                         signed_values,
+                         1u,
+                         "cut-positive-volume"));
     result.fragments.push_back(std::move(fragment));
     return result;
 }
@@ -1005,6 +1170,9 @@ void appendLinearLevelSetCellCut2D(LevelSetInterfaceDomain& domain,
                                    const LevelSetCellCutInput& input)
 {
     auto result = cutLinearLevelSetCell2D(domain.request(), input);
+    for (auto& region : result.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
     for (auto& fragment : result.fragments) {
         domain.addFragment(std::move(fragment));
     }
@@ -1014,6 +1182,9 @@ void appendLinearLevelSetCellCut3D(LevelSetInterfaceDomain& domain,
                                    const LevelSetCellCutInput& input)
 {
     auto result = cutLinearLevelSetCell3D(domain.request(), input);
+    for (auto& region : result.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
     for (auto& fragment : result.fragments) {
         domain.addFragment(std::move(fragment));
     }

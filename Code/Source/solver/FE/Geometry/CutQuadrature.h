@@ -62,6 +62,7 @@ struct CutQuadratureProvenance {
     std::string embedded_geometry_id{};
     std::string cut_topology_id{};
     MeshIndex parent_entity{static_cast<MeshIndex>(-1)};
+    int marker{-1};
     std::uint64_t cut_topology_revision{0};
     std::uint64_t predicate_policy_key{0};
     CutQuadratureConstructionKind construction{CutQuadratureConstructionKind::AxisAlignedBoxClip};

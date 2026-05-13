@@ -238,6 +238,60 @@ struct CutInterfaceQuadraturePoint {
     Real weight{0.0};
 };
 
+struct CutInterfaceVolumeRegion {
+    int interface_marker{-1};
+    MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
+    LocalIndex local_region_index{INVALID_LOCAL_INDEX};
+    std::uint64_t stable_id{0};
+    geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
+    std::array<Real, 3> centroid{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> normal{{1.0, 0.0, 0.0}};
+    Real parent_measure{0.0};
+    Real measure{0.0};
+    Real volume_fraction{0.0};
+    Real min_level_set_value{0.0};
+    Real max_level_set_value{0.0};
+    std::string topology_id{};
+
+    [[nodiscard]] bool active() const noexcept {
+        return interface_marker >= 0 &&
+               parent_cell >= static_cast<MeshIndex>(0) &&
+               side != geometry::CutIntegrationSide::Interface &&
+               measure > Real{0.0};
+    }
+
+    [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRule(
+        const CutInterfaceDomainRequest& request) const {
+        if (side == geometry::CutIntegrationSide::Interface) {
+            throw std::invalid_argument("level-set volume region requires Negative or Positive side");
+        }
+
+        geometry::CutQuadratureRule rule;
+        rule.kind = geometry::CutQuadratureKind::Volume;
+        rule.side = side;
+        rule.measure = measure;
+        rule.parent_measure = parent_measure;
+        rule.volume_fraction = volume_fraction;
+        rule.exact_for_constants = true;
+        rule.exact_polynomial_order = 0;
+        rule.policy.kind = geometry::CutQuadratureConstructionKind::TopologySubdivision;
+        rule.policy.polynomial_order = 0;
+        rule.policy.name = "constant-level-set-volume";
+        rule.provenance.embedded_geometry_id = request.source.identifier();
+        rule.provenance.cut_topology_id = topology_id;
+        rule.provenance.parent_entity = parent_cell;
+        rule.provenance.marker = interface_marker;
+        rule.provenance.cut_topology_revision = stable_id;
+        rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+        rule.provenance.construction = rule.policy.kind;
+        rule.provenance.frame = request.frame;
+        rule.provenance_id = request.source.identifier();
+        rule.frame = request.frame;
+        rule.points.push_back(geometry::CutQuadraturePoint{centroid, normal, measure});
+        return rule;
+    }
+};
+
 struct CutInterfaceFragment {
     int interface_marker{-1};
     MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
@@ -300,6 +354,7 @@ struct CutInterfaceFragment {
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;
+        rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
         rule.provenance.construction = rule.policy.kind;
@@ -323,9 +378,13 @@ struct CutInterfaceDomainSummary {
     int interface_marker{-1};
     std::size_t fragment_count{0};
     std::size_t active_fragment_count{0};
+    std::size_t volume_region_count{0};
+    std::size_t active_volume_region_count{0};
     std::size_t quadrature_point_count{0};
     std::size_t degenerate_fragment_count{0};
     Real measure{0.0};
+    Real negative_volume_measure{0.0};
+    Real positive_volume_measure{0.0};
 };
 
 [[nodiscard]] inline std::uint64_t cutInterfaceStableId(
@@ -341,6 +400,25 @@ struct CutInterfaceDomainSummary {
     mix(static_cast<std::uint64_t>(interface_marker));
     mix(static_cast<std::uint64_t>(parent_cell));
     mix(static_cast<std::uint64_t>(local_fragment_index));
+    mix(source_revision);
+    return h;
+}
+
+[[nodiscard]] inline std::uint64_t cutVolumeStableId(
+    int interface_marker,
+    MeshIndex parent_cell,
+    LocalIndex local_region_index,
+    geometry::CutIntegrationSide side,
+    std::uint64_t source_revision) noexcept {
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](std::uint64_t value) noexcept {
+        h ^= value;
+        h *= 1099511628211ull;
+    };
+    mix(static_cast<std::uint64_t>(interface_marker));
+    mix(static_cast<std::uint64_t>(parent_cell));
+    mix(static_cast<std::uint64_t>(local_region_index));
+    mix(static_cast<std::uint64_t>(side));
     mix(source_revision);
     return h;
 }
@@ -370,6 +448,10 @@ public:
         return fragments_;
     }
 
+    [[nodiscard]] const std::vector<CutInterfaceVolumeRegion>& volumeRegions() const noexcept {
+        return volume_regions_;
+    }
+
     [[nodiscard]] std::vector<MeshIndex> cutCells() const {
         std::vector<MeshIndex> cells;
         for (const auto& fragment : fragments_) {
@@ -384,6 +466,7 @@ public:
 
     void clearFragments() {
         fragments_.clear();
+        volume_regions_.clear();
     }
 
     void addFragment(CutInterfaceFragment fragment) {
@@ -403,6 +486,24 @@ public:
         fragments_.push_back(std::move(fragment));
     }
 
+    void addVolumeRegion(CutInterfaceVolumeRegion region) {
+        if (region.interface_marker < 0) {
+            region.interface_marker = request_.interface_marker;
+        }
+        if (region.local_region_index == INVALID_LOCAL_INDEX) {
+            region.local_region_index = static_cast<LocalIndex>(volume_regions_.size());
+        }
+        if (region.stable_id == 0) {
+            region.stable_id =
+                cutVolumeStableId(region.interface_marker,
+                                  region.parent_cell,
+                                  region.local_region_index,
+                                  region.side,
+                                  request_.source.value_revision);
+        }
+        volume_regions_.push_back(std::move(region));
+    }
+
     [[nodiscard]] std::vector<geometry::CutQuadratureRule> interfaceQuadratureRules() const {
         std::vector<geometry::CutQuadratureRule> rules;
         rules.reserve(fragments_.size());
@@ -414,10 +515,22 @@ public:
         return rules;
     }
 
+    [[nodiscard]] std::vector<geometry::CutQuadratureRule> volumeQuadratureRules() const {
+        std::vector<geometry::CutQuadratureRule> rules;
+        rules.reserve(volume_regions_.size());
+        for (const auto& region : volume_regions_) {
+            if (region.active()) {
+                rules.push_back(region.toCutQuadratureRule(request_));
+            }
+        }
+        return rules;
+    }
+
     [[nodiscard]] CutInterfaceDomainSummary summary() const noexcept {
         CutInterfaceDomainSummary s;
         s.interface_marker = request_.interface_marker;
         s.fragment_count = fragments_.size();
+        s.volume_region_count = volume_regions_.size();
         for (const auto& fragment : fragments_) {
             if (fragment.degeneracy != CutInterfaceDegeneracy::None) {
                 ++s.degenerate_fragment_count;
@@ -429,12 +542,24 @@ public:
             s.quadrature_point_count += fragment.quadraturePointCount();
             s.measure += fragment.measure;
         }
+        for (const auto& region : volume_regions_) {
+            if (!region.active()) {
+                continue;
+            }
+            ++s.active_volume_region_count;
+            if (region.side == geometry::CutIntegrationSide::Negative) {
+                s.negative_volume_measure += region.measure;
+            } else if (region.side == geometry::CutIntegrationSide::Positive) {
+                s.positive_volume_measure += region.measure;
+            }
+        }
         return s;
     }
 
 private:
     CutInterfaceDomainRequest request_{};
     std::vector<CutInterfaceFragment> fragments_{};
+    std::vector<CutInterfaceVolumeRegion> volume_regions_{};
 };
 
 } // namespace interfaces

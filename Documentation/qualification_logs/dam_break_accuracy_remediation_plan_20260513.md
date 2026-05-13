@@ -54,13 +54,13 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Exact Cut-Volume Integration Checklist
 
-- [ ] Extend generated level-set interface processing to classify every owned
+- [x] Extend generated level-set interface processing to classify every owned
       cell as full-negative, full-positive, or cut.
 - [ ] For full-negative and full-positive cells, preserve the selected side as
       normal cell-volume quadrature for the active-domain measure.
-- [ ] For cut cells, generate side-specific volume quadrature rules for both
+- [x] For cut cells, generate side-specific volume quadrature rules for both
       negative and positive level-set regions.
-- [ ] Carry parent cell id, interface marker, integration side, and volume
+- [x] Carry parent cell id, interface marker, integration side, and volume
       fraction on each generated volume rule.
 - [x] Extend `CutIntegrationContext` so generated volume rules are indexed by
       interface marker and side.
@@ -76,7 +76,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
       kernels for the same residual terms.
 - [ ] Add interpreter and compiled/JIT support for the new integral domain.
-- [ ] Add tests proving constant-field cut-volume integrals match expected
+- [x] Add tests proving constant-field cut-volume integrals match expected
       negative and positive volume fractions.
 
 ## Navier-Stokes Assembly Checklist
@@ -179,11 +179,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add parser tests proving defaults preserve existing cases.
 - [x] Add configuration tests rejecting active-domain use on non-unfitted
       free-surface BCs.
-- [ ] Add cut-volume classification tests for full-negative cells.
-- [ ] Add cut-volume classification tests for full-positive cells.
-- [ ] Add cut-volume classification tests for partially cut cells.
-- [ ] Add constant-integral tests for negative-side volume rules.
-- [ ] Add constant-integral tests for positive-side volume rules.
+- [x] Add cut-volume classification tests for full-negative cells.
+- [x] Add cut-volume classification tests for full-positive cells.
+- [x] Add cut-volume classification tests for partially cut cells.
+- [x] Add constant-integral tests for negative-side volume rules.
+- [x] Add constant-integral tests for positive-side volume rules.
 - [ ] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
 - [ ] Add Forms tests for cut-volume tangent/Jacobian assembly.
 - [ ] Add Navier-Stokes installation tests proving active-domain cases install

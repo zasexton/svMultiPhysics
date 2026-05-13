@@ -1,10 +1,12 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 
 #include <gtest/gtest.h>
 
 #include <stdexcept>
 
 using namespace svmp::FE;
+using namespace svmp::FE::geometry;
 using namespace svmp::FE::interfaces;
 
 TEST(LevelSetInterfaceDomain, RequestCarriesFieldSourceAndMarker)
@@ -296,6 +298,131 @@ TEST(LevelSetInterfaceDomain, LinearFragmentQuadratureRulesCarryCentroidWeightsA
     EXPECT_DOUBLE_EQ(rules[1].points.front().point[1], 1.0 / 3.0);
     EXPECT_DOUBLE_EQ(rules[1].points.front().weight, 0.5);
     EXPECT_DOUBLE_EQ(rules[1].points.front().normal[2], 1.0);
+}
+
+TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
+{
+    CutInterfaceDomainRequest negative_request;
+    negative_request.source = LevelSetInterfaceSource::fromEvaluator("full-negative-source");
+    negative_request.interface_marker = 83;
+    negative_request.quadrature_policy_key = 29;
+
+    LevelSetInterfaceDomain negative_domain(negative_request);
+    const LevelSetCellCutInput negative_input{
+        .parent_cell = 11,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-1.0, -1.0, -1.0, -1.0}};
+    appendLinearLevelSetCellCut2D(negative_domain, negative_input);
+
+    auto summary = negative_domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 0u);
+    EXPECT_EQ(summary.active_volume_region_count, 1u);
+    EXPECT_NEAR(summary.negative_volume_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(summary.positive_volume_measure, 0.0, 1.0e-14);
+
+    auto rules = negative_domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_EQ(rules.front().kind, CutQuadratureKind::Volume);
+    EXPECT_EQ(rules.front().side, CutIntegrationSide::Negative);
+    EXPECT_EQ(rules.front().provenance.parent_entity, 11);
+    EXPECT_EQ(rules.front().provenance.marker, 83);
+    EXPECT_EQ(rules.front().provenance.predicate_policy_key, 29u);
+    EXPECT_NEAR(rules.front().parent_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(rules.front().measure, 1.0, 1.0e-14);
+    ASSERT_EQ(rules.front().points.size(), 1u);
+    EXPECT_NEAR(rules.front().points.front().weight, 1.0, 1.0e-14);
+
+    CutInterfaceDomainRequest positive_request;
+    positive_request.source = LevelSetInterfaceSource::fromEvaluator("full-positive-source");
+    positive_request.interface_marker = 84;
+
+    LevelSetInterfaceDomain positive_domain(positive_request);
+    const LevelSetCellCutInput positive_input{
+        .parent_cell = 12,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = negative_input.node_coordinates,
+        .level_set_values = {1.0, 1.0, 1.0, 1.0}};
+    appendLinearLevelSetCellCut2D(positive_domain, positive_input);
+
+    summary = positive_domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 0u);
+    EXPECT_EQ(summary.active_volume_region_count, 1u);
+    EXPECT_NEAR(summary.negative_volume_measure, 0.0, 1.0e-14);
+    EXPECT_NEAR(summary.positive_volume_measure, 1.0, 1.0e-14);
+
+    rules = positive_domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_EQ(rules.front().side, CutIntegrationSide::Positive);
+    EXPECT_EQ(rules.front().provenance.parent_entity, 12);
+    EXPECT_EQ(rules.front().provenance.marker, 84);
+    EXPECT_NEAR(rules.front().measure, 1.0, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
+{
+    CutInterfaceDomainRequest square_request;
+    square_request.source = LevelSetInterfaceSource::fromEvaluator("cut-square-source");
+    square_request.interface_marker = 85;
+
+    LevelSetInterfaceDomain square_domain(square_request);
+    const LevelSetCellCutInput square_input{
+        .parent_cell = 13,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(square_domain, square_input);
+
+    auto summary = square_domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.active_volume_region_count, 2u);
+    EXPECT_NEAR(summary.negative_volume_measure, 0.5, 1.0e-14);
+    EXPECT_NEAR(summary.positive_volume_measure, 0.5, 1.0e-14);
+
+    auto rules = square_domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(rules[0].side, CutIntegrationSide::Negative);
+    EXPECT_EQ(rules[1].side, CutIntegrationSide::Positive);
+    EXPECT_NEAR(rules[0].measure, 0.5, 1.0e-14);
+    EXPECT_NEAR(rules[1].measure, 0.5, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().weight + rules[1].points.front().weight,
+                1.0,
+                1.0e-14);
+
+    CutInterfaceDomainRequest tetra_request;
+    tetra_request.source = LevelSetInterfaceSource::fromEvaluator("cut-tetra-source");
+    tetra_request.interface_marker = 86;
+
+    LevelSetInterfaceDomain tetra_domain(tetra_request);
+    const LevelSetCellCutInput tetra_input{
+        .parent_cell = 14,
+        .element_type = ElementType::Tetra4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}},
+                             {{0.0, 0.0, 1.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, 0.5}};
+    appendLinearLevelSetCellCut3D(tetra_domain, tetra_input);
+
+    summary = tetra_domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.active_volume_region_count, 2u);
+
+    rules = tetra_domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(rules[0].side, CutIntegrationSide::Negative);
+    EXPECT_EQ(rules[1].side, CutIntegrationSide::Positive);
+    EXPECT_NEAR(rules[0].parent_measure, 1.0 / 6.0, 1.0e-14);
+    EXPECT_NEAR(rules[0].volume_fraction, 1.0 / 8.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].volume_fraction, 7.0 / 8.0, 1.0e-14);
+    EXPECT_NEAR(rules[0].measure, 1.0 / 48.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].measure, 7.0 / 48.0, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)

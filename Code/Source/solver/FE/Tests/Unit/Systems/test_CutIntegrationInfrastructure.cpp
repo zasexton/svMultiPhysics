@@ -2036,13 +2036,25 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     ASSERT_EQ(context.generatedInterfaceMarkers().size(), 1u);
     EXPECT_EQ(context.generatedInterfaceMarkers().front(), 51);
     ASSERT_EQ(context.interfaceRules().size(), 1u);
+    ASSERT_EQ(context.volumeRules().size(), 2u);
 
     const auto marker_rules = context.interfaceRulesForMarker(51);
     ASSERT_EQ(marker_rules.size(), 1u);
     ASSERT_NE(marker_rules.front(), nullptr);
     EXPECT_EQ(marker_rules.front()->provenance.parent_entity, 7);
+    EXPECT_EQ(marker_rules.front()->provenance.marker, 51);
     EXPECT_EQ(marker_rules.front()->provenance.predicate_policy_key, 19u);
     EXPECT_TRUE(context.interfaceRulesForMarker(52).empty());
+
+    const auto negative_volume_rules =
+        context.generatedVolumeRulesForMarkerAndSide(51, CutIntegrationSide::Negative);
+    const auto positive_volume_rules =
+        context.generatedVolumeRulesForMarkerAndSide(51, CutIntegrationSide::Positive);
+    ASSERT_EQ(negative_volume_rules.size(), 1u);
+    ASSERT_EQ(positive_volume_rules.size(), 1u);
+    EXPECT_EQ(negative_volume_rules.front()->provenance.marker, 51);
+    EXPECT_NEAR(negative_volume_rules.front()->measure, 0.5, 1.0e-14);
+    EXPECT_NEAR(positive_volume_rules.front()->measure, 0.5, 1.0e-14);
 
     const auto evaluation = context.evaluateScalarCutOperator(
         CutIntegrationAssemblyPath::Standard,
@@ -2055,8 +2067,11 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
 
     context.clear();
     EXPECT_FALSE(context.hasGeneratedInterfaceMarker(51));
+    EXPECT_FALSE(context.hasGeneratedVolumeMarker(51));
     EXPECT_TRUE(context.generatedInterfaceMarkers().empty());
+    EXPECT_TRUE(context.generatedVolumeMarkers().empty());
     EXPECT_TRUE(context.interfaceRules().empty());
+    EXPECT_TRUE(context.volumeRules().empty());
 }
 
 TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide)
@@ -2226,12 +2241,16 @@ TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesConstants
             [](const CutScalarOperatorPoint&) { return Real{1.0}; },
             [](const CutScalarOperatorPoint&) { return Real{1.0}; });
 
-        EXPECT_EQ(evaluation.volume_rule_count, 0u);
+        EXPECT_EQ(evaluation.volume_rule_count, 2u);
+        EXPECT_EQ(evaluation.volume_point_count, 2u);
+        EXPECT_NEAR(evaluation.negative_volume_measure, 0.5, 1.0e-14);
+        EXPECT_NEAR(evaluation.positive_volume_measure, 0.5, 1.0e-14);
+        EXPECT_NEAR(evaluation.volumeIntegral(), 1.0, 1.0e-14);
         EXPECT_EQ(evaluation.interface_rule_count, 1u);
         EXPECT_EQ(evaluation.interface_point_count, 1u);
         EXPECT_NEAR(evaluation.interface_measure, 1.0, 1.0e-14);
         EXPECT_NEAR(evaluation.interface_integral, 1.0, 1.0e-14);
-        EXPECT_NEAR(evaluation.totalIntegral(), 1.0, 1.0e-14);
+        EXPECT_NEAR(evaluation.totalIntegral(), 2.0, 1.0e-14);
     }
 }
 
@@ -2274,11 +2293,13 @@ TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesLinearFie
                 return point.point[0] + Real{2.0} * point.point[1];
             });
 
+        EXPECT_EQ(evaluation.volume_rule_count, 2u);
         EXPECT_EQ(evaluation.interface_rule_count, 1u);
         EXPECT_EQ(evaluation.interface_point_count, 1u);
+        EXPECT_NEAR(evaluation.volumeIntegral(), 1.5, 1.0e-14);
         EXPECT_NEAR(evaluation.interface_measure, 1.0, 1.0e-14);
         EXPECT_NEAR(evaluation.interface_integral, 1.5, 1.0e-14);
-        EXPECT_NEAR(evaluation.totalIntegral(), 1.5, 1.0e-14);
+        EXPECT_NEAR(evaluation.totalIntegral(), 3.0, 1.0e-14);
     }
 }
 
