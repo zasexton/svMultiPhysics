@@ -306,6 +306,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       at step `50` with residual `5.1076666039798896e-04`. A 60-step MPI-4
       probe using fluid tolerance `6.0e-4` and fluid Newton cap `9` crossed
       that point, reached `result_060.pvtu`, and ended with `success=1`.
+      Full-run finding: the checked-in `6.0e-4` D18 MPI-4 profile run crossed
+      step `50` but stopped at step `63` with residual
+      `6.2761512021829798e-04`. The next probe should raise only the fluid
+      nonlinear tolerance in a narrow increment and verify that the early
+      residual history remains comparable before another checked-in control
+      update.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.

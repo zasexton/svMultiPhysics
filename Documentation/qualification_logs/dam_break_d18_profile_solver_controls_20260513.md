@@ -135,6 +135,27 @@ profile-run residual floor at step 50. The `6.0e-4` setting keeps the accepted
 residual below `1.0e-3` while allowing the run to move beyond the first
 profile-run obstruction.
 
+## Full Profile Attempt With Step 50 Controls
+
+The checked-in D18 input using fluid nonlinear tolerance `6.0e-4` and fluid
+Newton cap `9` was then run without reducing `Number_of_time_steps`.
+
+- Run directory: `/tmp/svmp_d18_mpi4_profile_6e4_max9_312step_aNYi90`
+- Command: `mpirun -np 4 /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics solver.xml`
+- Result: stopped at step `63`
+- Stop time: `3.1500000000000021e-02`
+- Final reported nonlinear residual:
+  `6.2761512021829798e-04`
+- Fluid Newton cap: `9`
+- Linear solve at the floor: `converged=1`, `iters=0`,
+  `rel=1.5716529455800737e-01`
+- Last written result: `result_063.pvtu`
+
+This shows the `6.0e-4` setting crosses the step-50 floor but is still below
+the next MPI profile-run residual floor. The next profile-control probe should
+raise only the fluid nonlinear tolerance in a narrow increment and verify that
+the early residual history remains comparable to the `6.0e-4` run.
+
 Static checks:
 
 ```bash
@@ -152,5 +173,5 @@ build/svMultiPhysics-build/bin/test_application \
 The checked-in D18/D38 Test05 profile inputs now use the loose profile controls
 above with fluid nonlinear tolerance `6.0e-4` and fluid Newton cap `9`. The
 strict one-step controls remain documented as solver-floor evidence, but the
-profile comparison requires a multi-step run that can reach `result_312`
-without the step-4 MPI BlockSchur stall or the later Newton residual floor.
+profile comparison still requires a multi-step run that can reach `result_312`
+without the step-4 MPI BlockSchur stall or the later Newton residual floors.
