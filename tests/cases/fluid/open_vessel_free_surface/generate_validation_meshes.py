@@ -26,6 +26,7 @@ from svv.utils.remeshing import mmg
 ROOT = Path(__file__).resolve().parent
 WATER_DENSITY = 998.2
 WATER_VISCOSITY = 1.003e-3
+GRAVITY = 9.81
 SURFACE_TENSION = 0.0728
 UNFITTED_SURFACE_TENSION = 0.0
 LINEAR_SOLVER_TOLERANCE = "1.0e-4"
@@ -345,13 +346,33 @@ def obstacle_predicate(obstacle: Box, tol: float) -> Callable[[np.ndarray, np.nd
     return predicate
 
 
-def write_pressure_gauge(case_dir: Path, grid: pv.UnstructuredGrid, point: tuple[float, float, float]) -> None:
+def hydrostatic_pressure_at(point: np.ndarray, fill_height: float) -> float:
+    return WATER_DENSITY * GRAVITY * (fill_height - float(point[1]))
+
+
+def write_pressure_gauge(
+    case_dir: Path,
+    grid: pv.UnstructuredGrid,
+    point: tuple[float, float, float],
+    pressure: float | Callable[[np.ndarray], float] = 0.0,
+) -> dict:
     distances = np.linalg.norm(grid.points - np.array(point), axis=1)
     node_id = int(np.argmin(distances))
+    selected_point = grid.points[node_id]
+    pressure_value = float(pressure(selected_point) if callable(pressure) else pressure)
     with (case_dir / "pressure_gauge.csv").open("w", newline="") as output:
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(["node_id", "pressure"])
-        writer.writerow([node_id, "0.0"])
+        writer.writerow([node_id, f"{pressure_value:.12g}"])
+
+    metadata = {
+        "node_id": node_id,
+        "coordinates": [float(value) for value in selected_point],
+        "expected_initial_hydrostatic_pressure": pressure_value,
+    }
+    if "phi" in grid.point_data:
+        metadata["initial_phi"] = float(grid.point_data["phi"][node_id])
+    return metadata
 
 
 def write_metadata(case_dir: Path, metadata: dict) -> None:
@@ -658,6 +679,8 @@ def write_case(
     obstacles: list[Box] | None = None,
     include_top_wall_bc: bool = False,
     active_domain: str | None = None,
+    gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
+    record_gauge_metadata: bool = False,
 ) -> None:
     obstacles = obstacles or []
     prepare_case_dir(case_dir)
@@ -680,7 +703,10 @@ def write_case(
         specs.append(SurfaceSpec("obstacle", obstacle_predicate(obstacles[0], tol)))
     write_surfaces(grid, specs, surface_dir)
 
-    write_pressure_gauge(case_dir, grid, gauge_point)
+    gauge_metadata = write_pressure_gauge(case_dir, grid, gauge_point, gauge_pressure)
+    if record_gauge_metadata:
+        metadata = dict(metadata)
+        metadata["pressure_gauge"] = gauge_metadata
     write_metadata(case_dir, metadata)
     write_solver_xml(
         case_dir,
@@ -776,7 +802,11 @@ def generate_spheric_test05() -> None:
             domain=domain,
             phi=phi,
             fill_height=dam_height,
-            gauge_point=(gate_x, dam_height, 0.015),
+            gauge_point=(0.10, 0.075, 0.015),
+            gauge_pressure=lambda point, dam_height=dam_height: hydrostatic_pressure_at(
+                point, dam_height
+            ),
+            record_gauge_metadata=True,
             metadata={
                 "benchmark": f"SPHERIC Test 05 wet-bed dam break d={wet_depth_mm} mm",
                 "representation": "unfitted_level_set",

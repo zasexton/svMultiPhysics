@@ -137,9 +137,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Reject or warn on pressure gauges placed on the dry side.
 - [ ] Reject or warn on pressure gauges with `abs(phi)` below a small
       near-interface margin.
-- [ ] Replace current D18 gauge node `279` with a robust wet-region node in the
+- [x] Replace current D18 gauge node `279` with a robust wet-region node in the
       retained water column.
-- [ ] Record the selected gauge id, coordinates, initial `phi`, and expected
+- [x] Record the selected gauge id, coordinates, initial `phi`, and expected
       initial hydrostatic pressure in benchmark metadata.
 - [ ] Verify the initial pressure-gauge offset no longer matches the previous
       full-volume hydrostatic error range.

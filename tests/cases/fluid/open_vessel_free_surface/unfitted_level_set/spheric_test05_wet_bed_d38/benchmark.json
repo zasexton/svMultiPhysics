@@ -19,6 +19,16 @@
     "The initial level-set field is the union of the wet bed and the retained water column.",
     "Negative level-set values denote the water side for active-domain assembly."
   ],
+  "pressure_gauge": {
+    "coordinates": [
+      0.0922952151152521,
+      0.0842691030345939,
+      0.0142363529744199
+    ],
+    "expected_initial_hydrostatic_pressure": 643.659423052,
+    "initial_phi": -0.0142363529744199,
+    "node_id": 256
+  },
   "representation": "unfitted_level_set",
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-05"

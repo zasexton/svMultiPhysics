@@ -551,6 +551,12 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectText(free_surface, "Active_domain_method", "CutVolume");
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
+      EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
+                               "256,643.659423052"));
+      EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
+                               "\"node_id\": 256"));
+      EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
+                               "\"initial_phi\": -0.0142363529744199"));
     }
 
     if (expected.fitted) {
