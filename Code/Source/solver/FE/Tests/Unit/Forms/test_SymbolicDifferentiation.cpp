@@ -709,6 +709,30 @@ TEST(SymbolicNonlinearFormKernelTest, TraceNitscheBoundaryJacobianMatchesAD)
     compareADAndSymbolic(mesh, dof_map, space, space, residual, U);
 }
 
+TEST(SymbolicNonlinearFormKernelTest, ZeroTangentProbeKeepsResidualTestSymbol)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "d_mesh");
+    const auto psi = FormExpr::testFunction(space, "psi");
+
+    const auto residual =
+        (FormExpr::constant(0.0) * u * psi).dx() +
+        (psi * FormExpr::currentMeasure()).ds(2);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::MeshMotionUnknowns;
+    options.geometry_sensitivity.mesh_motion_field = 7;
+    compiler.setOptions(options);
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir));
+
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+    EXPECT_TRUE(kernel.tangentIR().isCompiled());
+}
+
 TEST(SymbolicNonlinearFormKernelTest, RestrictMinusPlusJacobianMatchesAD)
 {
     TwoTetraSharedFaceMeshAccess mesh;

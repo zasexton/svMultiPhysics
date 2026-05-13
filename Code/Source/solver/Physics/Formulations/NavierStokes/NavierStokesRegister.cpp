@@ -191,14 +191,17 @@ svmp::FE::forms::GeometryTangentPath parse_geometry_tangent_path(std::string_vie
                                                                  std::string_view context)
 {
   const auto path = lower_copy(trim_copy(std::string(raw)));
-  if (path == "symbolic" || path == "symbolic_required" || path == "required") {
+  if (path == "symbolic" || path == "symbolic_required" ||
+      path == "symbolicrequired" || path == "required") {
     return svmp::FE::forms::GeometryTangentPath::SymbolicRequired;
   }
-  if (path == "ad" || path == "ad_reference" || path == "reference_ad") {
+  if (path == "ad" || path == "ad_reference" || path == "adreference" ||
+      path == "reference_ad" || path == "referencead") {
     return svmp::FE::forms::GeometryTangentPath::ADReference;
   }
   if (path == "symbolic_ad_check" || path == "symbolic_with_ad_check" ||
-      path == "check" || path == "parity_check") {
+      path == "symbolicadcheck" || path == "symbolicwithadcheck" ||
+      path == "check" || path == "parity_check" || path == "paritycheck") {
     return svmp::FE::forms::GeometryTangentPath::SymbolicWithADCheck;
   }
   if (path == "auto") {

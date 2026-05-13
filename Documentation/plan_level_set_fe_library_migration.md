@@ -538,6 +538,28 @@ Done when:
 - The generated fixtures live under the existing fitted and unfitted
   open-vessel folders and can be regenerated from the repository script.
 
+## Phase 16 - Free-Surface Runtime Qualification
+
+Goal: run the generated free-surface validation cases through the OOP solver in
+serial and MPI configurations.
+
+Checklist:
+
+- [x] Fix generated fitted ALE startup blockers in equation translation and
+  symbolic tangent setup.
+- [x] Verify targeted parser, translator, tangent, and moving-domain tests
+  after the startup fixes.
+- [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated
+  fitted and unfitted cases.
+- [ ] Record benchmark accuracy and performance results against validation
+  expectations.
+
+Done when:
+
+- The generated free-surface validation fixtures run in serial and MPI
+  configurations, and any runtime defects or benchmark gaps are captured with
+  follow-up fixes.
+
 ## Completion Criteria
 
 - [x] `Code/Source/solver/FE/LevelSet` contains all reusable level-set

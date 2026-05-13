@@ -417,6 +417,33 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
             "open_vessel_surface");
 }
 
+TEST(OpenVesselExamples, FittedAleCaseBuildsMeshMotionOopInputs)
+{
+  const auto case_dir = openVesselCaseDir("fitted_ale");
+  tinyxml2::XMLDocument doc;
+  ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(root, nullptr);
+
+  auto mesh = makeTranslatorQuadMesh();
+  const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
+
+  auto mesh_motion_params = equationParametersFromElement(
+      mutableChildWithAttribute(*root, "Add_equation", "type", "mesh_motion"));
+  const auto mesh_motion_input =
+      application::translators::EquationTranslator::buildInput(
+          *mesh_motion_params,
+          meshes);
+  EXPECT_EQ(mesh_motion_input.equation_type, "mesh_motion");
+  EXPECT_EQ(mesh_motion_input.equation_params.at("Model").value, "Harmonic");
+  EXPECT_EQ(mesh_motion_input.equation_params.at("Field_name").value,
+            "mesh_displacement");
+  EXPECT_EQ(mesh_motion_input.equation_params.at("Operator_tag").value,
+            "equations");
+  EXPECT_EQ(mesh_motion_input.equation_params.at("Kappa").value, "1.0");
+  ASSERT_EQ(mesh_motion_input.boundary_conditions.size(), 3u);
+}
+
 TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
 {
   struct CaseExpectation {

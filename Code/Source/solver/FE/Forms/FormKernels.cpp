@@ -15573,6 +15573,55 @@ private:
     return expr.transformNodes(transform);
 }
 
+struct FunctionSymbolNames {
+    std::optional<std::string> test{};
+    std::optional<std::string> trial{};
+};
+
+void collectFunctionSymbolNames(const FormExprNode& node, FunctionSymbolNames& names)
+{
+    if (!names.test && node.type() == FormExprType::TestFunction) {
+        names.test = node.toString();
+    }
+    if (!names.trial && node.type() == FormExprType::TrialFunction) {
+        names.trial = node.toString();
+    }
+    if (names.test && names.trial) {
+        return;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            collectFunctionSymbolNames(*child, names);
+            if (names.test && names.trial) {
+                return;
+            }
+        }
+    }
+}
+
+[[nodiscard]] FunctionSymbolNames firstFunctionSymbolNames(const FormExpr& expr)
+{
+    FunctionSymbolNames names;
+    if (expr.isValid() && expr.node() != nullptr) {
+        collectFunctionSymbolNames(*expr.node(), names);
+    }
+    return names;
+}
+
+[[nodiscard]] FunctionSymbolNames firstFunctionSymbolNames(const FormIR& ir)
+{
+    FunctionSymbolNames names;
+    for (const auto& term : ir.terms()) {
+        if (term.integrand.isValid() && term.integrand.node() != nullptr) {
+            collectFunctionSymbolNames(*term.integrand.node(), names);
+            if (names.test && names.trial) {
+                break;
+            }
+        }
+    }
+    return names;
+}
+
 } // namespace
 
 // ============================================================================
@@ -15698,10 +15747,19 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         tangent_form = (FormExpr::constant(0.0) * inner(u, v)).dx();
     }
     if (!tangent_form.hasTest() || !tangent_form.hasTrial()) {
-        // Tangent can be identically zero for residual terms that are independent of u,
-        // but FormCompiler::compileBilinear requires explicit test+trial terminals.
-        const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), "du");
-        const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), "v");
+        // Tangent can be identically zero for residual terms that are independent
+        // of the active trial, but FormCompiler::compileBilinear requires
+        // explicit test and trial terminals. Reuse existing symbol names so the
+        // zero probe does not introduce a second test/trial symbol in the same
+        // space.
+        const auto tangent_names = firstFunctionSymbolNames(tangent_form);
+        const auto residual_names = firstFunctionSymbolNames(residual_ir_);
+        const auto trial_name =
+            tangent_names.trial.value_or(residual_names.trial.value_or("du"));
+        const auto test_name =
+            tangent_names.test.value_or(residual_names.test.value_or("v"));
+        const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), trial_name);
+        const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), test_name);
         tangent_form = tangent_form + (FormExpr::constant(0.0) * inner(u, v)).dx();
     }
 
