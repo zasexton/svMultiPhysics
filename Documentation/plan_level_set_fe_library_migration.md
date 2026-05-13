@@ -592,11 +592,11 @@ Checklist:
   free-surface mesh displacement is coupled to fluid normal velocity.
 - [x] Route coupled unfitted level-set transport onto the unified transient
   operator so the level-set field advances with the fluid solve.
-- [ ] Run the Test05 D18 wet-bed case to the first published profile time and
+- [x] Run the Test05 D18 wet-bed case to the first published profile time and
   compare the extracted level-set interface against the reference data.
 - [ ] Repeat benchmark-relevant transient checks across serial, MPI-2, and
   MPI-4 where wall time and solver robustness allow.
-- [ ] Record fitted ALE free-surface transient root-cause findings and required
+- [x] Record fitted ALE free-surface transient root-cause findings and required
   implementation follow-up.
 - [ ] Record free-surface benchmark accuracy and performance results with
   enough time steps to support the comparisons.
