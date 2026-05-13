@@ -3061,6 +3061,7 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     const auto p = system.findFieldByName(ns_opts.pressure_field_name);
     bool has_mesh_rows = false;
     bool has_fluid_mesh_columns = false;
+    bool has_mesh_fluid_columns = false;
     for (const auto& record : system.formulationRecords()) {
         for (const auto& [test_field, trial_field] : record.block_couplings) {
             if (test_field == displacement && trial_field == displacement) {
@@ -3069,10 +3070,14 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
             if (trial_field == displacement && (test_field == u || test_field == p)) {
                 has_fluid_mesh_columns = true;
             }
+            if (test_field == displacement && trial_field == u) {
+                has_mesh_fluid_columns = true;
+            }
         }
     }
     EXPECT_TRUE(has_mesh_rows);
     EXPECT_TRUE(has_fluid_mesh_columns);
+    EXPECT_TRUE(has_mesh_fluid_columns);
 
     std::vector<FE::Real> solution(
         static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);

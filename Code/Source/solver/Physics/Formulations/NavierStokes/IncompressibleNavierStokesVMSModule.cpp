@@ -736,6 +736,81 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         "IncompressibleNavierStokesVMSModule: unsupported free-surface kinematic enforcement");
 }
 
+void installFittedFreeSurfaceMeshKinematics(
+    FE::systems::FESystem& system,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::ALEBinding& ale_binding,
+    const FE::forms::FormExpr& u,
+    const IncompressibleNavierStokesVMSOptions& options,
+    const FE::systems::FormInstallOptions& base_install_options,
+    FE::FieldId velocity_field)
+{
+    using namespace FE::forms;
+
+    if (bc.implementation != FreeSurfaceImplementation::FittedALE ||
+        bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::None ||
+        !ale_binding.coupled()) {
+        return;
+    }
+    if (bc.normal_kinematic_policy !=
+        FreeSurfaceNormalKinematicPolicy::MatchFluidNormalVelocity) {
+        return;
+    }
+    if (ale_binding.mesh_displacement_field == FE::INVALID_FIELD_ID) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: fitted free-surface mesh kinematics require a coupled mesh displacement unknown");
+    }
+
+    const auto& rec = system.fieldRecord(ale_binding.mesh_displacement_field);
+    if (!rec.space) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: fitted free-surface mesh displacement field has no function space");
+    }
+
+    const auto psi = TestField(
+        ale_binding.mesh_displacement_field,
+        *rec.space,
+        "psi_free_surface_mesh");
+    const auto d_mesh = StateField(
+        ale_binding.mesh_displacement_field,
+        *rec.space,
+        "d_mesh_free_surface");
+    const auto n = currentNormal();
+    const auto normal_mismatch = normalTrace(dt(d_mesh) - u, n);
+    const auto penalty = [&]() {
+        switch (bc.kinematic_enforcement) {
+        case FreeSurfaceKinematicEnforcement::Penalty:
+            return bc::toScalarExpr(
+                bc.kinematic_penalty,
+                freeSurfaceValueName("ns_free_surface_mesh_kinematic_penalty", bc));
+        case FreeSurfaceKinematicEnforcement::Nitsche:
+            return FormExpr::constant(options.nitsche_gamma) / hNormal();
+        case FreeSurfaceKinematicEnforcement::None:
+            break;
+        }
+        return FormExpr::constant(0.0);
+    }();
+
+    auto residual = integrateOnFreeSurface(
+        penalty * normal_mismatch * normalTrace(psi, n),
+        bc,
+        /*ale_enabled=*/true);
+
+    auto install = base_install_options;
+    install.compiler_options.use_symbolic_tangent = true;
+    ale_binding.configureInstallOptions(install);
+    if (velocity_field != FE::INVALID_FIELD_ID) {
+        install.extra_trial_fields.push_back(velocity_field);
+    }
+
+    (void)FE::systems::installFormulation(
+        system,
+        "equations",
+        {ale_binding.mesh_displacement_field},
+        residual,
+        install);
+}
+
 } // namespace
 
 void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& system) const
@@ -990,6 +1065,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             mu,
             options_,
             options_.enable_ale);
+        installFittedFreeSurfaceMeshKinematics(
+            system,
+            effective_bc,
+            ale_binding,
+            u,
+            options_,
+            free_surface_contact_angle_install,
+            u_id);
         applyFreeSurfaceCutCellStabilization(
             momentum_form,
             continuity_form,

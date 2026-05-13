@@ -588,6 +588,8 @@ Checklist:
 
 - [x] Add a reproducible SPHERIC Test05 profile comparison utility for
   digitized free-surface benchmark profiles.
+- [x] Install the fitted ALE mesh-motion normal kinematic residual so the
+  free-surface mesh displacement is coupled to fluid normal velocity.
 - [ ] Run the Test05 D18 wet-bed case to the first published profile time and
   compare the extracted level-set interface against the reference data.
 - [ ] Repeat benchmark-relevant transient checks across serial, MPI-2, and
