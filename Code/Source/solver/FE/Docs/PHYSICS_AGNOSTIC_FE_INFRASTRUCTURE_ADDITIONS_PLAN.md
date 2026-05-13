@@ -156,27 +156,27 @@ auxiliary states without duplicating equal-and-opposite source bookkeeping.
 
 Checklist:
 
-- [ ] Add a `PairedExchangeDescriptor`.
-- [ ] Allow descriptor to identify:
-  - [ ] donor field or group
-  - [ ] receiver field or group
-  - [ ] exchanged quantity name
-  - [ ] sign convention
-  - [ ] source callback or form contribution id
-  - [ ] conservation tolerance
-- [ ] Add helper utilities to register equal-and-opposite residual
+- [x] Add a `PairedExchangeDescriptor`.
+- [x] Allow descriptor to identify:
+  - [x] donor field or group
+  - [x] receiver field or group
+  - [x] exchanged quantity name
+  - [x] sign convention
+  - [x] source callback or form contribution id
+  - [x] conservation tolerance
+- [x] Add helper utilities to register equal-and-opposite residual
       contributions.
-- [ ] Connect descriptor to existing `BalanceDescriptor`, `FluxBalanceSummary`,
+- [x] Connect descriptor to existing `BalanceDescriptor`, `FluxBalanceSummary`,
       and conservation analysis.
-- [ ] Support local and global exchange checks.
-- [ ] Support optional weighted exchange, for example density-weighted or
+- [x] Support local and global exchange checks.
+- [x] Support optional weighted exchange, for example density-weighted or
       volume-fraction-weighted, without hard-coding the weights.
-- [ ] Add tests for:
-  - [ ] equal-and-opposite scalar exchange
-  - [ ] multi-field group exchange
-  - [ ] failed conservation tolerance
-  - [ ] conservation metadata emission
-  - [ ] no false conservation claim when metadata is absent
+- [x] Add tests for:
+  - [x] equal-and-opposite scalar exchange
+  - [x] multi-field group exchange
+  - [x] failed conservation tolerance
+  - [x] conservation metadata emission
+  - [x] no false conservation claim when metadata is absent
 
 Implementation notes:
 

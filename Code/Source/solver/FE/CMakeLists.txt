@@ -891,6 +891,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/MixedKernelPlan.h
     Systems/OperatorBackends.h
     Systems/OperatorRegistry.h
+    Systems/PairedExchange.h
     Systems/ParameterRegistry.h
     Systems/SearchAccess.h
     Systems/SetupStoragePlan.h
@@ -922,6 +923,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/MeshSearchAccess.cpp
     Systems/OperatorBackends.cpp
     Systems/OperatorRegistry.cpp
+    Systems/PairedExchange.cpp
     Systems/ParameterRegistry.cpp
     Systems/StateAdmissibility.cpp
     Systems/SurfaceContactKernel.cpp
@@ -2596,6 +2598,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_CutIntegrationInfrastructure.cpp
 		                Tests/Unit/Systems/test_FieldRegistry.cpp
 		                Tests/Unit/Systems/test_BoundedUpdatePolicy.cpp
+		                Tests/Unit/Systems/test_PairedExchange.cpp
 		                Tests/Unit/Systems/test_StateAdmissibility.cpp
 		                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
 		                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
