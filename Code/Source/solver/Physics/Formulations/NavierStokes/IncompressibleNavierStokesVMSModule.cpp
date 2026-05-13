@@ -24,6 +24,11 @@
 #include "FE/Systems/FormsInstaller.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Fields/MeshFields.h"
+#  include "Mesh/Mesh.h"
+#endif
+
 #include <cstddef>
 #include <array>
 #include <cmath>
@@ -53,6 +58,8 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
 }
 
 namespace {
+
+using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
 
 [[nodiscard]] bool spacesCompatible(const FE::spaces::FunctionSpace& lhs,
                                     const FE::spaces::FunctionSpace& rhs) noexcept
@@ -96,6 +103,143 @@ namespace {
     return existing;
 }
 
+struct ActivePressureInitializationDomain {
+    const FreeSurfaceBoundary* boundary{nullptr};
+    FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
+};
+
+struct LevelSetVertexFieldView {
+    const FE::Real* values{nullptr};
+    std::size_t components{0};
+    std::size_t entity_count{0};
+};
+
+[[nodiscard]] const char* pressureActiveDomainName(
+    FreeSurfaceActiveDomain domain) noexcept
+{
+    switch (domain) {
+    case FreeSurfaceActiveDomain::None:
+        return "None";
+    case FreeSurfaceActiveDomain::LevelSetNegative:
+        return "LevelSetNegative";
+    case FreeSurfaceActiveDomain::LevelSetPositive:
+        return "LevelSetPositive";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] std::optional<ActivePressureInitializationDomain>
+activePressureInitializationDomainFor(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces)
+{
+    std::optional<ActivePressureInitializationDomain> active_domain;
+    for (const auto& bc : free_surfaces) {
+        if (bc.active_domain == FreeSurfaceActiveDomain::None) {
+            continue;
+        }
+        if (bc.implementation != FreeSurfaceImplementation::UnfittedLevelSet) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization is only valid for unfitted level-set free surfaces");
+        }
+        if (bc.level_set_field_name.empty()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization requires a non-empty level_set_field_name");
+        }
+        if (active_domain.has_value()) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: at most one active-domain free surface may restrict hydrostatic pressure initialization");
+        }
+        active_domain = ActivePressureInitializationDomain{&bc, bc.active_domain};
+    }
+    return active_domain;
+}
+
+[[nodiscard]] LevelSetVertexFieldView activePressureLevelSetField(
+    const FE::systems::FESystem& system,
+    const ActivePressureInitializationDomain& active_domain,
+    FE::GlobalIndex n_vertices)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto* native_mesh = system.mesh();
+    if (native_mesh == nullptr) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization requires a native mesh vertex level-set field");
+    }
+
+    const auto& local_mesh = native_mesh->local_mesh();
+    const auto& bc = *active_domain.boundary;
+    if (!MeshFields::has_field(local_mesh, EntityKind::Vertex,
+                               bc.level_set_field_name)) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization could not find vertex level-set field '" +
+            bc.level_set_field_name + "'");
+    }
+
+    const auto handle = MeshFields::get_field_handle(
+        local_mesh, EntityKind::Vertex, bc.level_set_field_name);
+    if (MeshFields::field_type(local_mesh, handle) != FieldScalarType::Float64) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization requires a Float64 vertex level-set field");
+    }
+
+    const auto components = MeshFields::field_components(local_mesh, handle);
+    if (components < 1u) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization requires at least one level-set component");
+    }
+
+    const auto entity_count = MeshFields::field_entity_count(local_mesh, handle);
+    if (entity_count < static_cast<std::size_t>(n_vertices)) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization level-set field has fewer entries than pressure vertices");
+    }
+
+    const auto* values = MeshFields::field_data_as<FE::Real>(local_mesh, handle);
+    if (values == nullptr) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization found an empty level-set field");
+    }
+
+    return LevelSetVertexFieldView{values, components, entity_count};
+#else
+    (void)system;
+    (void)active_domain;
+    (void)n_vertices;
+    throw std::runtime_error(
+        "IncompressibleNavierStokesVMSModule: active-domain hydrostatic pressure initialization requires native mesh support");
+#endif
+}
+
+[[nodiscard]] bool pressureVertexOnActiveSide(
+    FE::Real phi,
+    FE::Real isovalue,
+    FreeSurfaceActiveDomain active_domain) noexcept
+{
+    switch (active_domain) {
+    case FreeSurfaceActiveDomain::None:
+        return true;
+    case FreeSurfaceActiveDomain::LevelSetNegative:
+        return phi <= isovalue;
+    case FreeSurfaceActiveDomain::LevelSetPositive:
+        return phi >= isovalue;
+    }
+    return true;
+}
+
+[[nodiscard]] FE::Real hydrostaticPressureAt(
+    const std::array<FE::Real, 3>& x,
+    const IncompressibleNavierStokesVMSOptions& options,
+    const IncompressibleNavierStokesVMSOptions::
+        HydrostaticPressureInitialization& init) noexcept
+{
+    FE::Real pressure = init.reference_pressure;
+    for (std::size_t d = 0; d < options.body_force.size(); ++d) {
+        pressure += options.density * options.body_force[d] *
+                    (x[d] - init.reference_point[d]);
+    }
+    return pressure;
+}
+
 } // namespace
 
 void IncompressibleNavierStokesVMSModule::applyInitialConditions(
@@ -123,10 +267,21 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
 
     const auto& mesh = system.meshAccess();
     const auto pressure_offset = system.fieldDofOffset(p_id);
+    const auto n_vertices = mesh.numVertices();
+    const auto active_pressure_domain =
+        activePressureInitializationDomainFor(options_.free_surface);
+    std::optional<LevelSetVertexFieldView> level_set_values;
+    if (active_pressure_domain.has_value()) {
+        level_set_values =
+            activePressureLevelSetField(system, *active_pressure_domain,
+                                        n_vertices);
+    }
+
     std::vector<FE::GlobalIndex> dofs;
     std::vector<FE::Real> values;
+    std::size_t active_wet_vertices = 0u;
+    std::size_t active_dry_vertices = 0u;
 
-    const auto n_vertices = mesh.numVertices();
     for (FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto vertex_dofs = entity_map->getVertexDofs(vertex);
         if (vertex_dofs.empty()) {
@@ -134,11 +289,24 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
         }
 
         const auto x = mesh.getNodeCoordinates(vertex);
-        FE::Real pressure = init.reference_pressure;
-        for (std::size_t d = 0; d < options_.body_force.size(); ++d) {
-            pressure += options_.density * options_.body_force[d] *
-                        (x[d] - init.reference_point[d]);
+        bool initialize_hydrostatic = true;
+        if (active_pressure_domain.has_value()) {
+            const auto vertex_offset =
+                static_cast<std::size_t>(vertex) * level_set_values->components;
+            const auto phi = level_set_values->values[vertex_offset];
+            initialize_hydrostatic = pressureVertexOnActiveSide(
+                phi,
+                active_pressure_domain->boundary->level_set_isovalue,
+                active_pressure_domain->active_domain);
+            if (initialize_hydrostatic) {
+                ++active_wet_vertices;
+            } else {
+                ++active_dry_vertices;
+            }
         }
+        const FE::Real pressure = initialize_hydrostatic
+            ? hydrostaticPressureAt(x, options_, init)
+            : init.reference_pressure;
 
         for (const auto local_dof : vertex_dofs) {
             dofs.push_back(pressure_offset + local_dof);
@@ -160,11 +328,20 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
     view->setVectorEntries(dofs, values);
     view->endAssemblyPhase();
     view->finalizeAssembly();
+
+    if (active_pressure_domain.has_value()) {
+        std::ostringstream oss;
+        oss << "IncompressibleNavierStokesVMSModule: hydrostatic pressure "
+            << "initialization Active_domain="
+            << pressureActiveDomainName(active_pressure_domain->active_domain)
+            << " wet_pressure_vertices=" << active_wet_vertices
+            << " dry_pressure_vertices=" << active_dry_vertices
+            << " reference_pressure=" << init.reference_pressure;
+        FE_LOG_INFO(oss.str());
+    }
 }
 
 namespace {
-
-using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
 
 [[nodiscard]] bool isUnfittedLevelSet(const FreeSurfaceBoundary& bc) noexcept
 {

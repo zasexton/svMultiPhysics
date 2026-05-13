@@ -127,11 +127,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Hydrostatic Initialization And Gauge Checklist
 
-- [ ] Update hydrostatic pressure initialization for active-domain cases.
-- [ ] Initialize wet-side pressure consistently with the water column.
-- [ ] Set dry-side pressure to the reference pressure or otherwise exclude it
+- [x] Update hydrostatic pressure initialization for active-domain cases.
+- [x] Initialize wet-side pressure consistently with the water column.
+- [x] Set dry-side pressure to the reference pressure or otherwise exclude it
       from the active pressure initialization.
-- [ ] Prevent dry-side full-tank hydrostatic pressure from influencing the
+- [x] Prevent dry-side full-tank hydrostatic pressure from influencing the
       initial active-domain solve.
 - [ ] Add a gauge validation check for active-domain cases.
 - [ ] Reject or warn on pressure gauges placed on the dry side.
@@ -201,7 +201,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       cut-volume kernels.
 - [x] Add Navier-Stokes installation tests proving active-domain cases do not
       install duplicate full `.dx()` kernels for the same terms.
-- [ ] Add hydrostatic initialization tests for wet-side-only pressure.
+- [x] Add hydrostatic initialization tests for wet-side-only pressure.
 - [ ] Add gauge validation tests for dry and near-interface nodes.
 
 ## Integration And Qualification Checklist
