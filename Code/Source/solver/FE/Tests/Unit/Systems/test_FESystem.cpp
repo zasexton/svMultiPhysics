@@ -577,6 +577,26 @@ TEST(FESystem, MeshMotionFieldBindingsArePhysicsNeutral)
     EXPECT_EQ(*bound_displacement, displacement);
 }
 
+TEST(FESystem, MeshMotionFieldAccessInfersStandardRegisteredFields)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto displacement = sys.addField(
+        FieldSpec{.name = "mesh_displacement", .space = vector_space, .components = 2});
+    const auto velocity = sys.addField(
+        FieldSpec{.name = "mesh_velocity", .space = vector_space, .components = 2});
+    const auto acceleration = sys.addField(
+        FieldSpec{.name = "mesh_acceleration", .space = vector_space, .components = 2});
+
+    const auto access = sys.meshMotionFieldAccess();
+    EXPECT_EQ(access.mesh_displacement, displacement);
+    EXPECT_EQ(access.mesh_velocity, velocity);
+    EXPECT_EQ(access.mesh_acceleration, acceleration);
+}
+
 TEST(FESystem, PrescribedMeshMotionFieldIsExcludedFromUnknownLayout)
 {
     auto mesh = build_single_quad_mesh();

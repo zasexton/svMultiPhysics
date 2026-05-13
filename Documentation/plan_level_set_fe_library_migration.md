@@ -565,6 +565,9 @@ Checklist:
   generated validation fixtures.
 - [x] Verify targeted parser, translator, tangent, and moving-domain tests
   after the startup fixes.
+- [x] Forward moving-mesh field bindings and explicit coordinate frames through
+  decorated, device, scheduled, and parallel assemblers so fitted ALE
+  free-surface forms run under MPI.
 - [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated
   fitted and unfitted cases.
 - [ ] Record benchmark accuracy and performance results against validation

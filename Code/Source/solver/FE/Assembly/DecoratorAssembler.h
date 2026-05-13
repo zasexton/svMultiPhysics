@@ -111,6 +111,11 @@ public:
         base_->setFieldSolutionAccess(fields);
     }
 
+    void setMeshMotionFieldAccess(const MeshMotionFieldAccess& fields) override
+    {
+        base_->setMeshMotionFieldAccess(fields);
+    }
+
     void setPreviousSolution(std::span<const Real> solution) override { base_->setPreviousSolution(solution); }
 
     void setPreviousSolution2(std::span<const Real> solution) override { base_->setPreviousSolution2(solution); }

@@ -167,6 +167,7 @@ public:
     void setCurrentSolution(std::span<const Real> solution) override;
     void setCurrentSolutionView(const GlobalSystemView* solution_view) override;
     void setFieldSolutionAccess(std::span<const FieldSolutionAccess> fields) override;
+    void setMeshMotionFieldAccess(const MeshMotionFieldAccess& fields) override;
     void setPreviousSolution(std::span<const Real> solution) override;
     void setPreviousSolution2(std::span<const Real> solution) override;
     void setPreviousSolutionView(const GlobalSystemView* solution_view) override;

@@ -120,6 +120,18 @@ private:
             base_.getCellCoordinates(cell_id, coords);
         }
 
+        [[nodiscard]] bool supportsCoordinateFrame(CoordinateFrame frame) const override
+        {
+            return base_.supportsCoordinateFrame(frame);
+        }
+
+        void getCellCoordinates(GlobalIndex cell_id,
+                                CoordinateFrame frame,
+                                std::vector<std::array<Real, 3>>& coords) const override
+        {
+            base_.getCellCoordinates(cell_id, frame, coords);
+        }
+
         [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id, GlobalIndex cell_id) const override
         {
             return base_.getLocalFaceIndex(face_id, cell_id);

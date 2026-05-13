@@ -6258,7 +6258,36 @@ std::optional<FieldId> FESystem::meshMotionField(MeshMotionFieldRole role) const
 
 assembly::MeshMotionFieldAccess FESystem::meshMotionFieldAccess() const noexcept
 {
-    return mesh_motion_fields_;
+    auto access = mesh_motion_fields_;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const int mesh_dim = mesh_access_ ? mesh_access_->dimension() : 0;
+    auto infer_standard_field = [&](MeshMotionFieldRole role) {
+        FieldId& slot = meshMotionRoleSlot(access, role);
+        if (slot != INVALID_FIELD_ID) {
+            return;
+        }
+        const FieldId field = field_registry_.findByName(
+            svmp::motion::standard_motion_field_name(toMeshMotionRole(role)));
+        if (field == INVALID_FIELD_ID || !field_registry_.has(field)) {
+            return;
+        }
+        const auto& rec = field_registry_.get(field);
+        if (rec.scope != FieldScope::VolumeCell || rec.space == nullptr ||
+            rec.space->field_type() != FieldType::Vector) {
+            return;
+        }
+        const int expected_dim = mesh_dim > 0 ? mesh_dim : rec.components;
+        if (rec.components != expected_dim) {
+            return;
+        }
+        slot = field;
+    };
+
+    for (const auto role : kFEMeshMotionRoles) {
+        infer_standard_field(role);
+    }
+#endif
+    return access;
 }
 
 void FESystem::setGeometricNonlinearityPolicy(GeometricNonlinearityPolicy policy)

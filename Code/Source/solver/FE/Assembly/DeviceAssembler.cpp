@@ -252,6 +252,11 @@ void DeviceAssembler::setFieldSolutionAccess(std::span<const FieldSolutionAccess
     impl_->cpu_assembler->setFieldSolutionAccess(fields);
 }
 
+void DeviceAssembler::setMeshMotionFieldAccess(const MeshMotionFieldAccess& fields)
+{
+    impl_->cpu_assembler->setMeshMotionFieldAccess(fields);
+}
+
 void DeviceAssembler::setPreviousSolution(std::span<const Real> solution)
 {
     impl_->cpu_assembler->setPreviousSolution(solution);
