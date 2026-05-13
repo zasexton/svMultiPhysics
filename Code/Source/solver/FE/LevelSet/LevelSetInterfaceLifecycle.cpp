@@ -115,6 +115,9 @@ void appendGeneratedInterfaceCell(
     for (auto& fragment : cut_result.fragments) {
         domain.addFragment(std::move(fragment));
     }
+    for (auto& region : cut_result.volume_regions) {
+        domain.addVolumeRegion(std::move(region));
+    }
 }
 
 } // namespace

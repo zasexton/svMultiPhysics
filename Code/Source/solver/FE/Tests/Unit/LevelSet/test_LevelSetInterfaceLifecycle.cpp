@@ -206,10 +206,15 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(result.domain.request().ownership_revision, 13u);
     EXPECT_EQ(result.summary.interface_marker, interface_marker);
     EXPECT_EQ(result.summary.active_fragment_count, 1u);
+    EXPECT_EQ(result.summary.active_volume_region_count, 2u);
     EXPECT_EQ(result.summary.quadrature_point_count, 1u);
     EXPECT_GT(result.summary.measure, 0.0);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.0);
+    EXPECT_GT(result.summary.positive_volume_measure, 0.0);
     ASSERT_EQ(result.domain.fragments().size(), 1u);
     EXPECT_EQ(result.domain.fragments().front().interface_marker, interface_marker);
+    ASSERT_EQ(result.domain.volumeRegions().size(), 2u);
+    EXPECT_EQ(result.domain.volumeRegions().front().interface_marker, interface_marker);
 }
 
 TEST(LevelSetInterfaceLifecycle, PreservesMarkerIdentity)

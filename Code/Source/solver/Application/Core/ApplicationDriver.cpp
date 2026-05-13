@@ -3,6 +3,10 @@
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
 
+#include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
 #include "FE/Systems/TimeIntegrator.h"
@@ -24,7 +28,12 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <initializer_list>
+#include <map>
+#include <memory>
+#include <optional>
 #include <set>
+#include <span>
 #include <thread>
 #include <vector>
 #include <sstream>
@@ -226,6 +235,50 @@ bool parse_bool_relaxed(const std::string& raw)
   return false;
 }
 
+std::string normalized_token(std::string value)
+{
+  value = lower_copy(trim_copy(std::move(value)));
+  value.erase(std::remove_if(value.begin(), value.end(),
+                             [](unsigned char c) {
+                               return c == '_' || c == '-' || std::isspace(c);
+                             }),
+              value.end());
+  return value;
+}
+
+std::optional<std::string> first_defined_parameter(
+    const std::map<std::string, std::string>& params,
+    std::initializer_list<const char*> keys)
+{
+  for (const char* key : keys) {
+    const auto it = params.find(key);
+    if (it != params.end() && !trim_copy(it->second).empty()) {
+      return it->second;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<double> first_defined_double_parameter(
+    const std::map<std::string, std::string>& params,
+    std::initializer_list<const char*> keys)
+{
+  if (const auto value = first_defined_parameter(params, keys)) {
+    return std::stod(*value);
+  }
+  return std::nullopt;
+}
+
+std::optional<int> first_defined_int_parameter(
+    const std::map<std::string, std::string>& params,
+    std::initializer_list<const char*> keys)
+{
+  if (const auto value = first_defined_parameter(params, keys)) {
+    return std::stoi(*value);
+  }
+  return std::nullopt;
+}
+
 std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r)
 {
   using svmp::FE::timestepping::StepRejectReason;
@@ -246,6 +299,182 @@ const EquationParameters* first_equation(const Parameters& params)
     }
   }
   return nullptr;
+}
+
+struct ActiveCutVolumeRequest {
+  std::string level_set_field_name{"level_set"};
+  std::string domain_id{"free_surface"};
+  int requested_interface_marker{-1};
+  double isovalue{0.0};
+};
+
+std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& params)
+{
+  std::vector<ActiveCutVolumeRequest> requests;
+  for (const auto* eq : params.equation_parameters) {
+    if (eq == nullptr || !eq->type.defined() ||
+        normalized_token(eq->type.value()) != "fluid") {
+      continue;
+    }
+    for (auto* bc : eq->boundary_conditions) {
+      if (bc == nullptr) {
+        continue;
+      }
+      auto bc_params = bc->get_parameter_list();
+      const auto type = first_defined_parameter(bc_params, {"Type"});
+      if (!type || normalized_token(*type) != "freesurface") {
+        continue;
+      }
+      const auto implementation =
+          first_defined_parameter(bc_params, {"Implementation",
+                                             "Free_surface_implementation",
+                                             "FreeSurfaceImplementation"});
+      if (!implementation ||
+          normalized_token(*implementation) != "unfittedlevelset") {
+        continue;
+      }
+      const auto active_domain =
+          first_defined_parameter(bc_params, {"Active_domain",
+                                             "ActiveDomain",
+                                             "Free_surface_active_domain",
+                                             "FreeSurfaceActiveDomain"});
+      if (!active_domain) {
+        continue;
+      }
+      const auto active_token = normalized_token(*active_domain);
+      if (active_token == "none" || active_token == "off" ||
+          active_token == "inactive") {
+        continue;
+      }
+
+      const auto method =
+          first_defined_parameter(bc_params, {"Active_domain_method",
+                                             "ActiveDomainMethod",
+                                             "Free_surface_active_domain_method",
+                                             "FreeSurfaceActiveDomainMethod"});
+      if (method && normalized_token(*method) == "smoothedindicator") {
+        continue;
+      }
+
+      ActiveCutVolumeRequest request{};
+      if (const auto field =
+              first_defined_parameter(bc_params, {"Level_set_field_name",
+                                                 "Level_set_field",
+                                                 "LevelSetFieldName",
+                                                 "LevelSetField"})) {
+        request.level_set_field_name = trim_copy(*field);
+      }
+      if (const auto domain =
+              first_defined_parameter(bc_params, {"Generated_interface_domain_id",
+                                                 "GeneratedInterfaceDomainId",
+                                                 "Interface_domain_id",
+                                                 "InterfaceDomainId"})) {
+        request.domain_id = trim_copy(*domain);
+      }
+      if (const auto marker =
+              first_defined_int_parameter(bc_params, {"Interface_marker",
+                                                     "InterfaceMarker"})) {
+        request.requested_interface_marker = *marker;
+      }
+      if (const auto isovalue =
+              first_defined_double_parameter(bc_params, {"Level_set_isovalue",
+                                                        "LevelSetIsovalue",
+                                                        "Interface_isovalue",
+                                                        "InterfaceIsovalue"})) {
+        request.isovalue = *isovalue;
+      }
+      requests.push_back(std::move(request));
+    }
+  }
+  return requests;
+}
+
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    svmp::FE::backends::GenericVector& solution)
+{
+  std::vector<svmp::FE::Real> values(static_cast<std::size_t>(solution.size()), 0.0);
+  auto view = solution.createAssemblyView();
+  if (!view) {
+    const auto span = solution.localSpan();
+    if (span.size() != values.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Could not gather FE-ordered solution values.");
+    }
+    std::copy(span.begin(), span.end(), values.begin());
+    return values;
+  }
+
+  constexpr svmp::FE::GlobalIndex chunk_size = 4096;
+  std::vector<svmp::FE::GlobalIndex> dofs;
+  std::vector<svmp::FE::Real> chunk_values;
+  dofs.reserve(static_cast<std::size_t>(std::min(solution.size(), chunk_size)));
+  chunk_values.reserve(dofs.capacity());
+  for (svmp::FE::GlobalIndex offset = 0; offset < solution.size();
+       offset += chunk_size) {
+    const auto chunk =
+        std::min<svmp::FE::GlobalIndex>(chunk_size, solution.size() - offset);
+    dofs.resize(static_cast<std::size_t>(chunk));
+    chunk_values.resize(static_cast<std::size_t>(chunk));
+    for (svmp::FE::GlobalIndex i = 0; i < chunk; ++i) {
+      dofs[static_cast<std::size_t>(i)] = offset + i;
+    }
+    view->getVectorEntries(
+        std::span<const svmp::FE::GlobalIndex>(dofs.data(), dofs.size()),
+        std::span<svmp::FE::Real>(chunk_values.data(), chunk_values.size()));
+    std::copy(chunk_values.begin(), chunk_values.end(),
+              values.begin() + static_cast<std::ptrdiff_t>(offset));
+  }
+  return values;
+}
+
+bool refreshActiveCutIntegrationContext(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    svmp::FE::backends::GenericVector& solution,
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+{
+  if (!sim.fe_system) {
+    return false;
+  }
+
+  const auto requests = activeCutVolumeRequests(params);
+  if (requests.empty()) {
+    return false;
+  }
+
+  auto context =
+      std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+  const auto fe_solution = gatherFeOrderedSolution(solution);
+
+  for (const auto& request : requests) {
+    svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = request.level_set_field_name;
+    options.domain_id = request.domain_id;
+    options.requested_interface_marker = request.requested_interface_marker;
+    options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+
+    auto result = lifecycle.build(*sim.fe_system, options, fe_solution);
+    if (!result.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Generated active-domain interface '" +
+          request.domain_id + "' for level-set field '" +
+          request.level_set_field_name + "' failed: " + result.diagnostic);
+    }
+
+    const auto summary = result.summary;
+    context->addGeneratedInterfaceDomain(result.domain);
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Active-domain cut context marker="
+        << result.interface_marker << " field='" << request.level_set_field_name
+        << "' domain_id='" << request.domain_id << "' active_fragments="
+        << summary.active_fragment_count << " active_volume_regions="
+        << summary.active_volume_region_count
+        << " negative_volume=" << summary.negative_volume_measure
+        << " positive_volume=" << summary.positive_volume_measure << std::endl;
+  }
+
+  sim.fe_system->setCutIntegrationContext(std::move(context));
+  return true;
 }
 
 class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {
@@ -565,6 +794,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   sim.time_history->repack(*sim.backend);
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle cut_lifecycle;
+  (void)refreshActiveCutIntegrationContext(
+      sim, params, sim.time_history->u(), cut_lifecycle);
+
   const double solve_time = sim.time_history->time();
   oopCout() << "[svMultiPhysics::Application] Steady solve: time=" << solve_time
             << " newton(max_it=" << newton_opts.max_iterations << ", min_it=" << newton_opts.min_iterations
@@ -701,6 +934,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
   };
+  auto cut_lifecycle =
+      std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
+  callbacks.on_before_physics_solve =
+      [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
+        (void)refreshActiveCutIntegrationContext(
+            sim, params, h.u(), *cut_lifecycle);
+        return true;
+      };
   callbacks.on_nonlinear_done = [&](const svmp::FE::timestepping::TimeHistory& h,
                                    const svmp::FE::timestepping::NewtonReport& nr) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: nonlinear_done step=" << h.stepIndex()

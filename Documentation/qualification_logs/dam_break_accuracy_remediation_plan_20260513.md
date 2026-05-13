@@ -189,6 +189,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add cut-volume classification tests for partially cut cells.
 - [x] Add constant-integral tests for negative-side volume rules.
 - [x] Add constant-integral tests for positive-side volume rules.
+- [x] Preserve generated cut-volume regions when building level-set
+      interface lifecycle domains.
 - [x] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
 - [x] Add Forms tests for cut-volume tangent/Jacobian assembly.
 - [x] Add Forms tests covering JIT-enabled cut-volume wrapper fallback.
@@ -200,6 +202,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       cut-volume kernels.
 - [x] Add Navier-Stokes installation tests proving active-domain cases do not
       install duplicate full `.dx()` kernels for the same terms.
+- [x] Register generated level-set cut-integration context before
+      active-domain transient assembly.
 - [x] Add hydrostatic initialization tests for wet-side-only pressure.
 - [x] Add gauge validation tests for dry and near-interface nodes.
 - [x] Add XML ingestion coverage proving active-domain free-surface boundary
