@@ -202,6 +202,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       install duplicate full `.dx()` kernels for the same terms.
 - [x] Add hydrostatic initialization tests for wet-side-only pressure.
 - [x] Add gauge validation tests for dry and near-interface nodes.
+- [x] Add XML ingestion coverage proving active-domain free-surface boundary
+      controls reach the Navier-Stokes translator.
 
 ## Integration And Qualification Checklist
 

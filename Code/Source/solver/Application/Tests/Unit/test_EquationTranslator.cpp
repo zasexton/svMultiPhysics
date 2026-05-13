@@ -254,6 +254,9 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
     <Implementation>UnfittedLevelSet</Implementation>
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Active_domain_smoothing_width>0.02</Active_domain_smoothing_width>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
   </Add_BC>
 </Add_equation>
@@ -270,6 +273,9 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   EXPECT_EQ(bc.params.at("Implementation").value, "UnfittedLevelSet");
   EXPECT_EQ(bc.params.at("Level_set_field_name").value, "phi");
   EXPECT_EQ(bc.params.at("Generated_interface_domain_id").value, "water_air");
+  EXPECT_EQ(bc.params.at("Active_domain").value, "LevelSetNegative");
+  EXPECT_EQ(bc.params.at("Active_domain_method").value, "CutVolume");
+  EXPECT_EQ(bc.params.at("Active_domain_smoothing_width").value, "0.02");
   EXPECT_EQ(bc.params.at("Enable_cut_cell_stabilization").value, "true");
 }
 
