@@ -170,7 +170,7 @@ struct IncompressibleNavierStokesVMSOptions {
         bool enabled{false};
         ScalarValue velocity_gradient_penalty{1.0};
         ScalarValue pressure_gradient_penalty{1.0};
-        bool use_cut_metadata_scale{true};
+        bool use_cut_metadata_scale{false};
     };
 
     /**

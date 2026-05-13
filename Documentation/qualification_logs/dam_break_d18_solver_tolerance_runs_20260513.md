@@ -49,8 +49,8 @@ floor reached by the current coupled `phi`, `Velocity`, and `Pressure` system.
 - The current D18 fixture should keep the last passing `1e-4` solver tolerances
   until the coupled solver floor is addressed.
 - `Use_cut_metadata_scale=true` is not currently a usable stabilization option
-  for this active-domain D18 path because it terminates during first-step
-  assembly.
+  for this active-domain D18 path. It now stops during setup with an explicit
+  validation error instead of reaching first-step assembly.
 
 ## Follow-Up Items
 
@@ -58,8 +58,11 @@ floor reached by the current coupled `phi`, `Velocity`, and `Pressure` system.
       layout, or restructure D18 so the Navier-Stokes solve can use a
       velocity-pressure solver block without the level-set field in the same
       linear system.
-- [ ] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
+- [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
+- [ ] Implement per-face metadata-scale constants for cut-adjacent facet
+      stabilization before enabling `Use_cut_metadata_scale=true` in D18/D38
+      fixtures.
 - [ ] Re-run the `1e-6` nonlinear and linear relative tolerance test after the
       solver path is corrected.
 - [ ] Keep recording nonlinear iteration counts, linear iteration counts, and

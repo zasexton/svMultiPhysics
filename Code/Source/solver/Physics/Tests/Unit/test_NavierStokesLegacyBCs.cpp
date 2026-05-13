@@ -670,7 +670,7 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_A
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InteriorFaceIntegral));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Jump));
-    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::ParameterRef));
+    ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::ParameterRef));
 #endif
 }
 

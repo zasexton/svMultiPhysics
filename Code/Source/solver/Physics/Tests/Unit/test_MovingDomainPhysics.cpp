@@ -1990,7 +1990,46 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsCutMetadataScale)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .external_pressure = 1.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+            .use_cut_metadata_scale = true,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    try {
+        module.registerOn(system);
+        FAIL() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_NE(std::string(ex.what()).find("cut metadata scaling is not supported"),
+                  std::string::npos)
+            << ex.what();
+    }
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInterfaceIntegral)

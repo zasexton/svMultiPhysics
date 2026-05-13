@@ -158,8 +158,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       `Pressure` D18 layout, or restructure D18 so the Navier-Stokes solve can
       use a velocity-pressure solver block without the level-set field in the
       same linear system.
-- [ ] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
+- [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
+- [ ] Implement per-face metadata-scale constants for cut-adjacent facet
+      stabilization before enabling `Use_cut_metadata_scale=true` in D18/D38
+      fixtures.
 - [ ] Re-run D18 strict tolerance after the solver path is corrected.
 - [ ] Record nonlinear iteration counts, linear iteration counts, and residual
       norms for each D18/D38 qualification attempt.
@@ -220,6 +223,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add gauge validation tests for dry and near-interface nodes.
 - [x] Add XML ingestion coverage proving active-domain free-surface boundary
       controls reach the Navier-Stokes translator.
+- [x] Add Navier-Stokes tests proving cut-cell stabilization defaults to
+      constant scale and rejects explicit metadata scaling on cut-adjacent
+      facets.
 
 ## Integration And Qualification Checklist
 
@@ -231,6 +237,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       D18 level set.
 - [x] Confirm pressure is no longer initialized as full-tank hydrostatic in the
       dry region.
+- [x] Confirm a D18 `Use_cut_metadata_scale=true` smoke case stops with setup
+      validation instead of an assembly crash.
 - [ ] Run the same one-step D18 test with 2 MPI ranks.
 - [ ] Run the same one-step D18 test with 4 MPI ranks.
 - [ ] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge
