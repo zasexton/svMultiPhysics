@@ -98,6 +98,7 @@ struct MatrixFreeOptions;
 class IMatrixFreeKernel;
 class MatrixFreeOperator;
 class FunctionalKernel;
+class CutIntegrationContext;
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 class CompositeMeshAccess;
 #endif
@@ -1372,6 +1373,18 @@ public:
         return operator_registry_.has(op);
     }
 
+    void setCutIntegrationContext(std::shared_ptr<const assembly::CutIntegrationContext> context) noexcept {
+        cut_integration_context_ = std::move(context);
+    }
+
+    void clearCutIntegrationContext() noexcept {
+        cut_integration_context_.reset();
+    }
+
+    [[nodiscard]] const assembly::CutIntegrationContext* cutIntegrationContext() const noexcept {
+        return cut_integration_context_.get();
+    }
+
     /**
      * @brief True when setup determined that an operator's matrix is state-independent.
      *
@@ -1559,6 +1572,7 @@ private:
 
     FieldRegistry field_registry_;
     OperatorRegistry operator_registry_;
+    std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
     std::vector<std::unique_ptr<constraints::ISystemConstraint>> system_constraint_defs_;
 

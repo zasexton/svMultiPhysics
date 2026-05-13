@@ -107,12 +107,17 @@ namespace spaces {
     class FunctionSpace;
 }
 
+namespace geometry {
+    enum class CutIntegrationSide : std::uint8_t;
+}
+
 namespace assembly {
 
 // Forward declarations
 class GlobalSystemView;
 class AssemblyKernel;
 class AssemblyContext;
+class CutIntegrationContext;
 struct AuxiliaryOutputBinding;
 
 /**
@@ -1096,6 +1101,28 @@ public:
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view) = 0;
+
+    /**
+     * @brief Assemble cell-style kernels on cut-volume quadrature rules.
+     *
+     * Default implementation throws; concrete assemblers that support full
+     * cell contexts can override this and reuse their cell insertion path.
+     */
+    [[nodiscard]] virtual AssemblyResult assembleCutVolumes(
+        const IMeshAccess& /*mesh*/,
+        const CutIntegrationContext& /*cut_context*/,
+        int /*interface_marker*/,
+        geometry::CutIntegrationSide /*side*/,
+        const spaces::FunctionSpace& /*test_space*/,
+        const spaces::FunctionSpace& /*trial_space*/,
+        AssemblyKernel& /*kernel*/,
+        GlobalSystemView* /*matrix_view*/,
+        GlobalSystemView* /*vector_view*/,
+        bool /*assemble_matrix*/,
+        bool /*assemble_vector*/)
+    {
+        FE_THROW(FEException, "Assembler::assembleCutVolumes: not implemented");
+    }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     /**

@@ -17,6 +17,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/TimeIntegrationContext.h"
 
 #include "Forms/FormKernels.h"
@@ -1362,6 +1363,52 @@ assembly::AssemblyResult assembleOperator(
         }
     }
 #endif
+
+    // Cut-volume terms from generated level-set volume rules
+    if (!plan.cut_volume_terms.empty()) {
+        const auto* cut_context = system.cutIntegrationContext();
+        FE_THROW_IF(cut_context == nullptr, InvalidArgumentException,
+                    "assembleOperator: cut-volume terms require a registered CutIntegrationContext");
+
+        for (const auto& term : plan.cut_volume_terms) {
+            FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: cut-volume term kernel");
+            const bool want_matrix = request.want_matrix && term.matrix_capable;
+            const bool want_vector = request.want_vector && term.vector_capable;
+            if (!want_matrix && !want_vector) {
+                continue;
+            }
+
+            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
+            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+
+            if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(term.test_field);
+                const auto& trial_field = system.field_registry_.get(term.trial_field);
+                std::ostringstream oss;
+                oss << "assembleOperator: op='" << request.op << "' cut-volume term marker="
+                    << term.marker << " side="
+                    << (term.side == geometry::CutIntegrationSide::Negative ? "negative" : "positive")
+                    << " test='" << test_field.name << "' trial='" << trial_field.name
+                    << "' want_matrix=" << (want_matrix ? 1 : 0)
+                    << " want_vector=" << (want_vector ? 1 : 0);
+                traceLog(oss.str());
+            }
+
+            auto r = assembler.assembleCutVolumes(
+                mesh,
+                *cut_context,
+                term.marker,
+                term.side,
+                *term.test_space,
+                *term.trial_space,
+                *term.kernel,
+                want_matrix ? matrix_out : nullptr,
+                want_vector ? vector_out : nullptr,
+                want_matrix,
+                want_vector);
+            mergeAssemblyResult(total, r);
+        }
+    }
 
     // Global (non-element-local) terms (e.g., contact)
     if (request.assemble_global_terms) {

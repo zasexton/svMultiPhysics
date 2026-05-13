@@ -5836,6 +5836,9 @@ void FESystem::buildAssemblyPlans()
         for (const auto& term : plan.interface_terms) {
             consider_matrix_term(term.kernel, term.matrix_capable);
         }
+        for (const auto& term : plan.cut_volume_terms) {
+            consider_matrix_term(term.kernel, term.matrix_capable);
+        }
 
         if (!plan.global_terms.empty()) {
             // Global kernels do not yet expose matrix-independence metadata, so

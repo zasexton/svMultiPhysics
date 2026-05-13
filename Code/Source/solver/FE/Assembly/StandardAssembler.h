@@ -296,6 +296,19 @@ public:
         GlobalSystemView& matrix_view,
         GlobalSystemView* vector_view) override;
 
+    [[nodiscard]] AssemblyResult assembleCutVolumes(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        geometry::CutIntegrationSide side,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view,
+        bool assemble_matrix,
+        bool assemble_vector) override;
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     [[nodiscard]] AssemblyResult assembleInterfaceFaces(
         const IMeshAccess& mesh,

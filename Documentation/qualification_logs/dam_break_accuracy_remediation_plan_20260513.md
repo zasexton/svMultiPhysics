@@ -73,6 +73,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Update Forms vocabulary/documentation to include the new cut-volume
       measure.
 - [x] Route cut-volume kernels through `CutDomainAssembler`.
+- [x] Execute registered cut-volume operator terms from `FESystem::assemble(...)`
+      using a registered `CutIntegrationContext`.
 - [x] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
       kernels for the same residual terms.
 - [x] Ensure JIT-enabled cut-volume Forms kernels use the marker/side-aware
@@ -190,6 +192,8 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
 - [x] Add Forms tests for cut-volume tangent/Jacobian assembly.
 - [x] Add Forms tests covering JIT-enabled cut-volume wrapper fallback.
+- [x] Add system-level Forms tests proving cut-volume residual and tangent
+      insertion through `FESystem::assemble(...)`.
 - [x] Add Navier-Stokes installation tests proving active-domain cases install
       cut-volume kernels.
 - [x] Add Navier-Stokes installation tests proving active-domain cases do not

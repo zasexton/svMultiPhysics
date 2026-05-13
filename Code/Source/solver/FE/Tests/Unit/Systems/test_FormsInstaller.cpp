@@ -16,8 +16,11 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Assembly/CutIntegrationContext.h"
 
 #include "Elements/Element.h"
+
+#include "Geometry/CutQuadrature.h"
 
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
@@ -661,6 +664,79 @@ TEST(FormsInstaller, FormsInstaller_RegistersCutVolumeKernel)
     EXPECT_EQ(def.cut_volumes.front().test_field, u_field);
     EXPECT_EQ(def.cut_volumes.front().trial_field, u_field);
     EXPECT_NE(def.cut_volumes.front().kernel, nullptr);
+}
+
+TEST(FormsInstaller, FormsInstaller_AssemblesCutVolumeKernelThroughSystem)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 78;
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto residual_form =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {u_field}, residual_form);
+    ASSERT_FALSE(installed.residual.empty());
+    ASSERT_NE(installed.residual[0], nullptr);
+
+    auto cut_context = std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    svmp::FE::geometry::CutQuadratureRule rule;
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+    rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = Real{1.0} / Real{6.0};
+    rule.measure = Real{1.0} / Real{12.0};
+    rule.volume_fraction = Real{0.5};
+    rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+        .point = {{Real{0.25}, Real{0.25}, Real{0.25}}},
+        .weight = rule.measure,
+    });
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = rule.volume_fraction;
+    cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+    sys.setCutIntegrationContext(cut_context);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    std::vector<Real> U = {Real{1.0}, Real{1.0}, Real{1.0}, Real{1.0}};
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    svmp::FE::assembly::DenseSystemView out(4);
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, &out);
+    ASSERT_TRUE(result.success) << result.error_message;
+    EXPECT_EQ(result.elements_assembled, 1);
+
+    constexpr Real expected_vector = Real{1.0} / Real{48.0};
+    constexpr Real expected_matrix = Real{1.0} / Real{192.0};
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(out.getVectorEntry(i), expected_vector, 1.0e-12);
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(out.getMatrixEntry(i, j), expected_matrix, 1.0e-12);
+        }
+    }
 }
 
 TEST(FormsInstaller, InstallFormulationWithMetadata_CapturesInstalledRecord)
