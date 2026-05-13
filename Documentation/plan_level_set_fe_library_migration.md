@@ -568,9 +568,9 @@ Checklist:
 - [x] Forward moving-mesh field bindings and explicit coordinate frames through
   decorated, device, scheduled, and parallel assemblers so fitted ALE
   free-surface forms run under MPI.
-- [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated
+- [x] Run bounded serial, MPI-2, and MPI-4 qualification for the generated
   fitted and unfitted cases.
-- [ ] Record benchmark accuracy and performance results against validation
+- [x] Record benchmark accuracy and performance results against validation
   expectations.
 
 Done when:
