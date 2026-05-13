@@ -44,26 +44,29 @@ floor reached by the current coupled `phi`, `Velocity`, and `Pressure` system.
 
 - The D18 active-domain volume diagnostics stayed consistent across the solver
   trials, so these runs did not indicate a wet-volume assembly regression.
-- The strict `1e-6` nonlinear and linear relative tolerance path is blocked by
-  the current coupled FSILS GMRES solver floor.
-- The current D18 fixture should keep the last passing `1e-4` solver tolerances
-  until the coupled solver floor is addressed.
+- The strict `1e-6` nonlinear and linear relative tolerance path was blocked by
+  the coupled FSILS GMRES solver floor in the initial attempts.
+- The coupled outer FGMRES BlockSchur route later removed that solver-floor
+  blocker. The checked-in D18 fixture now carries the strict `1e-6` nonlinear
+  and linear relative tolerances and the `1e-10` absolute linear tolerance.
 - `Use_cut_metadata_scale=true` is not currently a usable stabilization option
   for this active-domain D18 path. It now stops during setup with an explicit
   validation error instead of reaching first-step assembly.
+- Updated evidence:
+  `Documentation/qualification_logs/dam_break_d18_strict_tolerance_inputs_20260513.md`.
 
 ## Follow-Up Items
 
-- [ ] Add a robust solver path for the coupled `phi`, `Velocity`, and `Pressure`
+- [x] Add a robust solver path for the coupled `phi`, `Velocity`, and `Pressure`
       layout, or restructure D18 so the Navier-Stokes solve can use a
       velocity-pressure solver block without the level-set field in the same
       linear system.
 - [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
-- [ ] Implement per-face metadata-scale constants for cut-adjacent facet
+- [x] Implement per-face metadata-scale constants for cut-adjacent facet
       stabilization before enabling `Use_cut_metadata_scale=true` in D18/D38
       fixtures.
-- [ ] Re-run the `1e-6` nonlinear and linear relative tolerance test after the
+- [x] Re-run the `1e-6` nonlinear and linear relative tolerance test after the
       solver path is corrected.
-- [ ] Keep recording nonlinear iteration counts, linear iteration counts, and
+- [x] Keep recording nonlinear iteration counts, linear iteration counts, and
       residual norms for each D18 and D38 qualification attempt.

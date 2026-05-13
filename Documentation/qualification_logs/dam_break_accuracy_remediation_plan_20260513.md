@@ -151,11 +151,13 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 - [x] Keep the current time-step setup unchanged until active-domain assembly is
       verified.
-- [ ] After active-domain assembly passes smoke tests, tighten D18 nonlinear
+- [x] After active-domain assembly passes smoke tests, tighten D18 nonlinear
       relative tolerance to `1e-6`.
-- [ ] Tighten D18 linear relative tolerance to `1e-6`.
-- [ ] Use an absolute linear tolerance no looser than `1e-10` for the
+- [x] Tighten D18 linear relative tolerance to `1e-6`.
+- [x] Use an absolute linear tolerance no looser than `1e-10` for the
       qualification run, unless solver logs show a documented scaling issue.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_strict_tolerance_inputs_20260513.md`.
 - [x] Record the D18 strict-tolerance solver floor in
       `Documentation/qualification_logs/dam_break_d18_solver_tolerance_runs_20260513.md`.
 - [x] Route coupled level-set/fluid solver backend, linear solver, and Newton

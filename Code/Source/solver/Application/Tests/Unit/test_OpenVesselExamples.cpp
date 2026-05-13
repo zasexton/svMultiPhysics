@@ -219,9 +219,9 @@ void expectBlockSchurSolver(const tinyxml2::XMLElement& equation)
   EXPECT_FALSE(text(solver, "Krylov_space_dimension").empty());
   EXPECT_FALSE(text(solver, "Tolerance").empty());
   expectText(solver, "NS_GM_max_iterations", "1000");
-  expectText(solver, "NS_GM_tolerance", "1.0e-4");
+  expectText(solver, "NS_GM_tolerance", "1.0e-6");
   expectText(solver, "NS_CG_max_iterations", "1000");
-  expectText(solver, "NS_CG_tolerance", "1.0e-4");
+  expectText(solver, "NS_CG_tolerance", "1.0e-6");
   expectText(solver, "NS_Schur_preconditioner", "algebraic-shat");
   expectText(solver, "NS_Momentum_approximation", "ilu-k");
   expectText(solver, "NS_Use_coupled_outer_FGMRES", "true");
