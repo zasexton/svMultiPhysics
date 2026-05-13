@@ -879,6 +879,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FEAdaptivityTransfer.h
     Systems/FESystem.h
     Systems/FormsInstaller.h
+    Systems/BoundedUpdatePolicy.h
     Systems/FieldRegistry.h
     Systems/GeometricNonlinearity.h
     Systems/GeometryTransaction.h
@@ -912,6 +913,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FEAdaptivityTransfer.cpp
     Systems/FESystem.cpp
     Systems/FormsInstaller.cpp
+    Systems/BoundedUpdatePolicy.cpp
     Systems/FieldRegistry.cpp
     Systems/GeometryTransaction.cpp
     Systems/GlobalKernelStateProvider.cpp
@@ -2593,6 +2595,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_ContactProximityInfrastructure.cpp
 		                Tests/Unit/Systems/test_CutIntegrationInfrastructure.cpp
 		                Tests/Unit/Systems/test_FieldRegistry.cpp
+		                Tests/Unit/Systems/test_BoundedUpdatePolicy.cpp
 		                Tests/Unit/Systems/test_StateAdmissibility.cpp
 		                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
 		                Tests/Unit/Systems/test_SurfaceContactKernel.cpp

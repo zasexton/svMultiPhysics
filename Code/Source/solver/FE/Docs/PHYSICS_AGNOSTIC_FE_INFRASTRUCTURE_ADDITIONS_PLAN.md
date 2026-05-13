@@ -117,31 +117,31 @@ owning the limiter formulas.
 
 Checklist:
 
-- [ ] Add a generic `BoundedUpdatePolicy` interface.
-- [ ] Provide built-in FE policies:
-  - [ ] `None`
-  - [ ] `CheckOnly`
-  - [ ] `ClampCellAverage`
-  - [ ] `RejectStepOnViolation`
-- [ ] Add extension points for Physics-owned limiters:
-  - [ ] pre-update callback
-  - [ ] post-update callback
-  - [ ] candidate-state filter
-  - [ ] admissibility residual callback
-- [ ] Ensure the policy can operate on:
-  - [ ] one scalar field
-  - [ ] a state group
-  - [ ] auxiliary state
-- [ ] Integrate policy checks into the relevant time-update path without
+- [x] Add a generic `BoundedUpdatePolicy` interface.
+- [x] Provide built-in FE policies:
+  - [x] `None`
+  - [x] `CheckOnly`
+  - [x] `ClampCellAverage`
+  - [x] `RejectStepOnViolation`
+- [x] Add extension points for Physics-owned limiters:
+  - [x] pre-update callback
+  - [x] post-update callback
+  - [x] candidate-state filter
+  - [x] admissibility residual callback
+- [x] Ensure the policy can operate on:
+  - [x] one scalar field
+  - [x] a state group
+  - [x] auxiliary state
+- [x] Integrate policy checks into the relevant time-update path without
       changing default behavior.
-- [ ] Emit invariant-domain metadata when a bounded policy is active.
-- [ ] Add tests for:
-  - [ ] no-op default behavior
-  - [ ] rejection on negative scalar
-  - [ ] warning-only mode
-  - [ ] cell-average clamp mode
-  - [ ] group-level bound check
-  - [ ] compatibility with existing time history
+- [x] Emit invariant-domain metadata when a bounded policy is active.
+- [x] Add tests for:
+  - [x] no-op default behavior
+  - [x] rejection on negative scalar
+  - [x] warning-only mode
+  - [x] cell-average clamp mode
+  - [x] group-level bound check
+  - [x] compatibility with existing time history
 
 Implementation notes:
 
