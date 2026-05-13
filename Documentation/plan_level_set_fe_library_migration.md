@@ -596,6 +596,8 @@ Checklist:
   compare the extracted level-set interface against the reference data.
 - [x] Double-check the MPI-4 D18 step-312 pressure and velocity fields and
   record the hydrostatic full-volume consistency gap.
+- [x] Write the dam-break field-consistency follow-up issues and investigation
+  areas into a dedicated qualification note.
 - [ ] Add wet-side active-domain integration or equivalent material weighting
   for unfitted level-set free-surface Navier-Stokes benchmark cases.
 - [ ] Repeat benchmark-relevant transient checks across serial, MPI-2, and
