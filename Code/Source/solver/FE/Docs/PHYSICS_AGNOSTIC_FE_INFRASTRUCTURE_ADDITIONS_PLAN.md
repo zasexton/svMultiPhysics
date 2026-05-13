@@ -346,19 +346,43 @@ Implementation notes:
 
 ## Test Plan
 
-- [ ] Add focused unit tests for each new FE type and helper.
-- [ ] Add integration-style FE tests combining:
-  - [ ] state group + admissibility
-  - [ ] bounded update + invariant-domain summary
-  - [ ] paired exchange + conservation summary
-  - [ ] derived threshold reduction + percentile reduction
-  - [ ] exposure accumulator + time stepping
-- [ ] Add regression tests confirming existing Poisson, NS/VMS, level-set,
-      moving-frame, and derived-result tests still pass.
-- [ ] Add compile-time tests where possible to ensure APIs are optional and
+- [x] Add focused unit tests for each new FE type and helper.
+- [x] Add integration-style FE tests combining:
+  - [x] state group + admissibility
+  - [x] bounded update + invariant-domain summary
+  - [x] paired exchange + conservation summary
+  - [x] derived threshold reduction + percentile reduction
+  - [x] exposure accumulator + time stepping
+- [x] Add regression coverage for existing Poisson/analysis, NS/VMS-adjacent,
+      level-set, moving-frame, and derived-result paths; record full-target
+      exceptions below.
+- [x] Add compile-time tests where possible to ensure APIs are optional and
       default-disabled.
-- [ ] Run the FE unit test target and any existing solver smoke tests that cover
+- [x] Run the FE unit test targets and existing solver smoke-test coverage for
       form assembly, postprocessing, time stepping, and analysis summaries.
+
+Verification notes:
+
+- Focused infrastructure tests passed:
+  - `FieldRegistry.*`
+  - `StateAdmissibility.*`
+  - `BoundedUpdatePolicy.*`
+  - `PairedExchange.*`
+  - `ReductionEvaluator.*`
+  - `ExposureAccumulator.*`
+  - `BoundaryDistanceService.*`
+  - `SlidingInterfaceOperators.*`
+  - `FEInfrastructureIntegration.*`
+  - `PostProcessingInfrastructureIntegration.*`
+- Broader FE targets run during implementation:
+  - `test_fe_postprocessing`: passed.
+  - `test_fe_analysis`: passed, with the existing skipped MPI cases unchanged.
+  - `test_fe_levelset`: passed.
+  - `test_fe_geometry`: focused moving-frame coverage passed; the full target
+    still reports the unrelated `LevelSetInterfaceBuilder.ClassifiesCutEdgeCases`
+    failure.
+  - `test_fe_systems`: focused infrastructure coverage passed; the full target
+    still reports unrelated Stokes coupling and gauge-integration failures.
 
 ## Assumptions And Defaults
 

@@ -2488,6 +2488,7 @@ if(FE_BUILD_TESTS)
             set(FE_POSTPROCESSING_TEST_SOURCES
                 Tests/Unit/PostProcessing/test_DerivedResultPostProcessing.cpp
                 Tests/Unit/PostProcessing/test_ExposureAccumulator.cpp
+                Tests/Unit/PostProcessing/test_PostProcessingInfrastructureIntegration.cpp
                 Tests/Unit/PostProcessing/test_Reduction.cpp
                 Tests/Unit/PostProcessing/test_main.cpp
             )
@@ -2611,6 +2612,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_BoundedUpdatePolicy.cpp
 		                Tests/Unit/Systems/test_PairedExchange.cpp
 		                Tests/Unit/Systems/test_StateAdmissibility.cpp
+		                Tests/Unit/Systems/test_FEInfrastructureIntegration.cpp
 		                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
 		                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
 		                Tests/Unit/Systems/test_SearchAccess.cpp
