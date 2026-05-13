@@ -168,7 +168,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       stabilization before enabling `Use_cut_metadata_scale=true` in D18/D38
       fixtures.
 - [ ] Re-run D18 strict tolerance after the solver path is corrected.
-- [ ] Record nonlinear iteration counts, linear iteration counts, and residual
+- [x] Record nonlinear iteration counts, linear iteration counts, and residual
       norms for each D18/D38 qualification attempt.
 - [ ] If active-domain cut cells introduce solver instability, tune
       stabilization only after confirming volume integration and initialization
@@ -247,25 +247,27 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Run the same one-step D18 test with 4 MPI ranks.
 - [x] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge
       pressure.
-- [ ] Run D18 to the current comparison time after one-step checks pass.
-- [ ] Confirm velocity and kinetic energy show dam-break collapse dynamics.
-- [ ] Confirm pressure no longer matches the previous full-volume hydrostatic
+- [x] Run D18 to the current comparison time after one-step checks pass.
+- [x] Confirm velocity and kinetic energy show dam-break collapse dynamics.
+- [x] Confirm pressure no longer matches the previous full-volume hydrostatic
       error pattern.
 - [ ] Compare corrected D18 profile against digitized SPHERIC Test05 D18 data.
+      Not completed in the MPI-4 full-run evidence pass because no digitized
+      D18 profile data file was found in the repository.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.
 
 ## Acceptance Checklist
 
-- [ ] D18 no longer passes or fails based only on the wet-bed front metric.
-- [ ] D18 active-domain assembly uses wet-side cut-volume rules for all
+- [x] D18 no longer passes or fails based only on the wet-bed front metric.
+- [x] D18 active-domain assembly uses wet-side cut-volume rules for all
       Navier-Stokes and VMS volume terms.
-- [ ] D18 pressure initialization and pressure gauge are both wet-side
+- [x] D18 pressure initialization and pressure gauge are both wet-side
       consistent.
-- [ ] D18 velocity field shows physically meaningful collapse dynamics at the
+- [x] D18 velocity field shows physically meaningful collapse dynamics at the
       comparison time.
-- [ ] D18 pressure field no longer remains close to full-volume hydrostatic.
+- [x] D18 pressure field no longer remains close to full-volume hydrostatic.
 - [ ] Serial, MPI-2, and MPI-4 D18 results agree within documented tolerances.
 - [ ] D38 is evaluated only after the D18 active-domain path passes.
 - [ ] Existing non-active-domain free-surface cases keep their current behavior.
@@ -274,12 +276,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Assumptions
 
-- [ ] Negative level-set values represent water in the generated D18/D38
+- [x] Negative level-set values represent water in the generated D18/D38
       fixtures.
-- [ ] Exact cut-volume integration is the required acceptance path.
+- [x] Exact cut-volume integration is the required acceptance path.
 - [x] Smoothed material weighting is a fallback diagnostic, not final benchmark
       qualification.
 - [x] Open-atmosphere D18 should not add artificial interface traction when
       external pressure and surface tension are zero.
-- [ ] D18 kinematic enforcement remains off until wet-side Navier-Stokes
+- [x] D18 kinematic enforcement remains off until wet-side Navier-Stokes
       assembly, initialization, and validation have been corrected.
