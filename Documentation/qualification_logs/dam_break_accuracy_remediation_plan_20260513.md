@@ -168,12 +168,20 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       same linear system.
       Current finding: solver-control routing is corrected and D18 now has a
       concrete FSILS BlockSchur route with
-      `block_layout=[LevelSetVelocity(0:4), Pressure(4:1)]`, but strict
-      one-step runs still stop on a BlockSchur true-residual floor.
+      `block_layout=[LevelSetVelocity(0:4), Pressure(4:1)]`. A larger
+      BlockSchur budget can let some strict linear solves reach the requested
+      tolerance, but the strict one-step case then fails nonlinear convergence;
+      transient line search rejects the accepted PTC direction because every
+      tested step increases the residual. Evidence:
+      `Documentation/qualification_logs/dam_break_d18_strict_blockschur_budget_linesearch_20260513.md`.
 - [x] Add explicit D18/D38 FSILS BlockSchur layout grouping and solver XML
       controls for the `phi`, `Velocity`, and `Pressure` field order.
       Evidence:
       `Documentation/qualification_logs/dam_break_d18_blockschur_layout_20260513.md`.
+- [x] Probe whether the strict D18 BlockSchur issue is resolved by raising the
+      outer budget or enabling transient line search.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_strict_blockschur_budget_linesearch_20260513.md`.
 - [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
 - [x] Implement per-face metadata-scale constants for cut-adjacent facet
