@@ -278,6 +278,10 @@ Setup:
 - negative level-set values denote the water side
 - fluid volume terms use `Active_domain=LevelSetNegative` and
   `Active_domain_method=CutVolume`
+- `Active_domain_method=SmoothedIndicator` is available only as a diagnostic
+  fallback. If `Active_domain_smoothing_width` is omitted or set to zero, the
+  transition width is derived from local cell diameter; accepted D18/D38 runs
+  continue to require exact cut-volume integration.
 
 Reference behavior:
 

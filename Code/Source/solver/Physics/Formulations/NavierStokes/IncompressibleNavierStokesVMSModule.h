@@ -196,6 +196,7 @@ struct IncompressibleNavierStokesVMSOptions {
         FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
         FreeSurfaceActiveDomainMethod active_domain_method{
             FreeSurfaceActiveDomainMethod::CutVolume};
+        FE::Real active_domain_smoothing_width{0.0};
 
         // Dynamic stress balance: sigma(u,p)n = (-p_ext + gamma*kappa)n.
         ScalarValue external_pressure{0.0};

@@ -2130,6 +2130,18 @@ void append_free_surface_bc(
     fs.active_domain_method = parse_free_surface_active_domain_method(
         *active_domain_method, "Free-surface Active_domain_method");
   }
+  if (const auto active_domain_smoothing_width = first_defined_double(
+          bc.params,
+          {"Active_domain_smoothing_width", "ActiveDomainSmoothingWidth",
+           "Free_surface_active_domain_smoothing_width",
+           "FreeSurfaceActiveDomainSmoothingWidth"})) {
+    if (*active_domain_smoothing_width < 0.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free_surface Active_domain_smoothing_width must be nonnegative.");
+    }
+    fs.active_domain_smoothing_width =
+        static_cast<svmp::FE::Real>(*active_domain_smoothing_width);
+  }
   if (fs.implementation == FreeSurfaceImplementation::FittedALE) {
     fs.boundary_marker = bc.boundary_marker;
   } else {

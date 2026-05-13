@@ -474,6 +474,93 @@ TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesOn
 #endif
 }
 
+TEST(NavierStokesInitialConditions, SmoothedIndicatorHydrostaticPressureInitializesOnlyWetSide)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Active-domain hydrostatic initialization test requires native mesh support.";
+#else
+    auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto p_id = system.addField(FE::systems::FieldSpec{
+        .name = "p",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::Unknown,
+    });
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system.setup({}));
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 2.0;
+    opts.viscosity = 0.001;
+    opts.body_force = {0.0, -9.81, 0.0};
+    opts.hydrostatic_pressure_initialization.enabled = true;
+    opts.hydrostatic_pressure_initialization.reference_point = {0.0, 1.0, 0.0};
+    opts.hydrostatic_pressure_initialization.reference_pressure = 100.0;
+    opts.free_surface.push_back(
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation = formulations::navier_stokes::
+                    FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 7,
+                .level_set_field_name = "phi",
+                .level_set_isovalue = 0.0,
+                .active_domain = formulations::navier_stokes::
+                    FreeSurfaceActiveDomain::LevelSetNegative,
+                .active_domain_method = formulations::navier_stokes::
+                    FreeSurfaceActiveDomainMethod::SmoothedIndicator,
+            });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+
+    auto factory = FE::backends::BackendFactory::create(FE::backends::BackendKind::FSILS);
+    auto state = factory->createVector(system.dofHandler().getNumDofs());
+    state->zero();
+
+    module.applyInitialConditions(system, *state);
+    const auto values = state->localSpan();
+
+    const auto* entity_map = system.fieldDofHandler(p_id).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto pressure_offset = system.fieldDofOffset(p_id);
+    const auto& mesh_access = system.meshAccess();
+
+    for (FE::GlobalIndex vertex = 0; vertex < mesh_access.numVertices(); ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(vertex_dofs.size(), 1u);
+        const auto x = mesh_access.getNodeCoordinates(vertex);
+        const bool wet_side = vertex == 0 || vertex == 1;
+        const auto expected = wet_side
+            ? 100.0 + 2.0 * (-9.81) * (x[1] - 1.0)
+            : 100.0;
+        const auto dof = pressure_offset + vertex_dofs.front();
+        ASSERT_GE(dof, 0);
+        ASSERT_LT(static_cast<std::size_t>(dof), values.size());
+        EXPECT_NEAR(values[static_cast<std::size_t>(dof)], expected, 1.0e-12)
+            << "vertex " << vertex;
+    }
+#endif
+}
+
 TEST(NavierStokesPressureGauge, NodePressureConstraintPinsSelectedPressureVertex)
 {
     auto mesh = std::make_shared<TwoQuadStripMeshAccess>();

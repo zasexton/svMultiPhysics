@@ -749,7 +749,13 @@ void applyFreeSurfaceCutCellStabilization(
 struct ActiveVolumeDomain {
     int interface_marker{-1};
     FE::forms::CutVolumeSide side{FE::forms::CutVolumeSide::Negative};
+    FreeSurfaceActiveDomainMethod method{FreeSurfaceActiveDomainMethod::CutVolume};
+    FE::forms::FormExpr indicator{};
 };
+
+[[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system);
 
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept
 {
@@ -782,16 +788,13 @@ struct ActiveVolumeDomain {
 }
 
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
-    const std::vector<FreeSurfaceBoundary>& free_surfaces)
+    const std::vector<FreeSurfaceBoundary>& free_surfaces,
+    const FE::systems::FESystem& system)
 {
     std::optional<ActiveVolumeDomain> active_domain;
     for (const auto& bc : free_surfaces) {
         if (bc.active_domain == FreeSurfaceActiveDomain::None) {
             continue;
-        }
-        if (bc.active_domain_method != FreeSurfaceActiveDomainMethod::CutVolume) {
-            throw std::invalid_argument(
-                "IncompressibleNavierStokesVMSModule: active-domain free-surface volume integration currently requires Active_domain_method=CutVolume");
         }
         if (active_domain.has_value()) {
             throw std::invalid_argument(
@@ -809,7 +812,25 @@ struct ActiveVolumeDomain {
             side = FE::forms::CutVolumeSide::Positive;
             break;
         }
-        active_domain = ActiveVolumeDomain{bc.interface_marker, side};
+        FE::forms::FormExpr indicator{};
+        if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
+            const auto phi = freeSurfaceLevelSet(bc, system);
+            const auto signed_phi =
+                bc.active_domain == FreeSurfaceActiveDomain::LevelSetNegative
+                    ? FE::forms::FormExpr::constant(bc.level_set_isovalue) - phi
+                    : phi - FE::forms::FormExpr::constant(bc.level_set_isovalue);
+            const auto width = bc.active_domain_smoothing_width > FE::Real{0.0}
+                ? FE::forms::FormExpr::constant(bc.active_domain_smoothing_width)
+                : FE::forms::h();
+            indicator = FE::forms::smoothHeaviside(signed_phi, width);
+            FE_LOG_WARNING(
+                "IncompressibleNavierStokesVMSModule: Active_domain_method=SmoothedIndicator is diagnostic and not a final benchmark acceptance path");
+        }
+        active_domain = ActiveVolumeDomain{
+            bc.interface_marker,
+            side,
+            bc.active_domain_method,
+            indicator};
 
         std::ostringstream oss;
         oss << "IncompressibleNavierStokesVMSModule: active-domain free surface "
@@ -818,6 +839,12 @@ struct ActiveVolumeDomain {
             << " Active_domain_method="
             << activeDomainMethodName(bc.active_domain_method)
             << " side=" << cutVolumeSideName(side);
+        if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
+            oss << " smoothing_width="
+                << (bc.active_domain_smoothing_width > FE::Real{0.0}
+                        ? std::to_string(bc.active_domain_smoothing_width)
+                        : std::string("cell_diameter"));
+        }
         FE_LOG_INFO(oss.str());
     }
     return active_domain;
@@ -829,6 +856,9 @@ struct ActiveVolumeDomain {
 {
     if (!active_domain.has_value()) {
         return integrand.dx();
+    }
+    if (active_domain->method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
+        return (active_domain->indicator * integrand).dx();
     }
     return integrand.dCutVolume(active_domain->interface_marker,
                                 active_domain->side);
@@ -1306,7 +1336,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     const auto q = TestField(p_id, *pressure_space_, "q");
 
     const auto active_volume_domain =
-        activeVolumeDomainFor(effective_free_surfaces);
+        activeVolumeDomainFor(effective_free_surfaces, system);
 
     const auto rho = FormExpr::constant(options_.density);
 

@@ -48,7 +48,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Reject active-domain configuration on non-`UnfittedLevelSet`
       free-surface boundaries.
 - [x] Default `Active_domain_method` to `CutVolume`.
-- [ ] Allow `Active_domain_method=SmoothedIndicator` only as a diagnostic or
+- [x] Allow `Active_domain_method=SmoothedIndicator` only as a diagnostic or
       temporary fallback.
 - [x] Document that generated D18/D38 fixtures use negative level-set values as
       the water side.
@@ -110,19 +110,19 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Material-Weighting Fallback Checklist
 
-- [ ] Implement `Active_domain_method=SmoothedIndicator` only after the public
+- [x] Implement `Active_domain_method=SmoothedIndicator` only after the public
       active-domain option exists.
-- [ ] Multiply the same Navier-Stokes and VMS volume integrands by a smoothed
+- [x] Multiply the same Navier-Stokes and VMS volume integrands by a smoothed
       wet indicator when the fallback is selected.
-- [ ] Use the level-set field and isovalue already configured for the
+- [x] Use the level-set field and isovalue already configured for the
       free-surface boundary.
-- [ ] Make the transition width explicit in configuration or derive it from
+- [x] Make the transition width explicit in configuration or derive it from
       local mesh size with a documented default.
-- [ ] Mark this method as diagnostic, approximate, and not sufficient for final
+- [x] Mark this method as diagnostic, approximate, and not sufficient for final
       D18/D38 qualification.
-- [ ] Add regression coverage showing the fallback changes the full-tank
+- [x] Add regression coverage showing the fallback changes the full-tank
       hydrostatic behavior.
-- [ ] Do not use the fallback as the accepted benchmark path unless the exact
+- [x] Do not use the fallback as the accepted benchmark path unless the exact
       cut-volume path is explicitly deferred in a later decision.
 
 ## Hydrostatic Initialization And Gauge Checklist
@@ -248,7 +248,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Negative level-set values represent water in the generated D18/D38
       fixtures.
 - [ ] Exact cut-volume integration is the required acceptance path.
-- [ ] Smoothed material weighting is a fallback diagnostic, not final benchmark
+- [x] Smoothed material weighting is a fallback diagnostic, not final benchmark
       qualification.
 - [x] Open-atmosphere D18 should not add artificial interface traction when
       external pressure and surface tension are zero.
