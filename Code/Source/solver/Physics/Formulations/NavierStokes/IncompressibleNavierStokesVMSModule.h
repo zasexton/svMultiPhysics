@@ -60,6 +60,17 @@ enum class FreeSurfaceImplementation : std::uint8_t {
     UnfittedLevelSet
 };
 
+enum class FreeSurfaceActiveDomain : std::uint8_t {
+    None,
+    LevelSetNegative,
+    LevelSetPositive
+};
+
+enum class FreeSurfaceActiveDomainMethod : std::uint8_t {
+    CutVolume,
+    SmoothedIndicator
+};
+
 enum class FreeSurfaceKinematicEnforcement : std::uint8_t {
     None,
     Penalty,
@@ -180,6 +191,11 @@ struct IncompressibleNavierStokesVMSOptions {
         std::string level_set_field_name{"level_set"};
         std::string generated_interface_domain_id{"free_surface"};
         FE::Real level_set_isovalue{0.0};
+
+        // Optional active-domain restriction for unfitted level-set volume terms.
+        FreeSurfaceActiveDomain active_domain{FreeSurfaceActiveDomain::None};
+        FreeSurfaceActiveDomainMethod active_domain_method{
+            FreeSurfaceActiveDomainMethod::CutVolume};
 
         // Dynamic stress balance: sigma(u,p)n = (-p_ext + gamma*kappa)n.
         ScalarValue external_pressure{0.0};

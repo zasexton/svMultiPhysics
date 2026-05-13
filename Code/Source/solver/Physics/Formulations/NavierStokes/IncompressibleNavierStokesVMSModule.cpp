@@ -332,6 +332,10 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: cut-cell stabilization is only valid for unfitted level-set free surfaces");
         }
+        if (bc.active_domain != FreeSurfaceActiveDomain::None) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: active-domain free-surface volume integration is only valid for unfitted level-set free surfaces");
+        }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
             !ale_enabled) {
             throw std::invalid_argument(

@@ -891,6 +891,14 @@ TEST(MovingDomainPhysics, MovingMeshTangentPathDefaultsToSymbolicRequired)
               FE::forms::GeometryTangentPath::SymbolicRequired);
 }
 
+TEST(MovingDomainPhysics, UnfittedFreeSurfaceActiveDomainDefaultsToInactiveCutVolume)
+{
+    const ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary free_surface{};
+    EXPECT_EQ(free_surface.active_domain, ns::FreeSurfaceActiveDomain::None);
+    EXPECT_EQ(free_surface.active_domain_method,
+              ns::FreeSurfaceActiveDomainMethod::CutVolume);
+}
+
 TEST(MovingDomainPhysics, MeshMotionRegistryTranslatesHarmonicSmoothingEquation)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -2034,6 +2042,25 @@ TEST(MovingDomainPhysics, NavierStokesRejectsCutCellStabilizationOnFittedSurface
         .cut_cell_stabilization = {
             .enabled = true,
         },
+    });
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics, NavierStokesRejectsActiveDomainOnFittedSurface)
+{
+    constexpr int marker = 46;
+    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = marker,
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
     });
 
     FE::systems::FESystem system(mesh);

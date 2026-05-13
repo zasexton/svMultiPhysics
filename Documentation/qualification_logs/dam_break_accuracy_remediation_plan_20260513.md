@@ -26,11 +26,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Public Configuration Checklist
 
-- [ ] Add an explicit active-domain option for unfitted free-surface
+- [x] Add an explicit active-domain option for unfitted free-surface
       Navier-Stokes.
-- [ ] Add a code enum equivalent to:
+- [x] Add a code enum equivalent to:
       `FreeSurfaceActiveDomain { None, LevelSetNegative, LevelSetPositive }`.
-- [ ] Parse the option under the existing free-surface boundary condition block.
+- [x] Parse the option under the existing free-surface boundary condition block.
 - [ ] Use this XML spelling for the accepted D18/D38 path:
 
 ```xml
@@ -41,12 +41,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 </Add_BC>
 ```
 
-- [ ] Keep `Active_domain=None` as the default for backward compatibility.
-- [ ] Reject `Active_domain` values other than `None`, `LevelSetNegative`, and
+- [x] Keep `Active_domain=None` as the default for backward compatibility.
+- [x] Reject `Active_domain` values other than `None`, `LevelSetNegative`, and
       `LevelSetPositive`.
-- [ ] Reject active-domain configuration on non-`UnfittedLevelSet`
+- [x] Reject active-domain configuration on non-`UnfittedLevelSet`
       free-surface boundaries.
-- [ ] Default `Active_domain_method` to `CutVolume`.
+- [x] Default `Active_domain_method` to `CutVolume`.
 - [ ] Allow `Active_domain_method=SmoothedIndicator` only as a diagnostic or
       temporary fallback.
 - [ ] Document that generated D18/D38 fixtures use negative level-set values as
@@ -174,10 +174,10 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Unit Test Checklist
 
-- [ ] Add parser tests for valid active-domain values.
-- [ ] Add parser tests for invalid active-domain values.
-- [ ] Add parser tests proving defaults preserve existing cases.
-- [ ] Add configuration tests rejecting active-domain use on non-unfitted
+- [x] Add parser tests for valid active-domain values.
+- [x] Add parser tests for invalid active-domain values.
+- [x] Add parser tests proving defaults preserve existing cases.
+- [x] Add configuration tests rejecting active-domain use on non-unfitted
       free-surface BCs.
 - [ ] Add cut-volume classification tests for full-negative cells.
 - [ ] Add cut-volume classification tests for full-positive cells.

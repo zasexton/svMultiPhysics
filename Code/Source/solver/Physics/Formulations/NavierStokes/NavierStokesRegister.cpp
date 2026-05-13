@@ -1806,6 +1806,43 @@ parse_free_surface_kinematic_enforcement(std::string_view raw, std::string_view 
       " must be one of None, Penalty, or Nitsche.");
 }
 
+svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain
+parse_free_surface_active_domain(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomain;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "none" || token == "disabled" || token == "off") {
+    return FreeSurfaceActiveDomain::None;
+  }
+  if (token == "levelsetnegative" || token == "negative" || token == "negativelevelset") {
+    return FreeSurfaceActiveDomain::LevelSetNegative;
+  }
+  if (token == "levelsetpositive" || token == "positive" || token == "positivelevelset") {
+    return FreeSurfaceActiveDomain::LevelSetPositive;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of None, LevelSetNegative, or LevelSetPositive.");
+}
+
+svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomainMethod
+parse_free_surface_active_domain_method(std::string_view raw, std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfaceActiveDomainMethod;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "cutvolume" || token == "cutcellvolume" ||
+      token == "exactcutvolume") {
+    return FreeSurfaceActiveDomainMethod::CutVolume;
+  }
+  if (token == "smoothedindicator" || token == "smoothindicator" ||
+      token == "indicator") {
+    return FreeSurfaceActiveDomainMethod::SmoothedIndicator;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of CutVolume or SmoothedIndicator.");
+}
+
 svmp::Physics::formulations::navier_stokes::FreeSurfaceNormalKinematicPolicy
 parse_free_surface_normal_kinematic_policy(std::string_view raw, std::string_view context)
 {
@@ -2079,6 +2116,20 @@ void append_free_surface_bc(
 
   IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary fs{};
   fs.implementation = free_surface_implementation_from_params(bc.params);
+  if (const auto active_domain = first_defined_string(
+          bc.params,
+          {"Active_domain", "ActiveDomain",
+           "Free_surface_active_domain", "FreeSurfaceActiveDomain"})) {
+    fs.active_domain =
+        parse_free_surface_active_domain(*active_domain, "Free-surface Active_domain");
+  }
+  if (const auto active_domain_method = first_defined_string(
+          bc.params,
+          {"Active_domain_method", "ActiveDomainMethod",
+           "Free_surface_active_domain_method", "FreeSurfaceActiveDomainMethod"})) {
+    fs.active_domain_method = parse_free_surface_active_domain_method(
+        *active_domain_method, "Free-surface Active_domain_method");
+  }
   if (fs.implementation == FreeSurfaceImplementation::FittedALE) {
     fs.boundary_marker = bc.boundary_marker;
   } else {
