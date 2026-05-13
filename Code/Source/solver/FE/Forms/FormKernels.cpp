@@ -191,6 +191,32 @@ void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const>
     return ctx.cutVolumeSide() == expected_side;
 }
 
+[[nodiscard]] FormExpr firstScalarProbeComponent(const FormExpr& expr,
+                                                 const FormExprNode::SpaceSignature& signature)
+{
+    switch (signature.field_type) {
+        case FieldType::Scalar:
+            return expr;
+        case FieldType::Tensor:
+        case FieldType::SymmetricTensor:
+            return expr.component(0, 0);
+        default:
+            return expr.component(0);
+    }
+}
+
+[[nodiscard]] FormExpr zeroBilinearProbe(const FormExprNode::SpaceSignature& trial_space,
+                                         const FormExprNode::SpaceSignature& test_space,
+                                         std::string trial_name,
+                                         std::string test_name)
+{
+    const auto u = FormExpr::trialFunction(trial_space, std::move(trial_name));
+    const auto v = FormExpr::testFunction(test_space, std::move(test_name));
+    return FormExpr::constant(0.0) *
+           firstScalarProbeComponent(u, trial_space) *
+           firstScalarProbeComponent(v, test_space);
+}
+
 template<typename Scalar>
 using EvalValue = Value<Scalar>;
 
@@ -15816,6 +15842,9 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
             case IntegralDomain::InterfaceFace:
                 wrapped = dI.dI(term.interface_marker);
                 break;
+            case IntegralDomain::CutVolume:
+                wrapped = dI.dCutVolume(term.interface_marker, term.cut_volume_side);
+                break;
         }
 
         if (!wrapped.isValid()) {
@@ -15827,9 +15856,10 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
     }
 
     if (!tangent_form.isValid()) {
-        const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), "du");
-        const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), "v");
-        tangent_form = (FormExpr::constant(0.0) * inner(u, v)).dx();
+        tangent_form = zeroBilinearProbe(*residual_ir_.trialSpace(),
+                                         *residual_ir_.testSpace(),
+                                         "du",
+                                         "v").dx();
     }
     if (!tangent_form.hasTest() || !tangent_form.hasTrial()) {
         // Tangent can be identically zero for residual terms that are independent
@@ -15843,9 +15873,10 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
             tangent_names.trial.value_or(residual_names.trial.value_or("du"));
         const auto test_name =
             tangent_names.test.value_or(residual_names.test.value_or("v"));
-        const auto u = FormExpr::trialFunction(*residual_ir_.trialSpace(), trial_name);
-        const auto v = FormExpr::testFunction(*residual_ir_.testSpace(), test_name);
-        tangent_form = tangent_form + (FormExpr::constant(0.0) * inner(u, v)).dx();
+        tangent_form = tangent_form + zeroBilinearProbe(*residual_ir_.trialSpace(),
+                                                        *residual_ir_.testSpace(),
+                                                        trial_name,
+                                                        test_name).dx();
     }
 
     FormCompiler compiler;

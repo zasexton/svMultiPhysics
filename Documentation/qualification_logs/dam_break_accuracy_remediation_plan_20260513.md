@@ -145,7 +145,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Solver And Time-Integration Checklist
 
-- [ ] Keep the current time-step setup unchanged until active-domain assembly is
+- [x] Keep the current time-step setup unchanged until active-domain assembly is
       verified.
 - [ ] After active-domain assembly passes smoke tests, tighten D18 nonlinear
       relative tolerance to `1e-6`.
@@ -204,6 +204,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       install duplicate full `.dx()` kernels for the same terms.
 - [x] Register generated level-set cut-integration context before
       active-domain transient assembly.
+- [x] Preserve cut-volume measures when rebuilding symbolic tangent forms.
+- [x] Keep mixed-field zero tangent probes shape-compatible for cut-volume
+      assembly.
 - [x] Add hydrostatic initialization tests for wet-side-only pressure.
 - [x] Add gauge validation tests for dry and near-interface nodes.
 - [x] Add XML ingestion coverage proving active-domain free-surface boundary
@@ -211,13 +214,13 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Integration And Qualification Checklist
 
-- [ ] Run a one-step D18 serial smoke test after active-domain assembly is
+- [x] Run a one-step D18 serial smoke test after active-domain assembly is
       implemented.
-- [ ] Confirm the log reports `Active_domain=LevelSetNegative` and
+- [x] Confirm the log reports `Active_domain=LevelSetNegative` and
       `Active_domain_method=CutVolume`.
-- [ ] Confirm wet volume is nonzero and physically consistent with the initial
+- [x] Confirm wet volume is nonzero and physically consistent with the initial
       D18 level set.
-- [ ] Confirm pressure is no longer initialized as full-tank hydrostatic in the
+- [x] Confirm pressure is no longer initialized as full-tank hydrostatic in the
       dry region.
 - [ ] Run the same one-step D18 test with 2 MPI ranks.
 - [ ] Run the same one-step D18 test with 4 MPI ranks.

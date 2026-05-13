@@ -15,6 +15,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
@@ -710,6 +711,59 @@ TEST(CutCellForms, CutVolumeIntegralJITCompilerEmitsMarkerSideKernels)
     EXPECT_TRUE(saw_51_negative);
     EXPECT_TRUE(saw_51_positive);
     EXPECT_TRUE(saw_52_negative);
+}
+
+TEST(CutCellForms, SymbolicTangentPreservesCutVolumeMeasure)
+{
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual =
+        ((u * u + Real(0.25) * u) * v).dCutVolume(73, CutVolumeSide::Positive);
+
+    FormCompiler compiler;
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+    const auto& tangent = kernel.tangentIR();
+    ASSERT_TRUE(tangent.isCompiled());
+    EXPECT_TRUE(tangent.hasCutVolumeTerms());
+    EXPECT_FALSE(tangent.hasCellTerms());
+    ASSERT_FALSE(tangent.terms().empty());
+    for (const auto& term : tangent.terms()) {
+        EXPECT_EQ(term.domain, IntegralDomain::CutVolume);
+        EXPECT_EQ(term.interface_marker, 73);
+        EXPECT_EQ(term.cut_volume_side, CutVolumeSide::Positive);
+    }
+}
+
+TEST(CutCellForms, ZeroTangentProbeSupportsMixedCutVolumeBlocks)
+{
+    requireLLVMJITOrSkip();
+
+    auto base = std::make_shared<svmp::FE::spaces::H1Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/1);
+    svmp::FE::spaces::ProductSpace velocity_space(base, /*components=*/3);
+    svmp::FE::spaces::H1Space pressure_space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(velocity_space, "u");
+    const auto q = TestFunction(pressure_space, "q");
+    const auto residual =
+        (FormExpr::constant(0.0) * u.component(0) * q).dCutVolume(91, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+    ASSERT_TRUE(kernel.tangentIR().isCompiled());
+
+    auto jit = svmp::FE::forms::jit::JITCompiler::getOrCreate(
+        svmp::FE::forms::test::makeUnitTestJITOptions());
+    ASSERT_NE(jit, nullptr);
+    const auto compiled = jit->compile(kernel.tangentIR());
+    ASSERT_TRUE(compiled.ok) << compiled.message;
 }
 
 TEST(CutCellForms, CutMetadataResidualTangentMatchesADAndFiniteDifferenceVerification)
