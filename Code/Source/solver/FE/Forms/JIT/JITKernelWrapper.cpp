@@ -153,6 +153,25 @@ struct RequestedKernelOutputs {
     return false;
 }
 
+[[nodiscard]] bool wrappedKernelHasCutVolumeTerms(const assembly::AssemblyKernel& kernel) noexcept
+{
+    if (const auto* k = dynamic_cast<const FormKernel*>(&kernel)) {
+        return k->ir().hasCutVolumeTerms();
+    }
+    if (const auto* k = dynamic_cast<const LinearFormKernel*>(&kernel)) {
+        return k->bilinearIR().hasCutVolumeTerms() ||
+               (k->linearIR().has_value() && k->linearIR()->hasCutVolumeTerms());
+    }
+    if (const auto* k = dynamic_cast<const NonlinearFormKernel*>(&kernel)) {
+        return k->residualIR().hasCutVolumeTerms();
+    }
+    if (const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(&kernel)) {
+        return k->residualIR().hasCutVolumeTerms() ||
+               k->tangentIR().hasCutVolumeTerms();
+    }
+    return false;
+}
+
 void traceSpecialization(const JITKernelWrapper* wrapper,
                          const assembly::AssemblyKernel& fallback,
                          std::uint64_t revision,
@@ -469,6 +488,10 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         fallback_->computeCell(ctx, output);
         return;
     }
+    if (wrappedKernelHasCutVolumeTerms(*fallback_)) {
+        fallback_->computeCell(ctx, output);
+        return;
+    }
 
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
@@ -699,6 +722,22 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
     maybeCompile();
     if (!canUseJIT()) {
+        if (fallback_->supportsCellBatch()) {
+            fallback_->computeCellBatch(
+                std::span<const assembly::AssemblyContext* const>(contexts.data(), n),
+                std::span<assembly::KernelOutput>(outputs.data(), n));
+            return;
+        }
+
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (contexts[idx] == nullptr) {
+                continue;
+            }
+            fallback_->computeCell(*contexts[idx], outputs[idx]);
+        }
+        return;
+    }
+    if (wrappedKernelHasCutVolumeTerms(*fallback_)) {
         if (fallback_->supportsCellBatch()) {
             fallback_->computeCellBatch(
                 std::span<const assembly::AssemblyContext* const>(contexts.data(), n),
@@ -3135,6 +3174,10 @@ void JITKernelWrapper::maybeCompile()
             FE_LOG_WARNING("JIT requested for kernel '" + fallback_->name() +
                            "', but this kernel type is not JIT-accelerated yet; using interpreter.");
         }
+        return;
+    }
+
+    if (wrappedKernelHasCutVolumeTerms(*fallback_)) {
         return;
     }
 

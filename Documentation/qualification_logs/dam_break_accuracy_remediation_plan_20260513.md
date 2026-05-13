@@ -75,6 +75,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Route cut-volume kernels through `CutDomainAssembler`.
 - [x] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
       kernels for the same residual terms.
+- [x] Ensure JIT-enabled cut-volume Forms kernels use the marker/side-aware
+      interpreter fallback until native cut-volume code generation carries
+      cut-volume marker and side context.
 - [ ] Add interpreter and compiled/JIT support for the new integral domain.
 - [x] Add tests proving constant-field cut-volume integrals match expected
       negative and positive volume fractions.
@@ -186,6 +189,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add constant-integral tests for positive-side volume rules.
 - [x] Add Forms tests for `IntegralDomain::CutVolume` residual assembly.
 - [x] Add Forms tests for cut-volume tangent/Jacobian assembly.
+- [x] Add Forms tests covering JIT-enabled cut-volume wrapper fallback.
 - [ ] Add Navier-Stokes installation tests proving active-domain cases install
       cut-volume kernels.
 - [ ] Add Navier-Stokes installation tests proving active-domain cases do not

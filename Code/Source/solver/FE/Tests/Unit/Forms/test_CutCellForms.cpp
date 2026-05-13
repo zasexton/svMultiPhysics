@@ -11,6 +11,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITFunctionalKernelWrapper.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -909,6 +911,13 @@ TEST(CutCellForms, CutVolumeFormTermsFilterByMarkerAndSide)
     FormCompiler compiler;
     auto ir = compiler.compileResidual(residual);
     NonlinearFormKernel kernel(std::move(ir), ADMode::Forward, NonlinearKernelOutput::Both);
+    auto jit_ir = compiler.compileResidual(residual);
+    auto jit_fallback = std::make_shared<NonlinearFormKernel>(
+        std::move(jit_ir), ADMode::Forward, NonlinearKernelOutput::Both);
+    JITOptions jit_options;
+    jit_options.enable = true;
+    jit_options.specialization.enable = false;
+    svmp::FE::forms::jit::JITKernelWrapper jit_kernel(jit_fallback, jit_options);
 
     const std::vector<Real> solution = {Real(0.16), Real(-0.04), Real(0.09), Real(0.02)};
     const JITConstants constants;
@@ -916,21 +925,21 @@ TEST(CutCellForms, CutVolumeFormTermsFilterByMarkerAndSide)
     options.include_interface_rules = false;
     options.volume_marker = 51;
 
-    const auto summary = svmp::FE::assembly::assembleCutDomains(
-        cut_context,
-        kernel,
-        [&](const svmp::FE::assembly::CutRuleAssemblyRequest& request,
-            AssemblyContext& ctx) {
-            ASSERT_NE(request.rule, nullptr);
-            populateP1ReferenceTetraCutContext(
-                ctx, *request.rule, space, kernel.getRequiredData(), constants, solution);
-        },
-        options);
+    auto assemble_with = [&](svmp::FE::assembly::AssemblyKernel& active_kernel) {
+        return svmp::FE::assembly::assembleCutDomains(
+            cut_context,
+            active_kernel,
+            [&](const svmp::FE::assembly::CutRuleAssemblyRequest& request,
+                AssemblyContext& ctx) {
+                ASSERT_NE(request.rule, nullptr);
+                populateP1ReferenceTetraCutContext(
+                    ctx, *request.rule, space, active_kernel.getRequiredData(), constants, solution);
+            },
+            options);
+    };
 
-    ASSERT_EQ(summary.volume_rule_count, std::size_t{2});
-    EXPECT_EQ(summary.skipped_rule_count, std::size_t{1});
-    ASSERT_TRUE(summary.hasVector());
-    ASSERT_TRUE(summary.hasMatrix());
+    const auto summary = assemble_with(kernel);
+    const auto jit_summary = assemble_with(jit_kernel);
 
     std::vector<Real> expected_vector(4u, Real(0.0));
     std::vector<Real> expected_matrix(16u, Real(0.0));
@@ -959,14 +968,22 @@ TEST(CutCellForms, CutVolumeFormTermsFilterByMarkerAndSide)
     accumulate_expected(cut_context.volumeRules()[0], Real(2.0));
     accumulate_expected(cut_context.volumeRules()[1], Real(3.0));
 
-    ASSERT_EQ(summary.total_output.local_vector.size(), expected_vector.size());
-    ASSERT_EQ(summary.total_output.local_matrix.size(), expected_matrix.size());
-    for (std::size_t i = 0u; i < expected_vector.size(); ++i) {
-        EXPECT_NEAR(summary.total_output.local_vector[i], expected_vector[i], Real(1.0e-13));
-    }
-    for (std::size_t i = 0u; i < expected_matrix.size(); ++i) {
-        EXPECT_NEAR(summary.total_output.local_matrix[i], expected_matrix[i], Real(1.0e-13));
-    }
+    auto expect_summary = [&](const auto& actual) {
+        ASSERT_EQ(actual.volume_rule_count, std::size_t{2});
+        EXPECT_EQ(actual.skipped_rule_count, std::size_t{1});
+        ASSERT_TRUE(actual.hasVector());
+        ASSERT_TRUE(actual.hasMatrix());
+        ASSERT_EQ(actual.total_output.local_vector.size(), expected_vector.size());
+        ASSERT_EQ(actual.total_output.local_matrix.size(), expected_matrix.size());
+        for (std::size_t i = 0u; i < expected_vector.size(); ++i) {
+            EXPECT_NEAR(actual.total_output.local_vector[i], expected_vector[i], Real(1.0e-13));
+        }
+        for (std::size_t i = 0u; i < expected_matrix.size(); ++i) {
+            EXPECT_NEAR(actual.total_output.local_matrix[i], expected_matrix[i], Real(1.0e-13));
+        }
+    };
+    expect_summary(summary);
+    expect_summary(jit_summary);
 }
 
 TEST(CutCellForms, CutSensitivityTerminalsDriveSymbolicNewtonTangentConvergence)
