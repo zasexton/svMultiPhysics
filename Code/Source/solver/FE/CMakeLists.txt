@@ -942,6 +942,7 @@ set(FE_POSTPROCESSING_HEADERS
     PostProcessing/DerivedResultRegistry.h
     PostProcessing/DerivedResultEvaluator.h
     PostProcessing/DerivedResultOutput.h
+    PostProcessing/ExposureAccumulator.h
     PostProcessing/Reduction.h
 )
 
@@ -950,6 +951,7 @@ set(FE_POSTPROCESSING_SOURCES
     PostProcessing/DerivedResultRegistry.cpp
     PostProcessing/DerivedResultEvaluator.cpp
     PostProcessing/DerivedResultOutput.cpp
+    PostProcessing/ExposureAccumulator.cpp
     PostProcessing/Reduction.cpp
 )
 
@@ -2481,6 +2483,7 @@ if(FE_BUILD_TESTS)
         if(FE_WITH_MESH AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/PostProcessing/test_main.cpp)
             set(FE_POSTPROCESSING_TEST_SOURCES
                 Tests/Unit/PostProcessing/test_DerivedResultPostProcessing.cpp
+                Tests/Unit/PostProcessing/test_ExposureAccumulator.cpp
                 Tests/Unit/PostProcessing/test_Reduction.cpp
                 Tests/Unit/PostProcessing/test_main.cpp
             )

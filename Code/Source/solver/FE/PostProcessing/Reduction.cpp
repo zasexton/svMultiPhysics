@@ -38,8 +38,8 @@ namespace {
 
 } // namespace
 
-bool ReductionEvaluator::inRegion(const ReductionRegion& region,
-                                  const ReductionSample& sample)
+bool ReductionEvaluator::sampleInRegion(const ReductionRegion& region,
+                                        const ReductionSample& sample)
 {
     switch (region.kind) {
         case ReductionRegionKind::WholeDomain:
@@ -70,7 +70,7 @@ ThresholdReductionResult ReductionEvaluator::thresholdMeasure(
     ThresholdReductionResult result;
     result.sample_count = static_cast<std::uint64_t>(samples.size());
     for (const auto& sample : samples) {
-        if (!inRegion(definition.region, sample)) {
+        if (!sampleInRegion(definition.region, sample)) {
             continue;
         }
         if (matchesThreshold(sample.value, definition.sense, definition.threshold)) {
@@ -88,7 +88,7 @@ ThresholdReductionResult ReductionEvaluator::thresholdIntegral(
     ThresholdReductionResult result = thresholdMeasure(definition, samples);
     result.integral = 0.0;
     for (const auto& sample : samples) {
-        if (!inRegion(definition.region, sample)) {
+        if (!sampleInRegion(definition.region, sample)) {
             continue;
         }
         if (matchesThreshold(sample.value, definition.sense, definition.threshold)) {
@@ -121,7 +121,7 @@ HistogramResult ReductionEvaluator::histogram(const HistogramDefinition& definit
     result.bin_edges.back() = definition.upper_bound;
 
     for (const auto& sample : samples) {
-        if (!inRegion(definition.region, sample)) {
+        if (!sampleInRegion(definition.region, sample)) {
             continue;
         }
         const Real weight = sampleWeight(sample, definition.weighted);
@@ -161,7 +161,7 @@ std::optional<Real> ReductionEvaluator::percentile(
     std::vector<std::pair<Real, Real>> values;
     values.reserve(samples.size());
     for (const auto& sample : samples) {
-        if (!inRegion(definition.region, sample)) {
+        if (!sampleInRegion(definition.region, sample)) {
             continue;
         }
         const Real weight = sampleWeight(sample, definition.weighted);
@@ -209,7 +209,7 @@ MinMaxPercentileSummary ReductionEvaluator::minMaxPercentileSummary(
 
     bool have_value = false;
     for (const auto& sample : samples) {
-        if (!inRegion(definition.region, sample)) {
+        if (!sampleInRegion(definition.region, sample)) {
             continue;
         }
         if (!have_value) {

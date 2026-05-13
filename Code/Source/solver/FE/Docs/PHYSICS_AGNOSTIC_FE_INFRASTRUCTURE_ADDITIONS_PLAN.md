@@ -231,33 +231,33 @@ without encoding biological damage or turbulence meanings.
 
 Checklist:
 
-- [ ] Add an `ExposureAccumulator` utility.
-- [ ] Support accumulation forms:
-  - [ ] time above threshold
-  - [ ] time below threshold
-  - [ ] integral of positive excess
-  - [ ] integral of squared positive excess
-  - [ ] running maximum
-  - [ ] running minimum
-- [ ] Support storage scopes:
-  - [ ] node
-  - [ ] cell
-  - [ ] quadrature point
-  - [ ] region aggregate
-- [ ] Reuse existing auxiliary history/state storage where possible.
-- [ ] Allow the driving quantity to be:
-  - [ ] field value
-  - [ ] derived expression
-  - [ ] auxiliary value
-  - [ ] callback-evaluated quantity
-- [ ] Add restart-safe serialization if auxiliary state restart support already
+- [x] Add an `ExposureAccumulator` utility.
+- [x] Support accumulation forms:
+  - [x] time above threshold
+  - [x] time below threshold
+  - [x] integral of positive excess
+  - [x] integral of squared positive excess
+  - [x] running maximum
+  - [x] running minimum
+- [x] Support storage scopes:
+  - [x] node
+  - [x] cell
+  - [x] quadrature point
+  - [x] region aggregate
+- [x] Reuse existing auxiliary history/state storage where possible.
+- [x] Allow the driving quantity to be:
+  - [x] field value
+  - [x] derived expression
+  - [x] auxiliary value
+  - [x] callback-evaluated quantity
+- [x] Add restart-safe serialization if auxiliary state restart support already
       exists.
-- [ ] Add tests for:
-  - [ ] constant signal accumulation
-  - [ ] threshold crossing over multiple time steps
-  - [ ] reset behavior
-  - [ ] QP/cell/node storage modes
-  - [ ] integration with time history
+- [x] Add tests for:
+  - [x] constant signal accumulation
+  - [x] threshold crossing over multiple time steps
+  - [x] reset behavior
+  - [x] QP/cell/node storage modes
+  - [x] integration with time history
 
 Implementation notes:
 

@@ -118,6 +118,11 @@ struct MinMaxPercentileSummary {
 
 class ReductionEvaluator {
 public:
+    static bool sampleInRegion(const ReductionRegion& region,
+                               const ReductionSample& sample);
+
+    static Real sampleWeight(const ReductionSample& sample, bool weighted);
+
     static ThresholdReductionResult thresholdMeasure(
         const ThresholdReductionDefinition& definition,
         std::span<const ReductionSample> samples);
@@ -135,10 +140,6 @@ public:
     static MinMaxPercentileSummary minMaxPercentileSummary(
         const MinMaxPercentileSummaryDefinition& definition,
         std::span<const ReductionSample> samples);
-
-private:
-    static bool inRegion(const ReductionRegion& region, const ReductionSample& sample);
-    static Real sampleWeight(const ReductionSample& sample, bool weighted);
 };
 
 } // namespace post
