@@ -245,7 +245,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       validation instead of an assembly crash.
 - [x] Run the same one-step D18 test with 2 MPI ranks.
 - [x] Run the same one-step D18 test with 4 MPI ranks.
-- [ ] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge
+- [x] Compare serial, MPI-2, and MPI-4 wet volume, pressure range, and gauge
       pressure.
 - [ ] Run D18 to the current comparison time after one-step checks pass.
 - [ ] Confirm velocity and kinetic energy show dam-break collapse dynamics.

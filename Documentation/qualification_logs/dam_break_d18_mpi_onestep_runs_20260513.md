@@ -31,5 +31,23 @@ with only `Number_of_time_steps` changed to `1`.
   precision needed for this smoke check.
 - The MPI-4 active wet volume agrees with the serial and MPI-2 active wet
   volumes to the precision needed for this smoke check.
-- Pressure range and gauge comparisons still need to be extracted before the
-  serial/MPI agreement item can be checked.
+- Pressure extrema and the node-256 pressure gauge agree across serial, MPI-2,
+  and MPI-4 to the precision needed for this smoke check.
+
+## Serial/MPI One-Step Comparison
+
+Pressure diagnostics were extracted from the serial `result_001.vtu` and the
+MPI `result_001.pvtu` files. The MPI PVTU files include ghost points, so this
+comparison uses pressure minimum, pressure maximum, and the configured gauge
+node rather than pointwise means.
+
+| Run | Active wet volume | Cut-cell wet volume | Pressure min | Pressure max | Gauge node 256 pressure |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Serial | `0.001587` | `0.000157407` | `-0.004173629881460488` | `1468.8514642144446` | `643.659423052` |
+| MPI-2 | `0.001586995` | `0.00015740662` | `-0.004138792283994896` | `1468.851462771724` | `643.659423052` |
+| MPI-4 | `0.001586997` | `0.00015740672` | `-0.004323321966844228` | `1468.8514938250307` | `643.659423052` |
+
+- Active wet volumes round to the same D18 wet-side volume across all three
+  runs.
+- Gauge pressure is identical to the printed precision.
+- Pressure maximum differs by less than `3.2e-05` across the three runs.
