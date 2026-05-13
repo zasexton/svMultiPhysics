@@ -301,6 +301,24 @@ const EquationParameters* first_equation(const Parameters& params)
   return nullptr;
 }
 
+const EquationParameters* primary_solver_equation(const Parameters& params)
+{
+  const auto* first = first_equation(params);
+  if (first == nullptr) {
+    return nullptr;
+  }
+
+  if (first->type.defined() && lower_copy(first->type.value()) == "level_set") {
+    for (const auto* e : params.equation_parameters) {
+      if (e && e->type.defined() && lower_copy(e->type.value()) == "fluid") {
+        return e;
+      }
+    }
+  }
+
+  return first;
+}
+
 struct ActiveCutVolumeRequest {
   std::string level_set_field_name{"level_set"};
   std::string domain_id{"free_surface"};
@@ -745,7 +763,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   }
 
   svmp::FE::timestepping::NewtonOptions newton_opts{};
-  if (const auto* eq = first_equation(params)) {
+  if (const auto* eq = primary_solver_equation(params)) {
     if (eq->max_iterations.defined()) {
       newton_opts.max_iterations = eq->max_iterations.value();
     }
@@ -867,7 +885,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     opts.generalized_alpha_rho_inf = params.general_simulation_parameters.spectral_radius_of_infinite_time_step.value();
   }
 
-  if (const auto* eq = first_equation(params)) {
+  if (const auto* eq = primary_solver_equation(params)) {
     if (eq->max_iterations.defined()) {
       opts.newton.max_iterations = eq->max_iterations.value();
     }

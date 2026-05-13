@@ -138,17 +138,13 @@ toFsilsBlockSchurMomentumApproximation(const std::string& value)
                            value + "'.");
 }
 
+const EquationParameters* selectSolverEquation(const Parameters& params);
+
 svmp::FE::backends::BackendKind selectBackend(const Parameters& params)
 {
   using svmp::FE::backends::BackendKind;
 
-  const EquationParameters* eq = nullptr;
-  for (const auto* e : params.equation_parameters) {
-    if (e) {
-      eq = e;
-      break;
-    }
-  }
+  const EquationParameters* eq = selectSolverEquation(params);
 
   if (!eq || !eq->linear_solver.linear_algebra.defined()) {
     return BackendKind::FSILS;
@@ -224,6 +220,34 @@ bool firstEquationTypeIs(const Parameters& params, const std::string& equation_t
   return false;
 }
 
+const EquationParameters* firstEquation(const Parameters& params)
+{
+  for (const auto* e : params.equation_parameters) {
+    if (e) {
+      return e;
+    }
+  }
+  return nullptr;
+}
+
+const EquationParameters* selectSolverEquation(const Parameters& params)
+{
+  const auto* first = firstEquation(params);
+  if (first == nullptr) {
+    return nullptr;
+  }
+
+  if (first->type.defined() && lower_copy(first->type.value()) == "level_set") {
+    for (const auto* e : params.equation_parameters) {
+      if (e && e->type.defined() && lower_copy(e->type.value()) == "fluid") {
+        return e;
+      }
+    }
+  }
+
+  return first;
+}
+
 svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& params,
                                                          svmp::FE::backends::BackendKind backend_kind)
 {
@@ -231,13 +255,7 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
 
   SolverOptions opts{};
 
-  const EquationParameters* eq = nullptr;
-  for (const auto* e : params.equation_parameters) {
-    if (e) {
-      eq = e;
-      break;
-    }
-  }
+  const EquationParameters* eq = selectSolverEquation(params);
 
   if (!eq) {
     return opts;

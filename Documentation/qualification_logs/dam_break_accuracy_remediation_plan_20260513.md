@@ -158,10 +158,17 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       qualification run, unless solver logs show a documented scaling issue.
 - [x] Record the D18 strict-tolerance solver floor in
       `Documentation/qualification_logs/dam_break_d18_solver_tolerance_runs_20260513.md`.
+- [x] Route coupled level-set/fluid solver backend, linear solver, and Newton
+      controls through the fluid equation for D18-style equation ordering.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_solver_routing_strict_tolerance_attempts_20260513.md`.
 - [ ] Add a robust solver path for the coupled `phi`, `Velocity`, and
       `Pressure` D18 layout, or restructure D18 so the Navier-Stokes solve can
       use a velocity-pressure solver block without the level-set field in the
       same linear system.
+      Current finding: solver-control routing is corrected, but strict
+      one-step runs still stop on a true-residual floor or pseudo-transient
+      nonlinear stagnation.
 - [x] Fix the active-domain `Use_cut_metadata_scale=true` assembly crash before
       using metadata-scaled cut-cell stabilization for D18.
 - [ ] Implement per-face metadata-scale constants for cut-adjacent facet
