@@ -579,6 +579,30 @@ Done when:
   configurations, and any runtime defects or benchmark gaps are captured with
   follow-up fixes.
 
+## Phase 17 - Free-Surface Transient Benchmark Qualification
+
+Goal: extend the generated-case runs beyond startup checks so benchmark
+comparisons use physically meaningful transient horizons.
+
+Checklist:
+
+- [x] Add a reproducible SPHERIC Test05 profile comparison utility for
+  digitized free-surface benchmark profiles.
+- [ ] Run the Test05 D18 wet-bed case to the first published profile time and
+  compare the extracted level-set interface against the reference data.
+- [ ] Repeat benchmark-relevant transient checks across serial, MPI-2, and
+  MPI-4 where wall time and solver robustness allow.
+- [ ] Record fitted ALE free-surface transient root-cause findings and required
+  implementation follow-up.
+- [ ] Record free-surface benchmark accuracy and performance results with
+  enough time steps to support the comparisons.
+
+Done when:
+
+- The transient benchmark evidence identifies which generated free-surface
+  cases are quantitatively comparable today and which cases need implementation
+  work before they can be used as full validation targets.
+
 ## Completion Criteria
 
 - [x] `Code/Source/solver/FE/LevelSet` contains all reusable level-set
