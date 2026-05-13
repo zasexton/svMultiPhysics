@@ -216,6 +216,10 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       comparison time.
 - [x] Keep the extracted `phi=0` front/profile plot, but label it as an
       interface diagnostic until field checks pass.
+- [x] Add digitized SPHERIC Test05 D18/D38 reference profile tables from the
+      public benchmark archive.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_profile_comparison_20260513/README.md`.
 
 ## Unit Test Checklist
 
@@ -278,8 +282,10 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Confirm pressure no longer matches the previous full-volume hydrostatic
       error pattern.
 - [ ] Compare corrected D18 profile against digitized SPHERIC Test05 D18 data.
-      Not completed in the MPI-4 full-run evidence pass because no digitized
-      D18 profile data file was found in the repository.
+      Reference data now exists in the repository. The existing corrected
+      MPI-4 output stops at `0.040 s`, while the first D18 reference profile is
+      at `0.156 s`; the checked-in D18/D38 inputs now run for 312 steps so
+      `result_312` can be compared against `d18_1.dat`.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.

@@ -1,0 +1,73 @@
+{
+  "field_metrics": {
+    "cells": 1596,
+    "dry_point_count": 388,
+    "kinetic_energy": 0.011892269698111017,
+    "kinetic_energy_growth": 0.011892269698111017,
+    "largest_velocity": {
+      "phi": -0.014241684460973018,
+      "point_index": 417,
+      "region": "wet",
+      "speed": 0.43128009111533566
+    },
+    "largest_velocity_in_wet_region": true,
+    "phi_max": 0.1620001087895369,
+    "phi_min": -0.016039647553089394,
+    "points": 502,
+    "pressure_gauge": {
+      "expected_initial_hydrostatic_pressure": 643.659423052,
+      "found": true,
+      "hydrostatic_reference_error": 0.0,
+      "matches": 1,
+      "node_id": 256,
+      "pressure": 643.659423052,
+      "pressure_max_across_matches": 643.659423052,
+      "pressure_min_across_matches": 643.659423052
+    },
+    "pressure_max": 1468.8752458421454,
+    "pressure_mean": 324.49865173914634,
+    "pressure_min": -0.4887446012009375,
+    "result": "/tmp/svmp_d18_mpi4_full_GexjZk/result_080.pvtu",
+    "velocity_max": 0.43128009111533566,
+    "velocity_mean": 0.025793725723876962,
+    "velocity_wet_mean": 0.09562483807678604,
+    "wet_point_count": 114,
+    "wet_volume": 0.001574256463463625
+  },
+  "profile_comparison": {
+    "metrics": {
+      "coverage_fraction": 1.0,
+      "direct_coverage_fraction": 0.5454545454545454,
+      "direct_samples": 30,
+      "front_error_m": -0.34957736214581125,
+      "front_position_role": "diagnostic_only",
+      "interface_points_in_window": 67,
+      "interface_points_total": 409,
+      "interpolated_samples": 25,
+      "mae_m": 0.02889566597938519,
+      "max_abs_error_m": 0.06816173138106507,
+      "mean_error_m": -0.01831777071875044,
+      "peak_y_error_m": 0.01217173138106506,
+      "reference_front_x_m": 1.030093,
+      "reference_peak_y_m": 0.12707000000000002,
+      "reference_points": 55,
+      "rmse_m": 0.03276055991180921,
+      "sample_radius_m": 0.013685000000000003,
+      "samples": 55,
+      "simulated_front_x_m": 0.6805156378541887,
+      "simulated_peak_y_m": 0.13924173138106508
+    },
+    "plot_output": "Documentation/qualification_logs/dam_break_d18_profile_comparison_20260513/d18_1_profile.png",
+    "reference_profile": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_1.dat",
+    "x_window_m": [
+      0.37781,
+      1.030093
+    ]
+  },
+  "result": "/tmp/svmp_d18_mpi4_full_GexjZk/result_080.pvtu",
+  "scalar": "phi",
+  "validation": {
+    "failures": [],
+    "passed": true
+  }
+}

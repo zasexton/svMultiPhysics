@@ -39,6 +39,10 @@ TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "full_volume_hydrostatic_pressure": 17.6869,
     "hydrostatic_error_range": [-17.6869, 0.0],
 }
+TEST05_REFERENCE_PROFILE_TIMES = {
+    18: [0.156, 0.219, 0.281, 0.343, 0.406, 0.468, 0.531],
+    38: [0.156, 0.219, 0.281, 0.343, 0.406, 0.468, 0.531, 0.593],
+}
 
 warnings.filterwarnings("ignore", message="Meshio doesn't know keyword.*")
 
@@ -826,6 +830,19 @@ def test05_pressure_gauge_verification(gauge_metadata: dict) -> dict:
     }
 
 
+def test05_reference_profiles(wet_depth_mm: int) -> list[dict[str, object]]:
+    return [
+        {
+            "time_s": time_s,
+            "path": (
+                "tests/cases/fluid/open_vessel_free_surface/reference_profiles/"
+                f"spheric_test05_wet_bed/d{wet_depth_mm}_{index}.dat"
+            ),
+        }
+        for index, time_s in enumerate(TEST05_REFERENCE_PROFILE_TIMES[wet_depth_mm], start=1)
+    ]
+
+
 def generate_spheric_test05() -> None:
     domain = Box(0.0, 1.20, 0.0, 0.18, 0.0, 0.03)
     gate_x = 0.38
@@ -858,6 +875,7 @@ def generate_spheric_test05() -> None:
                 "benchmark": f"SPHERIC Test 05 wet-bed dam break d={wet_depth_mm} mm",
                 "representation": "unfitted_level_set",
                 "source_urls": source_urls,
+                "reference_profiles": test05_reference_profiles(wet_depth_mm),
                 "mesh_tools": ["PyVista", "TetGen", "MMG"],
                 "dimensions_m": {
                     "initial_column_height": dam_height,
@@ -877,7 +895,7 @@ def generate_spheric_test05() -> None:
             h=0.035,
             fitted=False,
             time_step=0.0005,
-            time_steps=80,
+            time_steps=312,
             active_domain="LevelSetNegative",
             use_cut_metadata_scale=True,
             use_blockschur_solver=True,

@@ -75,10 +75,13 @@ remains on the wet side and stays at the expected initial hydrostatic reference.
 
 ## Remaining Work
 
-- A corrected profile comparison was not run because no digitized SPHERIC
-  Test05 D18 profile data file was found in the repository.
-- D38 should remain deferred until the D18 profile comparison and strict
-  tolerance solver path are completed.
+- Digitized SPHERIC Test05 D18/D38 reference profile tables are now available
+  under
+  `tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed`.
+- This run ended at `0.040 s`, while the first D18 profile table is labeled
+  `0.156 s`; it is not a time-aligned profile qualification run.
+- D38 should remain deferred until the D18 profile comparison at `0.156 s` and
+  strict tolerance solver path are completed.
 - This full-run evidence used `Use_cut_metadata_scale=false`. A later one-step
   smoke check enabled metadata scaling after per-face constants were
   implemented; a full rerun with that option remains pending for final

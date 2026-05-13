@@ -43,6 +43,36 @@
     "previous_invalid_d18_initial_phi": -0.001806,
     "previous_invalid_d18_node_id": 279
   },
+  "reference_profiles": [
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_1.dat",
+      "time_s": 0.156
+    },
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_2.dat",
+      "time_s": 0.219
+    },
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_3.dat",
+      "time_s": 0.281
+    },
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_4.dat",
+      "time_s": 0.343
+    },
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_5.dat",
+      "time_s": 0.406
+    },
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_6.dat",
+      "time_s": 0.468
+    },
+    {
+      "path": "tests/cases/fluid/open_vessel_free_surface/reference_profiles/spheric_test05_wet_bed/d18_7.dat",
+      "time_s": 0.531
+    }
+  ],
   "representation": "unfitted_level_set",
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-05"
