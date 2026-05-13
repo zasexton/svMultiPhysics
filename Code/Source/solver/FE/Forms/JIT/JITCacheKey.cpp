@@ -81,6 +81,7 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, static_cast<std::uint64_t>(in.domain));
     mixCacheKey(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(in.boundary_marker)));
     mixCacheKey(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(in.interface_marker)));
+    mixCacheKey(h, static_cast<std::uint64_t>(in.cut_volume_side));
     mixCacheKey(h, in.combined_ir_hash);
     mixCacheKey(h, in.test_space_hash);
     mixCacheKey(h, in.trial_space_hash);

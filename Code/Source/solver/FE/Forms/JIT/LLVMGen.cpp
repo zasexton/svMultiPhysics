@@ -1680,6 +1680,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         }
 
         if (domain != IntegralDomain::Cell &&
+            domain != IntegralDomain::CutVolume &&
             domain != IntegralDomain::Boundary &&
             domain != IntegralDomain::InteriorFace &&
             domain != IntegralDomain::InterfaceFace) {

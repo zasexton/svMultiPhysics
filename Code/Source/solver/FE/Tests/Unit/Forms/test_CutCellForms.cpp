@@ -10,6 +10,7 @@
 #include "Geometry/CutQuadrature.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITFunctionalKernelWrapper.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
@@ -663,6 +664,52 @@ TEST(CutCellForms, CutVolumeIntegralJITMatchesInterpreterOnSameCutQuadrature)
     EXPECT_NEAR(interp, expected, 1.0e-13);
     EXPECT_NEAR(jit, expected, 1.0e-13);
     EXPECT_NEAR(jit, interp, 1.0e-13);
+}
+
+TEST(CutCellForms, CutVolumeIntegralJITCompilerEmitsMarkerSideKernels)
+{
+    requireLLVMJITOrSkip();
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual =
+        (Real(2.0) * u * v).dCutVolume(51, CutVolumeSide::Negative) +
+        (Real(3.0) * u * v).dCutVolume(51, CutVolumeSide::Positive) +
+        (Real(5.0) * u * v).dCutVolume(52, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    const auto ir = compiler.compileResidual(residual);
+    auto jit = svmp::FE::forms::jit::JITCompiler::getOrCreate(
+        svmp::FE::forms::test::makeUnitTestJITOptions());
+    ASSERT_NE(jit, nullptr);
+
+    const auto compiled = jit->compile(ir);
+    ASSERT_TRUE(compiled.ok) << compiled.message;
+
+    bool saw_51_negative = false;
+    bool saw_51_positive = false;
+    bool saw_52_negative = false;
+    for (const auto& kernel : compiled.kernels) {
+        ASSERT_NE(kernel.address, std::uintptr_t{0});
+        EXPECT_EQ(kernel.domain, IntegralDomain::CutVolume);
+        if (kernel.interface_marker == 51 &&
+            kernel.cut_volume_side == CutVolumeSide::Negative) {
+            saw_51_negative = true;
+        }
+        if (kernel.interface_marker == 51 &&
+            kernel.cut_volume_side == CutVolumeSide::Positive) {
+            saw_51_positive = true;
+        }
+        if (kernel.interface_marker == 52 &&
+            kernel.cut_volume_side == CutVolumeSide::Negative) {
+            saw_52_negative = true;
+        }
+    }
+
+    EXPECT_TRUE(saw_51_negative);
+    EXPECT_TRUE(saw_51_positive);
+    EXPECT_TRUE(saw_52_negative);
 }
 
 TEST(CutCellForms, CutMetadataResidualTangentMatchesADAndFiniteDifferenceVerification)

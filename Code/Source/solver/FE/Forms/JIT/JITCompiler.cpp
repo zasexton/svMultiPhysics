@@ -239,12 +239,14 @@ struct GroupKey {
     IntegralDomain domain{IntegralDomain::Cell};
     int boundary_marker{-1};
     int interface_marker{-1};
+    CutVolumeSide cut_volume_side{CutVolumeSide::Negative};
 
     friend bool operator==(const GroupKey& a, const GroupKey& b) noexcept
     {
         return a.domain == b.domain &&
                a.boundary_marker == b.boundary_marker &&
-               a.interface_marker == b.interface_marker;
+               a.interface_marker == b.interface_marker &&
+               a.cut_volume_side == b.cut_volume_side;
     }
 };
 
@@ -255,6 +257,7 @@ struct GroupKeyHash {
         hashMix(h, static_cast<std::uint64_t>(k.domain));
         hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(k.boundary_marker)));
         hashMix(h, static_cast<std::uint64_t>(static_cast<std::int64_t>(k.interface_marker)));
+        hashMix(h, static_cast<std::uint64_t>(k.cut_volume_side));
         return static_cast<std::size_t>(h);
     }
 };
@@ -313,6 +316,9 @@ struct CompilationPlan {
         key.domain = term.domain;
         key.boundary_marker = term.boundary_marker;
         key.interface_marker = term.interface_marker;
+        if (term.domain == IntegralDomain::CutVolume) {
+            key.cut_volume_side = term.cut_volume_side;
+        }
 
         auto& g = groups_by_key[key];
         g.key = key;
@@ -392,6 +398,7 @@ struct CompilationPlan {
             .domain = group.key.domain,
             .boundary_marker = group.key.boundary_marker,
             .interface_marker = group.key.interface_marker,
+            .cut_volume_side = group.key.cut_volume_side,
             .combined_ir_hash = combined_ir_hash,
             .test_space_hash = test_sig_hash.h,
             .trial_space_hash = trial_sig_hash.h,
@@ -716,6 +723,7 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
         k.domain = group.key.domain;
         k.boundary_marker = group.key.boundary_marker;
         k.interface_marker = group.key.interface_marker;
+        k.cut_volume_side = group.key.cut_volume_side;
         k.cache_key = group.cache_key;
         k.cacheable = group.cacheable;
 

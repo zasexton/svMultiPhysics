@@ -166,6 +166,8 @@ private:
 
         std::uintptr_t interface_all{0};
         std::unordered_map<int, std::uintptr_t> interface_by_marker{};
+
+        std::unordered_map<std::uint64_t, std::uintptr_t> cut_volume_by_region{};
 	    };
 
 	    enum class KernelRole : std::uint8_t {

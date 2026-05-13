@@ -28,6 +28,7 @@ struct JITCompiledKernel {
     IntegralDomain domain{IntegralDomain::Cell};
     int boundary_marker{-1};
     int interface_marker{-1};
+    CutVolumeSide cut_volume_side{CutVolumeSide::Negative};
 
     std::uint64_t cache_key{0};
     bool cacheable{true};

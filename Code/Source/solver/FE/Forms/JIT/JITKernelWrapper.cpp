@@ -172,6 +172,28 @@ struct RequestedKernelOutputs {
     return false;
 }
 
+[[nodiscard]] CutVolumeSide toFormsCutVolumeSide(geometry::CutIntegrationSide side) noexcept
+{
+    return side == geometry::CutIntegrationSide::Positive
+        ? CutVolumeSide::Positive
+        : CutVolumeSide::Negative;
+}
+
+[[nodiscard]] bool hasCutVolumeDomain(const assembly::AssemblyContext& ctx) noexcept
+{
+    return ctx.cutVolumeMarker() >= 0 &&
+           (ctx.cutVolumeSide() == geometry::CutIntegrationSide::Negative ||
+            ctx.cutVolumeSide() == geometry::CutIntegrationSide::Positive);
+}
+
+[[nodiscard]] std::uint64_t cutVolumeDispatchKey(int marker, CutVolumeSide side) noexcept
+{
+    const auto marker_bits =
+        static_cast<std::uint64_t>(static_cast<std::uint32_t>(marker));
+    const auto side_bit = side == CutVolumeSide::Positive ? 1ULL : 0ULL;
+    return (marker_bits << 1U) | side_bit;
+}
+
 void traceSpecialization(const JITKernelWrapper* wrapper,
                          const assembly::AssemblyKernel& fallback,
                          std::uint64_t revision,
@@ -488,19 +510,24 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         fallback_->computeCell(ctx, output);
         return;
     }
-    if (wrappedKernelHasCutVolumeTerms(*fallback_)) {
-        fallback_->computeCell(ctx, output);
-        return;
-    }
 
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
+        const bool cut_volume_context = hasCutVolumeDomain(ctx);
+        const auto active_domain =
+            cut_volume_context ? IntegralDomain::CutVolume : IntegralDomain::Cell;
+        const auto active_cut_side = toFormsCutVolumeSide(ctx.cutVolumeSide());
 
         // When vectorize=true, JIT kernels expect CellKernelBatchArgsV1 (batch ABI).
         // Wrap callJIT to pack a batch-of-1 with stack-local scratch so computeCell
         // is thread-safe (no shared member vectors).
-        auto callJITCell = [&](std::uintptr_t addr, const assembly::jit::CellKernelArgsV6& v6_args) {
-            if (options_.vectorize) {
+        auto callJITCell = [&](std::uintptr_t addr,
+                               IntegralDomain domain,
+                               const assembly::jit::CellKernelArgsV6& v6_args) {
+            if (addr == 0) {
+                return;
+            }
+            if (domain == IntegralDomain::Cell && options_.vectorize) {
                 const auto pn = static_cast<std::uint32_t>(effectiveSimdBatchWidth(options_));
 
                 thread_local std::vector<assembly::jit::KernelSideArgsV6> local_sides;
@@ -533,6 +560,37 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
                 callJIT(addr, &v6_args);
             }
         };
+        const auto cutVolumeAddress = [&](const CompiledDispatch& dispatch) noexcept -> std::uintptr_t {
+            const auto exact = dispatch.cut_volume_by_region.find(
+                cutVolumeDispatchKey(ctx.cutVolumeMarker(), active_cut_side));
+            if (exact != dispatch.cut_volume_by_region.end()) {
+                return exact->second;
+            }
+            const auto wildcard = dispatch.cut_volume_by_region.find(
+                cutVolumeDispatchKey(-1, active_cut_side));
+            return wildcard != dispatch.cut_volume_by_region.end() ? wildcard->second : 0;
+        };
+        const auto hasCellLikeDispatch = [&](const CompiledDispatch& dispatch) noexcept {
+            return dispatch.cell != 0 ||
+                   (cut_volume_context && cutVolumeAddress(dispatch) != 0);
+        };
+        const auto callCellLikeDispatches =
+            [&](const CompiledDispatch& dispatch,
+                const assembly::jit::CellKernelArgsV6& args) noexcept -> bool {
+                bool called = false;
+                if (dispatch.cell != 0) {
+                    callJITCell(dispatch.cell, IntegralDomain::Cell, args);
+                    called = true;
+                }
+                if (cut_volume_context) {
+                    const auto addr = cutVolumeAddress(dispatch);
+                    if (addr != 0) {
+                        callJITCell(addr, IntegralDomain::CutVolume, args);
+                        called = true;
+                    }
+                }
+                return called;
+            };
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -558,9 +616,12 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 	        }
 
 	        const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	        const auto disp = getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::Cell, ctx, nullptr);
+	        const auto disp = getSpecializedDispatch(KernelRole::Form, k->ir(), active_domain, ctx, nullptr);
 	        const auto& compiled = disp ? *disp : compiled_form_;
-	        callJITCell(compiled.cell, args);
+	        if (!callCellLikeDispatches(compiled, args)) {
+	            fallback_->computeCell(ctx, output);
+	            return;
+	        }
 
         output.has_matrix = want_matrix;
         output.has_vector = want_vector;
@@ -592,11 +653,14 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 
 	        // 1) Jacobian (bilinear part).
 	        const auto disp_bi =
-	            getSpecializedDispatch(KernelRole::Bilinear, k->bilinearIR(), IntegralDomain::Cell, ctx, nullptr);
+	            getSpecializedDispatch(KernelRole::Bilinear, k->bilinearIR(), active_domain, ctx, nullptr);
 	        const auto& compiled_bi = disp_bi ? *disp_bi : compiled_bilinear_;
 	        if (want_matrix) {
 	            const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	            callJITCell(compiled_bi.cell, args_bi);
+	            if (!callCellLikeDispatches(compiled_bi, args_bi)) {
+	                fallback_->computeCell(ctx, output);
+	                return;
+	            }
 	        }
 
 	        // 2) Residual vector = (linear part) + (K*u).
@@ -607,10 +671,13 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 
 	            if (has_compiled_linear_ && k->linearIR().has_value()) {
 	                const auto disp_lin =
-	                    getSpecializedDispatch(KernelRole::Linear, *k->linearIR(), IntegralDomain::Cell, ctx, nullptr);
+	                    getSpecializedDispatch(KernelRole::Linear, *k->linearIR(), active_domain, ctx, nullptr);
 	                const auto& compiled_lin = disp_lin ? *disp_lin : compiled_linear_;
 	                const auto args_lin = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-	                callJITCell(compiled_lin.cell, args_lin);
+	                if (!callCellLikeDispatches(compiled_lin, args_lin)) {
+	                    fallback_->computeCell(ctx, output);
+	                    return;
+	                }
 	            }
 
             // K*u contribution.
@@ -623,7 +690,10 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
 		                tmp.clear();
 
 	                const auto args_bi = assembly::jit::packCellKernelArgsV6(ctx, tmp, checks);
-	                callJITCell(compiled_bi.cell, args_bi);
+	                if (!callCellLikeDispatches(compiled_bi, args_bi)) {
+	                    fallback_->computeCell(ctx, output);
+	                    return;
+	                }
 
                 accumulateDenseMatVecRaw(
                     tmp.local_matrix.data(),
@@ -675,26 +745,32 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         // after it regressed instruction-cache pressure and is no longer part
         // of the production dispatch path.
         if (want_matrix) {
-            if (compiled_tangent_.cell == 0) {
+            if (!hasCellLikeDispatch(compiled_tangent_)) {
                 fallback_->computeCell(ctx, output);
                 return;
             }
             const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-            const auto disp = k_sym ? getSpecializedDispatch(KernelRole::Tangent, k_sym->tangentIR(), IntegralDomain::Cell, ctx, nullptr)
+            const auto disp = k_sym ? getSpecializedDispatch(KernelRole::Tangent, k_sym->tangentIR(), active_domain, ctx, nullptr)
                                     : nullptr;
             const auto& compiled = disp ? *disp : compiled_tangent_;
-            callJITCell(compiled.cell, args);
+            if (!callCellLikeDispatches(compiled, args)) {
+                fallback_->computeCell(ctx, output);
+                return;
+            }
         }
 
         if (want_vector) {
-            if (compiled_residual_.cell == 0) {
+            if (!hasCellLikeDispatch(compiled_residual_)) {
                 fallback_->computeCell(ctx, output);
                 return;
             }
             const auto args = assembly::jit::packCellKernelArgsV6(ctx, output, checks);
-            const auto disp = getSpecializedDispatch(KernelRole::Residual, residual_ir, IntegralDomain::Cell, ctx, nullptr);
+            const auto disp = getSpecializedDispatch(KernelRole::Residual, residual_ir, active_domain, ctx, nullptr);
             const auto& compiled = disp ? *disp : compiled_residual_;
-            callJITCell(compiled.cell, args);
+            if (!callCellLikeDispatches(compiled, args)) {
+                fallback_->computeCell(ctx, output);
+                return;
+            }
         }
 
         output.has_matrix = want_matrix;
@@ -2584,6 +2660,16 @@ bool JITKernelWrapper::hasCompiledTangentDispatch(IntegralDomain domain, int mar
             }
             return compiled_tangent_.interface_all != 0 ||
                    !compiled_tangent_.interface_by_marker.empty();
+        case IntegralDomain::CutVolume:
+            if (marker >= 0) {
+                return compiled_tangent_.cut_volume_by_region.find(
+                           cutVolumeDispatchKey(marker, CutVolumeSide::Negative)) !=
+                           compiled_tangent_.cut_volume_by_region.end() ||
+                       compiled_tangent_.cut_volume_by_region.find(
+                           cutVolumeDispatchKey(marker, CutVolumeSide::Positive)) !=
+                           compiled_tangent_.cut_volume_by_region.end();
+            }
+            return !compiled_tangent_.cut_volume_by_region.empty();
     }
     return false;
 }
@@ -2947,6 +3033,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
     disp->message = r.message;
     disp->boundary_by_marker.reserve(r.kernels.size());
     disp->interface_by_marker.reserve(r.kernels.size());
+    disp->cut_volume_by_region.reserve(r.kernels.size());
 
     for (const auto& k : r.kernels) {
         switch (k.domain) {
@@ -2969,6 +3056,10 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
                 } else {
                     disp->interface_by_marker[k.interface_marker] = k.address;
                 }
+                break;
+            case IntegralDomain::CutVolume:
+                disp->cut_volume_by_region[cutVolumeDispatchKey(
+                    k.interface_marker, k.cut_volume_side)] = k.address;
                 break;
         }
     }
@@ -3177,10 +3268,6 @@ void JITKernelWrapper::maybeCompile()
         return;
     }
 
-    if (wrappedKernelHasCutVolumeTerms(*fallback_)) {
-        return;
-    }
-
     if (!compiler_) {
         compiler_ = JITCompiler::getOrCreate(options_);
     }
@@ -3203,6 +3290,7 @@ void JITKernelWrapper::maybeCompile()
         out.message = r.message;
         out.boundary_by_marker.reserve(r.kernels.size());
         out.interface_by_marker.reserve(r.kernels.size());
+        out.cut_volume_by_region.reserve(r.kernels.size());
 
         for (const auto& k : r.kernels) {
             switch (k.domain) {
@@ -3225,6 +3313,10 @@ void JITKernelWrapper::maybeCompile()
                     } else {
                         out.interface_by_marker[k.interface_marker] = k.address;
                     }
+                    break;
+                case IntegralDomain::CutVolume:
+                    out.cut_volume_by_region[cutVolumeDispatchKey(
+                        k.interface_marker, k.cut_volume_side)] = k.address;
                     break;
             }
         }

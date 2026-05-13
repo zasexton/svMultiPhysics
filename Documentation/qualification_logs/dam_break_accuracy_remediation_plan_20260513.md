@@ -78,10 +78,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       using a registered `CutIntegrationContext`.
 - [x] Ensure cut-volume forms do not also assemble duplicate full-cell `.dx()`
       kernels for the same residual terms.
-- [x] Ensure JIT-enabled cut-volume Forms kernels use the marker/side-aware
-      interpreter fallback until native cut-volume code generation carries
-      cut-volume marker and side context.
-- [ ] Add interpreter and compiled/JIT support for the new integral domain.
+- [x] Ensure JIT-enabled cut-volume Forms kernels use marker/side-aware
+      dispatch for cut-volume marker and side context.
+- [x] Add interpreter and compiled/JIT support for the new integral domain.
 - [x] Add tests proving constant-field cut-volume integrals match expected
       negative and positive volume fractions.
 
