@@ -275,6 +275,9 @@ Setup:
 - thin three-dimensional extrusion of the published two-dimensional setup
 - level-set field initialized as the union of the wet bed and retained water
   column
+- negative level-set values denote the water side
+- fluid volume terms use `Active_domain=LevelSetNegative` and
+  `Active_domain_method=CutVolume`
 
 Reference behavior:
 

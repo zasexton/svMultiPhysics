@@ -31,11 +31,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add a code enum equivalent to:
       `FreeSurfaceActiveDomain { None, LevelSetNegative, LevelSetPositive }`.
 - [x] Parse the option under the existing free-surface boundary condition block.
-- [ ] Use this XML spelling for the accepted D18/D38 path:
+- [x] Use this XML spelling for the accepted D18/D38 path:
 
 ```xml
 <Add_BC name="free_surface">
-  <Type>UnfittedLevelSet</Type>
+  <Type>Free_surface</Type>
+  <Implementation>UnfittedLevelSet</Implementation>
   <Active_domain>LevelSetNegative</Active_domain>
   <Active_domain_method>CutVolume</Active_domain_method>
 </Add_BC>
@@ -49,7 +50,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Default `Active_domain_method` to `CutVolume`.
 - [ ] Allow `Active_domain_method=SmoothedIndicator` only as a diagnostic or
       temporary fallback.
-- [ ] Document that generated D18/D38 fixtures use negative level-set values as
+- [x] Document that generated D18/D38 fixtures use negative level-set values as
       the water side.
 
 ## Exact Cut-Volume Integration Checklist
@@ -103,7 +104,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [ ] Keep pressure constraints/gauges compatible with the active wet region.
 - [ ] Keep zero-surface-tension, zero-external-pressure cases from adding a
       false interface traction.
-- [ ] Keep D18 kinematic enforcement disabled for the first corrected path.
+- [x] Keep D18 kinematic enforcement disabled for the first corrected path.
 - [ ] Add diagnostics showing which active-domain side and method were used.
 - [ ] Add diagnostics showing total wet volume and cut-cell volume contribution.
 

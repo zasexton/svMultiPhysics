@@ -371,6 +371,7 @@ def write_solver_xml(
     time_steps: int,
     include_top_wall_bc: bool = False,
     include_obstacle_bc: bool = False,
+    active_domain: str | None = None,
 ) -> None:
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
@@ -392,6 +393,11 @@ def write_solver_xml(
   </Add_BC>"""
         for name in wall_bcs
     )
+    active_domain_block = ""
+    if active_domain is not None:
+        active_domain_block = f"""
+    <Active_domain>{active_domain}</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>"""
 
     if fitted:
         equations = f"""
@@ -568,7 +574,7 @@ def write_solver_xml(
     <Implementation>UnfittedLevelSet</Implementation>
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
-    <Level_set_isovalue>0.0</Level_set_isovalue>
+    <Level_set_isovalue>0.0</Level_set_isovalue>{active_domain_block}
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{UNFITTED_SURFACE_TENSION}</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
@@ -651,6 +657,7 @@ def write_case(
     time_steps: int,
     obstacles: list[Box] | None = None,
     include_top_wall_bc: bool = False,
+    active_domain: str | None = None,
 ) -> None:
     obstacles = obstacles or []
     prepare_case_dir(case_dir)
@@ -685,6 +692,7 @@ def write_case(
         time_steps=time_steps,
         include_top_wall_bc=include_top_wall_bc,
         include_obstacle_bc=bool(obstacles),
+        active_domain=active_domain,
     )
 
     print(
@@ -786,12 +794,14 @@ def generate_spheric_test05() -> None:
                 "notes": [
                     "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
                     "The initial level-set field is the union of the wet bed and the retained water column.",
+                    "Negative level-set values denote the water side for active-domain assembly.",
                 ],
             },
             h=0.035,
             fitted=False,
             time_step=0.0005,
             time_steps=80,
+            active_domain="LevelSetNegative",
         )
 
 

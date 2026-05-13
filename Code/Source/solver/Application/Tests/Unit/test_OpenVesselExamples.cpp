@@ -544,6 +544,14 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     expectText(free_surface,
                "Implementation",
                expected.fitted ? "FittedALE" : "UnfittedLevelSet");
+    const bool is_test05 =
+        startsWith(expected.case_name, "spheric_test05_wet_bed_");
+    if (is_test05) {
+      expectText(free_surface, "Active_domain", "LevelSetNegative");
+      expectText(free_surface, "Active_domain_method", "CutVolume");
+      EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
+                nullptr);
+    }
 
     if (expected.fitted) {
       expectText(fluid, "Enable_ALE", "true");

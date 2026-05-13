@@ -16,7 +16,8 @@
   ],
   "notes": [
     "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
-    "The initial level-set field is the union of the wet bed and the retained water column."
+    "The initial level-set field is the union of the wet bed and the retained water column.",
+    "Negative level-set values denote the water side for active-domain assembly."
   ],
   "representation": "unfitted_level_set",
   "source_urls": [
