@@ -29,6 +29,20 @@
     "initial_phi": -0.0142363529744199,
     "node_id": 256
   },
+  "pressure_gauge_verification": {
+    "current_prescribed_pressure_matches_initial_hydrostatic": true,
+    "current_pressure_matches_previous_invalid_error_range": false,
+    "current_pressure_matches_previous_invalid_offset": false,
+    "current_pressure_minus_previous_invalid_pressure": 625.972523052,
+    "initial_pressure_error_after_constraint": 0.0,
+    "previous_invalid_d18_full_volume_hydrostatic_pressure": 17.6869,
+    "previous_invalid_d18_hydrostatic_error_range": [
+      -17.6869,
+      0.0
+    ],
+    "previous_invalid_d18_initial_phi": -0.001806,
+    "previous_invalid_d18_node_id": 279
+  },
   "representation": "unfitted_level_set",
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-05"

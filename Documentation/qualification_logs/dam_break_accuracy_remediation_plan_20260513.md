@@ -140,7 +140,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       retained water column.
 - [x] Record the selected gauge id, coordinates, initial `phi`, and expected
       initial hydrostatic pressure in benchmark metadata.
-- [ ] Verify the initial pressure-gauge offset no longer matches the previous
+- [x] Verify the initial pressure-gauge offset no longer matches the previous
       full-volume hydrostatic error range.
 
 ## Solver And Time-Integration Checklist

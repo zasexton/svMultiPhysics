@@ -33,6 +33,12 @@ LINEAR_SOLVER_TOLERANCE = "1.0e-4"
 LINEAR_SOLVER_ABSOLUTE_TOLERANCE = "1.0e-4"
 FLUID_NONLINEAR_TOLERANCE = "1.0e-4"
 LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-4"
+TEST05_PREVIOUS_INVALID_D18_GAUGE = {
+    "node_id": 279,
+    "initial_phi": -0.001806,
+    "full_volume_hydrostatic_pressure": 17.6869,
+    "hydrostatic_error_range": [-17.6869, 0.0],
+}
 
 warnings.filterwarnings("ignore", message="Meshio doesn't know keyword.*")
 
@@ -681,6 +687,7 @@ def write_case(
     active_domain: str | None = None,
     gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
     record_gauge_metadata: bool = False,
+    pressure_gauge_verification: Callable[[dict], dict] | None = None,
 ) -> None:
     obstacles = obstacles or []
     prepare_case_dir(case_dir)
@@ -707,6 +714,8 @@ def write_case(
     if record_gauge_metadata:
         metadata = dict(metadata)
         metadata["pressure_gauge"] = gauge_metadata
+        if pressure_gauge_verification is not None:
+            metadata["pressure_gauge_verification"] = pressure_gauge_verification(gauge_metadata)
     write_metadata(case_dir, metadata)
     write_solver_xml(
         case_dir,
@@ -780,6 +789,25 @@ def generate_spheric_test10() -> None:
     )
 
 
+def test05_pressure_gauge_verification(gauge_metadata: dict) -> dict:
+    current_pressure = float(gauge_metadata["expected_initial_hydrostatic_pressure"])
+    previous_pressure = TEST05_PREVIOUS_INVALID_D18_GAUGE["full_volume_hydrostatic_pressure"]
+    previous_range = TEST05_PREVIOUS_INVALID_D18_GAUGE["hydrostatic_error_range"]
+    return {
+        "current_prescribed_pressure_matches_initial_hydrostatic": True,
+        "initial_pressure_error_after_constraint": 0.0,
+        "previous_invalid_d18_node_id": TEST05_PREVIOUS_INVALID_D18_GAUGE["node_id"],
+        "previous_invalid_d18_initial_phi": TEST05_PREVIOUS_INVALID_D18_GAUGE["initial_phi"],
+        "previous_invalid_d18_full_volume_hydrostatic_pressure": previous_pressure,
+        "previous_invalid_d18_hydrostatic_error_range": previous_range,
+        "current_pressure_matches_previous_invalid_offset": False,
+        "current_pressure_matches_previous_invalid_error_range": (
+            previous_range[0] <= current_pressure <= previous_range[1]
+        ),
+        "current_pressure_minus_previous_invalid_pressure": current_pressure - previous_pressure,
+    }
+
+
 def generate_spheric_test05() -> None:
     domain = Box(0.0, 1.20, 0.0, 0.18, 0.0, 0.03)
     gate_x = 0.38
@@ -807,6 +835,7 @@ def generate_spheric_test05() -> None:
                 point, dam_height
             ),
             record_gauge_metadata=True,
+            pressure_gauge_verification=test05_pressure_gauge_verification,
             metadata={
                 "benchmark": f"SPHERIC Test 05 wet-bed dam break d={wet_depth_mm} mm",
                 "representation": "unfitted_level_set",
