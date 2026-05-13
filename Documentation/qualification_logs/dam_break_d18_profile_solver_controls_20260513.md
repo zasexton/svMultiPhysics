@@ -156,6 +156,27 @@ the next MPI profile-run residual floor. The next profile-control probe should
 raise only the fluid nonlinear tolerance in a narrow increment and verify that
 the early residual history remains comparable to the `6.0e-4` run.
 
+## Incremental 7.0e-4 Probe
+
+A temporary 100-step D18 MPI-4 probe raised only the fluid nonlinear tolerance
+from `6.0e-4` to `7.0e-4`.
+
+- Run directory: `/tmp/svmp_d18_mpi4_fluid7e4_max9_100step_BVHWNC`
+- Command: `mpirun -np 4 /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics solver.xml`
+- Step 63 result: crossed the previous floor with residual
+  `6.2761451707296309e-04`, `converged=1`, `iters=1`
+- Result: stopped at step `67`
+- Stop time: `3.3500000000000023e-02`
+- Final reported nonlinear residual:
+  `7.5725252640414459e-04`
+- Linear solve at the floor: `converged=1`, `iters=0`,
+  `rel=9.2415067301916454e-02`
+- Last written result: `result_067.pvtu`
+
+The early residual history matched the stable `6.0e-4` run, but `7.0e-4` is
+not sufficient for the profile comparison because it only moves the residual
+floor from step 63 to step 67.
+
 Static checks:
 
 ```bash
