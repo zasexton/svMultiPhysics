@@ -176,19 +176,19 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 
 ## Validation Script Checklist
 
-- [ ] Update the profile comparison script so wet-bed front position is
+- [x] Update the profile comparison script so wet-bed front position is
       diagnostic-only for D18.
-- [ ] Report peak height error separately from front-position error.
-- [ ] Report wet volume at each compared output.
-- [ ] Report wet-volume drift from the initial condition.
-- [ ] Report pressure min, max, mean, and hydrostatic-reference error.
-- [ ] Report velocity max, mean, and wet-side mean.
-- [ ] Report kinetic energy growth from the initial condition.
-- [ ] Report whether largest velocities occur in the retained/released water
+- [x] Report peak height error separately from front-position error.
+- [x] Report wet volume at each compared output.
+- [x] Report wet-volume drift from the initial condition.
+- [x] Report pressure min, max, mean, and hydrostatic-reference error.
+- [x] Report velocity max, mean, and wet-side mean.
+- [x] Report kinetic energy growth from the initial condition.
+- [x] Report whether largest velocities occur in the retained/released water
       region rather than the dry or top exterior region.
-- [ ] Add a validation failure if pressure remains close to the old full-volume
+- [x] Add a validation failure if pressure remains close to the old full-volume
       hydrostatic state.
-- [ ] Add a validation failure if velocity remains near-static at the D18
+- [x] Add a validation failure if velocity remains near-static at the D18
       comparison time.
 - [ ] Keep the extracted `phi=0` front/profile plot, but label it as an
       interface diagnostic until field checks pass.
