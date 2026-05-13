@@ -893,6 +893,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/ParameterRegistry.h
     Systems/SearchAccess.h
     Systems/SetupStoragePlan.h
+    Systems/StateAdmissibility.h
     Systems/SurfaceContactKernel.h
     Systems/SystemAssembly.h
     Systems/SystemSetup.h
@@ -920,6 +921,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/OperatorBackends.cpp
     Systems/OperatorRegistry.cpp
     Systems/ParameterRegistry.cpp
+    Systems/StateAdmissibility.cpp
     Systems/SurfaceContactKernel.cpp
     Systems/SystemAssembly.cpp
     Systems/SystemSetup.cpp
@@ -2591,6 +2593,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_ContactProximityInfrastructure.cpp
 		                Tests/Unit/Systems/test_CutIntegrationInfrastructure.cpp
 		                Tests/Unit/Systems/test_FieldRegistry.cpp
+		                Tests/Unit/Systems/test_StateAdmissibility.cpp
 		                Tests/Unit/Systems/test_ContactPenaltyKernel.cpp
 		                Tests/Unit/Systems/test_SurfaceContactKernel.cpp
 		                Tests/Unit/Systems/test_SearchAccess.cpp

@@ -75,32 +75,32 @@ without knowing the physics.
 
 Checklist:
 
-- [ ] Add `StateAdmissibilityDescriptor`.
-- [ ] Support admissibility types:
-  - [ ] lower bound
-  - [ ] upper bound
-  - [ ] interval bound
-  - [ ] sum equality
-  - [ ] sum inequality
-  - [ ] finite-value requirement
-  - [ ] user-provided residual callback
-- [ ] Support scopes:
-  - [ ] nodal values
-  - [ ] cell averages
-  - [ ] quadrature values
-  - [ ] region aggregates
-  - [ ] global aggregate
-- [ ] Allow descriptors to attach to either one field or a `StateGroup`.
-- [ ] Add an FE utility to evaluate admissibility residuals after assembly or
+- [x] Add `StateAdmissibilityDescriptor`.
+- [x] Support admissibility types:
+  - [x] lower bound
+  - [x] upper bound
+  - [x] interval bound
+  - [x] sum equality
+  - [x] sum inequality
+  - [x] finite-value requirement
+  - [x] user-provided residual callback
+- [x] Support scopes:
+  - [x] nodal values
+  - [x] cell averages
+  - [x] quadrature values
+  - [x] region aggregates
+  - [x] global aggregate
+- [x] Allow descriptors to attach to either one field or a `StateGroup`.
+- [x] Add an FE utility to evaluate admissibility residuals after assembly or
       update.
-- [ ] Connect results to existing `InvariantDomainSummary` analysis metadata.
-- [ ] Add options for warning-only versus hard failure.
-- [ ] Add unit tests for:
-  - [ ] scalar nonnegativity
-  - [ ] bounded scalar interval
-  - [ ] phase-like sum constraint
-  - [ ] group-level violation reporting
-  - [ ] analysis summary emission
+- [x] Connect results to existing `InvariantDomainSummary` analysis metadata.
+- [x] Add options for warning-only versus hard failure.
+- [x] Add unit tests for:
+  - [x] scalar nonnegativity
+  - [x] bounded scalar interval
+  - [x] phase-like sum constraint
+  - [x] group-level violation reporting
+  - [x] analysis summary emission
 
 Implementation notes:
 
