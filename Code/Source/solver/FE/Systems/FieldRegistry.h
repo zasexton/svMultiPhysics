@@ -43,6 +43,25 @@ enum class DerivedFieldRole : std::uint8_t {
     TimeDerivative
 };
 
+using StateGroupId = std::uint16_t;
+constexpr StateGroupId INVALID_STATE_GROUP_ID = std::numeric_limits<StateGroupId>::max();
+
+enum class StateGroupKind : std::uint8_t {
+    IndependentFields,
+    ConservedComponents,
+    VolumeFractions,
+    MomentOrBinSet,
+    AuxiliaryCoupledState
+};
+
+enum class FieldShapeKind : std::uint8_t {
+    ScalarField,
+    VectorField,
+    TensorField,
+    IndexedScalarSet,
+    MixedFieldGroup
+};
+
 struct DerivedFieldMetadata {
     FieldId source_field{INVALID_FIELD_ID};
     DerivedFieldRole role{DerivedFieldRole::None};
@@ -78,6 +97,44 @@ struct FieldRecord {
     int max_time_derivative_order{0};
 };
 
+struct StateGroupBounds {
+    std::optional<Real> lower{};
+    std::optional<Real> upper{};
+};
+
+struct StateGroupSumConstraint {
+    Real target{0.0};
+    Real tolerance{0.0};
+    bool equality{true};
+};
+
+struct StateGroupSpec {
+    std::string name;
+    StateGroupKind kind{StateGroupKind::IndependentFields};
+    FieldShapeKind shape{FieldShapeKind::MixedFieldGroup};
+    std::vector<FieldId> fields{};
+    std::vector<std::string> field_names{};
+    int component_count{0};
+    std::optional<std::string> conserved_quantity_name{};
+    std::optional<StateGroupSumConstraint> sum_constraint{};
+    StateGroupBounds bounds{};
+    std::vector<std::string> analysis_tags{};
+};
+
+struct StateGroupRecord {
+    StateGroupId id{INVALID_STATE_GROUP_ID};
+    std::string name;
+    StateGroupKind kind{StateGroupKind::IndependentFields};
+    FieldShapeKind shape{FieldShapeKind::MixedFieldGroup};
+    std::vector<FieldId> fields{};
+    std::vector<std::string> field_names{};
+    int component_count{0};
+    std::optional<std::string> conserved_quantity_name{};
+    std::optional<StateGroupSumConstraint> sum_constraint{};
+    StateGroupBounds bounds{};
+    std::vector<std::string> analysis_tags{};
+};
+
 class FieldRegistry {
 public:
     FieldId add(FieldSpec spec);
@@ -88,10 +145,20 @@ public:
     [[nodiscard]] std::size_t size() const noexcept { return fields_.size(); }
     [[nodiscard]] const std::vector<FieldRecord>& records() const noexcept { return fields_; }
 
+    StateGroupId addStateGroup(StateGroupSpec spec);
+    [[nodiscard]] const StateGroupRecord& getStateGroup(StateGroupId id) const;
+    [[nodiscard]] StateGroupId findStateGroupByName(std::string_view name) const noexcept;
+    [[nodiscard]] bool hasStateGroup(StateGroupId id) const noexcept;
+    [[nodiscard]] std::size_t stateGroupCount() const noexcept { return state_groups_.size(); }
+    [[nodiscard]] const std::vector<StateGroupRecord>& stateGroups() const noexcept { return state_groups_; }
+
 private:
     std::vector<FieldRecord> fields_;
     std::unordered_map<std::string, FieldId> name_to_id_;
     FieldId next_id_{0};
+    std::vector<StateGroupRecord> state_groups_;
+    std::unordered_map<std::string, StateGroupId> state_group_name_to_id_;
+    StateGroupId next_state_group_id_{0};
 };
 
 } // namespace systems
