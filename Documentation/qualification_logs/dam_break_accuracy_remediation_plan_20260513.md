@@ -194,9 +194,14 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       `Documentation/qualification_logs/dam_break_d18_coupled_outer_fgmres_20260513.md`.
 - [x] Record nonlinear iteration counts, linear iteration counts, and residual
       norms for each D18/D38 qualification attempt.
-- [ ] If active-domain cut cells introduce solver instability, tune
+- [x] If active-domain cut cells introduce solver instability, tune
       stabilization only after confirming volume integration and initialization
       are correct.
+      Current finding: after volume integration and initialization were
+      verified, an increased cut-adjacent stabilization penalty did not improve
+      the MPI-4 D18 nonlinear plateau. The remaining blocker is coupled
+      BlockSchur solver scaling, not the stabilization coefficient. Evidence:
+      `Documentation/qualification_logs/dam_break_d18_mpi_solver_scaling_20260513.md`.
 
 ## Validation Script Checklist
 
@@ -286,6 +291,11 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       MPI-4 output stops at `0.040 s`, while the first D18 reference profile is
       at `0.156 s`; the checked-in D18/D38 inputs now run for 312 steps so
       `result_312` can be compared against `d18_1.dat`.
+      Updated finding: the first checked-in strict MPI-4 312-step attempt stops
+      during step 1 because the `1.0e-10` absolute linear tolerance forces a
+      small-RHS true-residual target below the useful MPI D18 solver floor.
+      Evidence:
+      `Documentation/qualification_logs/dam_break_d18_mpi_solver_scaling_20260513.md`.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.
