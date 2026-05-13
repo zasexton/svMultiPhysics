@@ -880,6 +880,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/BoundedUpdatePolicy.h
+    Systems/BoundaryDistanceService.h
     Systems/FieldRegistry.h
     Systems/GeometricNonlinearity.h
     Systems/GeometryTransaction.h
@@ -915,6 +916,7 @@ set(FE_SYSTEMS_SOURCES
     Systems/FESystem.cpp
     Systems/FormsInstaller.cpp
     Systems/BoundedUpdatePolicy.cpp
+    Systems/BoundaryDistanceService.cpp
     Systems/FieldRegistry.cpp
     Systems/GeometryTransaction.cpp
     Systems/GlobalKernelStateProvider.cpp
@@ -2602,6 +2604,7 @@ if(FE_BUILD_TESTS)
 	            set(FE_SYSTEMS_TEST_SOURCES
 		                Tests/Unit/Systems/test_ContactProximityInfrastructure.cpp
 		                Tests/Unit/Systems/test_CutIntegrationInfrastructure.cpp
+		                Tests/Unit/Systems/test_BoundaryDistanceService.cpp
 		                Tests/Unit/Systems/test_FieldRegistry.cpp
 		                Tests/Unit/Systems/test_BoundedUpdatePolicy.cpp
 		                Tests/Unit/Systems/test_PairedExchange.cpp

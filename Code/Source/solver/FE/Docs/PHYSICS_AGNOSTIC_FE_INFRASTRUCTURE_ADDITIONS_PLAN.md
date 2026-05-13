@@ -271,23 +271,23 @@ closures, immersed methods, and near-wall postprocessing.
 
 Checklist:
 
-- [ ] Add a generic `BoundaryDistanceService`.
-- [ ] Support nearest distance to:
-  - [ ] all boundaries
-  - [ ] selected boundary markers
-  - [ ] wall-tagged boundary sets
-- [ ] Support query locations:
-  - [ ] nodes
-  - [ ] cells
-  - [ ] quadrature points
-- [ ] Store optional nearest boundary id and nearest point.
-- [ ] Provide invalidation when mesh coordinates or moving mesh state changes.
-- [ ] Add caching with explicit rebuild.
-- [ ] Add tests for:
-  - [ ] simple 1D/2D/3D meshes
-  - [ ] selected marker filtering
-  - [ ] moving mesh invalidation
-  - [ ] deterministic nearest-boundary choice for ties
+- [x] Add a generic `BoundaryDistanceService`.
+- [x] Support nearest distance to:
+  - [x] all boundaries
+  - [x] selected boundary markers
+  - [x] wall-tagged boundary sets
+- [x] Support query locations:
+  - [x] nodes
+  - [x] cells
+  - [x] quadrature points
+- [x] Store optional nearest boundary id and nearest point.
+- [x] Provide invalidation when mesh coordinates or moving mesh state changes.
+- [x] Add caching with explicit rebuild.
+- [x] Add tests for:
+  - [x] simple 1D/2D/3D meshes
+  - [x] selected marker filtering
+  - [x] moving mesh invalidation
+  - [x] deterministic nearest-boundary choice for ties
 
 Implementation notes:
 
