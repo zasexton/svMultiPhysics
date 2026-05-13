@@ -101,7 +101,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Apply the active-domain measure to continuity terms.
 - [x] Apply the active-domain measure to all VMS residual and stabilization
       terms.
-- [ ] Keep pressure constraints/gauges compatible with the active wet region.
+- [x] Keep pressure constraints/gauges compatible with the active wet region.
 - [ ] Keep zero-surface-tension, zero-external-pressure cases from adding a
       false interface traction.
 - [x] Keep D18 kinematic enforcement disabled for the first corrected path.
@@ -133,9 +133,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       from the active pressure initialization.
 - [x] Prevent dry-side full-tank hydrostatic pressure from influencing the
       initial active-domain solve.
-- [ ] Add a gauge validation check for active-domain cases.
-- [ ] Reject or warn on pressure gauges placed on the dry side.
-- [ ] Reject or warn on pressure gauges with `abs(phi)` below a small
+- [x] Add a gauge validation check for active-domain cases.
+- [x] Reject or warn on pressure gauges placed on the dry side.
+- [x] Reject or warn on pressure gauges with `abs(phi)` below a small
       near-interface margin.
 - [x] Replace current D18 gauge node `279` with a robust wet-region node in the
       retained water column.
@@ -202,7 +202,7 @@ restricted to the wet active domain or an explicitly accepted equivalent.
 - [x] Add Navier-Stokes installation tests proving active-domain cases do not
       install duplicate full `.dx()` kernels for the same terms.
 - [x] Add hydrostatic initialization tests for wet-side-only pressure.
-- [ ] Add gauge validation tests for dry and near-interface nodes.
+- [x] Add gauge validation tests for dry and near-interface nodes.
 
 ## Integration And Qualification Checklist
 

@@ -28,6 +28,8 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -511,6 +513,140 @@ TEST(NavierStokesPressureGauge, NodePressureConstraintPinsSelectedPressureVertex
     const auto dof = system.fieldDofOffset(p_id) + vertex_dofs.front();
     EXPECT_TRUE(system.constraints().isConstrained(dof));
     EXPECT_NEAR(system.constraints().getInhomogeneity(dof), 2.5, 1.0e-12);
+}
+
+TEST(NavierStokesPressureGauge, ActiveDomainRejectsDryPressureConstraint)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Active-domain pressure constraint validation requires native mesh support.";
+#else
+    auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.001;
+    opts.free_surface.push_back(
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation = formulations::navier_stokes::
+                    FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 7,
+                .level_set_field_name = "phi",
+                .level_set_isovalue = 0.0,
+                .active_domain = formulations::navier_stokes::
+                    FreeSurfaceActiveDomain::LevelSetNegative,
+            });
+    opts.node_pressure_constraints.id_type =
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraintIdType::LocalVertexId;
+    opts.node_pressure_constraints.values = {
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraint{.node_id = 2, .pressure = 0.0}};
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    try {
+        module.registerOn(system);
+        FAIL() << "expected dry-side pressure constraint rejection";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_NE(std::string(ex.what()).find("dry side"), std::string::npos)
+            << ex.what();
+    }
+#endif
+}
+
+TEST(NavierStokesPressureGauge, ActiveDomainRejectsNearInterfacePressureConstraint)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Active-domain pressure constraint validation requires native mesh support.";
+#else
+    auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+    auto& local_mesh = mesh->local_mesh();
+    const auto phi_handle =
+        MeshFields::get_field_handle(local_mesh, EntityKind::Vertex, "phi");
+    auto* phi = MeshFields::field_data_as<real_t>(local_mesh, phi_handle);
+    phi[0] = -5.0e-9;
+
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1,
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "u";
+    opts.pressure_field_name = "p";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.001;
+    opts.free_surface.push_back(
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            FreeSurfaceBoundary{
+                .implementation = formulations::navier_stokes::
+                    FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = 7,
+                .level_set_field_name = "phi",
+                .level_set_isovalue = 0.0,
+                .active_domain = formulations::navier_stokes::
+                    FreeSurfaceActiveDomain::LevelSetNegative,
+            });
+    opts.node_pressure_constraints.id_type =
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraintIdType::LocalVertexId;
+    opts.node_pressure_constraints.values = {
+        formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::
+            NodePressureConstraint{.node_id = 0, .pressure = 0.0}};
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    try {
+        module.registerOn(system);
+        FAIL() << "expected near-interface pressure constraint rejection";
+    } catch (const std::invalid_argument& ex) {
+        EXPECT_NE(std::string(ex.what()).find("too close"), std::string::npos)
+            << ex.what();
+    }
+#endif
 }
 
 TEST(NavierStokesPressureGauge, PublishesDynamicViscosityConstitutiveMetadata)
