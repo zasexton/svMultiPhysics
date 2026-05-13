@@ -129,6 +129,73 @@ void insertSortedUniqueIndex(std::vector<GlobalIndex>& values, GlobalIndex value
 
 [[nodiscard]] int referenceVertexCount(ElementType type) noexcept;
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+using FaceVertexKey = std::vector<svmp::index_t>;
+
+struct FaceVertexKeyHash {
+    [[nodiscard]] std::size_t operator()(const FaceVertexKey& key) const noexcept
+    {
+        std::size_t seed = key.size();
+        for (const auto value : key) {
+            seed ^= std::hash<svmp::index_t>{}(value) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+        }
+        return seed;
+    }
+};
+
+[[nodiscard]] FaceVertexKey makeFaceVertexKey(const svmp::MeshBase& mesh, svmp::index_t face)
+{
+    auto key = mesh.face_vertices(face);
+    std::sort(key.begin(), key.end());
+    return key;
+}
+
+void materializeFullCodim1TopologyPreservingFaceMetadata(svmp::MeshBase& mesh,
+                                                         MeshFinalizeOptions options)
+{
+    std::unordered_map<FaceVertexKey, svmp::label_t, FaceVertexKeyHash> labels_by_key;
+    std::unordered_map<FaceVertexKey, std::vector<std::string>, FaceVertexKeyHash> sets_by_key;
+
+    for (svmp::index_t face = 0; face < static_cast<svmp::index_t>(mesh.n_faces()); ++face) {
+        const auto label = mesh.boundary_label(face);
+        if (label != svmp::INVALID_LABEL) {
+            labels_by_key.emplace(makeFaceVertexKey(mesh, face), label);
+        }
+    }
+
+    const auto face_set_names = mesh.list_sets(svmp::EntityKind::Face);
+    for (const auto& set_name : face_set_names) {
+        for (const auto face : mesh.get_set(svmp::EntityKind::Face, set_name)) {
+            if (face < 0 || static_cast<std::size_t>(face) >= mesh.n_faces()) {
+                continue;
+            }
+            sets_by_key[makeFaceVertexKey(mesh, face)].push_back(set_name);
+        }
+        mesh.remove_set(svmp::EntityKind::Face, set_name);
+    }
+
+    options.codim1_storage = MeshCodim1StorageMode::Full;
+    mesh.set_faces_from_arrays({}, {0}, {}, {}, MeshCodim1StorageMode::None);
+    mesh.finalize(options);
+
+    for (svmp::index_t face = 0; face < static_cast<svmp::index_t>(mesh.n_faces()); ++face) {
+        const auto key = makeFaceVertexKey(mesh, face);
+
+        const auto label_it = labels_by_key.find(key);
+        if (label_it != labels_by_key.end()) {
+            mesh.set_boundary_label(face, label_it->second);
+        }
+
+        const auto set_it = sets_by_key.find(key);
+        if (set_it != sets_by_key.end()) {
+            for (const auto& set_name : set_it->second) {
+                mesh.add_to_set(svmp::EntityKind::Face, set_name, face);
+            }
+        }
+    }
+}
+#endif
+
 void getCellCornerNodes(const assembly::IMeshAccess& access,
                         GlobalIndex cell,
                         std::vector<GlobalIndex>& nodes)
@@ -2019,15 +2086,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             needs_faces && mesh_base.n_faces() == 0u && !boundary_faces_already_planned;
         const bool needs_full_faces =
             mesh_storage.codim1_storage == MeshCodim1StorageMode::Full;
-        FE_THROW_IF(needs_full_faces &&
-                    mesh_base.codim1_storage_mode() == MeshCodim1StorageMode::BoundaryOnly,
-                    InvalidStateException,
-                    "FESystem::setup: storage plan requires full interior-face topology, "
-                    "but the mesh currently holds boundary-only face topology");
 
         const bool edges_missing =
             mesh_storage.edge_storage && mesh_base.n_edges() == 0u;
-        if (faces_missing || edges_missing) {
+        if (needs_full_faces &&
+            mesh_base.codim1_storage_mode() == MeshCodim1StorageMode::BoundaryOnly) {
+            materializeFullCodim1TopologyPreservingFaceMetadata(mesh_base, mesh_storage);
+        } else if (faces_missing || edges_missing) {
             if (!faces_missing) {
                 mesh_storage.codim1_storage = mesh_base.codim1_storage_mode();
             }

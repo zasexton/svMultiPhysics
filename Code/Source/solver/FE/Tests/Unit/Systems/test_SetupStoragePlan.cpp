@@ -100,6 +100,42 @@ std::shared_ptr<svmp::Mesh> buildQuadMeshWithoutDerivedTopology()
     return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> buildTwoQuadMeshWithBoundaryOnlyFaceMetadata()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0
+    };
+    const std::vector<svmp::offset_t> c2v_offsets = {0, 4, 8};
+    const std::vector<svmp::index_t> c2v = {
+        0, 1, 4, 3,
+        1, 2, 5, 4
+    };
+
+    CellShape cell{};
+    cell.family = CellFamily::Quad;
+    cell.num_corners = 4;
+    cell.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, x_ref, c2v_offsets, c2v, {cell, cell});
+
+    svmp::MeshFinalizeOptions options;
+    options.codim1_storage = svmp::MeshCodim1StorageMode::BoundaryOnly;
+    base->finalize(options);
+
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        base->set_boundary_label(f, 7);
+        base->add_to_set(svmp::EntityKind::Face, "exterior", f);
+    }
+
+    return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<H1Space> h1(int order)
 {
     return std::make_shared<H1Space>(ElementType::Quad4, order);
@@ -327,6 +363,37 @@ TEST(SetupStoragePlan, SetupMaterializesBoundaryOnlyTopologyForBoundaryWork)
     EXPECT_FALSE(system.setupStoragePlan().requirements.interior_face_topology);
     EXPECT_EQ(mesh->base().codim1_storage_mode(), svmp::MeshCodim1StorageMode::BoundaryOnly);
     EXPECT_EQ(mesh->base().n_faces(), 4u);
+}
+
+TEST(SetupStoragePlan, SetupUpgradesBoundaryOnlyTopologyForInteriorFaceWork)
+{
+    auto mesh = buildTwoQuadMeshWithBoundaryOnlyFaceMetadata();
+    ASSERT_EQ(mesh->base().codim1_storage_mode(), svmp::MeshCodim1StorageMode::BoundaryOnly);
+    ASSERT_EQ(mesh->base().n_faces(), 6u);
+
+    FESystem system(mesh);
+    const auto u = addScalarField(system);
+    system.addInteriorFaceKernel("interior", u, std::make_shared<InteriorFaceOnlyKernel>());
+
+    ASSERT_NO_THROW(system.setup());
+
+    EXPECT_TRUE(system.setupStoragePlan().requirements.interior_face_topology);
+    EXPECT_EQ(mesh->base().codim1_storage_mode(), svmp::MeshCodim1StorageMode::Full);
+    EXPECT_EQ(mesh->base().n_faces(), 7u);
+
+    std::size_t labelled_faces = 0;
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mesh->base().n_faces()); ++f) {
+        if (mesh->base().boundary_label(f) == 7) {
+            ++labelled_faces;
+        }
+    }
+    EXPECT_EQ(labelled_faces, 6u);
+
+    const auto& exterior = mesh->base().get_set(svmp::EntityKind::Face, "exterior");
+    EXPECT_EQ(exterior.size(), 6u);
+    for (const auto face : exterior) {
+        EXPECT_EQ(mesh->base().boundary_label(face), 7);
+    }
 }
 
 TEST(SetupStoragePlan, SummaryReportsDecidedStorageStructures)

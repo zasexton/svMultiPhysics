@@ -552,6 +552,8 @@ Checklist:
   adjacent cell measure.
 - [x] Fix unfitted level-set/fluid registration ordering for coupled velocity
   transport.
+- [x] Upgrade boundary-only face topology to full face topology during FE setup
+  when unfitted cut-cell or interface terms require interior faces.
 - [x] Verify targeted parser, translator, tangent, and moving-domain tests
   after the startup fixes.
 - [ ] Run bounded serial, MPI-2, and MPI-4 qualification for the generated
