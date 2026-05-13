@@ -74,6 +74,12 @@ struct InterfaceTransferResult {
     InterfaceFieldKind field_kind = InterfaceFieldKind::Scalar;
     InterfaceFrameTransformPolicy frame_policy = InterfaceFrameTransformPolicy::None;
     std::uint32_t component_count = 1;
+    std::string interface_name{};
+    SlidingInterfaceMapKind sliding_map_kind{SlidingInterfaceMapKind::Sliding};
+    InterfaceOperatorState interface_state{InterfaceOperatorState::Empty};
+    Real interface_time{0.0};
+    std::uint64_t interface_time_level_epoch{0};
+    std::uint64_t interface_revision_key{0};
     std::vector<Real> target_values;
     std::vector<Real> target_weights;
     Real source_integral = 0.0;
@@ -101,6 +107,10 @@ struct SlidingInterfaceMap {
     std::uint64_t time_level_epoch{0};
 
     [[nodiscard]] bool valid_for_current_revisions() const noexcept;
+    [[nodiscard]] bool valid_for_time_level(
+        Real query_time,
+        std::uint64_t query_epoch,
+        Real time_tolerance = 1.0e-12) const noexcept;
     void set_trial_map(svmp::search::InterfaceMap map, Real map_time, std::uint64_t epoch);
     void accept_trial(InterfaceOperatorState accepted_state = InterfaceOperatorState::AcceptedTimeStep);
     void rollback_trial();
@@ -173,6 +183,12 @@ public:
     const std::vector<Real>& source_face_values,
     const InterfaceTransferOptions& options = {});
 
+[[nodiscard]] InterfaceTransferResult applySlidingInterfaceTransfer(
+    const InterfaceTransferOperator& op,
+    const SlidingInterfaceMap& sliding_map,
+    const std::vector<Real>& source_face_values,
+    const InterfaceTransferOptions& options = {});
+
 [[nodiscard]] InterfaceTransferDiagnostics diagnoseInterfaceTransfer(
     const svmp::search::InterfaceMap& interface_map,
     const InterfaceTransferResult& result,
@@ -182,6 +198,14 @@ public:
     const SlidingInterfaceMap& sliding_map,
     std::uint64_t fe_dof_layout_revision,
     std::uint64_t cached_fe_dof_layout_revision);
+
+[[nodiscard]] InterfaceOperatorInvalidationPolicy interfaceOperatorInvalidationForTime(
+    const SlidingInterfaceMap& sliding_map,
+    Real current_time,
+    std::uint64_t current_time_level_epoch,
+    std::uint64_t fe_dof_layout_revision,
+    std::uint64_t cached_fe_dof_layout_revision,
+    Real time_tolerance = 1.0e-12);
 
 } // namespace systems
 } // namespace FE

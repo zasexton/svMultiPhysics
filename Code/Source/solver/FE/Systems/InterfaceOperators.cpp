@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -182,6 +183,20 @@ bool SlidingInterfaceMap::valid_for_current_revisions() const noexcept {
             state == InterfaceOperatorState::AcceptedTimeStep);
 }
 
+bool SlidingInterfaceMap::valid_for_time_level(
+    Real query_time,
+    std::uint64_t query_epoch,
+    Real time_tolerance) const noexcept {
+    if (!valid_for_current_revisions()) {
+        return false;
+    }
+    if (!std::isfinite(time) || !std::isfinite(query_time) || time_tolerance < 0.0) {
+        return false;
+    }
+    return time_level_epoch == query_epoch &&
+           std::abs(time - query_time) <= time_tolerance;
+}
+
 void SlidingInterfaceMap::set_trial_map(
     svmp::search::InterfaceMap map,
     Real map_time,
@@ -306,6 +321,27 @@ InterfaceTransferResult applyInterfaceTransfer(
     return result;
 }
 
+InterfaceTransferResult applySlidingInterfaceTransfer(
+    const InterfaceTransferOperator& op,
+    const SlidingInterfaceMap& sliding_map,
+    const std::vector<Real>& source_face_values,
+    const InterfaceTransferOptions& options) {
+    if (!sliding_map.valid_for_current_revisions()) {
+        throw std::invalid_argument("sliding interface map is not accepted for current revisions");
+    }
+    auto result = applyInterfaceTransfer(op,
+                                         sliding_map.interface_map,
+                                         source_face_values,
+                                         options);
+    result.interface_name = sliding_map.name;
+    result.sliding_map_kind = sliding_map.map_kind;
+    result.interface_state = sliding_map.state;
+    result.interface_time = sliding_map.time;
+    result.interface_time_level_epoch = sliding_map.time_level_epoch;
+    result.interface_revision_key = sliding_map.accepted_revision_key;
+    return result;
+}
+
 InterfaceTransferDiagnostics diagnoseInterfaceTransfer(
     const svmp::search::InterfaceMap& interface_map,
     const InterfaceTransferResult& result,
@@ -352,6 +388,29 @@ InterfaceOperatorInvalidationPolicy interfaceOperatorInvalidation(
     }
     if (dof_changed) {
         policy.rebuild_interface_operator = true;
+        policy.rebuild_matrix = true;
+        policy.refresh_preconditioner = true;
+        policy.refresh_restart_metadata = true;
+    }
+    return policy;
+}
+
+InterfaceOperatorInvalidationPolicy interfaceOperatorInvalidationForTime(
+    const SlidingInterfaceMap& sliding_map,
+    Real current_time,
+    std::uint64_t current_time_level_epoch,
+    std::uint64_t fe_dof_layout_revision,
+    std::uint64_t cached_fe_dof_layout_revision,
+    Real time_tolerance) {
+    auto policy = interfaceOperatorInvalidation(sliding_map,
+                                                fe_dof_layout_revision,
+                                                cached_fe_dof_layout_revision);
+    if (!sliding_map.valid_for_time_level(current_time,
+                                          current_time_level_epoch,
+                                          time_tolerance)) {
+        policy.rebuild_search = true;
+        policy.rebuild_interface_operator = true;
+        policy.refresh_matrix_free_geometry = true;
         policy.rebuild_matrix = true;
         policy.refresh_preconditioner = true;
         policy.refresh_restart_metadata = true;

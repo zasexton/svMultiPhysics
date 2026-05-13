@@ -754,6 +754,7 @@ set(FE_GEOMETRY_HEADERS
     Interfaces/LevelSetInterfaceDomain.h
     Geometry/FrameAwareTransform.h
     Geometry/MovingFrame.h
+    Geometry/RegionFrameBinding.h
     Geometry/FiniteDeformationKinematics.h
     Geometry/FrameGeometry.h
     Geometry/LinearMapping.h
@@ -780,6 +781,7 @@ set(FE_GEOMETRY_SOURCES
     Interfaces/LevelSetInterfaceBuilder.cpp
     Geometry/FrameAwareTransform.cpp
     Geometry/MovingFrame.cpp
+    Geometry/RegionFrameBinding.cpp
     Geometry/FiniteDeformationKinematics.cpp
     Geometry/LinearMapping.cpp
     Geometry/IsoparametricMapping.cpp

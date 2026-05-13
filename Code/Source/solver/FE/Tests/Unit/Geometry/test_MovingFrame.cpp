@@ -1,4 +1,6 @@
+#include "Core/FEException.h"
 #include "Geometry/MovingFrame.h"
+#include "Geometry/RegionFrameBinding.h"
 
 #include <gtest/gtest.h>
 
@@ -64,4 +66,56 @@ TEST(MovingFrame, ComputesAnalyticRelativeVelocityAndAcceleration)
         frame, FrameVector3{{1.0, 4.0, 0.0}}, point);
     EXPECT_DOUBLE_EQ(rel[0], 0.0);
     EXPECT_DOUBLE_EQ(rel[1], 2.0);
+}
+
+TEST(MovingFrame, RegionFrameRegistryLooksUpFramesByRegion)
+{
+    RegionFrameRegistry registry;
+    auto frame = MovingFrameTransform::inertial();
+    frame.name = "boundary_frame";
+    frame.kind = CoordinateFrameKind::Moving;
+    frame.linear_velocity = FrameVector3{{1.0, 0.0, 0.0}};
+    registry.addFrame(frame);
+
+    FrameRegionDescriptor boundary;
+    boundary.kind = FrameRegionKind::BoundaryMarker;
+    boundary.marker = 4;
+    registry.bindRegion(RegionFrameBinding{.region = boundary,
+                                           .frame_name = "boundary_frame"});
+
+    const auto* found = registry.findFrameForRegion(boundary);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->name, "boundary_frame");
+
+    FrameRegionDescriptor missing;
+    missing.kind = FrameRegionKind::BoundaryMarker;
+    missing.marker = 5;
+    EXPECT_EQ(registry.findFrameForRegion(missing), nullptr);
+    EXPECT_THROW(static_cast<void>(registry.requireFrameForRegion(missing)),
+                 svmp::FE::InvalidArgumentException);
+}
+
+TEST(MovingFrame, RegionFrameVelocityAtQuadraturePoint)
+{
+    RegionFrameRegistry registry;
+    auto frame = MovingFrameTransform::inertial();
+    frame.name = "cell_frame";
+    frame.kind = CoordinateFrameKind::Moving;
+    frame.angular_velocity = FrameVector3{{0.0, 0.0, 2.0}};
+    registry.addFrame(frame);
+
+    FrameRegionDescriptor cells;
+    cells.kind = FrameRegionKind::CellSet;
+    cells.entity_ids = {10, 11};
+    registry.bindRegion(RegionFrameBinding{.region = cells,
+                                           .frame_name = "cell_frame"});
+
+    const auto& bound_frame = registry.requireFrameForRegion(cells);
+    const FrameVector3 quadrature_point{{1.0, 0.0, 0.0}};
+    const auto velocity = MovingFrameTransform::frameVelocityAtPoint(
+        bound_frame, quadrature_point);
+
+    EXPECT_DOUBLE_EQ(velocity[0], 0.0);
+    EXPECT_DOUBLE_EQ(velocity[1], 2.0);
+    EXPECT_DOUBLE_EQ(velocity[2], 0.0);
 }

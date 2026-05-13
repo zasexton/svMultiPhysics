@@ -302,23 +302,29 @@ only generic orchestration gaps.
 
 Checklist:
 
-- [ ] Audit existing moving-frame APIs for region-scoped frame lookup.
-- [ ] Add generic region-to-frame binding metadata only if missing.
-- [ ] Add validation that frame-dependent forms fail clearly when no frame is
+- [x] Audit existing moving-frame APIs for region-scoped frame lookup.
+- [x] Add generic region-to-frame binding metadata only if missing.
+- [x] Add validation that frame-dependent forms fail clearly when no frame is
       bound.
-- [ ] Audit existing sliding-interface invalidation and transfer APIs for
+- [x] Audit existing sliding-interface invalidation and transfer APIs for
       time-dependent map updates.
-- [ ] Add tests for:
-  - [ ] frame lookup by region
-  - [ ] frame velocity at quadrature points
-  - [ ] stale interface map invalidation
-  - [ ] conservative transfer metadata through sliding maps
-- [ ] Document the intended reuse path for MRF and rotor/stator Physics modules.
+- [x] Add tests for:
+  - [x] frame lookup by region
+  - [x] frame velocity at quadrature points
+  - [x] stale interface map invalidation
+  - [x] conservative transfer metadata through sliding maps
+- [x] Document the intended reuse path for MRF and rotor/stator Physics modules.
 
 Implementation notes:
 
 - Do not add duplicate sliding, mortar, or rotating-frame APIs.
 - Do not add impeller-specific concepts to FE.
+- Physics modules that need a moving or rotating frame should bind generic FE
+  regions to `CoordinateFrameDescriptor` entries, then consume frame velocity,
+  acceleration, and transform utilities through the geometry layer. Rotor/stator
+  or steady moving-frame modules should reuse these bindings and the existing
+  sliding-interface transfer/invalidation metadata instead of introducing
+  separate FE concepts for any particular device class.
 
 ## Documentation Checklist
 
