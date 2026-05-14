@@ -318,6 +318,12 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       Follow-up probe: temporary fluid tolerance `8.0e-4` crossed step `67`
       but stopped at step `78` with residual `8.1397034085718028e-04`, so it
       should not be promoted.
+      Follow-up probe: temporary fluid tolerance `9.0e-4` reproduced the rough
+      early branch already seen at `1.0e-3`; step `0` accepted with residual
+      `5.0439070069931181e-03`, and steps `1` and `3` reported residuals
+      above `3.7e+02`. Do not continue raising the nonlinear tolerance as the
+      primary fix; the next step is a solver-side check of the zero-update
+      residual-floor behavior.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.

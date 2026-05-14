@@ -198,6 +198,24 @@ The early residual history again matched the stable `6.0e-4` run, but
 `8.0e-4` is not sufficient for the profile comparison because it only moves
 the residual floor from step 67 to step 78.
 
+## 9.0e-4 Early-Branch Rejection
+
+A temporary D18 MPI-4 probe raised only the fluid nonlinear tolerance from
+`6.0e-4` to `9.0e-4` and was stopped manually after the early residual history
+changed.
+
+- Run directory: `/tmp/svmp_d18_mpi4_fluid9e4_max9_120step_x9IPfB`
+- Command: `mpirun -np 4 /home/zack/Downloads/svMultiPhysics/build/svMultiPhysics-build/bin/svmultiphysics solver.xml`
+- Stop action: manual stop after observing the early branch
+- Step 0 residual: `5.0439070069931181e-03`
+- Step 1 residual: `3.7869871429247371e+02`
+- Step 3 residual: `5.0774384112740950e+02`
+
+This reproduces the rough early behavior previously seen with `1.0e-3`.
+Tolerance increments at or above `9.0e-4` should not be used as profile-run
+controls without a separate solver-side change, because they alter the initial
+trajectory before the run reaches the later zero-update residual floors.
+
 Static checks:
 
 ```bash
