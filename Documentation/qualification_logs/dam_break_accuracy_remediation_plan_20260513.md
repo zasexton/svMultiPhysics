@@ -315,6 +315,9 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       Follow-up probe: temporary fluid tolerance `7.0e-4` crossed step `63`
       but stopped at step `67` with residual `7.5725252640414459e-04`, so it
       should not be promoted.
+      Follow-up probe: temporary fluid tolerance `8.0e-4` crossed step `67`
+      but stopped at step `78` with residual `8.1397034085718028e-04`, so it
+      should not be promoted.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.
