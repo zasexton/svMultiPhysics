@@ -102,9 +102,15 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
   return (end == env) ? default_value : static_cast<int>(value);
 }
 
-[[nodiscard]] int blockSchurMinOuterIterations() noexcept
+[[nodiscard]] int blockSchurEnvMinOuterIterations() noexcept
 {
   return std::max(0, envIntValue("SVMP_FSILS_BLOCKSCHUR_MIN_OUTER_ITERS", 0));
+}
+
+[[nodiscard]] int blockSchurMinOuterIterations(
+    const fe_fsi_linear_solver::FSILS_lsType& ls) noexcept
+{
+  return std::max(ls.blockschur_min_outer_iterations, blockSchurEnvMinOuterIterations());
 }
 
 [[nodiscard]] bool fsilsTraceEnabled() noexcept
@@ -1149,7 +1155,8 @@ bool ns_solver_coupled_fgmres_scalar(
 
   const double true_eps = std::max(ls.RI.absTol, ls.RI.relTol * true_initial_norm);
   const double outer_eps = std::max(ls.RI.absTol, ls.RI.relTol * outer_initial_norm);
-  if (true_initial_norm <= true_eps) {
+  const int min_outer_iters = blockSchurMinOuterIterations(ls);
+  if (true_initial_norm <= true_eps && min_outer_iters <= 0) {
     Ri = x;
     ls.RI.itr = 0;
     ls.RI.suc = true;
@@ -1232,7 +1239,7 @@ bool ns_solver_coupled_fgmres_scalar(
     ls.blockschur_stats.record_outer_iteration(
         fsils_collective_delta(collective_before_outer, lhs.commu.collective_stats));
 
-    if (std::abs(err(i + 1)) < outer_eps || breakdown) {
+    if (breakdown || (std::abs(err(i + 1)) < outer_eps && (i + 1) >= min_outer_iters)) {
       break;
     }
   }
@@ -1278,7 +1285,7 @@ bool ns_solver_coupled_fgmres_scalar(
   const double final_norm_sq = final_norm_globals[0] + final_norm_globals[1];
 
   ls.RI.fNorm = std::sqrt(final_norm_sq);
-  ls.RI.suc = (ls.RI.fNorm < true_eps);
+  ls.RI.suc = (ls.RI.itr >= min_outer_iters && ls.RI.fNorm < true_eps);
   ls.Resc = (final_norm_sq > 0.0) ? static_cast<int>(100.0 * (constraint_norm * constraint_norm) / final_norm_sq) : 0;
   ls.Resm = 100 - ls.Resc;
   ls.RI.dB = (true_initial_norm > std::numeric_limits<double>::epsilon() && ls.RI.fNorm > 0.0)
@@ -1491,7 +1498,7 @@ static void ns_solver_mc(fe_fsi_linear_solver::FSILS_lhsType& lhs,
   ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
   int i_count{0};
-  const int min_outer_iters = blockSchurMinOuterIterations();
+  const int min_outer_iters = blockSchurMinOuterIterations(ls);
 
   auto update_outer_residual = [&](int max_col) {
     #pragma omp parallel for schedule(static)
@@ -1881,7 +1888,7 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
   ls.blockschur_stats.reset();
   eps = std::max(ls.RI.absTol, ls.RI.relTol*eps);
   int i_count{0};
-  const int min_outer_iters = blockSchurMinOuterIterations();
+  const int min_outer_iters = blockSchurMinOuterIterations(ls);
 
   auto update_outer_residual = [&](int max_col) {
     #pragma omp parallel for schedule(static)

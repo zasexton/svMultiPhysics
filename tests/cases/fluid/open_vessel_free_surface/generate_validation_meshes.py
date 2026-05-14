@@ -40,6 +40,7 @@ TEST05_BLOCKSCHUR_LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-4"
 TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "9"
 TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS = "100"
 TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION = "80"
+TEST05_BLOCKSCHUR_MIN_OUTER_ITERATIONS = "1"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
     "initial_phi": -0.001806,
@@ -476,6 +477,7 @@ def write_solver_xml(
     <NS_GM_tolerance>{unfitted_linear_tolerance}</NS_GM_tolerance>
     <NS_CG_max_iterations>1000</NS_CG_max_iterations>
     <NS_CG_tolerance>{unfitted_linear_tolerance}</NS_CG_tolerance>
+    <NS_min_outer_iterations>{TEST05_BLOCKSCHUR_MIN_OUTER_ITERATIONS}</NS_min_outer_iterations>
     <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>"""

@@ -814,6 +814,8 @@ void FsilsLinearSolver::setOptions(const SolverOptions& options)
         FE_THROW_IF(*options.fsils_blockschur_cg_rel_tol < 0.0, InvalidArgumentException,
                     "FsilsLinearSolver: fsils_blockschur_cg_rel_tol must be >= 0");
     }
+    FE_THROW_IF(options.fsils_blockschur_min_outer_iterations < 0, InvalidArgumentException,
+                "FsilsLinearSolver: fsils_blockschur_min_outer_iterations must be >= 0");
     options_ = normalizeSolverOptionsForBackend(options, BackendKind::FSILS);
     invalidateReusableBlockSchurState();
 }
@@ -1558,6 +1560,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     << " requested=" << requested_max_iter
                     << " cap=" << outer_cap
                     << " effective=" << effective_max_iter
+                    << " min_outer=" << options_.fsils_blockschur_min_outer_iterations
                     << " coupled_updates=" << (has_native_rank_one_updates ? 1 : 0)
                     << " coupled_outer=" << (configured_coupled_outer ? 1 : 0);
             traceLog(cap_oss.str());
@@ -1615,6 +1618,8 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             to_fsils_blockschur_preconditioner(options_.fsils_blockschur_schur_preconditioner);
         ls.CG.schur_momentum_approximation =
             to_fsils_blockschur_momentum_approximation(options_.fsils_blockschur_momentum_approximation);
+        ls.blockschur_min_outer_iterations =
+            std::max(0, options_.fsils_blockschur_min_outer_iterations);
         ls.use_coupled_outer_fgmres_scalar =
             options_.fsils_blockschur_use_coupled_outer_fgmres;
 
@@ -1625,6 +1630,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             ls.con_ncomp = con_ncomp;
         }
     } else {
+        ls.blockschur_min_outer_iterations = 0;
         ls.use_coupled_outer_fgmres_scalar = false;
         const auto method = to_fsils_solver(options_.method);
         if (method == fe_fsi_linear_solver::LS_TYPE_GMRES) {

@@ -135,6 +135,7 @@
     <NS_GM_tolerance>1.0e-4</NS_GM_tolerance>
     <NS_CG_max_iterations>1000</NS_CG_max_iterations>
     <NS_CG_tolerance>1.0e-4</NS_CG_tolerance>
+    <NS_min_outer_iterations>1</NS_min_outer_iterations>
     <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>

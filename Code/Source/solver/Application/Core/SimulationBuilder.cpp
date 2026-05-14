@@ -354,6 +354,8 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     opts.fsils_blockschur_cg_max_iter = eq->linear_solver.ns_cg_max_iterations.value();
     opts.fsils_blockschur_gm_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_gm_tolerance.value());
     opts.fsils_blockschur_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
+    opts.fsils_blockschur_min_outer_iterations =
+        eq->linear_solver.ns_min_outer_iterations.value();
     opts.fsils_blockschur_schur_preconditioner =
         toFsilsBlockSchurPreconditioner(eq->linear_solver.ns_schur_preconditioner.value());
     opts.fsils_blockschur_momentum_approximation =

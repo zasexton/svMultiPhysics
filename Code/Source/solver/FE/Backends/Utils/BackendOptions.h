@@ -619,6 +619,7 @@ struct SolverOptions {
     std::optional<int> fsils_blockschur_cg_max_iter{};
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
     std::optional<Real> fsils_blockschur_cg_rel_tol{};
+    int fsils_blockschur_min_outer_iterations{0};
     /// Use a full-system FGMRES outer iteration preconditioned by the
     /// BlockSchur split. This helps grouped primary blocks whose native
     /// fractional-step direction is not a descent direction for the coupled

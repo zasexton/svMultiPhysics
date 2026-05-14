@@ -324,6 +324,15 @@ restricted to the wet active domain or an explicitly accepted equivalent.
       above `3.7e+02`. Do not continue raising the nonlinear tolerance as the
       primary fix; the next step is a solver-side check of the zero-update
       residual-floor behavior.
+      Solver-side update: `NS_min_outer_iterations=1` is now parsed, routed to
+      FSILS BlockSchur, and honored by the coupled outer FGMRES path. A D18
+      MPI-4 70-step probe using the checked-in XML controls crossed the
+      previous step-63 floor, reached `result_070.pvtu`, and returned
+      `success=1`; step `63` converged with residual
+      `2.1432747190868549e-04` and one linear outer iteration. Evidence:
+      `Documentation/qualification_logs/dam_break_d18_min_outer_iterations_20260513.md`.
+      Next step: run the full checked-in D18 MPI-4 `312`-step profile case and
+      compare `result_312.pvtu` against the D18 reference profile.
 - [ ] Only after D18 passes, repeat the same workflow for D38.
 - [ ] Save solver logs, validation metrics, plots, and command lines in a new
       qualification log directory.
