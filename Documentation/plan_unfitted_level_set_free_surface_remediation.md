@@ -249,6 +249,9 @@ side volume keep active side-volume metadata.
 - [x] Ensure MPI-owned and ghost-cell cut-volume metadata remain deterministic.
       Cut-volume rule export is sorted by parent cell, side, marker, and stable
       topology revision, and stable ids do not depend on ownership revision.
+- [x] Prune generated active cut-volume slivers below the cut-quadrature
+      validity fraction so near-zero retained regions do not enter assembly or
+      cut-adjacent stabilization scaling.
 
 ### Tests
 
@@ -443,6 +446,9 @@ benchmark runs.
       preserving local cut-neighborhood stabilization.
 - [x] Add no-output smoke diagnostics for the cut-adjacent stabilization scale
       cap so D18/D38 probes can verify bounded scale values before VTK output.
+- [x] Add no-output smoke parsing for generated cut-volume sliver pruning,
+      including retained minimum active volume fraction and pruned region
+      counts.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

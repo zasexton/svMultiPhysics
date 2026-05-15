@@ -1071,6 +1071,61 @@ def diagnostic_cut_adjacent_capped_scale_count(diagnostics: dict[str, Any]) -> i
     return max(counts)
 
 
+def diagnostic_active_pruned_volume_regions(diagnostics: dict[str, Any]) -> int | None:
+    counts = [
+        int(record["active_pruned_volume_regions"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("active_pruned_volume_regions"), int)
+    ]
+    if not counts:
+        return None
+    return max(counts)
+
+
+def diagnostic_active_pruned_volume(diagnostics: dict[str, Any]) -> float | None:
+    volumes = [
+        float(record["active_pruned_volume"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("active_pruned_volume"), (int, float))
+    ]
+    if not volumes:
+        return None
+    return max(volumes)
+
+
+def diagnostic_active_min_volume_fraction(diagnostics: dict[str, Any]) -> float | None:
+    fractions = [
+        float(record["active_min_volume_fraction"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("active_min_volume_fraction"), (int, float))
+    ]
+    if not fractions:
+        return None
+    return min(fractions)
+
+
+def diagnostic_generated_pruned_volume_rules(diagnostics: dict[str, Any]) -> int | None:
+    counts = [
+        int(record["generated_pruned_volume_rules"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("generated_pruned_volume_rules"), int)
+    ]
+    if not counts:
+        return None
+    return max(counts)
+
+
+def diagnostic_generated_pruned_volume(diagnostics: dict[str, Any]) -> float | None:
+    volumes = [
+        float(record["generated_pruned_volume"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("generated_pruned_volume"), (int, float))
+    ]
+    if not volumes:
+        return None
+    return max(volumes)
+
+
 def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None:
     for record in reversed(diagnostics.get("hydrostatic_initializations", [])):
         checked = record.get("checked_gauge_constraints")
@@ -1114,6 +1169,21 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     capped_scale_count = diagnostic_cut_adjacent_capped_scale_count(diagnostics)
     if capped_scale_count is not None:
         metrics["diagnostic_cut_adjacent_capped_scale_count"] = capped_scale_count
+    pruned_volume_regions = diagnostic_active_pruned_volume_regions(diagnostics)
+    if pruned_volume_regions is not None:
+        metrics["diagnostic_active_pruned_volume_regions"] = pruned_volume_regions
+    pruned_volume = diagnostic_active_pruned_volume(diagnostics)
+    if pruned_volume is not None:
+        metrics["diagnostic_active_pruned_volume"] = pruned_volume
+    active_min_fraction = diagnostic_active_min_volume_fraction(diagnostics)
+    if active_min_fraction is not None:
+        metrics["diagnostic_active_min_volume_fraction"] = active_min_fraction
+    generated_pruned_rules = diagnostic_generated_pruned_volume_rules(diagnostics)
+    if generated_pruned_rules is not None:
+        metrics["diagnostic_generated_pruned_volume_rules"] = generated_pruned_rules
+    generated_pruned_volume = diagnostic_generated_pruned_volume(diagnostics)
+    if generated_pruned_volume is not None:
+        metrics["diagnostic_generated_pruned_volume"] = generated_pruned_volume
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
@@ -1297,6 +1367,33 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
             errors.append(
                 f"diagnostic cut-adjacent capped scale count {capped_count} is below "
                 f"{args.min_diagnostic_cut_adjacent_capped_scale_count}"
+            )
+    if args.min_diagnostic_active_pruned_volume_regions is not None:
+        pruned_count = metrics.get("diagnostic_active_pruned_volume_regions")
+        if not isinstance(pruned_count, int):
+            errors.append("diagnostic active pruned volume-region count is unavailable")
+        elif pruned_count < args.min_diagnostic_active_pruned_volume_regions:
+            errors.append(
+                f"diagnostic active pruned volume-region count {pruned_count} is below "
+                f"{args.min_diagnostic_active_pruned_volume_regions}"
+            )
+    if args.min_diagnostic_active_min_volume_fraction is not None:
+        min_fraction = metrics.get("diagnostic_active_min_volume_fraction")
+        if not isinstance(min_fraction, (int, float)):
+            errors.append("diagnostic active min volume fraction is unavailable")
+        elif min_fraction < args.min_diagnostic_active_min_volume_fraction:
+            errors.append(
+                f"diagnostic active min volume fraction {min_fraction:.6g} is below "
+                f"{args.min_diagnostic_active_min_volume_fraction:.6g}"
+            )
+    if args.min_diagnostic_generated_pruned_volume_rules is not None:
+        pruned_rules = metrics.get("diagnostic_generated_pruned_volume_rules")
+        if not isinstance(pruned_rules, int):
+            errors.append("diagnostic generated pruned volume-rule count is unavailable")
+        elif pruned_rules < args.min_diagnostic_generated_pruned_volume_rules:
+            errors.append(
+                f"diagnostic generated pruned volume-rule count {pruned_rules} is below "
+                f"{args.min_diagnostic_generated_pruned_volume_rules}"
             )
     if args.stale_pressure_gauge_tolerance is not None:
         stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
@@ -1619,6 +1716,16 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "stdout_tail": tail,
             }
             add_diagnostic_metrics(failure, failure["diagnostics"])
+            previous = previous_invalid_pressure(load_benchmark(run_dir))
+            if previous is not None:
+                failure["pressure_gauge_previous_invalid"] = previous
+                gauge_value = failure.get("diagnostic_pressure_gauge_value")
+                if gauge_value is not None:
+                    failure["diagnostic_pressure_gauge_previous_invalid_difference"] = (
+                        gauge_value - previous
+                    )
+            diagnostic_errors = evaluate_timeout_diagnostics(failure, args)
+            failure["diagnostic_errors"] = diagnostic_errors
             if args.disable_coupled_outer_fgmres:
                 failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
@@ -1626,6 +1733,10 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
             add_solver_control_overrides(failure, args)
+            failure["errors"] = (
+                diagnostic_errors
+                or [f"solver exited with return code {completed.returncode}"]
+            )
             write_failure(failure)
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
 
@@ -1697,6 +1808,9 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-cut-volume-max-exact-order", type=int)
     parser.add_argument("--max-diagnostic-cut-adjacent-scale", type=float)
     parser.add_argument("--min-diagnostic-cut-adjacent-capped-scale-count", type=int)
+    parser.add_argument("--min-diagnostic-active-pruned-volume-regions", type=int)
+    parser.add_argument("--min-diagnostic-active-min-volume-fraction", type=float)
+    parser.add_argument("--min-diagnostic-generated-pruned-volume-rules", type=int)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)

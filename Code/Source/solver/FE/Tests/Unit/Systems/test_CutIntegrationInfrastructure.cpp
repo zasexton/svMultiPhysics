@@ -2833,6 +2833,48 @@ TEST(CutIntegrationInfrastructure, CapsCutAdjacentFacetStabilizationScales)
                      CutIntegrationContext::maxCutCellStabilizationScale());
 }
 
+TEST(CutIntegrationInfrastructure, PrunesGeneratedSliverVolumeRules)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/12,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/7);
+    request.interface_marker = 140;
+
+    LevelSetInterfaceDomain domain(request);
+
+    CutInterfaceVolumeRegion sliver;
+    sliver.parent_cell = 4;
+    sliver.side = CutIntegrationSide::Negative;
+    sliver.parent_measure = 1.0;
+    sliver.measure = CutIntegrationContext::minGeneratedCutVolumeFraction() * 0.25;
+    sliver.volume_fraction =
+        CutIntegrationContext::minGeneratedCutVolumeFraction() * 0.25;
+    sliver.centroid = {{0.1, 0.0, 0.0}};
+    sliver.normal = {{1.0, 0.0, 0.0}};
+    domain.addVolumeRegion(sliver);
+
+    CutInterfaceVolumeRegion kept;
+    kept.parent_cell = 5;
+    kept.side = CutIntegrationSide::Negative;
+    kept.parent_measure = 1.0;
+    kept.measure = 0.25;
+    kept.volume_fraction = 0.25;
+    kept.centroid = {{0.5, 0.0, 0.0}};
+    kept.normal = {{1.0, 0.0, 0.0}};
+    domain.addVolumeRegion(kept);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+
+    EXPECT_EQ(context.generatedPrunedVolumeRuleCount(), 1u);
+    EXPECT_NEAR(context.generatedPrunedVolumeMeasure(), sliver.measure, 1.0e-16);
+    const auto rules = context.generatedVolumeRulesForMarkerAndSide(
+        140, CutIntegrationSide::Negative);
+    ASSERT_EQ(rules.size(), 1u);
+    EXPECT_EQ(rules.front()->provenance.parent_entity, 5);
+}
+
 TEST(CutIntegrationInfrastructure, SmallGeneratedCutFragmentsFeedConditioningNeighborhoods)
 {
     CutInterfaceDomainRequest request;

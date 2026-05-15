@@ -217,6 +217,18 @@ public:
         return Real{1.0e8};
     }
 
+    [[nodiscard]] static constexpr Real minGeneratedCutVolumeFraction() noexcept {
+        return Real{1.0e-10};
+    }
+
+    [[nodiscard]] static bool shouldPruneGeneratedVolumeRule(
+        const geometry::CutQuadratureRule& rule) noexcept {
+        return !rule.full_cell_equivalent &&
+               std::isfinite(rule.volume_fraction) &&
+               rule.volume_fraction > Real{0.0} &&
+               rule.volume_fraction < minGeneratedCutVolumeFraction();
+    }
+
     void clear() {
         metadata_.clear();
         volume_rules_.clear();
@@ -236,6 +248,8 @@ public:
         stabilization_hooks_.clear();
         bindings_.clear();
         sensitivity_metadata_.clear();
+        generated_pruned_volume_rule_count_ = 0u;
+        generated_pruned_volume_measure_ = Real{0.0};
     }
 
     void addVolumeRule(CutCellAssemblyMetadata metadata,
@@ -290,6 +304,13 @@ public:
         }
         if (metadata.side != rule.side) {
             throw std::invalid_argument("generated level-set volume metadata side must match the rule side");
+        }
+        if (shouldPruneGeneratedVolumeRule(rule)) {
+            ++generated_pruned_volume_rule_count_;
+            if (std::isfinite(rule.measure) && rule.measure > Real{0.0}) {
+                generated_pruned_volume_measure_ += rule.measure;
+            }
+            return;
         }
 
         const bool keep_binding_alignment = bindings_.size() == volume_rules_.size();
@@ -463,6 +484,14 @@ public:
 
     [[nodiscard]] const std::vector<int>& generatedInterfaceMarkers() const noexcept {
         return generated_interface_markers_;
+    }
+
+    [[nodiscard]] std::size_t generatedPrunedVolumeRuleCount() const noexcept {
+        return generated_pruned_volume_rule_count_;
+    }
+
+    [[nodiscard]] Real generatedPrunedVolumeMeasure() const noexcept {
+        return generated_pruned_volume_measure_;
     }
 
     [[nodiscard]] bool hasFacetSetMarker(int marker) const {
@@ -1212,6 +1241,8 @@ private:
     std::vector<CutStabilizationHook> stabilization_hooks_{};
     std::vector<CutIntegrationBinding> bindings_{};
     std::vector<CutGeometrySensitivityMetadata> sensitivity_metadata_{};
+    std::size_t generated_pruned_volume_rule_count_{0u};
+    Real generated_pruned_volume_measure_{0.0};
 };
 
 } // namespace assembly

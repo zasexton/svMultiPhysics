@@ -415,7 +415,9 @@ struct WetVolumeDiagnostic {
 
 struct ActiveSideRegionSummary {
   svmp::FE::Real active_volume{0.0};
+  svmp::FE::Real pruned_volume{0.0};
   std::size_t active_volume_regions{0};
+  std::size_t pruned_volume_regions{0};
   std::size_t active_quadrature_points{0};
   std::size_t active_wet_cells{0};
   std::size_t cut_cell_count{0};
@@ -663,6 +665,19 @@ ActiveSideRegionSummary summarizeActiveSideRegions(
   const auto side = cutIntegrationSide(active_side);
   for (const auto& region : domain.volumeRegions()) {
     if (!region.active() || region.side != side) {
+      continue;
+    }
+    if (!region.full_cell_equivalent &&
+        std::isfinite(region.volume_fraction) &&
+        region.volume_fraction > svmp::FE::Real{0.0} &&
+        region.volume_fraction <
+            svmp::FE::assembly::CutIntegrationContext::
+                minGeneratedCutVolumeFraction()) {
+      ++summary.pruned_volume_regions;
+      if (std::isfinite(region.measure) &&
+          region.measure > svmp::FE::Real{0.0}) {
+        summary.pruned_volume += region.measure;
+      }
       continue;
     }
     ++summary.active_volume_regions;
@@ -2144,10 +2159,18 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     }
 
     const auto summary = result.summary;
-    const auto active_volume =
+    const auto active_summary = summarizeActiveSideRegions(
+        result.domain,
+        request.active_side,
+        static_cast<std::size_t>(std::max<svmp::FE::GlobalIndex>(
+            0, sim.fe_system->meshAccess().numCells())));
+    const auto raw_active_volume =
         request.active_side == LevelSetActiveSide::Negative
             ? summary.negative_volume_measure
             : summary.positive_volume_measure;
+    const auto active_volume = active_summary.active_volume;
+    const auto global_raw_active_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(static_cast<double>(raw_active_volume), comm));
     const auto global_active_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(active_volume), comm));
     if (!(global_active_volume > svmp::FE::Real{0.0})) {
@@ -2157,7 +2180,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           request.level_set_field_name + "' domain_id='" + request.domain_id +
           "' active_side=" + activeSideName(request.active_side) +
           " isovalue=" + std::to_string(request.isovalue) +
-          " has zero active wet volume.");
+          " has zero retained active wet volume after generated cut-volume pruning.");
     }
     const auto topology_key = cutContextTopologyKey(result.domain);
     mixCutContextHash(report.topology_key, topology_key);
@@ -2167,7 +2190,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto global_active_interface_fragments =
         globalSumSize(summary.active_fragment_count, comm);
     const auto global_active_volume_regions =
+        globalSumSize(active_summary.active_volume_regions, comm);
+    const auto global_raw_active_volume_regions =
         globalSumSize(summary.active_volume_region_count, comm);
+    const auto global_pruned_volume_regions =
+        globalSumSize(active_summary.pruned_volume_regions, comm);
+    const auto global_pruned_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(static_cast<double>(active_summary.pruned_volume), comm));
     const auto global_negative_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(summary.negative_volume_measure), comm));
     const auto global_positive_volume = static_cast<svmp::FE::Real>(
@@ -2176,15 +2205,24 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     report.active_volume_regions += global_active_volume_regions;
     report.negative_volume += global_negative_volume;
     report.positive_volume += global_positive_volume;
+    const auto generated_pruned_count_before =
+        context->generatedPrunedVolumeRuleCount();
+    const auto generated_pruned_volume_before =
+        context->generatedPrunedVolumeMeasure();
     context->addGeneratedInterfaceDomain(result.domain);
+    const auto local_generated_pruned_volume_rules =
+        context->generatedPrunedVolumeRuleCount() -
+        generated_pruned_count_before;
+    const auto local_generated_pruned_volume =
+        context->generatedPrunedVolumeMeasure() -
+        generated_pruned_volume_before;
+    const auto global_generated_pruned_volume_rules =
+        globalSumSize(local_generated_pruned_volume_rules, comm);
+    const auto global_generated_pruned_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(static_cast<double>(local_generated_pruned_volume), comm));
     const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
         *context, result.domain, sim.fe_system->meshAccess());
     mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
-    const auto active_summary = summarizeActiveSideRegions(
-        result.domain,
-        request.active_side,
-        static_cast<std::size_t>(std::max<svmp::FE::GlobalIndex>(
-            0, sim.fe_system->meshAccess().numCells())));
     const auto facet_scale_summary =
         summarizeCutAdjacentFacetScales(facet_set_handle);
     const auto global_cut_adjacent_facets =
@@ -2274,10 +2312,20 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " cut_context_revision=" << result.value_revision
         << " active_side_volume=" << global_active_volume
         << " active_side_volume_local=" << active_volume
+        << " active_side_raw_volume=" << global_raw_active_volume
+        << " active_side_raw_volume_local=" << raw_active_volume
         << " interface_fragments=" << global_interface_fragments
         << " active_interface_fragments=" << global_active_interface_fragments
         << " active_volume_regions="
         << global_active_volume_regions
+        << " active_raw_volume_regions="
+        << global_raw_active_volume_regions
+        << " active_pruned_volume_regions="
+        << global_pruned_volume_regions
+        << " active_pruned_volume=" << global_pruned_volume
+        << " generated_pruned_volume_rules="
+        << global_generated_pruned_volume_rules
+        << " generated_pruned_volume=" << global_generated_pruned_volume
         << " active_wet_cells=" << global_active_wet_cells
         << " active_cut_cells=" << global_cut_cells
         << " active_full_wet_cells=" << global_full_wet_cells
