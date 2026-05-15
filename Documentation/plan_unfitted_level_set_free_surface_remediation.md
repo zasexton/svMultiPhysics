@@ -364,7 +364,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
 ### Tests
 
 - [x] Add an output test that verifies cell wet fraction is written for cut cells.
-- [ ] Add an output test that verifies full-wet and full-dry cells report 1 and 0.
+- [x] Add an output test that verifies full-wet and full-dry cells report 1 and 0.
 - [ ] Add a maintenance test proving volume correction changes the next cut
       context before output.
 - [ ] Add a maintenance test proving reinitialization does not silently move the

@@ -71,3 +71,29 @@ TEST(ActiveDomainOutput, WritesWetVolumeFractionForCutCell)
   ASSERT_NE(data, nullptr);
   EXPECT_NEAR(data[0], 0.375, 1.0e-12);
 }
+
+TEST(ActiveDomainOutput, WritesFullWetAndFullDryFractions)
+{
+  auto mesh = makeTwoQuadCellMesh();
+
+  svmp::FE::geometry::CutQuadratureRule full_wet_rule;
+  full_wet_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  full_wet_rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  full_wet_rule.volume_fraction = 1.0;
+  full_wet_rule.provenance.parent_entity = 0;
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &full_wet_rule,
+  };
+  const auto fields_written =
+      application::core::writeWetVolumeFractionField(
+          *mesh, "WetVolumeFraction", rules);
+
+  EXPECT_EQ(fields_written, 1u);
+  const auto handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeFraction");
+  const auto* data = static_cast<const double*>(mesh->field_data(handle));
+  ASSERT_NE(data, nullptr);
+  EXPECT_DOUBLE_EQ(data[0], 1.0);
+  EXPECT_DOUBLE_EQ(data[1], 0.0);
+}
