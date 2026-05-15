@@ -379,7 +379,7 @@ benchmark runs.
 ### Unit And Component Tests
 
 - [x] Cut context rebuilds from current Newton state.
-- [ ] Cut context rebuilds from line-search trial state.
+- [x] Cut context rebuilds from line-search trial state.
 - [ ] Rejected line-search trial does not leave stale trial cut context installed.
 - [ ] Missing active domain is rejected for validation unfitted free-surface
       cases.
