@@ -113,7 +113,7 @@ preconditioner metadata.
       Newton and the next residual assembly sees the new active side.
 - [x] Add a line-search test where a rejected trial changes the cut topology and
       the accepted state restores the previous topology.
-- [ ] Add a transient test proving accepted-step reinitialization or volume
+- [x] Add a transient test proving accepted-step reinitialization or volume
       correction is reflected in output-time active volume.
 - [ ] Add a regression test that fails if `on_before_physics_solve` is the only
       cut-context rebuild point for a coupled level-set/fluid solve.
