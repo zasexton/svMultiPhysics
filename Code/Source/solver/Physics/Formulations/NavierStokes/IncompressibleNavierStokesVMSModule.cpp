@@ -10,6 +10,7 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 
 #include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
 #include "FE/Core/Logger.h"
@@ -1621,10 +1622,30 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         validateFreeSurfaceBoundary(effective_bc, options_.enable_ale);
         effective_free_surfaces.push_back(std::move(effective_bc));
     }
+    const auto active_pressure_domain =
+        activePressureDomainFor(effective_free_surfaces);
     validateActiveDomainPressureConstraints(
         system,
         options_,
         effective_free_surfaces);
+
+    if (active_pressure_domain.has_value() &&
+        active_pressure_domain->boundary->active_domain_method ==
+            FreeSurfaceActiveDomainMethod::CutVolume) {
+        const auto side =
+            active_pressure_domain->active_domain ==
+                    FreeSurfaceActiveDomain::LevelSetPositive
+                ? FE::constraints::LevelSetConstraintSide::Positive
+                : FE::constraints::LevelSetConstraintSide::Negative;
+        system.addSystemConstraint(
+            std::make_unique<
+                FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
+                p_id,
+                active_pressure_domain->boundary->level_set_field_name,
+                side,
+                active_pressure_domain->boundary->level_set_isovalue,
+                FE::Real{0.0}));
+    }
 
     if (!options_.node_pressure_constraints.values.empty()) {
         std::vector<FE::constraints::VertexDirichletValue> values;

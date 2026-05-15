@@ -549,6 +549,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/SystemConstraints.h
     Constraints/StrongDirichletConstraint.h
     Constraints/VertexDirichletConstraint.h
+    Constraints/LevelSetActiveSideVertexDirichletConstraint.h
     Constraints/AuxiliaryDrivenDirichletConstraint.h
     Constraints/HCurlTangentialConstraint.h
     Constraints/HDivNormalConstraint.h
@@ -578,6 +579,7 @@ set(FE_CONSTRAINTS_SOURCES
     Constraints/SystemConstraints.cpp
     Constraints/StrongDirichletConstraint.cpp
     Constraints/VertexDirichletConstraint.cpp
+    Constraints/LevelSetActiveSideVertexDirichletConstraint.cpp
     Constraints/AuxiliaryDrivenDirichletConstraint.cpp
     Constraints/HCurlTangentialConstraint.cpp
     Constraints/HDivNormalConstraint.cpp

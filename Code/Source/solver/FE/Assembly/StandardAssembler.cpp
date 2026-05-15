@@ -42,6 +42,7 @@
 #endif
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <algorithm>
 #include <utility>
@@ -1722,6 +1723,22 @@ void StandardAssembler::initialize()
 
 void StandardAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView* vector_view)
 {
+    if (constraints_ && constraints_->isClosed()) {
+        constraints_->forEach([&](const constraints::AffineConstraints::ConstraintView& constraint) {
+            if (!constraint.isDirichlet()) {
+                return;
+            }
+            if (matrix_view) {
+                matrix_view->setDiagonal(constraint.slave_dof, Real{1.0});
+            }
+            if (vector_view) {
+                std::array<GlobalIndex, 1> dof{constraint.slave_dof};
+                std::array<Real, 1> value{static_cast<Real>(constraint.inhomogeneity)};
+                vector_view->setVectorEntries(dof, value);
+            }
+        });
+    }
+
     // End assembly phase and trigger finalization
     if (matrix_view) {
         matrix_view->endAssemblyPhase();

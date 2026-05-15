@@ -527,6 +527,9 @@ benchmark runs.
 - [x] Parse direct Eigen factorization diagnostics in the smoke script so
       no-output and failed-run probes can gate zero rows, pressure zero rows,
       and nonfinite matrix entries.
+- [x] Constrain inactive active-domain pressure vertex DOFs and finalize
+      Dirichlet diagonals for constrained rows with no element support, so
+      direct monolithic probes do not retain singular dry pressure rows.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
