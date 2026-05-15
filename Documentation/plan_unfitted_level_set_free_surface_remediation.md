@@ -318,7 +318,7 @@ explicit stabilization policy change.
       visited by stabilization assembly.
 - [x] Add a unit test where a far-field interior face receives zero contribution.
 - [x] Add tests with `Use_cut_metadata_scale=true`.
-- [ ] Add tests with `Use_cut_metadata_scale=false`.
+- [x] Add tests with `Use_cut_metadata_scale=false`.
 - [ ] Add a regression test for D18/D38 stabilization setup with active cut
       metadata.
 - [ ] Add a solver-level smoke test proving stabilization does not suppress the
