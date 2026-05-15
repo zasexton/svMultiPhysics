@@ -321,7 +321,7 @@ explicit stabilization policy change.
 - [x] Add tests with `Use_cut_metadata_scale=false`.
 - [x] Add a regression test for D18/D38 stabilization setup with active cut
       metadata.
-- [ ] Add a solver-level smoke test proving stabilization does not suppress the
+- [x] Add a solver-level smoke test proving stabilization does not suppress the
       expected dam-break velocity growth through global over-damping.
 
 ## 5. Improve Level-Set Maintenance And Wet-Region Diagnostics
