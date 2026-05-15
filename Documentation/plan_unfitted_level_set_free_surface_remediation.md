@@ -432,6 +432,9 @@ benchmark runs.
 - [x] Add constraint-component mean, RMS, fluctuation, and residual mean
       diagnostics to failed FSILS true-residual records so pressure nullspace
       drift can be separated from pressure-block residual error.
+- [x] Add compact FSILS BlockSchur solve-summary diagnostics and smoke parsing
+      for nested Schur and momentum iteration limits, tolerances, and internal
+      convergence state.
 - [x] Add smoke-script linear and BlockSchur subsolver override switches so
       D18/D38 solver-control probes can be run from temporary case copies
       without editing validation fixtures.

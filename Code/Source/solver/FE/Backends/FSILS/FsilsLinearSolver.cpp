@@ -5586,6 +5586,52 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     report.blockschur_schur_collective_words = ls.CG.stats.collective_words;
     report.blockschur_schur_collective_time_seconds = ls.CG.stats.collective_time;
 
+    if (lhs.commu.task == 0 && use_blockschur &&
+        (!report.converged || fsilsTraceEnabled())) {
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver: solve summary"
+            << " diagnostic=fsils_solve_summary"
+            << " method=" << solverMethodToString(options_.method)
+            << " prepared_mode="
+            << (current_preparation_uses_blockschur ? "blockschur" : "original")
+            << " solve_ok=" << (solve_ok ? 1 : 0)
+            << " converged=" << (report.converged ? 1 : 0)
+            << " iterations=" << report.iterations
+            << " initial_residual_norm=" << report.initial_residual_norm
+            << " final_residual_norm=" << report.final_residual_norm
+            << " relative_residual=" << report.relative_residual
+            << " rel_tol=" << options_.rel_tol
+            << " abs_tol=" << options_.abs_tol
+            << " max_iter=" << options_.max_iter
+            << " internal_iterations=" << ls.RI.itr
+            << " internal_initial_norm=" << ls.RI.iNorm
+            << " internal_final_norm=" << ls.RI.fNorm
+            << " internal_success=" << (ls.RI.suc ? 1 : 0)
+            << " blockschur_outer_iterations="
+            << report.blockschur_outer_iterations
+            << " blockschur_momentum_solve_calls="
+            << report.blockschur_momentum_solve_calls
+            << " blockschur_momentum_iterations="
+            << report.blockschur_momentum_iterations
+            << " blockschur_momentum_restart_cycles="
+            << report.blockschur_momentum_restart_cycles
+            << " blockschur_momentum_mitr=" << ls.GM.mItr
+            << " blockschur_momentum_sd=" << ls.GM.sD
+            << " blockschur_momentum_rel_tol=" << ls.GM.relTol
+            << " blockschur_momentum_abs_tol=" << ls.GM.absTol
+            << " blockschur_schur_solve_calls="
+            << report.blockschur_schur_solve_calls
+            << " blockschur_schur_iterations="
+            << report.blockschur_schur_iterations
+            << " blockschur_schur_mitr=" << ls.CG.mItr
+            << " blockschur_schur_sd=" << ls.CG.sD
+            << " blockschur_schur_rel_tol=" << ls.CG.relTol
+            << " blockschur_schur_abs_tol=" << ls.CG.absTol
+            << " blockschur_schur_exact_convergence="
+            << (ls.CG.exact_convergence ? 1 : 0);
+        FE_LOG_INFO(oss.str());
+    }
+
     if (lhs.commu.task == 0) {
         std::fprintf(stderr,
                      "\n=== FSILS BACKEND METRICS (rank 0) ===\n"

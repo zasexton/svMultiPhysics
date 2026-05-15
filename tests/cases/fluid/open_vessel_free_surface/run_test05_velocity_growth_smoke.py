@@ -872,6 +872,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "pressure_gauge_checks": [],
         "residual_block_norms": [],
         "fsils_true_residuals": [],
+        "fsils_solve_summaries": [],
         "vector_component_norms": [],
         "time_loop": {
             "nonlinear_records": [],
@@ -911,6 +912,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["residual_block_norms"].append(parse_key_values(line))
         elif "true residual diagnostics" in line:
             diagnostics["fsils_true_residuals"].append(parse_key_values(line))
+        elif "diagnostic=fsils_solve_summary" in line:
+            diagnostics["fsils_solve_summaries"].append(parse_key_values(line))
         elif "vector component norms" in line:
             record = parse_key_values(vector_component_header(line))
             record["components"] = parse_component_norms(line)
@@ -1126,6 +1129,22 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             "constraint_residual_rms",
         ):
             value = latest_true_residual.get(name)
+            if isinstance(value, (int, float)):
+                metrics[f"latest_fsils_{name}"] = value
+    if diagnostics.get("fsils_solve_summaries"):
+        latest_solve_summary = diagnostics["fsils_solve_summaries"][-1]
+        metrics["latest_fsils_solve_summary"] = latest_solve_summary
+        for name in (
+            "blockschur_schur_iterations",
+            "blockschur_schur_mitr",
+            "blockschur_schur_rel_tol",
+            "blockschur_schur_abs_tol",
+            "blockschur_momentum_iterations",
+            "blockschur_momentum_mitr",
+            "internal_final_norm",
+            "internal_success",
+        ):
+            value = latest_solve_summary.get(name)
             if isinstance(value, (int, float)):
                 metrics[f"latest_fsils_{name}"] = value
 
