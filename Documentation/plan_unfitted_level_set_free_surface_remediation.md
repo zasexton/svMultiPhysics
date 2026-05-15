@@ -331,7 +331,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
 
 ### Maintenance Checklist
 
-- [ ] Decide which validation cases require reinitialization and which should run
+- [x] Decide which validation cases require reinitialization and which should run
       without it.
 - [ ] Decide which validation cases require volume correction and which should
       run without it.

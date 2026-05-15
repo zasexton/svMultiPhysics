@@ -62,6 +62,27 @@ domain explicitly, normally `Active_domain=LevelSetNegative` with
 `Active_domain_method=CutVolume`; full-domain unfitted runs require an explicit
 diagnostic opt-in.
 
+## Level-Set Maintenance Policy
+
+Reinitialization is a validation control, not a universal default. Cases that
+measure a prescribed or analytic level-set transport error should avoid
+projection repair unless the acceptance metric explicitly includes the repair
+effect. Cases that exercise long, strongly deformed free surfaces should use
+reinitialization until a conservative transport formulation is available, with
+the interface displacement reported as a diagnostic.
+
+Reinitialization policy by tracked validation case:
+
+| Case | Reinitialization policy | Rationale |
+| --- | --- | --- |
+| `unfitted_level_set/solver.xml` | Enabled | The open-tank fixture is a maintenance regression for a stationary interface; projection repair should leave the flat interface unchanged within tolerance. |
+| `unfitted_level_set/linear_sloshing_2d/solver.xml` | Enabled | The standing-wave verifier measures the repaired interface against the analytic height, so projection drift is part of the regression signal. |
+| `unfitted_level_set/mms_traveling_interface_2d/solver.xml` | Enabled | The manufactured interface case verifies that projection repair remains compatible with prescribed interface motion. |
+| `unfitted_level_set/spheric_test10_lateral_water_1x/solver.xml` | Enabled | The sloshing-impact case has large interface deformation and should keep signed-distance quality during long probes. |
+| `unfitted_level_set/spheric_test05_wet_bed_d18/solver.xml` | Disabled for qualification probes | The wet-bed dam-break probes should isolate active-domain, pressure, velocity-extension, and cut-stabilization behavior before projection repair is reintroduced with displacement diagnostics. |
+| `unfitted_level_set/spheric_test05_wet_bed_d38/solver.xml` | Disabled for qualification probes | The D38 probe follows the same policy as D18 so both wet-bed depths compare the same solver controls. |
+| `unfitted_level_set/spheric_test02_dambreak_obstacle/solver.xml` | Enabled | The obstacle dam-break has severe interface distortion, so projection repair is required for long-running geometry quality. |
+
 ## Open Tank At Rest
 
 Purpose: verify that the half-filled open-vessel examples remain in hydrostatic
