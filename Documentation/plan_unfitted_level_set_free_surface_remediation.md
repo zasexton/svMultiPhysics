@@ -309,7 +309,7 @@ explicit stabilization policy change.
       cut-neighborhood stabilization, not global stabilization.
 - [x] Include the interface side and active-domain side in stabilization
       diagnostics.
-- [ ] Fail fast if cut-cell stabilization is enabled but no cut context or
+- [x] Fail fast if cut-cell stabilization is enabled but no cut context or
       cut-adjacent facet set exists.
 
 ### Tests

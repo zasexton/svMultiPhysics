@@ -24,6 +24,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -287,6 +288,52 @@ TEST(FormKernelDGTest, MarkedInteriorFacesUseCutFacetSetHandle)
                                                        missing_mat, nullptr,
                                                        /*interior_facet_marker=*/99),
                  FEException);
+}
+
+TEST(FormKernelDGTest, MarkedCutAdjacentInteriorFacesRequireCutContext)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    constexpr int marker = 12;
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = cutAdjacentFacetIntegral(
+        cutStabilizationScale() * inner(jump(u), jump(v)), marker);
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    assembly::StandardAssembler assembler_without_context;
+    assembler_without_context.setDofMap(dof_map);
+    assembly::DenseMatrixView no_context_mat(8);
+    no_context_mat.zero();
+    try {
+        (void)assembler_without_context.assembleInteriorFaces(
+            mesh, space, space, kernel, no_context_mat, nullptr, marker);
+        FAIL() << "Expected marked cut-adjacent assembly to require a cut context";
+    } catch (const FEException& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("requires a cut integration context"), std::string::npos);
+    }
+
+    assembly::CutIntegrationContext empty_context;
+    assembly::StandardAssembler assembler_without_facet_set;
+    assembler_without_facet_set.setDofMap(dof_map);
+    assembler_without_facet_set.setCutIntegrationContext(&empty_context);
+    assembly::DenseMatrixView missing_set_mat(8);
+    missing_set_mat.zero();
+    try {
+        (void)assembler_without_facet_set.assembleInteriorFaces(
+            mesh, space, space, kernel, missing_set_mat, nullptr, marker);
+        FAIL() << "Expected marked cut-adjacent assembly to require a facet set";
+    } catch (const FEException& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("missing cut-adjacent facet set"), std::string::npos);
+    }
 }
 
 TEST(FormKernelDGTest, MarkedInteriorFaceUsesFacetBoundCutStabilizationScale)
