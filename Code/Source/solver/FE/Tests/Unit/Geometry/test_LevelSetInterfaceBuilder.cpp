@@ -66,6 +66,16 @@ Real integrate_volume_weight(const svmp::FE::geometry::CutQuadratureRule& rule)
     return value;
 }
 
+Real integrate_volume_coordinate(const svmp::FE::geometry::CutQuadratureRule& rule,
+                                 std::size_t component)
+{
+    Real value = 0.0;
+    for (const auto& point : rule.points) {
+        value += point.weight * point.point[component];
+    }
+    return value;
+}
+
 struct InterfaceApproximation {
     Real measure{0.0};
     Real weighted_normal_error{0.0};
@@ -668,12 +678,16 @@ TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
     auto rules = vertex_domain.volumeQuadratureRules();
     ASSERT_EQ(rules.size(), 2u);
     EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
-    ASSERT_EQ(rules[0].points.size(), 1u);
-    EXPECT_NEAR(rules[0].points.front().point[0], t / Real{3.0}, 1.0e-14);
-    EXPECT_NEAR(rules[0].points.front().point[1], t / Real{3.0}, 1.0e-14);
-    EXPECT_NEAR(rules[0].points.front().weight,
+    ASSERT_EQ(rules[0].points.size(), 3u);
+    EXPECT_NEAR(integrate_volume_weight(rules[0]),
                 expected_vertex_volume,
                 1.0e-20);
+    EXPECT_NEAR(integrate_volume_coordinate(rules[0], 0),
+                expected_vertex_volume * t / Real{3.0},
+                1.0e-27);
+    EXPECT_NEAR(integrate_volume_coordinate(rules[0], 1),
+                expected_vertex_volume * t / Real{3.0},
+                1.0e-27);
 
     LevelSetInterfaceDomain edge_domain(make_request(/*marker=*/32));
     appendLinearLevelSetCellCut2D(
@@ -695,7 +709,7 @@ TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
     rules = edge_domain.volumeQuadratureRules();
     ASSERT_EQ(rules.size(), 2u);
     EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
-    ASSERT_EQ(rules[0].points.size(), 2u);
+    ASSERT_EQ(rules[0].points.size(), 6u);
     EXPECT_NEAR(integrate_volume_weight(rules[0]), t, 1.0e-14);
 }
 

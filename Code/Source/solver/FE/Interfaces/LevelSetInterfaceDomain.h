@@ -126,7 +126,7 @@ struct LevelSetInterfaceSource {
 
 [[nodiscard]] constexpr int implementedLevelSetCutVolumeExactOrder(
     int requested_order) noexcept {
-    return requested_order > 1 ? 1 : (requested_order > 0 ? requested_order : 0);
+    return requested_order > 2 ? 2 : (requested_order > 0 ? requested_order : 0);
 }
 
 struct CutInterfaceDomainRequest {
@@ -312,7 +312,10 @@ struct CutInterfaceVolumeRegion {
         if (volume_order < 0) {
             throw std::invalid_argument("cut-volume quadrature order must be nonnegative");
         }
-        const int exact_order = implementedLevelSetCutVolumeExactOrder(volume_order);
+        int exact_order = implementedLevelSetCutVolumeExactOrder(volume_order);
+        if (quadrature_points.empty() && !full_cell_equivalent) {
+            exact_order = std::min(exact_order, 1);
+        }
 
         geometry::CutQuadratureRule rule;
         rule.kind = geometry::CutQuadratureKind::Volume;
@@ -322,12 +325,18 @@ struct CutInterfaceVolumeRegion {
         rule.volume_fraction = volume_fraction;
         rule.exact_for_constants = true;
         rule.exact_polynomial_order = exact_order;
-        rule.policy.kind = geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+        rule.policy.kind = exact_order > 1
+                               ? geometry::CutQuadratureConstructionKind::CurvedTopologySubdivision
+                               : geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
         rule.policy.polynomial_order = exact_order;
-        rule.policy.moment_fitted = exact_order > 0;
-        rule.policy.name = exact_order == 0
-                               ? "conservative-level-set-volume"
-                               : "linear-moment-fitted-level-set-volume";
+        rule.policy.moment_fitted = exact_order == 1;
+        if (exact_order == 0) {
+            rule.policy.name = "conservative-level-set-volume";
+        } else if (exact_order == 1) {
+            rule.policy.name = "linear-moment-fitted-level-set-volume";
+        } else {
+            rule.policy.name = "quadratic-subcell-level-set-volume";
+        }
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;

@@ -677,6 +677,28 @@ def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
     )
 
 
+def diagnostic_cut_volume_min_exact_order(diagnostics: dict[str, Any]) -> int | None:
+    orders = [
+        int(record["min_exact_order"])
+        for record in diagnostics.get("cut_volume_assemblies", [])
+        if isinstance(record.get("min_exact_order"), int)
+    ]
+    if not orders:
+        return None
+    return min(orders)
+
+
+def diagnostic_cut_volume_max_exact_order(diagnostics: dict[str, Any]) -> int | None:
+    orders = [
+        int(record["max_exact_order"])
+        for record in diagnostics.get("cut_volume_assemblies", [])
+        if isinstance(record.get("max_exact_order"), int)
+    ]
+    if not orders:
+        return None
+    return max(orders)
+
+
 def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None:
     for record in reversed(diagnostics.get("hydrostatic_initializations", [])):
         checked = record.get("checked_gauge_constraints")
@@ -720,6 +742,12 @@ def diagnostic_timeout_metrics(case_name: str,
     active_volume_error = diagnostic_active_volume_error(diagnostics)
     if active_volume_error is not None:
         metrics["diagnostic_active_volume_error"] = active_volume_error
+    min_exact_order = diagnostic_cut_volume_min_exact_order(diagnostics)
+    if min_exact_order is not None:
+        metrics["diagnostic_cut_volume_min_exact_order"] = min_exact_order
+    max_exact_order = diagnostic_cut_volume_max_exact_order(diagnostics)
+    if max_exact_order is not None:
+        metrics["diagnostic_cut_volume_max_exact_order"] = max_exact_order
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
@@ -775,6 +803,24 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
             errors.append(
                 f"diagnostic active-volume error {volume_error:.6g} exceeds "
                 f"{args.max_diagnostic_active_volume_error:.6g}"
+            )
+    if args.min_diagnostic_cut_volume_exact_order is not None:
+        exact_order = metrics.get("diagnostic_cut_volume_min_exact_order")
+        if not isinstance(exact_order, int):
+            errors.append("diagnostic cut-volume exact order is unavailable")
+        elif exact_order < args.min_diagnostic_cut_volume_exact_order:
+            errors.append(
+                f"diagnostic cut-volume exact order {exact_order} is below "
+                f"{args.min_diagnostic_cut_volume_exact_order}"
+            )
+    if args.min_diagnostic_cut_volume_max_exact_order is not None:
+        exact_order = metrics.get("diagnostic_cut_volume_max_exact_order")
+        if not isinstance(exact_order, int):
+            errors.append("diagnostic cut-volume max exact order is unavailable")
+        elif exact_order < args.min_diagnostic_cut_volume_max_exact_order:
+            errors.append(
+                f"diagnostic cut-volume max exact order {exact_order} is below "
+                f"{args.min_diagnostic_cut_volume_max_exact_order}"
             )
     if args.stale_pressure_gauge_tolerance is not None:
         stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
@@ -1073,6 +1119,8 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-solution-velocity-range", type=float)
     parser.add_argument("--min-diagnostic-pressure-range", type=float)
     parser.add_argument("--max-diagnostic-active-volume-error", type=float)
+    parser.add_argument("--min-diagnostic-cut-volume-exact-order", type=int)
+    parser.add_argument("--min-diagnostic-cut-volume-max-exact-order", type=int)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)

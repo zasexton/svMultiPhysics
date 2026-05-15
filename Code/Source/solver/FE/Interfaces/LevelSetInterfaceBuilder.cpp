@@ -124,6 +124,29 @@ struct RegionMoments {
     return add(scale(a, Real{1.0} - t), scale(b, t));
 }
 
+[[nodiscard]] std::array<Real, 3> barycentricPoint(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    const std::array<Real, 3>& c,
+    Real wa,
+    Real wb,
+    Real wc) noexcept {
+    return add(add(scale(a, wa), scale(b, wb)), scale(c, wc));
+}
+
+[[nodiscard]] std::array<Real, 3> barycentricPoint(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    const std::array<Real, 3>& c,
+    const std::array<Real, 3>& d,
+    Real wa,
+    Real wb,
+    Real wc,
+    Real wd) noexcept {
+    return add(add(scale(a, wa), scale(b, wb)),
+               add(scale(c, wc), scale(d, wd)));
+}
+
 [[nodiscard]] CutInterfaceDegeneracy classifyZeroContact2D(
     const std::vector<Real>& signed_values,
     std::size_t count,
@@ -565,10 +588,18 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
         if (area <= tolerance) {
             continue;
         }
-        geometry::CutQuadraturePoint qp;
-        qp.point = scale(add(add(origin, b), c), Real{1.0} / Real{3.0});
-        qp.weight = area;
-        points.push_back(qp);
+        constexpr Real high = Real{2.0} / Real{3.0};
+        constexpr Real low = Real{1.0} / Real{6.0};
+        const Real weight = area / Real{3.0};
+        points.push_back(geometry::CutQuadraturePoint{
+            .point = barycentricPoint(origin, b, c, high, low, low),
+            .weight = weight});
+        points.push_back(geometry::CutQuadraturePoint{
+            .point = barycentricPoint(origin, b, c, low, high, low),
+            .weight = weight});
+        points.push_back(geometry::CutQuadraturePoint{
+            .point = barycentricPoint(origin, b, c, low, low, high),
+            .weight = weight});
     }
     return points;
 }
@@ -652,17 +683,13 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     return moments;
 }
 
-[[nodiscard]] RegionMoments negativeTetrahedronMoments(
+[[nodiscard]] std::vector<std::vector<std::array<Real, 3>>> tetrahedronSideFaces(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     const std::vector<CutPointCandidate>& ordered_cut_points,
+    geometry::CutIntegrationSide side,
     Real tolerance)
 {
-    const Real parent_volume = tetraVolume(points[0], points[1], points[2], points[3]);
-    if (parent_volume <= Real{0.0}) {
-        return RegionMoments{};
-    }
-
     constexpr std::array<std::array<std::size_t, 3>, 4> faces{{
         {{0u, 1u, 2u}},
         {{0u, 1u, 3u}},
@@ -676,7 +703,10 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         for (const auto index : face) {
             signed_face.push_back(SignedPoint{points[index], signed_values[index]});
         }
-        const auto clipped = clipPolygonToNegativeLevelSet(signed_face, tolerance);
+        const auto clipped =
+            side == geometry::CutIntegrationSide::Negative
+                ? clipPolygonToNegativeLevelSet(signed_face, tolerance)
+                : clipPolygonToPositiveLevelSet(signed_face, tolerance);
         if (clipped.size() >= 3u) {
             std::vector<std::array<Real, 3>> face_points;
             face_points.reserve(clipped.size());
@@ -694,8 +724,61 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         }
         clipped_faces.push_back(std::move(cut_face));
     }
+    return clipped_faces;
+}
 
-    return polyhedronMomentsFromFaces(clipped_faces, tolerance);
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(
+    const std::vector<std::vector<std::array<Real, 3>>>& faces,
+    Real tolerance)
+{
+    std::vector<std::array<Real, 3>> unique_points;
+    for (const auto& face : faces) {
+        for (const auto& point : face) {
+            addUniquePoint(unique_points, point, tolerance);
+        }
+    }
+    if (unique_points.empty()) {
+        return {};
+    }
+
+    std::array<Real, 3> center{{0.0, 0.0, 0.0}};
+    for (const auto& point : unique_points) {
+        center = add(center, point);
+    }
+    center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
+
+    std::vector<geometry::CutQuadraturePoint> points;
+    constexpr Real high = Real{0.5854101966249685};
+    constexpr Real low = Real{0.1381966011250105};
+    for (const auto& face : faces) {
+        if (face.size() < 3u) {
+            continue;
+        }
+        for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
+            const auto& a = center;
+            const auto& b = face[0];
+            const auto& c = face[i];
+            const auto& d = face[i + 1u];
+            const Real volume = tetraVolume(a, b, c, d);
+            if (volume <= tolerance) {
+                continue;
+            }
+            const Real weight = volume / Real{4.0};
+            points.push_back(geometry::CutQuadraturePoint{
+                .point = barycentricPoint(a, b, c, d, high, low, low, low),
+                .weight = weight});
+            points.push_back(geometry::CutQuadraturePoint{
+                .point = barycentricPoint(a, b, c, d, low, high, low, low),
+                .weight = weight});
+            points.push_back(geometry::CutQuadraturePoint{
+                .point = barycentricPoint(a, b, c, d, low, low, high, low),
+                .weight = weight});
+            points.push_back(geometry::CutQuadraturePoint{
+                .point = barycentricPoint(a, b, c, d, low, low, low, high),
+                .weight = weight});
+        }
+    }
+    return points;
 }
 
 [[nodiscard]] RegionMoments complementMoments(
@@ -1357,12 +1440,29 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
+    const auto negative_faces =
+        tetrahedronSideFaces(input.node_coordinates,
+                             signed_values,
+                             cut_points,
+                             geometry::CutIntegrationSide::Negative,
+                             request.tolerance);
+    const auto positive_faces =
+        tetrahedronSideFaces(input.node_coordinates,
+                             signed_values,
+                             cut_points,
+                             geometry::CutIntegrationSide::Positive,
+                             request.tolerance);
     const auto negative_moments =
-        negativeTetrahedronMoments(input.node_coordinates,
-                                   signed_values,
-                                   cut_points,
-                                   request.tolerance);
-    const auto positive_moments = complementMoments(parent_moments, negative_moments);
+        polyhedronMomentsFromFaces(negative_faces, request.tolerance);
+    auto positive_moments =
+        polyhedronMomentsFromFaces(positive_faces, request.tolerance);
+    if (positive_moments.measure <= Real{1.0e-30}) {
+        positive_moments = complementMoments(parent_moments, negative_moments);
+    }
+    const auto negative_quadrature =
+        polyhedronQuadratureFromFaces(negative_faces, request.tolerance);
+    const auto positive_quadrature =
+        polyhedronQuadratureFromFaces(positive_faces, request.tolerance);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)
@@ -1404,7 +1504,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          normal,
                          signed_values,
                          0u,
-                         "cut-negative-volume"));
+                         "cut-negative-volume",
+                         negative_quadrature));
     appendSideVolumeRegion(
         result,
         makeVolumeRegion(request,
@@ -1418,7 +1519,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          normal,
                          signed_values,
                          1u,
-                         "cut-positive-volume"));
+                         "cut-positive-volume",
+                         positive_quadrature));
     result.fragments.push_back(std::move(fragment));
     return result;
 }

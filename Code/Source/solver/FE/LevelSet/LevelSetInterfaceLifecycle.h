@@ -27,7 +27,10 @@ struct LevelSetGeneratedInterfaceOptions {
         /*field_order=*/1,
         /*form_order=*/1)};
     int interface_quadrature_order{-1};
-    int volume_quadrature_order{-1};
+    int volume_quadrature_order{interfaces::defaultLevelSetCutVolumeQuadratureOrder(
+        /*geometry_order=*/1,
+        /*field_order=*/1,
+        /*form_order=*/2)};
     bool keep_degenerate_fragments{false};
 };
 

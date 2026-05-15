@@ -183,9 +183,10 @@ declare exactness only for constants, but the rules are used for full
 Navier-Stokes and VMS integrands.
 
 Current production path: generated level-set cut volumes use side-specific
-centroid moment fitting for order 0 and order 1 rules. The generic
+centroid moment fitting for order 0 and order 1 rules, and quadratic subcell
+rules for cut sides when order 2 or higher is requested. The generic
 `makeMomentFittedCutVolumeQuadrature(...)` utility remains available, but the
-builder stores the computed side centroid directly so topology metadata and
+builder stores the computed side quadrature directly so topology metadata and
 side fractions stay deterministic.
 
 Degenerate-cut fallback policy: exact no-cut and full-zero cells remain inactive
@@ -202,9 +203,9 @@ side volume keep active side-volume metadata.
 - [x] Define a minimum accepted order for linear velocity-pressure elements.
       Linear geometry, field, and form input requests order 1.
 - [x] Define a minimum accepted order for quadratic geometry or quadratic fields.
-      Any quadratic geometry, field, or form input requests at least order 2;
-      generated rules still report the lower implemented exact order until
-      higher-order cut-volume construction is added.
+      Any quadratic geometry, field, or form input requests at least order 2,
+      and generated cut-side rules now report quadratic exactness when subcell
+      quadrature points are available.
 - [x] Decide whether the first production path uses sub-triangulation,
       moment-fitted quadrature, or a hybrid of both.
 - [x] Audit the existing `makeMomentFittedCutVolumeQuadrature(...)` utility and
@@ -214,9 +215,8 @@ side volume keep active side-volume metadata.
       and interface cuts passing close to vertices.
 - [x] Preserve exact total measure for constants even when higher-order
       quadrature is requested.
-      Higher requested orders currently reuse the linear moment-fitted volume
-      rule and report the implemented exact polynomial order while keeping
-      conservative side measures and weights.
+      Higher requested orders report the implemented exact polynomial order
+      while keeping conservative side measures and weights.
 
 ### Implementation Checklist
 
@@ -235,6 +235,8 @@ side volume keep active side-volume metadata.
       polygon is triangular.
 - [x] For cut tetrahedra, generate side-specific sub-tetrahedra or moment-fitted
       rules.
+      Cut triangles, quads, and tetrahedra now use positive-weight quadratic
+      subcell rules for cut-side volume integration when requested.
 - [x] Decide whether hexahedra, wedges, and pyramids are unsupported with a hard
       diagnostic or supported through the existing extension registry.
       The built-in level-set cutter rejects them with a diagnostic unless an
@@ -254,10 +256,10 @@ side volume keep active side-volume metadata.
 - [x] Add exact linear integration tests for cut triangles.
 - [x] Add exact linear integration tests for cut quads.
 - [x] Add exact linear integration tests for cut tetrahedra.
-- [x] Add polynomial convergence tests for quadratic fields where exactness is
-      not guaranteed.
-      A refinement test integrates a quadratic field over a triangular cut-volume
-      region and checks that the generated cut-volume quadrature error decreases.
+- [x] Add polynomial tests for quadratic fields.
+      Quadratic subcell tests integrate quadratic fields exactly over 2D and 3D
+      linear cut-volume regions to match the P1 Navier-Stokes/VMS convective
+      integrand order.
 - [x] Add tests where the interface cuts very close to a vertex.
 - [x] Add tests where the interface cuts very close to an edge.
 - [x] Add tests for small wet volume fractions.
@@ -404,6 +406,9 @@ benchmark runs.
       probes so pressure and velocity changes can be checked before VTK output.
 - [x] Add no-output D18/D38 smoke checks that evaluate parsed pressure-gauge
       values, solution ranges, and active-volume consistency on timeout.
+- [x] Add no-output D18/D38 smoke checks that verify parsed cut-volume
+      diagnostics include quadratic exact-order rules after quadratic subcell
+      quadrature is enabled.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
@@ -436,7 +441,7 @@ Use these as numerical-method guardrails while implementing the fixes.
 
 - [x] Confirm the chosen geometry update strategy is explicitly monolithic,
       outer-iterated, or explicit, rather than accidentally stale.
-- [ ] Confirm cut-cell quadrature is adequate for the finite-element order and
+- [x] Confirm cut-cell quadrature is adequate for the finite-element order and
       nonlinear Navier-Stokes/VMS integrands.
 - [x] Confirm ghost penalties are restricted to a cut-neighborhood or documented
       extension patch.
