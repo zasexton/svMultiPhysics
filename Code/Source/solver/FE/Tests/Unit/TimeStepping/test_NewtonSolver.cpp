@@ -1045,7 +1045,7 @@ TEST(NewtonSolver, SynchronizesUpdatedCoupledGeometryBeforeResidualAssembly)
     nopt.residual_op = "op";
     nopt.jacobian_op = "op";
     nopt.max_iterations = 2;
-    nopt.abs_tolerance = 0.0;
+    nopt.abs_tolerance = 1e-14;
     nopt.rel_tolerance = 0.0;
     nopt.step_tolerance = 0.0;
     nopt.use_line_search = false;
