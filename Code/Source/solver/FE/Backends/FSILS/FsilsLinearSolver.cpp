@@ -4587,6 +4587,187 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         traceLog(oss.str());
     };
 
+    auto componentSquaredNorms = [&](const FsilsVector& vec) {
+        std::vector<double> local_sq(static_cast<std::size_t>(dof), 0.0);
+        std::vector<double> global_sq(static_cast<std::size_t>(dof), 0.0);
+        const auto span = vec.localSpan();
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const int internal = lhs.map(old);
+            if (internal < 0 || internal >= lhs.mynNo) {
+                continue;
+            }
+            const std::size_t base =
+                static_cast<std::size_t>(old) * static_cast<std::size_t>(dof);
+            for (int c = 0; c < dof; ++c) {
+                const double value = static_cast<double>(
+                    span[base + static_cast<std::size_t>(c)]);
+                local_sq[static_cast<std::size_t>(c)] += value * value;
+            }
+        }
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized && lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                local_sq.data(),
+                global_sq.data(),
+                dof,
+                MPI_DOUBLE,
+                lhs.commu);
+        } else {
+            global_sq = local_sq;
+        }
+#else
+        global_sq = local_sq;
+#endif
+        return global_sq;
+    };
+
+    auto blockNormFromComponentSquares =
+        [](const std::vector<double>& component_sq, int start, int n_components) {
+            double sq_sum = 0.0;
+            const int begin = std::max(0, start);
+            const int end = std::min<int>(
+                static_cast<int>(component_sq.size()),
+                begin + std::max(0, n_components));
+            for (int c = begin; c < end; ++c) {
+                sq_sum += component_sq[static_cast<std::size_t>(c)];
+            }
+            return std::sqrt(std::max(0.0, sq_sum));
+        };
+    auto fullNormFromComponentSquares =
+        [&](const std::vector<double>& component_sq) {
+            return blockNormFromComponentSquares(
+                component_sq, 0, static_cast<int>(component_sq.size()));
+        };
+
+    auto appendVectorBlockNorms =
+        [&](std::ostringstream& oss,
+            std::string_view prefix,
+            const std::vector<double>& component_sq,
+            int start,
+            int n_components) {
+            oss << ' ' << prefix << "_norm="
+                << blockNormFromComponentSquares(component_sq, start, n_components);
+        };
+
+    auto logTrueResidualDiagnostics =
+        [&](std::string_view phase,
+            const FsilsResidualCheckResult& result,
+            Real target,
+            const FsilsVector& solution,
+            const FsilsVector& rhs_true,
+            const FsilsVector& ax_matrix,
+            const FsilsVector& ax_correction,
+            const FsilsVector& ax_full,
+            const FsilsVector& residual_true) {
+            const auto solution_sq = componentSquaredNorms(solution);
+            const auto rhs_sq = componentSquaredNorms(rhs_true);
+            const auto ax_matrix_sq = componentSquaredNorms(ax_matrix);
+            const auto ax_correction_sq = componentSquaredNorms(ax_correction);
+            const auto ax_full_sq = componentSquaredNorms(ax_full);
+            const auto residual_sq = componentSquaredNorms(residual_true);
+
+            if (lhs.commu.task != 0) {
+                return;
+            }
+
+            std::ostringstream oss;
+            oss << "FsilsLinearSolver: true residual diagnostics"
+                << " diagnostic=fsils_true_residual"
+                << " phase='" << phase << "'"
+                << " method=" << solverMethodToString(options_.method)
+                << " prepared_mode="
+                << (current_preparation_uses_blockschur ? "blockschur" : "original")
+                << " ok=" << (result.ok ? 1 : 0)
+                << " rhs_norm=" << result.rhs_norm
+                << " residual_norm=" << result.residual_norm
+                << " relative_residual=" << result.relative_residual
+                << " target=" << target
+                << " solution_norm=" << fullNormFromComponentSquares(solution_sq)
+                << " ax_matrix_norm=" << fullNormFromComponentSquares(ax_matrix_sq)
+                << " ax_correction_norm="
+                << fullNormFromComponentSquares(ax_correction_sq)
+                << " ax_full_norm=" << fullNormFromComponentSquares(ax_full_sq)
+                << " rank_one_updates=" << rank_one_updates_.size()
+                << " reduced_field_updates=" << reduced_field_updates_.size()
+                << " grouped_bordered_field_couplings="
+                << grouped_bordered_field_couplings_.size()
+                << " stage_scale=" << stage_scale;
+
+            for (int c = 0; c < dof; ++c) {
+                const auto index = static_cast<std::size_t>(c);
+                oss << " component" << c << "_solution_norm="
+                    << std::sqrt(std::max(0.0, solution_sq[index]))
+                    << " component" << c << "_rhs_norm="
+                    << std::sqrt(std::max(0.0, rhs_sq[index]))
+                    << " component" << c << "_ax_matrix_norm="
+                    << std::sqrt(std::max(0.0, ax_matrix_sq[index]))
+                    << " component" << c << "_ax_correction_norm="
+                    << std::sqrt(std::max(0.0, ax_correction_sq[index]))
+                    << " component" << c << "_ax_full_norm="
+                    << std::sqrt(std::max(0.0, ax_full_sq[index]))
+                    << " component" << c << "_residual_norm="
+                    << std::sqrt(std::max(0.0, residual_sq[index]));
+            }
+
+            if (options_.block_layout.has_value()) {
+                int block_index = 0;
+                for (const auto& block : options_.block_layout->blocks) {
+                    const int start = block.start_component;
+                    const int n_components = block.n_components;
+                    oss << " block" << block_index << "_name='" << block.name << "'"
+                        << " block" << block_index << "_role="
+                        << blockRoleToString(block.role)
+                        << " block" << block_index << "_start=" << start
+                        << " block" << block_index << "_components="
+                        << n_components;
+                    appendVectorBlockNorms(oss,
+                                           "block" + std::to_string(block_index) +
+                                               "_solution",
+                                           solution_sq,
+                                           start,
+                                           n_components);
+                    appendVectorBlockNorms(oss,
+                                           "block" + std::to_string(block_index) +
+                                               "_rhs",
+                                           rhs_sq,
+                                           start,
+                                           n_components);
+                    appendVectorBlockNorms(oss,
+                                           "block" + std::to_string(block_index) +
+                                               "_ax_matrix",
+                                           ax_matrix_sq,
+                                           start,
+                                           n_components);
+                    appendVectorBlockNorms(oss,
+                                           "block" + std::to_string(block_index) +
+                                               "_ax_correction",
+                                           ax_correction_sq,
+                                           start,
+                                           n_components);
+                    appendVectorBlockNorms(oss,
+                                           "block" + std::to_string(block_index) +
+                                               "_ax_full",
+                                           ax_full_sq,
+                                           start,
+                                           n_components);
+                    appendVectorBlockNorms(oss,
+                                           "block" + std::to_string(block_index) +
+                                               "_residual",
+                                           residual_sq,
+                                           start,
+                                           n_components);
+                    ++block_index;
+                }
+                oss << " block_count=" << block_index;
+            } else {
+                oss << " block_count=0";
+            }
+
+            FE_LOG_INFO(oss.str());
+        };
+
     auto validateOriginalResidual = [&](std::string_view phase) -> FsilsResidualCheckResult {
         const double tp0 = fe_fsi_linear_solver::fsils_cpu_t();
         FsilsResidualCheckResult result;
@@ -4609,45 +4790,55 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 << ", target=" << target << ")";
             result.detail = oss.str();
 
+            FsilsVector rhs_true(shared_layout);
+            rhs_true.copyFrom(*b);
+            prepareRhsVectorForOperator(rhs_true);
+
+            FsilsVector x_true(shared_layout);
+            x_true.copyFrom(*x);
+            x_true.updateGhosts();
+
+            FsilsVector ax_matrix(shared_layout);
+            A->mult(x_true, ax_matrix);
+
+            FsilsVector ax_full(shared_layout);
+            ax_full.copyFrom(ax_matrix);
+            addRankOneUpdatesToProduct(rank_one_updates_, x_true, ax_full, lhs.commu);
+            addReducedFieldUpdatesToProduct(reduced_field_updates_,
+                                            x_true,
+                                            ax_full,
+                                            lhs.commu,
+                                            grouped_bordered_field_couplings_);
+            addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
+                                                      x_true,
+                                                      ax_full,
+                                                      lhs.commu);
+
+            FsilsVector ax_correction(shared_layout);
+            ax_correction.copyFrom(ax_full);
+            {
+                auto corr_span = ax_correction.localSpan();
+                const auto matrix_span = ax_matrix.localSpan();
+                FE_THROW_IF(corr_span.size() != matrix_span.size(),
+                            FEException,
+                            "FsilsLinearSolver::solve: residual validation correction size mismatch");
+                for (std::size_t i = 0; i < corr_span.size(); ++i) {
+                    corr_span[i] -= matrix_span[i];
+                }
+            }
+
+            logTrueResidualDiagnostics(phase,
+                                       result,
+                                       target,
+                                       x_true,
+                                       rhs_true,
+                                       ax_matrix,
+                                       ax_correction,
+                                       ax_full,
+                                       residual_true);
+
             if (fsilsCompareFaceOperatorDumpPrefix() != nullptr) {
                 const std::uint64_t dump_index = residual_validation_dump_index++;
-                FsilsVector rhs_true(shared_layout);
-                rhs_true.copyFrom(*b);
-                prepareRhsVectorForOperator(rhs_true);
-
-                FsilsVector x_true(shared_layout);
-                x_true.copyFrom(*x);
-                x_true.updateGhosts();
-
-                FsilsVector ax_matrix(shared_layout);
-                A->mult(x_true, ax_matrix);
-
-                FsilsVector ax_full(shared_layout);
-                ax_full.copyFrom(ax_matrix);
-                addRankOneUpdatesToProduct(rank_one_updates_, x_true, ax_full, lhs.commu);
-                addReducedFieldUpdatesToProduct(reduced_field_updates_,
-                                                x_true,
-                                                ax_full,
-                                                lhs.commu,
-                                                grouped_bordered_field_couplings_);
-                addGroupedBorderedFieldCouplingsToProduct(grouped_bordered_field_couplings_,
-                                                          x_true,
-                                                          ax_full,
-                                                          lhs.commu);
-
-                FsilsVector ax_correction(shared_layout);
-                ax_correction.copyFrom(ax_full);
-                {
-                    auto corr_span = ax_correction.localSpan();
-                    const auto matrix_span = ax_matrix.localSpan();
-                    FE_THROW_IF(corr_span.size() != matrix_span.size(),
-                                FEException,
-                                "FsilsLinearSolver::solve: residual validation correction size mismatch");
-                    for (std::size_t i = 0; i < corr_span.size(); ++i) {
-                        corr_span[i] -= matrix_span[i];
-                    }
-                }
-
                 dumpResidualValidationVector(dump_index, phase, "x", x_true);
                 dumpResidualValidationVector(dump_index, phase, "rhs", rhs_true);
                 dumpResidualValidationVector(dump_index, phase, "ax_matrix", ax_matrix);

@@ -423,6 +423,9 @@ benchmark runs.
 - [x] Aggregate rank-local MPI cut-volume assembly diagnostics in the smoke
       script so active-volume, quadrature-order, and wet-volume checks compare
       global assembly summaries against global cut-context rebuild summaries.
+- [x] Add parseable FSILS true-residual diagnostics and smoke parsing for
+      failed BlockSchur D18/D38 probes so formulation-block residual
+      contributions are captured before additional solver changes.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

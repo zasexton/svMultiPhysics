@@ -832,12 +832,14 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "hydrostatic_initializations": [],
         "pressure_gauge_checks": [],
         "residual_block_norms": [],
+        "fsils_true_residuals": [],
         "vector_component_norms": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
             "vtk_outputs": [],
         },
+        "true_residual_failure_count": solver_output.count("true residual check failed"),
     }
     for line in solver_output.splitlines():
         linear_match = LINEAR_SOLVER_RE.search(line)
@@ -868,6 +870,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["pressure_gauge_checks"].append(parse_key_values(line))
         elif "residual block norms" in line:
             diagnostics["residual_block_norms"].append(parse_key_values(line))
+        elif "true residual diagnostics" in line:
+            diagnostics["fsils_true_residuals"].append(parse_key_values(line))
         elif "vector component norms" in line:
             record = parse_key_values(vector_component_header(line))
             record["components"] = parse_component_norms(line)
@@ -1043,6 +1047,8 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
+    if diagnostics.get("fsils_true_residuals"):
+        metrics["latest_fsils_true_residual"] = diagnostics["fsils_true_residuals"][-1]
 
     wet_fraction_volume = metrics.get("wet_fraction_volume")
     context_volumes = metrics.get("cut_context_active_side_volumes", [])
@@ -1111,6 +1117,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("hydrostatic initialization diagnostics were not reported")
     if not latest_component_record(diagnostics, "solution_state"):
         errors.append("solution-state component diagnostics were not reported")
+    if (diagnostics.get("true_residual_failure_count", 0) > 0 and
+            not diagnostics.get("fsils_true_residuals")):
+        errors.append("FSILS true-residual diagnostics were not reported")
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
