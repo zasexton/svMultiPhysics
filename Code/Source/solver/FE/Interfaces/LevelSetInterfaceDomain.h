@@ -284,10 +284,7 @@ struct CutInterfaceVolumeRegion {
         if (volume_order < 0) {
             throw std::invalid_argument("cut-volume quadrature order must be nonnegative");
         }
-        if (volume_order > 1) {
-            throw std::invalid_argument("cut-volume quadrature order is not supported for this region");
-        }
-        const int exact_order = volume_order;
+        const int exact_order = std::min(volume_order, 1);
 
         geometry::CutQuadratureRule rule;
         rule.kind = geometry::CutQuadratureKind::Volume;

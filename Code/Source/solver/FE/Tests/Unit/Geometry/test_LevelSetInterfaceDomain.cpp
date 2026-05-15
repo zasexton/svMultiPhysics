@@ -511,6 +511,7 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         CutInterfaceDomainRequest request;
         request.source = LevelSetInterfaceSource::fromEvaluator("constant-volume-source");
         request.interface_marker = marker++;
+        request.volume_quadrature_order = 3;
 
         LevelSetInterfaceDomain domain(request);
         const LevelSetCellCutInput input{
@@ -530,6 +531,7 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         Real weight_sum = 0.0;
         for (const auto& rule : rules) {
             EXPECT_TRUE(rule.exact_for_constants);
+            EXPECT_EQ(rule.exact_polynomial_order, 1);
             EXPECT_NEAR(rule.parent_measure, c.parent_measure, 1.0e-14);
             measure_sum += rule.measure;
             for (const auto& point : rule.points) {
@@ -609,9 +611,9 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_EQ(linear_rule.policy.polynomial_order, 1);
     EXPECT_EQ(linear_rule.policy.name, "linear-level-set-interface");
 
-    CutInterfaceDomainRequest unsupported_request = request;
-    unsupported_request.quadrature_order = 2;
-    EXPECT_THROW((void)domain.fragments().front().toCutQuadratureRule(unsupported_request),
+    CutInterfaceDomainRequest high_order_request = request;
+    high_order_request.quadrature_order = 2;
+    EXPECT_THROW((void)domain.fragments().front().toCutQuadratureRule(high_order_request),
                  std::invalid_argument);
 
     CutInterfaceVolumeRegion region;
@@ -629,8 +631,16 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_EQ(volume_rule.policy.polynomial_order, 1);
     EXPECT_EQ(volume_rule.policy.name, "linear-moment-fitted-level-set-volume");
     EXPECT_TRUE(volume_rule.policy.moment_fitted);
-    EXPECT_THROW((void)domain.volumeRegions().front().toCutQuadratureRule(unsupported_request),
-                 std::invalid_argument);
+
+    const auto high_order_volume_rule =
+        domain.volumeRegions().front().toCutQuadratureRule(high_order_request);
+    EXPECT_EQ(high_order_volume_rule.exact_polynomial_order, 1);
+    EXPECT_EQ(high_order_volume_rule.policy.polynomial_order, 1);
+    EXPECT_EQ(high_order_volume_rule.policy.name, "linear-moment-fitted-level-set-volume");
+    EXPECT_TRUE(high_order_volume_rule.policy.moment_fitted);
+    EXPECT_NEAR(high_order_volume_rule.measure, 0.5, 1.0e-14);
+    ASSERT_EQ(high_order_volume_rule.points.size(), 1u);
+    EXPECT_NEAR(high_order_volume_rule.points.front().weight, 0.5, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceDomain, SeparateInterfaceAndVolumeQuadratureOrders)

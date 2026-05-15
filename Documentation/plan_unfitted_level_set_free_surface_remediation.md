@@ -188,8 +188,11 @@ side volume keep active side-volume metadata.
       path.
 - [x] Define fallback behavior for degenerate cuts, near-zero volume fractions,
       and interface cuts passing close to vertices.
-- [ ] Preserve exact total measure for constants even when higher-order
+- [x] Preserve exact total measure for constants even when higher-order
       quadrature is requested.
+      Higher requested orders currently reuse the linear moment-fitted volume
+      rule and report the implemented exact polynomial order while keeping
+      conservative side measures and weights.
 
 ### Implementation Checklist
 
