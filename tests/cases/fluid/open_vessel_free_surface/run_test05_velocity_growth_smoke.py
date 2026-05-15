@@ -116,11 +116,26 @@ def free_surface_bc(root: ET.Element) -> ET.Element:
     raise ValueError("missing fluid free-surface boundary condition")
 
 
+def fluid_equation(root: ET.Element) -> ET.Element:
+    for equation in root.findall("Add_equation"):
+        if equation.attrib.get("type") == "fluid":
+            return equation
+    raise ValueError("missing fluid equation")
+
+
+def navier_stokes_linear_solver(root: ET.Element) -> ET.Element:
+    for solver in fluid_equation(root).findall("LS"):
+        if solver.attrib.get("type") == "NS":
+            return solver
+    raise ValueError("missing fluid NS linear solver block")
+
+
 def configure_solver(solver_xml: Path,
                      steps: int,
                      time_step_size: float | None = None,
                      disable_cut_stabilization: bool = False,
-                     max_nonlinear_iterations: int | None = None) -> None:
+                     max_nonlinear_iterations: int | None = None,
+                     disable_coupled_outer_fgmres: bool = False) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -149,6 +164,11 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Enable_cut_cell_stabilization", "false")
     else:
         require_text(free_surface, "Enable_cut_cell_stabilization", "true")
+
+    if disable_coupled_outer_fgmres:
+        set_text(navier_stokes_linear_solver(root),
+                 "NS_Use_coupled_outer_FGMRES",
+                 "false")
 
     tree.write(solver_xml, encoding="UTF-8", xml_declaration=True)
 
@@ -766,6 +786,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 time_step_size=args.time_step_size,
                 disable_cut_stabilization=args.disable_cut_stabilization,
                 max_nonlinear_iterations=args.max_nonlinear_iterations,
+                disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
             )
 
         try:
@@ -792,6 +813,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "diagnostics": parse_solver_diagnostics(output),
                 "stdout_tail": tail,
             }
+            if args.disable_coupled_outer_fgmres:
+                failure["disable_coupled_outer_fgmres"] = True
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True)) from exc
         write_solver_log(run_dir, completed.stdout)
         if completed.returncode != 0:
@@ -803,6 +826,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "diagnostics": parse_solver_diagnostics(completed.stdout),
                 "stdout_tail": tail,
             }
+            if args.disable_coupled_outer_fgmres:
+                failure["disable_coupled_outer_fgmres"] = True
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
 
         metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
@@ -813,6 +838,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
         metrics["steps"] = args.steps
         if args.time_step_size is not None:
             metrics["time_step_size"] = args.time_step_size
+        if args.disable_coupled_outer_fgmres:
+            metrics["disable_coupled_outer_fgmres"] = True
         errors = evaluate(metrics, args)
         metrics["passed"] = not errors
         metrics["errors"] = errors
@@ -843,6 +870,7 @@ def main() -> int:
     parser.add_argument("--max-wet-fraction-volume-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
+    parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)

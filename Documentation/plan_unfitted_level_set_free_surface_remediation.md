@@ -398,6 +398,8 @@ benchmark runs.
       solver iteration: cut-context provenance, active wet-region summaries,
       cut-volume quadrature sanity, cut-adjacent stabilization scales,
       residual block norms, and pressure-gauge initialization checks.
+- [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
+      coupled outer FGMRES in the temporary case copy without editing fixtures.
 - [ ] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [ ] Run a short D18 probe and confirm velocity grows in the released/retained
