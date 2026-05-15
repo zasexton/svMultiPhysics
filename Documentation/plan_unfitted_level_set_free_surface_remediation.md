@@ -87,10 +87,18 @@ remain reusable when only cut metadata changes.
 
 ### Cache And Invalidation Checklist
 
-- [ ] Identify all assembler caches that depend on cut-volume rules.
-- [ ] Identify all assembler caches that depend on interface `dI(...)` rules.
-- [ ] Identify all assembler caches that depend on cut-adjacent facet sets.
-- [ ] Invalidate cut-dependent kernel dispatch tables when marker/side rules
+Cache dependency inventory: cut-volume rules feed cut-domain quadrature lookup,
+cell kernel dispatch, matrix-free data, matrix assembly metadata,
+preconditioner metadata, and restart metadata. Interface `dI(...)` rules feed
+interface quadrature lookup, interface kernel dispatch, matrix-free data, and
+the same matrix/preconditioner/restart metadata. Cut-adjacent facet sets feed
+interior-facet traversal, stabilization hooks, matrix-free data, and
+preconditioner metadata.
+
+- [x] Identify all assembler caches that depend on cut-volume rules.
+- [x] Identify all assembler caches that depend on interface `dI(...)` rules.
+- [x] Identify all assembler caches that depend on cut-adjacent facet sets.
+- [x] Invalidate cut-dependent kernel dispatch tables when marker/side rules
       change.
 - [ ] Invalidate cut-dependent sparsity assumptions only if topology changes can
       add or remove test/trial couplings.

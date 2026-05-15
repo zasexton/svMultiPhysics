@@ -2484,6 +2484,68 @@ TEST(CutIntegrationInfrastructure, InvalidationSeparatesGeometryAndFELayoutChang
     EXPECT_TRUE(layout_decision.refresh_preconditioner);
 }
 
+TEST(CutIntegrationInfrastructure, InvalidationCoversCutCacheDependencyClasses)
+{
+    CutIntegrationRevisionSnapshot cached;
+    cached.valid = true;
+    cached.cut_revision_key = 10;
+    cached.geometry_revision = 1;
+    cached.active_configuration_epoch = 2;
+    cached.cut_topology_revision = 3;
+    cached.quadrature_policy_revision = 4;
+    cached.conditioning_revision = 5;
+    cached.fe_space_revision = 6;
+    cached.fe_dof_layout_revision = 7;
+    cached.cut_cell_count = 2;
+    cached.cut_face_count = 1;
+
+    auto marker_side_change = cached;
+    marker_side_change.active_configuration_epoch = 20;
+    const auto marker_side_decision =
+        classifyCutIntegrationRefresh(cached, marker_side_change);
+    EXPECT_TRUE(marker_side_decision.rebuild_cut_classification);
+    EXPECT_TRUE(marker_side_decision.rebuild_quadrature);
+    EXPECT_TRUE(marker_side_decision.rebuild_matrix);
+    EXPECT_TRUE(marker_side_decision.rebuild_matrix_free_data);
+    EXPECT_TRUE(marker_side_decision.refresh_preconditioner);
+    EXPECT_TRUE(marker_side_decision.refresh_restart_metadata);
+    EXPECT_TRUE(marker_side_decision.update_stabilization_hooks);
+
+    auto cut_volume_rule_change = cached;
+    cut_volume_rule_change.quadrature_policy_revision = 40;
+    const auto cut_rule_decision =
+        classifyCutIntegrationRefresh(cached, cut_volume_rule_change);
+    EXPECT_TRUE(cut_rule_decision.rebuild_quadrature);
+    EXPECT_TRUE(cut_rule_decision.rebuild_matrix);
+    EXPECT_TRUE(cut_rule_decision.rebuild_matrix_free_data);
+    EXPECT_TRUE(cut_rule_decision.refresh_preconditioner);
+
+    auto interface_rule_change = cached;
+    interface_rule_change.cut_topology_revision = 30;
+    const auto interface_decision =
+        classifyCutIntegrationRefresh(cached, interface_rule_change);
+    EXPECT_TRUE(interface_decision.rebuild_quadrature);
+    EXPECT_TRUE(interface_decision.rebuild_matrix);
+    EXPECT_TRUE(interface_decision.rebuild_matrix_free_data);
+
+    auto cut_facet_change = cached;
+    cut_facet_change.conditioning_revision = 50;
+    const auto cut_facet_decision =
+        classifyCutIntegrationRefresh(cached, cut_facet_change);
+    EXPECT_TRUE(cut_facet_decision.rebuild_matrix);
+    EXPECT_TRUE(cut_facet_decision.rebuild_matrix_free_data);
+    EXPECT_TRUE(cut_facet_decision.update_stabilization_hooks);
+
+    auto fe_layout_change = cached;
+    fe_layout_change.fe_space_revision = 60;
+    const auto layout_decision =
+        classifyCutIntegrationRefresh(cached, fe_layout_change);
+    EXPECT_FALSE(layout_decision.rebuild_cut_classification);
+    EXPECT_FALSE(layout_decision.rebuild_quadrature);
+    EXPECT_FALSE(layout_decision.update_stabilization_hooks);
+    EXPECT_TRUE(layout_decision.rebuild_matrix);
+}
+
 TEST(CutIntegrationInfrastructure, ConditioningDiagnosticsIdentifySmallAndDegenerateCuts)
 {
     const auto diagnostic = diagnoseCutConditioning({0.5, 1.0e-9, 0.0}, 1.0e-6, 1.0e-12);
