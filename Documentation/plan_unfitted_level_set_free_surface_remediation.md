@@ -426,6 +426,9 @@ benchmark runs.
 - [x] Add parseable FSILS true-residual diagnostics and smoke parsing for
       failed BlockSchur D18/D38 probes so formulation-block residual
       contributions are captured before additional solver changes.
+- [x] Add smoke-script linear and BlockSchur subsolver override switches so
+      D18/D38 solver-control probes can be run from temporary case copies
+      without editing validation fixtures.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

@@ -180,6 +180,13 @@ def configure_solver(solver_xml: Path,
                      time_step_size: float | None = None,
                      disable_cut_stabilization: bool = False,
                      max_nonlinear_iterations: int | None = None,
+                     linear_relative_tolerance: float | None = None,
+                     linear_absolute_tolerance: float | None = None,
+                     linear_max_iterations: int | None = None,
+                     ns_gm_max_iterations: int | None = None,
+                     ns_cg_max_iterations: int | None = None,
+                     ns_gm_tolerance: float | None = None,
+                     ns_cg_tolerance: float | None = None,
                      disable_coupled_outer_fgmres: bool = False,
                      disable_cut_metadata_scale: bool = False,
                      disable_vtk_output: bool = False,
@@ -210,6 +217,39 @@ def configure_solver(solver_xml: Path,
         for equation in root.findall("Add_equation"):
             set_text(equation, "Max_iterations", str(max_nonlinear_iterations))
 
+    needs_ns_solver = (
+        linear_relative_tolerance is not None or
+        linear_absolute_tolerance is not None or
+        linear_max_iterations is not None or
+        ns_gm_max_iterations is not None or
+        ns_cg_max_iterations is not None or
+        ns_gm_tolerance is not None or
+        ns_cg_tolerance is not None or
+        disable_coupled_outer_fgmres
+    )
+    ns_solver = navier_stokes_linear_solver(root) if needs_ns_solver else None
+    if linear_relative_tolerance is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "Tolerance", f"{linear_relative_tolerance:.16g}")
+    if linear_absolute_tolerance is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "Absolute_tolerance", f"{linear_absolute_tolerance:.16g}")
+    if linear_max_iterations is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "Max_iterations", str(linear_max_iterations))
+    if ns_gm_max_iterations is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "NS_GM_max_iterations", str(ns_gm_max_iterations))
+    if ns_cg_max_iterations is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "NS_CG_max_iterations", str(ns_cg_max_iterations))
+    if ns_gm_tolerance is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "NS_GM_tolerance", f"{ns_gm_tolerance:.16g}")
+    if ns_cg_tolerance is not None:
+        assert ns_solver is not None
+        set_text(ns_solver, "NS_CG_tolerance", f"{ns_cg_tolerance:.16g}")
+
     free_surface = free_surface_bc(root)
     require_text(free_surface, "Implementation", "UnfittedLevelSet")
     require_text(free_surface, "Active_domain", "LevelSetNegative")
@@ -224,9 +264,8 @@ def configure_solver(solver_xml: Path,
         require_text(free_surface, "Enable_cut_cell_stabilization", "true")
 
     if disable_coupled_outer_fgmres:
-        set_text(navier_stokes_linear_solver(root),
-                 "NS_Use_coupled_outer_FGMRES",
-                 "false")
+        assert ns_solver is not None
+        set_text(ns_solver, "NS_Use_coupled_outer_FGMRES", "false")
 
     tree.write(solver_xml, encoding="UTF-8", xml_declaration=True)
 
@@ -1058,6 +1097,22 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         )
 
 
+def add_solver_control_overrides(metrics: dict[str, Any],
+                                 args: argparse.Namespace) -> None:
+    for name in (
+        "linear_relative_tolerance",
+        "linear_absolute_tolerance",
+        "linear_max_iterations",
+        "ns_gm_max_iterations",
+        "ns_cg_max_iterations",
+        "ns_gm_tolerance",
+        "ns_cg_tolerance",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            metrics[name] = value
+
+
 def parse_active_volume_history_from_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "cut_context_active_side_volumes",
@@ -1422,6 +1477,13 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 time_step_size=args.time_step_size,
                 disable_cut_stabilization=args.disable_cut_stabilization,
                 max_nonlinear_iterations=args.max_nonlinear_iterations,
+                linear_relative_tolerance=args.linear_relative_tolerance,
+                linear_absolute_tolerance=args.linear_absolute_tolerance,
+                linear_max_iterations=args.linear_max_iterations,
+                ns_gm_max_iterations=args.ns_gm_max_iterations,
+                ns_cg_max_iterations=args.ns_cg_max_iterations,
+                ns_gm_tolerance=args.ns_gm_tolerance,
+                ns_cg_tolerance=args.ns_cg_tolerance,
                 disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
                 disable_cut_metadata_scale=args.disable_cut_metadata_scale,
                 disable_vtk_output=args.disable_vtk_output,
@@ -1460,6 +1522,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_cut_metadata_scale"] = True
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
+            add_solver_control_overrides(failure, args)
             if args.allow_timeout_diagnostics and not diagnostic_errors:
                 failure["passed"] = True
                 failure["errors"] = []
@@ -1485,6 +1548,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_cut_metadata_scale"] = True
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
+            add_solver_control_overrides(failure, args)
             write_failure(failure)
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
 
@@ -1511,6 +1575,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics["disable_vtk_output"] = True
         if args.final_output_only:
             metrics["final_output_only"] = True
+        add_solver_control_overrides(metrics, args)
         errors = evaluate(metrics, args)
         metrics["passed"] = not errors
         metrics["errors"] = errors
@@ -1556,6 +1621,13 @@ def main() -> int:
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
+    parser.add_argument("--linear-relative-tolerance", type=float)
+    parser.add_argument("--linear-absolute-tolerance", type=float)
+    parser.add_argument("--linear-max-iterations", type=int)
+    parser.add_argument("--ns-gm-max-iterations", type=int)
+    parser.add_argument("--ns-cg-max-iterations", type=int)
+    parser.add_argument("--ns-gm-tolerance", type=float)
+    parser.add_argument("--ns-cg-tolerance", type=float)
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     args = parser.parse_args()
 
