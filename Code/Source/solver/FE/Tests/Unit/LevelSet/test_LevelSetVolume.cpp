@@ -359,6 +359,57 @@ TEST(LevelSetVolume, VolumeCorrectionUpdatesOutputTimeActiveVolume)
     EXPECT_NE(output_time_volume.negative_volume, initial_volume.negative_volume);
 }
 
+TEST(LevelSetVolume, VolumeCorrectionRefreshesCutContextBeforeOutput)
+{
+    const ScalarFieldFixture fixture;
+    const auto coefficients = planeCoefficients(fixture, FE::Real{0.5});
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(fixture.system.dofHandler().getNumDofs()), 0.0);
+    const auto offset = static_cast<std::size_t>(fixture.system.fieldDofOffset(fixture.phi));
+    std::copy(coefficients.begin(),
+              coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(offset));
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 384.0;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        fixture.system,
+        fixture.phi,
+        level_set::LevelSetVolumeOptions{},
+        correction_opts,
+        solution,
+        corrected_solution);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+
+    level_set::LevelSetGeneratedInterfaceOptions interface_opts{};
+    interface_opts.level_set_field_name = "phi";
+    interface_opts.domain_id = "output-fluid";
+    interface_opts.requested_interface_marker = 916;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto stale_context =
+        lifecycle.build(fixture.system, interface_opts, solution);
+    const auto output_context =
+        lifecycle.build(fixture.system, interface_opts, corrected_solution);
+
+    ASSERT_TRUE(stale_context.success) << stale_context.diagnostic;
+    ASSERT_TRUE(output_context.success) << output_context.diagnostic;
+    EXPECT_EQ(stale_context.interface_marker, output_context.interface_marker);
+    EXPECT_NE(stale_context.value_revision, output_context.value_revision);
+    EXPECT_NE(stale_context.summary.negative_volume_measure,
+              output_context.summary.negative_volume_measure);
+    EXPECT_NEAR(stale_context.summary.negative_volume_measure,
+                1.0 / 48.0,
+                1.0e-12);
+    EXPECT_NEAR(output_context.summary.negative_volume_measure,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
+}
+
 TEST(LevelSetVolume, VolumeCorrectionSynchronizesHistoryAndCutContext)
 {
     const ScalarFieldFixture fixture;
