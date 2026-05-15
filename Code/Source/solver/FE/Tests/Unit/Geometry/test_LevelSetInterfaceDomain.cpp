@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <vector>
 
@@ -321,6 +322,82 @@ TEST(LevelSetInterfaceDomain, LinearFragmentQuadratureRulesCarryCentroidWeightsA
     EXPECT_DOUBLE_EQ(rules[1].points.front().point[1], 1.0 / 3.0);
     EXPECT_DOUBLE_EQ(rules[1].points.front().weight, 0.5);
     EXPECT_DOUBLE_EQ(rules[1].points.front().normal[2], 1.0);
+}
+
+TEST(LevelSetInterfaceDomain, CutVolumeMetadataIsDeterministicForOwnedAndGhostRegions)
+{
+    const auto make_domain = [](std::uint64_t ownership_revision, bool reverse_order) {
+        CutInterfaceDomainRequest request;
+        request.source = LevelSetInterfaceSource::fromEvaluator("deterministic-volume-source",
+                                                                /*layout_revision=*/3,
+                                                                /*value_revision=*/17);
+        request.interface_marker = 87;
+        request.ownership_revision = ownership_revision;
+
+        std::vector<CutInterfaceVolumeRegion> regions;
+        auto make_region = [](MeshIndex parent_cell,
+                              LocalIndex local_region_index,
+                              CutIntegrationSide side,
+                              Real measure) {
+            CutInterfaceVolumeRegion region;
+            region.parent_cell = parent_cell;
+            region.local_region_index = local_region_index;
+            region.side = side;
+            region.parent_measure = 1.0;
+            region.volume_fraction = measure;
+            region.measure = measure;
+            region.centroid = {{measure, 0.25, 0.0}};
+            region.topology_id = "cell-" + std::to_string(parent_cell) + "-region-" +
+                                 std::to_string(local_region_index);
+            return region;
+        };
+        regions.push_back(make_region(/*parent_cell=*/7,
+                                      /*local_region_index=*/0,
+                                      CutIntegrationSide::Negative,
+                                      0.25));
+        regions.push_back(make_region(/*parent_cell=*/4,
+                                      /*local_region_index=*/1,
+                                      CutIntegrationSide::Positive,
+                                      0.75));
+        regions.push_back(make_region(/*parent_cell=*/4,
+                                      /*local_region_index=*/0,
+                                      CutIntegrationSide::Negative,
+                                      0.25));
+        if (reverse_order) {
+            std::reverse(regions.begin(), regions.end());
+        }
+
+        LevelSetInterfaceDomain domain(request);
+        for (auto& region : regions) {
+            domain.addVolumeRegion(std::move(region));
+        }
+        return domain;
+    };
+
+    const auto owned_rules =
+        make_domain(/*ownership_revision=*/5, /*reverse_order=*/false).volumeQuadratureRules();
+    const auto ghost_rules =
+        make_domain(/*ownership_revision=*/6, /*reverse_order=*/true).volumeQuadratureRules();
+
+    ASSERT_EQ(owned_rules.size(), 3u);
+    ASSERT_EQ(ghost_rules.size(), owned_rules.size());
+    EXPECT_EQ(owned_rules[0].provenance.parent_entity, 4);
+    EXPECT_EQ(owned_rules[0].side, CutIntegrationSide::Negative);
+    EXPECT_EQ(owned_rules[1].provenance.parent_entity, 4);
+    EXPECT_EQ(owned_rules[1].side, CutIntegrationSide::Positive);
+    EXPECT_EQ(owned_rules[2].provenance.parent_entity, 7);
+    EXPECT_EQ(owned_rules[2].side, CutIntegrationSide::Negative);
+
+    for (std::size_t i = 0; i < owned_rules.size(); ++i) {
+        EXPECT_EQ(ghost_rules[i].provenance.parent_entity,
+                  owned_rules[i].provenance.parent_entity);
+        EXPECT_EQ(ghost_rules[i].side, owned_rules[i].side);
+        EXPECT_EQ(ghost_rules[i].provenance.cut_topology_revision,
+                  owned_rules[i].provenance.cut_topology_revision);
+        EXPECT_EQ(ghost_rules[i].provenance.cut_topology_id,
+                  owned_rules[i].provenance.cut_topology_id);
+        EXPECT_NEAR(ghost_rules[i].measure, owned_rules[i].measure, 1.0e-14);
+    }
 }
 
 TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)

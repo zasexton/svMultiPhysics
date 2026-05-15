@@ -226,7 +226,9 @@ side volume keep active side-volume metadata.
       cut-volume rules.
 - [x] Ensure `dI(...)` surface rules and `dCutVolume(...)` volume rules can use
       different quadrature orders.
-- [ ] Ensure MPI-owned and ghost-cell cut-volume metadata remain deterministic.
+- [x] Ensure MPI-owned and ghost-cell cut-volume metadata remain deterministic.
+      Cut-volume rule export is sorted by parent cell, side, marker, and stable
+      topology revision, and stable ids do not depend on ownership revision.
 
 ### Tests
 
