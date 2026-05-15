@@ -189,6 +189,8 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     options.requested_interface_marker = interface_marker;
     options.domain_id = "water-air";
     options.tolerance = 1.0e-12;
+    options.interface_quadrature_order = 0;
+    options.volume_quadrature_order = 1;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     const auto result = lifecycle.build(system, options, solution);
@@ -204,6 +206,8 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(result.domain.request().mesh_geometry_revision, 7u);
     EXPECT_EQ(result.domain.request().mesh_topology_revision, 11u);
     EXPECT_EQ(result.domain.request().ownership_revision, 13u);
+    EXPECT_EQ(result.domain.request().resolvedInterfaceQuadratureOrder(), 0);
+    EXPECT_EQ(result.domain.request().resolvedVolumeQuadratureOrder(), 1);
     EXPECT_EQ(result.summary.interface_marker, interface_marker);
     EXPECT_EQ(result.summary.active_fragment_count, 1u);
     EXPECT_EQ(result.summary.active_volume_region_count, 2u);
@@ -213,8 +217,14 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_GT(result.summary.positive_volume_measure, 0.0);
     ASSERT_EQ(result.domain.fragments().size(), 1u);
     EXPECT_EQ(result.domain.fragments().front().interface_marker, interface_marker);
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_EQ(interface_rules.size(), 1u);
+    EXPECT_EQ(interface_rules.front().exact_polynomial_order, 0);
     ASSERT_EQ(result.domain.volumeRegions().size(), 2u);
     EXPECT_EQ(result.domain.volumeRegions().front().interface_marker, interface_marker);
+    const auto volume_rules = result.domain.volumeQuadratureRules();
+    ASSERT_EQ(volume_rules.size(), 2u);
+    EXPECT_EQ(volume_rules.front().exact_polynomial_order, 1);
 }
 
 TEST(LevelSetInterfaceLifecycle, FullSideVolumeRegionSucceedsWithoutInterfaceFragment)

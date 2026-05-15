@@ -555,3 +555,47 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_THROW((void)domain.volumeRegions().front().toCutQuadratureRule(unsupported_request),
                  std::invalid_argument);
 }
+
+TEST(LevelSetInterfaceDomain, SeparateInterfaceAndVolumeQuadratureOrders)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("split-order-source");
+    request.interface_marker = 88;
+    request.quadrature_order = 1;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 1;
+
+    LevelSetInterfaceDomain domain(request);
+    CutInterfaceFragment segment;
+    segment.parent_cell = 4;
+    segment.kind = CutInterfaceFragmentKind::Segment;
+    segment.measure = 1.0;
+    segment.topology_id = "split-order-segment";
+    segment.quadrature_points = {
+        CutInterfaceQuadraturePoint{.point = {{0.5, 0.0, 0.0}},
+                                    .parent_coordinate = {{0.5, 0.0, 0.0}},
+                                    .normal = {{1.0, 0.0, 0.0}},
+                                    .weight = 1.0}};
+    domain.addFragment(segment);
+
+    CutInterfaceVolumeRegion region;
+    region.parent_cell = 4;
+    region.side = CutIntegrationSide::Negative;
+    region.parent_measure = 1.0;
+    region.measure = 0.5;
+    region.volume_fraction = 0.5;
+    region.centroid = {{0.25, 0.5, 0.0}};
+    region.topology_id = "split-order-volume";
+    domain.addVolumeRegion(region);
+
+    const auto interface_rules = domain.interfaceQuadratureRules();
+    ASSERT_EQ(interface_rules.size(), 1u);
+    EXPECT_EQ(interface_rules.front().exact_polynomial_order, 0);
+    EXPECT_EQ(interface_rules.front().policy.name, "constant-level-set-interface");
+
+    const auto volume_rules = domain.volumeQuadratureRules();
+    ASSERT_EQ(volume_rules.size(), 1u);
+    EXPECT_EQ(volume_rules.front().exact_polynomial_order, 1);
+    EXPECT_EQ(volume_rules.front().policy.name,
+              "linear-moment-fitted-level-set-volume");
+}

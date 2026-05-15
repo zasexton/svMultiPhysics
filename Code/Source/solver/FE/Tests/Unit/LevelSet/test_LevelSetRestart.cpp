@@ -201,6 +201,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     interface_options.isovalue = 0.0;
     interface_options.tolerance = 1.0e-12;
     interface_options.quadrature_order = 1;
+    interface_options.interface_quadrature_order = 0;
+    interface_options.volume_quadrature_order = 1;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     const auto built = lifecycle.build(system, interface_options, solution);
@@ -213,6 +215,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     EXPECT_EQ(interface_record.level_set_field_id, phi);
     EXPECT_EQ(interface_record.domain_id, "water-air");
     EXPECT_EQ(interface_record.interface_marker, built.interface_marker);
+    EXPECT_EQ(interface_record.interface_quadrature_order, 0);
+    EXPECT_EQ(interface_record.volume_quadrature_order, 1);
     EXPECT_EQ(interface_record.value_revision, built.value_revision);
     EXPECT_EQ(interface_record.mesh_geometry_revision, 7u);
     EXPECT_EQ(interface_record.mesh_topology_revision, 11u);
@@ -236,6 +240,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     EXPECT_EQ(restored_options.requested_interface_marker,
               built.interface_marker);
     EXPECT_EQ(restored_options.domain_id, interface_options.domain_id);
+    EXPECT_EQ(restored_options.interface_quadrature_order, 0);
+    EXPECT_EQ(restored_options.volume_quadrature_order, 1);
 
     level_set::LevelSetGeneratedInterfaceLifecycle restored_lifecycle;
     restored_lifecycle.restoreValueRevision(interface_record.value_revision);

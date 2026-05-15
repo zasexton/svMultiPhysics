@@ -205,7 +205,7 @@ side fractions stay deterministic.
 - [x] Store the quadrature policy name and exact polynomial order in cut metadata.
 - [x] Make `LevelSetGeneratedInterfaceOptions::quadrature_order` meaningful for
       cut-volume rules.
-- [ ] Ensure `dI(...)` surface rules and `dCutVolume(...)` volume rules can use
+- [x] Ensure `dI(...)` surface rules and `dCutVolume(...)` volume rules can use
       different quadrature orders.
 - [ ] Ensure MPI-owned and ghost-cell cut-volume metadata remain deterministic.
 

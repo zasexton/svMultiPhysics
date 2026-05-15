@@ -23,6 +23,8 @@ struct LevelSetGeneratedInterfaceOptions {
     Real isovalue{0.0};
     Real tolerance{1.0e-12};
     int quadrature_order{1};
+    int interface_quadrature_order{-1};
+    int volume_quadrature_order{-1};
     bool keep_degenerate_fragments{false};
 };
 

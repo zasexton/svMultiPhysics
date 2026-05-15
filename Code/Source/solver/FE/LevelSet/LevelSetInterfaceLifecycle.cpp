@@ -149,6 +149,20 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     if (options.quadrature_order < 0) {
         throw std::invalid_argument("generated level-set interface requires nonnegative quadrature_order");
     }
+    const int interface_quadrature_order =
+        options.interface_quadrature_order >= 0 ? options.interface_quadrature_order
+                                                : options.quadrature_order;
+    const int volume_quadrature_order =
+        options.volume_quadrature_order >= 0 ? options.volume_quadrature_order
+                                             : options.quadrature_order;
+    if (interface_quadrature_order < 0) {
+        throw std::invalid_argument(
+            "generated level-set interface requires nonnegative interface_quadrature_order");
+    }
+    if (volume_quadrature_order < 0) {
+        throw std::invalid_argument(
+            "generated level-set interface requires nonnegative volume_quadrature_order");
+    }
 
     const auto field = resolveLevelSetField(system, options);
     const auto& field_dofs = system.fieldDofHandler(field);
@@ -187,6 +201,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     request.isovalue = options.isovalue;
     request.tolerance = options.tolerance;
     request.quadrature_order = options.quadrature_order;
+    request.interface_quadrature_order = interface_quadrature_order;
+    request.volume_quadrature_order = volume_quadrature_order;
     request.mesh_geometry_revision = mesh.geometryRevision();
     request.mesh_topology_revision = mesh.topologyRevision();
     request.ownership_revision = mesh.ownershipRevision();

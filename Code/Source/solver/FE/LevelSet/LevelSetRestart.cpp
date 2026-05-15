@@ -82,6 +82,8 @@ captureLevelSetGeneratedInterfaceRestartRecord(
     record.isovalue = options.isovalue;
     record.tolerance = options.tolerance;
     record.quadrature_order = options.quadrature_order;
+    record.interface_quadrature_order = options.interface_quadrature_order;
+    record.volume_quadrature_order = options.volume_quadrature_order;
     record.keep_degenerate_fragments = options.keep_degenerate_fragments;
     record.value_revision = result.value_revision;
     record.mesh_geometry_revision = result.domain.request().mesh_geometry_revision;
@@ -106,6 +108,8 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
     options.isovalue = record.isovalue;
     options.tolerance = record.tolerance;
     options.quadrature_order = record.quadrature_order;
+    options.interface_quadrature_order = record.interface_quadrature_order;
+    options.volume_quadrature_order = record.volume_quadrature_order;
     options.keep_degenerate_fragments = record.keep_degenerate_fragments;
     return options;
 }
@@ -139,6 +143,14 @@ bool levelSetGeneratedInterfaceRestartRecordMatches(
     }
     if (record.quadrature_order < 0) {
         setDiagnostic(diagnostic, "generated-interface restart quadrature order is invalid");
+        return false;
+    }
+    if (record.interface_quadrature_order < -1) {
+        setDiagnostic(diagnostic, "generated-interface restart interface quadrature order is invalid");
+        return false;
+    }
+    if (record.volume_quadrature_order < -1) {
+        setDiagnostic(diagnostic, "generated-interface restart volume quadrature order is invalid");
         return false;
     }
 
