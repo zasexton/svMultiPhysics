@@ -476,6 +476,9 @@ benchmark runs.
 - [x] Add smoke-script parsing and controls for interior-face timing diagnostics
       so cut-adjacent stabilization probes can verify faces considered, faces
       assembled, and per-stage interior-face costs.
+- [x] Add smoke-script parsing and controls for cut-volume timing diagnostics so
+      no-output probes can verify indexed rule traversal, rule counts,
+      quadrature-point counts, and per-stage cut-volume costs.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
