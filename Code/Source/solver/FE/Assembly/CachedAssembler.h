@@ -546,7 +546,8 @@ public:
         const spaces::FunctionSpace& trial_space,
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
-        GlobalSystemView* vector_view) override;
+        GlobalSystemView* vector_view,
+        int interior_facet_marker = -1) override;
 
     // =========================================================================
     // Cache-Specific Assembly Operations

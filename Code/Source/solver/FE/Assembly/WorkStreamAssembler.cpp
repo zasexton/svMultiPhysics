@@ -455,7 +455,8 @@ AssemblyResult WorkStreamAssembler::assembleInteriorFaces(
     const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
-    GlobalSystemView* vector_view)
+    GlobalSystemView* vector_view,
+    int interior_facet_marker)
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
@@ -467,6 +468,8 @@ AssemblyResult WorkStreamAssembler::assembleInteriorFaces(
     if (!kernel.hasInteriorFace()) {
         return result;
     }
+    FE_THROW_IF(interior_facet_marker >= 0, FEException,
+                "WorkStreamAssembler::assembleInteriorFaces: marked interior facet sets are not implemented");
 
     matrix_view.beginAssemblyPhase();
     if (vector_view && vector_view != &matrix_view) {

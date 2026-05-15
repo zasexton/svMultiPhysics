@@ -5726,6 +5726,7 @@ void FESystem::buildAssemblyPlans()
                         "FESystem::buildAssemblyPlans: invalid interior trial field");
 
             plan.interior_terms.push_back(PlannedInteriorFaceTerm{
+                term.marker,
                 term.test_field,
                 term.trial_field,
                 test_field.space.get(),

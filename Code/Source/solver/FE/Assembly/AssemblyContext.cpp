@@ -281,6 +281,7 @@ void AssemblyContext::configure(
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
+    interior_face_marker_ = -1;
     clearCutVolumeDomain();
     required_data_ = required_data;
 
@@ -341,6 +342,7 @@ void AssemblyContext::configure(
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
+    interior_face_marker_ = -1;
     clearCutVolumeDomain();
     required_data_ = required_data;
 
@@ -398,6 +400,7 @@ void AssemblyContext::configureFace(
     cell_domain_id_ = 0;
     face_id_ = face_id;
     local_face_id_ = local_face_id;
+    interior_face_marker_ = -1;
     required_data_ = required_data;
 
     n_test_dofs_ = static_cast<LocalIndex>(element.num_dofs());
@@ -455,6 +458,7 @@ void AssemblyContext::configureFace(
     cell_domain_id_ = 0;
     face_id_ = face_id;
     local_face_id_ = local_face_id;
+    interior_face_marker_ = -1;
     required_data_ = required_data;
 
     test_field_type_ = test_space.field_type();
@@ -503,6 +507,10 @@ void AssemblyContext::clear()
     cell_id_ = -1;
     cell_domain_id_ = 0;
     face_id_ = -1;
+    local_face_id_ = 0;
+    boundary_marker_ = -1;
+    interior_face_marker_ = -1;
+    clearCutVolumeDomain();
     n_test_dofs_ = 0;
     n_trial_dofs_ = 0;
     n_qpts_ = 0;
@@ -3161,6 +3169,7 @@ void AssemblyContext::configureForCoupledBlock(
     face_id_ = -1;
     local_face_id_ = 0;
     boundary_marker_ = -1;
+    interior_face_marker_ = -1;
     clearCutVolumeDomain();
     required_data_ = meta.required_data;
 

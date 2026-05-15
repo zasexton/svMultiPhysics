@@ -300,7 +300,7 @@ explicit stabilization policy change.
       is rebuilt.
 - [x] Store the generated facet set in `CutIntegrationContext` with a stable
       marker or handle.
-- [ ] Route cut-adjacent facet kernels through the assembler using that marker or
+- [x] Route cut-adjacent facet kernels through the assembler using that marker or
       handle.
 - [ ] Bind cut metadata scale per cut-adjacent facet.
 - [ ] Ensure non-cut interior faces receive zero cut-cell stabilization

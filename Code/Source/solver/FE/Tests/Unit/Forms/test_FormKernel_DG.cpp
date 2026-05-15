@@ -92,6 +92,73 @@ TEST(FormKernelDGTest, PenaltyJumpJumpProducesExpectedBlocks)
     }
 }
 
+TEST(FormKernelDGTest, MarkedInteriorFacesUseCutFacetSetHandle)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    constexpr int active_marker = 12;
+    constexpr int inactive_marker = 13;
+    const Real eta = 2.5;
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (FormExpr::constant(eta) * inner(jump(u), jump(v))).dS(active_marker);
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle active_handle;
+    active_handle.marker = active_marker;
+    active_handle.name = "active-cut-adjacent-facets";
+    active_handle.facets = {0};
+    cut_context.addFacetSetHandle(std::move(active_handle));
+
+    assembly::CutFacetSetHandle inactive_handle;
+    inactive_handle.marker = inactive_marker;
+    inactive_handle.name = "inactive-cut-adjacent-facets";
+    inactive_handle.facets = {0};
+    cut_context.addFacetSetHandle(std::move(inactive_handle));
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&cut_context);
+
+    assembly::DenseMatrixView active_mat(8);
+    active_mat.zero();
+    const auto active_result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                               active_mat, nullptr,
+                                                               active_marker);
+    EXPECT_EQ(active_result.interior_faces_assembled, 1);
+
+    const Real area = std::sqrt(3.0) / 2.0;
+    EXPECT_NEAR(active_mat.getMatrixEntry(1, 1), eta * area / 6.0, 5e-11);
+    EXPECT_NEAR(active_mat.getMatrixEntry(1, 4), -eta * area / 6.0, 5e-11);
+
+    assembly::DenseMatrixView inactive_mat(8);
+    inactive_mat.zero();
+    const auto inactive_result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                                 inactive_mat, nullptr,
+                                                                 inactive_marker);
+    EXPECT_EQ(inactive_result.interior_faces_assembled, 1);
+    for (GlobalIndex i = 0; i < 8; ++i) {
+        for (GlobalIndex j = 0; j < 8; ++j) {
+            SCOPED_TRACE(::testing::Message() << "i=" << i << ", j=" << j);
+            EXPECT_DOUBLE_EQ(inactive_mat.getMatrixEntry(i, j), 0.0);
+        }
+    }
+
+    assembly::DenseMatrixView missing_mat(8);
+    missing_mat.zero();
+    EXPECT_THROW((void)assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                       missing_mat, nullptr,
+                                                       /*interior_facet_marker=*/99),
+                 FEException);
+}
+
 TEST(FormKernelDGTest, CutStabilizationScaleUsesAdjacentCutCellMetadata)
 {
     TwoTetraSharedFaceMeshAccess mesh;

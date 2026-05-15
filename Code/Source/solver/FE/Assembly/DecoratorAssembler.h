@@ -245,9 +245,11 @@ public:
         const spaces::FunctionSpace& trial_space,
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
-        GlobalSystemView* vector_view) override
+        GlobalSystemView* vector_view,
+        int interior_facet_marker = -1) override
     {
-        return base_->assembleInteriorFaces(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
+        return base_->assembleInteriorFaces(
+            mesh, test_space, trial_space, kernel, matrix_view, vector_view, interior_facet_marker);
     }
 
     [[nodiscard]] AssemblyResult assembleCutVolumes(

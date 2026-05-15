@@ -191,6 +191,20 @@ void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const>
     return ctx.cutVolumeSide() == expected_side;
 }
 
+[[nodiscard]] bool interiorFaceTermMatchesContext(
+    const IntegralTerm& term,
+    const assembly::AssemblyContext& ctx) noexcept
+{
+    if (term.domain != IntegralDomain::InteriorFace) {
+        return false;
+    }
+    const int active_marker = ctx.interiorFaceMarker();
+    if (term.interface_marker < 0) {
+        return active_marker < 0;
+    }
+    return term.interface_marker == active_marker;
+}
+
 [[nodiscard]] FormExpr firstScalarProbeComponent(const FormExpr& expr,
                                                  const FormExprNode::SpaceSignature& signature)
 {
@@ -13405,7 +13419,7 @@ void FormKernel::computeInteriorFace(
         const auto& terms = ir_.terms();
         for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
             const auto& term = terms[term_index];
-            if (term.domain != IntegralDomain::InteriorFace) continue;
+            if (!interiorFaceTermMatchesContext(term, ctx_minus)) continue;
             const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
             const auto* time_ctx = ctx_eval.timeIntegrationContext();
             const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
@@ -15132,7 +15146,7 @@ void NonlinearFormKernel::computeInteriorFace(
 
                 Dual sum_q = makeDualConstant(0.0, ws.alloc());
                 for (const auto& term : residual_ir_.terms()) {
-                    if (term.domain != IntegralDomain::InteriorFace) continue;
+                    if (!interiorFaceTermMatchesContext(term, ctx_minus)) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
@@ -16434,7 +16448,7 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                     env.i = i;
                     Real sum_q = 0.0;
                     for (const auto& term : residual_ir_.terms()) {
-                        if (term.domain != IntegralDomain::InteriorFace) continue;
+                        if (!interiorFaceTermMatchesContext(term, ctx_minus)) continue;
                         const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                         if (term_weight == 0.0) continue;
 
@@ -16473,7 +16487,7 @@ void SymbolicNonlinearFormKernel::computeInteriorFace(const assembly::AssemblyCo
                             constitutive_state_.get(), &constitutive_cache};
 
             for (const auto& term : tangent_ir_.terms()) {
-                if (term.domain != IntegralDomain::InteriorFace) continue;
+                if (!interiorFaceTermMatchesContext(term, ctx_minus)) continue;
                 const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
                 const auto* time_ctx = ctx_eval.timeIntegrationContext();
                 const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
@@ -17358,7 +17372,7 @@ void CoupledResidualSensitivityKernel::computeInteriorFace(const assembly::Assem
                 for (std::size_t t = 0u; t < terms.size(); ++t) {
                     if (have_mask && term_has_coupled_dependency_[t] == 0u) continue;
                     const auto& term = terms[t];
-                    if (term.domain != IntegralDomain::InteriorFace) continue;
+                    if (!interiorFaceTermMatchesContext(term, ctx_eval)) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);

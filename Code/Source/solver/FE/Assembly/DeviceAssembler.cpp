@@ -477,10 +477,12 @@ AssemblyResult DeviceAssembler::assembleInteriorFaces(
     const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
-    GlobalSystemView* vector_view)
+    GlobalSystemView* vector_view,
+    int interior_facet_marker)
 {
     return impl_->cpu_assembler->assembleInteriorFaces(mesh, test_space, trial_space,
-                                                       kernel, matrix_view, vector_view);
+                                                       kernel, matrix_view, vector_view,
+                                                       interior_facet_marker);
 }
 
 // ============================================================================

@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Forms/CutCellForms.h"
@@ -37,11 +38,16 @@ void expectInteriorFaceJacobianMatchesCentralFD(const assembly::IMeshAccess& mes
                                                assembly::AssemblyKernel& kernel_vec,
                                                const std::vector<Real>& U,
                                                Real eps,
-                                               Real tol)
+                                               Real tol,
+                                               int interior_facet_marker = -1,
+                                               const assembly::CutIntegrationContext* cut_context = nullptr)
 {
     assembly::StandardAssembler assembler;
     assembler.setDofMap(dof_map);
     assembler.setCurrentSolution(U);
+    if (cut_context != nullptr) {
+        assembler.setCutIntegrationContext(cut_context);
+    }
 
     const auto n = dof_map.getNumDofs();
 
@@ -50,7 +56,8 @@ void expectInteriorFaceJacobianMatchesCentralFD(const assembly::IMeshAccess& mes
     J.zero();
     R.zero();
 
-    const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel_both, J, &R);
+    const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel_both, J, &R,
+                                                        interior_facet_marker);
     EXPECT_EQ(result.interior_faces_assembled, 1);
 
     for (GlobalIndex j = 0; j < n; ++j) {
@@ -64,14 +71,16 @@ void expectInteriorFaceJacobianMatchesCentralFD(const assembly::IMeshAccess& mes
         assembly::DenseVectorView Rp(n);
         M_dummy_p.zero();
         Rp.zero();
-        (void)assembler.assembleInteriorFaces(mesh, space, space, kernel_vec, M_dummy_p, &Rp);
+        (void)assembler.assembleInteriorFaces(mesh, space, space, kernel_vec, M_dummy_p, &Rp,
+                                              interior_facet_marker);
 
         assembler.setCurrentSolution(U_minus);
         assembly::DenseMatrixView M_dummy_m(n);
         assembly::DenseVectorView Rm(n);
         M_dummy_m.zero();
         Rm.zero();
-        (void)assembler.assembleInteriorFaces(mesh, space, space, kernel_vec, M_dummy_m, &Rm);
+        (void)assembler.assembleInteriorFaces(mesh, space, space, kernel_vec, M_dummy_m, &Rm,
+                                              interior_facet_marker);
 
         for (GlobalIndex i = 0; i < n; ++i) {
             SCOPED_TRACE(::testing::Message() << "i=" << i << ", j=" << j);
@@ -157,10 +166,19 @@ TEST(NonlinearFormKernelDGHelpersTest, CutAdjacentGhostPenaltyJacobianMatchesCen
     NonlinearFormKernel kernel_both(std::move(ir), ADMode::Forward, NonlinearKernelOutput::Both);
     NonlinearFormKernel kernel_vec(std::move(ir_vec), ADMode::Forward, NonlinearKernelOutput::VectorOnly);
 
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = 12;
+    handle.name = "test-cut-adjacent-facets";
+    handle.facets = {0};
+    cut_context.addFacetSetHandle(std::move(handle));
+
     std::vector<Real> U = {0.12, -0.05, 0.08, 0.02, -0.07, 0.2, 0.05, -0.15};
     expectInteriorFaceJacobianMatchesCentralFD(mesh, dof_map, space,
                                               kernel_both, kernel_vec,
-                                              U, /*eps=*/1e-6, /*tol=*/5e-7);
+                                              U, /*eps=*/1e-6, /*tol=*/5e-7,
+                                              /*interior_facet_marker=*/12,
+                                              &cut_context);
 }
 
 } // namespace test

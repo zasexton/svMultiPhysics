@@ -1108,7 +1108,8 @@ public:
         const spaces::FunctionSpace& trial_space,
         AssemblyKernel& kernel,
         GlobalSystemView& matrix_view,
-        GlobalSystemView* vector_view) = 0;
+        GlobalSystemView* vector_view,
+        int interior_facet_marker = -1) = 0;
 
     /**
      * @brief Assemble cell-style kernels on cut-volume quadrature rules.

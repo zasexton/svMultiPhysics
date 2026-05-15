@@ -628,9 +628,11 @@ AssemblyResult ColoredAssembler::assembleInteriorFaces(
     const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
-    GlobalSystemView* vector_view)
+    GlobalSystemView* vector_view,
+    int interior_facet_marker)
 {
-    return base().assembleInteriorFaces(mesh, test_space, trial_space, kernel, matrix_view, vector_view);
+    return base().assembleInteriorFaces(
+        mesh, test_space, trial_space, kernel, matrix_view, vector_view, interior_facet_marker);
 }
 
 AssemblyResult ColoredAssembler::assembleCellsFused(

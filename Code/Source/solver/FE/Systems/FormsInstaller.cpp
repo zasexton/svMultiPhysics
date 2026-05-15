@@ -78,6 +78,7 @@ struct DomainDispatch {
     bool has_interior{false};
     bool has_interface{false};
     std::vector<int> boundary_markers{};
+    std::vector<int> interior_markers{};
     std::vector<int> interface_markers{};
     struct CutVolumeRegion {
         int marker{-1};
@@ -121,6 +122,19 @@ DomainDispatch analyzeDispatch(const forms::FormIR& ir)
             markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
             out.boundary_markers = std::move(markers);
         }
+    }
+
+    if (!ir.hasInteriorFaceTerms()) {
+        out.interior_markers.clear();
+    } else {
+        std::vector<int> markers;
+        for (const auto& term : ir.terms()) {
+            if (term.domain != forms::IntegralDomain::InteriorFace) continue;
+            markers.push_back(term.interface_marker);
+        }
+        std::sort(markers.begin(), markers.end());
+        markers.erase(std::unique(markers.begin(), markers.end()), markers.end());
+        out.interior_markers = std::move(markers);
     }
 
     if (!ir.hasInterfaceFaceTerms()) {
@@ -192,8 +206,11 @@ void registerKernel(
     for (int marker : dispatch.boundary_markers) {
         system.addBoundaryKernel(op, marker, test_field, trial_field, kernel);
     }
-    if (dispatch.has_interior) {
+    if (dispatch.has_interior && dispatch.interior_markers.empty()) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
+    }
+    for (int marker : dispatch.interior_markers) {
+        system.addInteriorFaceKernel(op, marker, test_field, trial_field, kernel);
     }
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
@@ -219,8 +236,11 @@ void registerKernelDomains(
     for (int marker : dispatch.boundary_markers) {
         system.addBoundaryKernel(op, marker, test_field, trial_field, kernel);
     }
-    if (dispatch.has_interior) {
+    if (dispatch.has_interior && dispatch.interior_markers.empty()) {
         system.addInteriorFaceKernel(op, test_field, trial_field, kernel);
+    }
+    for (int marker : dispatch.interior_markers) {
+        system.addInteriorFaceKernel(op, marker, test_field, trial_field, kernel);
     }
     for (int marker : dispatch.interface_markers) {
         system.addInterfaceFaceKernel(op, marker, test_field, trial_field, kernel);
@@ -234,7 +254,8 @@ void registerKernelDomains(
 [[nodiscard]] bool dispatchHasAnyTerm(const DomainDispatch& dispatch) noexcept
 {
     return dispatch.has_cell || dispatch.has_interior || dispatch.has_interface ||
-           !dispatch.boundary_markers.empty() || !dispatch.interface_markers.empty() ||
+           !dispatch.boundary_markers.empty() || !dispatch.interior_markers.empty() ||
+           !dispatch.interface_markers.empty() ||
            !dispatch.cut_volume_regions.empty();
 }
 

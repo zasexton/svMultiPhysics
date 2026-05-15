@@ -1760,6 +1760,13 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
     }
 
     try {
+        if (ctx_minus.interiorFaceMarker() >= 0) {
+            fallback_->computeInteriorFace(ctx_minus, ctx_plus,
+                                           output_minus, output_plus,
+                                           coupling_minus_plus, coupling_plus_minus);
+            return;
+        }
+
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 
     if (kind_ == WrappedKind::FormKernel) {

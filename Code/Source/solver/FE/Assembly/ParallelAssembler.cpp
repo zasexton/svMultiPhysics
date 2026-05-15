@@ -1268,7 +1268,8 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
     const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
-    GlobalSystemView* vector_view)
+    GlobalSystemView* vector_view,
+    int interior_facet_marker)
 {
     if (!initialized_) {
         initialize();
@@ -1278,7 +1279,8 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
         OwnedCellsMeshAccess owned_mesh(mesh);
         return local_assembler_.assembleInteriorFaces(owned_mesh, test_space,
                                                       trial_space, kernel,
-                                                      matrix_view, vector_view);
+                                                      matrix_view, vector_view,
+                                                      interior_facet_marker);
     }
 
     beginGhostAssemblyIfNeeded();
@@ -1288,17 +1290,17 @@ AssemblyResult ParallelAssembler::assembleInteriorFaces(
             if (&matrix_view == vector_view) {
                 GhostRoutingView routed(matrix_view, ghost_manager_, ghost_policy_);
                 return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed,
-                                                             &routed);
+                                                             &routed, interior_facet_marker);
             }
             GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
             GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
             return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed_matrix,
-                                                         &routed_vector);
+                                                         &routed_vector, interior_facet_marker);
         }
 
         GhostRoutingView routed_matrix(matrix_view, ghost_manager_, ghost_policy_);
         return local_assembler_.assembleInteriorFaces(policy_mesh, test_space, trial_space, kernel, routed_matrix,
-                                                     nullptr);
+                                                     nullptr, interior_facet_marker);
     });
 }
 

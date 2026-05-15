@@ -3124,7 +3124,8 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     const spaces::FunctionSpace& trial_space,
     AssemblyKernel& kernel,
     GlobalSystemView& matrix_view,
-    GlobalSystemView* vector_view)
+    GlobalSystemView* vector_view,
+    int interior_facet_marker)
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
@@ -3136,6 +3137,16 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 
     if (!kernel.hasInteriorFace()) {
         return result;
+    }
+
+    const CutFacetSetHandle* facet_set_handle = nullptr;
+    if (interior_facet_marker >= 0) {
+        FE_THROW_IF(cut_integration_context_ == nullptr, FEException,
+                    "StandardAssembler::assembleInteriorFaces: marked interior-face assembly requires a cut integration context");
+        facet_set_handle = cut_integration_context_->facetSetHandleForMarker(interior_facet_marker);
+        FE_THROW_IF(facet_set_handle == nullptr, FEException,
+                    "StandardAssembler::assembleInteriorFaces: missing cut-adjacent facet set for marker " +
+                        std::to_string(interior_facet_marker));
     }
 
     matrix_view.beginAssemblyPhase();
@@ -3236,6 +3247,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
         mesh.forEachInteriorFace(
             [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+            if (facet_set_handle != nullptr &&
+                !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_id))) {
+                return;
+            }
             if (!should_process(cell_minus, cell_plus)) {
                 return;
             }
@@ -3262,6 +3277,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
             context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+            context_.setInteriorFaceMarker(interior_facet_marker);
             context_.clearAllPreviousSolutionData();
 
             std::array<LocalIndex, 4> align_plus_storage{};
@@ -3319,6 +3335,7 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
             context_plus.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
             context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+            context_plus.setInteriorFaceMarker(interior_facet_marker);
             context_plus.clearAllPreviousSolutionData();
 
             if (cut_integration_context_ != nullptr) {

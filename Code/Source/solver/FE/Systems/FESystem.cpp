@@ -7520,10 +7520,30 @@ void FESystem::addBoundaryKernel(OperatorTag op, BoundaryId boundary, FieldId te
 void FESystem::addInteriorFaceKernel(OperatorTag op, FieldId field,
                                      std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
-    addInteriorFaceKernel(std::move(op), field, field, std::move(kernel));
+    addInteriorFaceKernel(std::move(op), /*interior_facet_marker=*/-1,
+                          field, field, std::move(kernel));
 }
 
 void FESystem::addInteriorFaceKernel(OperatorTag op, FieldId test_field, FieldId trial_field,
+                                     std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    addInteriorFaceKernel(std::move(op), /*interior_facet_marker=*/-1,
+                          test_field, trial_field, std::move(kernel));
+}
+
+void FESystem::addInteriorFaceKernel(OperatorTag op,
+                                     int interior_facet_marker,
+                                     FieldId field,
+                                     std::shared_ptr<assembly::AssemblyKernel> kernel)
+{
+    addInteriorFaceKernel(std::move(op), interior_facet_marker,
+                          field, field, std::move(kernel));
+}
+
+void FESystem::addInteriorFaceKernel(OperatorTag op,
+                                     int interior_facet_marker,
+                                     FieldId test_field,
+                                     FieldId trial_field,
                                      std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
     invalidateSetup();
@@ -7537,7 +7557,8 @@ void FESystem::addInteriorFaceKernel(OperatorTag op, FieldId test_field, FieldId
     if (kernel) {
         field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
     }
-    def.interior.push_back(InteriorFaceTerm{test_field, trial_field, std::move(kernel)});
+    def.interior.push_back(
+        InteriorFaceTerm{interior_facet_marker, test_field, trial_field, std::move(kernel)});
 }
 
 void FESystem::addInterfaceFaceKernel(OperatorTag op, InterfaceId interface_marker, FieldId field,

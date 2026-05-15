@@ -1566,6 +1566,16 @@ public:
     void setBoundaryMarker(int marker) { boundary_marker_ = marker; }
 
     /**
+     * @brief Get active interior facet-set marker (interior faces only)
+     */
+    [[nodiscard]] int interiorFaceMarker() const noexcept { return interior_face_marker_; }
+
+    /**
+     * @brief Set active interior facet-set marker
+     */
+    void setInteriorFaceMarker(int marker) noexcept { interior_face_marker_ = marker; }
+
+    /**
      * @brief Get active cut-volume marker for cut-domain cell-style assembly
      */
     [[nodiscard]] int cutVolumeMarker() const noexcept { return cut_volume_marker_; }
@@ -2024,6 +2034,7 @@ private:
     GlobalIndex face_id_{-1};
     LocalIndex local_face_id_{0};
     int boundary_marker_{-1};
+    int interior_face_marker_{-1};
     int cut_volume_marker_{-1};
     geometry::CutIntegrationSide cut_volume_side_{geometry::CutIntegrationSide::Interface};
     int dim_{3};
