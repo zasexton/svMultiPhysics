@@ -352,7 +352,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
 - [x] Add cell-centered wet volume fraction output from generated cut-volume
       metadata.
 - [x] Add total wet volume output per accepted step.
-- [ ] Add wet-volume drift output relative to the initial accepted volume.
+- [x] Add wet-volume drift output relative to the initial accepted volume.
 - [ ] Add cut-cell count, full-wet cell count, and full-dry cell count output.
 - [ ] Keep vertex-sign `ActiveFluid` only as a visualization helper.
 - [ ] Rename or document vertex-sign `ActiveFluid` so it is not mistaken for the

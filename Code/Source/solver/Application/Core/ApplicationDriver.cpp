@@ -987,11 +987,25 @@ void logWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
     int step,
-    double time)
+    double time,
+    std::map<std::string, svmp::FE::Real>& initial_wet_volume_by_key)
 {
   const auto diagnostics =
       collectWetVolumeDiagnostics(requests, cut_context);
   for (const auto& diagnostic : diagnostics) {
+    const std::string key = diagnostic.level_set_field_name + "|" +
+                            diagnostic.domain_id + "|" +
+                            std::to_string(diagnostic.marker);
+    const auto [initial_it, inserted] =
+        initial_wet_volume_by_key.try_emplace(key, diagnostic.wet_volume);
+    (void)inserted;
+    const auto initial_wet_volume = initial_it->second;
+    const auto wet_volume_drift =
+        diagnostic.wet_volume - initial_wet_volume;
+    const auto relative_wet_volume_drift =
+        std::abs(initial_wet_volume) > svmp::FE::Real{0.0}
+            ? wet_volume_drift / initial_wet_volume
+            : svmp::FE::Real{0.0};
     application::core::oopCout()
         << "[svMultiPhysics::Application] Wet volume diagnostic"
         << " step=" << step
@@ -1001,7 +1015,11 @@ void logWetVolumeDiagnostics(
         << " marker=" << diagnostic.marker
         << " active_side=" << activeSideName(diagnostic.active_side)
         << " isovalue=" << diagnostic.isovalue
-        << " wet_volume=" << diagnostic.wet_volume << std::endl;
+        << " wet_volume=" << diagnostic.wet_volume
+        << " initial_wet_volume=" << initial_wet_volume
+        << " wet_volume_drift=" << wet_volume_drift
+        << " relative_wet_volume_drift=" << relative_wet_volume_drift
+        << std::endl;
   }
 }
 
@@ -2375,6 +2393,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   auto cut_lifecycle =
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
+  std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
   using TransientStateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   opts.newton.synchronize_state =
@@ -2428,7 +2447,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         activeCutVolumeRequests(params),
         sim.fe_system->cutIntegrationContext(),
         h.stepIndex(),
-        h.time());
+        h.time(),
+        initial_wet_volume_by_key);
     auto vtk_start = std::chrono::steady_clock::now();
     outputResults(sim, params, h.stepIndex(), h.time(), pvd);
     vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
