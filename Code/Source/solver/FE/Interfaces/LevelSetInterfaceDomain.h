@@ -265,6 +265,13 @@ struct CutInterfaceVolumeRegion {
         if (side == geometry::CutIntegrationSide::Interface) {
             throw std::invalid_argument("level-set volume region requires Negative or Positive side");
         }
+        if (request.quadrature_order < 0) {
+            throw std::invalid_argument("cut-volume quadrature order must be nonnegative");
+        }
+        if (request.quadrature_order > 1) {
+            throw std::invalid_argument("cut-volume quadrature order is not supported for this region");
+        }
+        const int exact_order = request.quadrature_order;
 
         geometry::CutQuadratureRule rule;
         rule.kind = geometry::CutQuadratureKind::Volume;
@@ -273,10 +280,13 @@ struct CutInterfaceVolumeRegion {
         rule.parent_measure = parent_measure;
         rule.volume_fraction = volume_fraction;
         rule.exact_for_constants = true;
-        rule.exact_polynomial_order = 0;
-        rule.policy.kind = geometry::CutQuadratureConstructionKind::TopologySubdivision;
-        rule.policy.polynomial_order = 0;
-        rule.policy.name = "constant-level-set-volume";
+        rule.exact_polynomial_order = exact_order;
+        rule.policy.kind = geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+        rule.policy.polynomial_order = exact_order;
+        rule.policy.moment_fitted = exact_order > 0;
+        rule.policy.name = exact_order == 0
+                               ? "conservative-level-set-volume"
+                               : "linear-moment-fitted-level-set-volume";
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;

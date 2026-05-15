@@ -164,15 +164,21 @@ Problem: generated cut-volume rules currently provide one centroid point and
 declare exactness only for constants, but the rules are used for full
 Navier-Stokes and VMS integrands.
 
+Current production path: generated level-set cut volumes use side-specific
+centroid moment fitting for order 0 and order 1 rules. The generic
+`makeMomentFittedCutVolumeQuadrature(...)` utility remains available, but the
+builder stores the computed side centroid directly so topology metadata and
+side fractions stay deterministic.
+
 ### Quadrature Policy Checklist
 
 - [ ] Define a default cut-volume quadrature order as a function of FE order and
       form order.
 - [ ] Define a minimum accepted order for linear velocity-pressure elements.
 - [ ] Define a minimum accepted order for quadratic geometry or quadratic fields.
-- [ ] Decide whether the first production path uses sub-triangulation,
+- [x] Decide whether the first production path uses sub-triangulation,
       moment-fitted quadrature, or a hybrid of both.
-- [ ] Audit the existing `makeMomentFittedCutVolumeQuadrature(...)` utility and
+- [x] Audit the existing `makeMomentFittedCutVolumeQuadrature(...)` utility and
       decide whether it can be promoted to the generated level-set interface
       path.
 - [ ] Define fallback behavior for degenerate cuts, near-zero volume fractions,
@@ -184,20 +190,20 @@ Navier-Stokes and VMS integrands.
 
 - [ ] Replace `constant-level-set-volume` with a policy that can generate more
       than one point per cut side.
-- [ ] Generate negative-side and positive-side quadrature rules with consistent
+- [x] Generate negative-side and positive-side quadrature rules with consistent
       parent cell ids, side labels, volume fractions, and provenance.
 - [ ] For full negative and full positive cells, reuse normal element quadrature
       or mark the generated rule as full-cell-equivalent.
-- [ ] For cut triangles, generate side-specific sub-triangle or moment-fitted
+- [x] For cut triangles, generate side-specific sub-triangle or moment-fitted
       rules.
-- [ ] For cut quads, generate side-specific rules without assuming the cut
+- [x] For cut quads, generate side-specific rules without assuming the cut
       polygon is triangular.
-- [ ] For cut tetrahedra, generate side-specific sub-tetrahedra or moment-fitted
+- [x] For cut tetrahedra, generate side-specific sub-tetrahedra or moment-fitted
       rules.
 - [ ] Decide whether hexahedra, wedges, and pyramids are unsupported with a hard
       diagnostic or supported through the existing extension registry.
-- [ ] Store the quadrature policy name and exact polynomial order in cut metadata.
-- [ ] Make `LevelSetGeneratedInterfaceOptions::quadrature_order` meaningful for
+- [x] Store the quadrature policy name and exact polynomial order in cut metadata.
+- [x] Make `LevelSetGeneratedInterfaceOptions::quadrature_order` meaningful for
       cut-volume rules.
 - [ ] Ensure `dI(...)` surface rules and `dCutVolume(...)` volume rules can use
       different quadrature orders.
@@ -206,16 +212,16 @@ Navier-Stokes and VMS integrands.
 ### Tests
 
 - [ ] Add exact constant integration tests for all supported element types.
-- [ ] Add exact linear integration tests for cut triangles.
-- [ ] Add exact linear integration tests for cut quads.
-- [ ] Add exact linear integration tests for cut tetrahedra.
+- [x] Add exact linear integration tests for cut triangles.
+- [x] Add exact linear integration tests for cut quads.
+- [x] Add exact linear integration tests for cut tetrahedra.
 - [ ] Add polynomial convergence tests for quadratic fields where exactness is
       not guaranteed.
 - [ ] Add tests where the interface cuts very close to a vertex.
 - [ ] Add tests where the interface cuts very close to an edge.
 - [ ] Add tests for small wet volume fractions.
-- [ ] Add tests for full-negative and full-positive cells.
-- [ ] Add tests proving negative and positive measures sum to the parent measure.
+- [x] Add tests for full-negative and full-positive cells.
+- [x] Add tests proving negative and positive measures sum to the parent measure.
 - [ ] Add a Navier-Stokes assembly test proving a nonconstant pressure or
       velocity field changes when constant-only quadrature is replaced.
 

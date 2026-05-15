@@ -29,6 +29,11 @@ struct SignedPoint {
     Real value{0.0};
 };
 
+struct RegionMoments {
+    Real measure{0.0};
+    std::array<Real, 3> centroid{{0.0, 0.0, 0.0}};
+};
+
 [[nodiscard]] Real dot2(const std::array<Real, 3>& a,
                         const std::array<Real, 3>& b) noexcept {
     return a[0] * b[0] + a[1] * b[1];
@@ -381,36 +386,105 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     return clipped;
 }
 
-[[nodiscard]] Real polygonArea2D(const std::vector<SignedPoint>& polygon) noexcept {
-    if (polygon.size() < 3u) {
-        return Real{0.0};
+[[nodiscard]] std::vector<SignedPoint> clipPolygonToPositiveLevelSet(
+    const std::vector<SignedPoint>& polygon,
+    Real tolerance)
+{
+    std::vector<SignedPoint> clipped;
+    if (polygon.empty()) {
+        return clipped;
     }
-    Real twice_area = Real{0.0};
-    for (std::size_t i = 0; i < polygon.size(); ++i) {
-        const auto& a = polygon[i].point;
-        const auto& b = polygon[(i + 1u) % polygon.size()].point;
-        twice_area += a[0] * b[1] - a[1] * b[0];
+
+    const auto inside = [tolerance](const SignedPoint& point) noexcept {
+        return point.value >= -tolerance;
+    };
+    SignedPoint previous = polygon.back();
+    bool previous_inside = inside(previous);
+    for (const auto& current : polygon) {
+        const bool current_inside = inside(current);
+        if (previous_inside && current_inside) {
+            clipped.push_back(current);
+        } else if (previous_inside && !current_inside) {
+            clipped.push_back(interpolateSignedPoint(previous, current));
+        } else if (!previous_inside && current_inside) {
+            clipped.push_back(interpolateSignedPoint(previous, current));
+            clipped.push_back(current);
+        }
+        previous = current;
+        previous_inside = current_inside;
     }
-    return Real{0.5} * std::abs(twice_area);
+    return clipped;
 }
 
-[[nodiscard]] Real negativeVolumeFraction2D(
+[[nodiscard]] RegionMoments polygonMoments2D(
+    const std::vector<SignedPoint>& polygon) noexcept
+{
+    RegionMoments moments;
+    if (polygon.size() < 3u) {
+        return moments;
+    }
+
+    const auto& origin = polygon.front().point;
+    Real signed_measure = Real{0.0};
+    std::array<Real, 3> first_moment{{0.0, 0.0, 0.0}};
+    for (std::size_t i = 1u; i + 1u < polygon.size(); ++i) {
+        const auto& a = origin;
+        const auto& b = polygon[i].point;
+        const auto& c = polygon[i + 1u].point;
+        const Real triangle_measure =
+            Real{0.5} * ((b[0] - a[0]) * (c[1] - a[1]) -
+                         (b[1] - a[1]) * (c[0] - a[0]));
+        signed_measure += triangle_measure;
+        const auto triangle_centroid =
+            scale(add(add(a, b), c), Real{1.0} / Real{3.0});
+        first_moment = add(first_moment,
+                           scale(triangle_centroid, triangle_measure));
+    }
+    if (std::abs(signed_measure) <= Real{1.0e-30}) {
+        return RegionMoments{};
+    }
+    moments.measure = std::abs(signed_measure);
+    moments.centroid = scale(first_moment, Real{1.0} / signed_measure);
+    return moments;
+}
+
+[[nodiscard]] std::vector<SignedPoint> makeSignedPolygon(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
-    std::size_t count,
-    Real tolerance)
+    std::size_t count)
 {
     std::vector<SignedPoint> polygon;
     polygon.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         polygon.push_back(SignedPoint{points[i], signed_values[i]});
     }
-    const Real parent_area = polygonArea2D(polygon);
-    if (parent_area <= Real{0.0}) {
-        return Real{0.0};
+    return polygon;
+}
+
+[[nodiscard]] RegionMoments parentMoments2D(
+    const std::vector<std::array<Real, 3>>& points,
+    std::size_t count)
+{
+    std::vector<SignedPoint> polygon;
+    polygon.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        polygon.push_back(SignedPoint{points[i], Real{0.0}});
     }
-    const auto clipped = clipPolygonToNegativeLevelSet(polygon, tolerance);
-    return clampFraction(polygonArea2D(clipped) / parent_area);
+    return polygonMoments2D(polygon);
+}
+
+[[nodiscard]] RegionMoments cutSideMoments2D(
+    const std::vector<std::array<Real, 3>>& points,
+    const std::vector<Real>& signed_values,
+    std::size_t count,
+    geometry::CutIntegrationSide side,
+    Real tolerance)
+{
+    const auto polygon = makeSignedPolygon(points, signed_values, count);
+    const auto clipped = side == geometry::CutIntegrationSide::Negative
+                             ? clipPolygonToNegativeLevelSet(polygon, tolerance)
+                             : clipPolygonToPositiveLevelSet(polygon, tolerance);
+    return polygonMoments2D(clipped);
 }
 
 void addUniquePoint(std::vector<std::array<Real, 3>>& points,
@@ -435,7 +509,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     return std::abs(dot3(sub(b, a), cross(sub(c, a), sub(d, a)))) / Real{6.0};
 }
 
-[[nodiscard]] Real polyhedronVolumeFromFaces(
+[[nodiscard]] RegionMoments polyhedronMomentsFromFaces(
     const std::vector<std::vector<std::array<Real, 3>>>& faces,
     Real tolerance)
 {
@@ -446,7 +520,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         }
     }
     if (unique_points.empty()) {
-        return Real{0.0};
+        return RegionMoments{};
     }
 
     std::array<Real, 3> center{{0.0, 0.0, 0.0}};
@@ -455,22 +529,32 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     }
     center = scale(center, Real{1.0} / static_cast<Real>(unique_points.size()));
 
-    Real volume = Real{0.0};
+    RegionMoments moments;
+    std::array<Real, 3> first_moment{{0.0, 0.0, 0.0}};
     for (const auto& face : faces) {
         if (face.size() < 3u) {
             continue;
         }
         for (std::size_t i = 1u; i + 1u < face.size(); ++i) {
-            volume += std::abs(dot3(sub(face[0], center),
-                                    cross(sub(face[i], center),
-                                          sub(face[i + 1u], center)))) /
-                      Real{6.0};
+            const Real volume = std::abs(dot3(sub(face[0], center),
+                                              cross(sub(face[i], center),
+                                                    sub(face[i + 1u], center)))) /
+                                Real{6.0};
+            const auto tetra_centroid =
+                scale(add(add(center, face[0]), add(face[i], face[i + 1u])),
+                      Real{0.25});
+            moments.measure += volume;
+            first_moment = add(first_moment, scale(tetra_centroid, volume));
         }
     }
-    return volume;
+    if (moments.measure <= Real{1.0e-30}) {
+        return RegionMoments{};
+    }
+    moments.centroid = scale(first_moment, Real{1.0} / moments.measure);
+    return moments;
 }
 
-[[nodiscard]] Real negativeVolumeFractionTetrahedron(
+[[nodiscard]] RegionMoments negativeTetrahedronMoments(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     const std::vector<CutPointCandidate>& ordered_cut_points,
@@ -478,7 +562,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
 {
     const Real parent_volume = tetraVolume(points[0], points[1], points[2], points[3]);
     if (parent_volume <= Real{0.0}) {
-        return Real{0.0};
+        return RegionMoments{};
     }
 
     constexpr std::array<std::array<std::size_t, 3>, 4> faces{{
@@ -513,20 +597,25 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         clipped_faces.push_back(std::move(cut_face));
     }
 
-    return clampFraction(polyhedronVolumeFromFaces(clipped_faces, tolerance) /
-                         parent_volume);
+    return polyhedronMomentsFromFaces(clipped_faces, tolerance);
 }
 
-[[nodiscard]] Real parentMeasure2D(
-    const std::vector<std::array<Real, 3>>& points,
-    std::size_t count)
+[[nodiscard]] RegionMoments complementMoments(
+    const RegionMoments& parent,
+    const RegionMoments& part)
 {
-    std::vector<SignedPoint> polygon;
-    polygon.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        polygon.push_back(SignedPoint{points[i], Real{0.0}});
+    RegionMoments complement;
+    complement.measure = parent.measure - part.measure;
+    if (complement.measure <= Real{1.0e-30}) {
+        complement.measure = Real{0.0};
+        complement.centroid = parent.centroid;
+        return complement;
     }
-    return polygonArea2D(polygon);
+    const auto parent_moment = scale(parent.centroid, parent.measure);
+    const auto part_moment = scale(part.centroid, part.measure);
+    complement.centroid =
+        scale(sub(parent_moment, part_moment), Real{1.0} / complement.measure);
+    return complement;
 }
 
 [[nodiscard]] Real parentMeasure3D(
@@ -547,6 +636,15 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
         c = add(c, points[i]);
     }
     return scale(c, Real{1.0} / static_cast<Real>(count));
+}
+
+[[nodiscard]] RegionMoments parentMoments3D(
+    const std::vector<std::array<Real, 3>>& points)
+{
+    RegionMoments moments;
+    moments.measure = parentMeasure3D(points);
+    moments.centroid = cellCentroid(points, 4u);
+    return moments;
 }
 
 [[nodiscard]] CutInterfaceVolumeRegion makeVolumeRegion(
@@ -729,8 +827,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         }
     }
 
-    const Real parent_measure = parentMeasure2D(input.node_coordinates, count);
-    const auto parent_centroid = cellCentroid(input.node_coordinates, count);
+    const auto parent_moments = parentMoments2D(input.node_coordinates, count);
+    const Real parent_measure = parent_moments.measure;
+    const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
         estimateGradient2D(input.node_coordinates, signed_values, count);
 
@@ -868,11 +967,22 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
+    const auto negative_moments =
+        cutSideMoments2D(input.node_coordinates,
+                         signed_values,
+                         count,
+                         geometry::CutIntegrationSide::Negative,
+                         request.tolerance);
+    const auto positive_moments =
+        cutSideMoments2D(input.node_coordinates,
+                         signed_values,
+                         count,
+                         geometry::CutIntegrationSide::Positive,
+                         request.tolerance);
     fragment.negative_volume_fraction =
-        negativeVolumeFraction2D(input.node_coordinates,
-                                 signed_values,
-                                 count,
-                                 request.tolerance);
+        parent_measure > Real{0.0}
+            ? clampFraction(negative_moments.measure / parent_measure)
+            : Real{0.0};
     fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
@@ -908,7 +1018,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          geometry::CutIntegrationSide::Negative,
                          parent_measure,
                          fragment.negative_volume_fraction,
-                         parent_centroid,
+                         negative_moments.measure > Real{0.0}
+                             ? negative_moments.centroid
+                             : parent_centroid,
                          normal,
                          signed_values,
                          0u,
@@ -920,7 +1032,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          geometry::CutIntegrationSide::Positive,
                          parent_measure,
                          fragment.positive_volume_fraction,
-                         parent_centroid,
+                         positive_moments.measure > Real{0.0}
+                             ? positive_moments.centroid
+                             : parent_centroid,
                          normal,
                          signed_values,
                          1u,
@@ -965,8 +1079,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         }
     }
 
-    const Real parent_measure = parentMeasure3D(input.node_coordinates);
-    const auto parent_centroid = cellCentroid(input.node_coordinates, count);
+    const auto parent_moments = parentMoments3D(input.node_coordinates);
+    const Real parent_measure = parent_moments.measure;
+    const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
         estimateGradient3D(input.node_coordinates, signed_values, count);
 
@@ -1109,11 +1224,16 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
     }
     fragment.normal = normal;
     fragment.measure = measure;
+    const auto negative_moments =
+        negativeTetrahedronMoments(input.node_coordinates,
+                                   signed_values,
+                                   cut_points,
+                                   request.tolerance);
+    const auto positive_moments = complementMoments(parent_moments, negative_moments);
     fragment.negative_volume_fraction =
-        negativeVolumeFractionTetrahedron(input.node_coordinates,
-                                          signed_values,
-                                          cut_points,
-                                          request.tolerance);
+        parent_measure > Real{0.0}
+            ? clampFraction(negative_moments.measure / parent_measure)
+            : Real{0.0};
     fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
@@ -1145,7 +1265,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          geometry::CutIntegrationSide::Negative,
                          parent_measure,
                          fragment.negative_volume_fraction,
-                         parent_centroid,
+                         negative_moments.measure > Real{0.0}
+                             ? negative_moments.centroid
+                             : parent_centroid,
                          normal,
                          signed_values,
                          0u,
@@ -1157,7 +1279,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                          geometry::CutIntegrationSide::Positive,
                          parent_measure,
                          fragment.positive_volume_fraction,
-                         parent_centroid,
+                         positive_moments.measure > Real{0.0}
+                             ? positive_moments.centroid
+                             : parent_centroid,
                          normal,
                          signed_values,
                          1u,

@@ -9,6 +9,19 @@ using namespace svmp::FE;
 using namespace svmp::FE::geometry;
 using namespace svmp::FE::interfaces;
 
+namespace {
+
+Real integrateCoordinate(const CutQuadratureRule& rule, std::size_t component)
+{
+    Real value = 0.0;
+    for (const auto& point : rule.points) {
+        value += point.weight * point.point[component];
+    }
+    return value;
+}
+
+} // namespace
+
 TEST(LevelSetInterfaceDomain, RequestCarriesFieldSourceAndMarker)
 {
     CutInterfaceDomainRequest request;
@@ -394,6 +407,18 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     EXPECT_NEAR(rules[0].points.front().weight + rules[1].points.front().weight,
                 1.0,
                 1.0e-14);
+    EXPECT_EQ(rules[0].exact_polynomial_order, 1);
+    EXPECT_EQ(rules[0].policy.name, "linear-moment-fitted-level-set-volume");
+    ASSERT_EQ(rules[0].points.size(), 1u);
+    ASSERT_EQ(rules[1].points.size(), 1u);
+    EXPECT_NEAR(rules[0].points.front().point[0], 0.25, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().point[1], 0.5, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[0], 0.75, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[1], 0.5, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 0), 0.125, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 1), 0.25, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 0), 0.375, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 1), 0.25, 1.0e-14);
 
     CutInterfaceDomainRequest tetra_request;
     tetra_request.source = LevelSetInterfaceSource::fromEvaluator("cut-tetra-source");
@@ -423,6 +448,55 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     EXPECT_NEAR(rules[1].volume_fraction, 7.0 / 8.0, 1.0e-14);
     EXPECT_NEAR(rules[0].measure, 1.0 / 48.0, 1.0e-14);
     EXPECT_NEAR(rules[1].measure, 7.0 / 48.0, 1.0e-14);
+    ASSERT_EQ(rules[0].points.size(), 1u);
+    ASSERT_EQ(rules[1].points.size(), 1u);
+    EXPECT_NEAR(rules[0].points.front().point[0], 0.125, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().point[1], 0.125, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().point[2], 0.125, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 0), 1.0 / 384.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 1), 1.0 / 384.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 2), 1.0 / 384.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[0], 15.0 / 56.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[1], 15.0 / 56.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[2], 15.0 / 56.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 0), 5.0 / 128.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 1), 5.0 / 128.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 2), 5.0 / 128.0, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceDomain, LinearCellCutsExportTriangleVolumeCentroids)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("cut-triangle-source");
+    request.interface_marker = 87;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 15,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    const auto rules = domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(rules[0].side, CutIntegrationSide::Negative);
+    EXPECT_EQ(rules[1].side, CutIntegrationSide::Positive);
+    EXPECT_NEAR(rules[0].measure, 3.0 / 8.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].measure, 1.0 / 8.0, 1.0e-14);
+    EXPECT_NEAR(rules[0].measure + rules[1].measure, 0.5, 1.0e-14);
+    ASSERT_EQ(rules[0].points.size(), 1u);
+    ASSERT_EQ(rules[1].points.size(), 1u);
+    EXPECT_NEAR(rules[0].points.front().point[0], 2.0 / 9.0, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().point[1], 7.0 / 18.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[0], 2.0 / 3.0, 1.0e-14);
+    EXPECT_NEAR(rules[1].points.front().point[1], 1.0 / 6.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 0), 1.0 / 12.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[0], 1), 7.0 / 48.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 0), 1.0 / 12.0, 1.0e-14);
+    EXPECT_NEAR(integrateCoordinate(rules[1], 1), 1.0 / 48.0, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
@@ -461,5 +535,23 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     CutInterfaceDomainRequest unsupported_request = request;
     unsupported_request.quadrature_order = 2;
     EXPECT_THROW((void)domain.fragments().front().toCutQuadratureRule(unsupported_request),
+                 std::invalid_argument);
+
+    CutInterfaceVolumeRegion region;
+    region.parent_cell = 8;
+    region.side = CutIntegrationSide::Negative;
+    region.parent_measure = 2.0;
+    region.measure = 0.5;
+    region.volume_fraction = 0.25;
+    region.centroid = {{0.25, 0.5, 0.0}};
+    region.topology_id = "cut-volume-region";
+    domain.addVolumeRegion(region);
+
+    const auto volume_rule = domain.volumeRegions().front().toCutQuadratureRule(linear_request);
+    EXPECT_EQ(volume_rule.exact_polynomial_order, 1);
+    EXPECT_EQ(volume_rule.policy.polynomial_order, 1);
+    EXPECT_EQ(volume_rule.policy.name, "linear-moment-fitted-level-set-volume");
+    EXPECT_TRUE(volume_rule.policy.moment_fitted);
+    EXPECT_THROW((void)domain.volumeRegions().front().toCutQuadratureRule(unsupported_request),
                  std::invalid_argument);
 }
