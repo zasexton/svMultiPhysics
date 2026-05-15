@@ -391,7 +391,7 @@ benchmark runs.
 
 ### Solver Smoke Tests
 
-- [ ] Run a one-step static flat-interface case and confirm zero spurious motion.
+- [x] Run a one-step static flat-interface case and confirm zero spurious motion.
 - [x] Run a one-step moving-interface case and confirm the wet volume used by
       Navier-Stokes changes with `phi`.
 - [ ] Run a short D18 probe and confirm pressure departs from the invalid

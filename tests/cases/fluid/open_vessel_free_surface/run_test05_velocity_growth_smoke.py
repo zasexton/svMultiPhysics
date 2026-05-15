@@ -25,14 +25,17 @@ ROOT = Path(__file__).resolve().parents[4]
 CASE_ROOT = ROOT / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set"
 CASES = {
     "mini2d": None,
+    "static2d": None,
     "d18": CASE_ROOT / "spheric_test05_wet_bed_d18",
     "d38": CASE_ROOT / "spheric_test05_wet_bed_d38",
 }
 CASE_GATE_X = {
     "mini2d": 0.4,
+    "static2d": 0.5,
 }
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
+STATIC_INTERFACE_HEIGHT = 0.53
 
 
 def point_array(mesh: pv.DataSet, name: str) -> np.ndarray:
@@ -204,7 +207,7 @@ def write_boundary(path: Path,
     poly.save(path)
 
 
-def write_mini_mesh(case_dir: Path) -> tuple[int, float]:
+def write_mini_mesh(case_dir: Path, static: bool = False) -> tuple[int, float]:
     nx = 8
     ny = 8
     tank_height = 1.0
@@ -235,10 +238,14 @@ def write_mini_mesh(case_dir: Path) -> tuple[int, float]:
 
     x = points[:, 0]
     y = points[:, 1]
-    phi = np.minimum(y - bed_depth, np.maximum(x - column_width, y - column_height))
-    free_surface_height = np.where(x <= column_width, column_height, bed_depth)
-    pressure = rho * gravity * np.maximum(free_surface_height - y, 0.0)
-    pressure[phi > 0.0] = 0.0
+    if static:
+        phi = y - STATIC_INTERFACE_HEIGHT
+        pressure = np.zeros(points.shape[0], dtype=float)
+    else:
+        phi = np.minimum(y - bed_depth, np.maximum(x - column_width, y - column_height))
+        free_surface_height = np.where(x <= column_width, column_height, bed_depth)
+        pressure = rho * gravity * np.maximum(free_surface_height - y, 0.0)
+        pressure[phi > 0.0] = 0.0
 
     grid.point_data["GlobalNodeID"] = np.arange(points.shape[0], dtype=np.int64)
     grid.point_data["phi"] = phi
@@ -261,14 +268,18 @@ def write_mini_mesh(case_dir: Path) -> tuple[int, float]:
     write_boundary(surface_dir / "wall_top.vtp", points, top, 2 * ny + nx)
 
     gauge_node = 0
-    gauge_pressure = float(rho * gravity * column_height)
+    gauge_pressure = 0.0 if static else float(rho * gravity * column_height)
     return gauge_node, gauge_pressure
 
 
 def write_mini_solver_xml(case_dir: Path,
                           steps: int,
                           gauge_node: int,
-                          gauge_pressure: float) -> None:
+                          gauge_pressure: float,
+                          static: bool = False) -> None:
+    force_y = "0.0" if static else "-9.81"
+    hydrostatic_initialization = "false" if static else "true"
+    hydrostatic_reference_y = STATIC_INTERFACE_HEIGHT if static else 0.75
     (case_dir / "pressure_gauge.csv").write_text(
         f"node_id,pressure\n{gauge_node},{gauge_pressure:.16g}\n", encoding="utf-8")
     (case_dir / "solver.xml").write_text(f"""<?xml version="1.0" encoding="UTF-8" ?>
@@ -350,11 +361,11 @@ def write_mini_solver_xml(case_dir: Path,
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
   <Density>998.2</Density>
   <Force_x>0.0</Force_x>
-  <Force_y>-9.81</Force_y>
+  <Force_y>{force_y}</Force_y>
   <Force_z>0.0</Force_z>
-  <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
+  <Hydrostatic_pressure_initialization>{hydrostatic_initialization}</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
-  <Hydrostatic_pressure_reference_point>0.0 0.75 0.0</Hydrostatic_pressure_reference_point>
+  <Hydrostatic_pressure_reference_point>0.0 {hydrostatic_reference_y:.16g} 0.0</Hydrostatic_pressure_reference_point>
   <Node_pressure_constraints>
     <Id_type>Global_vertex_gid</Id_type>
     <Values_file_path>pressure_gauge.csv</Values_file_path>
@@ -412,10 +423,10 @@ def write_mini_solver_xml(case_dir: Path,
 """, encoding="utf-8")
 
 
-def write_mini_case(case_dir: Path, steps: int) -> None:
+def write_mini_case(case_dir: Path, steps: int, static: bool = False) -> None:
     case_dir.mkdir(parents=True)
-    gauge_node, gauge_pressure = write_mini_mesh(case_dir)
-    write_mini_solver_xml(case_dir, steps, gauge_node, gauge_pressure)
+    gauge_node, gauge_pressure = write_mini_mesh(case_dir, static)
+    write_mini_solver_xml(case_dir, steps, gauge_node, gauge_pressure, static)
 
 
 def result_path(case_dir: Path, step: int) -> Path:
@@ -504,6 +515,13 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors = []
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
+    if metrics.get("case") == "static2d":
+        if metrics["max_speed"] > args.max_static_speed:
+            errors.append(
+                f"static max speed {metrics['max_speed']:.6g} exceeds "
+                f"{args.max_static_speed:.6g}"
+            )
+        return errors
     if metrics["max_speed"] < args.min_max_speed:
         errors.append(
             f"max speed {metrics['max_speed']:.6g} is below {args.min_max_speed:.6g}"
@@ -544,7 +562,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
     with tempfile.TemporaryDirectory(prefix=f"dam_break_{case_name}_") as temp_name:
         run_dir = Path(temp_name) / case_name
         if source is None:
-            write_mini_case(run_dir, args.steps)
+            write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
         else:
             run_dir = Path(temp_name) / source.name
             copy_case(source, run_dir, args.source_ref)
@@ -566,9 +584,9 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
 
         metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
         metrics.update(parse_active_volume_history(completed.stdout))
-        errors = evaluate(metrics, args)
         metrics["case"] = case_name
         metrics["steps"] = args.steps
+        errors = evaluate(metrics, args)
         metrics["passed"] = not errors
         metrics["errors"] = errors
         if errors:
@@ -587,6 +605,7 @@ def main() -> int:
     parser.add_argument("--min-gate-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-front-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-active-volume-change", type=float, default=0.0)
+    parser.add_argument("--max-static-speed", type=float, default=1.0e-9)
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)
