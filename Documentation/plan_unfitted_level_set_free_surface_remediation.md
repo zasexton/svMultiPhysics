@@ -394,6 +394,10 @@ benchmark runs.
 - [x] Run a one-step static flat-interface case and confirm zero spurious motion.
 - [x] Run a one-step moving-interface case and confirm the wet volume used by
       Navier-Stokes changes with `phi`.
+- [x] Add compact parseable diagnostics for D18/D38 failures before further
+      solver iteration: cut-context provenance, active wet-region summaries,
+      cut-volume quadrature sanity, cut-adjacent stabilization scales,
+      residual block norms, and pressure-gauge initialization checks.
 - [ ] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [ ] Run a short D18 probe and confirm velocity grows in the released/retained

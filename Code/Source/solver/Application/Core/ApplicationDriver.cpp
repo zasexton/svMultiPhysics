@@ -413,6 +413,30 @@ struct WetVolumeDiagnostic {
   std::size_t full_dry_cell_count{0};
 };
 
+struct ActiveSideRegionSummary {
+  svmp::FE::Real active_volume{0.0};
+  std::size_t active_volume_regions{0};
+  std::size_t active_quadrature_points{0};
+  std::size_t active_wet_cells{0};
+  std::size_t cut_cell_count{0};
+  std::size_t full_wet_cell_count{0};
+  std::size_t full_dry_cell_count{0};
+  std::size_t nonfinite_measure_regions{0};
+  std::size_t negative_measure_regions{0};
+  std::size_t empty_quadrature_regions{0};
+  svmp::FE::Real min_volume_fraction{std::numeric_limits<svmp::FE::Real>::infinity()};
+  svmp::FE::Real max_volume_fraction{-std::numeric_limits<svmp::FE::Real>::infinity()};
+};
+
+struct CutAdjacentFacetScaleSummary {
+  std::size_t metadata_count{0};
+  std::size_t zero_scale_count{0};
+  std::size_t nonfinite_scale_count{0};
+  svmp::FE::Real min_scale{std::numeric_limits<svmp::FE::Real>::infinity()};
+  svmp::FE::Real max_scale{-std::numeric_limits<svmp::FE::Real>::infinity()};
+  svmp::FE::Real mean_scale{0.0};
+};
+
 std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& params)
 {
   std::vector<ActiveCutVolumeRequest> requests;
@@ -626,6 +650,101 @@ svmp::FE::geometry::CutIntegrationSide cutIntegrationSide(
   return side == LevelSetActiveSide::Negative
              ? svmp::FE::geometry::CutIntegrationSide::Negative
              : svmp::FE::geometry::CutIntegrationSide::Positive;
+}
+
+ActiveSideRegionSummary summarizeActiveSideRegions(
+    const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
+    LevelSetActiveSide active_side,
+    std::size_t n_cells)
+{
+  ActiveSideRegionSummary summary;
+  std::vector<double> wet_fraction(n_cells, 0.0);
+  const auto side = cutIntegrationSide(active_side);
+  for (const auto& region : domain.volumeRegions()) {
+    if (!region.active() || region.side != side) {
+      continue;
+    }
+    ++summary.active_volume_regions;
+    summary.active_volume += region.measure;
+    summary.active_quadrature_points += region.quadrature_points.empty()
+        ? 1u
+        : region.quadrature_points.size();
+    if (!std::isfinite(region.measure)) {
+      ++summary.nonfinite_measure_regions;
+    }
+    if (region.measure < svmp::FE::Real{0.0}) {
+      ++summary.negative_measure_regions;
+    }
+    if (region.quadrature_points.empty()) {
+      ++summary.empty_quadrature_regions;
+    }
+    if (std::isfinite(region.volume_fraction)) {
+      summary.min_volume_fraction =
+          std::min(summary.min_volume_fraction, region.volume_fraction);
+      summary.max_volume_fraction =
+          std::max(summary.max_volume_fraction, region.volume_fraction);
+    }
+    const auto cell = region.parent_cell;
+    if (cell >= 0 && static_cast<std::size_t>(cell) < wet_fraction.size()) {
+      wet_fraction[static_cast<std::size_t>(cell)] = std::clamp(
+          wet_fraction[static_cast<std::size_t>(cell)] +
+              static_cast<double>(region.volume_fraction),
+          0.0,
+          1.0);
+    }
+  }
+
+  constexpr double fraction_tol = 1.0e-12;
+  for (const auto fraction : wet_fraction) {
+    if (fraction <= fraction_tol) {
+      ++summary.full_dry_cell_count;
+    } else if (fraction >= 1.0 - fraction_tol) {
+      ++summary.full_wet_cell_count;
+      ++summary.active_wet_cells;
+    } else {
+      ++summary.cut_cell_count;
+      ++summary.active_wet_cells;
+    }
+  }
+  if (!std::isfinite(summary.min_volume_fraction)) {
+    summary.min_volume_fraction = svmp::FE::Real{0.0};
+  }
+  if (!std::isfinite(summary.max_volume_fraction)) {
+    summary.max_volume_fraction = svmp::FE::Real{0.0};
+  }
+  return summary;
+}
+
+CutAdjacentFacetScaleSummary summarizeCutAdjacentFacetScales(
+    const svmp::FE::assembly::CutFacetSetHandle& handle)
+{
+  CutAdjacentFacetScaleSummary summary;
+  summary.metadata_count = handle.facet_metadata.size();
+  svmp::FE::Real sum = svmp::FE::Real{0.0};
+  for (const auto& metadata : handle.facet_metadata) {
+    const auto scale = metadata.stabilization_scale;
+    if (!std::isfinite(scale)) {
+      ++summary.nonfinite_scale_count;
+      continue;
+    }
+    if (scale <= svmp::FE::Real{0.0}) {
+      ++summary.zero_scale_count;
+    }
+    summary.min_scale = std::min(summary.min_scale, scale);
+    summary.max_scale = std::max(summary.max_scale, scale);
+    sum += scale;
+  }
+  if (summary.metadata_count > 0u) {
+    summary.mean_scale =
+        sum / static_cast<svmp::FE::Real>(summary.metadata_count);
+  }
+  if (!std::isfinite(summary.min_scale)) {
+    summary.min_scale = svmp::FE::Real{0.0};
+  }
+  if (!std::isfinite(summary.max_scale)) {
+    summary.max_scale = svmp::FE::Real{0.0};
+  }
+  return summary;
 }
 
 std::string fieldNameToken(std::string value)
@@ -1916,7 +2035,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     std::span<const svmp::FE::Real> fe_solution,
-    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
+    const char* provenance)
 {
   ActiveCutContextRefreshReport report{};
   if (!sim.fe_system) {
@@ -1974,8 +2094,18 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         *context, result.domain, sim.fe_system->meshAccess());
     mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
     report.cut_adjacent_facets += facet_set_handle.facets.size();
+    const auto active_summary = summarizeActiveSideRegions(
+        result.domain,
+        request.active_side,
+        static_cast<std::size_t>(std::max<svmp::FE::GlobalIndex>(
+            0, sim.fe_system->meshAccess().numCells())));
+    const auto facet_scale_summary =
+        summarizeCutAdjacentFacetScales(facet_set_handle);
     application::core::oopCout()
-        << "[svMultiPhysics::Application] Active-domain cut context marker="
+        << "[svMultiPhysics::Application] Active-domain cut context"
+        << " diagnostic=cut_context_rebuild"
+        << " provenance=" << (provenance != nullptr ? provenance : "unknown")
+        << " marker="
         << result.interface_marker << " field='" << request.level_set_field_name
         << "' domain_id='" << request.domain_id
         << "' active_side=" << activeSideName(request.active_side)
@@ -1986,7 +2116,35 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " active_interface_fragments=" << summary.active_fragment_count
         << " active_volume_regions="
         << summary.active_volume_region_count
+        << " active_wet_cells=" << active_summary.active_wet_cells
+        << " active_cut_cells=" << active_summary.cut_cell_count
+        << " active_full_wet_cells=" << active_summary.full_wet_cell_count
+        << " active_full_dry_cells=" << active_summary.full_dry_cell_count
+        << " active_quadrature_points="
+        << active_summary.active_quadrature_points
+        << " active_empty_quadrature_regions="
+        << active_summary.empty_quadrature_regions
+        << " active_nonfinite_measure_regions="
+        << active_summary.nonfinite_measure_regions
+        << " active_negative_measure_regions="
+        << active_summary.negative_measure_regions
+        << " active_min_volume_fraction="
+        << active_summary.min_volume_fraction
+        << " active_max_volume_fraction="
+        << active_summary.max_volume_fraction
         << " cut_adjacent_facets=" << facet_set_handle.facets.size()
+        << " cut_adjacent_metadata="
+        << facet_scale_summary.metadata_count
+        << " cut_adjacent_zero_scale="
+        << facet_scale_summary.zero_scale_count
+        << " cut_adjacent_nonfinite_scale="
+        << facet_scale_summary.nonfinite_scale_count
+        << " cut_adjacent_min_scale="
+        << facet_scale_summary.min_scale
+        << " cut_adjacent_max_scale="
+        << facet_scale_summary.max_scale
+        << " cut_adjacent_mean_scale="
+        << facet_scale_summary.mean_scale
         << " negative_volume=" << summary.negative_volume_measure
         << " positive_volume=" << summary.positive_volume_measure << std::endl;
   }
@@ -1999,21 +2157,24 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     svmp::FE::backends::GenericVector& solution,
-    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
+    const char* provenance)
 {
   const auto fe_solution = gatherFeOrderedSolution(solution);
   return refreshActiveCutIntegrationContextFromSolution(
       sim,
       params,
       std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
-      lifecycle);
+      lifecycle,
+      provenance);
 }
 
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     const svmp::FE::systems::SystemStateView& state,
-    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
+    const char* provenance)
 {
   if (!sim.fe_system) {
     return {};
@@ -2022,14 +2183,15 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
       static_cast<std::size_t>(sim.fe_system->dofHandler().getNumDofs());
   if (!state.u.empty() && state.u.size() >= required_dofs) {
     return refreshActiveCutIntegrationContextFromSolution(
-        sim, params, state.u, lifecycle);
+        sim, params, state.u, lifecycle, provenance);
   }
   const auto fe_solution = gatherFeOrderedSolution(state);
   return refreshActiveCutIntegrationContextFromSolution(
       sim,
       params,
       std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
-      lifecycle);
+      lifecycle,
+      provenance);
 }
 
 class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {
@@ -2344,7 +2506,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           const svmp::FE::systems::SystemStateView& state,
           StateSyncPoint point) {
         const auto report = refreshActiveCutIntegrationContext(
-            sim, params, state, *cut_lifecycle);
+            sim, params, state, *cut_lifecycle, stateSyncPointName(point));
         logCutTopologyChange(report, point, *cut_topology_key, "steady");
       };
 
@@ -2364,7 +2526,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
   (void)refreshActiveCutIntegrationContext(
-      sim, params, sim.time_history->u(), *cut_lifecycle);
+      sim, params, sim.time_history->u(), *cut_lifecycle, "steady_initial");
 
   const double solve_time = sim.time_history->time();
   oopCout() << "[svMultiPhysics::Application] Steady solve: time=" << solve_time
@@ -2386,7 +2548,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   sim.fe_system->commitTimeStep();
   (void)refreshActiveCutIntegrationContext(
-      sim, params, sim.time_history->u(), *cut_lifecycle);
+      sim, params, sim.time_history->u(), *cut_lifecycle, "steady_accepted");
   outputResults(sim, params, /*step=*/1, solve_time, pvd);
 
   const auto comm = svmp::MeshComm::world();
@@ -2519,7 +2681,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
         const auto report = refreshActiveCutIntegrationContext(
-            sim, params, state, *cut_lifecycle);
+            sim, params, state, *cut_lifecycle, stateSyncPointName(point));
         logCutTopologyChange(report, point, *cut_topology_key, "transient");
       };
   callbacks.on_before_physics_solve =
@@ -2527,7 +2689,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
         (void)refreshActiveCutIntegrationContext(
-            sim, params, h.u(), *cut_lifecycle);
+            sim, params, h.u(), *cut_lifecycle, "before_physics_solve");
         return true;
       };
   callbacks.on_nonlinear_done = [&](const svmp::FE::timestepping::TimeHistory& h,
@@ -2550,7 +2712,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     (void)updateLevelSetAdvectionVelocities(
         sim, h, level_set_advection_velocity);
     const auto cut_report = refreshActiveCutIntegrationContext(
-        sim, params, h.u(), *cut_lifecycle);
+        sim, params, h.u(), *cut_lifecycle, "accepted_step");
     if (level_set_maintenance_changed && cut_report.refreshed) {
       oopCout()
           << "[svMultiPhysics::Application] Level-set maintenance refreshed cut context"

@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -366,12 +367,17 @@ void validateActiveDomainPressureConstraints(
         n_vertices,
         "active-domain pressure constraint validation");
     const auto& bc = *active_pressure_domain->boundary;
+    std::size_t checked_local_constraints = 0u;
+    std::size_t skipped_nonlocal_constraints = 0u;
+    FE::Real min_signed_gap = std::numeric_limits<FE::Real>::infinity();
+    FE::Real max_signed_gap = -std::numeric_limits<FE::Real>::infinity();
     for (const auto& constraint : options.node_pressure_constraints.values) {
         const auto local_vertex = pressureConstraintLocalVertex(
             system,
             options.node_pressure_constraints.id_type,
             constraint.node_id);
         if (!local_vertex.has_value()) {
+            ++skipped_nonlocal_constraints;
             continue;
         }
         if (*local_vertex < 0 || *local_vertex >= n_vertices) {
@@ -384,6 +390,9 @@ void validateActiveDomainPressureConstraints(
         const auto phi = level_set_values.values[
             static_cast<std::size_t>(*local_vertex) * level_set_values.components];
         const auto signed_gap = phi - bc.level_set_isovalue;
+        ++checked_local_constraints;
+        min_signed_gap = std::min(min_signed_gap, signed_gap);
+        max_signed_gap = std::max(max_signed_gap, signed_gap);
         if (!pressureVertexOnActiveSide(phi,
                                         bc.level_set_isovalue,
                                         active_pressure_domain->active_domain)) {
@@ -408,6 +417,25 @@ void validateActiveDomainPressureConstraints(
             throw std::invalid_argument(oss.str());
         }
     }
+    if (!std::isfinite(min_signed_gap)) {
+        min_signed_gap = FE::Real{0.0};
+    }
+    if (!std::isfinite(max_signed_gap)) {
+        max_signed_gap = FE::Real{0.0};
+    }
+    std::ostringstream oss;
+    oss << "IncompressibleNavierStokesVMSModule: pressure gauge diagnostic"
+        << " diagnostic=pressure_gauge_check"
+        << " constraints=" << options.node_pressure_constraints.values.size()
+        << " checked_local_constraints=" << checked_local_constraints
+        << " skipped_nonlocal_constraints=" << skipped_nonlocal_constraints
+        << " Active_domain="
+        << pressureActiveDomainName(active_pressure_domain->active_domain)
+        << " isovalue=" << bc.level_set_isovalue
+        << " min_signed_gap=" << min_signed_gap
+        << " max_signed_gap=" << max_signed_gap
+        << " margin=" << kPressureGaugeLevelSetMargin;
+    FE_LOG_INFO(oss.str());
 }
 
 } // namespace
@@ -457,6 +485,12 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
     std::vector<FE::Real> values;
     std::size_t active_wet_vertices = 0u;
     std::size_t active_dry_vertices = 0u;
+    FE::Real initialized_pressure_min =
+        std::numeric_limits<FE::Real>::infinity();
+    FE::Real initialized_pressure_max =
+        -std::numeric_limits<FE::Real>::infinity();
+    FE::Real wet_pressure_min = std::numeric_limits<FE::Real>::infinity();
+    FE::Real wet_pressure_max = -std::numeric_limits<FE::Real>::infinity();
 
     for (FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto vertex_dofs = entity_map->getVertexDofs(vertex);
@@ -487,6 +521,12 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
                          pressure_initialization_field->components]
                    : hydrostaticPressureAt(x, options_, init))
             : init.reference_pressure;
+        initialized_pressure_min = std::min(initialized_pressure_min, pressure);
+        initialized_pressure_max = std::max(initialized_pressure_max, pressure);
+        if (initialize_hydrostatic) {
+            wet_pressure_min = std::min(wet_pressure_min, pressure);
+            wet_pressure_max = std::max(wet_pressure_max, pressure);
+        }
 
         for (const auto local_dof : vertex_dofs) {
             dofs.push_back(pressure_offset + local_dof);
@@ -510,13 +550,29 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
     view->finalizeAssembly();
 
     if (active_pressure_domain.has_value()) {
+        if (!std::isfinite(initialized_pressure_min)) {
+            initialized_pressure_min = FE::Real{0.0};
+        }
+        if (!std::isfinite(initialized_pressure_max)) {
+            initialized_pressure_max = FE::Real{0.0};
+        }
+        if (!std::isfinite(wet_pressure_min)) {
+            wet_pressure_min = FE::Real{0.0};
+        }
+        if (!std::isfinite(wet_pressure_max)) {
+            wet_pressure_max = FE::Real{0.0};
+        }
         std::ostringstream oss;
         oss << "IncompressibleNavierStokesVMSModule: hydrostatic pressure "
-            << "initialization Active_domain="
+            << "initialization diagnostic=hydrostatic_initialization Active_domain="
             << pressureActiveDomainName(active_pressure_domain->active_domain)
             << " wet_pressure_vertices=" << active_wet_vertices
             << " dry_pressure_vertices=" << active_dry_vertices
-            << " reference_pressure=" << init.reference_pressure;
+            << " reference_pressure=" << init.reference_pressure
+            << " initialized_pressure_min=" << initialized_pressure_min
+            << " initialized_pressure_max=" << initialized_pressure_max
+            << " wet_pressure_min=" << wet_pressure_min
+            << " wet_pressure_max=" << wet_pressure_max;
         if (!init.field_name.empty()) {
             oss << " pressure_field='" << init.field_name << "'";
         }

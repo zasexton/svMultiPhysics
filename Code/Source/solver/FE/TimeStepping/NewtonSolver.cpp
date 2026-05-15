@@ -1261,7 +1261,9 @@ void logVectorComponentNorms(const systems::FESystem& sys,
     }
 
     std::ostringstream oss;
-    oss << "NewtonSolver: " << label << " component norms";
+    oss << "NewtonSolver: vector component norms"
+        << " diagnostic=vector_component_norms"
+        << " label='" << label << "'";
     for (const auto& c : comps) {
         const double mean = (c.count > 0u) ? (c.sum / static_cast<double>(c.count)) : 0.0;
         oss << " [" << c.label
@@ -3500,19 +3502,18 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     };
 
     auto traceResidualComponents = [&](const char* phase) {
-        if (!oopTraceEnabled()) {
-            return;
-        }
         const auto components = computeResidualComponents();
         std::ostringstream oss;
-        oss << "NewtonSolver: residual components";
+        oss << "NewtonSolver: residual block norms"
+            << " diagnostic=residual_block_norms";
         if (phase != nullptr) {
             oss << " phase='" << phase << "'";
         }
         oss << " field=" << components.field
             << " aux=" << components.auxiliary
             << " combined=" << components.combined();
-        traceLog(oss.str());
+        FE_LOG_INFO(oss.str());
+        logVectorComponentNorms(transient.system(), r, "residual_block_norms");
     };
 
     const bool ptc_enabled = options_.pseudo_transient.enabled;

@@ -35,6 +35,11 @@ CASE_GATE_X = {
 }
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
+KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
+COMPONENT_NORM_RE = re.compile(
+    r"\[(.*?) norm=([-+0-9.eE]+) mean=([-+0-9.eE]+)\]"
+)
+VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
 STATIC_INTERFACE_HEIGHT = 0.53
 
 
@@ -71,6 +76,16 @@ def result_indices_by_initial_gid(initial: pv.DataSet,
     return np.asarray(indices, dtype=np.int64)
 
 
+def cell_measure(mesh: pv.DataSet) -> np.ndarray:
+    sized = mesh.compute_cell_sizes(length=False, area=True, volume=True)
+    for name in ("Volume", "Area"):
+        if name in sized.cell_data:
+            values = np.asarray(sized.cell_data[name], dtype=float)
+            if np.any(np.abs(values) > 0.0):
+                return values
+    raise ValueError("mesh cell sizes do not include nonzero area or volume")
+
+
 def text(root: ET.Element, path: str) -> str:
     element = root.find(path)
     if element is None or element.text is None:
@@ -101,7 +116,11 @@ def free_surface_bc(root: ET.Element) -> ET.Element:
     raise ValueError("missing fluid free-surface boundary condition")
 
 
-def configure_solver(solver_xml: Path, steps: int) -> None:
+def configure_solver(solver_xml: Path,
+                     steps: int,
+                     time_step_size: float | None = None,
+                     disable_cut_stabilization: bool = False,
+                     max_nonlinear_iterations: int | None = None) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -114,13 +133,22 @@ def configure_solver(solver_xml: Path, steps: int) -> None:
     set_text(general, "Increment_in_saving_VTK_files", "1")
     set_text(general, "Start_saving_after_time_step", "1")
     set_text(general, "Increment_in_saving_restart_files", str(steps))
+    if time_step_size is not None:
+        set_text(general, "Time_step_size", f"{time_step_size:.16g}")
+
+    if max_nonlinear_iterations is not None:
+        for equation in root.findall("Add_equation"):
+            set_text(equation, "Max_iterations", str(max_nonlinear_iterations))
 
     free_surface = free_surface_bc(root)
     require_text(free_surface, "Implementation", "UnfittedLevelSet")
     require_text(free_surface, "Active_domain", "LevelSetNegative")
     require_text(free_surface, "Active_domain_method", "CutVolume")
-    require_text(free_surface, "Enable_cut_cell_stabilization", "true")
     require_text(free_surface, "Use_cut_metadata_scale", "true")
+    if disable_cut_stabilization:
+        set_text(free_surface, "Enable_cut_cell_stabilization", "false")
+    else:
+        require_text(free_surface, "Enable_cut_cell_stabilization", "true")
 
     tree.write(solver_xml, encoding="UTF-8", xml_declaration=True)
 
@@ -469,8 +497,127 @@ def parse_active_volume_history(solver_output: str) -> dict[str, Any]:
     }
 
 
+def parse_scalar(value: str) -> Any:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    if value in {"true", "false"}:
+        return value == "true"
+    try:
+        if re.fullmatch(r"[-+]?[0-9]+", value):
+            return int(value)
+        return float(value)
+    except ValueError:
+        return value
+
+
+def parse_key_values(line: str) -> dict[str, Any]:
+    return {
+        match.group(1): parse_scalar(match.group(2))
+        for match in KEY_VALUE_RE.finditer(line)
+    }
+
+
+def parse_component_norms(line: str) -> list[dict[str, Any]]:
+    label_match = VECTOR_COMPONENT_LABEL_RE.search(line)
+    if label_match is not None:
+        line = line[label_match.end():]
+    return [
+        {
+            "component": match.group(1),
+            "norm": float(match.group(2)),
+            "mean": float(match.group(3)),
+        }
+        for match in COMPONENT_NORM_RE.finditer(line)
+    ]
+
+
+def vector_component_header(line: str) -> str:
+    label_match = VECTOR_COMPONENT_LABEL_RE.search(line)
+    if label_match is None:
+        return line
+    return line[:label_match.end()]
+
+
+def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "cut_context_rebuilds": [],
+        "cut_volume_assemblies": [],
+        "hydrostatic_initializations": [],
+        "pressure_gauge_checks": [],
+        "residual_block_norms": [],
+        "vector_component_norms": [],
+    }
+    for line in solver_output.splitlines():
+        if "Active-domain cut context" in line:
+            diagnostics["cut_context_rebuilds"].append(parse_key_values(line))
+        elif "cut-volume active-domain diagnostics" in line:
+            diagnostics["cut_volume_assemblies"].append(parse_key_values(line))
+        elif "hydrostatic pressure initialization" in line:
+            diagnostics["hydrostatic_initializations"].append(parse_key_values(line))
+        elif "pressure gauge diagnostic" in line:
+            diagnostics["pressure_gauge_checks"].append(parse_key_values(line))
+        elif "residual block norms" in line:
+            diagnostics["residual_block_norms"].append(parse_key_values(line))
+        elif "vector component norms" in line:
+            record = parse_key_values(vector_component_header(line))
+            record["components"] = parse_component_norms(line)
+            diagnostics["vector_component_norms"].append(record)
+
+    diagnostics["counts"] = {
+        name: len(records)
+        for name, records in diagnostics.items()
+        if isinstance(records, list)
+    }
+    diagnostics.update(parse_active_volume_history(solver_output))
+    return diagnostics
+
+
+def pressure_gauge_metrics(output: pv.DataSet, benchmark: dict[str, Any]) -> dict[str, Any]:
+    gauge = benchmark.get("pressure_gauge")
+    if not isinstance(gauge, dict) or "Pressure" not in output.point_data:
+        return {}
+    node_id = gauge.get("node_id")
+    if node_id is None:
+        return {}
+
+    gids = None
+    for name in ("GlobalNodeID", "GlobalVertexID"):
+        if name in output.point_data:
+            gids = np.asarray(output.point_data[name], dtype=np.int64).reshape(-1)
+            break
+    if gids is None:
+        return {"pressure_gauge_found": False}
+
+    indices = np.flatnonzero(gids == int(node_id))
+    if indices.size == 0:
+        return {"pressure_gauge_found": False}
+
+    pressure = np.asarray(output.point_data["Pressure"], dtype=float).reshape(-1)
+    value = float(pressure[indices[0]])
+    metrics: dict[str, Any] = {
+        "pressure_gauge_found": True,
+        "pressure_gauge_node_id": int(node_id),
+        "pressure_gauge_value": value,
+        "pressure_gauge_matches": int(indices.size),
+    }
+    expected = gauge.get("expected_initial_hydrostatic_pressure")
+    if isinstance(expected, (int, float)):
+        metrics["pressure_gauge_expected_initial"] = float(expected)
+        metrics["pressure_gauge_initial_error"] = value - float(expected)
+
+    verification = benchmark.get("pressure_gauge_verification")
+    if isinstance(verification, dict):
+        stale = verification.get("previous_invalid_d18_full_volume_hydrostatic_pressure")
+        if isinstance(stale, (int, float)):
+            metrics["pressure_gauge_previous_invalid"] = float(stale)
+            metrics["pressure_gauge_previous_invalid_difference"] = value - float(stale)
+    return metrics
+
+
 def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, Any]:
     benchmark_path = case_dir / "benchmark.json"
+    benchmark: dict[str, Any] = {}
     if benchmark_path.exists():
         benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
         dimensions = benchmark["dimensions_m"]
@@ -497,7 +644,7 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
     wet_speed = speed[wet0]
     wet_velocity = velocity[wet0]
 
-    return {
+    metrics: dict[str, Any] = {
         "result": str(result),
         "max_speed": float(np.nanmax(wet_speed)),
         "wet_mean_speed": float(np.nanmean(wet_speed)),
@@ -509,6 +656,16 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
         "gate_nodes": int(np.count_nonzero(gate_region)),
         "front_nodes": int(np.count_nonzero(front_region)),
     }
+    if "WetVolumeFraction" in output.cell_data:
+        fractions = np.asarray(output.cell_data["WetVolumeFraction"], dtype=float).reshape(-1)
+        measures = cell_measure(output)
+        if fractions.shape[0] == measures.shape[0]:
+            metrics["wet_fraction_cell_count"] = int(fractions.shape[0])
+            metrics["wet_fraction_volume"] = float(np.sum(fractions * measures))
+            metrics["wet_fraction_min"] = float(np.min(fractions))
+            metrics["wet_fraction_max"] = float(np.max(fractions))
+    metrics.update(pressure_gauge_metrics(output, benchmark))
+    return metrics
 
 
 def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
@@ -551,6 +708,33 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
                 f"assembly active wet-volume change {volume_change:.6g} is below "
                 f"{args.min_active_volume_change:.6g}"
             )
+    if args.stale_pressure_gauge_tolerance is not None:
+        if not metrics.get("pressure_gauge_found", False):
+            errors.append("pressure gauge was not found in the solver output")
+        else:
+            stale_difference = metrics.get("pressure_gauge_previous_invalid_difference")
+            if not isinstance(stale_difference, (int, float)):
+                errors.append("previous invalid pressure gauge value is unavailable")
+            elif abs(float(stale_difference)) <= args.stale_pressure_gauge_tolerance:
+                errors.append(
+                    "pressure gauge remains close to the previous full-volume "
+                    "hydrostatic value"
+                )
+    if args.max_wet_fraction_volume_error is not None:
+        wet_fraction_volume = metrics.get("wet_fraction_volume")
+        context_volumes = metrics.get("cut_context_active_side_volumes", [])
+        if not isinstance(wet_fraction_volume, (int, float)):
+            errors.append("WetVolumeFraction output volume is unavailable")
+        elif not context_volumes:
+            errors.append("cut-context active-side volume was not reported")
+        else:
+            error = abs(float(wet_fraction_volume) - float(context_volumes[-1]))
+            metrics["wet_fraction_volume_error_vs_last_cut_context"] = error
+            if error > args.max_wet_fraction_volume_error:
+                errors.append(
+                    f"WetVolumeFraction volume error {error:.6g} exceeds "
+                    f"{args.max_wet_fraction_volume_error:.6g}"
+                )
     return errors
 
 
@@ -559,39 +743,85 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
     if source is not None and not source.exists():
         raise FileNotFoundError(source)
 
-    with tempfile.TemporaryDirectory(prefix=f"dam_break_{case_name}_") as temp_name:
+    temp_context = None
+    if args.preserve_run_dir:
+        temp_name = tempfile.mkdtemp(prefix=f"dam_break_{case_name}_")
+    else:
+        temp_context = tempfile.TemporaryDirectory(prefix=f"dam_break_{case_name}_")
+        temp_name = temp_context.name
+
+    def write_solver_log(run_dir: Path, output: str) -> None:
+        (run_dir / "solver_run.log").write_text(output, encoding="utf-8")
+
+    try:
         run_dir = Path(temp_name) / case_name
         if source is None:
             write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
         else:
             run_dir = Path(temp_name) / source.name
             copy_case(source, run_dir, args.source_ref)
-            configure_solver(run_dir / "solver.xml", args.steps)
-
-        completed = subprocess.run(
-            [str(solver), "solver.xml"],
-            cwd=run_dir,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            check=False,
-        )
-        if completed.returncode != 0:
-            tail = "\n".join(completed.stdout.splitlines()[-80:])
-            raise RuntimeError(
-                f"{case_name} solver probe exited with {completed.returncode}\n{tail}"
+            configure_solver(
+                run_dir / "solver.xml",
+                args.steps,
+                time_step_size=args.time_step_size,
+                disable_cut_stabilization=args.disable_cut_stabilization,
+                max_nonlinear_iterations=args.max_nonlinear_iterations,
             )
 
+        try:
+            completed = subprocess.run(
+                [str(solver), "solver.xml"],
+                cwd=run_dir,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=args.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            write_solver_log(run_dir, output)
+            tail = "\n".join(output.splitlines()[-80:])
+            failure = {
+                "case": case_name,
+                "run_dir": str(run_dir),
+                "timed_out": True,
+                "timeout_seconds": args.timeout_seconds,
+                "diagnostics": parse_solver_diagnostics(output),
+                "stdout_tail": tail,
+            }
+            raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True)) from exc
+        write_solver_log(run_dir, completed.stdout)
+        if completed.returncode != 0:
+            tail = "\n".join(completed.stdout.splitlines()[-80:])
+            failure = {
+                "case": case_name,
+                "run_dir": str(run_dir),
+                "returncode": completed.returncode,
+                "diagnostics": parse_solver_diagnostics(completed.stdout),
+                "stdout_tail": tail,
+            }
+            raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
+
         metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
+        metrics["diagnostics"] = parse_solver_diagnostics(completed.stdout)
         metrics.update(parse_active_volume_history(completed.stdout))
         metrics["case"] = case_name
+        metrics["run_dir"] = str(run_dir)
         metrics["steps"] = args.steps
+        if args.time_step_size is not None:
+            metrics["time_step_size"] = args.time_step_size
         errors = evaluate(metrics, args)
         metrics["passed"] = not errors
         metrics["errors"] = errors
         if errors:
             raise RuntimeError(json.dumps(metrics, indent=2, sort_keys=True))
         return metrics
+    finally:
+        if temp_context is not None:
+            temp_context.cleanup()
 
 
 def main() -> int:
@@ -600,12 +830,19 @@ def main() -> int:
     parser.add_argument("--case", choices=sorted(CASES), action="append")
     parser.add_argument("--source-ref")
     parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--time-step-size", type=float)
+    parser.add_argument("--timeout-seconds", type=float)
+    parser.add_argument("--preserve-run-dir", action="store_true")
     parser.add_argument("--min-max-speed", type=float, default=1.0e-2)
     parser.add_argument("--min-wet-mean-speed", type=float, default=2.5e-4)
     parser.add_argument("--min-gate-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-front-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-active-volume-change", type=float, default=0.0)
     parser.add_argument("--max-static-speed", type=float, default=1.0e-9)
+    parser.add_argument("--stale-pressure-gauge-tolerance", type=float)
+    parser.add_argument("--max-wet-fraction-volume-error", type=float)
+    parser.add_argument("--disable-cut-stabilization", action="store_true")
+    parser.add_argument("--max-nonlinear-iterations", type=int)
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)

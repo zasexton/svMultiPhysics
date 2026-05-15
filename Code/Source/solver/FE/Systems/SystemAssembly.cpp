@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <limits>
 #include <type_traits>
 #include <sstream>
 #include <string>
@@ -241,14 +242,49 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
     std::size_t cut_cell_rules = 0u;
     std::size_t full_cell_rules = 0u;
     std::size_t quadrature_points = 0u;
+    std::size_t null_rules = 0u;
+    std::size_t zero_quadrature_rules = 0u;
+    std::size_t nonfinite_measure_rules = 0u;
+    std::size_t negative_measure_rules = 0u;
+    std::size_t nonfinite_volume_fraction_rules = 0u;
+    Real min_rule_measure = std::numeric_limits<Real>::infinity();
+    Real max_rule_measure = -std::numeric_limits<Real>::infinity();
+    Real min_volume_fraction = std::numeric_limits<Real>::infinity();
+    Real max_volume_fraction = -std::numeric_limits<Real>::infinity();
+    int min_exact_order = std::numeric_limits<int>::max();
+    int max_exact_order = std::numeric_limits<int>::min();
     constexpr Real full_cell_tol = Real{1.0e-12};
 
     for (const auto* rule : rules) {
         if (rule == nullptr) {
+            ++null_rules;
             continue;
         }
         active_volume += rule->measure;
         quadrature_points += rule->points.size();
+        if (rule->points.empty()) {
+            ++zero_quadrature_rules;
+        }
+        if (!std::isfinite(rule->measure)) {
+            ++nonfinite_measure_rules;
+        }
+        if (rule->measure < Real{0.0}) {
+            ++negative_measure_rules;
+        }
+        if (!std::isfinite(rule->volume_fraction)) {
+            ++nonfinite_volume_fraction_rules;
+        } else {
+            min_volume_fraction =
+                std::min(min_volume_fraction, rule->volume_fraction);
+            max_volume_fraction =
+                std::max(max_volume_fraction, rule->volume_fraction);
+        }
+        if (std::isfinite(rule->measure)) {
+            min_rule_measure = std::min(min_rule_measure, rule->measure);
+            max_rule_measure = std::max(max_rule_measure, rule->measure);
+        }
+        min_exact_order = std::min(min_exact_order, rule->exact_polynomial_order);
+        max_exact_order = std::max(max_exact_order, rule->exact_polynomial_order);
         if (rule->volume_fraction > full_cell_tol &&
             rule->volume_fraction < Real{1.0} - full_cell_tol) {
             cut_cell_active_volume += rule->measure;
@@ -258,9 +294,29 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
             ++full_cell_rules;
         }
     }
+    if (!std::isfinite(min_rule_measure)) {
+        min_rule_measure = Real{0.0};
+    }
+    if (!std::isfinite(max_rule_measure)) {
+        max_rule_measure = Real{0.0};
+    }
+    if (!std::isfinite(min_volume_fraction)) {
+        min_volume_fraction = Real{0.0};
+    }
+    if (!std::isfinite(max_volume_fraction)) {
+        max_volume_fraction = Real{0.0};
+    }
+    if (min_exact_order == std::numeric_limits<int>::max()) {
+        min_exact_order = 0;
+    }
+    if (max_exact_order == std::numeric_limits<int>::min()) {
+        max_exact_order = 0;
+    }
 
     std::ostringstream oss;
-    oss << "assembleOperator: cut-volume active-domain diagnostics marker="
+    oss << "assembleOperator: cut-volume active-domain diagnostics"
+        << " diagnostic=cut_volume_assembly"
+        << " marker="
         << marker
         << " side=" << cutIntegrationSideName(side)
         << " active_wet_volume=" << active_volume
@@ -269,7 +325,19 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
         << " rules=" << rules.size()
         << " cut_cell_rules=" << cut_cell_rules
         << " full_cell_rules=" << full_cell_rules
-        << " quadrature_points=" << quadrature_points;
+        << " quadrature_points=" << quadrature_points
+        << " null_rules=" << null_rules
+        << " zero_quadrature_rules=" << zero_quadrature_rules
+        << " nonfinite_measure_rules=" << nonfinite_measure_rules
+        << " negative_measure_rules=" << negative_measure_rules
+        << " nonfinite_volume_fraction_rules="
+        << nonfinite_volume_fraction_rules
+        << " min_rule_measure=" << min_rule_measure
+        << " max_rule_measure=" << max_rule_measure
+        << " min_volume_fraction=" << min_volume_fraction
+        << " max_volume_fraction=" << max_volume_fraction
+        << " min_exact_order=" << min_exact_order
+        << " max_exact_order=" << max_exact_order;
     FE_LOG_INFO(oss.str());
 }
 
