@@ -35,15 +35,25 @@ line-search trial state being assembled. Rejected line-search trials are
 followed by an accepted/restored-state synchronization so trial cut geometry is
 not left installed for subsequent assembly or output.
 
+Cache-invalidation contract: generated cut topology, generated volume and
+interface quadrature, and generated cut-adjacent facet sets participate in the
+cut integration revision snapshot. A topology, quadrature-policy, active-side,
+embedded-field value, or conditioning change invalidates cut classification,
+cut quadrature, matrix and matrix-free assembly data, preconditioner metadata,
+restart metadata, and stabilization hooks. Pure FE layout changes invalidate
+matrix, preconditioner, and restart metadata without rebuilding cut
+classification or cut quadrature. State-independent full-cell `.dx()` caches
+remain reusable when only cut metadata changes.
+
 ### Design Checklist
 
 - [x] Decide and document the intended coupling contract:
       `monolithic-consistent`, `outer-fixed-point`, or `explicit-geometry`.
 - [x] For the accepted OOP free-surface path, require a geometry update point
       before every residual assembly that can observe a changed level-set field.
-- [ ] Define whether cut topology changes during Newton invalidate only
+- [x] Define whether cut topology changes during Newton invalidate only
       cut-domain kernels or the whole assembler operator cache.
-- [ ] Define a stable revision key that changes when level-set coefficients,
+- [x] Define a stable revision key that changes when level-set coefficients,
       generated interface topology, cut-volume quadrature, or cut-adjacent
       facets change.
 - [x] Define behavior for failed line-search trials so rejected trial geometry
