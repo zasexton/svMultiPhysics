@@ -64,6 +64,7 @@ JACOBIAN_TOP_MISMATCH_RE = re.compile(
 )
 DOUBLE_BAR_VALUE_RE = re.compile(r"\|\|([^|]+)\|\|=([-+0-9.eE]+)")
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
+BLOCK_SUMMARY_RE = re.compile(r"(?P<name>[^;{}]+)\{(?P<body>[^}]*)\}")
 JACOBIAN_COMPONENT_BLOCK_MIN_DENOMINATOR = 1.0e-12
 LINEAR_SOLVER_RE = re.compile(
     r"SimulationBuilder: linear solver method=(?P<method>\S+)"
@@ -1235,6 +1236,31 @@ def vector_component_header(line: str) -> str:
     return line[:label_match.end()]
 
 
+def parse_eigen_factorization_diagnostic(line: str) -> dict[str, Any]:
+    record = parse_key_values(line)
+    block_match = re.search(r"block_summaries=(.*)$", line)
+    blocks = []
+    if block_match is not None:
+        for match in BLOCK_SUMMARY_RE.finditer(block_match.group(1)):
+            block = parse_key_values(match.group("body").replace(",", " "))
+            block["name"] = match.group("name").strip()
+            blocks.append(block)
+            if block["name"] == "Pressure":
+                pressure_zero_rows = block.get("zero_rows")
+                pressure_zero_cols = block.get("zero_cols")
+                if isinstance(pressure_zero_rows, int):
+                    record["pressure_zero_rows"] = pressure_zero_rows
+                if isinstance(pressure_zero_cols, int):
+                    record["pressure_zero_cols"] = pressure_zero_cols
+                for key in ("zero_row_runs_local", "zero_col_runs_local"):
+                    value = block.get(key)
+                    if isinstance(value, str):
+                        record[f"pressure_{key}"] = value
+    if blocks:
+        record["blocks"] = blocks
+    return record
+
+
 def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {
         "solver_controls": {},
@@ -1262,6 +1288,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "assembly_timings": [],
         "interior_face_timings": [],
         "cut_volume_timings": [],
+        "eigen_factorization_diagnostics": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
@@ -1358,6 +1385,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["form_mixed_plans"].append(parse_key_values(line))
         elif "NewtonSolver: linear solve history" in line:
             diagnostics["linear_solve_histories"].append(parse_key_values(line))
+        elif "Eigen direct factorization diagnostic" in line:
+            diagnostics["eigen_factorization_diagnostics"].append(
+                parse_eigen_factorization_diagnostic(line)
+            )
         elif "JIT specialization trace:" in line:
             diagnostics["jit_specialization_traces"].append(parse_jit_specialization_trace(line))
         elif "[INTERIOR_FACE_TIMING]" in line:
@@ -1912,6 +1943,30 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["form_block_install_count"] = len(diagnostics["form_block_installs"])
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
+    if diagnostics.get("eigen_factorization_diagnostics"):
+        records = diagnostics["eigen_factorization_diagnostics"]
+        latest_eigen = records[-1]
+        metrics["latest_eigen_factorization_diagnostic"] = latest_eigen
+        metrics["diagnostic_eigen_factorization_count"] = len(records)
+        for source, target in (
+                ("zero_rows", "diagnostic_eigen_factorization_max_zero_rows"),
+                ("zero_cols", "diagnostic_eigen_factorization_max_zero_cols"),
+                ("nonfinite_entries", "diagnostic_eigen_factorization_max_nonfinite_entries"),
+                ("pressure_zero_rows", "diagnostic_eigen_factorization_max_pressure_zero_rows"),
+                ("pressure_zero_cols", "diagnostic_eigen_factorization_max_pressure_zero_cols")):
+            values = [
+                record.get(source)
+                for record in records
+                if isinstance(record.get(source), (int, float))
+            ]
+            if values:
+                metrics[target] = max(values)
+        for key in ("zero_row_runs", "zero_col_runs",
+                    "pressure_zero_row_runs_local",
+                    "pressure_zero_col_runs_local"):
+            value = latest_eigen.get(key)
+            if isinstance(value, str):
+                metrics[f"diagnostic_eigen_factorization_latest_{key}"] = value
     if diagnostics.get("jit_specialization_traces"):
         traces = diagnostics["jit_specialization_traces"]
         metrics["latest_jit_specialization_trace"] = traces[-1]
@@ -2290,6 +2345,40 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("marked interior-face fallback diagnostics were not reported")
     if args.require_assembly_topology_consistency:
         errors.extend(assembly_topology_consistency_errors(diagnostics))
+    if (args.require_eigen_factorization_diagnostics and
+            not diagnostics.get("eigen_factorization_diagnostics")):
+        errors.append("Eigen factorization diagnostics were not reported")
+    if args.max_eigen_factorization_zero_rows is not None:
+        zero_rows = metrics.get("diagnostic_eigen_factorization_max_zero_rows")
+        if not isinstance(zero_rows, (int, float)):
+            errors.append("Eigen factorization zero-row diagnostics are unavailable")
+        elif zero_rows > args.max_eigen_factorization_zero_rows:
+            errors.append(
+                f"Eigen factorization zero rows {zero_rows} exceed "
+                f"{args.max_eigen_factorization_zero_rows}"
+            )
+    if args.max_eigen_factorization_pressure_zero_rows is not None:
+        pressure_zero_rows = metrics.get(
+            "diagnostic_eigen_factorization_max_pressure_zero_rows"
+        )
+        if not isinstance(pressure_zero_rows, (int, float)):
+            errors.append("Eigen factorization pressure zero-row diagnostics are unavailable")
+        elif pressure_zero_rows > args.max_eigen_factorization_pressure_zero_rows:
+            errors.append(
+                f"Eigen factorization pressure zero rows {pressure_zero_rows} exceed "
+                f"{args.max_eigen_factorization_pressure_zero_rows}"
+            )
+    if args.max_eigen_factorization_nonfinite_entries is not None:
+        nonfinite = metrics.get(
+            "diagnostic_eigen_factorization_max_nonfinite_entries"
+        )
+        if not isinstance(nonfinite, (int, float)):
+            errors.append("Eigen factorization nonfinite-entry diagnostics are unavailable")
+        elif nonfinite > args.max_eigen_factorization_nonfinite_entries:
+            errors.append(
+                f"Eigen factorization nonfinite entries {nonfinite} exceed "
+                f"{args.max_eigen_factorization_nonfinite_entries}"
+            )
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -2575,6 +2664,40 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         errors.append("marked interior-face fallback diagnostics were not reported")
     if args.require_assembly_topology_consistency:
         errors.extend(assembly_topology_consistency_errors(metrics["diagnostics"]))
+    if (args.require_eigen_factorization_diagnostics and
+            not metrics["diagnostics"].get("eigen_factorization_diagnostics")):
+        errors.append("Eigen factorization diagnostics were not reported")
+    if args.max_eigen_factorization_zero_rows is not None:
+        zero_rows = metrics.get("diagnostic_eigen_factorization_max_zero_rows")
+        if not isinstance(zero_rows, (int, float)):
+            errors.append("Eigen factorization zero-row diagnostics are unavailable")
+        elif zero_rows > args.max_eigen_factorization_zero_rows:
+            errors.append(
+                f"Eigen factorization zero rows {zero_rows} exceed "
+                f"{args.max_eigen_factorization_zero_rows}"
+            )
+    if args.max_eigen_factorization_pressure_zero_rows is not None:
+        pressure_zero_rows = metrics.get(
+            "diagnostic_eigen_factorization_max_pressure_zero_rows"
+        )
+        if not isinstance(pressure_zero_rows, (int, float)):
+            errors.append("Eigen factorization pressure zero-row diagnostics are unavailable")
+        elif pressure_zero_rows > args.max_eigen_factorization_pressure_zero_rows:
+            errors.append(
+                f"Eigen factorization pressure zero rows {pressure_zero_rows} exceed "
+                f"{args.max_eigen_factorization_pressure_zero_rows}"
+            )
+    if args.max_eigen_factorization_nonfinite_entries is not None:
+        nonfinite = metrics.get(
+            "diagnostic_eigen_factorization_max_nonfinite_entries"
+        )
+        if not isinstance(nonfinite, (int, float)):
+            errors.append("Eigen factorization nonfinite-entry diagnostics are unavailable")
+        elif nonfinite > args.max_eigen_factorization_nonfinite_entries:
+            errors.append(
+                f"Eigen factorization nonfinite entries {nonfinite} exceed "
+                f"{args.max_eigen_factorization_nonfinite_entries}"
+            )
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
     if metrics.get("case") == "static2d":
@@ -2908,6 +3031,10 @@ def main() -> int:
     parser.add_argument("--require-jit-specialization-trace-diagnostics", action="store_true")
     parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
+    parser.add_argument("--require-eigen-factorization-diagnostics", action="store_true")
+    parser.add_argument("--max-eigen-factorization-zero-rows", type=int)
+    parser.add_argument("--max-eigen-factorization-pressure-zero-rows", type=int)
+    parser.add_argument("--max-eigen-factorization-nonfinite-entries", type=int)
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)
