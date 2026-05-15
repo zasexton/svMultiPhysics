@@ -1466,6 +1466,15 @@ def cut_context_solution_source_errors(diagnostics: dict[str, Any]) -> list[str]
     return errors
 
 
+def timeout_before_solution_state(diagnostics: dict[str, Any]) -> bool:
+    summary = diagnostics.get("time_loop", {}).get("summary", {})
+    if not isinstance(summary, dict):
+        return False
+    nonlinear_records = summary.get("nonlinear_records", 0)
+    accepted_steps = summary.get("accepted_steps", 0)
+    return int(nonlinear_records or 0) == 0 and int(accepted_steps or 0) == 0
+
+
 def add_diagnostic_metrics(metrics: dict[str, Any],
                            diagnostics: dict[str, Any]) -> None:
     metrics["diagnostics"] = diagnostics
@@ -1512,6 +1521,28 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
+    if diagnostics.get("hydrostatic_initializations"):
+        latest_hydrostatic = diagnostics["hydrostatic_initializations"][-1]
+        metrics["latest_hydrostatic_initialization"] = latest_hydrostatic
+        for name in (
+            "wet_pressure_vertices",
+            "dry_pressure_vertices",
+            "gauge_constraints",
+            "checked_gauge_constraints",
+            "skipped_gauge_constraints",
+            "initialized_pressure_min",
+            "initialized_pressure_max",
+            "wet_pressure_min",
+            "wet_pressure_max",
+            "gauge_pressure_min",
+            "gauge_pressure_max",
+            "gauge_initialized_pressure_min",
+            "gauge_initialized_pressure_max",
+            "gauge_pressure_max_abs_error",
+        ):
+            value = latest_hydrostatic.get(name)
+            if isinstance(value, (int, float)):
+                metrics[f"diagnostic_hydrostatic_{name}"] = value
     solution_source_summary = cut_context_solution_source_summary(diagnostics)
     if solution_source_summary:
         metrics["diagnostic_cut_context_solution_sources"] = solution_source_summary
@@ -1787,15 +1818,18 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     errors = []
     diagnostics = metrics["diagnostics"]
     gauge_required = metrics.get("case") in {"d18", "d38", "mini2d", "static2d"}
+    pre_solution_timeout = timeout_before_solution_state(diagnostics)
     if not diagnostics.get("cut_context_rebuilds"):
         errors.append("cut-context rebuild diagnostics were not reported")
     if not diagnostics.get("cut_volume_assemblies"):
         errors.append("cut-volume assembly diagnostics were not reported")
-    if gauge_required and not diagnostics.get("pressure_gauge_checks"):
-        errors.append("pressure gauge diagnostics were not reported")
+    if gauge_required and not (
+            diagnostics.get("pressure_gauge_checks") or
+            diagnostics.get("hydrostatic_initializations")):
+        errors.append("pressure-gauge or hydrostatic initialization diagnostics were not reported")
     if gauge_required and not diagnostics.get("hydrostatic_initializations"):
         errors.append("hydrostatic initialization diagnostics were not reported")
-    if not latest_component_record(diagnostics, "solution_state"):
+    if not pre_solution_timeout and not latest_component_record(diagnostics, "solution_state"):
         errors.append("solution-state component diagnostics were not reported")
     if (diagnostics.get("true_residual_failure_count", 0) > 0 and
             not diagnostics.get("fsils_true_residuals")):

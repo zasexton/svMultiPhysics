@@ -479,6 +479,10 @@ benchmark runs.
 - [x] Add smoke-script parsing and controls for cut-volume timing diagnostics so
       no-output probes can verify indexed rule traversal, rule counts,
       quadrature-point counts, and per-stage cut-volume costs.
+- [x] Make timeout validation accept pre-solution assembly diagnostics when a
+      no-output probe times out before nonlinear solution-state records while
+      still requiring cut-context, cut-volume, and hydrostatic initialization
+      diagnostics.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
