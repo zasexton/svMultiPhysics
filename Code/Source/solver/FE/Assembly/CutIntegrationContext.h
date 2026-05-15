@@ -45,6 +45,7 @@ struct CutCellAssemblyMetadata {
     std::uint64_t revision_key = 0;
     std::uint64_t cut_topology_revision = 0;
     std::uint64_t quadrature_policy_key = 0;
+    std::uint64_t source_value_revision = 0;
 };
 
 struct CutStabilizationHook {
@@ -106,6 +107,7 @@ struct CutIntegrationBinding {
     std::uint64_t cut_revision_key = 0;
     std::uint64_t cut_topology_revision = 0;
     std::uint64_t quadrature_policy_key = 0;
+    std::uint64_t source_value_revision = 0;
     std::vector<CutIntegrationAssemblyPath> visible_to_paths{};
 };
 
@@ -170,6 +172,7 @@ public:
         generated_interface_markers_.clear();
         facet_set_rule_indices_by_marker_.clear();
         facet_set_markers_.clear();
+        expected_source_value_revision_by_marker_.clear();
         kinematic_data_.clear();
         stabilization_hooks_.clear();
         bindings_.clear();
@@ -236,6 +239,7 @@ public:
             binding.cut_revision_key = stored_metadata.revision_key;
             binding.cut_topology_revision = stored_metadata.cut_topology_revision;
             binding.quadrature_policy_key = stored_metadata.quadrature_policy_key;
+            binding.source_value_revision = stored_metadata.source_value_revision;
             binding.visible_to_paths = {
                 CutIntegrationAssemblyPath::Standard,
                 CutIntegrationAssemblyPath::MatrixFree,
@@ -252,6 +256,8 @@ public:
         if (marker < 0) {
             return;
         }
+        setExpectedGeneratedSourceValueRevision(marker,
+                                                domain.request().source.value_revision);
         auto volume_rules = domain.volumeQuadratureRules();
         for (auto& rule : volume_rules) {
             CutCellAssemblyMetadata metadata;
@@ -267,6 +273,7 @@ public:
             metadata.revision_key = rule.provenance.cut_topology_revision;
             metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
             metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
+            metadata.source_value_revision = domain.request().source.value_revision;
             addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
         }
         auto rules = domain.interfaceQuadratureRules();
@@ -296,6 +303,54 @@ public:
 
     void addSensitivityMetadata(CutGeometrySensitivityMetadata metadata) {
         sensitivity_metadata_.push_back(std::move(metadata));
+    }
+
+    void setExpectedGeneratedSourceValueRevision(int marker,
+                                                 std::uint64_t revision) {
+        if (marker < 0) {
+            throw std::invalid_argument(
+                "generated cut-volume source revision requires a nonnegative marker");
+        }
+        expected_source_value_revision_by_marker_[marker] = revision;
+    }
+
+    [[nodiscard]] bool hasExpectedGeneratedSourceValueRevision(int marker) const {
+        return expected_source_value_revision_by_marker_.find(marker) !=
+               expected_source_value_revision_by_marker_.end();
+    }
+
+    [[nodiscard]] std::uint64_t expectedGeneratedSourceValueRevision(int marker) const {
+        const auto it = expected_source_value_revision_by_marker_.find(marker);
+        return it == expected_source_value_revision_by_marker_.end() ? 0u : it->second;
+    }
+
+    void assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+        int marker,
+        geometry::CutIntegrationSide side) const {
+        if (side == geometry::CutIntegrationSide::Interface) {
+            return;
+        }
+        const auto expected_it = expected_source_value_revision_by_marker_.find(marker);
+        if (expected_it == expected_source_value_revision_by_marker_.end()) {
+            return;
+        }
+        const auto rule_it =
+            generated_volume_rule_indices_by_marker_and_side_.find(marker);
+        if (rule_it == generated_volume_rule_indices_by_marker_and_side_.end()) {
+            return;
+        }
+        const auto& indices = rule_it->second[volumeSideIndex(side)];
+        for (const auto index : indices) {
+            if (index >= metadata_.size()) {
+                throw std::invalid_argument(
+                    "generated cut-volume rule is missing source revision metadata");
+            }
+            const auto actual = metadata_[index].source_value_revision;
+            if (actual == 0u || actual != expected_it->second) {
+                throw std::invalid_argument(
+                    "generated cut-volume rule revision does not match the current source value revision");
+            }
+        }
     }
 
     [[nodiscard]] const std::vector<CutCellAssemblyMetadata>& metadata() const noexcept {
@@ -364,6 +419,7 @@ public:
         if (side == geometry::CutIntegrationSide::Interface) {
             return indices;
         }
+        assertGeneratedVolumeRulesCurrentForMarkerAndSide(marker, side);
         const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
         if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
             return indices;
@@ -395,6 +451,7 @@ public:
         if (side == geometry::CutIntegrationSide::Interface) {
             return rules;
         }
+        assertGeneratedVolumeRulesCurrentForMarkerAndSide(marker, side);
         const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
         if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
             return rules;
@@ -416,6 +473,7 @@ public:
         if (side == geometry::CutIntegrationSide::Interface) {
             return metadata;
         }
+        assertGeneratedVolumeRulesCurrentForMarkerAndSide(marker, side);
         const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
         if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
             return metadata;
@@ -624,6 +682,7 @@ public:
             binding.kind = geometry::CutQuadratureKind::Volume;
             binding.side = geometry::CutIntegrationSide::Negative;
             binding.cut_revision_key = map.revision_key();
+            binding.source_value_revision = map.revision_key();
             binding.visible_to_paths = {
                 CutIntegrationAssemblyPath::Standard,
                 CutIntegrationAssemblyPath::MatrixFree,
@@ -819,6 +878,7 @@ public:
             binding.cut_revision_key = topology.topology_revision;
             binding.cut_topology_revision = topology.topology_revision;
             binding.quadrature_policy_key = quadrature_policy_key;
+            binding.source_value_revision = topology.topology_revision;
             binding.visible_to_paths = {
                 CutIntegrationAssemblyPath::Standard,
                 CutIntegrationAssemblyPath::MatrixFree,
@@ -918,6 +978,7 @@ private:
     std::vector<int> generated_interface_markers_{};
     std::unordered_map<int, std::vector<std::size_t>> facet_set_rule_indices_by_marker_{};
     std::vector<int> facet_set_markers_{};
+    std::unordered_map<int, std::uint64_t> expected_source_value_revision_by_marker_{};
     std::vector<EmbeddedBoundaryKinematicData> kinematic_data_{};
     std::vector<CutStabilizationHook> stabilization_hooks_{};
     std::vector<CutIntegrationBinding> bindings_{};

@@ -2075,6 +2075,69 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_TRUE(context.volumeRules().empty());
 }
 
+TEST(CutIntegrationInfrastructure, GeneratedCutVolumesRejectStaleSourceRevision)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.interface_marker = 51;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 7,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    ASSERT_TRUE(context.hasExpectedGeneratedSourceValueRevision(51));
+    EXPECT_EQ(context.expectedGeneratedSourceValueRevision(51), 3u);
+    ASSERT_EQ(context.metadata().size(), 2u);
+    EXPECT_EQ(context.metadata().front().source_value_revision, 3u);
+    EXPECT_NO_THROW({
+        const auto indices = context.generatedVolumeRuleIndicesForMarkerAndSide(
+            51, CutIntegrationSide::Negative);
+        (void)indices;
+    });
+
+    context.setExpectedGeneratedSourceValueRevision(51, 4u);
+    EXPECT_THROW({
+        const auto indices = context.generatedVolumeRuleIndicesForMarkerAndSide(
+            51, CutIntegrationSide::Negative);
+        (void)indices;
+    }, std::invalid_argument);
+
+    class CountingCellKernel final : public AssemblyKernel {
+    public:
+        [[nodiscard]] RequiredData getRequiredData() const override {
+            return RequiredData::None;
+        }
+
+        void computeCell(const AssemblyContext&, KernelOutput&) override {}
+    };
+
+    CountingCellKernel kernel;
+    CutDomainAssemblyOptions options;
+    options.include_interface_rules = false;
+    options.volume_marker = 51;
+    options.volume_side = CutIntegrationSide::Negative;
+
+    EXPECT_THROW({
+        const auto summary = assembleCutDomains(
+            context,
+            kernel,
+            [](const CutRuleAssemblyRequest&, AssemblyContext&) {},
+            options);
+        (void)summary;
+    }, std::invalid_argument);
+}
+
 TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide)
 {
     CutIntegrationContext context;
@@ -2428,6 +2491,7 @@ TEST(CutIntegrationInfrastructure, AssemblyContextCarriesQuadratureMetadataAndHo
                         99,
                         100,
                         101,
+                        102,
                         {CutIntegrationAssemblyPath::Standard,
                          CutIntegrationAssemblyPath::MatrixFree,
                          CutIntegrationAssemblyPath::Interpreter,

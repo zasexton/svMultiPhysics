@@ -159,6 +159,12 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
     const bool has_explicit_bindings = !context.bindings().empty();
 
     if (options.include_volume_rules) {
+        if (options.volume_marker >= 0 &&
+            options.volume_side != geometry::CutIntegrationSide::Interface) {
+            context.assertGeneratedVolumeRulesCurrentForMarkerAndSide(
+                options.volume_marker,
+                options.volume_side);
+        }
         const auto& volume_rules = context.volumeRules();
         const auto& metadata = context.metadata();
         const auto& bindings = context.bindings();

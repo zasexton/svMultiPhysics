@@ -104,7 +104,7 @@ preconditioner metadata.
       add or remove test/trial couplings.
 - [x] Preserve state-independent full-cell `.dx()` caches when only cut metadata
       changed.
-- [ ] Add an assertion that `dCutVolume(...)` assembly cannot run with a stale
+- [x] Add an assertion that `dCutVolume(...)` assembly cannot run with a stale
       cut-context revision for the current nonlinear state.
 
 ### Tests
