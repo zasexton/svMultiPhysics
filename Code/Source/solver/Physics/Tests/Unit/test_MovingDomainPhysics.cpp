@@ -2146,10 +2146,14 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesCutMetadataScale)
     });
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
     module.registerOn(system);
+    const auto log_output = testing::internal::GetCapturedStdout();
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
+    EXPECT_NE(log_output.find("cut-cell stabilization"), std::string::npos);
+    EXPECT_NE(log_output.find("use_cut_metadata_scale=true"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInterfaceIntegral)

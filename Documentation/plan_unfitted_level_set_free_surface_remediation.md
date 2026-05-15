@@ -317,7 +317,7 @@ explicit stabilization policy change.
 - [x] Add a unit test where only one element is cut and only adjacent facets are
       visited by stabilization assembly.
 - [x] Add a unit test where a far-field interior face receives zero contribution.
-- [ ] Add tests with `Use_cut_metadata_scale=true`.
+- [x] Add tests with `Use_cut_metadata_scale=true`.
 - [ ] Add tests with `Use_cut_metadata_scale=false`.
 - [ ] Add a regression test for D18/D38 stabilization setup with active cut
       metadata.
