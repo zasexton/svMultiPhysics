@@ -1391,8 +1391,11 @@ bool refreshActiveCutIntegrationContextFromSolution(
         << result.interface_marker << " field='" << request.level_set_field_name
         << "' domain_id='" << request.domain_id
         << "' active_side=" << activeSideName(request.active_side)
-        << " active_side_volume=" << active_volume << " active_fragments="
-        << summary.active_fragment_count << " active_volume_regions="
+        << " cut_context_revision=" << result.value_revision
+        << " active_side_volume=" << active_volume
+        << " interface_fragments=" << summary.fragment_count
+        << " active_interface_fragments=" << summary.active_fragment_count
+        << " active_volume_regions="
         << summary.active_volume_region_count
         << " negative_volume=" << summary.negative_volume_measure
         << " positive_volume=" << summary.positive_volume_measure << std::endl;

@@ -79,7 +79,7 @@ remain reusable when only cut metadata changes.
 - [x] Ensure the rebuild path can gather field coefficients in FE ordering
       without unnecessary full-vector copies on every assembly if the state did
       not change.
-- [ ] Add logging that reports the cut-context revision, negative volume,
+- [x] Add logging that reports the cut-context revision, negative volume,
       positive volume, active volume-region count, and interface-fragment count
       at each accepted step.
 - [ ] Add debug logging for Newton iterations that reports when cut topology
