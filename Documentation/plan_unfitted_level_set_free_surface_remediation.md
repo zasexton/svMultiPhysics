@@ -416,6 +416,10 @@ benchmark runs.
 - [x] Add smoke-script MPI launcher support so D18/D38 qualification runs can
       use the same multi-rank execution path as the long-run evidence while
       still writing the parsed qualification log.
+- [x] Make active cut-context zero-wet-volume validation MPI-global so ranks
+      with no local wet cells do not abort when the global active wet volume is
+      positive, and report global cut-context volumes and counts in the rebuild
+      diagnostic.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

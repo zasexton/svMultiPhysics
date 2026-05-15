@@ -1603,6 +1603,75 @@ double globalMaxAbsDifference(std::span<const svmp::FE::Real> left,
   return local;
 }
 
+double globalSumDouble(double local, const svmp::MeshComm& comm)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_SUM, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
+double globalMinDouble(double local, const svmp::MeshComm& comm)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MIN, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
+double globalMaxDouble(double local, const svmp::MeshComm& comm)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
+std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm)
+{
+  auto local_count = static_cast<long long>(local);
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    long long global_count = 0;
+    MPI_Allreduce(&local_count, &global_count, 1, MPI_LONG_LONG, MPI_SUM, comm.native());
+    return static_cast<std::size_t>(std::max<long long>(0, global_count));
+  }
+#else
+  (void)comm;
+#endif
+
+  return static_cast<std::size_t>(std::max<long long>(0, local_count));
+}
+
 void initializeLevelSetMaintenanceTargets(
     application::core::SimulationComponents& sim,
     std::vector<LevelSetMaintenanceRequest>& requests)
@@ -2052,6 +2121,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
   report.refreshed = true;
   report.topology_key = kCutContextHashOffset;
+  const auto comm = svmp::MeshComm::world();
 
   for (const auto& request : requests) {
     svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
@@ -2073,7 +2143,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         request.active_side == LevelSetActiveSide::Negative
             ? summary.negative_volume_measure
             : summary.positive_volume_measure;
-    if (!(active_volume > svmp::FE::Real{0.0})) {
+    const auto global_active_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(static_cast<double>(active_volume), comm));
+    if (!(global_active_volume > svmp::FE::Real{0.0})) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Active-domain cut context marker=" +
           std::to_string(result.interface_marker) + " field='" +
@@ -2085,15 +2157,24 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto topology_key = cutContextTopologyKey(result.domain);
     mixCutContextHash(report.topology_key, topology_key);
     report.value_revision = result.value_revision;
-    report.interface_fragments += summary.fragment_count;
-    report.active_volume_regions += summary.active_volume_region_count;
-    report.negative_volume += summary.negative_volume_measure;
-    report.positive_volume += summary.positive_volume_measure;
+    const auto global_interface_fragments =
+        globalSumSize(summary.fragment_count, comm);
+    const auto global_active_interface_fragments =
+        globalSumSize(summary.active_fragment_count, comm);
+    const auto global_active_volume_regions =
+        globalSumSize(summary.active_volume_region_count, comm);
+    const auto global_negative_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(static_cast<double>(summary.negative_volume_measure), comm));
+    const auto global_positive_volume = static_cast<svmp::FE::Real>(
+        globalSumDouble(static_cast<double>(summary.positive_volume_measure), comm));
+    report.interface_fragments += global_interface_fragments;
+    report.active_volume_regions += global_active_volume_regions;
+    report.negative_volume += global_negative_volume;
+    report.positive_volume += global_positive_volume;
     context->addGeneratedInterfaceDomain(result.domain);
     const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
         *context, result.domain, sim.fe_system->meshAccess());
     mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
-    report.cut_adjacent_facets += facet_set_handle.facets.size();
     const auto active_summary = summarizeActiveSideRegions(
         result.domain,
         request.active_side,
@@ -2101,6 +2182,79 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             0, sim.fe_system->meshAccess().numCells())));
     const auto facet_scale_summary =
         summarizeCutAdjacentFacetScales(facet_set_handle);
+    const auto global_cut_adjacent_facets =
+        globalSumSize(facet_set_handle.facets.size(), comm);
+    const auto global_cut_adjacent_metadata =
+        globalSumSize(facet_scale_summary.metadata_count, comm);
+    report.cut_adjacent_facets += global_cut_adjacent_facets;
+    const auto global_active_wet_cells =
+        globalSumSize(active_summary.active_wet_cells, comm);
+    const auto global_cut_cells =
+        globalSumSize(active_summary.cut_cell_count, comm);
+    const auto global_full_wet_cells =
+        globalSumSize(active_summary.full_wet_cell_count, comm);
+    const auto global_full_dry_cells =
+        globalSumSize(active_summary.full_dry_cell_count, comm);
+    const auto global_active_quadrature_points =
+        globalSumSize(active_summary.active_quadrature_points, comm);
+    const auto global_empty_quadrature_regions =
+        globalSumSize(active_summary.empty_quadrature_regions, comm);
+    const auto global_nonfinite_measure_regions =
+        globalSumSize(active_summary.nonfinite_measure_regions, comm);
+    const auto global_negative_measure_regions =
+        globalSumSize(active_summary.negative_measure_regions, comm);
+    const auto local_min_volume_fraction =
+        active_summary.active_volume_regions > 0u
+            ? static_cast<double>(active_summary.min_volume_fraction)
+            : std::numeric_limits<double>::infinity();
+    const auto global_min_volume_fraction_raw =
+        globalMinDouble(local_min_volume_fraction, comm);
+    const auto global_min_volume_fraction =
+        std::isfinite(global_min_volume_fraction_raw)
+            ? static_cast<svmp::FE::Real>(global_min_volume_fraction_raw)
+            : svmp::FE::Real{0.0};
+    const auto local_max_volume_fraction =
+        active_summary.active_volume_regions > 0u
+            ? static_cast<double>(active_summary.max_volume_fraction)
+            : -std::numeric_limits<double>::infinity();
+    const auto global_max_volume_fraction_raw =
+        globalMaxDouble(local_max_volume_fraction, comm);
+    const auto global_max_volume_fraction =
+        std::isfinite(global_max_volume_fraction_raw)
+            ? static_cast<svmp::FE::Real>(global_max_volume_fraction_raw)
+            : svmp::FE::Real{0.0};
+    const auto global_zero_scale_count =
+        globalSumSize(facet_scale_summary.zero_scale_count, comm);
+    const auto global_nonfinite_scale_count =
+        globalSumSize(facet_scale_summary.nonfinite_scale_count, comm);
+    const auto local_min_scale =
+        facet_scale_summary.metadata_count > 0u
+            ? static_cast<double>(facet_scale_summary.min_scale)
+            : std::numeric_limits<double>::infinity();
+    const auto global_min_scale_raw = globalMinDouble(local_min_scale, comm);
+    const auto global_min_scale =
+        std::isfinite(global_min_scale_raw)
+            ? static_cast<svmp::FE::Real>(global_min_scale_raw)
+            : svmp::FE::Real{0.0};
+    const auto local_max_scale =
+        facet_scale_summary.metadata_count > 0u
+            ? static_cast<double>(facet_scale_summary.max_scale)
+            : -std::numeric_limits<double>::infinity();
+    const auto global_max_scale_raw = globalMaxDouble(local_max_scale, comm);
+    const auto global_max_scale =
+        std::isfinite(global_max_scale_raw)
+            ? static_cast<svmp::FE::Real>(global_max_scale_raw)
+            : svmp::FE::Real{0.0};
+    const auto local_scale_sum =
+        static_cast<double>(facet_scale_summary.mean_scale) *
+        static_cast<double>(facet_scale_summary.metadata_count);
+    const auto global_scale_sum = globalSumDouble(local_scale_sum, comm);
+    const auto global_mean_scale =
+        global_cut_adjacent_metadata > 0u
+            ? static_cast<svmp::FE::Real>(
+                  global_scale_sum /
+                  static_cast<double>(global_cut_adjacent_metadata))
+            : svmp::FE::Real{0.0};
     application::core::oopCout()
         << "[svMultiPhysics::Application] Active-domain cut context"
         << " diagnostic=cut_context_rebuild"
@@ -2111,42 +2265,45 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << "' active_side=" << activeSideName(request.active_side)
         << " isovalue=" << request.isovalue
         << " cut_context_revision=" << result.value_revision
-        << " active_side_volume=" << active_volume
-        << " interface_fragments=" << summary.fragment_count
-        << " active_interface_fragments=" << summary.active_fragment_count
+        << " active_side_volume=" << global_active_volume
+        << " active_side_volume_local=" << active_volume
+        << " interface_fragments=" << global_interface_fragments
+        << " active_interface_fragments=" << global_active_interface_fragments
         << " active_volume_regions="
-        << summary.active_volume_region_count
-        << " active_wet_cells=" << active_summary.active_wet_cells
-        << " active_cut_cells=" << active_summary.cut_cell_count
-        << " active_full_wet_cells=" << active_summary.full_wet_cell_count
-        << " active_full_dry_cells=" << active_summary.full_dry_cell_count
+        << global_active_volume_regions
+        << " active_wet_cells=" << global_active_wet_cells
+        << " active_cut_cells=" << global_cut_cells
+        << " active_full_wet_cells=" << global_full_wet_cells
+        << " active_full_dry_cells=" << global_full_dry_cells
         << " active_quadrature_points="
-        << active_summary.active_quadrature_points
+        << global_active_quadrature_points
         << " active_empty_quadrature_regions="
-        << active_summary.empty_quadrature_regions
+        << global_empty_quadrature_regions
         << " active_nonfinite_measure_regions="
-        << active_summary.nonfinite_measure_regions
+        << global_nonfinite_measure_regions
         << " active_negative_measure_regions="
-        << active_summary.negative_measure_regions
+        << global_negative_measure_regions
         << " active_min_volume_fraction="
-        << active_summary.min_volume_fraction
+        << global_min_volume_fraction
         << " active_max_volume_fraction="
-        << active_summary.max_volume_fraction
-        << " cut_adjacent_facets=" << facet_set_handle.facets.size()
+        << global_max_volume_fraction
+        << " cut_adjacent_facets=" << global_cut_adjacent_facets
         << " cut_adjacent_metadata="
-        << facet_scale_summary.metadata_count
+        << global_cut_adjacent_metadata
         << " cut_adjacent_zero_scale="
-        << facet_scale_summary.zero_scale_count
+        << global_zero_scale_count
         << " cut_adjacent_nonfinite_scale="
-        << facet_scale_summary.nonfinite_scale_count
+        << global_nonfinite_scale_count
         << " cut_adjacent_min_scale="
-        << facet_scale_summary.min_scale
+        << global_min_scale
         << " cut_adjacent_max_scale="
-        << facet_scale_summary.max_scale
+        << global_max_scale
         << " cut_adjacent_mean_scale="
-        << facet_scale_summary.mean_scale
-        << " negative_volume=" << summary.negative_volume_measure
-        << " positive_volume=" << summary.positive_volume_measure << std::endl;
+        << global_mean_scale
+        << " negative_volume=" << global_negative_volume
+        << " negative_volume_local=" << summary.negative_volume_measure
+        << " positive_volume=" << global_positive_volume
+        << " positive_volume_local=" << summary.positive_volume_measure << std::endl;
   }
 
   sim.fe_system->setCutIntegrationContext(std::move(context));
