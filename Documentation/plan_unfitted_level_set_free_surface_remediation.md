@@ -438,6 +438,9 @@ benchmark runs.
 - [x] Add compact FSILS BlockSchur solve-summary diagnostics and smoke parsing
       for nested Schur and momentum iteration limits, tolerances, and internal
       convergence state.
+- [x] Add an opt-in bounded BlockSchur true-residual retry for probes where
+      native FSILS status reports success but wrapper residual validation
+      rejects the solve, and report retry counts in smoke diagnostics.
 - [x] Add smoke-script linear and BlockSchur subsolver override switches so
       D18/D38 solver-control probes can be run from temporary case copies
       without editing validation fixtures.

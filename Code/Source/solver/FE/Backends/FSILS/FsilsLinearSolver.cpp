@@ -1108,6 +1108,61 @@ struct GmresLaunchConfig {
     return has_coupled_updates ? 200 : 50;
 }
 
+[[nodiscard]] bool fsilsBlockSchurTrueResidualRetryEnabled() noexcept
+{
+    auto enabled_value = [](const char* env) {
+        if (env == nullptr) {
+            return false;
+        }
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isspace(ch) != 0;
+        }), value.end());
+        return !value.empty() && value != "0" && value != "false" &&
+               value != "off" && value != "no";
+    };
+    if (const char* env = std::getenv("SVMP_FSILS_DISABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY")) {
+        if (enabled_value(env)) {
+            return false;
+        }
+    }
+    return enabled_value(std::getenv("SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY"));
+}
+
+[[nodiscard]] Real fsilsBlockSchurTrueResidualRetryRelScale() noexcept
+{
+    Real scale = static_cast<Real>(1.0e-3);
+    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_REL_SCALE")) {
+        try {
+            scale = static_cast<Real>(std::stod(env));
+        } catch (...) {
+            scale = static_cast<Real>(1.0e-3);
+        }
+    }
+    if (!std::isfinite(static_cast<double>(scale)) ||
+        scale <= static_cast<Real>(0.0) ||
+        scale >= static_cast<Real>(1.0)) {
+        scale = static_cast<Real>(1.0e-3);
+    }
+    return scale;
+}
+
+[[nodiscard]] int fsilsBlockSchurTrueResidualRetryMaxIterCap() noexcept
+{
+    int cap = 2000;
+    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_MAX_ITER")) {
+        try {
+            cap = std::stoi(env);
+        } catch (...) {
+            cap = 2000;
+        }
+    }
+    return std::max(1, cap);
+}
+
 struct ResolvedSaddlePointBlocks {
     const BlockDescriptor* primary{nullptr};
     const BlockDescriptor* constraint{nullptr};
@@ -5172,9 +5227,73 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
     };
 
+    int blockschur_true_residual_retries = 0;
+    auto tightenBlockSchurTrueResidualRetryControls =
+        [&](std::string_view phase,
+            const FsilsResidualCheckResult& rejected_check) -> bool {
+        if (!use_blockschur ||
+            !fsilsBlockSchurTrueResidualRetryEnabled() ||
+            !ls.RI.suc ||
+            rejected_check.ok ||
+            !std::isfinite(static_cast<double>(rejected_check.residual_norm)) ||
+            !std::isfinite(static_cast<double>(rejected_check.relative_residual))) {
+            return false;
+        }
+
+        const Real base_rel =
+            (options_.rel_tol > Real{0.0} &&
+             std::isfinite(static_cast<double>(options_.rel_tol)))
+                ? options_.rel_tol
+                : Real{1.0e-6};
+        const Real retry_rel = std::max<Real>(
+            Real{1.0e-10},
+            base_rel * fsilsBlockSchurTrueResidualRetryRelScale());
+        const int retry_max_iter = fsilsBlockSchurTrueResidualRetryMaxIterCap();
+        bool changed = false;
+
+        auto tighten_rel = [&](Real& value) {
+            if (!(value > Real{0.0}) ||
+                !std::isfinite(static_cast<double>(value)) ||
+                value > retry_rel) {
+                value = retry_rel;
+                changed = true;
+            }
+        };
+        auto increase_mitr = [&](int& value) {
+            if (value < retry_max_iter) {
+                value = retry_max_iter;
+                changed = true;
+            }
+        };
+
+        tighten_rel(ls.GM.relTol);
+        tighten_rel(ls.CG.relTol);
+        increase_mitr(ls.GM.mItr);
+        increase_mitr(ls.CG.mItr);
+        if (!changed) {
+            return false;
+        }
+
+        if (lhs.commu.task == 0) {
+            std::ostringstream oss;
+            oss << "FsilsLinearSolver: BlockSchur true-residual retry"
+                << " diagnostic=fsils_blockschur_true_residual_retry"
+                << " phase=" << phase
+                << " rejected_residual_norm=" << rejected_check.residual_norm
+                << " rejected_relative_residual=" << rejected_check.relative_residual
+                << " retry_rel_tol=" << retry_rel
+                << " retry_max_iter=" << retry_max_iter
+                << " gm_mitr=" << ls.GM.mItr
+                << " cg_mitr=" << ls.CG.mItr;
+            FE_LOG_INFO(oss.str());
+        }
+        return true;
+    };
+
     std::string solve_error;
     bool solve_ok = runFsilsSolve(use_blockschur, solve_error);
     FsilsResidualCheckResult initial_check{};
+    FsilsResidualCheckResult initial_internal_check{};
     if (solve_ok) {
         undoStageScalingOnSolution(use_blockschur);
         storeSolveBufferToSolution();
@@ -5189,7 +5308,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         }
         const std::string phase =
             use_blockschur ? "blockschur" : std::string(solverMethodToString(options_.method));
-        const auto initial_internal_check = validateInternalResidual(phase);
+        initial_internal_check = validateInternalResidual(phase);
         initial_check = initial_internal_check;
         if (shouldValidateResidual(initial_internal_check.ok, /*recovery_phase=*/false)) {
             initial_check = validateOriginalResidual(phase);
@@ -5199,6 +5318,40 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                     maybeAcceptNearTargetTrueResidualReplay(initial_internal_check,
                                                            initial_check,
                                                            phase);
+            }
+        }
+        if (!initial_check.ok &&
+            tightenBlockSchurTrueResidualRetryControls(phase, initial_check)) {
+            ++blockschur_true_residual_retries;
+            rebuildPreparedSystem(use_blockschur);
+            solve_ok = runFsilsSolve(use_blockschur, solve_error);
+            if (solve_ok) {
+                undoStageScalingOnSolution(use_blockschur);
+                storeSolveBufferToSolution();
+                for (int polish_iter = 0; polish_iter < 4; ++polish_iter) {
+                    if (!applyLowRankResidualPolish()) {
+                        break;
+                    }
+                }
+                const std::string retry_phase = "blockschur_retry";
+                initial_internal_check = validateInternalResidual(retry_phase);
+                initial_check = initial_internal_check;
+                if (shouldValidateResidual(initial_internal_check.ok,
+                                           /*recovery_phase=*/false)) {
+                    initial_check = validateOriginalResidual(retry_phase);
+                    initial_check =
+                        maybeRecenterConstraintMeanAndValidate(retry_phase, initial_check);
+                    initial_check =
+                        maybeAcceptNearTargetTrueResidualReplay(initial_internal_check,
+                                                               initial_check,
+                                                               retry_phase);
+                }
+            } else {
+                initial_check.ok = false;
+                initial_check.residual_norm = std::numeric_limits<Real>::infinity();
+                initial_check.relative_residual = std::numeric_limits<Real>::infinity();
+                initial_check.detail =
+                    std::string("BlockSchur true-residual retry threw: ") + solve_error;
             }
         }
     } else {
@@ -5607,6 +5760,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             << " internal_initial_norm=" << ls.RI.iNorm
             << " internal_final_norm=" << ls.RI.fNorm
             << " internal_success=" << (ls.RI.suc ? 1 : 0)
+            << " true_residual_retries=" << blockschur_true_residual_retries
             << " blockschur_outer_iterations="
             << report.blockschur_outer_iterations
             << " blockschur_momentum_solve_calls="

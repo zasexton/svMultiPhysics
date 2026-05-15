@@ -303,6 +303,13 @@ def solver_command(solver: Path, args: argparse.Namespace) -> list[str]:
     return [str(args.mpiexec), "-np", str(args.mpi_ranks), str(solver), "solver.xml"]
 
 
+def solver_environment(args: argparse.Namespace) -> dict[str, str]:
+    env = os.environ.copy()
+    if args.enable_blockschur_true_residual_retry:
+        env["SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY"] = "1"
+    return env
+
+
 def copy_case_from_ref(case_dir: Path, destination: Path, source_ref: str) -> None:
     relative = case_dir.relative_to(ROOT)
     completed = subprocess.run(
@@ -873,6 +880,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "residual_block_norms": [],
         "fsils_true_residuals": [],
         "fsils_solve_summaries": [],
+        "fsils_blockschur_retries": [],
         "vector_component_norms": [],
         "time_loop": {
             "nonlinear_records": [],
@@ -914,6 +922,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["fsils_true_residuals"].append(parse_key_values(line))
         elif "diagnostic=fsils_solve_summary" in line:
             diagnostics["fsils_solve_summaries"].append(parse_key_values(line))
+        elif "diagnostic=fsils_blockschur_true_residual_retry" in line:
+            diagnostics["fsils_blockschur_retries"].append(parse_key_values(line))
         elif "vector component norms" in line:
             record = parse_key_values(vector_component_header(line))
             record["components"] = parse_component_norms(line)
@@ -1213,10 +1223,22 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             "blockschur_momentum_mitr",
             "internal_final_norm",
             "internal_success",
+            "true_residual_retries",
         ):
             value = latest_solve_summary.get(name)
             if isinstance(value, (int, float)):
                 metrics[f"latest_fsils_{name}"] = value
+    retry_counts = [
+        int(record["true_residual_retries"])
+        for record in diagnostics.get("fsils_solve_summaries", [])
+        if isinstance(record.get("true_residual_retries"), int)
+    ]
+    retry_counts.extend(
+        1 for record in diagnostics.get("fsils_blockschur_retries", [])
+        if record.get("diagnostic") == "fsils_blockschur_true_residual_retry"
+    )
+    if retry_counts:
+        metrics["diagnostic_blockschur_true_residual_retries"] = max(retry_counts)
 
     wet_fraction_volume = metrics.get("wet_fraction_volume")
     context_volumes = metrics.get("cut_context_active_side_volumes", [])
@@ -1394,6 +1416,15 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
             errors.append(
                 f"diagnostic generated pruned volume-rule count {pruned_rules} is below "
                 f"{args.min_diagnostic_generated_pruned_volume_rules}"
+            )
+    if args.min_diagnostic_blockschur_true_residual_retries is not None:
+        retries = metrics.get("diagnostic_blockschur_true_residual_retries")
+        if not isinstance(retries, int):
+            errors.append("diagnostic BlockSchur true-residual retry count is unavailable")
+        elif retries < args.min_diagnostic_blockschur_true_residual_retries:
+            errors.append(
+                f"diagnostic BlockSchur true-residual retry count {retries} is below "
+                f"{args.min_diagnostic_blockschur_true_residual_retries}"
             )
     if args.stale_pressure_gauge_tolerance is not None:
         stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
@@ -1671,6 +1702,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             completed = subprocess.run(
                 command,
                 cwd=run_dir,
+                env=solver_environment(args),
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1696,6 +1728,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_cut_metadata_scale"] = True
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
+            if args.enable_blockschur_true_residual_retry:
+                failure["enable_blockschur_true_residual_retry"] = True
             add_solver_control_overrides(failure, args)
             if args.allow_timeout_diagnostics and not diagnostic_errors:
                 failure["passed"] = True
@@ -1732,6 +1766,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_cut_metadata_scale"] = True
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
+            if args.enable_blockschur_true_residual_retry:
+                failure["enable_blockschur_true_residual_retry"] = True
             add_solver_control_overrides(failure, args)
             failure["errors"] = (
                 diagnostic_errors
@@ -1761,6 +1797,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics["disable_cut_metadata_scale"] = True
         if args.disable_vtk_output:
             metrics["disable_vtk_output"] = True
+        if args.enable_blockschur_true_residual_retry:
+            metrics["enable_blockschur_true_residual_retry"] = True
         if args.final_output_only:
             metrics["final_output_only"] = True
         add_solver_control_overrides(metrics, args)
@@ -1811,6 +1849,7 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-active-pruned-volume-regions", type=int)
     parser.add_argument("--min-diagnostic-active-min-volume-fraction", type=float)
     parser.add_argument("--min-diagnostic-generated-pruned-volume-rules", type=int)
+    parser.add_argument("--min-diagnostic-blockschur-true-residual-retries", type=int)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
@@ -1822,6 +1861,7 @@ def main() -> int:
     parser.add_argument("--ns-gm-tolerance", type=float)
     parser.add_argument("--ns-cg-tolerance", type=float)
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
+    parser.add_argument("--enable-blockschur-true-residual-retry", action="store_true")
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)
