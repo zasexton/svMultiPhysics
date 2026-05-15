@@ -100,7 +100,7 @@ preconditioner metadata.
 - [x] Identify all assembler caches that depend on cut-adjacent facet sets.
 - [x] Invalidate cut-dependent kernel dispatch tables when marker/side rules
       change.
-- [ ] Invalidate cut-dependent sparsity assumptions only if topology changes can
+- [x] Invalidate cut-dependent sparsity assumptions only if topology changes can
       add or remove test/trial couplings.
 - [ ] Preserve state-independent full-cell `.dx()` caches when only cut metadata
       changed.

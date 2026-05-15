@@ -2456,22 +2456,26 @@ TEST(CutIntegrationInfrastructure, InvalidationSeparatesGeometryAndFELayoutChang
     auto geometry_decision = classifyCutIntegrationRefresh(cached, current);
     EXPECT_TRUE(geometry_decision.rebuild_cut_classification);
     EXPECT_TRUE(geometry_decision.rebuild_quadrature);
+    EXPECT_FALSE(geometry_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(geometry_decision.rebuild_matrix_free_data);
 
     current = cached;
     current.cut_topology_revision = 77;
     auto topology_decision = classifyCutIntegrationRefresh(cached, current);
     EXPECT_TRUE(topology_decision.rebuild_quadrature);
+    EXPECT_TRUE(topology_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(topology_decision.update_stabilization_hooks);
 
     current = cached;
     current.embedded_field_value_revision = 9;
     auto field_decision = classifyCutIntegrationRefresh(cached, current);
     EXPECT_TRUE(field_decision.rebuild_cut_classification);
+    EXPECT_TRUE(field_decision.rebuild_sparsity_pattern);
 
     current = cached;
     current.conditioning_revision = 4;
     auto conditioning_decision = classifyCutIntegrationRefresh(cached, current);
+    EXPECT_TRUE(conditioning_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(conditioning_decision.update_stabilization_hooks);
     EXPECT_TRUE(conditioning_decision.refresh_preconditioner);
 
@@ -2480,6 +2484,7 @@ TEST(CutIntegrationInfrastructure, InvalidationSeparatesGeometryAndFELayoutChang
     auto layout_decision = classifyCutIntegrationRefresh(cached, current);
     EXPECT_FALSE(layout_decision.rebuild_cut_classification);
     EXPECT_FALSE(layout_decision.rebuild_quadrature);
+    EXPECT_TRUE(layout_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(layout_decision.rebuild_matrix);
     EXPECT_TRUE(layout_decision.refresh_preconditioner);
 }
@@ -2505,6 +2510,7 @@ TEST(CutIntegrationInfrastructure, InvalidationCoversCutCacheDependencyClasses)
         classifyCutIntegrationRefresh(cached, marker_side_change);
     EXPECT_TRUE(marker_side_decision.rebuild_cut_classification);
     EXPECT_TRUE(marker_side_decision.rebuild_quadrature);
+    EXPECT_TRUE(marker_side_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(marker_side_decision.rebuild_matrix);
     EXPECT_TRUE(marker_side_decision.rebuild_matrix_free_data);
     EXPECT_TRUE(marker_side_decision.refresh_preconditioner);
@@ -2516,6 +2522,7 @@ TEST(CutIntegrationInfrastructure, InvalidationCoversCutCacheDependencyClasses)
     const auto cut_rule_decision =
         classifyCutIntegrationRefresh(cached, cut_volume_rule_change);
     EXPECT_TRUE(cut_rule_decision.rebuild_quadrature);
+    EXPECT_FALSE(cut_rule_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(cut_rule_decision.rebuild_matrix);
     EXPECT_TRUE(cut_rule_decision.rebuild_matrix_free_data);
     EXPECT_TRUE(cut_rule_decision.refresh_preconditioner);
@@ -2525,6 +2532,7 @@ TEST(CutIntegrationInfrastructure, InvalidationCoversCutCacheDependencyClasses)
     const auto interface_decision =
         classifyCutIntegrationRefresh(cached, interface_rule_change);
     EXPECT_TRUE(interface_decision.rebuild_quadrature);
+    EXPECT_TRUE(interface_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(interface_decision.rebuild_matrix);
     EXPECT_TRUE(interface_decision.rebuild_matrix_free_data);
 
@@ -2532,6 +2540,7 @@ TEST(CutIntegrationInfrastructure, InvalidationCoversCutCacheDependencyClasses)
     cut_facet_change.conditioning_revision = 50;
     const auto cut_facet_decision =
         classifyCutIntegrationRefresh(cached, cut_facet_change);
+    EXPECT_TRUE(cut_facet_decision.rebuild_sparsity_pattern);
     EXPECT_TRUE(cut_facet_decision.rebuild_matrix);
     EXPECT_TRUE(cut_facet_decision.rebuild_matrix_free_data);
     EXPECT_TRUE(cut_facet_decision.update_stabilization_hooks);
@@ -2542,6 +2551,7 @@ TEST(CutIntegrationInfrastructure, InvalidationCoversCutCacheDependencyClasses)
         classifyCutIntegrationRefresh(cached, fe_layout_change);
     EXPECT_FALSE(layout_decision.rebuild_cut_classification);
     EXPECT_FALSE(layout_decision.rebuild_quadrature);
+    EXPECT_TRUE(layout_decision.rebuild_sparsity_pattern);
     EXPECT_FALSE(layout_decision.update_stabilization_hooks);
     EXPECT_TRUE(layout_decision.rebuild_matrix);
 }
