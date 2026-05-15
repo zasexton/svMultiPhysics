@@ -1108,9 +1108,8 @@ void scatterFeOrderedSolution(
   solution.updateGhosts();
 }
 
-double globalMaxAbsDifference(std::span<const svmp::FE::Real> left,
-                              std::span<const svmp::FE::Real> right,
-                              const svmp::MeshComm& comm)
+double maxAbsDifference(std::span<const svmp::FE::Real> left,
+                        std::span<const svmp::FE::Real> right)
 {
   if (left.size() != right.size()) {
     throw std::runtime_error(
@@ -1123,6 +1122,15 @@ double globalMaxAbsDifference(std::span<const svmp::FE::Real> left,
         local,
         static_cast<double>(std::abs(left[i] - right[i])));
   }
+
+  return local;
+}
+
+double globalMaxAbsDifference(std::span<const svmp::FE::Real> left,
+                              std::span<const svmp::FE::Real> right,
+                              const svmp::MeshComm& comm)
+{
+  const double local = maxAbsDifference(left, right);
 
 #ifdef MESH_HAS_MPI
   int initialized = 0;
@@ -1307,16 +1315,33 @@ bool applyLevelSetMaintenance(
   }
 
   if (changed) {
+    std::vector<std::vector<svmp::FE::Real>> older_history_before;
+    older_history_before.reserve(
+        static_cast<std::size_t>(std::max(0, history.historyDepth() - 1)));
+    for (int k = 2; k <= history.historyDepth(); ++k) {
+      older_history_before.push_back(gatherFeOrderedSolution(history.uPrevK(k)));
+    }
+
     scatterFeOrderedSolution(history.u(), fe_solution);
     scatterFeOrderedSolution(history.uPrev(), fe_solution);
     history.updateGhosts();
     const auto current_previous_delta = globalMaxAbsDifference(
         history.uSpan(), history.uPrevSpan(), svmp::MeshComm::world());
+    double older_history_delta = 0.0;
+    for (int k = 2; k <= history.historyDepth(); ++k) {
+      const auto after = gatherFeOrderedSolution(history.uPrevK(k));
+      older_history_delta = std::max(
+          older_history_delta,
+          maxAbsDifference(
+              older_history_before[static_cast<std::size_t>(k - 2)],
+              after));
+    }
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set maintenance synchronized"
         << " step=" << history.stepIndex()
         << " accepted_solution=true previous_state=true"
         << " current_previous_max_abs_delta=" << current_previous_delta
+        << " older_history_max_abs_delta=" << older_history_delta
         << " history_depth=" << history.historyDepth() << std::endl;
   }
   return changed;

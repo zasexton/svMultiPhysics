@@ -344,7 +344,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
       reporting shift magnitude and achieved volume error.
 - [x] Ensure reinitialization and volume correction update the accepted solution,
       previous-state history, and cut context consistently.
-- [ ] Ensure maintenance does not invalidate the time integrator history in a way
+- [x] Ensure maintenance does not invalidate the time integrator history in a way
       that changes the next BDF residual unexpectedly.
 
 ### Diagnostic Output Checklist

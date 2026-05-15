@@ -7,6 +7,7 @@
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
+#include "Systems/TimeIntegrator.h"
 
 #include <gtest/gtest.h>
 
@@ -413,4 +414,82 @@ TEST(LevelSetVolume, VolumeCorrectionSynchronizesHistoryAndCutContext)
     EXPECT_NEAR(previous_context.summary.negative_volume_measure,
                 correction_opts.target_negative_volume,
                 correction_opts.volume_tolerance);
+}
+
+TEST(LevelSetVolume, MaintainedPreviousStateLeavesBDF1ResidualNeutral)
+{
+    const ScalarFieldFixture fixture;
+    const auto coefficients = planeCoefficients(fixture, FE::Real{0.5});
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(fixture.system.dofHandler().getNumDofs()), 0.0);
+    const auto offset = static_cast<std::size_t>(fixture.system.fieldDofOffset(fixture.phi));
+    std::copy(coefficients.begin(),
+              coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(offset));
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 384.0;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        fixture.system,
+        fixture.phi,
+        level_set::LevelSetVolumeOptions{},
+        correction_opts,
+        solution,
+        corrected_solution);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+
+    const auto accepted_solution = corrected_solution;
+    const auto previous_solution = corrected_solution;
+    auto older_history = solution;
+    for (auto& value : older_history) {
+        value -= FE::Real{10.0};
+    }
+
+    std::array<std::span<const FE::Real>, 2> history_spans = {
+        std::span<const FE::Real>(previous_solution.data(), previous_solution.size()),
+        std::span<const FE::Real>(older_history.data(), older_history.size()),
+    };
+    const std::array<double, 2> dt_history = {0.1, 0.1};
+    FE::systems::SystemStateView state{};
+    state.dt = 0.1;
+    state.dt_prev = 0.1;
+    state.u = std::span<const FE::Real>(
+        accepted_solution.data(), accepted_solution.size());
+    state.u_prev = history_spans[0];
+    state.u_prev2 = history_spans[1];
+    state.u_history = std::span<const std::span<const FE::Real>>(
+        history_spans.data(), history_spans.size());
+    state.dt_history = std::span<const double>(
+        dt_history.data(), dt_history.size());
+
+    const FE::systems::BDFIntegrator bdf1(1);
+    const auto context = bdf1.buildContext(/*max_time_derivative_order=*/1, state);
+    ASSERT_TRUE(context.dt1.has_value());
+    ASSERT_EQ(context.dt1->a.size(), 2u);
+
+    for (std::size_t i = 0; i < accepted_solution.size(); ++i) {
+        const auto derivative =
+            context.dt1->a[0] * accepted_solution[i] +
+            context.dt1->a[1] * previous_solution[i];
+        EXPECT_NEAR(derivative, 0.0, 1.0e-12);
+    }
+
+    auto alternate_older_history = older_history;
+    for (auto& value : alternate_older_history) {
+        value += FE::Real{25.0};
+    }
+    history_spans[1] = std::span<const FE::Real>(
+        alternate_older_history.data(), alternate_older_history.size());
+    state.u_prev2 = history_spans[1];
+    state.u_history = std::span<const std::span<const FE::Real>>(
+        history_spans.data(), history_spans.size());
+    const auto alternate_context =
+        bdf1.buildContext(/*max_time_derivative_order=*/1, state);
+    ASSERT_TRUE(alternate_context.dt1.has_value());
+    ASSERT_EQ(alternate_context.dt1->a.size(), context.dt1->a.size());
+    EXPECT_EQ(alternate_context.dt1->a, context.dt1->a);
 }
