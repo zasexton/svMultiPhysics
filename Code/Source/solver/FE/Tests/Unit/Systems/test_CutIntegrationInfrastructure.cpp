@@ -2697,6 +2697,16 @@ TEST(CutIntegrationInfrastructure, BuildsMarkerBackedCutAdjacentFacetSetHandle)
     EXPECT_EQ(handle.facets[0], 20);
     EXPECT_EQ(handle.facets[1], 21);
     EXPECT_EQ(handle.facets[2], 23);
+    ASSERT_EQ(handle.facet_metadata.size(), 3u);
+    EXPECT_EQ(handle.facet_metadata[0].facet, 20);
+    EXPECT_EQ(handle.facet_metadata[0].first_cell, 1);
+    EXPECT_EQ(handle.facet_metadata[0].second_cell, 2);
+    EXPECT_EQ(handle.facet_metadata[1].facet, 21);
+    EXPECT_EQ(handle.facet_metadata[1].first_cell, 2);
+    EXPECT_EQ(handle.facet_metadata[1].second_cell, 6);
+    EXPECT_EQ(handle.facet_metadata[2].facet, 23);
+    EXPECT_EQ(handle.facet_metadata[2].first_cell, 6);
+    EXPECT_EQ(handle.facet_metadata[2].second_cell, 8);
     EXPECT_NE(handle.stable_id, 0u);
 }
 
@@ -2739,10 +2749,20 @@ TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfa
     EXPECT_EQ(handle.facets[2], 23);
 
     CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
     CutFacetSetHandle context_handle;
     context_handle.marker = handle.marker;
     context_handle.name = handle.name;
     context_handle.facets = {handle.facets[2], handle.facets[0], handle.facets[1], handle.facets[0]};
+    for (const auto& facet : handle.facet_metadata) {
+        CutFacetSetFacetMetadata metadata;
+        metadata.facet = facet.facet;
+        metadata.first_cell = facet.first_cell;
+        metadata.second_cell = facet.second_cell;
+        metadata.stabilization_scale = facet.stabilization_scale;
+        metadata.stable_id = facet.stable_id;
+        context_handle.facet_metadata.push_back(metadata);
+    }
     context_handle.stable_id = handle.stable_id;
     context.addFacetSetHandle(std::move(context_handle));
 
@@ -2761,6 +2781,11 @@ TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfa
     EXPECT_TRUE(stored->containsFacet(21));
     EXPECT_TRUE(stored->containsFacet(23));
     EXPECT_FALSE(stored->containsFacet(22));
+    ASSERT_EQ(stored->facet_metadata.size(), 3u);
+    EXPECT_NEAR(stored->stabilizationScaleForFacet(20), 2.0, 1.0e-12);
+    EXPECT_NEAR(stored->stabilizationScaleForFacet(21), 2.0, 1.0e-12);
+    EXPECT_NEAR(stored->stabilizationScaleForFacet(23), 2.0, 1.0e-12);
+    EXPECT_DOUBLE_EQ(stored->stabilizationScaleForFacet(22), 0.0);
     EXPECT_NE(stored->stable_id, 0u);
 
     context.clear();

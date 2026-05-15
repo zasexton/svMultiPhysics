@@ -644,6 +644,16 @@ svmp::FE::assembly::CutFacetSetHandle addGeneratedCutAdjacentFacetSet(
   stored_handle.marker = handle.marker;
   stored_handle.name = handle.name;
   stored_handle.facets = handle.facets;
+  stored_handle.facet_metadata.reserve(handle.facet_metadata.size());
+  for (const auto& facet : handle.facet_metadata) {
+    svmp::FE::assembly::CutFacetSetFacetMetadata metadata;
+    metadata.facet = facet.facet;
+    metadata.first_cell = facet.first_cell;
+    metadata.second_cell = facet.second_cell;
+    metadata.stabilization_scale = facet.stabilization_scale;
+    metadata.stable_id = facet.stable_id;
+    stored_handle.facet_metadata.push_back(metadata);
+  }
   stored_handle.stable_id = handle.stable_id;
   return context.addFacetSetHandle(std::move(stored_handle));
 }

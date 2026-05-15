@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -158,10 +159,19 @@ struct CutFacetSetOperatorEvaluation {
     Real integral = 0.0;
 };
 
+struct CutFacetSetFacetMetadata {
+    MeshIndex facet{static_cast<MeshIndex>(-1)};
+    MeshIndex first_cell{static_cast<MeshIndex>(-1)};
+    MeshIndex second_cell{static_cast<MeshIndex>(-1)};
+    Real stabilization_scale{0.0};
+    std::uint64_t stable_id{0};
+};
+
 struct CutFacetSetHandle {
     int marker{-1};
     std::string name{};
     std::vector<MeshIndex> facets{};
+    std::vector<CutFacetSetFacetMetadata> facet_metadata{};
     std::uint64_t stable_id{0};
 
     [[nodiscard]] bool valid() const noexcept {
@@ -174,6 +184,30 @@ struct CutFacetSetHandle {
 
     [[nodiscard]] bool containsFacet(MeshIndex facet) const noexcept {
         return std::binary_search(facets.begin(), facets.end(), facet);
+    }
+
+    [[nodiscard]] bool hasFacetMetadata() const noexcept {
+        return !facet_metadata.empty();
+    }
+
+    [[nodiscard]] const CutFacetSetFacetMetadata*
+    metadataForFacet(MeshIndex facet) const noexcept {
+        const auto it = std::lower_bound(
+            facet_metadata.begin(),
+            facet_metadata.end(),
+            facet,
+            [](const CutFacetSetFacetMetadata& metadata, MeshIndex value) {
+                return metadata.facet < value;
+            });
+        if (it == facet_metadata.end() || it->facet != facet) {
+            return nullptr;
+        }
+        return &*it;
+    }
+
+    [[nodiscard]] Real stabilizationScaleForFacet(MeshIndex facet) const noexcept {
+        const auto* metadata = metadataForFacet(facet);
+        return metadata == nullptr ? Real{0.0} : metadata->stabilization_scale;
     }
 };
 
@@ -223,6 +257,8 @@ public:
         if (handle.marker < 0) {
             throw std::invalid_argument("cut facet set handle requires a nonnegative marker");
         }
+        normalizeFacetSetHandle(handle);
+        bindFacetStabilizationScales(handle, metadata_);
         std::sort(handle.facets.begin(), handle.facets.end());
         handle.facets.erase(std::unique(handle.facets.begin(), handle.facets.end()),
                             handle.facets.end());
@@ -1011,6 +1047,117 @@ private:
             mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(facet)));
         }
         return h;
+    }
+
+    static void normalizeFacetSetHandle(CutFacetSetHandle& handle) {
+        handle.facets.erase(std::remove_if(handle.facets.begin(),
+                                           handle.facets.end(),
+                                           [](MeshIndex facet) {
+                                               return facet < static_cast<MeshIndex>(0);
+                                           }),
+                            handle.facets.end());
+        for (const auto& metadata : handle.facet_metadata) {
+            if (metadata.facet >= static_cast<MeshIndex>(0)) {
+                handle.facets.push_back(metadata.facet);
+            }
+        }
+
+        std::sort(handle.facets.begin(), handle.facets.end());
+        handle.facets.erase(std::unique(handle.facets.begin(), handle.facets.end()),
+                            handle.facets.end());
+
+        handle.facet_metadata.erase(
+            std::remove_if(handle.facet_metadata.begin(),
+                           handle.facet_metadata.end(),
+                           [](const CutFacetSetFacetMetadata& metadata) {
+                               return metadata.facet < static_cast<MeshIndex>(0);
+                           }),
+            handle.facet_metadata.end());
+        std::sort(handle.facet_metadata.begin(),
+                  handle.facet_metadata.end(),
+                  [](const CutFacetSetFacetMetadata& a,
+                     const CutFacetSetFacetMetadata& b) {
+                      if (a.facet != b.facet) {
+                          return a.facet < b.facet;
+                      }
+                      if (a.first_cell != b.first_cell) {
+                          return a.first_cell < b.first_cell;
+                      }
+                      return a.second_cell < b.second_cell;
+                  });
+
+        std::vector<CutFacetSetFacetMetadata> unique_metadata;
+        unique_metadata.reserve(handle.facet_metadata.size());
+        for (const auto& metadata : handle.facet_metadata) {
+            if (!unique_metadata.empty() &&
+                unique_metadata.back().facet == metadata.facet) {
+                auto& merged = unique_metadata.back();
+                merged.stabilization_scale =
+                    std::max(merged.stabilization_scale, metadata.stabilization_scale);
+                if (merged.stable_id == 0u) {
+                    merged.stable_id = metadata.stable_id;
+                }
+                continue;
+            }
+            unique_metadata.push_back(metadata);
+        }
+        handle.facet_metadata = std::move(unique_metadata);
+    }
+
+    [[nodiscard]] static std::unordered_map<MeshIndex, Real>
+    buildCutCellStabilizationScales(
+        const std::vector<CutCellAssemblyMetadata>& metadata) {
+        std::unordered_map<MeshIndex, Real> scales;
+        constexpr Real fraction_floor = Real{1.0e-12};
+        constexpr Real full_fraction_tol = Real{1.0e-12};
+        for (const auto& entry : metadata) {
+            const MeshIndex parent =
+                entry.parent_entity >= static_cast<MeshIndex>(0)
+                    ? entry.parent_entity
+                    : entry.cell;
+            if (parent < static_cast<MeshIndex>(0) ||
+                !std::isfinite(entry.volume_fraction) ||
+                entry.volume_fraction <= fraction_floor ||
+                entry.volume_fraction >= Real{1.0} - full_fraction_tol) {
+                continue;
+            }
+
+            const Real scale = Real{1.0} /
+                               std::max(entry.volume_fraction, fraction_floor);
+            auto [it, inserted] = scales.emplace(parent, scale);
+            if (!inserted) {
+                it->second = std::max(it->second, scale);
+            }
+        }
+        return scales;
+    }
+
+    [[nodiscard]] static Real cutCellStabilizationScale(
+        const std::unordered_map<MeshIndex, Real>& scales,
+        MeshIndex cell) noexcept {
+        if (cell < static_cast<MeshIndex>(0)) {
+            return Real{0.0};
+        }
+        const auto it = scales.find(cell);
+        return it == scales.end() ? Real{0.0} : it->second;
+    }
+
+    static void bindFacetStabilizationScales(
+        CutFacetSetHandle& handle,
+        const std::vector<CutCellAssemblyMetadata>& metadata) {
+        if (handle.facet_metadata.empty()) {
+            return;
+        }
+        const auto scales = buildCutCellStabilizationScales(metadata);
+        for (auto& facet : handle.facet_metadata) {
+            if (std::isfinite(facet.stabilization_scale) &&
+                facet.stabilization_scale > Real{0.0}) {
+                continue;
+            }
+            facet.stabilization_scale =
+                std::max(cutCellStabilizationScale(scales, facet.first_cell),
+                         cutCellStabilizationScale(scales, facet.second_cell));
+        }
     }
 
     [[nodiscard]] static bool bindingVisibleToPath(const CutIntegrationBinding& binding,

@@ -173,9 +173,16 @@ using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
 
 [[nodiscard]] Real cutStabilizationScaleForInteriorFace(
     const CutStabilizationCellScales& scales,
+    const CutFacetSetHandle* facet_set_handle,
+    GlobalIndex face_id,
     GlobalIndex cell_minus,
     GlobalIndex cell_plus)
 {
+    if (facet_set_handle != nullptr && facet_set_handle->hasFacetMetadata()) {
+        return facet_set_handle->stabilizationScaleForFacet(
+            static_cast<MeshIndex>(face_id));
+    }
+
     Real scale = Real{0.0};
     if (const auto it = scales.find(cell_minus); it != scales.end()) {
         scale = std::max(scale, it->second);
@@ -3340,7 +3347,11 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 
             if (cut_integration_context_ != nullptr) {
                 const auto cut_scale = cutStabilizationScaleForInteriorFace(
-                    cut_stabilization_cell_scales, cell_minus, cell_plus);
+                    cut_stabilization_cell_scales,
+                    facet_set_handle,
+                    face_id,
+                    cell_minus,
+                    cell_plus);
                 bindCutStabilizationScaleConstants(
                     context_, jit_constants_, cut_scale, cut_face_jit_constants);
                 context_plus.setJITConstants(cut_face_jit_constants);

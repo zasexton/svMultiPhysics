@@ -302,7 +302,7 @@ explicit stabilization policy change.
       marker or handle.
 - [x] Route cut-adjacent facet kernels through the assembler using that marker or
       handle.
-- [ ] Bind cut metadata scale per cut-adjacent facet.
+- [x] Bind cut metadata scale per cut-adjacent facet.
 - [ ] Ensure non-cut interior faces receive zero cut-cell stabilization
       contribution even when `Use_cut_metadata_scale=false`.
 - [ ] Make the behavior of `Use_cut_metadata_scale=false` mean unscaled local

@@ -113,6 +113,7 @@ struct CutAdjacentInteriorFacet {
     MeshIndex second_cell{static_cast<MeshIndex>(-1)};
     bool first_cell_cut{false};
     bool second_cell_cut{false};
+    Real stabilization_scale{0.0};
     std::uint64_t stable_id{0};
 };
 
@@ -120,6 +121,7 @@ struct CutAdjacentFacetSetHandle {
     int marker{-1};
     std::string name{};
     std::vector<MeshIndex> facets{};
+    std::vector<CutAdjacentInteriorFacet> facet_metadata{};
     std::uint64_t stable_id{0};
 
     [[nodiscard]] bool valid() const noexcept {

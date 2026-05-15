@@ -298,14 +298,36 @@ CutAdjacentFacetSetHandle makeCutAdjacentFacetSetHandle(
     handle.marker = marker;
     handle.name = std::move(name);
     handle.facets.reserve(facets.size());
+    handle.facet_metadata.reserve(facets.size());
     for (const auto& facet : facets) {
         if (facet.facet >= 0) {
             handle.facets.push_back(facet.facet);
+            handle.facet_metadata.push_back(facet);
         }
     }
     std::sort(handle.facets.begin(), handle.facets.end());
     handle.facets.erase(std::unique(handle.facets.begin(), handle.facets.end()),
                         handle.facets.end());
+    std::sort(handle.facet_metadata.begin(),
+              handle.facet_metadata.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.facet != b.facet) {
+                      return a.facet < b.facet;
+                  }
+                  if (a.first_cell != b.first_cell) {
+                      return a.first_cell < b.first_cell;
+                  }
+                  return a.second_cell < b.second_cell;
+              });
+    handle.facet_metadata.erase(
+        std::unique(handle.facet_metadata.begin(),
+                    handle.facet_metadata.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.facet == b.facet &&
+                               a.first_cell == b.first_cell &&
+                               a.second_cell == b.second_cell;
+                    }),
+        handle.facet_metadata.end());
 
     std::uint64_t h = 1469598103934665603ull;
     const auto mix = [&h](std::uint64_t value) noexcept {

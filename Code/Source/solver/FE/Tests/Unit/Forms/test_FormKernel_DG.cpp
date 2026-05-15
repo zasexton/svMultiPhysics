@@ -159,6 +159,56 @@ TEST(FormKernelDGTest, MarkedInteriorFacesUseCutFacetSetHandle)
                  FEException);
 }
 
+TEST(FormKernelDGTest, MarkedInteriorFaceUsesFacetBoundCutStabilizationScale)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    constexpr int marker = 18;
+    constexpr Real eta = 3.0;
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (cutStabilizationScale() * inner(jump(u), jump(v))).dS(marker);
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = "facet-bound-cut-scale";
+    handle.facets = {0};
+    assembly::CutFacetSetFacetMetadata metadata;
+    metadata.facet = 0;
+    metadata.first_cell = 0;
+    metadata.second_cell = 1;
+    metadata.stabilization_scale = eta;
+    handle.facet_metadata.push_back(metadata);
+    cut_context.addFacetSetHandle(std::move(handle));
+
+    const auto* stored_handle = cut_context.facetSetHandleForMarker(marker);
+    ASSERT_NE(stored_handle, nullptr);
+    EXPECT_NEAR(stored_handle->stabilizationScaleForFacet(0), eta, 1.0e-12);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&cut_context);
+
+    assembly::DenseMatrixView mat(8);
+    mat.zero();
+
+    const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                        mat, nullptr, marker);
+    EXPECT_EQ(result.interior_faces_assembled, 1);
+
+    const Real area = std::sqrt(3.0) / 2.0;
+    EXPECT_NEAR(mat.getMatrixEntry(1, 1), eta * area / 6.0, 5e-11);
+    EXPECT_NEAR(mat.getMatrixEntry(1, 4), -eta * area / 6.0, 5e-11);
+}
+
 TEST(FormKernelDGTest, CutStabilizationScaleUsesAdjacentCutCellMetadata)
 {
     TwoTetraSharedFaceMeshAccess mesh;
