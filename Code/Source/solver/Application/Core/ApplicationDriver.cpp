@@ -407,6 +407,9 @@ struct WetVolumeDiagnostic {
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
   double isovalue{0.0};
   svmp::FE::Real wet_volume{0.0};
+  std::size_t cut_cell_count{0};
+  std::size_t full_wet_cell_count{0};
+  std::size_t full_dry_cell_count{0};
 };
 
 std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& params)
@@ -943,7 +946,8 @@ std::size_t writeWetVolumeFractionOutput(
 
 std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
-    const svmp::FE::assembly::CutIntegrationContext* cut_context)
+    const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    std::size_t n_cells)
 {
   std::vector<WetVolumeDiagnostic> diagnostics;
   if (requests.empty() || cut_context == nullptr) {
@@ -966,6 +970,7 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
       continue;
     }
 
+    std::vector<double> wet_fraction(n_cells, 0.0);
     WetVolumeDiagnostic diagnostic;
     diagnostic.level_set_field_name = request.level_set_field_name;
     diagnostic.domain_id = request.domain_id;
@@ -975,6 +980,24 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     for (const auto* rule : rules) {
       if (rule != nullptr) {
         diagnostic.wet_volume += rule->measure;
+        const auto cell = rule->provenance.parent_entity;
+        if (cell >= 0 && static_cast<std::size_t>(cell) < wet_fraction.size()) {
+          wet_fraction[static_cast<std::size_t>(cell)] = std::clamp(
+              wet_fraction[static_cast<std::size_t>(cell)] +
+                  static_cast<double>(rule->volume_fraction),
+              0.0,
+              1.0);
+        }
+      }
+    }
+    constexpr double fraction_tol = 1.0e-12;
+    for (const auto fraction : wet_fraction) {
+      if (fraction <= fraction_tol) {
+        ++diagnostic.full_dry_cell_count;
+      } else if (fraction >= 1.0 - fraction_tol) {
+        ++diagnostic.full_wet_cell_count;
+      } else {
+        ++diagnostic.cut_cell_count;
       }
     }
     diagnostics.push_back(std::move(diagnostic));
@@ -986,12 +1009,13 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
 void logWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    std::size_t n_cells,
     int step,
     double time,
     std::map<std::string, svmp::FE::Real>& initial_wet_volume_by_key)
 {
   const auto diagnostics =
-      collectWetVolumeDiagnostics(requests, cut_context);
+      collectWetVolumeDiagnostics(requests, cut_context, n_cells);
   for (const auto& diagnostic : diagnostics) {
     const std::string key = diagnostic.level_set_field_name + "|" +
                             diagnostic.domain_id + "|" +
@@ -1019,6 +1043,9 @@ void logWetVolumeDiagnostics(
         << " initial_wet_volume=" << initial_wet_volume
         << " wet_volume_drift=" << wet_volume_drift
         << " relative_wet_volume_drift=" << relative_wet_volume_drift
+        << " cut_cell_count=" << diagnostic.cut_cell_count
+        << " full_wet_cell_count=" << diagnostic.full_wet_cell_count
+        << " full_dry_cell_count=" << diagnostic.full_dry_cell_count
         << std::endl;
   }
 }
@@ -2446,6 +2473,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     logWetVolumeDiagnostics(
         activeCutVolumeRequests(params),
         sim.fe_system->cutIntegrationContext(),
+        sim.primary_mesh ? sim.primary_mesh->n_cells() : 0u,
         h.stepIndex(),
         h.time(),
         initial_wet_volume_by_key);
