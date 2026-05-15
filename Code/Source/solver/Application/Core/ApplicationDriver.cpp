@@ -1,5 +1,6 @@
 #include "Application/Core/ApplicationDriver.h"
 
+#include "Application/Core/ActiveDomainOutput.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
 
@@ -870,24 +871,6 @@ std::size_t copyRawFreeSurfaceDebugOutput(svmp::Mesh& mesh)
   return copied;
 }
 
-svmp::FieldHandle ensureVolumeFloat64Field(svmp::Mesh& mesh,
-                                           const std::string& name,
-                                           std::size_t components)
-{
-  if (mesh.has_field(svmp::EntityKind::Volume, name)) {
-    auto handle = mesh.field_handle(svmp::EntityKind::Volume, name);
-    if (mesh.field_type(handle) == svmp::FieldScalarType::Float64 &&
-        mesh.field_components(handle) == components) {
-      return handle;
-    }
-    mesh.remove_field(handle);
-  }
-  return mesh.attach_field(svmp::EntityKind::Volume,
-                           name,
-                           svmp::FieldScalarType::Float64,
-                           components);
-}
-
 std::size_t writeWetVolumeFractionOutput(
     svmp::Mesh& mesh,
     const std::vector<ActiveCutVolumeRequest>& requests,
@@ -914,31 +897,8 @@ std::size_t writeWetVolumeFractionOutput(
     }
 
     const auto field_name = wetVolumeFractionFieldName(request, i);
-    const auto handle = ensureVolumeFloat64Field(mesh, field_name, 1u);
-    auto* data = static_cast<double*>(mesh.field_data(handle));
-    if (data == nullptr) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Failed to allocate VTK cell field '" +
-          field_name + "'.");
-    }
-    std::fill(data, data + mesh.n_cells(), 0.0);
-
-    for (const auto* rule : rules) {
-      if (rule == nullptr) {
-        continue;
-      }
-      const auto cell = rule->provenance.parent_entity;
-      if (cell < 0 ||
-          static_cast<std::size_t>(cell) >= mesh.n_cells()) {
-        continue;
-      }
-      auto& fraction = data[static_cast<std::size_t>(cell)];
-      fraction = std::clamp(
-          fraction + static_cast<double>(rule->volume_fraction),
-          0.0,
-          1.0);
-    }
-    ++fields_written;
+    fields_written +=
+        application::core::writeWetVolumeFractionField(mesh, field_name, rules);
   }
 
   return fields_written;

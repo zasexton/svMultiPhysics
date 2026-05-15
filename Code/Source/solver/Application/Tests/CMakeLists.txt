@@ -8,6 +8,7 @@ endif()
 enable_testing()
 
 add_executable(test_application
+  Unit/test_ActiveDomainOutput.cpp
   Unit/test_EquationTranslator.cpp
   Unit/test_LevelSetEquationTranslator.cpp
   Unit/test_LegacyParameterStubs.cpp
@@ -15,6 +16,7 @@ add_executable(test_application
   Unit/test_MeshTranslator.cpp
   Unit/test_OpenVesselExamples.cpp
   Unit/test_OpenVesselStabilizationMetadata.cpp
+  ../Core/ActiveDomainOutput.cpp
   ../Core/MeshCollection.cpp
   ../Translators/EquationTranslator.cpp
   ../Translators/LevelSetEquationTranslator.cpp
