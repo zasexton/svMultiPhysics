@@ -43,7 +43,9 @@ struct IntegralTerm {
     // For boundary integrals: marker >= 0 restricts to that marker; marker < 0 means "all".
     int boundary_marker{-1};
 
-    // For interface integrals: marker >= 0 selects a registered interface surface; marker < 0 means "all".
+    // For interface integrals: marker >= 0 selects a registered interface
+    // surface; marker < 0 means "all".  For InteriorFace terms, the same
+    // slot carries an optional marker-backed interior facet-set id.
     int interface_marker{-1};
 
     // For cut-volume integrals: selects the level-set side under interface_marker.

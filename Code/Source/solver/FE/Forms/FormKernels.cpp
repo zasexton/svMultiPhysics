@@ -15837,7 +15837,7 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                 wrapped = dI.ds(term.boundary_marker);
                 break;
             case IntegralDomain::InteriorFace:
-                wrapped = dI.dS();
+                wrapped = dI.dS(term.interface_marker);
                 break;
             case IntegralDomain::InterfaceFace:
                 wrapped = dI.dI(term.interface_marker);

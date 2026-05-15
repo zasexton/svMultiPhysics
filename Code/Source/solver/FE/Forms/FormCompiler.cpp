@@ -1008,12 +1008,13 @@ void collectIntegralTerms(
         }
         case FormExprType::InteriorFaceIntegral: {
             if (children.size() != 1) throw std::logic_error("InteriorFaceIntegral node must have 1 child");
+            const int marker = n.interfaceMarker().value_or(-1);
             collect_integrand_terms(collect_integrand_terms,
                                     makeExprFromNode(children[0]),
                                     sign,
                                     IntegralDomain::InteriorFace,
                                     /*boundary_marker=*/-1,
-                                    /*interface_marker=*/-1,
+                                    /*interface_marker=*/marker,
                                     CutVolumeSide::Negative);
             return;
         }
@@ -1454,7 +1455,8 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                         term_with_measure = block_terms[k].integrand.ds(block_terms[k].boundary_marker);
                         break;
                     case IntegralDomain::InteriorFace:
-                        term_with_measure = block_terms[k].integrand.dS();
+                        term_with_measure =
+                            block_terms[k].integrand.dS(block_terms[k].interface_marker);
                         break;
                     case IntegralDomain::InterfaceFace:
                         term_with_measure = block_terms[k].integrand.dI(block_terms[k].interface_marker);
@@ -1515,7 +1517,8 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
                         term_with_measure = block_terms[k].integrand.ds(block_terms[k].boundary_marker);
                         break;
                     case IntegralDomain::InteriorFace:
-                        term_with_measure = block_terms[k].integrand.dS();
+                        term_with_measure =
+                            block_terms[k].integrand.dS(block_terms[k].interface_marker);
                         break;
                     case IntegralDomain::InterfaceFace:
                         term_with_measure = block_terms[k].integrand.dI(block_terms[k].interface_marker);

@@ -762,7 +762,7 @@ public:
 	    // ---- Measures ----
 	    [[nodiscard]] FormExpr dx() const;
 	    [[nodiscard]] FormExpr ds(int boundary_marker = -1) const;
-	    [[nodiscard]] FormExpr dS() const;
+	    [[nodiscard]] FormExpr dS(int interior_facet_marker = -1) const;
 	    [[nodiscard]] FormExpr dI(int interface_marker = -1) const;
         [[nodiscard]] FormExpr dCutVolume(int interface_marker,
                                           CutVolumeSide side) const;

@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace svmp {
@@ -187,9 +188,17 @@ struct CutCellFormTerminals {
     return inner(cutAdjacentFacetGradientJump(expr), FormExpr::normal().minus());
 }
 
-[[nodiscard]] inline FormExpr cutAdjacentFacetIntegral(const FormExpr& integrand)
+[[nodiscard]] FormExpr cutAdjacentFacetIntegral(const FormExpr& integrand) = delete;
+
+[[nodiscard]] inline FormExpr cutAdjacentFacetIntegral(
+    const FormExpr& integrand,
+    int facet_set_marker)
 {
-    return integrand.dS();
+    if (facet_set_marker < 0) {
+        throw std::invalid_argument(
+            "cutAdjacentFacetIntegral requires a nonnegative cut-adjacent facet-set marker");
+    }
+    return integrand.dS(facet_set_marker);
 }
 
 } // namespace forms

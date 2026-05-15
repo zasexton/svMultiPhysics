@@ -1670,14 +1670,15 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 break;
             }
             case FormExprType::InteriorFaceIntegral: {
+                const int marker = node->interfaceMarker().value_or(-1);
                 const auto a = diff1(0);
-                out.primal = a.primal.dS();
+                out.primal = a.primal.dS(marker);
                 auto deriv_integrand = a.deriv;
                 if (differentiatesMeshGeometry(cfg)) {
                     deriv_integrand = deriv_integrand +
                         a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
                 }
-                out.deriv = deriv_integrand.dS();
+                out.deriv = deriv_integrand.dS(marker);
                 break;
             }
             case FormExprType::InterfaceIntegral: {
@@ -2542,9 +2543,10 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 break;
             }
             case FormExprType::InteriorFaceIntegral: {
+                const int marker = node->interfaceMarker().value_or(-1);
                 const auto a = diff1(0);
-                out.primal = a.primal.dS();
-                out.deriv = a.deriv.dS();
+                out.primal = a.primal.dS(marker);
+                out.deriv = a.deriv.dS(marker);
                 break;
             }
             case FormExprType::InterfaceIntegral: {

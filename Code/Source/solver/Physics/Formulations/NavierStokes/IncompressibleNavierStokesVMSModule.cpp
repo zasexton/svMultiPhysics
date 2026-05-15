@@ -811,7 +811,8 @@ void applyFreeSurfaceCutCellStabilization(
             momentum_form +
             FE::forms::cutAdjacentFacetIntegral(
                 cut_scale * velocity_penalty * mu * h_f *
-                velocity_jump_term);
+                    velocity_jump_term,
+                bc.interface_marker);
     }
 
     if (!bc_forms::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
@@ -828,7 +829,8 @@ void applyFreeSurfaceCutCellStabilization(
             FE::forms::cutAdjacentFacetIntegral(
                 cut_scale * pressure_penalty * h3 /
                 (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
-                FE::forms::inner(pressure_jump_p, pressure_jump_q));
+                    FE::forms::inner(pressure_jump_p, pressure_jump_q),
+                bc.interface_marker);
     }
 }
 

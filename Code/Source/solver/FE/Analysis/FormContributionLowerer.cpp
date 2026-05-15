@@ -70,7 +70,7 @@ namespace {
                     wrapped = term.integrand.dx();
                     break;
                 case forms::IntegralDomain::InteriorFace:
-                    wrapped = term.integrand.dS();
+                    wrapped = term.integrand.dS(term.interface_marker);
                     break;
                 case forms::IntegralDomain::InterfaceFace:
                     wrapped = term.integrand.dI(term.interface_marker);

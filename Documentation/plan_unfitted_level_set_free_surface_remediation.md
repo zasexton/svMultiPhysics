@@ -284,11 +284,11 @@ explicit stabilization policy change.
 
 - [x] Define a real cut-adjacent facet measure or marker-backed facet set for
       generated interfaces.
-- [ ] Change `cutAdjacentFacetIntegral(...)` so it cannot silently mean all
+- [x] Change `cutAdjacentFacetIntegral(...)` so it cannot silently mean all
       interior faces.
-- [ ] Require an interface marker, generated facet-set marker, or cut-context
+- [x] Require an interface marker, generated facet-set marker, or cut-context
       binding when installing cut-cell stabilization.
-- [ ] Keep plain `dS()` available only for intentionally global DG terms, not
+- [x] Keep plain `dS()` available only for intentionally global DG terms, not
       cut-cell stabilization.
 - [x] Decide whether cut-cell stabilization uses only facets with one cut cell or
       a wider extension patch.

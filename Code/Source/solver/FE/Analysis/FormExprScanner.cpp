@@ -900,7 +900,7 @@ void collectScaleUsages(const forms::FormExprNode& node,
     } else if (type == FT::InteriorFaceIntegral) {
         child_context.domain = DomainKind::InteriorFace;
         child_context.boundary_marker = -1;
-        child_context.interface_marker = -1;
+        child_context.interface_marker = node.interfaceMarker().value_or(-1);
     } else if (type == FT::InterfaceIntegral) {
         child_context.domain = DomainKind::InterfaceFace;
         child_context.boundary_marker = -1;
@@ -992,7 +992,7 @@ void scanNode(const forms::FormExprNode& node,
             result.has_interior_face_integral = true;
             child_context.domain = DomainKind::InteriorFace;
             child_context.boundary_marker = -1;
-            child_context.interface_marker = -1;
+            child_context.interface_marker = node.interfaceMarker().value_or(-1);
             break;
         case FT::InterfaceIntegral: {
             result.has_interface_integral = true;

@@ -149,7 +149,8 @@ TEST(NonlinearFormKernelDGHelpersTest, CutAdjacentGhostPenaltyJacobianMatchesCen
     const auto residual = cutAdjacentFacetIntegral(
         FormExpr::constant(Real{2.5}) *
         cutAdjacentFacetNormalGradientJump(u) *
-        cutAdjacentFacetNormalGradientJump(v));
+            cutAdjacentFacetNormalGradientJump(v),
+        /*facet_set_marker=*/12);
 
     auto ir = compiler.compileResidual(residual);
     auto ir_vec = compiler.compileResidual(residual);
