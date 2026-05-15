@@ -5334,6 +5334,7 @@ void StandardAssembler::prepareBasis(
         cached_field_recipes_valid_ = false;
         cached_quad_rule_ptr_ = &quad_rule;
         cached_need_hessians_ = need_basis_hessians;
+        basis_scratch_valid_ = false;
         cached_qpt_test_valid_ = false;
         cached_qpt_trial_valid_ = false;
         cached_qpt_major_valid_ = false;
@@ -6533,6 +6534,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         } else {
             cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
             active_rule = &*cut_rule;
+            cached_quad_rule_ptr_ = nullptr;
+            basis_scratch_valid_ = false;
         }
         FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumes: active quadrature rule");
         prepareGeometry(context_, mesh, cell_id, *active_rule);

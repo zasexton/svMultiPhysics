@@ -31,6 +31,8 @@ CASES = {
 CASE_GATE_X = {
     "mini2d": 0.4,
 }
+CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
+CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
 
 
 def point_array(mesh: pv.DataSet, name: str) -> np.ndarray:
@@ -433,6 +435,29 @@ def result_path(case_dir: Path, step: int) -> Path:
     raise FileNotFoundError(f"no result file found under {case_dir}")
 
 
+def parse_active_volume_history(solver_output: str) -> dict[str, Any]:
+    context_volumes = [
+        float(match.group(1))
+        for match in CUT_CONTEXT_VOLUME_RE.finditer(solver_output)
+    ]
+    assembly_volumes = [
+        float(match.group(1))
+        for match in CUT_ASSEMBLY_VOLUME_RE.finditer(solver_output)
+    ]
+
+    def span(values: list[float]) -> float:
+        if len(values) < 2:
+            return 0.0
+        return float(max(values) - min(values))
+
+    return {
+        "cut_context_active_side_volumes": context_volumes,
+        "assembly_active_wet_volumes": assembly_volumes,
+        "cut_context_active_side_volume_change": span(context_volumes),
+        "assembly_active_wet_volume_change": span(assembly_volumes),
+    }
+
+
 def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, Any]:
     benchmark_path = case_dir / "benchmark.json"
     if benchmark_path.exists():
@@ -498,6 +523,16 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
             f"front mean ux {metrics['front_mean_velocity'][0]:.6g} is below "
             f"{args.min_front_mean_ux:.6g}"
         )
+    if args.min_active_volume_change > 0.0:
+        volume_change = metrics.get("assembly_active_wet_volume_change", 0.0)
+        volume_count = len(metrics.get("assembly_active_wet_volumes", []))
+        if volume_count < 2:
+            errors.append("assembly active wet volume was not reported at least twice")
+        elif volume_change < args.min_active_volume_change:
+            errors.append(
+                f"assembly active wet-volume change {volume_change:.6g} is below "
+                f"{args.min_active_volume_change:.6g}"
+            )
     return errors
 
 
@@ -530,6 +565,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             )
 
         metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
+        metrics.update(parse_active_volume_history(completed.stdout))
         errors = evaluate(metrics, args)
         metrics["case"] = case_name
         metrics["steps"] = args.steps
@@ -550,6 +586,7 @@ def main() -> int:
     parser.add_argument("--min-wet-mean-speed", type=float, default=2.5e-4)
     parser.add_argument("--min-gate-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-front-mean-ux", type=float, default=1.0e-4)
+    parser.add_argument("--min-active-volume-change", type=float, default=0.0)
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)
