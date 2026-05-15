@@ -37,7 +37,8 @@ CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
 COMPONENT_NORM_RE = re.compile(
-    r"\[(.*?) norm=([-+0-9.eE]+) mean=([-+0-9.eE]+)\]"
+    r"\[(.*?) norm=([-+0-9.eE]+) mean=([-+0-9.eE]+)"
+    r"(?: min=([-+0-9.eE]+) max=([-+0-9.eE]+))?\]"
 )
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
 STATIC_INTERFACE_HEIGHT = 0.53
@@ -542,14 +543,18 @@ def parse_component_norms(line: str) -> list[dict[str, Any]]:
     label_match = VECTOR_COMPONENT_LABEL_RE.search(line)
     if label_match is not None:
         line = line[label_match.end():]
-    return [
-        {
+    components = []
+    for match in COMPONENT_NORM_RE.finditer(line):
+        record = {
             "component": match.group(1),
             "norm": float(match.group(2)),
             "mean": float(match.group(3)),
         }
-        for match in COMPONENT_NORM_RE.finditer(line)
-    ]
+        if match.group(4) is not None and match.group(5) is not None:
+            record["min"] = float(match.group(4))
+            record["max"] = float(match.group(5))
+        components.append(record)
+    return components
 
 
 def vector_component_header(line: str) -> str:

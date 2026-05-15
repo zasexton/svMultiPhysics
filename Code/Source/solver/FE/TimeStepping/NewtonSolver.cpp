@@ -1168,6 +1168,8 @@ void logVectorComponentNorms(const systems::FESystem& sys,
         std::string label{};
         double sq_norm{0.0};
         double sum{0.0};
+        double min_value{std::numeric_limits<double>::infinity()};
+        double max_value{-std::numeric_limits<double>::infinity()};
         std::uint64_t count{0};
     };
 
@@ -1212,6 +1214,8 @@ void logVectorComponentNorms(const systems::FESystem& sys,
         auto& comp = comps[static_cast<std::size_t>(comp_idx)];
         comp.sq_norm += v * v;
         comp.sum += v;
+        comp.min_value = std::min(comp.min_value, v);
+        comp.max_value = std::max(comp.max_value, v);
         comp.count += 1;
     }
 
@@ -1223,11 +1227,17 @@ void logVectorComponentNorms(const systems::FESystem& sys,
         std::vector<double> global_norm(comps.size(), 0.0);
         std::vector<double> local_sum(comps.size(), 0.0);
         std::vector<double> global_sum(comps.size(), 0.0);
+        std::vector<double> local_min(comps.size(), std::numeric_limits<double>::infinity());
+        std::vector<double> global_min(comps.size(), std::numeric_limits<double>::infinity());
+        std::vector<double> local_max(comps.size(), -std::numeric_limits<double>::infinity());
+        std::vector<double> global_max(comps.size(), -std::numeric_limits<double>::infinity());
         std::vector<unsigned long long> local_count(comps.size(), 0ull);
         std::vector<unsigned long long> global_count(comps.size(), 0ull);
         for (std::size_t i = 0; i < comps.size(); ++i) {
             local_norm[i] = comps[i].sq_norm;
             local_sum[i] = comps[i].sum;
+            local_min[i] = comps[i].min_value;
+            local_max[i] = comps[i].max_value;
             local_count[i] = static_cast<unsigned long long>(comps[i].count);
         }
         MPI_Allreduce(local_norm.data(),
@@ -1242,6 +1252,18 @@ void logVectorComponentNorms(const systems::FESystem& sys,
                       MPI_DOUBLE,
                       MPI_SUM,
                       MPI_COMM_WORLD);
+        MPI_Allreduce(local_min.data(),
+                      global_min.data(),
+                      static_cast<int>(local_min.size()),
+                      MPI_DOUBLE,
+                      MPI_MIN,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(local_max.data(),
+                      global_max.data(),
+                      static_cast<int>(local_max.size()),
+                      MPI_DOUBLE,
+                      MPI_MAX,
+                      MPI_COMM_WORLD);
         MPI_Allreduce(local_count.data(),
                       global_count.data(),
                       static_cast<int>(local_count.size()),
@@ -1251,6 +1273,8 @@ void logVectorComponentNorms(const systems::FESystem& sys,
         for (std::size_t i = 0; i < comps.size(); ++i) {
             comps[i].sq_norm = global_norm[i];
             comps[i].sum = global_sum[i];
+            comps[i].min_value = global_min[i];
+            comps[i].max_value = global_max[i];
             comps[i].count = static_cast<std::uint64_t>(global_count[i]);
         }
     }
@@ -1266,9 +1290,13 @@ void logVectorComponentNorms(const systems::FESystem& sys,
         << " label='" << label << "'";
     for (const auto& c : comps) {
         const double mean = (c.count > 0u) ? (c.sum / static_cast<double>(c.count)) : 0.0;
+        const double min_value = (c.count > 0u) ? c.min_value : 0.0;
+        const double max_value = (c.count > 0u) ? c.max_value : 0.0;
         oss << " [" << c.label
             << " norm=" << std::sqrt(std::max(0.0, c.sq_norm))
-            << " mean=" << mean << "]";
+            << " mean=" << mean
+            << " min=" << min_value
+            << " max=" << max_value << "]";
     }
     FE_LOG_INFO(oss.str());
 }
@@ -3514,6 +3542,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             << " combined=" << components.combined();
         FE_LOG_INFO(oss.str());
         logVectorComponentNorms(transient.system(), r, "residual_block_norms");
+        logVectorComponentNorms(transient.system(), history.u(), "solution_state");
     };
 
     const bool ptc_enabled = options_.pseudo_transient.enabled;

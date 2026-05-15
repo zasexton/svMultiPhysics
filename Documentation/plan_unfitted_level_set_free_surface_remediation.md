@@ -400,6 +400,8 @@ benchmark runs.
       residual block norms, and pressure-gauge initialization checks.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       coupled outer FGMRES in the temporary case copy without editing fixtures.
+- [x] Add parseable solution-state component norms and ranges to short D18/D38
+      probes so pressure and velocity changes can be checked before VTK output.
 - [ ] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [ ] Run a short D18 probe and confirm velocity grows in the released/retained
