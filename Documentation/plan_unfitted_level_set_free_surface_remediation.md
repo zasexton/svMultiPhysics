@@ -413,6 +413,9 @@ benchmark runs.
       nonlinear and linear iteration summaries, wet-volume histories, output
       diagnostics, and parsed timeout diagnostics even when VTK output is
       disabled or unavailable.
+- [x] Add smoke-script MPI launcher support so D18/D38 qualification runs can
+      use the same multi-rank execution path as the long-run evidence while
+      still writing the parsed qualification log.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

@@ -255,6 +255,14 @@ def resolve_solver(explicit: Path | None) -> Path:
     )
 
 
+def solver_command(solver: Path, args: argparse.Namespace) -> list[str]:
+    if args.mpi_ranks is None:
+        return [str(solver), "solver.xml"]
+    if args.mpi_ranks < 1:
+        raise ValueError("--mpi-ranks must be at least 1")
+    return [str(args.mpiexec), "-np", str(args.mpi_ranks), str(solver), "solver.xml"]
+
+
 def copy_case_from_ref(case_dir: Path, destination: Path, source_ref: str) -> None:
     relative = case_dir.relative_to(ROOT)
     completed = subprocess.run(
@@ -1277,8 +1285,9 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             )
 
         try:
+            command = solver_command(solver, args)
             completed = subprocess.run(
-                [str(solver), "solver.xml"],
+                command,
                 cwd=run_dir,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -1295,6 +1304,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             diagnostics = parse_solver_diagnostics(output)
             failure = diagnostic_timeout_metrics(case_name, run_dir, diagnostics)
             failure["timeout_seconds"] = args.timeout_seconds
+            failure["command"] = command
             failure["stdout_tail"] = tail
             diagnostic_errors = evaluate_timeout_diagnostics(failure, args)
             failure["diagnostic_errors"] = diagnostic_errors
@@ -1317,6 +1327,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             failure = {
                 "case": case_name,
                 "run_dir": str(run_dir),
+                "command": solver_command(solver, args),
                 "returncode": completed.returncode,
                 "diagnostics": parse_solver_diagnostics(completed.stdout),
                 "stdout_tail": tail,
@@ -1341,6 +1352,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
         add_diagnostic_metrics(metrics, diagnostics)
         metrics["case"] = case_name
+        metrics["command"] = solver_command(solver, args)
         metrics["run_dir"] = str(run_dir)
         metrics["steps"] = args.steps
         if args.time_step_size is not None:
@@ -1368,6 +1380,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--solver", type=Path)
+    parser.add_argument("--mpiexec", type=Path, default=Path("mpiexec"))
+    parser.add_argument("--mpi-ranks", type=int)
     parser.add_argument("--case", choices=sorted(CASES), action="append")
     parser.add_argument("--source-ref")
     parser.add_argument("--steps", type=int, default=1)
