@@ -21,12 +21,142 @@
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <cmath>
+#include <functional>
+#include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace forms {
 namespace test {
+
+namespace {
+
+class ThreeTetraChainMeshAccess final : public assembly::IMeshAccess {
+public:
+    ThreeTetraChainMeshAccess()
+    {
+        nodes_ = {
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {0.0, 1.0, 0.0},
+            {0.0, 0.0, 1.0},
+            {1.0, 1.0, 1.0},
+            {1.0, 0.0, 2.0}
+        };
+        cells_ = {
+            {0, 1, 2, 3},
+            {1, 2, 3, 4},
+            {2, 3, 4, 5}
+        };
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 3; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 3; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 2; }
+    [[nodiscard]] int dimension() const override { return 3; }
+
+    [[nodiscard]] bool isOwnedCell(GlobalIndex) const override { return true; }
+
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override {
+        return ElementType::Tetra4;
+    }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(cell.begin(), cell.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        coords.resize(cell.size());
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell[i]));
+        }
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(assembly::CoordinateFrame frame) const override
+    {
+        return frame == assembly::CoordinateFrame::Active ||
+               frame == assembly::CoordinateFrame::Reference ||
+               frame == assembly::CoordinateFrame::Current;
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id,
+                            assembly::CoordinateFrame,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        getCellCoordinates(cell_id, coords);
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id,
+                                               GlobalIndex cell_id) const override
+    {
+        if (face_id == 0 && cell_id == 0) return 2;
+        if (face_id == 0 && cell_id == 1) return 0;
+        if (face_id == 1 && cell_id == 1) return 2;
+        if (face_id == 1 && cell_id == 2) return 0;
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override { return -1; }
+
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex>
+    getInteriorFaceCells(GlobalIndex face_id) const override {
+        if (face_id == 0) return {0, 1};
+        if (face_id == 1) return {1, 2};
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override {
+        callback(0);
+        callback(1);
+        callback(2);
+    }
+
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(int,
+                             std::function<void(GlobalIndex, GlobalIndex)>) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const override
+    {
+        callback(0, 0, 1);
+        callback(1, 1, 2);
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_;
+    std::vector<std::array<GlobalIndex, 4>> cells_;
+};
+
+[[nodiscard]] dofs::DofMap createThreeTetraDG_DofMap()
+{
+    dofs::DofMap dof_map(3, 12, 4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setCellDofs(1, std::vector<GlobalIndex>{4, 5, 6, 7});
+    dof_map.setCellDofs(2, std::vector<GlobalIndex>{8, 9, 10, 11});
+    dof_map.setNumDofs(12);
+    dof_map.setNumLocalDofs(12);
+    dof_map.finalize();
+    return dof_map;
+}
+
+} // namespace
 
 TEST(FormKernelDGTest, PenaltyJumpJumpProducesExpectedBlocks)
 {
@@ -207,6 +337,55 @@ TEST(FormKernelDGTest, MarkedInteriorFaceUsesFacetBoundCutStabilizationScale)
     const Real area = std::sqrt(3.0) / 2.0;
     EXPECT_NEAR(mat.getMatrixEntry(1, 1), eta * area / 6.0, 5e-11);
     EXPECT_NEAR(mat.getMatrixEntry(1, 4), -eta * area / 6.0, 5e-11);
+}
+
+TEST(FormKernelDGTest, UnscaledMarkedCutAdjacentFacetIntegralSkipsNonCutInteriorFaces)
+{
+    ThreeTetraChainMeshAccess mesh;
+    auto dof_map = createThreeTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    constexpr int marker = 22;
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (FormExpr::constant(1.0) * inner(jump(u), jump(v))).dS(marker);
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = "single-cut-adjacent-facet";
+    handle.facets = {0};
+    cut_context.addFacetSetHandle(std::move(handle));
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&cut_context);
+
+    assembly::DenseMatrixView mat(12);
+    mat.zero();
+
+    const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                        mat, nullptr, marker);
+    EXPECT_EQ(result.interior_faces_assembled, 1);
+
+    const Real area = std::sqrt(3.0) / 2.0;
+    EXPECT_NEAR(mat.getMatrixEntry(1, 1), area / 6.0, 5e-11);
+    EXPECT_NEAR(mat.getMatrixEntry(1, 4), -area / 6.0, 5e-11);
+
+    for (GlobalIndex i = 0; i < 12; ++i) {
+        for (GlobalIndex j = 0; j < 12; ++j) {
+            if (i < 8 && j < 8) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "i=" << i << ", j=" << j);
+            EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
+        }
+    }
 }
 
 TEST(FormKernelDGTest, CutStabilizationScaleUsesAdjacentCutCellMetadata)
