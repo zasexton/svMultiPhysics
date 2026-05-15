@@ -471,6 +471,20 @@ TEST(LevelSetInterfaceBuilder, ProvidesExtensionPointsForHexWedgeAndPyramid)
     EXPECT_TRUE(isLevelSetCellCutExtensionElement(ElementType::Pyramid5));
     EXPECT_FALSE(isLevelSetCellCutExtensionElement(ElementType::Tetra4));
 
+    for (const auto element_type :
+         {ElementType::Hex8, ElementType::Wedge6, ElementType::Pyramid5}) {
+        const LevelSetCellCutInput input{
+            .parent_cell = 98,
+            .element_type = element_type,
+            .node_coordinates = {},
+            .level_set_values = {}};
+        const auto direct_result =
+            cutLinearLevelSetCell3D(make_request(/*marker=*/43), input);
+        EXPECT_FALSE(direct_result.supported);
+        EXPECT_EQ(direct_result.degeneracy, CutInterfaceDegeneracy::NoCut);
+        EXPECT_FALSE(direct_result.diagnostic.empty());
+    }
+
     LevelSetCellCutExtensionRegistry registry;
     const auto make_extension = [](ElementType type, const char* name) {
         LevelSetCellCutExtension extension;

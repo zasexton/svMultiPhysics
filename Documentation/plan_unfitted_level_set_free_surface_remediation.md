@@ -205,8 +205,10 @@ side volume keep active side-volume metadata.
       polygon is triangular.
 - [x] For cut tetrahedra, generate side-specific sub-tetrahedra or moment-fitted
       rules.
-- [ ] Decide whether hexahedra, wedges, and pyramids are unsupported with a hard
+- [x] Decide whether hexahedra, wedges, and pyramids are unsupported with a hard
       diagnostic or supported through the existing extension registry.
+      The built-in level-set cutter rejects them with a diagnostic unless an
+      extension-registry cutter is explicitly registered for that element type.
 - [x] Store the quadrature policy name and exact polynomial order in cut metadata.
 - [x] Make `LevelSetGeneratedInterfaceOptions::quadrature_order` meaningful for
       cut-volume rules.
