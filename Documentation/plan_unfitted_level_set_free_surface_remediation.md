@@ -543,6 +543,11 @@ benchmark runs.
       unavailable; the one-step D18 GMRES timing probe reduced the worst parsed
       interior-face assembly from about 155 s to about 5.1 s including
       first-use JIT compilation.
+- [x] Record D18 GMRES post-JIT reference-time stop evidence: the run advanced
+      82 accepted steps with parsed nonlinear and linear convergence and fast
+      repeated assembly, then exited with return code -9 before final output;
+      the next blocker is long-run resource growth or extreme cut-adjacent
+      stabilization scale growth, not a direct-factorization singularity.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
