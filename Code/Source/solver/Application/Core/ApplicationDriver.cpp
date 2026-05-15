@@ -1055,6 +1055,7 @@ std::size_t maskInactiveFreeSurfaceOutput(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const std::vector<std::string>& field_names)
 {
+  constexpr const char* kActiveFluidVisualizationField = "ActiveFluid";
   if (requests.empty()) {
     return 0u;
   }
@@ -1078,17 +1079,22 @@ std::size_t maskInactiveFreeSurfaceOutput(
   }
 
   svmp::FieldHandle active_handle;
-  if (mesh.has_field(svmp::EntityKind::Vertex, "ActiveFluid")) {
-    active_handle = mesh.field_handle(svmp::EntityKind::Vertex, "ActiveFluid");
+  if (mesh.has_field(svmp::EntityKind::Vertex, kActiveFluidVisualizationField)) {
+    active_handle = mesh.field_handle(svmp::EntityKind::Vertex,
+                                      kActiveFluidVisualizationField);
     if (mesh.field_type(active_handle) != svmp::FieldScalarType::Float64 ||
         mesh.field_components(active_handle) != 1u) {
       mesh.remove_field(active_handle);
-      active_handle = mesh.attach_field(svmp::EntityKind::Vertex, "ActiveFluid",
-                                        svmp::FieldScalarType::Float64, 1u);
+      active_handle = mesh.attach_field(svmp::EntityKind::Vertex,
+                                        kActiveFluidVisualizationField,
+                                        svmp::FieldScalarType::Float64,
+                                        1u);
     }
   } else {
-    active_handle = mesh.attach_field(svmp::EntityKind::Vertex, "ActiveFluid",
-                                      svmp::FieldScalarType::Float64, 1u);
+    active_handle = mesh.attach_field(svmp::EntityKind::Vertex,
+                                      kActiveFluidVisualizationField,
+                                      svmp::FieldScalarType::Float64,
+                                      1u);
   }
   auto* active = static_cast<double*>(mesh.field_data(active_handle));
   if (active == nullptr) {
@@ -2712,6 +2718,12 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   }
 
   const auto active_output_requests = activeCutVolumeRequests(params);
+  if (!active_output_requests.empty() && is_root) {
+    oopCout()
+        << "[svMultiPhysics::Application] VTK output: ActiveFluid is a vertex-sign visualization mask; "
+        << "WetVolumeFraction is the generated cut-volume active-domain diagnostic."
+        << std::endl;
+  }
   const auto wet_fraction_fields = writeWetVolumeFractionOutput(
       mesh,
       active_output_requests,
