@@ -771,6 +771,13 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
     }
 }
 
+[[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept;
+[[nodiscard]] const char* activeDomainMethodName(
+    FreeSurfaceActiveDomainMethod method) noexcept;
+[[nodiscard]] const char* cutVolumeSideName(FE::forms::CutVolumeSide side) noexcept;
+[[nodiscard]] FE::forms::CutVolumeSide activeDomainSide(
+    FreeSurfaceActiveDomain domain) noexcept;
+
 void applyFreeSurfaceCutCellStabilization(
     FE::forms::FormExpr& momentum_form,
     FE::forms::FormExpr& continuity_form,
@@ -793,6 +800,30 @@ void applyFreeSurfaceCutCellStabilization(
         ? FE::forms::cutStabilizationScale()
         : FE::forms::FormExpr::constant(1.0);
     const auto h_f = FE::forms::avg(FE::forms::hNormal());
+    const auto interface_side =
+        bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
+            ? "Plus"
+            : (bc.active_domain == FreeSurfaceActiveDomain::LevelSetNegative
+                   ? "Minus"
+                   : "All");
+    const auto active_domain_side =
+        bc.active_domain == FreeSurfaceActiveDomain::None
+            ? "FullDomain"
+            : cutVolumeSideName(activeDomainSide(bc.active_domain));
+
+    std::ostringstream oss;
+    oss << "IncompressibleNavierStokesVMSModule: cut-cell stabilization "
+        << "marker=" << bc.interface_marker
+        << " level_set_field='" << bc.level_set_field_name << "'"
+        << " interface_side=" << interface_side
+        << " active_domain=" << activeDomainName(bc.active_domain)
+        << " active_domain_side=" << active_domain_side
+        << " Active_domain_method="
+        << activeDomainMethodName(bc.active_domain_method)
+        << " use_cut_metadata_scale="
+        << (cut.use_cut_metadata_scale ? "true" : "false")
+        << " facet_scope=cut-adjacent";
+    FE_LOG_INFO(oss.str());
 
     if (!bc_forms::isZeroConstantScalarValue(cut.velocity_gradient_penalty)) {
         const auto velocity_penalty = bc_forms::toScalarExpr(

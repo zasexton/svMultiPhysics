@@ -2100,7 +2100,9 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
     module.registerOn(system);
+    const auto log_output = testing::internal::GetCapturedStdout();
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
     EXPECT_TRUE(formulationRecordsContainInteriorFaceMarker(system, expected_marker));
@@ -2108,6 +2110,10 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
+    EXPECT_NE(log_output.find("cut-cell stabilization"), std::string::npos);
+    EXPECT_NE(log_output.find("interface_side=Minus"), std::string::npos);
+    EXPECT_NE(log_output.find("active_domain_side=Negative"), std::string::npos);
+    EXPECT_NE(log_output.find("use_cut_metadata_scale=false"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesCutMetadataScale)
@@ -2194,9 +2200,9 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainZeroTractionFreeSurfaceAvoidsI
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .interface_marker = interface_marker,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 0.0,
         .surface_tension = 0.0,
-        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
     });
 
     FE::systems::FESystem system(mesh);

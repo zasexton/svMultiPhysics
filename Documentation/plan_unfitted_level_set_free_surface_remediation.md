@@ -307,7 +307,7 @@ explicit stabilization policy change.
       contribution even when `Use_cut_metadata_scale=false`.
 - [x] Make the behavior of `Use_cut_metadata_scale=false` mean unscaled local
       cut-neighborhood stabilization, not global stabilization.
-- [ ] Include the interface side and active-domain side in stabilization
+- [x] Include the interface side and active-domain side in stabilization
       diagnostics.
 - [ ] Fail fast if cut-cell stabilization is enabled but no cut context or
       cut-adjacent facet set exists.
