@@ -741,10 +741,11 @@ def parse_interior_face_timing(line: str) -> dict[str, Any]:
 
 
 def parse_cut_volume_timing(line: str) -> dict[str, Any]:
-    values = {
+    values = parse_key_values(line)
+    values.update({
         match.group(1): parse_scalar(match.group(2))
         for match in INTERIOR_FACE_TIMING_VALUE_RE.finditer(line)
-    }
+    })
     values["diagnostic"] = "cut_volume_timing"
     return values
 
@@ -1475,6 +1476,68 @@ def timeout_before_solution_state(diagnostics: dict[str, Any]) -> bool:
     return int(nonlinear_records or 0) == 0 and int(accepted_steps or 0) == 0
 
 
+def assembly_topology_consistency_errors(diagnostics: dict[str, Any]) -> list[str]:
+    errors = []
+    facet_counts = [
+        int(record["cut_adjacent_facets"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("cut_adjacent_facets"), int)
+    ]
+    if diagnostics.get("interior_face_timings"):
+        if not facet_counts:
+            errors.append("cut-adjacent facet count is unavailable for interior-face timing checks")
+        else:
+            expected_facets = max(facet_counts)
+            mismatched = [
+                int(record["faces_assembled"])
+                for record in diagnostics["interior_face_timings"]
+                if isinstance(record.get("faces_assembled"), int) and
+                int(record["faces_assembled"]) != expected_facets
+            ]
+            if mismatched:
+                errors.append(
+                    "interior-face timing assembled counts do not match cut-adjacent facets "
+                    f"(expected {expected_facets}, examples {mismatched[:3]})"
+                )
+
+    assembly_records: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    for record in diagnostics.get("cut_volume_assemblies", []):
+        key = (record.get("marker"), record.get("side"))
+        assembly_records.setdefault(key, []).append(record)
+
+    for timing in diagnostics.get("cut_volume_timings", []):
+        key = (timing.get("marker"), timing.get("side"))
+        if key[0] is None or key[1] is None:
+            errors.append("cut-volume timing record is missing marker or side")
+            continue
+        matches = assembly_records.get(key, [])
+        if not matches:
+            errors.append(f"cut-volume timing record has no assembly diagnostic for marker/side {key}")
+            continue
+        if timing.get("indexed") != 1:
+            errors.append(f"cut-volume timing for marker/side {key} did not use indexed rule traversal")
+        considered = timing.get("rules_considered")
+        assembled = timing.get("rules_assembled")
+        if isinstance(considered, int) and isinstance(assembled, int) and considered != assembled:
+            errors.append(
+                f"cut-volume timing for marker/side {key} considered {considered} rules but assembled {assembled}"
+            )
+
+        matched_counts = False
+        for assembly in matches:
+            if (assembled == assembly.get("rules") and
+                    timing.get("full_rules") == assembly.get("full_cell_rules") and
+                    timing.get("partial_rules") == assembly.get("cut_cell_rules")):
+                matched_counts = True
+                break
+        if not matched_counts:
+            errors.append(
+                "cut-volume timing rule counts do not match cut-volume assembly diagnostics "
+                f"for marker/side {key}"
+            )
+    return errors
+
+
 def add_diagnostic_metrics(metrics: dict[str, Any],
                            diagnostics: dict[str, Any]) -> None:
     metrics["diagnostics"] = diagnostics
@@ -1752,6 +1815,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_assembly_timing_diagnostics",
         "require_interior_face_timing_diagnostics",
         "require_cut_volume_timing_diagnostics",
+        "require_assembly_topology_consistency",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -1853,6 +1917,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
         errors.append("cut-volume timing diagnostics were not reported")
+    if args.require_assembly_topology_consistency:
+        errors.extend(assembly_topology_consistency_errors(diagnostics))
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -2121,6 +2187,8 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_cut_volume_timing_diagnostics and
             not metrics["diagnostics"].get("cut_volume_timings")):
         errors.append("cut-volume timing diagnostics were not reported")
+    if args.require_assembly_topology_consistency:
+        errors.extend(assembly_topology_consistency_errors(metrics["diagnostics"]))
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
     if metrics.get("case") == "static2d":
@@ -2447,6 +2515,7 @@ def main() -> int:
     parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")
     parser.add_argument("--enable-cut-volume-timing", action="store_true")
     parser.add_argument("--require-cut-volume-timing-diagnostics", action="store_true")
+    parser.add_argument("--require-assembly-topology-consistency", action="store_true")
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)
