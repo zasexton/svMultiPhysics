@@ -1780,6 +1780,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   }
 
   sim.fe_system->commitTimeStep();
+  (void)refreshActiveCutIntegrationContext(
+      sim, params, sim.time_history->u(), *cut_lifecycle);
   outputResults(sim, params, /*step=*/1, solve_time, pvd);
 
   const auto comm = svmp::MeshComm::world();

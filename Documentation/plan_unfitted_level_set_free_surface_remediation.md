@@ -71,7 +71,7 @@ remain reusable when only cut metadata changes.
 - [x] Restore or rebuild the context for the accepted nonlinear state after a
       line-search trial exits.
 - [x] Rebuild the active cut context after accepted-step level-set maintenance.
-- [ ] Rebuild or clear the active cut context before output so diagnostics see
+- [x] Rebuild or clear the active cut context before output so diagnostics see
       the maintained accepted `phi`.
 - [x] Move `refreshActiveCutIntegrationContext(...)` or its core logic behind a
       reusable service that accepts a state view instead of being tied to
