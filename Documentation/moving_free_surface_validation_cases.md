@@ -77,6 +77,13 @@ not enforce wet-volume conservation. Validation cases therefore either report
 uncorrected wet-volume drift as an error metric or enable explicit volume
 correction and report the applied global shift.
 
+A conservative level-set transport option is deferred until the wet-fraction
+diagnostics below are available. Adding the option before cell wet fractions,
+total wet volume, correction-shift history, and benchmark drift thresholds are
+reported would make the option difficult to validate and compare. Until then,
+validation inputs must state whether they measure uncorrected drift or use the
+existing global-shift volume correction.
+
 Reinitialization policy by tracked validation case:
 
 | Case | Reinitialization policy | Rationale |
