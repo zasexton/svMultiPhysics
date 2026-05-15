@@ -2737,6 +2737,35 @@ TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfa
     EXPECT_EQ(handle.facets[0], 20);
     EXPECT_EQ(handle.facets[1], 21);
     EXPECT_EQ(handle.facets[2], 23);
+
+    CutIntegrationContext context;
+    CutFacetSetHandle context_handle;
+    context_handle.marker = handle.marker;
+    context_handle.name = handle.name;
+    context_handle.facets = {handle.facets[2], handle.facets[0], handle.facets[1], handle.facets[0]};
+    context_handle.stable_id = handle.stable_id;
+    context.addFacetSetHandle(std::move(context_handle));
+
+    EXPECT_TRUE(context.hasFacetSetHandleMarker(131));
+    ASSERT_EQ(context.facetSetHandles().size(), 1u);
+    const auto* stored = context.facetSetHandleForMarker(131);
+    ASSERT_NE(stored, nullptr);
+    EXPECT_TRUE(stored->valid());
+    EXPECT_EQ(stored->marker, 131);
+    EXPECT_EQ(stored->name, "generated-cut-facets");
+    ASSERT_EQ(stored->facets.size(), 3u);
+    EXPECT_EQ(stored->facets[0], 20);
+    EXPECT_EQ(stored->facets[1], 21);
+    EXPECT_EQ(stored->facets[2], 23);
+    EXPECT_TRUE(stored->containsFacet(20));
+    EXPECT_TRUE(stored->containsFacet(21));
+    EXPECT_TRUE(stored->containsFacet(23));
+    EXPECT_FALSE(stored->containsFacet(22));
+    EXPECT_NE(stored->stable_id, 0u);
+
+    context.clear();
+    EXPECT_FALSE(context.hasFacetSetHandleMarker(131));
+    EXPECT_EQ(context.facetSetHandleForMarker(131), nullptr);
 }
 
 TEST(CutIntegrationInfrastructure, SmallGeneratedCutFragmentsFeedConditioningNeighborhoods)

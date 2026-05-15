@@ -3,6 +3,7 @@
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
 
+#include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
@@ -12,6 +13,7 @@
 #include "FE/LevelSet/LevelSetVolume.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
+#include "FE/Systems/CutIntegrationInvalidation.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/NewtonSolver.h"
@@ -393,6 +395,7 @@ struct ActiveCutContextRefreshReport {
   std::uint64_t value_revision{0};
   std::size_t interface_fragments{0};
   std::size_t active_volume_regions{0};
+  std::size_t cut_adjacent_facets{0};
   svmp::FE::Real negative_volume{0.0};
   svmp::FE::Real positive_volume{0.0};
 };
@@ -604,6 +607,47 @@ const char* activeSideName(LevelSetActiveSide side) noexcept
              : "LevelSetPositive";
 }
 
+std::vector<svmp::FE::systems::CutInteriorFacetAdjacency>
+collectInteriorFacetAdjacencies(const svmp::FE::assembly::IMeshAccess& mesh)
+{
+  std::vector<svmp::FE::systems::CutInteriorFacetAdjacency> adjacencies;
+  adjacencies.reserve(static_cast<std::size_t>(std::max<svmp::FE::GlobalIndex>(
+      0, mesh.numInteriorFaces())));
+  mesh.forEachInteriorFace(
+      [&](svmp::FE::GlobalIndex face_id,
+          svmp::FE::GlobalIndex first_cell,
+          svmp::FE::GlobalIndex second_cell) {
+        adjacencies.push_back(
+            svmp::FE::systems::CutInteriorFacetAdjacency{
+                .facet = static_cast<svmp::FE::MeshIndex>(face_id),
+                .first_cell = static_cast<svmp::FE::MeshIndex>(first_cell),
+                .second_cell = static_cast<svmp::FE::MeshIndex>(second_cell)});
+      });
+  return adjacencies;
+}
+
+svmp::FE::assembly::CutFacetSetHandle addGeneratedCutAdjacentFacetSet(
+    svmp::FE::assembly::CutIntegrationContext& context,
+    const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
+    const svmp::FE::assembly::IMeshAccess& mesh)
+{
+  const auto adjacent_facets =
+      svmp::FE::systems::identifyCutAdjacentInteriorFacets(
+          domain.cutCells(), collectInteriorFacetAdjacencies(mesh));
+  const auto handle =
+      svmp::FE::systems::makeCutAdjacentFacetSetHandle(
+          domain.marker(),
+          "generated-cut-adjacent-facets",
+          adjacent_facets);
+
+  svmp::FE::assembly::CutFacetSetHandle stored_handle;
+  stored_handle.marker = handle.marker;
+  stored_handle.name = handle.name;
+  stored_handle.facets = handle.facets;
+  stored_handle.stable_id = handle.stable_id;
+  return context.addFacetSetHandle(std::move(stored_handle));
+}
+
 constexpr std::uint64_t kCutContextHashOffset = 1469598103934665603ull;
 constexpr std::uint64_t kCutContextHashPrime = 1099511628211ull;
 
@@ -692,6 +736,7 @@ void logCutTopologyChange(
         << " cut_context_revision=" << report.value_revision
         << " interface_fragments=" << report.interface_fragments
         << " active_volume_regions=" << report.active_volume_regions
+        << " cut_adjacent_facets=" << report.cut_adjacent_facets
         << " negative_volume=" << report.negative_volume
         << " positive_volume=" << report.positive_volume << std::endl;
   }
@@ -1501,6 +1546,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     report.negative_volume += summary.negative_volume_measure;
     report.positive_volume += summary.positive_volume_measure;
     context->addGeneratedInterfaceDomain(result.domain);
+    const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
+        *context, result.domain, sim.fe_system->meshAccess());
+    mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
+    report.cut_adjacent_facets += facet_set_handle.facets.size();
     application::core::oopCout()
         << "[svMultiPhysics::Application] Active-domain cut context marker="
         << result.interface_marker << " field='" << request.level_set_field_name
@@ -1512,6 +1561,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " active_interface_fragments=" << summary.active_fragment_count
         << " active_volume_regions="
         << summary.active_volume_region_count
+        << " cut_adjacent_facets=" << facet_set_handle.facets.size()
         << " negative_volume=" << summary.negative_volume_measure
         << " positive_volume=" << summary.positive_volume_measure << std::endl;
   }

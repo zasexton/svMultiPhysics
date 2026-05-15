@@ -158,6 +158,25 @@ struct CutFacetSetOperatorEvaluation {
     Real integral = 0.0;
 };
 
+struct CutFacetSetHandle {
+    int marker{-1};
+    std::string name{};
+    std::vector<MeshIndex> facets{};
+    std::uint64_t stable_id{0};
+
+    [[nodiscard]] bool valid() const noexcept {
+        return marker >= 0 && !facets.empty() && stable_id != 0u;
+    }
+
+    [[nodiscard]] bool empty() const noexcept {
+        return facets.empty();
+    }
+
+    [[nodiscard]] bool containsFacet(MeshIndex facet) const noexcept {
+        return std::binary_search(facets.begin(), facets.end(), facet);
+    }
+};
+
 class CutIntegrationContext {
 public:
     void clear() {
@@ -172,6 +191,8 @@ public:
         generated_interface_markers_.clear();
         facet_set_rule_indices_by_marker_.clear();
         facet_set_markers_.clear();
+        facet_set_handles_.clear();
+        facet_set_handle_indices_by_marker_.clear();
         expected_source_value_revision_by_marker_.clear();
         kinematic_data_.clear();
         stabilization_hooks_.clear();
@@ -196,6 +217,23 @@ public:
         }
         indices.push_back(facet_set_rules_.size());
         facet_set_rules_.push_back(std::move(rule));
+    }
+
+    const CutFacetSetHandle& addFacetSetHandle(CutFacetSetHandle handle) {
+        if (handle.marker < 0) {
+            throw std::invalid_argument("cut facet set handle requires a nonnegative marker");
+        }
+        std::sort(handle.facets.begin(), handle.facets.end());
+        handle.facets.erase(std::unique(handle.facets.begin(), handle.facets.end()),
+                            handle.facets.end());
+        if (handle.stable_id == 0u) {
+            handle.stable_id = facetSetStableId(handle.marker, handle.facets);
+        }
+
+        const auto index = facet_set_handles_.size();
+        facet_set_handle_indices_by_marker_[handle.marker] = index;
+        facet_set_handles_.push_back(std::move(handle));
+        return facet_set_handles_.back();
     }
 
     void addGeneratedVolumeRule(int marker,
@@ -394,6 +432,24 @@ public:
 
     [[nodiscard]] const std::vector<int>& facetSetMarkers() const noexcept {
         return facet_set_markers_;
+    }
+
+    [[nodiscard]] bool hasFacetSetHandleMarker(int marker) const {
+        return facet_set_handle_indices_by_marker_.find(marker) !=
+               facet_set_handle_indices_by_marker_.end();
+    }
+
+    [[nodiscard]] const std::vector<CutFacetSetHandle>& facetSetHandles() const noexcept {
+        return facet_set_handles_;
+    }
+
+    [[nodiscard]] const CutFacetSetHandle* facetSetHandleForMarker(int marker) const noexcept {
+        const auto it = facet_set_handle_indices_by_marker_.find(marker);
+        if (it == facet_set_handle_indices_by_marker_.end() ||
+            it->second >= facet_set_handles_.size()) {
+            return nullptr;
+        }
+        return &facet_set_handles_[it->second];
     }
 
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
@@ -942,6 +998,21 @@ public:
 #endif
 
 private:
+    [[nodiscard]] static std::uint64_t facetSetStableId(
+        int marker,
+        const std::vector<MeshIndex>& facets) noexcept {
+        std::uint64_t h = 1469598103934665603ull;
+        const auto mix = [&h](std::uint64_t value) noexcept {
+            h ^= value;
+            h *= 1099511628211ull;
+        };
+        mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(marker)));
+        for (const auto facet : facets) {
+            mix(static_cast<std::uint64_t>(static_cast<std::int64_t>(facet)));
+        }
+        return h;
+    }
+
     [[nodiscard]] static bool bindingVisibleToPath(const CutIntegrationBinding& binding,
                                                    CutIntegrationAssemblyPath path) noexcept {
         return binding.visible_to_paths.empty() ||
@@ -978,6 +1049,8 @@ private:
     std::vector<int> generated_interface_markers_{};
     std::unordered_map<int, std::vector<std::size_t>> facet_set_rule_indices_by_marker_{};
     std::vector<int> facet_set_markers_{};
+    std::vector<CutFacetSetHandle> facet_set_handles_{};
+    std::unordered_map<int, std::size_t> facet_set_handle_indices_by_marker_{};
     std::unordered_map<int, std::uint64_t> expected_source_value_revision_by_marker_{};
     std::vector<EmbeddedBoundaryKinematicData> kinematic_data_{};
     std::vector<CutStabilizationHook> stabilization_hooks_{};

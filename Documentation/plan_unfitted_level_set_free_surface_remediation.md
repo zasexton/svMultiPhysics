@@ -296,9 +296,9 @@ explicit stabilization policy change.
 
 ### Implementation Checklist
 
-- [ ] Generate cut-adjacent interior facet sets whenever the active cut context
+- [x] Generate cut-adjacent interior facet sets whenever the active cut context
       is rebuilt.
-- [ ] Store the generated facet set in `CutIntegrationContext` with a stable
+- [x] Store the generated facet set in `CutIntegrationContext` with a stable
       marker or handle.
 - [ ] Route cut-adjacent facet kernels through the assembler using that marker or
       handle.
