@@ -410,7 +410,7 @@ benchmark runs.
       water region.
 - [x] Run a short D18 probe and confirm the active wet region matches cut-volume
       metadata.
-- [ ] Run a short D38 probe with the same checks.
+- [x] Run a short D38 probe with the same checks.
 
 ### Benchmark Acceptance Tests
 
