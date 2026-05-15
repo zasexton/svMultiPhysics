@@ -358,7 +358,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
 - [x] Rename or document vertex-sign `ActiveFluid` so it is not mistaken for the
       integration active domain.
 - [x] Output the active-domain side, isovalue, and interface marker in run logs.
-- [ ] Output a warning when vertex-sign masking and cell wet fraction disagree
+- [x] Output a warning when vertex-sign masking and cell wet fraction disagree
       strongly near the interface.
 
 ### Tests

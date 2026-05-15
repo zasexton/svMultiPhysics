@@ -1006,6 +1006,137 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
   return diagnostics;
 }
 
+void logActiveFluidWetFractionDisagreementWarnings(
+    const svmp::Mesh& mesh,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    int step,
+    double time)
+{
+  if (requests.empty() || cut_context == nullptr) {
+    return;
+  }
+
+  constexpr double fraction_tol = 1.0e-12;
+  constexpr double strong_disagreement_threshold = 0.5;
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& request = requests[i];
+    if (!mesh.has_field(svmp::EntityKind::Vertex,
+                        request.level_set_field_name)) {
+      continue;
+    }
+    const auto phi_handle =
+        mesh.field_handle(svmp::EntityKind::Vertex,
+                          request.level_set_field_name);
+    if (mesh.field_type(phi_handle) != svmp::FieldScalarType::Float64 ||
+        mesh.field_components(phi_handle) != 1u) {
+      continue;
+    }
+    const auto* phi = static_cast<const double*>(mesh.field_data(phi_handle));
+    if (phi == nullptr) {
+      continue;
+    }
+
+    const auto marker = generatedVolumeMarkerForRequest(
+        *cut_context, request, i);
+    if (!marker.has_value()) {
+      continue;
+    }
+    const auto side = cutIntegrationSide(request.active_side);
+    const auto rules =
+        cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
+    if (rules.empty()) {
+      continue;
+    }
+
+    std::vector<double> wet_fraction(mesh.n_cells(), 0.0);
+    for (const auto* rule : rules) {
+      if (rule == nullptr) {
+        continue;
+      }
+      const auto cell = rule->provenance.parent_entity;
+      if (cell < 0 ||
+          static_cast<std::size_t>(cell) >= wet_fraction.size()) {
+        continue;
+      }
+      auto& fraction = wet_fraction[static_cast<std::size_t>(cell)];
+      fraction = std::clamp(
+          fraction + static_cast<double>(rule->volume_fraction),
+          0.0,
+          1.0);
+    }
+
+    std::size_t compared_cut_cell_count = 0u;
+    std::size_t disagreeing_cut_cell_count = 0u;
+    double max_abs_difference = 0.0;
+    svmp::FE::MeshIndex max_difference_cell =
+        static_cast<svmp::FE::MeshIndex>(-1);
+    for (std::size_t c = 0; c < wet_fraction.size(); ++c) {
+      const auto cut_fraction = wet_fraction[c];
+      if (cut_fraction <= fraction_tol ||
+          cut_fraction >= 1.0 - fraction_tol) {
+        continue;
+      }
+      const auto [vertices, vertex_count] =
+          mesh.cell_vertices_span(static_cast<svmp::index_t>(c));
+      if (vertices == nullptr || vertex_count == 0u) {
+        continue;
+      }
+      std::size_t active_vertex_count = 0u;
+      std::size_t valid_vertex_count = 0u;
+      for (std::size_t j = 0; j < vertex_count; ++j) {
+        const auto vertex = vertices[j];
+        if (vertex < 0 ||
+            static_cast<std::size_t>(vertex) >= mesh.n_vertices()) {
+          continue;
+        }
+        ++valid_vertex_count;
+        if (activeSideContains(phi[static_cast<std::size_t>(vertex)],
+                               request)) {
+          ++active_vertex_count;
+        }
+      }
+      if (valid_vertex_count == 0u) {
+        continue;
+      }
+
+      ++compared_cut_cell_count;
+      const auto vertex_fraction =
+          static_cast<double>(active_vertex_count) /
+          static_cast<double>(valid_vertex_count);
+      const auto abs_difference =
+          std::abs(vertex_fraction - cut_fraction);
+      if (abs_difference > max_abs_difference) {
+        max_abs_difference = abs_difference;
+        max_difference_cell = static_cast<svmp::FE::MeshIndex>(c);
+      }
+      if (abs_difference >= strong_disagreement_threshold) {
+        ++disagreeing_cut_cell_count;
+      }
+    }
+
+    if (disagreeing_cut_cell_count == 0u) {
+      continue;
+    }
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING ActiveFluid/WetVolumeFraction "
+        << "disagreement"
+        << " step=" << step
+        << " time=" << time
+        << " field='" << request.level_set_field_name << "'"
+        << " domain_id='" << request.domain_id << "'"
+        << " marker=" << *marker
+        << " active_side=" << activeSideName(request.active_side)
+        << " isovalue=" << request.isovalue
+        << " compared_cut_cell_count=" << compared_cut_cell_count
+        << " disagreeing_cut_cell_count=" << disagreeing_cut_cell_count
+        << " threshold=" << strong_disagreement_threshold
+        << " max_abs_difference=" << max_abs_difference
+        << " max_difference_cell=" << max_difference_cell
+        << std::endl;
+  }
+}
+
 void logWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
@@ -2736,6 +2867,12 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
               << " wet volume fraction cell field(s) from generated cut metadata."
               << std::endl;
   }
+  logActiveFluidWetFractionDisagreementWarnings(
+      mesh,
+      active_output_requests,
+      sim.fe_system->cutIntegrationContext(),
+      step,
+      time);
   if (!active_output_requests.empty() &&
       parseBoolEnv("SVMP_DEBUG_RAW_ACTIVE_DOMAIN_OUTPUT", false)) {
     const auto raw_fields_copied = copyRawFreeSurfaceDebugOutput(mesh);
