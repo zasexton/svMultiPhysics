@@ -187,6 +187,7 @@ def configure_solver(solver_xml: Path,
                      ns_cg_max_iterations: int | None = None,
                      ns_gm_tolerance: float | None = None,
                      ns_cg_tolerance: float | None = None,
+                     linear_solver_type: str | None = None,
                      disable_coupled_outer_fgmres: bool = False,
                      disable_cut_metadata_scale: bool = False,
                      disable_vtk_output: bool = False,
@@ -225,9 +226,13 @@ def configure_solver(solver_xml: Path,
         ns_cg_max_iterations is not None or
         ns_gm_tolerance is not None or
         ns_cg_tolerance is not None or
+        linear_solver_type is not None or
         disable_coupled_outer_fgmres
     )
     ns_solver = navier_stokes_linear_solver(root) if needs_ns_solver else None
+    if linear_solver_type is not None:
+        assert ns_solver is not None
+        ns_solver.set("type", linear_solver_type)
     if linear_relative_tolerance is not None:
         assert ns_solver is not None
         set_text(ns_solver, "Tolerance", f"{linear_relative_tolerance:.16g}")
@@ -1258,6 +1263,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "ns_cg_max_iterations",
         "ns_gm_tolerance",
         "ns_cg_tolerance",
+        "linear_solver_type",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -1689,6 +1695,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 ns_cg_max_iterations=args.ns_cg_max_iterations,
                 ns_gm_tolerance=args.ns_gm_tolerance,
                 ns_cg_tolerance=args.ns_cg_tolerance,
+                linear_solver_type=args.linear_solver_type,
                 disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
                 disable_cut_metadata_scale=args.disable_cut_metadata_scale,
                 disable_vtk_output=args.disable_vtk_output,
@@ -1860,6 +1867,7 @@ def main() -> int:
     parser.add_argument("--ns-cg-max-iterations", type=int)
     parser.add_argument("--ns-gm-tolerance", type=float)
     parser.add_argument("--ns-cg-tolerance", type=float)
+    parser.add_argument("--linear-solver-type")
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     parser.add_argument("--enable-blockschur-true-residual-retry", action="store_true")
     args = parser.parse_args()

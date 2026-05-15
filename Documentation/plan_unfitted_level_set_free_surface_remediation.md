@@ -444,6 +444,9 @@ benchmark runs.
 - [x] Add smoke-script linear and BlockSchur subsolver override switches so
       D18/D38 solver-control probes can be run from temporary case copies
       without editing validation fixtures.
+- [x] Add a smoke-script linear solver type override so D18/D38 probes can test
+      monolithic and split FSILS paths from temporary case copies without
+      editing validation fixtures.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
