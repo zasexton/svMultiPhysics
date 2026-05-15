@@ -400,6 +400,15 @@ struct ActiveCutContextRefreshReport {
   svmp::FE::Real positive_volume{0.0};
 };
 
+struct WetVolumeDiagnostic {
+  std::string level_set_field_name{};
+  std::string domain_id{};
+  int marker{-1};
+  LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
+  double isovalue{0.0};
+  svmp::FE::Real wet_volume{0.0};
+};
+
 std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& params)
 {
   std::vector<ActiveCutVolumeRequest> requests;
@@ -648,6 +657,21 @@ std::string wetVolumeFractionFieldName(
   return "WetVolumeFraction_" + fieldNameToken(request.domain_id);
 }
 
+std::optional<int> generatedVolumeMarkerForRequest(
+    const svmp::FE::assembly::CutIntegrationContext& cut_context,
+    const ActiveCutVolumeRequest& request,
+    std::size_t request_index)
+{
+  if (request.requested_interface_marker >= 0) {
+    return request.requested_interface_marker;
+  }
+  const auto& markers = cut_context.generatedVolumeMarkers();
+  if (request_index < markers.size()) {
+    return markers[request_index];
+  }
+  return std::nullopt;
+}
+
 std::vector<svmp::FE::systems::CutInteriorFacetAdjacency>
 collectInteriorFacetAdjacencies(const svmp::FE::assembly::IMeshAccess& mesh)
 {
@@ -870,21 +894,18 @@ std::size_t writeWetVolumeFractionOutput(
     return 0u;
   }
 
-  const auto& markers = cut_context->generatedVolumeMarkers();
   std::size_t fields_written = 0u;
   for (std::size_t i = 0; i < requests.size(); ++i) {
     const auto& request = requests[i];
-    int marker = request.requested_interface_marker;
-    if (marker < 0) {
-      if (i >= markers.size()) {
-        continue;
-      }
-      marker = markers[i];
+    const auto marker = generatedVolumeMarkerForRequest(
+        *cut_context, request, i);
+    if (!marker.has_value()) {
+      continue;
     }
 
     const auto side = cutIntegrationSide(request.active_side);
     const auto rules =
-        cut_context->generatedVolumeRulesForMarkerAndSide(marker, side);
+        cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
     if (rules.empty()) {
       continue;
     }
@@ -918,6 +939,70 @@ std::size_t writeWetVolumeFractionOutput(
   }
 
   return fields_written;
+}
+
+std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    const svmp::FE::assembly::CutIntegrationContext* cut_context)
+{
+  std::vector<WetVolumeDiagnostic> diagnostics;
+  if (requests.empty() || cut_context == nullptr) {
+    return diagnostics;
+  }
+
+  diagnostics.reserve(requests.size());
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& request = requests[i];
+    const auto marker = generatedVolumeMarkerForRequest(
+        *cut_context, request, i);
+    if (!marker.has_value()) {
+      continue;
+    }
+
+    const auto side = cutIntegrationSide(request.active_side);
+    const auto rules =
+        cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
+    if (rules.empty()) {
+      continue;
+    }
+
+    WetVolumeDiagnostic diagnostic;
+    diagnostic.level_set_field_name = request.level_set_field_name;
+    diagnostic.domain_id = request.domain_id;
+    diagnostic.marker = *marker;
+    diagnostic.active_side = request.active_side;
+    diagnostic.isovalue = request.isovalue;
+    for (const auto* rule : rules) {
+      if (rule != nullptr) {
+        diagnostic.wet_volume += rule->measure;
+      }
+    }
+    diagnostics.push_back(std::move(diagnostic));
+  }
+
+  return diagnostics;
+}
+
+void logWetVolumeDiagnostics(
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    int step,
+    double time)
+{
+  const auto diagnostics =
+      collectWetVolumeDiagnostics(requests, cut_context);
+  for (const auto& diagnostic : diagnostics) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Wet volume diagnostic"
+        << " step=" << step
+        << " time=" << time
+        << " field='" << diagnostic.level_set_field_name << "'"
+        << " domain_id='" << diagnostic.domain_id << "'"
+        << " marker=" << diagnostic.marker
+        << " active_side=" << activeSideName(diagnostic.active_side)
+        << " isovalue=" << diagnostic.isovalue
+        << " wet_volume=" << diagnostic.wet_volume << std::endl;
+  }
 }
 
 std::size_t maskInactiveFreeSurfaceOutput(
@@ -2339,6 +2424,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           << " cut_adjacent_facets=" << cut_report.cut_adjacent_facets
           << std::endl;
     }
+    logWetVolumeDiagnostics(
+        activeCutVolumeRequests(params),
+        sim.fe_system->cutIntegrationContext(),
+        h.stepIndex(),
+        h.time());
     auto vtk_start = std::chrono::steady_clock::now();
     outputResults(sim, params, h.stepIndex(), h.time(), pvd);
     vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
