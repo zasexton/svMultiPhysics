@@ -358,6 +358,42 @@ bool containsExprType(const svmp::FE::forms::FormExpr& expr,
     return expr.isValid() && containsExprType(expr.node(), target);
 }
 
+bool containsCutVolumeSide(const svmp::FE::forms::FormExprNode* node,
+                           svmp::FE::forms::CutVolumeSide target)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == svmp::FE::forms::FormExprType::CutVolumeIntegral &&
+        node->cutVolumeSide().value_or(svmp::FE::forms::CutVolumeSide::Negative) == target) {
+        return true;
+    }
+    for (const auto* child : node->children()) {
+        if (containsCutVolumeSide(child, target)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool formulationRecordsContainCutVolumeSide(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::forms::CutVolumeSide target)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (containsCutVolumeSide(record.residual_expr.get(), target)) {
+            return true;
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (containsCutVolumeSide(expr.get(), target)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool formulationRecordsContain(const svmp::FE::systems::FESystem& system,
                                svmp::FE::forms::FormExprType target)
 {
@@ -649,6 +685,8 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_A
     bc.params["Type"] = defined("Free_surface");
     bc.params["Implementation"] = defined("UnfittedLevelSet");
     bc.params["Level_set_field_name"] = defined("phi");
+    bc.params["Active_domain"] = defined("LevelSetNegative");
+    bc.params["Active_domain_method"] = defined("CutVolume");
     bc.params["External_pressure"] = defined("1.0");
     bc.params["Enable_cut_cell_stabilization"] = defined("true");
     bc.params["Cut_cell_velocity_gradient_penalty"] = defined("1.5");
@@ -671,6 +709,59 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceCutCellStabilizationTranslation_A
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InteriorFaceIntegral));
     ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Jump));
     ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::ParameterRef));
+#endif
+}
+
+TEST(NavierStokesLegacyBCs,
+     UnfittedFreeSurfaceCutCellStabilizationTranslation_ExplicitFalseIgnoresPenaltyTerms)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 81;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = svmp::INVALID_LABEL;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("UnfittedLevelSet");
+    bc.params["Level_set_field_name"] = defined("phi");
+    bc.params["Active_domain"] = defined("LevelSetNegative");
+    bc.params["Active_domain_method"] = defined("CutVolume");
+    bc.params["External_pressure"] = defined("1.0");
+    bc.params["Enable_cut_cell_stabilization"] = defined("false");
+    bc.params["Cut_cell_velocity_gradient_penalty"] = defined("1.5");
+    bc.params["Cut_cell_pressure_gradient_penalty"] = defined("0.2");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto phi_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    ASSERT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
+    ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InteriorFaceIntegral));
+    ASSERT_FALSE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::Jump));
 #endif
 }
 
@@ -716,6 +807,208 @@ TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_SetupSucc
 
     auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
     ASSERT_TRUE(module);
+    EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
+        system,
+        svmp::FE::forms::CutVolumeSide::Negative));
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsMissingActiveDomain)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 87;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = svmp::INVALID_LABEL;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("UnfittedLevelSet");
+    bc.params["Level_set_field_name"] = defined("phi");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto phi_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    EXPECT_THROW(
+        {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+            (void)module;
+        },
+        std::invalid_argument);
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_RejectsNoneWithoutOptIn)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 88;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = svmp::INVALID_LABEL;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("UnfittedLevelSet");
+    bc.params["Level_set_field_name"] = defined("phi");
+    bc.params["Active_domain"] = defined("None");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto phi_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    EXPECT_THROW(
+        {
+            auto module =
+                svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+            (void)module;
+        },
+        std::invalid_argument);
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceActiveDomainTranslation_AllowsExplicitFullDomainOptIn)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 89;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = svmp::INVALID_LABEL;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("UnfittedLevelSet");
+    bc.params["Level_set_field_name"] = defined("phi");
+    bc.params["Allow_full_domain_unfitted_free_surface"] = defined("true");
+    bc.params["External_pressure"] = defined("1.0");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto phi_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    EXPECT_TRUE(formulationRecordsContain(system, svmp::FE::forms::FormExprType::InterfaceIntegral));
+    EXPECT_FALSE(formulationRecordsContainCutVolumeSide(
+        system,
+        svmp::FE::forms::CutVolumeSide::Negative));
+#endif
+}
+
+TEST(NavierStokesLegacyBCs, UnfittedFreeSurfaceVelocityExtensionUsesInactiveCutVolume)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+
+    constexpr int marker = 86;
+    auto mesh = buildSingleTetraBoundaryMesh(marker);
+    ASSERT_TRUE(mesh);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "single_tetra";
+    input.mesh = mesh->local_mesh_ptr();
+
+    input.default_domain.params["Density"] = defined("1.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+
+    svmp::Physics::BoundaryConditionInput bc{};
+    bc.name = "free_surface";
+    bc.boundary_marker = svmp::INVALID_LABEL;
+    bc.params["Type"] = defined("Free_surface");
+    bc.params["Implementation"] = defined("UnfittedLevelSet");
+    bc.params["Level_set_field_name"] = defined("phi");
+    bc.params["Active_domain"] = defined("LevelSetNegative");
+    bc.params["Active_domain_method"] = defined("CutVolume");
+    bc.params["Enable_velocity_extension"] = defined("true");
+    bc.params["Velocity_extension_diffusivity"] = defined("2.0");
+    input.boundary_conditions.push_back(std::move(bc));
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto phi_space =
+        svmp::FE::spaces::SpaceFactory::create_h1(svmp::FE::ElementType::Tetra4, 1);
+    system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+        .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    ASSERT_TRUE(module);
+    EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
+        system,
+        svmp::FE::forms::CutVolumeSide::Negative));
+    EXPECT_TRUE(formulationRecordsContainCutVolumeSide(
+        system,
+        svmp::FE::forms::CutVolumeSide::Positive));
 #endif
 }
 

@@ -173,6 +173,11 @@ struct IncompressibleNavierStokesVMSOptions {
         bool use_cut_metadata_scale{false};
     };
 
+    struct FreeSurfaceVelocityExtension {
+        bool enabled{false};
+        ScalarValue diffusivity{1.0};
+    };
+
     /**
      * @brief Physics-side free-surface relation on a fitted or embedded interface
      *
@@ -197,6 +202,7 @@ struct IncompressibleNavierStokesVMSOptions {
         FreeSurfaceActiveDomainMethod active_domain_method{
             FreeSurfaceActiveDomainMethod::CutVolume};
         FE::Real active_domain_smoothing_width{0.0};
+        bool allow_full_domain_unfitted_free_surface{false};
 
         // Dynamic stress balance: sigma(u,p)n = (-p_ext + gamma*kappa)n.
         ScalarValue external_pressure{0.0};
@@ -221,6 +227,7 @@ struct IncompressibleNavierStokesVMSOptions {
         ScalarValue kinematic_penalty{0.0};
 
         FreeSurfaceCutCellStabilization cut_cell_stabilization{};
+        FreeSurfaceVelocityExtension velocity_extension{};
         std::vector<FreeSurfaceContactLine> contact_lines{};
     };
 
@@ -305,6 +312,7 @@ struct IncompressibleNavierStokesVMSOptions {
         bool enabled{false};
         std::array<FE::Real, 3> reference_point{0.0, 0.0, 0.0};
         FE::Real reference_pressure{0.0};
+        std::string field_name{};
     };
     HydrostaticPressureInitialization hydrostatic_pressure_initialization{};
 

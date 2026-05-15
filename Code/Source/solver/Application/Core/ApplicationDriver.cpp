@@ -586,6 +586,13 @@ bool activeSideContains(double phi, const LevelSetAdvectionVelocityRequest& requ
              : phi >= request.isovalue;
 }
 
+const char* activeSideName(LevelSetActiveSide side) noexcept
+{
+  return side == LevelSetActiveSide::Negative
+             ? "LevelSetNegative"
+             : "LevelSetPositive";
+}
+
 bool copyVertexFloat64Field(
     svmp::Mesh& mesh,
     const std::string& source_name,
@@ -1366,11 +1373,25 @@ bool refreshActiveCutIntegrationContextFromSolution(
     }
 
     const auto summary = result.summary;
+    const auto active_volume =
+        request.active_side == LevelSetActiveSide::Negative
+            ? summary.negative_volume_measure
+            : summary.positive_volume_measure;
+    if (!(active_volume > svmp::FE::Real{0.0})) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active-domain cut context marker=" +
+          std::to_string(result.interface_marker) + " field='" +
+          request.level_set_field_name + "' domain_id='" + request.domain_id +
+          "' active_side=" + activeSideName(request.active_side) +
+          " has zero active wet volume.");
+    }
     context->addGeneratedInterfaceDomain(result.domain);
     application::core::oopCout()
         << "[svMultiPhysics::Application] Active-domain cut context marker="
         << result.interface_marker << " field='" << request.level_set_field_name
-        << "' domain_id='" << request.domain_id << "' active_fragments="
+        << "' domain_id='" << request.domain_id
+        << "' active_side=" << activeSideName(request.active_side)
+        << " active_side_volume=" << active_volume << " active_fragments="
         << summary.active_fragment_count << " active_volume_regions="
         << summary.active_volume_region_count
         << " negative_volume=" << summary.negative_volume_measure

@@ -57,6 +57,10 @@ metadata, and level-set diagnostics, then installs the free-surface pressure
 jump, surface-tension, kinematic, and stabilization terms. Reusable level-set
 transport, volume, reinitialization, diagnostics, restart, and generated
 interface lifecycle code belongs in `Code/Source/solver/FE/LevelSet`.
+One-fluid unfitted free-surface validation cases must declare the wet active
+domain explicitly, normally `Active_domain=LevelSetNegative` with
+`Active_domain_method=CutVolume`; full-domain unfitted runs require an explicit
+diagnostic opt-in.
 
 ## Open Tank At Rest
 

@@ -8,7 +8,6 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
-#include "Physics/Materials/Fluid/NewtonianViscosity.h"
 
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
@@ -116,6 +115,12 @@ struct LevelSetVertexFieldView {
     std::size_t entity_count{0};
 };
 
+struct VertexScalarFieldView {
+    const FE::Real* values{nullptr};
+    std::size_t components{0};
+    std::size_t entity_count{0};
+};
+
 [[nodiscard]] const char* pressureActiveDomainName(
     FreeSurfaceActiveDomain domain) noexcept
 {
@@ -217,6 +222,60 @@ activePressureDomainFor(
     (void)context;
     throw std::runtime_error(
         "IncompressibleNavierStokesVMSModule: active-domain pressure operations require native mesh support");
+#endif
+}
+
+[[nodiscard]] VertexScalarFieldView pressureInitializationField(
+    const FE::systems::FESystem& system,
+    std::string_view field_name,
+    FE::GlobalIndex n_vertices)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto* native_mesh = system.mesh();
+    if (native_mesh == nullptr) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization requires a native mesh");
+    }
+
+    const auto& local_mesh = native_mesh->local_mesh();
+    const std::string field_name_string(field_name);
+    if (!MeshFields::has_field(local_mesh, EntityKind::Vertex, field_name_string)) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization could not find vertex field '" +
+            field_name_string + "'");
+    }
+
+    const auto handle = MeshFields::get_field_handle(local_mesh, EntityKind::Vertex, field_name_string);
+    if (MeshFields::field_type(local_mesh, handle) != FieldScalarType::Float64) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization requires a Float64 vertex field");
+    }
+
+    const auto components = MeshFields::field_components(local_mesh, handle);
+    if (components < 1u) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization requires at least one component");
+    }
+
+    const auto entity_count = MeshFields::field_entity_count(local_mesh, handle);
+    if (entity_count < static_cast<std::size_t>(n_vertices)) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization has fewer entries than pressure vertices");
+    }
+
+    const auto* values = MeshFields::field_data_as<FE::Real>(local_mesh, handle);
+    if (values == nullptr) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization found an empty vertex field");
+    }
+
+    return VertexScalarFieldView{values, components, entity_count};
+#else
+    (void)system;
+    (void)field_name;
+    (void)n_vertices;
+    throw std::runtime_error(
+        "IncompressibleNavierStokesVMSModule: hydrostatic pressure field initialization requires native mesh support");
 #endif
 }
 
@@ -388,6 +447,11 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
                                         n_vertices,
                                         "active-domain hydrostatic pressure initialization");
     }
+    std::optional<VertexScalarFieldView> pressure_initialization_field;
+    if (!init.field_name.empty()) {
+        pressure_initialization_field =
+            pressureInitializationField(system, init.field_name, n_vertices);
+    }
 
     std::vector<FE::GlobalIndex> dofs;
     std::vector<FE::Real> values;
@@ -417,7 +481,11 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
             }
         }
         const FE::Real pressure = initialize_hydrostatic
-            ? hydrostaticPressureAt(x, options_, init)
+            ? (pressure_initialization_field.has_value()
+                   ? pressure_initialization_field->values[
+                         static_cast<std::size_t>(vertex) *
+                         pressure_initialization_field->components]
+                   : hydrostaticPressureAt(x, options_, init))
             : init.reference_pressure;
 
         for (const auto local_dof : vertex_dofs) {
@@ -449,6 +517,9 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
             << " wet_pressure_vertices=" << active_wet_vertices
             << " dry_pressure_vertices=" << active_dry_vertices
             << " reference_pressure=" << init.reference_pressure;
+        if (!init.field_name.empty()) {
+            oss << " pressure_field='" << init.field_name << "'";
+        }
         FE_LOG_INFO(oss.str());
     }
 }
@@ -595,6 +666,11 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: unfitted free surface requires a non-empty level_set_field_name");
         }
+        if (bc.active_domain == FreeSurfaceActiveDomain::None &&
+            !bc.allow_full_domain_unfitted_free_surface) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: UnfittedLevelSet free surfaces require Active_domain=LevelSetNegative or LevelSetPositive; set Allow_full_domain_unfitted_free_surface=true only for deliberate full-domain diagnostic runs");
+        }
         const auto& cut = bc.cut_cell_stabilization;
         if (cut.enabled) {
             const auto* velocity_penalty =
@@ -615,6 +691,23 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
                     "IncompressibleNavierStokesVMSModule: enabled cut-cell stabilization requires a nonzero penalty");
             }
         }
+        const auto& extension = bc.velocity_extension;
+        if (extension.enabled) {
+            const auto* diffusivity =
+                std::get_if<FE::Real>(&extension.diffusivity);
+            if (diffusivity && *diffusivity < FE::Real{0.0}) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: velocity-extension diffusivity must be nonnegative");
+            }
+            if (FE::forms::bc::isZeroConstantScalarValue(extension.diffusivity)) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: enabled velocity extension requires a nonzero diffusivity");
+            }
+            if (bc.active_domain == FreeSurfaceActiveDomain::None) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: velocity extension requires an active-domain unfitted free surface");
+            }
+        }
     } else {
         if (bc.boundary_marker < 0) {
             throw std::invalid_argument(
@@ -627,6 +720,14 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
         if (bc.active_domain != FreeSurfaceActiveDomain::None) {
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: active-domain free-surface volume integration is only valid for unfitted level-set free surfaces");
+        }
+        if (bc.allow_full_domain_unfitted_free_surface) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: Allow_full_domain_unfitted_free_surface is only valid for unfitted level-set free surfaces");
+        }
+        if (bc.velocity_extension.enabled) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: velocity extension is only valid for unfitted level-set free surfaces");
         }
         if (bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
             !ale_enabled) {
@@ -787,6 +888,42 @@ struct ActiveVolumeDomain {
     return side == FE::forms::CutVolumeSide::Negative ? "Negative" : "Positive";
 }
 
+[[nodiscard]] FE::forms::CutVolumeSide activeDomainSide(
+    FreeSurfaceActiveDomain domain) noexcept
+{
+    switch (domain) {
+    case FreeSurfaceActiveDomain::None:
+    case FreeSurfaceActiveDomain::LevelSetNegative:
+        return FE::forms::CutVolumeSide::Negative;
+    case FreeSurfaceActiveDomain::LevelSetPositive:
+        return FE::forms::CutVolumeSide::Positive;
+    }
+    return FE::forms::CutVolumeSide::Negative;
+}
+
+[[nodiscard]] FE::forms::CutVolumeSide oppositeCutVolumeSide(
+    FE::forms::CutVolumeSide side) noexcept
+{
+    return side == FE::forms::CutVolumeSide::Negative
+               ? FE::forms::CutVolumeSide::Positive
+               : FE::forms::CutVolumeSide::Negative;
+}
+
+[[nodiscard]] FE::forms::FormExpr activeDomainIndicatorFor(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    const auto phi = freeSurfaceLevelSet(bc, system);
+    const auto signed_phi =
+        bc.active_domain == FreeSurfaceActiveDomain::LevelSetNegative
+            ? FE::forms::FormExpr::constant(bc.level_set_isovalue) - phi
+            : phi - FE::forms::FormExpr::constant(bc.level_set_isovalue);
+    const auto width = bc.active_domain_smoothing_width > FE::Real{0.0}
+        ? FE::forms::FormExpr::constant(bc.active_domain_smoothing_width)
+        : FE::forms::h();
+    return FE::forms::smoothHeaviside(signed_phi, width);
+}
+
 [[nodiscard]] std::optional<ActiveVolumeDomain> activeVolumeDomainFor(
     const std::vector<FreeSurfaceBoundary>& free_surfaces,
     const FE::systems::FESystem& system)
@@ -801,28 +938,10 @@ struct ActiveVolumeDomain {
                 "IncompressibleNavierStokesVMSModule: at most one active-domain free surface may restrict Navier-Stokes volume integration");
         }
 
-        FE::forms::CutVolumeSide side = FE::forms::CutVolumeSide::Negative;
-        switch (bc.active_domain) {
-        case FreeSurfaceActiveDomain::None:
-            break;
-        case FreeSurfaceActiveDomain::LevelSetNegative:
-            side = FE::forms::CutVolumeSide::Negative;
-            break;
-        case FreeSurfaceActiveDomain::LevelSetPositive:
-            side = FE::forms::CutVolumeSide::Positive;
-            break;
-        }
+        const FE::forms::CutVolumeSide side = activeDomainSide(bc.active_domain);
         FE::forms::FormExpr indicator{};
         if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
-            const auto phi = freeSurfaceLevelSet(bc, system);
-            const auto signed_phi =
-                bc.active_domain == FreeSurfaceActiveDomain::LevelSetNegative
-                    ? FE::forms::FormExpr::constant(bc.level_set_isovalue) - phi
-                    : phi - FE::forms::FormExpr::constant(bc.level_set_isovalue);
-            const auto width = bc.active_domain_smoothing_width > FE::Real{0.0}
-                ? FE::forms::FormExpr::constant(bc.active_domain_smoothing_width)
-                : FE::forms::h();
-            indicator = FE::forms::smoothHeaviside(signed_phi, width);
+            indicator = activeDomainIndicatorFor(bc, system);
             FE_LOG_WARNING(
                 "IncompressibleNavierStokesVMSModule: Active_domain_method=SmoothedIndicator is diagnostic and not a final benchmark acceptance path");
         }
@@ -835,6 +954,10 @@ struct ActiveVolumeDomain {
         std::ostringstream oss;
         oss << "IncompressibleNavierStokesVMSModule: active-domain free surface "
             << "marker=" << bc.interface_marker
+            << " level_set_field='" << bc.level_set_field_name << "'"
+            << " isovalue=" << bc.level_set_isovalue
+            << " generated_interface_domain_id='"
+            << bc.generated_interface_domain_id << "'"
             << " Active_domain=" << activeDomainName(bc.active_domain)
             << " Active_domain_method="
             << activeDomainMethodName(bc.active_domain_method)
@@ -862,6 +985,46 @@ struct ActiveVolumeDomain {
     }
     return integrand.dCutVolume(active_domain->interface_marker,
                                 active_domain->side);
+}
+
+[[nodiscard]] ActiveVolumeDomain inactiveVolumeDomainFor(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    const auto active_side = activeDomainSide(bc.active_domain);
+    FE::forms::FormExpr indicator{};
+    if (bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
+        indicator = FE::forms::FormExpr::constant(1.0) -
+                    activeDomainIndicatorFor(bc, system);
+    }
+    return ActiveVolumeDomain{
+        bc.interface_marker,
+        oppositeCutVolumeSide(active_side),
+        bc.active_domain_method,
+        indicator};
+}
+
+void applyFreeSurfaceVelocityExtension(
+    FE::forms::FormExpr& momentum_form,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system,
+    const FE::forms::FormExpr& u,
+    const FE::forms::FormExpr& v)
+{
+    if (!isUnfittedLevelSet(bc) || !bc.velocity_extension.enabled) {
+        return;
+    }
+
+    namespace bc_forms = FE::forms::bc;
+    const auto diffusivity = bc_forms::toScalarExpr(
+        bc.velocity_extension.diffusivity,
+        freeSurfaceValueName("ns_free_surface_velocity_extension_diffusivity", bc));
+    const auto inactive_domain = inactiveVolumeDomainFor(bc, system);
+    momentum_form =
+        momentum_form +
+        integrateOnActiveVolume(diffusivity * FE::forms::inner(FE::forms::grad(u),
+                                                               FE::forms::grad(v)),
+                                inactive_domain);
 }
 
 [[nodiscard]] FE::forms::FormExpr freeSurfaceLevelSet(
@@ -1348,25 +1511,27 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     }
     const auto f = FormExpr::asVector(std::move(f_comp));
 
-    // Viscosity is represented as a tagged constitutive expression so
-    // installFormulation() can publish the law from the residual DAG.
     const auto eps_for_mu = sym(grad(u));
     const auto gamma_for_mu =
         sqrt(FormExpr::constant(2.0) * inner(eps_for_mu, eps_for_mu));
-    std::shared_ptr<const FE::forms::ConstitutiveModel> viscosity_model =
-        options_.viscosity_model
-            ? options_.viscosity_model
-            : std::make_shared<materials::fluid::NewtonianViscosity>(
-                  options_.viscosity);
-    auto viscosity_metadata = FE::analysis::dynamicViscosityMetadata(
-        FE::INVALID_FIELD_ID,
-        options_.viscosity,
-        options_.viscosity_model);
-    viscosity_model = FE::constitutive::withConstitutiveLawMetadata(
-        std::move(viscosity_model),
-        0u,
-        std::move(viscosity_metadata));
-    const auto mu = constitutive(std::move(viscosity_model), gamma_for_mu).out(0);
+    FormExpr mu;
+    if (options_.viscosity_model) {
+        // Variable viscosity remains a tagged constitutive expression so
+        // installFormulation() can publish the law from the residual DAG.
+        std::shared_ptr<const FE::forms::ConstitutiveModel> viscosity_model =
+            options_.viscosity_model;
+        auto viscosity_metadata = FE::analysis::dynamicViscosityMetadata(
+            FE::INVALID_FIELD_ID,
+            options_.viscosity,
+            options_.viscosity_model);
+        viscosity_model = FE::constitutive::withConstitutiveLawMetadata(
+            std::move(viscosity_model),
+            0u,
+            std::move(viscosity_metadata));
+        mu = constitutive(std::move(viscosity_model), gamma_for_mu).out(0);
+    } else {
+        mu = FormExpr::constant(options_.viscosity);
+    }
 
     // ALE uses relative convection u - w_mesh. Static/default paths remain unchanged.
     const auto zero = zeroVector(dim);
@@ -1506,6 +1671,12 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             mu,
             options_,
             options_.enable_ale);
+        applyFreeSurfaceVelocityExtension(
+            momentum_form,
+            effective_bc,
+            system,
+            u,
+            v);
         installFittedFreeSurfaceMeshKinematics(
             system,
             effective_bc,
@@ -1557,6 +1728,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     auto install = physicsInstallOptions(options_.jit_policy);
     install.compiler_options.use_symbolic_tangent = true;
+    if (!options_.viscosity_model) {
+        install.recordDynamicViscosity(u_id, options_.viscosity);
+    }
     ale_binding.configureInstallOptions(install);
     (void)FE::systems::installFormulation(system, "equations", {u_id, p_id}, residual, install);
 }

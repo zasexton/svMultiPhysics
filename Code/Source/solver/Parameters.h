@@ -1294,6 +1294,7 @@ class DomainParameters : public ParameterLists
     Parameter<bool> hydrostatic_pressure_initialization;
     Parameter<double> hydrostatic_pressure_reference;
     VectorParameter<double> hydrostatic_pressure_reference_point;
+    Parameter<std::string> hydrostatic_pressure_field_name;
 
     Parameter<double> isotropic_conductivity;
 

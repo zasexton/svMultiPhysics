@@ -896,6 +896,9 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
     options.hydrostatic_pressure_initialization.reference_point =
         parse_real_vector3(*reference_point, "Hydrostatic_pressure_reference_point");
   }
+  if (const auto field_name = get_defined_string(domain.params, "Hydrostatic_pressure_field_name")) {
+    options.hydrostatic_pressure_initialization.field_name = *field_name;
+  }
 
   const auto* model_param = find_param(domain.params, "Viscosity.model");
   if (!model_param || !model_param->defined || trim_copy(model_param->value).empty()) {
@@ -2142,6 +2145,14 @@ void append_free_surface_bc(
     fs.active_domain_smoothing_width =
         static_cast<svmp::FE::Real>(*active_domain_smoothing_width);
   }
+  if (const auto allow_full_domain = first_defined_bool(
+          bc.params,
+          {"Allow_full_domain_unfitted_free_surface",
+           "AllowFullDomainUnfittedFreeSurface",
+           "Allow_full_domain_free_surface",
+           "AllowFullDomainFreeSurface"})) {
+    fs.allow_full_domain_unfitted_free_surface = *allow_full_domain;
+  }
   if (fs.implementation == FreeSurfaceImplementation::FittedALE) {
     fs.boundary_marker = bc.boundary_marker;
   } else {
@@ -2259,11 +2270,15 @@ void append_free_surface_bc(
     options.nitsche_scale_with_p = *scale_with_p;
   }
 
-  if (const auto enabled = first_defined_bool(
+  const auto cut_cell_stabilization_enabled = first_defined_bool(
           bc.params,
           {"Enable_cut_cell_stabilization", "EnableCutCellStabilization",
-           "Cut_cell_stabilization", "CutCellStabilization"})) {
-    fs.cut_cell_stabilization.enabled = *enabled;
+           "Cut_cell_stabilization", "CutCellStabilization"});
+  const bool cut_cell_stabilization_explicitly_disabled =
+      cut_cell_stabilization_enabled.has_value() &&
+      !*cut_cell_stabilization_enabled;
+  if (cut_cell_stabilization_enabled.has_value()) {
+    fs.cut_cell_stabilization.enabled = *cut_cell_stabilization_enabled;
   }
   if (const auto velocity_penalty = first_defined_double(
           bc.params,
@@ -2272,7 +2287,9 @@ void append_free_surface_bc(
     fs.cut_cell_stabilization.velocity_gradient_penalty =
         IncompressibleNavierStokesVMSOptions::ScalarValue{
             static_cast<svmp::FE::Real>(*velocity_penalty)};
-    fs.cut_cell_stabilization.enabled = true;
+    if (!cut_cell_stabilization_explicitly_disabled) {
+      fs.cut_cell_stabilization.enabled = true;
+    }
   }
   if (const auto pressure_penalty = first_defined_double(
           bc.params,
@@ -2281,13 +2298,34 @@ void append_free_surface_bc(
     fs.cut_cell_stabilization.pressure_gradient_penalty =
         IncompressibleNavierStokesVMSOptions::ScalarValue{
             static_cast<svmp::FE::Real>(*pressure_penalty)};
-    fs.cut_cell_stabilization.enabled = true;
+    if (!cut_cell_stabilization_explicitly_disabled) {
+      fs.cut_cell_stabilization.enabled = true;
+    }
   }
   if (const auto use_cut_scale = first_defined_bool(
           bc.params,
           {"Use_cut_metadata_scale", "UseCutMetadataScale",
            "Use_cut_stabilization_scale", "UseCutStabilizationScale"})) {
     fs.cut_cell_stabilization.use_cut_metadata_scale = *use_cut_scale;
+  }
+
+  if (const auto velocity_extension_enabled = first_defined_bool(
+          bc.params,
+          {"Enable_velocity_extension", "EnableVelocityExtension",
+           "Velocity_extension", "VelocityExtension",
+           "Extend_velocity_to_inactive_domain",
+           "ExtendVelocityToInactiveDomain"})) {
+    fs.velocity_extension.enabled = *velocity_extension_enabled;
+  }
+  if (const auto velocity_extension_diffusivity = first_defined_double(
+          bc.params,
+          {"Velocity_extension_diffusivity", "VelocityExtensionDiffusivity",
+           "Inactive_velocity_extension_diffusivity",
+           "InactiveVelocityExtensionDiffusivity"})) {
+    fs.velocity_extension.diffusivity =
+        IncompressibleNavierStokesVMSOptions::ScalarValue{
+            static_cast<svmp::FE::Real>(*velocity_extension_diffusivity)};
+    fs.velocity_extension.enabled = true;
   }
 
   append_free_surface_contact_line(bc.params, fs);

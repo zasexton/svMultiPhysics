@@ -154,6 +154,16 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "ConstantVelocity",
     "Velocity_value",
     "VelocityValue",
+    "Use_wet_extension_advection_velocity",
+    "UseWetExtensionAdvectionVelocity",
+    "Update_advection_velocity_from_wet_region",
+    "UpdateAdvectionVelocityFromWetRegion",
+    "Advection_velocity_from_field",
+    "AdvectionVelocityFromField",
+    "Source_velocity_field_name",
+    "SourceVelocityFieldName",
+    "Physical_velocity_field_name",
+    "PhysicalVelocityFieldName",
     "Enable_SUPG",
     "SUPG",
     "SUPG_enabled",
@@ -265,6 +275,10 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "ActiveDomainSmoothingWidth",
     "Free_surface_active_domain_smoothing_width",
     "FreeSurfaceActiveDomainSmoothingWidth",
+    "Allow_full_domain_unfitted_free_surface",
+    "AllowFullDomainUnfittedFreeSurface",
+    "Allow_full_domain_free_surface",
+    "AllowFullDomainFreeSurface",
     "Curvature",
     "Use_level_set_curvature",
     "UseLevelSetCurvature",
@@ -318,6 +332,16 @@ bool is_oop_boundary_extension_parameter(const std::string& name)
     "UseCutMetadataScale",
     "Use_cut_stabilization_scale",
     "UseCutStabilizationScale",
+    "Enable_velocity_extension",
+    "EnableVelocityExtension",
+    "Velocity_extension",
+    "VelocityExtension",
+    "Extend_velocity_to_inactive_domain",
+    "ExtendVelocityToInactiveDomain",
+    "Velocity_extension_diffusivity",
+    "VelocityExtensionDiffusivity",
+    "Inactive_velocity_extension_diffusivity",
+    "InactiveVelocityExtensionDiffusivity",
     "Contact_line_model",
     "ContactLineModel",
     "Free_surface_contact_line_model",
@@ -2002,6 +2026,7 @@ DomainParameters::DomainParameters()
   set_parameter("Hydrostatic_pressure_reference", 0.0, !required, hydrostatic_pressure_reference);
   set_parameter("Hydrostatic_pressure_reference_point", {0.0, 0.0, 0.0}, !required,
                 hydrostatic_pressure_reference_point);
+  set_parameter("Hydrostatic_pressure_field_name", "", !required, hydrostatic_pressure_field_name);
 
   set_parameter("Isotropic_conductivity", 0.0, !required, isotropic_conductivity);
 

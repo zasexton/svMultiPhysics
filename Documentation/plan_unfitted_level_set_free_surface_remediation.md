@@ -108,54 +108,54 @@ mesh.
 
 ### Configuration Checklist
 
-- [ ] Add explicit validation for `Free_surface` plus
+- [x] Add explicit validation for `Free_surface` plus
       `Implementation=UnfittedLevelSet`.
-- [ ] Reject missing `Active_domain` unless the input also sets a deliberate
+- [x] Reject missing `Active_domain` unless the input also sets a deliberate
       full-domain opt-in such as `Allow_full_domain_unfitted_free_surface=true`.
-- [ ] Reject `Active_domain=None` for validation fixtures that claim to be
+- [x] Reject `Active_domain=None` for validation fixtures that claim to be
       one-fluid free-surface unfitted cases.
-- [ ] Keep `Active_domain_method=CutVolume` as the accepted production path.
-- [ ] Keep `Active_domain_method=SmoothedIndicator` available only as a
+- [x] Keep `Active_domain_method=CutVolume` as the accepted production path.
+- [x] Keep `Active_domain_method=SmoothedIndicator` available only as a
       diagnostic or explicitly approximate fallback.
-- [ ] Emit a clear diagnostic showing the level-set field, isovalue, active side,
+- [x] Emit a clear diagnostic showing the level-set field, isovalue, active side,
       active-domain method, and generated interface domain id.
-- [ ] Validate that the configured active side contains at least one wet cell at
+- [x] Validate that the configured active side contains at least one wet cell at
       initialization.
-- [ ] Validate that the configured active side is consistent with benchmark
+- [x] Validate that the configured active side is consistent with benchmark
       documentation, for example negative `phi` is water for D18/D38.
 
 ### Fixture Checklist
 
-- [ ] Update `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/solver.xml`
+- [x] Update `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/solver.xml`
       to either set the wet active domain or explicitly mark itself as a
       full-domain diagnostic case.
-- [ ] Update
+- [x] Update
       `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test10_lateral_water_1x/solver.xml`
       to set the intended wet active domain.
-- [ ] Update
+- [x] Update
       `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test02_dambreak_obstacle/solver.xml`
       to set the intended wet active domain.
-- [ ] Verify
+- [x] Verify
       `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test05_wet_bed_d18/solver.xml`
       keeps `Active_domain=LevelSetNegative` and
       `Active_domain_method=CutVolume`.
-- [ ] Verify
+- [x] Verify
       `tests/cases/fluid/open_vessel_free_surface/unfitted_level_set/spheric_test05_wet_bed_d38/solver.xml`
       keeps `Active_domain=LevelSetNegative` and
       `Active_domain_method=CutVolume`.
-- [ ] Update moving-free-surface validation documentation to state that
+- [x] Update moving-free-surface validation documentation to state that
       unfitted one-fluid cases require an explicit wet active domain.
 
 ### Tests
 
-- [ ] Add an input-validation test for missing `Active_domain`.
-- [ ] Add an input-validation test for `Active_domain=None` without an explicit
+- [x] Add an input-validation test for missing `Active_domain`.
+- [x] Add an input-validation test for `Active_domain=None` without an explicit
       full-domain opt-in.
-- [ ] Add an input-validation test for active-domain options on fitted ALE free
+- [x] Add an input-validation test for active-domain options on fitted ALE free
       surfaces.
-- [ ] Add a smoke test proving a zero-stress unfitted free surface still changes
+- [x] Add a smoke test proving a zero-stress unfitted free surface still changes
       Navier-Stokes assembly through `dCutVolume(...)`.
-- [ ] Add a smoke test proving omitted active-domain configuration does not
+- [x] Add a smoke test proving omitted active-domain configuration does not
       silently produce a full-tank hydrostatic result in validation fixtures.
 
 ## 3. Replace Constant Cut-Volume Quadrature
