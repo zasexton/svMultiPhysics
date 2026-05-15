@@ -381,7 +381,7 @@ benchmark runs.
 - [x] Cut context rebuilds from current Newton state.
 - [x] Cut context rebuilds from line-search trial state.
 - [x] Rejected line-search trial does not leave stale trial cut context installed.
-- [ ] Missing active domain is rejected for validation unfitted free-surface
+- [x] Missing active domain is rejected for validation unfitted free-surface
       cases.
 - [ ] Cut-volume quadrature integrates constants exactly.
 - [ ] Cut-volume quadrature integrates linear fields to the selected exactness
