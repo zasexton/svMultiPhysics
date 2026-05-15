@@ -14,6 +14,7 @@ add_executable(test_application
   Unit/test_MeshCollection.cpp
   Unit/test_MeshTranslator.cpp
   Unit/test_OpenVesselExamples.cpp
+  Unit/test_OpenVesselStabilizationMetadata.cpp
   ../Core/MeshCollection.cpp
   ../Translators/EquationTranslator.cpp
   ../Translators/LevelSetEquationTranslator.cpp
