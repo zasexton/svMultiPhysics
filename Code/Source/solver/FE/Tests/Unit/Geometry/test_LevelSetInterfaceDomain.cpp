@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <stdexcept>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::geometry;
@@ -346,6 +347,7 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
     EXPECT_EQ(rules.front().provenance.predicate_policy_key, 29u);
     EXPECT_NEAR(rules.front().parent_measure, 1.0, 1.0e-14);
     EXPECT_NEAR(rules.front().measure, 1.0, 1.0e-14);
+    EXPECT_TRUE(rules.front().full_cell_equivalent);
     ASSERT_EQ(rules.front().points.size(), 1u);
     EXPECT_NEAR(rules.front().points.front().weight, 1.0, 1.0e-14);
 
@@ -373,6 +375,7 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
     EXPECT_EQ(rules.front().provenance.parent_entity, 12);
     EXPECT_EQ(rules.front().provenance.marker, 84);
     EXPECT_NEAR(rules.front().measure, 1.0, 1.0e-14);
+    EXPECT_TRUE(rules.front().full_cell_equivalent);
 }
 
 TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
@@ -402,6 +405,8 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     ASSERT_EQ(rules.size(), 2u);
     EXPECT_EQ(rules[0].side, CutIntegrationSide::Negative);
     EXPECT_EQ(rules[1].side, CutIntegrationSide::Positive);
+    EXPECT_FALSE(rules[0].full_cell_equivalent);
+    EXPECT_FALSE(rules[1].full_cell_equivalent);
     EXPECT_NEAR(rules[0].measure, 0.5, 1.0e-14);
     EXPECT_NEAR(rules[1].measure, 0.5, 1.0e-14);
     EXPECT_NEAR(rules[0].points.front().weight + rules[1].points.front().weight,
@@ -443,6 +448,8 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     ASSERT_EQ(rules.size(), 2u);
     EXPECT_EQ(rules[0].side, CutIntegrationSide::Negative);
     EXPECT_EQ(rules[1].side, CutIntegrationSide::Positive);
+    EXPECT_FALSE(rules[0].full_cell_equivalent);
+    EXPECT_FALSE(rules[1].full_cell_equivalent);
     EXPECT_NEAR(rules[0].parent_measure, 1.0 / 6.0, 1.0e-14);
     EXPECT_NEAR(rules[0].volume_fraction, 1.0 / 8.0, 1.0e-14);
     EXPECT_NEAR(rules[1].volume_fraction, 7.0 / 8.0, 1.0e-14);
@@ -462,6 +469,76 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     EXPECT_NEAR(integrateCoordinate(rules[1], 0), 5.0 / 128.0, 1.0e-14);
     EXPECT_NEAR(integrateCoordinate(rules[1], 1), 5.0 / 128.0, 1.0e-14);
     EXPECT_NEAR(integrateCoordinate(rules[1], 2), 5.0 / 128.0, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElementTypes)
+{
+    struct Case {
+        ElementType element_type{ElementType::Unknown};
+        bool three_dimensional{false};
+        std::vector<std::array<Real, 3>> node_coordinates{};
+        std::vector<Real> level_set_values{};
+        Real parent_measure{0.0};
+    };
+
+    const std::vector<std::array<Real, 3>> triangle_nodes{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}}};
+    const std::vector<std::array<Real, 3>> quad_nodes{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{0.0, 1.0, 0.0}}};
+    const std::vector<std::array<Real, 3>> tetra_nodes{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+        {{0.0, 0.0, 1.0}}};
+
+    const std::vector<Case> cases{
+        Case{ElementType::Triangle3, false, triangle_nodes, {-0.5, 0.5, -0.5}, 0.5},
+        Case{ElementType::Triangle6, false, triangle_nodes, {-0.5, 0.5, -0.5}, 0.5},
+        Case{ElementType::Quad4, false, quad_nodes, {-0.5, 0.5, 0.5, -0.5}, 1.0},
+        Case{ElementType::Quad8, false, quad_nodes, {-0.5, 0.5, 0.5, -0.5}, 1.0},
+        Case{ElementType::Quad9, false, quad_nodes, {-0.5, 0.5, 0.5, -0.5}, 1.0},
+        Case{ElementType::Tetra4, true, tetra_nodes, {-0.5, 0.5, 0.5, 0.5}, 1.0 / 6.0},
+        Case{ElementType::Tetra10, true, tetra_nodes, {-0.5, 0.5, 0.5, 0.5}, 1.0 / 6.0}};
+
+    int marker = 91;
+    MeshIndex parent_cell = 100;
+    for (const auto& c : cases) {
+        CutInterfaceDomainRequest request;
+        request.source = LevelSetInterfaceSource::fromEvaluator("constant-volume-source");
+        request.interface_marker = marker++;
+
+        LevelSetInterfaceDomain domain(request);
+        const LevelSetCellCutInput input{
+            .parent_cell = parent_cell++,
+            .element_type = c.element_type,
+            .node_coordinates = c.node_coordinates,
+            .level_set_values = c.level_set_values};
+        if (c.three_dimensional) {
+            appendLinearLevelSetCellCut3D(domain, input);
+        } else {
+            appendLinearLevelSetCellCut2D(domain, input);
+        }
+
+        const auto rules = domain.volumeQuadratureRules();
+        ASSERT_EQ(rules.size(), 2u);
+        Real measure_sum = 0.0;
+        Real weight_sum = 0.0;
+        for (const auto& rule : rules) {
+            EXPECT_TRUE(rule.exact_for_constants);
+            EXPECT_NEAR(rule.parent_measure, c.parent_measure, 1.0e-14);
+            measure_sum += rule.measure;
+            for (const auto& point : rule.points) {
+                weight_sum += point.weight;
+            }
+        }
+        EXPECT_NEAR(measure_sum, c.parent_measure, 1.0e-14);
+        EXPECT_NEAR(weight_sum, c.parent_measure, 1.0e-14);
+    }
 }
 
 TEST(LevelSetInterfaceDomain, LinearCellCutsExportTriangleVolumeCentroids)

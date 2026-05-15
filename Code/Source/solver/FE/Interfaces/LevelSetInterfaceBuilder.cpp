@@ -706,7 +706,8 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     const std::array<Real, 3>& interface_normal,
     const std::vector<Real>& signed_values,
     LocalIndex local_region_index,
-    const std::string& suffix)
+    const std::string& suffix,
+    bool full_cell_equivalent = false)
 {
     CutInterfaceVolumeRegion region;
     region.interface_marker = request.interface_marker;
@@ -723,6 +724,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     region.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     region.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     region.topology_id = "cell-" + std::to_string(input.parent_cell) + "-" + suffix;
+    region.full_cell_equivalent = full_cell_equivalent;
     region.stable_id = cutVolumeStableId(request.interface_marker,
                                          input.parent_cell,
                                          local_region_index,
@@ -899,7 +901,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              gradient_normal,
                              signed_values,
                              0u,
-                             "full-negative-volume"));
+                             "full-negative-volume",
+                             true));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
                                                   request.tolerance);
@@ -917,7 +920,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              gradient_normal,
                              signed_values,
                              0u,
-                             "full-positive-volume"));
+                             "full-positive-volume",
+                             true));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
                                                   request.tolerance);
@@ -1155,7 +1159,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              gradient_normal,
                              signed_values,
                              0u,
-                             "full-negative-volume"));
+                             "full-negative-volume",
+                             true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
         return result;
@@ -1172,7 +1177,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              gradient_normal,
                              signed_values,
                              0u,
-                             "full-positive-volume"));
+                             "full-positive-volume",
+                             true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
         return result;

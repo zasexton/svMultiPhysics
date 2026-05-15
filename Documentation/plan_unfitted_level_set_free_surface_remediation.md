@@ -197,7 +197,7 @@ side volume keep active side-volume metadata.
       than one point per cut side.
 - [x] Generate negative-side and positive-side quadrature rules with consistent
       parent cell ids, side labels, volume fractions, and provenance.
-- [ ] For full negative and full positive cells, reuse normal element quadrature
+- [x] For full negative and full positive cells, reuse normal element quadrature
       or mark the generated rule as full-cell-equivalent.
 - [x] For cut triangles, generate side-specific sub-triangle or moment-fitted
       rules.
@@ -216,7 +216,7 @@ side volume keep active side-volume metadata.
 
 ### Tests
 
-- [ ] Add exact constant integration tests for all supported element types.
+- [x] Add exact constant integration tests for all supported element types.
 - [x] Add exact linear integration tests for cut triangles.
 - [x] Add exact linear integration tests for cut quads.
 - [x] Add exact linear integration tests for cut tetrahedra.

@@ -91,6 +91,7 @@ struct CutQuadratureRule {
     std::string provenance_id{};
     CutGeometryFrame frame{CutGeometryFrame::Reference};
     bool curved_geometry{false};
+    bool full_cell_equivalent{false};
 };
 
 struct CutQuadratureValidityPolicy {
