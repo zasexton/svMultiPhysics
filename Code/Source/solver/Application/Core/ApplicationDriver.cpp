@@ -1218,6 +1218,12 @@ bool applyLevelSetMaintenance(
           << request.level_set_field_name << "' step=" << completed_step
           << " repaired_dofs=" << result.repaired_dofs
           << " interface_fragments=" << result.interface_fragments
+          << " interface_displacement_samples="
+          << result.interface_displacement_samples
+          << " max_interface_displacement="
+          << result.max_interface_displacement
+          << " l2_interface_displacement="
+          << result.l2_interface_displacement
           << " max_abs_update=" << result.max_abs_update << std::endl;
     }
 

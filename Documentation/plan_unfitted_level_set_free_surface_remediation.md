@@ -338,7 +338,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
 - [x] Document that plain level-set advection is not conservative by itself.
 - [x] Add an option for conservative level-set transport or document why it is
       deferred.
-- [ ] If projection-based reinitialization remains the default, add diagnostics
+- [x] If projection-based reinitialization remains the default, add diagnostics
       reporting interface displacement caused by reinitialization.
 - [ ] If global-shift volume correction remains the default, add diagnostics
       reporting shift magnitude and achieved volume error.

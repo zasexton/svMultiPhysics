@@ -199,6 +199,7 @@ TEST(LevelSetReinitialization, ProjectionRepairsNodalField)
 
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 1.0;
 
     std::vector<FE::Real> repaired;
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
@@ -213,7 +214,11 @@ TEST(LevelSetReinitialization, ProjectionRepairsNodalField)
     EXPECT_EQ(result.repaired_dofs, 4u);
     EXPECT_EQ(result.interface_fragments, 1u);
     EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_EQ(result.interface_displacement_samples, 3u);
     EXPECT_GT(result.max_abs_update, 0.0);
+    EXPECT_GT(result.max_interface_displacement, 0.0);
+    EXPECT_GT(result.l2_interface_displacement, 0.0);
+    EXPECT_LE(result.max_interface_displacement, result.max_abs_update);
 
     EXPECT_NEAR(vertexValue(*entity_map, repaired, 0), -0.25, 1.0e-12);
     EXPECT_NEAR(vertexValue(*entity_map, repaired, 1), 0.75, 1.0e-12);

@@ -315,6 +315,7 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         return result;
     }
 
+    Real interface_displacement_squared_sum = 0.0;
     for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
         const auto original = coefficientAtVertex(*entity_map, vertex, input_coefficients);
         const auto x = mesh.getNodeCoordinates(vertex);
@@ -330,9 +331,22 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
             repaired = -d;
         }
         setCoefficientAtVertex(*entity_map, vertex, repaired, repaired_coefficients);
-        result.max_abs_update = std::max(result.max_abs_update, std::abs(repaired - original));
+        const Real abs_update = std::abs(repaired - original);
+        result.max_abs_update = std::max(result.max_abs_update, abs_update);
         result.max_distance = std::max(result.max_distance, d);
+        if (options.interface_band_width > Real{0.0} &&
+            std::abs(original) <= options.interface_band_width) {
+            result.max_interface_displacement =
+                std::max(result.max_interface_displacement, abs_update);
+            interface_displacement_squared_sum += abs_update * abs_update;
+            ++result.interface_displacement_samples;
+        }
         ++result.repaired_dofs;
+    }
+    if (result.interface_displacement_samples > 0u) {
+        result.l2_interface_displacement =
+            std::sqrt(interface_displacement_squared_sum /
+                      static_cast<Real>(result.interface_displacement_samples));
     }
     result.success = true;
     return result;

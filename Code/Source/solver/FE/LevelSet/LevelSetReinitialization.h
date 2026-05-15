@@ -25,8 +25,11 @@ struct LevelSetSignedDistanceRepairResult {
     std::size_t repaired_dofs{0};
     std::size_t interface_fragments{0};
     std::size_t cut_cells{0};
+    std::size_t interface_displacement_samples{0};
     Real max_abs_update{0.0};
     Real max_distance{0.0};
+    Real max_interface_displacement{0.0};
+    Real l2_interface_displacement{0.0};
     std::string diagnostic{};
 };
 
