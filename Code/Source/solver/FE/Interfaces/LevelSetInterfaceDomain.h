@@ -102,6 +102,33 @@ struct LevelSetInterfaceSource {
     }
 };
 
+[[nodiscard]] constexpr int maximumCutVolumeOrderInput(int geometry_order,
+                                                       int field_order,
+                                                       int form_order) noexcept {
+    int order = geometry_order > field_order ? geometry_order : field_order;
+    order = order > form_order ? order : form_order;
+    return order > 0 ? order : 0;
+}
+
+[[nodiscard]] constexpr int minimumLevelSetCutVolumeQuadratureOrder(
+    int geometry_order,
+    int field_order,
+    int form_order) noexcept {
+    return maximumCutVolumeOrderInput(geometry_order, field_order, form_order);
+}
+
+[[nodiscard]] constexpr int defaultLevelSetCutVolumeQuadratureOrder(
+    int geometry_order,
+    int field_order,
+    int form_order) noexcept {
+    return minimumLevelSetCutVolumeQuadratureOrder(geometry_order, field_order, form_order);
+}
+
+[[nodiscard]] constexpr int implementedLevelSetCutVolumeExactOrder(
+    int requested_order) noexcept {
+    return requested_order > 1 ? 1 : (requested_order > 0 ? requested_order : 0);
+}
+
 struct CutInterfaceDomainRequest {
     LevelSetInterfaceSource source{};
     int interface_marker{-1};
@@ -284,7 +311,7 @@ struct CutInterfaceVolumeRegion {
         if (volume_order < 0) {
             throw std::invalid_argument("cut-volume quadrature order must be nonnegative");
         }
-        const int exact_order = std::min(volume_order, 1);
+        const int exact_order = implementedLevelSetCutVolumeExactOrder(volume_order);
 
         geometry::CutQuadratureRule rule;
         rule.kind = geometry::CutQuadratureKind::Volume;

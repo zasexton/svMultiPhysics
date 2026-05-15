@@ -177,10 +177,16 @@ side volume keep active side-volume metadata.
 
 ### Quadrature Policy Checklist
 
-- [ ] Define a default cut-volume quadrature order as a function of FE order and
+- [x] Define a default cut-volume quadrature order as a function of FE order and
       form order.
-- [ ] Define a minimum accepted order for linear velocity-pressure elements.
-- [ ] Define a minimum accepted order for quadratic geometry or quadratic fields.
+      The default helper uses the maximum of geometry order, field order, and
+      form order as the requested cut-volume quadrature order.
+- [x] Define a minimum accepted order for linear velocity-pressure elements.
+      Linear geometry, field, and form input requests order 1.
+- [x] Define a minimum accepted order for quadratic geometry or quadratic fields.
+      Any quadratic geometry, field, or form input requests at least order 2;
+      generated rules still report the lower implemented exact order until
+      higher-order cut-volume construction is added.
 - [x] Decide whether the first production path uses sub-triangulation,
       moment-fitted quadrature, or a hybrid of both.
 - [x] Audit the existing `makeMomentFittedCutVolumeQuadrature(...)` utility and

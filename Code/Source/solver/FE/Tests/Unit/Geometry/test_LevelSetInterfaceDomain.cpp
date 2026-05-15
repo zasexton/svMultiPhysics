@@ -643,6 +643,33 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_NEAR(high_order_volume_rule.points.front().weight, 0.5, 1.0e-14);
 }
 
+TEST(LevelSetInterfaceDomain, DefinesCutVolumeQuadratureOrderPolicy)
+{
+    EXPECT_EQ(minimumLevelSetCutVolumeQuadratureOrder(/*geometry_order=*/1,
+                                                     /*field_order=*/1,
+                                                     /*form_order=*/1),
+              1);
+    EXPECT_EQ(defaultLevelSetCutVolumeQuadratureOrder(/*geometry_order=*/1,
+                                                     /*field_order=*/1,
+                                                     /*form_order=*/1),
+              1);
+    EXPECT_EQ(minimumLevelSetCutVolumeQuadratureOrder(/*geometry_order=*/2,
+                                                     /*field_order=*/1,
+                                                     /*form_order=*/1),
+              2);
+    EXPECT_EQ(minimumLevelSetCutVolumeQuadratureOrder(/*geometry_order=*/1,
+                                                     /*field_order=*/2,
+                                                     /*form_order=*/1),
+              2);
+    EXPECT_EQ(defaultLevelSetCutVolumeQuadratureOrder(/*geometry_order=*/1,
+                                                     /*field_order=*/1,
+                                                     /*form_order=*/3),
+              3);
+    EXPECT_EQ(implementedLevelSetCutVolumeExactOrder(0), 0);
+    EXPECT_EQ(implementedLevelSetCutVolumeExactOrder(1), 1);
+    EXPECT_EQ(implementedLevelSetCutVolumeExactOrder(3), 1);
+}
+
 TEST(LevelSetInterfaceDomain, SeparateInterfaceAndVolumeQuadratureOrders)
 {
     CutInterfaceDomainRequest request;
