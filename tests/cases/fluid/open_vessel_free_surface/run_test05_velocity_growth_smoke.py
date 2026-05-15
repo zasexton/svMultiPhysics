@@ -136,7 +136,8 @@ def configure_solver(solver_xml: Path,
                      time_step_size: float | None = None,
                      disable_cut_stabilization: bool = False,
                      max_nonlinear_iterations: int | None = None,
-                     disable_coupled_outer_fgmres: bool = False) -> None:
+                     disable_coupled_outer_fgmres: bool = False,
+                     disable_cut_metadata_scale: bool = False) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -160,7 +161,10 @@ def configure_solver(solver_xml: Path,
     require_text(free_surface, "Implementation", "UnfittedLevelSet")
     require_text(free_surface, "Active_domain", "LevelSetNegative")
     require_text(free_surface, "Active_domain_method", "CutVolume")
-    require_text(free_surface, "Use_cut_metadata_scale", "true")
+    if disable_cut_metadata_scale:
+        set_text(free_surface, "Use_cut_metadata_scale", "false")
+    else:
+        require_text(free_surface, "Use_cut_metadata_scale", "true")
     if disable_cut_stabilization:
         set_text(free_surface, "Enable_cut_cell_stabilization", "false")
     else:
@@ -976,6 +980,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 disable_cut_stabilization=args.disable_cut_stabilization,
                 max_nonlinear_iterations=args.max_nonlinear_iterations,
                 disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
+                disable_cut_metadata_scale=args.disable_cut_metadata_scale,
             )
 
         try:
@@ -1002,6 +1007,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             failure["diagnostic_errors"] = diagnostic_errors
             if args.disable_coupled_outer_fgmres:
                 failure["disable_coupled_outer_fgmres"] = True
+            if args.disable_cut_metadata_scale:
+                failure["disable_cut_metadata_scale"] = True
             if args.allow_timeout_diagnostics and not diagnostic_errors:
                 failure["passed"] = True
                 return failure
@@ -1018,6 +1025,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             }
             if args.disable_coupled_outer_fgmres:
                 failure["disable_coupled_outer_fgmres"] = True
+            if args.disable_cut_metadata_scale:
+                failure["disable_cut_metadata_scale"] = True
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
 
         metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
@@ -1030,6 +1039,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics["time_step_size"] = args.time_step_size
         if args.disable_coupled_outer_fgmres:
             metrics["disable_coupled_outer_fgmres"] = True
+        if args.disable_cut_metadata_scale:
+            metrics["disable_cut_metadata_scale"] = True
         errors = evaluate(metrics, args)
         metrics["passed"] = not errors
         metrics["errors"] = errors
@@ -1063,6 +1074,7 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-pressure-range", type=float)
     parser.add_argument("--max-diagnostic-active-volume-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
+    parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     args = parser.parse_args()

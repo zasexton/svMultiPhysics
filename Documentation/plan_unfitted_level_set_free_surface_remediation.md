@@ -404,6 +404,9 @@ benchmark runs.
       probes so pressure and velocity changes can be checked before VTK output.
 - [x] Add no-output D18/D38 smoke checks that evaluate parsed pressure-gauge
       values, solution ranges, and active-volume consistency on timeout.
+- [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
+      cut metadata stabilization scaling in the temporary case copy while
+      preserving local cut-neighborhood stabilization.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
