@@ -1422,6 +1422,15 @@ bool refreshActiveCutIntegrationContext(
     const svmp::FE::systems::SystemStateView& state,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
 {
+  if (!sim.fe_system) {
+    return false;
+  }
+  const auto required_dofs =
+      static_cast<std::size_t>(sim.fe_system->dofHandler().getNumDofs());
+  if (!state.u.empty() && state.u.size() >= required_dofs) {
+    return refreshActiveCutIntegrationContextFromSolution(
+        sim, params, state.u, lifecycle);
+  }
   const auto fe_solution = gatherFeOrderedSolution(state);
   return refreshActiveCutIntegrationContextFromSolution(
       sim,

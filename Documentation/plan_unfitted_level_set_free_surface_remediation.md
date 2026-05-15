@@ -76,7 +76,7 @@ remain reusable when only cut metadata changes.
 - [x] Move `refreshActiveCutIntegrationContext(...)` or its core logic behind a
       reusable service that accepts a state view instead of being tied to
       `ApplicationDriver` time-loop wiring.
-- [ ] Ensure the rebuild path can gather field coefficients in FE ordering
+- [x] Ensure the rebuild path can gather field coefficients in FE ordering
       without unnecessary full-vector copies on every assembly if the state did
       not change.
 - [ ] Add logging that reports the cut-context revision, negative volume,
