@@ -538,6 +538,11 @@ benchmark runs.
       constraints: the run advanced 12 accepted steps with converged nonlinear
       and linear solves, and the remaining blocker was cut-adjacent
       interior-face assembly cost rather than direct-factorization singularity.
+- [x] Enable marker-specific JIT dispatch for cut-adjacent interior-face
+      kernels, keeping fallback only when a compiled marked kernel is
+      unavailable; the one-step D18 GMRES timing probe reduced the worst parsed
+      interior-face assembly from about 155 s to about 5.1 s including
+      first-use JIT compilation.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

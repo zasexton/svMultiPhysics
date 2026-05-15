@@ -160,6 +160,7 @@ private:
 
         std::uintptr_t cell{0};
         std::uintptr_t interior_face{0};
+        std::unordered_map<int, std::uintptr_t> interior_by_marker{};
 
         std::uintptr_t boundary_all{0};
         std::unordered_map<int, std::uintptr_t> boundary_by_marker{};

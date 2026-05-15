@@ -1760,15 +1760,23 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
     }
 
     try {
-        if (ctx_minus.interiorFaceMarker() >= 0) {
-            traceMarkedInteriorFaceFallbackOnce(ctx_minus.interiorFaceMarker());
+        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
+        const auto interior_face_address =
+            [](const CompiledDispatch& compiled, int marker) -> std::uintptr_t {
+                if (marker >= 0) {
+                    const auto it = compiled.interior_by_marker.find(marker);
+                    return it == compiled.interior_by_marker.end() ? 0u : it->second;
+                }
+                return compiled.interior_face;
+            };
+        const auto fallback_marked_interior_face = [&]() {
+            if (ctx_minus.interiorFaceMarker() >= 0) {
+                traceMarkedInteriorFaceFallbackOnce(ctx_minus.interiorFaceMarker());
+            }
             fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                            output_minus, output_plus,
                                            coupling_minus_plus, coupling_plus_minus);
-            return;
-        }
-
-        const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
+        };
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -1821,7 +1829,13 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	        const auto disp =
 	            getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	        const auto& compiled = disp ? *disp : compiled_form_;
-	        callJIT(compiled.interior_face, &args);
+            const auto address =
+                interior_face_address(compiled, ctx_minus.interiorFaceMarker());
+            if (address == 0u) {
+                fallback_marked_interior_face();
+                return;
+            }
+	        callJIT(address, &args);
 
         output_minus.has_matrix = true;
         output_minus.has_vector = false;
@@ -1902,17 +1916,35 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	                                                        output_minus, output_plus,
 	                                                        coupling_minus_plus, coupling_plus_minus,
 	                                                        checks);
+            std::uintptr_t tangent_address = 0u;
+            std::uintptr_t residual_address = 0u;
 	        if (want_matrix) {
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_tangent_;
-	            callJIT(compiled.interior_face, &args);
+	            tangent_address =
+                    interior_face_address(compiled, ctx_minus.interiorFaceMarker());
+                if (tangent_address == 0u) {
+                    fallback_marked_interior_face();
+                    return;
+                }
 	        }
 	        if (want_vector) {
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_residual_;
-	            callJIT(compiled.interior_face, &args);
+	            residual_address =
+                    interior_face_address(compiled, ctx_minus.interiorFaceMarker());
+                if (residual_address == 0u) {
+                    fallback_marked_interior_face();
+                    return;
+                }
+	        }
+	        if (want_matrix) {
+	            callJIT(tangent_address, &args);
+	        }
+	        if (want_vector) {
+	            callJIT(residual_address, &args);
 	        }
 
         output_minus.has_matrix = minus_requested.matrix;
@@ -2697,7 +2729,12 @@ bool JITKernelWrapper::hasCompiledTangentDispatch(IntegralDomain domain, int mar
             return compiled_tangent_.boundary_all != 0 ||
                    !compiled_tangent_.boundary_by_marker.empty();
         case IntegralDomain::InteriorFace:
-            return compiled_tangent_.interior_face != 0;
+            if (marker >= 0) {
+                return compiled_tangent_.interior_by_marker.find(marker) !=
+                       compiled_tangent_.interior_by_marker.end();
+            }
+            return compiled_tangent_.interior_face != 0 ||
+                   !compiled_tangent_.interior_by_marker.empty();
         case IntegralDomain::InterfaceFace:
             if (marker >= 0) {
                 return compiled_tangent_.interface_by_marker.find(marker) !=
@@ -3077,6 +3114,7 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
     disp->cacheable = r.cacheable;
     disp->message = r.message;
     disp->boundary_by_marker.reserve(r.kernels.size());
+    disp->interior_by_marker.reserve(r.kernels.size());
     disp->interface_by_marker.reserve(r.kernels.size());
     disp->cut_volume_by_region.reserve(r.kernels.size());
 
@@ -3093,7 +3131,11 @@ std::shared_ptr<const JITKernelWrapper::CompiledDispatch> JITKernelWrapper::comp
                 }
                 break;
             case IntegralDomain::InteriorFace:
-                disp->interior_face = k.address;
+                if (k.interface_marker < 0) {
+                    disp->interior_face = k.address;
+                } else {
+                    disp->interior_by_marker[k.interface_marker] = k.address;
+                }
                 break;
             case IntegralDomain::InterfaceFace:
                 if (k.interface_marker < 0) {
@@ -3334,6 +3376,7 @@ void JITKernelWrapper::maybeCompile()
         out.cacheable = r.cacheable;
         out.message = r.message;
         out.boundary_by_marker.reserve(r.kernels.size());
+        out.interior_by_marker.reserve(r.kernels.size());
         out.interface_by_marker.reserve(r.kernels.size());
         out.cut_volume_by_region.reserve(r.kernels.size());
 
@@ -3350,7 +3393,11 @@ void JITKernelWrapper::maybeCompile()
                     }
                     break;
                 case IntegralDomain::InteriorFace:
-                    out.interior_face = k.address;
+                    if (k.interface_marker < 0) {
+                        out.interior_face = k.address;
+                    } else {
+                        out.interior_by_marker[k.interface_marker] = k.address;
+                    }
                     break;
                 case IntegralDomain::InterfaceFace:
                     if (k.interface_marker < 0) {
