@@ -108,6 +108,9 @@ ASSEMBLY_TIMING_VALUE_RE = re.compile(
     r"^\s*(?P<label>[A-Za-z0-9 ()+]+):\s+"
     r"(?P<seconds>[-+0-9.eE]+)\s+s"
 )
+INTERIOR_FACE_TIMING_VALUE_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_]*)=\s*([-+0-9.eE]+)"
+)
 STATIC_INTERFACE_HEIGHT = 0.53
 STATE_SYNC_CUT_CONTEXT_PROVENANCES = {
     "accepted",
@@ -376,6 +379,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             )
     if args.enable_form_block_diagnostics:
         env["SVMP_FE_FORM_BLOCK_DIAGNOSTICS"] = "1"
+    if args.enable_interior_face_timing:
+        env["SVMP_INTERIOR_FACE_TIMING"] = "1"
     return env
 
 
@@ -724,6 +729,15 @@ def parse_key_values(line: str) -> dict[str, Any]:
     return values
 
 
+def parse_interior_face_timing(line: str) -> dict[str, Any]:
+    values = {
+        match.group(1): parse_scalar(match.group(2))
+        for match in INTERIOR_FACE_TIMING_VALUE_RE.finditer(line)
+    }
+    values["diagnostic"] = "interior_face_timing"
+    return values
+
+
 def convert_match(match: re.Match[str]) -> dict[str, Any]:
     return {
         name: parse_scalar(value)
@@ -1033,6 +1047,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "form_mixed_plans": [],
         "linear_solve_histories": [],
         "assembly_timings": [],
+        "interior_face_timings": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
@@ -1121,6 +1136,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["form_mixed_plans"].append(parse_key_values(line))
         elif "NewtonSolver: linear solve history" in line:
             diagnostics["linear_solve_histories"].append(parse_key_values(line))
+        elif "[INTERIOR_FACE_TIMING]" in line:
+            diagnostics["interior_face_timings"].append(parse_interior_face_timing(line))
         elif "vector component norms" in line:
             record = parse_key_values(vector_component_header(line))
             record["components"] = parse_component_norms(line)
@@ -1561,6 +1578,45 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             ]
             if values:
                 metrics[f"diagnostic_assembly_timing_max_{name}_seconds"] = max(values)
+    if diagnostics.get("interior_face_timings"):
+        timings = diagnostics["interior_face_timings"]
+        metrics["latest_interior_face_timing"] = timings[-1]
+        for name in (
+            "faces_considered",
+            "faces_assembled",
+        ):
+            values = [
+                int(record[name])
+                for record in timings
+                if isinstance(record.get(name), int)
+            ]
+            if values:
+                metrics[f"diagnostic_interior_face_timing_max_{name}"] = max(values)
+        for name in (
+            "total",
+            "setup",
+            "filter",
+            "dofs",
+            "local_face",
+            "align",
+            "prepare_minus",
+            "prepare_plus",
+            "ctx",
+            "cut_scale",
+            "solution",
+            "field",
+            "material",
+            "kernel",
+            "orient",
+            "insert",
+        ):
+            values = [
+                float(record[name])
+                for record in timings
+                if isinstance(record.get(name), (int, float))
+            ]
+            if values:
+                metrics[f"diagnostic_interior_face_timing_max_{name}_seconds"] = max(values)
     retry_counts = [
         int(record["true_residual_retries"])
         for record in diagnostics.get("fsils_solve_summaries", [])
@@ -1602,8 +1658,10 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
         "enable_form_block_diagnostics",
+        "enable_interior_face_timing",
         "require_cut_context_solution_source_diagnostics",
         "require_assembly_timing_diagnostics",
+        "require_interior_face_timing_diagnostics",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -1698,6 +1756,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.extend(cut_context_solution_source_errors(diagnostics))
     if args.require_assembly_timing_diagnostics and not diagnostics.get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
+    if args.require_interior_face_timing_diagnostics and not diagnostics.get("interior_face_timings"):
+        errors.append("interior-face timing diagnostics were not reported")
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -1960,6 +2020,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     if args.require_assembly_timing_diagnostics and not metrics["diagnostics"].get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
+    if (args.require_interior_face_timing_diagnostics and
+            not metrics["diagnostics"].get("interior_face_timings")):
+        errors.append("interior-face timing diagnostics were not reported")
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
     if metrics.get("case") == "static2d":
@@ -2282,6 +2345,8 @@ def main() -> int:
     parser.add_argument("--enable-linear-solve-component-norms", action="store_true")
     parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
     parser.add_argument("--enable-form-block-diagnostics", action="store_true")
+    parser.add_argument("--enable-interior-face-timing", action="store_true")
+    parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)

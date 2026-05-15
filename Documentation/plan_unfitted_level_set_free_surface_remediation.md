@@ -473,6 +473,9 @@ benchmark runs.
 - [x] Parse assemble-operator timing diagnostics in the smoke script so D18/D38
       timeouts can distinguish cut-adjacent interior-face work from cut-volume
       and cell assembly.
+- [x] Add smoke-script parsing and controls for interior-face timing diagnostics
+      so cut-adjacent stabilization probes can verify faces considered, faces
+      assembled, and per-stage interior-face costs.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
