@@ -73,6 +73,51 @@ TEST(ActiveDomainOutput, WritesWetVolumeFractionForCutCell)
   EXPECT_NEAR(data[0], 0.375, 1.0e-12);
 }
 
+TEST(ActiveDomainOutput, WetFractionsMatchGeneratedCutVolumeMetadata)
+{
+  auto mesh = makeTwoQuadCellMesh();
+
+  std::vector<svmp::FE::geometry::CutQuadratureRule> generated_rules(3);
+  generated_rules[0].kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  generated_rules[0].side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  generated_rules[0].volume_fraction = 0.25;
+  generated_rules[0].provenance.parent_entity = 0;
+
+  generated_rules[1].kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  generated_rules[1].side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  generated_rules[1].volume_fraction = 0.5;
+  generated_rules[1].provenance.parent_entity = 1;
+
+  generated_rules[2].kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  generated_rules[2].side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  generated_rules[2].volume_fraction = 0.25;
+  generated_rules[2].provenance.parent_entity = 1;
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &generated_rules[0],
+      &generated_rules[1],
+      &generated_rules[2],
+  };
+  const auto expected =
+      application::core::collectWetVolumeFractions(mesh->n_cells(), rules);
+  ASSERT_EQ(expected.size(), mesh->n_cells());
+  EXPECT_DOUBLE_EQ(expected[0], 0.25);
+  EXPECT_DOUBLE_EQ(expected[1], 0.75);
+
+  const auto fields_written =
+      application::core::writeWetVolumeFractionField(
+          *mesh, "WetVolumeFraction", rules);
+
+  EXPECT_EQ(fields_written, 1u);
+  const auto handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeFraction");
+  const auto* data = static_cast<const double*>(mesh->field_data(handle));
+  ASSERT_NE(data, nullptr);
+  for (std::size_t cell = 0; cell < expected.size(); ++cell) {
+    EXPECT_DOUBLE_EQ(data[cell], expected[cell]);
+  }
+}
+
 TEST(ActiveDomainOutput, WritesFullWetAndFullDryFractions)
 {
   auto mesh = makeTwoQuadCellMesh();

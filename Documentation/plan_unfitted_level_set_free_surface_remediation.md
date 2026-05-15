@@ -387,7 +387,7 @@ benchmark runs.
 - [x] Cut-volume quadrature integrates linear fields to the selected exactness
       target.
 - [x] Cut-adjacent stabilization is local to the generated cut-neighborhood.
-- [ ] Wet-fraction output matches generated cut-volume metadata.
+- [x] Wet-fraction output matches generated cut-volume metadata.
 
 ### Solver Smoke Tests
 
