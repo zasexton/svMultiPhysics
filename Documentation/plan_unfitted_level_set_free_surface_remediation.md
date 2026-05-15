@@ -548,6 +548,10 @@ benchmark runs.
       repeated assembly, then exited with return code -9 before final output;
       the next blocker is long-run resource growth or extreme cut-adjacent
       stabilization scale growth, not a direct-factorization singularity.
+- [x] Bind generated cut-adjacent facet sets and stabilization scales from the
+      configured active cut side, so inactive exterior slivers no longer inflate
+      one-fluid wet-support stabilization; the D18 one-step GMRES probe reduced
+      the parsed maximum cut-adjacent scale to about 34.37.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

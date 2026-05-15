@@ -613,6 +613,14 @@ public:
         return metadata;
     }
 
+    void bindFacetStabilizationScalesForMarkerAndSide(
+        CutFacetSetHandle& handle,
+        int marker,
+        geometry::CutIntegrationSide side) const {
+        bindFacetStabilizationScales(
+            handle, generatedVolumeMetadataForMarkerAndSide(marker, side));
+    }
+
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
     facetSetRulesForMarker(int marker) const {
         std::vector<const geometry::CutQuadratureRule*> rules;
@@ -1196,6 +1204,22 @@ private:
                          std::max(cutCellStabilizationScale(scales, facet.first_cell),
                                   cutCellStabilizationScale(scales, facet.second_cell)));
         }
+    }
+
+    static void bindFacetStabilizationScales(
+        CutFacetSetHandle& handle,
+        const std::vector<const CutCellAssemblyMetadata*>& metadata) {
+        if (metadata.empty()) {
+            return;
+        }
+        std::vector<CutCellAssemblyMetadata> compact_metadata;
+        compact_metadata.reserve(metadata.size());
+        for (const auto* entry : metadata) {
+            if (entry != nullptr) {
+                compact_metadata.push_back(*entry);
+            }
+        }
+        bindFacetStabilizationScales(handle, compact_metadata);
     }
 
     [[nodiscard]] static bool bindingVisibleToPath(const CutIntegrationBinding& binding,

@@ -2833,6 +2833,57 @@ TEST(CutIntegrationInfrastructure, CapsCutAdjacentFacetStabilizationScales)
                      CutIntegrationContext::maxCutCellStabilizationScale());
 }
 
+TEST(CutIntegrationInfrastructure, BindsCutAdjacentFacetScalesFromSelectedSideMetadata)
+{
+    CutIntegrationContext context;
+
+    CutCellAssemblyMetadata active_fragment;
+    active_fragment.cell = 4;
+    active_fragment.parent_entity = 4;
+    active_fragment.volume_fraction = 0.25;
+    active_fragment.side = CutIntegrationSide::Negative;
+
+    CutCellAssemblyMetadata inactive_fragment;
+    inactive_fragment.cell = 4;
+    inactive_fragment.parent_entity = 4;
+    inactive_fragment.volume_fraction = 1.0e-6;
+    inactive_fragment.side = CutIntegrationSide::Positive;
+
+    const auto add_rule = [&](CutCellAssemblyMetadata metadata) {
+        CutQuadratureRule rule;
+        rule.kind = CutQuadratureKind::Volume;
+        rule.side = metadata.side;
+        rule.measure = metadata.volume_fraction;
+        rule.parent_measure = 1.0;
+        rule.volume_fraction = metadata.volume_fraction;
+        context.addGeneratedVolumeRule(133, std::move(metadata), std::move(rule));
+    };
+    add_rule(active_fragment);
+    add_rule(inactive_fragment);
+
+    CutFacetSetHandle handle;
+    handle.marker = 133;
+    handle.name = "active-side-cut-facets";
+    handle.facets = {20};
+    handle.facet_metadata = {
+        CutFacetSetFacetMetadata{.facet = 20,
+                                  .first_cell = 4,
+                                  .second_cell = 5,
+                                  .stabilization_scale = 0.0,
+                                  .stable_id = 1u}};
+
+    context.bindFacetStabilizationScalesForMarkerAndSide(
+        handle, 133, CutIntegrationSide::Negative);
+
+    EXPECT_DOUBLE_EQ(handle.stabilizationScaleForFacet(20), 4.0);
+
+    CutFacetSetHandle inactive_handle = handle;
+    inactive_handle.facet_metadata[0].stabilization_scale = 0.0;
+    context.bindFacetStabilizationScalesForMarkerAndSide(
+        inactive_handle, 133, CutIntegrationSide::Positive);
+    EXPECT_DOUBLE_EQ(inactive_handle.stabilizationScaleForFacet(20), 1.0e6);
+}
+
 TEST(CutIntegrationInfrastructure, PrunesGeneratedSliverVolumeRules)
 {
     CutInterfaceDomainRequest request;

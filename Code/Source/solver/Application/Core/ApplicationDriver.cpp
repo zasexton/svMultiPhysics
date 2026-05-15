@@ -834,14 +834,44 @@ collectInteriorFacetAdjacencies(const svmp::FE::assembly::IMeshAccess& mesh)
   return adjacencies;
 }
 
+std::vector<svmp::FE::MeshIndex> activeCutCellsForMarkerAndSide(
+    const svmp::FE::assembly::CutIntegrationContext& context,
+    int marker,
+    LevelSetActiveSide active_side)
+{
+  std::vector<svmp::FE::MeshIndex> cells;
+  const auto metadata =
+      context.generatedVolumeMetadataForMarkerAndSide(
+          marker, cutIntegrationSide(active_side));
+  constexpr svmp::FE::Real full_fraction_tol = svmp::FE::Real{1.0e-12};
+  for (const auto* entry : metadata) {
+    if (entry == nullptr ||
+        entry->parent_entity < static_cast<svmp::FE::MeshIndex>(0) ||
+        !std::isfinite(entry->volume_fraction) ||
+        entry->volume_fraction <= svmp::FE::Real{0.0} ||
+        entry->volume_fraction >= svmp::FE::Real{1.0} - full_fraction_tol) {
+      continue;
+    }
+    cells.push_back(entry->parent_entity);
+  }
+  std::sort(cells.begin(), cells.end());
+  cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+  return cells;
+}
+
 svmp::FE::assembly::CutFacetSetHandle addGeneratedCutAdjacentFacetSet(
     svmp::FE::assembly::CutIntegrationContext& context,
     const svmp::FE::interfaces::LevelSetInterfaceDomain& domain,
-    const svmp::FE::assembly::IMeshAccess& mesh)
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    LevelSetActiveSide active_side)
 {
+  const auto active_cut_cells =
+      activeCutCellsForMarkerAndSide(context, domain.marker(), active_side);
+  const auto& cut_cells =
+      active_cut_cells.empty() ? domain.cutCells() : active_cut_cells;
   const auto adjacent_facets =
       svmp::FE::systems::identifyCutAdjacentInteriorFacets(
-          domain.cutCells(), collectInteriorFacetAdjacencies(mesh));
+          cut_cells, collectInteriorFacetAdjacencies(mesh));
   const auto handle =
       svmp::FE::systems::makeCutAdjacentFacetSetHandle(
           domain.marker(),
@@ -863,6 +893,10 @@ svmp::FE::assembly::CutFacetSetHandle addGeneratedCutAdjacentFacetSet(
     stored_handle.facet_metadata.push_back(metadata);
   }
   stored_handle.stable_id = handle.stable_id;
+  context.bindFacetStabilizationScalesForMarkerAndSide(
+      stored_handle,
+      domain.marker(),
+      cutIntegrationSide(active_side));
   return context.addFacetSetHandle(std::move(stored_handle));
 }
 
@@ -2222,7 +2256,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto global_generated_pruned_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(local_generated_pruned_volume), comm));
     const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
-        *context, result.domain, sim.fe_system->meshAccess());
+        *context, result.domain, sim.fe_system->meshAccess(), request.active_side);
     mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
     const auto facet_scale_summary =
         summarizeCutAdjacentFacetScales(facet_set_handle);
