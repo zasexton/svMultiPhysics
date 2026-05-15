@@ -52,3 +52,38 @@ can obscure it through preconditioning and tolerance behavior.
 The next implementation step should constrain or eliminate inactive pressure
 DOFs for the generated wet active domain, then rerun the one-step direct Eigen
 probe and the analytical verifier.
+
+## Run-Length Follow-Up
+
+The direct diagnostic now reports all zero pressure rows and columns as
+run-length ranges. In the one-step `linear_sloshing_2d` probe, the final
+nonlinear assembly still failed factorization with:
+
+```text
+zero_rows=68 zero_cols=68
+zero_row_runs=1056-1091|1124-1155
+Pressure{begin=867,end=1156,zero_rows=68,zero_cols=68,
+zero_row_runs_local=189-224|257-288,
+zero_col_runs_local=189-224|257-288}
+```
+
+Mapping those pressure-local ranges back to the initial mesh shows that every
+zero row is on the dry side of the interface (`phi > 0`). A gauge-only rerun
+with a valid wet pressure constraint still failed with the same final
+pressure-local zero-row ranges, so the direct factorization failure is not
+only a missing pressure reference.
+
+Disabling cut-cell stabilization in the temporary copy increased the final
+pressure zero-row count from 68 to 85 and restored the broader initial ranges:
+
+```text
+Pressure{zero_rows=85,zero_cols=85,
+zero_row_runs_local=166-168|171-172|183-184|187-224|235-236|239-240|251-252|255-288}
+```
+
+This indicates that cut-adjacent stabilization currently fills some dry
+pressure rows, but it does not provide a complete or principled elimination of
+inactive pressure unknowns. The factorization failure is therefore exposing a
+real active-domain algebra problem: pressure DOFs outside the wet support
+remain in the monolithic system, and stabilization can only partially mask the
+singularity.

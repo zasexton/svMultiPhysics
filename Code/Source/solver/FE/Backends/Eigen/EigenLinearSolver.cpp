@@ -147,6 +147,60 @@ template <class Predicate>
     return os.str();
 }
 
+template <class Predicate>
+[[nodiscard]] std::string index_runs(GlobalIndex n, Predicate predicate, int limit = 12)
+{
+    std::ostringstream os;
+    int emitted = 0;
+    GlobalIndex run_begin = -1;
+    GlobalIndex run_end = -1;
+    auto flush = [&]() {
+        if (run_begin < 0 || emitted >= limit) {
+            return;
+        }
+        if (emitted > 0) {
+            os << "|";
+        }
+        os << run_begin;
+        if (run_end != run_begin) {
+            os << "-" << run_end;
+        }
+        ++emitted;
+    };
+
+    for (GlobalIndex i = 0; i < n; ++i) {
+        if (predicate(i)) {
+            if (run_begin < 0) {
+                run_begin = i;
+                run_end = i;
+            } else if (i == run_end + 1) {
+                run_end = i;
+            } else {
+                flush();
+                if (emitted >= limit) {
+                    break;
+                }
+                run_begin = i;
+                run_end = i;
+            }
+        } else if (run_begin >= 0) {
+            flush();
+            if (emitted >= limit) {
+                break;
+            }
+            run_begin = -1;
+            run_end = -1;
+        }
+    }
+    if (emitted < limit) {
+        flush();
+    }
+    if (emitted == 0) {
+        return "none";
+    }
+    return os.str();
+}
+
 void emit_direct_factorization_diagnostics(const EigenMatrix& A,
                                            const EigenVector& b,
                                            const SolverOptions& options,
@@ -289,6 +343,14 @@ void emit_direct_factorization_diagnostics(const EigenMatrix& A,
        << " zero_cols_first="
        << first_indices(n_cols, [&](GlobalIndex col) {
               return col_abs_sum[static_cast<std::size_t>(col)] <= tiny;
+          })
+       << " zero_row_runs="
+       << index_runs(n_rows, [&](GlobalIndex row) {
+              return row_abs_sum[static_cast<std::size_t>(row)] <= tiny;
+          })
+       << " zero_col_runs="
+       << index_runs(n_cols, [&](GlobalIndex col) {
+              return col_abs_sum[static_cast<std::size_t>(col)] <= tiny;
           });
 
     const auto ranges = build_diagnostic_block_ranges(options, n_rows);
@@ -354,6 +416,20 @@ void emit_direct_factorization_diagnostics(const EigenMatrix& A,
                                 return col >= 0 && col < n_cols &&
                                        col_abs_sum[static_cast<std::size_t>(col)] <= tiny;
                             })
+           << ",zero_row_runs_local="
+           << index_runs(std::max<GlobalIndex>(range.end - range.begin, 0),
+                         [&](GlobalIndex local_row) {
+                             const auto row = range.begin + local_row;
+                             return row >= 0 && row < n_rows &&
+                                    row_abs_sum[static_cast<std::size_t>(row)] <= tiny;
+                         })
+           << ",zero_col_runs_local="
+           << index_runs(std::max<GlobalIndex>(range.end - range.begin, 0),
+                         [&](GlobalIndex local_col) {
+                             const auto col = range.begin + local_col;
+                             return col >= 0 && col < n_cols &&
+                                    col_abs_sum[static_cast<std::size_t>(col)] <= tiny;
+                         })
            << ",missing_diag=" << block_missing_diag
            << ",zero_diag=" << block_zero_diag
            << ",identity_rows=" << block_identity_rows
