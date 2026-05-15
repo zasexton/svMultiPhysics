@@ -101,6 +101,13 @@ TIMELOOP_ACCEPTED_RE = re.compile(
     r" dt=(?P<dt>[-+0-9.eE]+)"
 )
 VTK_WRITE_RE = re.compile(r"Wrote VTK: (?P<path>.+)$")
+ASSEMBLY_TIMING_HEADER_RE = re.compile(
+    r"assembleOperator TIMING \(rank (?P<rank>[0-9]+), op='(?P<op>[^']+)'\)"
+)
+ASSEMBLY_TIMING_VALUE_RE = re.compile(
+    r"^\s*(?P<label>[A-Za-z0-9 ()+]+):\s+"
+    r"(?P<seconds>[-+0-9.eE]+)\s+s"
+)
 STATIC_INTERFACE_HEIGHT = 0.53
 STATE_SYNC_CUT_CONTEXT_PROVENANCES = {
     "accepted",
@@ -983,6 +990,12 @@ def norm_key(label: str) -> str:
     return f"{key}_norm" if key else "norm"
 
 
+def timing_key(label: str) -> str:
+    key = label.strip().lower()
+    key = key.replace("dg+global", "dg_global")
+    return re.sub(r"[^a-z0-9]+", "_", key).strip("_")
+
+
 def parse_norm_key_values(line: str) -> dict[str, Any]:
     values = parse_key_values(DOUBLE_BAR_VALUE_RE.sub("", line))
     for match in DOUBLE_BAR_VALUE_RE.finditer(line):
@@ -1019,6 +1032,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "form_block_installs": [],
         "form_mixed_plans": [],
         "linear_solve_histories": [],
+        "assembly_timings": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
@@ -1026,7 +1040,27 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         },
         "true_residual_failure_count": solver_output.count("true residual check failed"),
     }
+    active_assembly_timing: dict[str, Any] | None = None
     for line in solver_output.splitlines():
+        timing_header = ASSEMBLY_TIMING_HEADER_RE.search(line)
+        if timing_header is not None:
+            active_assembly_timing = {
+                "rank": int(timing_header.group("rank")),
+                "op": timing_header.group("op"),
+            }
+            continue
+        if active_assembly_timing is not None:
+            timing_value = ASSEMBLY_TIMING_VALUE_RE.search(line)
+            if timing_value is not None:
+                active_assembly_timing[timing_key(timing_value.group("label"))] = (
+                    float(timing_value.group("seconds"))
+                )
+                continue
+            if line.strip().startswith("==="):
+                diagnostics["assembly_timings"].append(active_assembly_timing)
+                active_assembly_timing = None
+                continue
+
         linear_match = LINEAR_SOLVER_RE.search(line)
         time_stepping_match = TIME_STEPPING_RE.search(line)
         transient_match = TRANSIENT_SOLVE_RE.search(line)
@@ -1092,6 +1126,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             record["components"] = parse_component_norms(line)
             diagnostics["vector_component_norms"].append(record)
 
+    if active_assembly_timing is not None:
+        diagnostics["assembly_timings"].append(active_assembly_timing)
     diagnostics["counts"] = {
         name: len(records)
         for name, records in diagnostics.items()
@@ -1505,6 +1541,26 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["form_block_install_count"] = len(diagnostics["form_block_installs"])
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
+    if diagnostics.get("assembly_timings"):
+        timings = diagnostics["assembly_timings"]
+        metrics["latest_assembly_timing"] = timings[-1]
+        for name in (
+            "total",
+            "cell_terms",
+            "boundary_terms",
+            "other_dg_global",
+            "interior_faces",
+            "interface_faces",
+            "cut_volumes",
+            "global_terms",
+        ):
+            values = [
+                float(record[name])
+                for record in timings
+                if isinstance(record.get(name), (int, float))
+            ]
+            if values:
+                metrics[f"diagnostic_assembly_timing_max_{name}_seconds"] = max(values)
     retry_counts = [
         int(record["true_residual_retries"])
         for record in diagnostics.get("fsils_solve_summaries", [])
@@ -1547,6 +1603,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_linear_solve_component_norms",
         "enable_form_block_diagnostics",
         "require_cut_context_solution_source_diagnostics",
+        "require_assembly_timing_diagnostics",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -1639,6 +1696,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("form block installation diagnostics were not reported")
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(diagnostics))
+    if args.require_assembly_timing_diagnostics and not diagnostics.get("assembly_timings"):
+        errors.append("assembly timing diagnostics were not reported")
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -1899,6 +1958,8 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         return evaluate_timeout_diagnostics(metrics, args)
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
+    if args.require_assembly_timing_diagnostics and not metrics["diagnostics"].get("assembly_timings"):
+        errors.append("assembly timing diagnostics were not reported")
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
     if metrics.get("case") == "static2d":
@@ -2195,6 +2256,7 @@ def main() -> int:
     parser.add_argument("--require-linear-solve-history-diagnostics", action="store_true")
     parser.add_argument("--require-form-block-diagnostics", action="store_true")
     parser.add_argument("--require-cut-context-solution-source-diagnostics", action="store_true")
+    parser.add_argument("--require-assembly-timing-diagnostics", action="store_true")
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
