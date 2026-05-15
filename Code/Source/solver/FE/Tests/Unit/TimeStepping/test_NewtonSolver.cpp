@@ -36,6 +36,7 @@
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -945,6 +946,7 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
     struct SyncRecord {
         SyncPoint point;
         double u;
+        std::uint64_t cut_topology_key;
     };
     std::vector<SyncRecord> sync_records;
 
@@ -963,8 +965,11 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
         [&sync_records](const svmp::FE::systems::SystemStateView& state,
                         SyncPoint point) {
             ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            const auto cut_topology_key =
+                u > 1.5 ? std::uint64_t{0x202u} : std::uint64_t{0x101u};
             sync_records.push_back(
-                SyncRecord{point, static_cast<double>(state.u.front())});
+                SyncRecord{point, u, cut_topology_key});
         };
 
     svmp::FE::timestepping::NewtonSolver newton(nopt);
@@ -984,23 +989,33 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
     auto saw_trial_update = false;
     auto saw_trial_restore = false;
     auto saw_restored_state = false;
+    auto saw_trial_cut_topology = false;
+    auto saw_restored_cut_topology = false;
+    auto saw_restored_state_cut_topology = false;
     for (const auto& rec : sync_records) {
         if (rec.point == SyncPoint::LineSearchTrialResidual &&
             std::abs(rec.u - 2.0) < 1e-13) {
             saw_trial_update = true;
+            saw_trial_cut_topology = rec.cut_topology_key == std::uint64_t{0x202u};
         }
         if (rec.point == SyncPoint::LineSearchTrialResidual &&
             std::abs(rec.u - 1.0) < 1e-13) {
             saw_trial_restore = true;
+            saw_restored_cut_topology = rec.cut_topology_key == std::uint64_t{0x101u};
         }
         if (rec.point == SyncPoint::RestoredNonlinearState &&
             std::abs(rec.u - 1.0) < 1e-13) {
             saw_restored_state = true;
+            saw_restored_state_cut_topology =
+                rec.cut_topology_key == std::uint64_t{0x101u};
         }
     }
     EXPECT_TRUE(saw_trial_update);
     EXPECT_TRUE(saw_trial_restore);
     EXPECT_TRUE(saw_restored_state);
+    EXPECT_TRUE(saw_trial_cut_topology);
+    EXPECT_TRUE(saw_restored_cut_topology);
+    EXPECT_TRUE(saw_restored_state_cut_topology);
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
 }
 

@@ -111,7 +111,7 @@ preconditioner metadata.
 
 - [x] Add a unit test where a level-set field changes sign in one element during
       Newton and the next residual assembly sees the new active side.
-- [ ] Add a line-search test where a rejected trial changes the cut topology and
+- [x] Add a line-search test where a rejected trial changes the cut topology and
       the accepted state restores the previous topology.
 - [ ] Add a transient test proving accepted-step reinitialization or volume
       correction is reflected in output-time active volume.
