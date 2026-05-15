@@ -141,6 +141,78 @@ bool formulationRecordsContainInterfaceMarker(const FE::systems::FESystem& syste
     return false;
 }
 
+bool containsInteriorFaceMarker(const FormExprNode* node, int marker)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == FormExprType::InteriorFaceIntegral) {
+        const auto found = node->interfaceMarker();
+        if (found.has_value() && *found == marker) {
+            return true;
+        }
+    }
+    for (const auto* child : node->children()) {
+        if (containsInteriorFaceMarker(child, marker)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool containsUnmarkedInteriorFaceIntegral(const FormExprNode* node)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == FormExprType::InteriorFaceIntegral) {
+        const auto marker = node->interfaceMarker();
+        if (!marker.has_value() || *marker < 0) {
+            return true;
+        }
+    }
+    for (const auto* child : node->children()) {
+        if (containsUnmarkedInteriorFaceIntegral(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool formulationRecordsContainInteriorFaceMarker(const FE::systems::FESystem& system,
+                                                 int marker)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (containsInteriorFaceMarker(record.residual_expr.get(), marker)) {
+            return true;
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (containsInteriorFaceMarker(expr.get(), marker)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool formulationRecordsContainUnmarkedInteriorFaceIntegral(
+    const FE::systems::FESystem& system)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (containsUnmarkedInteriorFaceIntegral(record.residual_expr.get())) {
+            return true;
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (containsUnmarkedInteriorFaceIntegral(expr.get())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<SingleTetraMeshAccess> makeMesh()
 {
     return std::make_shared<SingleTetraMeshAccess>();
@@ -2006,6 +2078,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         .cut_cell_stabilization = {
             .enabled = true,
@@ -2015,17 +2088,23 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     });
 
     FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
+    const auto phi = system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::PrescribedData,
     });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     module.registerOn(system);
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContainInteriorFaceMarker(system, expected_marker));
+    EXPECT_FALSE(formulationRecordsContainUnmarkedInteriorFaceIntegral(system));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
@@ -2042,6 +2121,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesCutMetadataScale)
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         .cut_cell_stabilization = {
             .enabled = true,

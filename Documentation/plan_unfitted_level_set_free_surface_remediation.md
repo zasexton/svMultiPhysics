@@ -305,7 +305,7 @@ explicit stabilization policy change.
 - [x] Bind cut metadata scale per cut-adjacent facet.
 - [x] Ensure non-cut interior faces receive zero cut-cell stabilization
       contribution even when `Use_cut_metadata_scale=false`.
-- [ ] Make the behavior of `Use_cut_metadata_scale=false` mean unscaled local
+- [x] Make the behavior of `Use_cut_metadata_scale=false` mean unscaled local
       cut-neighborhood stabilization, not global stabilization.
 - [ ] Include the interface side and active-domain side in stabilization
       diagnostics.
