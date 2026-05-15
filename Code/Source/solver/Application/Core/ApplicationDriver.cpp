@@ -1111,16 +1111,8 @@ void logWetVolumeDiagnostics(
     const std::string key = diagnostic.level_set_field_name + "|" +
                             diagnostic.domain_id + "|" +
                             std::to_string(diagnostic.marker);
-    const auto [initial_it, inserted] =
-        initial_wet_volume_by_key.try_emplace(key, diagnostic.wet_volume);
-    (void)inserted;
-    const auto initial_wet_volume = initial_it->second;
-    const auto wet_volume_drift =
-        diagnostic.wet_volume - initial_wet_volume;
-    const auto relative_wet_volume_drift =
-        std::abs(initial_wet_volume) > svmp::FE::Real{0.0}
-            ? wet_volume_drift / initial_wet_volume
-            : svmp::FE::Real{0.0};
+    const auto drift = application::core::computeWetVolumeDrift(
+        key, diagnostic.wet_volume, initial_wet_volume_by_key);
     application::core::oopCout()
         << "[svMultiPhysics::Application] Wet volume diagnostic"
         << " step=" << step
@@ -1131,9 +1123,9 @@ void logWetVolumeDiagnostics(
         << " active_side=" << activeSideName(diagnostic.active_side)
         << " isovalue=" << diagnostic.isovalue
         << " wet_volume=" << diagnostic.wet_volume
-        << " initial_wet_volume=" << initial_wet_volume
-        << " wet_volume_drift=" << wet_volume_drift
-        << " relative_wet_volume_drift=" << relative_wet_volume_drift
+        << " initial_wet_volume=" << drift.initial_wet_volume
+        << " wet_volume_drift=" << drift.wet_volume_drift
+        << " relative_wet_volume_drift=" << drift.relative_wet_volume_drift
         << " cut_cell_count=" << diagnostic.cut_cell_count
         << " full_wet_cell_count=" << diagnostic.full_wet_cell_count
         << " full_dry_cell_count=" << diagnostic.full_dry_cell_count

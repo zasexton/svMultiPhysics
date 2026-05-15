@@ -6,6 +6,7 @@
 #include "Mesh/Topology/CellShape.h"
 
 #include <memory>
+#include <map>
 #include <vector>
 
 namespace {
@@ -96,4 +97,31 @@ TEST(ActiveDomainOutput, WritesFullWetAndFullDryFractions)
   ASSERT_NE(data, nullptr);
   EXPECT_DOUBLE_EQ(data[0], 1.0);
   EXPECT_DOUBLE_EQ(data[1], 0.0);
+}
+
+TEST(ActiveDomainOutput, TracksWetVolumeDriftAcrossAcceptedSteps)
+{
+  std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
+  const auto first =
+      application::core::computeWetVolumeDrift(
+          "phi|free_surface|101", 2.0, initial_wet_volume_by_key);
+  const auto later =
+      application::core::computeWetVolumeDrift(
+          "phi|free_surface|101", 2.1, initial_wet_volume_by_key);
+  const auto zero_initial =
+      application::core::computeWetVolumeDrift(
+          "phi|empty|102", 0.0, initial_wet_volume_by_key);
+  const auto zero_relative =
+      application::core::computeWetVolumeDrift(
+          "phi|empty|102", 0.25, initial_wet_volume_by_key);
+
+  EXPECT_DOUBLE_EQ(first.initial_wet_volume, 2.0);
+  EXPECT_DOUBLE_EQ(first.wet_volume_drift, 0.0);
+  EXPECT_DOUBLE_EQ(first.relative_wet_volume_drift, 0.0);
+  EXPECT_DOUBLE_EQ(later.initial_wet_volume, 2.0);
+  EXPECT_NEAR(later.wet_volume_drift, 0.1, 1.0e-12);
+  EXPECT_NEAR(later.relative_wet_volume_drift, 0.05, 1.0e-12);
+  EXPECT_DOUBLE_EQ(zero_initial.initial_wet_volume, 0.0);
+  EXPECT_DOUBLE_EQ(zero_relative.wet_volume_drift, 0.25);
+  EXPECT_DOUBLE_EQ(zero_relative.relative_wet_volume_drift, 0.0);
 }

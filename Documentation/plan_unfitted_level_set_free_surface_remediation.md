@@ -369,7 +369,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
       context before output.
 - [x] Add a maintenance test proving reinitialization does not silently move the
       zero contour beyond a configured tolerance.
-- [ ] Add a long-run diagnostic test that reports wet-volume drift.
+- [x] Add a long-run diagnostic test that reports wet-volume drift.
 
 ## 6. Integration And Acceptance Tests
 

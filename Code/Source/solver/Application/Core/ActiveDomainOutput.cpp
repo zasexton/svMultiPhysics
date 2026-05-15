@@ -1,6 +1,7 @@
 #include "Application/Core/ActiveDomainOutput.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 namespace application {
@@ -61,6 +62,25 @@ std::size_t writeWetVolumeFractionField(
   const auto wet_fraction = collectWetVolumeFractions(mesh.n_cells(), rules);
   std::copy(wet_fraction.begin(), wet_fraction.end(), data);
   return 1u;
+}
+
+WetVolumeDriftDiagnostic computeWetVolumeDrift(
+    const std::string& key,
+    svmp::FE::Real wet_volume,
+    std::map<std::string, svmp::FE::Real>& initial_wet_volume_by_key)
+{
+  const auto [initial_it, inserted] =
+      initial_wet_volume_by_key.try_emplace(key, wet_volume);
+  (void)inserted;
+
+  WetVolumeDriftDiagnostic diagnostic;
+  diagnostic.initial_wet_volume = initial_it->second;
+  diagnostic.wet_volume_drift = wet_volume - diagnostic.initial_wet_volume;
+  diagnostic.relative_wet_volume_drift =
+      std::abs(diagnostic.initial_wet_volume) > svmp::FE::Real{0.0}
+          ? diagnostic.wet_volume_drift / diagnostic.initial_wet_volume
+          : svmp::FE::Real{0.0};
+  return diagnostic;
 }
 
 } // namespace core
