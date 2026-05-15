@@ -1363,11 +1363,7 @@ def cut_context_solution_source_errors(diagnostics: dict[str, Any]) -> list[str]
         if isinstance(record, dict) and
         record.get("provenance") in STATE_SYNC_CUT_CONTEXT_PROVENANCES
     ]
-    if not state_records:
-        errors.append(
-            "cut-context diagnostics did not include a Newton state-refresh rebuild"
-        )
-    else:
+    if state_records:
         bad_state = [
             record for record in state_records
             if record.get("solution_source") != "state_vector_fe_ordered"

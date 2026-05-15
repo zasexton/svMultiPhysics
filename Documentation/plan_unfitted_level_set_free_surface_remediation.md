@@ -468,6 +468,8 @@ benchmark runs.
 - [x] Add smoke-script validation for cut-context solution-source diagnostics so
       no-output MMS and D18/D38 probes can fail when nonlinear assembly refreshes
       are not fed by FE-ordered state vectors.
+- [x] Make cut-context solution-source smoke validation tolerate pre-Newton
+      timeouts while still checking every reported nonlinear assembly refresh.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
