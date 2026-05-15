@@ -342,7 +342,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
       reporting interface displacement caused by reinitialization.
 - [x] If global-shift volume correction remains the default, add diagnostics
       reporting shift magnitude and achieved volume error.
-- [ ] Ensure reinitialization and volume correction update the accepted solution,
+- [x] Ensure reinitialization and volume correction update the accepted solution,
       previous-state history, and cut context consistently.
 - [ ] Ensure maintenance does not invalidate the time integrator history in a way
       that changes the next BDF residual unexpectedly.

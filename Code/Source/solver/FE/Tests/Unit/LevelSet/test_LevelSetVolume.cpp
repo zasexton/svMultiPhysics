@@ -3,6 +3,7 @@
 #include "Assembly/Assembler.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
@@ -355,4 +356,61 @@ TEST(LevelSetVolume, VolumeCorrectionUpdatesOutputTimeActiveVolume)
                 correction_opts.target_negative_volume,
                 correction_opts.volume_tolerance);
     EXPECT_NE(output_time_volume.negative_volume, initial_volume.negative_volume);
+}
+
+TEST(LevelSetVolume, VolumeCorrectionSynchronizesHistoryAndCutContext)
+{
+    const ScalarFieldFixture fixture;
+    const auto coefficients = planeCoefficients(fixture, FE::Real{0.5});
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(fixture.system.dofHandler().getNumDofs()), 0.0);
+    const auto offset = static_cast<std::size_t>(fixture.system.fieldDofOffset(fixture.phi));
+    std::copy(coefficients.begin(),
+              coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(offset));
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 384.0;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        fixture.system,
+        fixture.phi,
+        level_set::LevelSetVolumeOptions{},
+        correction_opts,
+        solution,
+        corrected_solution);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+
+    const auto accepted_solution = corrected_solution;
+    const auto previous_solution = corrected_solution;
+    ASSERT_EQ(accepted_solution.size(), previous_solution.size());
+    for (std::size_t i = 0; i < accepted_solution.size(); ++i) {
+        EXPECT_NEAR(accepted_solution[i], previous_solution[i], 1.0e-15);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions interface_opts{};
+    interface_opts.level_set_field_name = "phi";
+    interface_opts.domain_id = "maintained-fluid";
+    interface_opts.requested_interface_marker = 812;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto accepted_context =
+        lifecycle.build(fixture.system, interface_opts, accepted_solution);
+    const auto previous_context =
+        lifecycle.build(fixture.system, interface_opts, previous_solution);
+
+    ASSERT_TRUE(accepted_context.success) << accepted_context.diagnostic;
+    ASSERT_TRUE(previous_context.success) << previous_context.diagnostic;
+    EXPECT_EQ(previous_context.interface_marker, accepted_context.interface_marker);
+    EXPECT_EQ(previous_context.domain.marker(), accepted_context.domain.marker());
+    EXPECT_EQ(previous_context.value_revision, accepted_context.value_revision + 1u);
+    EXPECT_NEAR(accepted_context.summary.negative_volume_measure,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
+    EXPECT_NEAR(previous_context.summary.negative_volume_measure,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
 }

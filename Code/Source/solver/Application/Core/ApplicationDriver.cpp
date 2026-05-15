@@ -1108,6 +1108,37 @@ void scatterFeOrderedSolution(
   solution.updateGhosts();
 }
 
+double globalMaxAbsDifference(std::span<const svmp::FE::Real> left,
+                              std::span<const svmp::FE::Real> right,
+                              const svmp::MeshComm& comm)
+{
+  if (left.size() != right.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Cannot compare solution history vectors with mismatched sizes.");
+  }
+
+  double local = 0.0;
+  for (std::size_t i = 0; i < left.size(); ++i) {
+    local = std::max(
+        local,
+        static_cast<double>(std::abs(left[i] - right[i])));
+  }
+
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (initialized && comm.size() > 1) {
+    double global = 0.0;
+    MPI_Allreduce(&local, &global, 1, MPI_DOUBLE, MPI_MAX, comm.native());
+    return global;
+  }
+#else
+  (void)comm;
+#endif
+
+  return local;
+}
+
 void initializeLevelSetMaintenanceTargets(
     application::core::SimulationComponents& sim,
     std::vector<LevelSetMaintenanceRequest>& requests)
@@ -1279,6 +1310,14 @@ bool applyLevelSetMaintenance(
     scatterFeOrderedSolution(history.u(), fe_solution);
     scatterFeOrderedSolution(history.uPrev(), fe_solution);
     history.updateGhosts();
+    const auto current_previous_delta = globalMaxAbsDifference(
+        history.uSpan(), history.uPrevSpan(), svmp::MeshComm::world());
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Level-set maintenance synchronized"
+        << " step=" << history.stepIndex()
+        << " accepted_solution=true previous_state=true"
+        << " current_previous_max_abs_delta=" << current_previous_delta
+        << " history_depth=" << history.historyDepth() << std::endl;
   }
   return changed;
 }
@@ -2141,11 +2180,22 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
-    (void)applyLevelSetMaintenance(sim, h, level_set_maintenance);
+    const bool level_set_maintenance_changed =
+        applyLevelSetMaintenance(sim, h, level_set_maintenance);
     (void)updateLevelSetAdvectionVelocities(
         sim, h, level_set_advection_velocity);
-    (void)refreshActiveCutIntegrationContext(
+    const auto cut_report = refreshActiveCutIntegrationContext(
         sim, params, h.u(), *cut_lifecycle);
+    if (level_set_maintenance_changed && cut_report.refreshed) {
+      oopCout()
+          << "[svMultiPhysics::Application] Level-set maintenance refreshed cut context"
+          << " step=" << h.stepIndex()
+          << " cut_context_revision=" << cut_report.value_revision
+          << " negative_volume=" << cut_report.negative_volume
+          << " positive_volume=" << cut_report.positive_volume
+          << " cut_adjacent_facets=" << cut_report.cut_adjacent_facets
+          << std::endl;
+    }
     auto vtk_start = std::chrono::steady_clock::now();
     outputResults(sim, params, h.stepIndex(), h.time(), pvd);
     vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
