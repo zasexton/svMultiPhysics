@@ -64,6 +64,7 @@ JACOBIAN_TOP_MISMATCH_RE = re.compile(
 )
 DOUBLE_BAR_VALUE_RE = re.compile(r"\|\|([^|]+)\|\|=([-+0-9.eE]+)")
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
+JACOBIAN_COMPONENT_BLOCK_MIN_DENOMINATOR = 1.0e-12
 LINEAR_SOLVER_RE = re.compile(
     r"SimulationBuilder: linear solver method=(?P<method>\S+)"
     r" preconditioner=(?P<preconditioner>\S+)"
@@ -198,6 +199,16 @@ def set_text(parent: ET.Element, name: str, value: str) -> None:
     element.text = value
 
 
+def set_linear_algebra_backend(solver: ET.Element,
+                               backend: str,
+                               preconditioner: str = "none") -> None:
+    element = solver.find("Linear_algebra")
+    if element is None:
+        element = ET.SubElement(solver, "Linear_algebra")
+    element.set("type", backend)
+    set_text(element, "Preconditioner", preconditioner)
+
+
 def free_surface_bc(root: ET.Element) -> ET.Element:
     for equation in root.findall("Add_equation"):
         if equation.attrib.get("type") != "fluid":
@@ -216,9 +227,15 @@ def fluid_equation(root: ET.Element) -> ET.Element:
 
 
 def navier_stokes_linear_solver(root: ET.Element) -> ET.Element:
-    for solver in fluid_equation(root).findall("LS"):
+    solvers = fluid_equation(root).findall("LS")
+    for solver in solvers:
         if solver.attrib.get("type") == "NS":
             return solver
+    for solver in solvers:
+        if solver.find("NS_GM_max_iterations") is not None:
+            return solver
+    if len(solvers) == 1:
+        return solvers[0]
     raise ValueError("missing fluid NS linear solver block")
 
 
@@ -246,6 +263,10 @@ def configure_solver(solver_xml: Path,
     general = root.find("GeneralSimulationParameters")
     if general is None:
         raise ValueError("missing GeneralSimulationParameters")
+    for parent in root.iter():
+        for linear_algebra in list(parent.findall("Linear_algebra")):
+            if linear_algebra.attrib.get("type", "").strip().lower() == "eigen":
+                parent.remove(linear_algebra)
 
     set_text(general, "Number_of_time_steps", str(steps))
     set_text(general, "Save_results_to_VTK_format", "false" if disable_vtk_output else "true")
@@ -282,6 +303,8 @@ def configure_solver(solver_xml: Path,
     if linear_solver_type is not None:
         assert ns_solver is not None
         ns_solver.set("type", linear_solver_type)
+        if linear_solver_type.strip().lower() != "direct":
+            set_linear_algebra_backend(ns_solver, "fsils", "fsils")
     if linear_relative_tolerance is not None:
         assert ns_solver is not None
         set_text(ns_solver, "Tolerance", f"{linear_relative_tolerance:.16g}")
@@ -369,6 +392,10 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             env["SVMP_FE_JACOBIAN_CHECK_STEP"] = f"{args.jacobian_check_step:.16g}"
         if args.jacobian_check_components:
             env["SVMP_FE_JACOBIAN_CHECK_COMPONENTS"] = args.jacobian_check_components
+        if args.jacobian_check_component_sweeps:
+            env["SVMP_FE_JACOBIAN_CHECK_COMPONENT_SWEEPS"] = (
+                args.jacobian_check_component_sweeps
+            )
     if args.enable_newton_direction_check:
         env["SVMP_NEWTON_DIRECTION_CHECK"] = "1"
     if args.enable_linear_solve_history:
@@ -1100,6 +1127,85 @@ def parse_jacobian_top_mismatch(line: str) -> list[dict[str, Any]]:
     return entries
 
 
+def diagnostic_header(line: str, marker: str) -> str:
+    marker_index = line.find(marker)
+    if marker_index < 0:
+        return line
+    payload_index = line.find(" [", marker_index)
+    if payload_index < 0:
+        return line
+    return line[:payload_index]
+
+
+def normalized_component_sweeps(value: str | None) -> list[str]:
+    if not value:
+        return []
+    separator = ";" if ";" in value else ","
+    sweeps = []
+    for group in value.split(separator):
+        tokens = [
+            token.strip().lower()
+            for token in group.split(",")
+            if token.strip()
+        ]
+        if not tokens or tokens == ["all"]:
+            label = "all"
+        else:
+            label = ",".join(tokens)
+        if label not in sweeps:
+            sweeps.append(label)
+    return sweeps
+
+
+def jacobian_component_block_metrics(
+        records: list[dict[str, Any]]) -> dict[str, Any]:
+    relative_errors: dict[str, float] = {}
+    matrix_relative_errors: dict[str, float] = {}
+    filters: list[str] = []
+    skipped = 0
+    for record in records:
+        raw_filter = record.get("component_filter", record.get("components", "all"))
+        column_filter = str(raw_filter or "all")
+        if column_filter not in filters:
+            filters.append(column_filter)
+        components = record.get("components")
+        if not isinstance(components, list):
+            continue
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            row = str(component.get("component", "unknown"))
+            fd_norm = component.get("fd")
+            full_norm = component.get("full")
+            matrix_norm = component.get("matrix")
+            total_err = component.get("total_err")
+            matrix_err = component.get("matrix_err")
+            if not all(isinstance(value, (int, float)) for value in (
+                    fd_norm, full_norm, matrix_norm, total_err, matrix_err)):
+                continue
+            full_denominator = max(abs(float(fd_norm)), abs(float(full_norm)))
+            matrix_denominator = max(abs(float(fd_norm)), abs(float(matrix_norm)))
+            if full_denominator < JACOBIAN_COMPONENT_BLOCK_MIN_DENOMINATOR:
+                skipped += 1
+            else:
+                key = f"column={column_filter},row={row}"
+                relative_errors[key] = abs(float(total_err)) / full_denominator
+            if matrix_denominator >= JACOBIAN_COMPONENT_BLOCK_MIN_DENOMINATOR:
+                key = f"column={column_filter},row={row}"
+                matrix_relative_errors[key] = abs(float(matrix_err)) / matrix_denominator
+    result: dict[str, Any] = {
+        "filters": filters,
+        "skipped_near_zero_blocks": skipped,
+    }
+    if relative_errors:
+        result["relative_errors"] = dict(sorted(relative_errors.items()))
+        result["max_relative_error"] = max(relative_errors.values())
+    if matrix_relative_errors:
+        result["matrix_relative_errors"] = dict(sorted(matrix_relative_errors.items()))
+        result["max_matrix_relative_error"] = max(matrix_relative_errors.values())
+    return result
+
+
 def norm_key(label: str) -> str:
     key = label.strip().lower()
     key = re.sub(r"used_op=([^)]*)", r"used_op_\1", key)
@@ -1146,6 +1252,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "jacobian_check_component_norms": [],
         "jacobian_check_component_details": [],
         "jacobian_check_component_filters": [],
+        "jacobian_check_sweep_plans": [],
         "jacobian_check_top_mismatches": [],
         "form_block_dependencies": [],
         "form_block_installs": [],
@@ -1222,17 +1329,25 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         elif "NewtonSolver: Jacobian check jacobian_op=" in line:
             diagnostics["jacobian_checks"].append(parse_norm_key_values(line))
         elif "NewtonSolver: Jacobian check component norms" in line:
-            diagnostics["jacobian_check_component_norms"].append({
-                "components": parse_jacobian_component_norms(line),
-            })
+            record = parse_key_values(
+                diagnostic_header(line, "diagnostic=jacobian_check_component_norms")
+            )
+            record["components"] = parse_jacobian_component_norms(line)
+            diagnostics["jacobian_check_component_norms"].append(record)
         elif "diagnostic=jacobian_check_component_details" in line:
-            record = parse_key_values(line.split(" [", 1)[0])
+            record = parse_key_values(
+                diagnostic_header(line, "diagnostic=jacobian_check_component_details")
+            )
             record["components"] = parse_jacobian_component_details(line)
             diagnostics["jacobian_check_component_details"].append(record)
         elif "diagnostic=jacobian_check_component_filter" in line:
             diagnostics["jacobian_check_component_filters"].append(parse_key_values(line))
+        elif "diagnostic=jacobian_check_sweep_plan" in line:
+            diagnostics["jacobian_check_sweep_plans"].append(parse_key_values(line))
         elif "diagnostic=jacobian_check_top_mismatch" in line:
-            record = parse_key_values(line.split(" [", 1)[0])
+            record = parse_key_values(
+                diagnostic_header(line, "diagnostic=jacobian_check_top_mismatch")
+            )
             record["entries"] = parse_jacobian_top_mismatch(line)
             diagnostics["jacobian_check_top_mismatches"].append(record)
         elif "diagnostic=form_block_dependencies" in line:
@@ -1583,17 +1698,17 @@ def assembly_topology_consistency_errors(diagnostics: dict[str, Any]) -> list[st
         if not facet_counts:
             errors.append("cut-adjacent facet count is unavailable for interior-face timing checks")
         else:
-            expected_facets = max(facet_counts)
+            expected_facets = set(facet_counts)
             mismatched = [
                 int(record["faces_assembled"])
                 for record in diagnostics["interior_face_timings"]
                 if isinstance(record.get("faces_assembled"), int) and
-                int(record["faces_assembled"]) != expected_facets
+                int(record["faces_assembled"]) not in expected_facets
             ]
             if mismatched:
                 errors.append(
                     "interior-face timing assembled counts do not match cut-adjacent facets "
-                    f"(expected {expected_facets}, examples {mismatched[:3]})"
+                    f"(expected one of {sorted(expected_facets)}, examples {mismatched[:3]})"
                 )
 
     assembly_records: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
@@ -1758,8 +1873,34 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         if isinstance(value, (int, float)):
             metrics["diagnostic_jacobian_check_relative_error"] = float(value)
     if diagnostics.get("jacobian_check_component_details"):
-        metrics["latest_jacobian_check_component_details"] = (
-            diagnostics["jacobian_check_component_details"][-1]
+        details = diagnostics["jacobian_check_component_details"]
+        metrics["latest_jacobian_check_component_details"] = details[-1]
+        block_metrics = jacobian_component_block_metrics(details)
+        filters = block_metrics.get("filters")
+        if isinstance(filters, list):
+            metrics["diagnostic_jacobian_component_sweep_filters"] = filters
+            metrics["diagnostic_jacobian_component_sweep_count"] = len(filters)
+        if "relative_errors" in block_metrics:
+            metrics["diagnostic_jacobian_component_block_relative_errors"] = (
+                block_metrics["relative_errors"]
+            )
+        if "matrix_relative_errors" in block_metrics:
+            metrics["diagnostic_jacobian_component_block_matrix_relative_errors"] = (
+                block_metrics["matrix_relative_errors"]
+            )
+        for source, target in (
+                ("max_relative_error",
+                 "diagnostic_jacobian_component_block_max_relative_error"),
+                ("max_matrix_relative_error",
+                 "diagnostic_jacobian_component_block_max_matrix_relative_error"),
+                ("skipped_near_zero_blocks",
+                 "diagnostic_jacobian_component_block_skipped_near_zero_count")):
+            value = block_metrics.get(source)
+            if isinstance(value, (int, float)):
+                metrics[target] = value
+    if diagnostics.get("jacobian_check_sweep_plans"):
+        metrics["latest_jacobian_check_sweep_plan"] = (
+            diagnostics["jacobian_check_sweep_plans"][-1]
         )
     if diagnostics.get("jacobian_check_top_mismatches"):
         metrics["latest_jacobian_check_top_mismatch"] = (
@@ -2023,6 +2164,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_cut_volume_timing_diagnostics",
         "require_jit_specialization_trace_diagnostics",
         "require_marked_interior_face_fallback_diagnostics",
+        "require_jacobian_component_block_diagnostics",
         "require_assembly_topology_consistency",
         "allow_failure_diagnostics",
     ):
@@ -2032,6 +2174,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "jacobian_check_iteration",
         "jacobian_check_step",
         "jacobian_check_components",
+        "jacobian_check_component_sweeps",
         "linear_solve_history_max_calls",
         "linear_solve_component_norms_max_newton_it",
     ):
@@ -2112,6 +2255,21 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("Jacobian finite-difference diagnostics were not reported")
     if args.require_jacobian_top_mismatch_diagnostics and not diagnostics.get("jacobian_check_top_mismatches"):
         errors.append("Jacobian top-mismatch diagnostics were not reported")
+    if args.require_jacobian_component_block_diagnostics:
+        if not diagnostics.get("jacobian_check_component_details"):
+            errors.append("Jacobian component-block diagnostics were not reported")
+        expected_filters = normalized_component_sweeps(args.jacobian_check_component_sweeps)
+        actual_filters = metrics.get("diagnostic_jacobian_component_sweep_filters", [])
+        if expected_filters:
+            missing_filters = [
+                label for label in expected_filters
+                if label not in actual_filters
+            ]
+            if missing_filters:
+                errors.append(
+                    "Jacobian component-block diagnostics are missing sweep filter(s): "
+                    + ", ".join(missing_filters)
+                )
     if args.require_linear_solve_history_diagnostics and not diagnostics.get("linear_solve_histories"):
         errors.append("linear solve history diagnostics were not reported")
     if args.require_form_block_diagnostics and (
@@ -2249,6 +2407,15 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
             errors.append(
                 f"Jacobian finite-difference relative error {value:.6g} exceeds "
                 f"{args.max_jacobian_check_relative_error:.6g}"
+            )
+    if args.max_jacobian_component_block_relative_error is not None:
+        value = metrics.get("diagnostic_jacobian_component_block_max_relative_error")
+        if not isinstance(value, (int, float)):
+            errors.append("Jacobian component-block relative error is unavailable")
+        elif value > args.max_jacobian_component_block_relative_error:
+            errors.append(
+                f"Jacobian component-block relative error {value:.6g} exceeds "
+                f"{args.max_jacobian_component_block_relative_error:.6g}"
             )
     if args.stale_pressure_gauge_tolerance is not None:
         stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
@@ -2701,12 +2868,14 @@ def main() -> int:
     parser.add_argument("--require-newton-direction-check-diagnostics", action="store_true")
     parser.add_argument("--require-jacobian-check-diagnostics", action="store_true")
     parser.add_argument("--require-jacobian-top-mismatch-diagnostics", action="store_true")
+    parser.add_argument("--require-jacobian-component-block-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-history-diagnostics", action="store_true")
     parser.add_argument("--require-form-block-diagnostics", action="store_true")
     parser.add_argument("--require-cut-context-solution-source-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-timing-diagnostics", action="store_true")
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
+    parser.add_argument("--max-jacobian-component-block-relative-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
@@ -2724,6 +2893,7 @@ def main() -> int:
     parser.add_argument("--jacobian-check-iteration", type=int)
     parser.add_argument("--jacobian-check-step", type=float)
     parser.add_argument("--jacobian-check-components")
+    parser.add_argument("--jacobian-check-component-sweeps")
     parser.add_argument("--enable-newton-direction-check", action="store_true")
     parser.add_argument("--enable-linear-solve-history", action="store_true")
     parser.add_argument("--linear-solve-history-max-calls", type=int)

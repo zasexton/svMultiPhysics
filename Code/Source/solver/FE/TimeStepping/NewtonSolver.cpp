@@ -812,30 +812,66 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
     return std::string(begin, end);
 }
 
-[[nodiscard]] const std::vector<std::string>& jacobianCheckComponentFilter()
+using ComponentFilter = std::vector<std::string>;
+
+[[nodiscard]] ComponentFilter parseJacobianCheckComponentFilter(std::string_view text)
 {
-    static const std::vector<std::string> tokens = [] {
-        std::vector<std::string> parsed;
-        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_COMPONENTS");
-        if (env == nullptr) {
+    ComponentFilter parsed;
+    std::stringstream ss{std::string(text)};
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token = lowerCopy(trimCopy(token));
+        if (token == "all") {
+            parsed.clear();
             return parsed;
         }
-        std::stringstream ss(env);
-        std::string token;
-        while (std::getline(ss, token, ',')) {
-            token = lowerCopy(trimCopy(token));
-            if (!token.empty()) {
-                parsed.push_back(token);
-            }
+        if (!token.empty()) {
+            parsed.push_back(token);
         }
-        return parsed;
+    }
+    return parsed;
+}
+
+[[nodiscard]] const ComponentFilter& jacobianCheckComponentFilter()
+{
+    static const ComponentFilter tokens = [] {
+        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_COMPONENTS");
+        if (env == nullptr) {
+            return ComponentFilter{};
+        }
+        return parseJacobianCheckComponentFilter(env);
     }();
     return tokens;
 }
 
-[[nodiscard]] std::string jacobianCheckComponentFilterLabel()
+[[nodiscard]] const std::vector<ComponentFilter>& jacobianCheckComponentSweepFilters()
 {
-    const auto& tokens = jacobianCheckComponentFilter();
+    static const std::vector<ComponentFilter> filters = [] {
+        std::vector<ComponentFilter> parsed;
+        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_COMPONENT_SWEEPS");
+        if (env != nullptr) {
+            std::string sweep_text = trimCopy(env);
+            const char separator = (sweep_text.find(';') != std::string::npos) ? ';' : ',';
+            std::stringstream ss{sweep_text};
+            std::string group;
+            while (std::getline(ss, group, separator)) {
+                group = trimCopy(group);
+                if (group.empty()) {
+                    continue;
+                }
+                parsed.push_back(parseJacobianCheckComponentFilter(group));
+            }
+        }
+        if (parsed.empty()) {
+            parsed.push_back(jacobianCheckComponentFilter());
+        }
+        return parsed;
+    }();
+    return filters;
+}
+
+[[nodiscard]] std::string jacobianCheckComponentFilterLabel(std::span<const std::string> tokens)
+{
     if (tokens.empty()) {
         return "all";
     }
@@ -847,6 +883,53 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
         oss << tokens[i];
     }
     return oss.str();
+}
+
+[[nodiscard]] std::string jacobianCheckComponentFilterLabel()
+{
+    return jacobianCheckComponentFilterLabel(jacobianCheckComponentFilter());
+}
+
+[[nodiscard]] std::string jacobianCheckComponentSweepSummary(
+    const std::vector<ComponentFilter>& filters)
+{
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < filters.size(); ++i) {
+        if (i > 0u) {
+            oss << ";";
+        }
+        oss << jacobianCheckComponentFilterLabel(filters[i]);
+    }
+    return oss.str();
+}
+
+void fillJacobianCheckDirection(backends::GenericVector& direction,
+                                std::size_t sweep_index)
+{
+    auto v = direction.localSpan();
+    std::uint64_t s = 0x9e3779b97f4a7c15ULL ^
+        (static_cast<std::uint64_t>(mpiRank() + 1) * 0xbf58476d1ce4e5b9ULL) ^
+        (static_cast<std::uint64_t>(sweep_index + 1u) * 0x94d049bb133111ebULL);
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        // xorshift64*
+        s ^= s >> 12;
+        s ^= s << 25;
+        s ^= s >> 27;
+        const std::uint64_t x = s * 2685821657736338717ULL;
+        const double u01 = static_cast<double>((x >> 11) & ((1ULL << 53) - 1ULL)) *
+            (1.0 / 9007199254740992.0); // 2^53
+        v[i] = static_cast<Real>(2.0 * u01 - 1.0);
+    }
+}
+
+void logJacobianCheckSweepPlan(const std::vector<ComponentFilter>& filters)
+{
+    if (mpiRank() != 0) {
+        return;
+    }
+    FE_LOG_INFO("NewtonSolver: Jacobian check sweep plan diagnostic=jacobian_check_sweep_plan count=" +
+                std::to_string(filters.size()) +
+                " filters='" + jacobianCheckComponentSweepSummary(filters) + "'");
 }
 
 [[nodiscard]] bool jacobianCheckDofSelected(const systems::FESystem& sys,
@@ -883,10 +966,19 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
 }
 
 void applyJacobianCheckComponentFilter(const systems::FESystem& sys,
-                                       backends::GenericVector& direction)
+                                       backends::GenericVector& direction,
+                                       std::span<const std::string> tokens,
+                                       std::string_view filter_label,
+                                       std::size_t sweep_index)
 {
-    const auto& tokens = jacobianCheckComponentFilter();
     if (tokens.empty()) {
+        if (mpiRank() == 0) {
+            FE_LOG_INFO("NewtonSolver: Jacobian check component filter diagnostic=jacobian_check_component_filter components='" +
+                        std::string(filter_label) +
+                        "' component_filter='" + std::string(filter_label) +
+                        "' sweep=" + std::to_string(sweep_index) +
+                        " selected_dofs=all zeroed_dofs=0");
+        }
         return;
     }
 
@@ -937,8 +1029,10 @@ void applyJacobianCheckComponentFilter(const systems::FESystem& sys,
 
     if (mpiRank() == 0) {
         FE_LOG_INFO("NewtonSolver: Jacobian check component filter diagnostic=jacobian_check_component_filter components='" +
-                    jacobianCheckComponentFilterLabel() +
-                    "' selected_dofs=" + std::to_string(selected_count) +
+                    std::string(filter_label) +
+                    "' component_filter='" + std::string(filter_label) +
+                    "' sweep=" + std::to_string(sweep_index) +
+                    " selected_dofs=" + std::to_string(selected_count) +
                     " zeroed_dofs=" + std::to_string(zeroed_count));
     }
 }
@@ -1244,6 +1338,7 @@ std::vector<ComponentNormSnapshot> componentNormSnapshot(const systems::FESystem
 
 void logJacobianCheckComponentDetails(
     std::string_view component_filter,
+    std::size_t sweep_index,
     std::span<const ComponentNormSnapshot> base,
     std::span<const ComponentNormSnapshot> perturbed,
     std::span<const ComponentNormSnapshot> fd,
@@ -1273,7 +1368,8 @@ void logJacobianCheckComponentDetails(
     std::ostringstream oss;
     oss << "NewtonSolver: Jacobian check component details"
         << " diagnostic=jacobian_check_component_details"
-        << " component_filter='" << component_filter << "'";
+        << " component_filter='" << component_filter << "'"
+        << " sweep=" << sweep_index;
     for (std::size_t i = 0; i < count; ++i) {
         oss << " [" << base[i].label
             << " base=" << base[i].norm
@@ -1291,7 +1387,9 @@ void logJacobianCheckComponentDetails(
 void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
                                        backends::GenericVector& fd,
                                        backends::GenericVector& total_err,
-                                       backends::GenericVector& matrix_err)
+                                       backends::GenericVector& matrix_err,
+                                       std::string_view component_filter,
+                                       std::size_t sweep_index)
 {
     const auto& fmap = sys.fieldMap();
     const auto owned_dofs =
@@ -1385,7 +1483,10 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
     }
 
     std::ostringstream oss;
-    oss << "NewtonSolver: Jacobian check component norms";
+    oss << "NewtonSolver: Jacobian check component norms"
+        << " diagnostic=jacobian_check_component_norms"
+        << " component_filter='" << component_filter << "'"
+        << " sweep=" << sweep_index;
     for (const auto& s : stats) {
         oss << " [" << s.label
             << " fd=" << std::sqrt(std::max(0.0, s.fd_sq))
@@ -1399,7 +1500,9 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
 void logJacobianCheckTopMismatchEntries(const systems::FESystem& sys,
                                         backends::GenericVector& fd,
                                         backends::GenericVector& err,
-                                        std::size_t top_k)
+                                        std::size_t top_k,
+                                        std::string_view component_filter,
+                                        std::size_t sweep_index)
 {
     const auto owned_dofs =
         ownedDofsForVector(err, sys.dofHandler().getPartition().locallyOwned());
@@ -1451,6 +1554,8 @@ void logJacobianCheckTopMismatchEntries(const systems::FESystem& sys,
     std::ostringstream oss;
     oss << "NewtonSolver: Jacobian check top mismatch entries"
         << " diagnostic=jacobian_check_top_mismatch"
+        << " component_filter='" << component_filter << "'"
+        << " sweep=" << sweep_index
         << " rank=" << mpiRank();
     for (const auto& entry : top_entries) {
         oss << " [" << describeFieldComponentDof(sys, entry.dof)
@@ -4650,24 +4755,22 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             const double h = rel_step * (1.0 + u_rms);
 
             if (h > 0.0 && std::isfinite(h)) {
-                // Populate a deterministic pseudo-random direction in `du` (will be overwritten by the linear solve).
-                {
-                    auto v = du.localSpan();
-                    std::uint64_t s = 0x9e3779b97f4a7c15ULL ^ static_cast<std::uint64_t>(mpiRank() + 1);
-                    for (std::size_t i = 0; i < v.size(); ++i) {
-                        // xorshift64*
-                        s ^= s >> 12;
-                        s ^= s << 25;
-                        s ^= s >> 27;
-                        const std::uint64_t x = s * 2685821657736338717ULL;
-                        const double u01 = static_cast<double>((x >> 11) & ((1ULL << 53) - 1ULL)) *
-                            (1.0 / 9007199254740992.0); // 2^53
-                        v[i] = static_cast<Real>(2.0 * u01 - 1.0);
-                    }
-                }
-                zeroVectorEntries(constrained_dofs, du);
-                applyJacobianCheckComponentFilter(transient.system(), du);
-                du.updateGhosts();
+                const auto& component_sweeps = jacobianCheckComponentSweepFilters();
+                logJacobianCheckSweepPlan(component_sweeps);
+
+                for (std::size_t sweep_index = 0; sweep_index < component_sweeps.size(); ++sweep_index) {
+                    const auto& component_filter = component_sweeps[sweep_index];
+                    const auto component_filter_label = jacobianCheckComponentFilterLabel(component_filter);
+
+                    // Populate a deterministic pseudo-random direction in `du` (will be overwritten by the linear solve).
+                    fillJacobianCheckDirection(du, sweep_index);
+                    zeroVectorEntries(constrained_dofs, du);
+                    applyJacobianCheckComponentFilter(transient.system(),
+                                                      du,
+                                                      component_filter,
+                                                      component_filter_label,
+                                                      sweep_index);
+                    du.updateGhosts();
 
                 auto applyResidualFixups = [&](backends::GenericVector& vec) {
                     if (residual_addition != nullptr) {
@@ -4833,13 +4936,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 zeroVectorEntries(constrained_dofs, residual_base);
                 axpy(residual_base, static_cast<Real>(-1.0), residual_scratch);
 
-                if (mpiRank() == 0) {
-                    std::ostringstream oss;
-                    oss << "NewtonSolver: Jacobian check jacobian_op='" << options_.jacobian_op
-                        << "' residual_op='" << options_.residual_op << "'"
-                        << " component_filter='" << jacobianCheckComponentFilterLabel() << "'"
-                        << " it=" << it
-                        << " h=" << h
+	                if (mpiRank() == 0) {
+	                    std::ostringstream oss;
+	                    oss << "NewtonSolver: Jacobian check jacobian_op='" << options_.jacobian_op
+	                        << "' residual_op='" << options_.residual_op << "'"
+	                        << " diagnostic=jacobian_check"
+	                        << " component_filter='" << component_filter_label << "'"
+	                        << " sweep=" << sweep_index
+	                        << " it=" << it
+	                        << " h=" << h
                         << " ||J_matrix*v||=" << matrix_jv_norm
                         << " ||rank1*v||=" << rank_one_jv_norm
                         << " ||Jv||=" << jv_norm
@@ -4853,20 +4958,29 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " ||r_used-r_residual||=" << r_diff_norm;
                     FE_LOG_INFO(oss.str());
                 }
-                logJacobianCheckComponentDetails(jacobianCheckComponentFilterLabel(),
-                                                 base_component_norms,
-                                                 perturbed_component_norms,
-                                                 fd_component_norms,
-                                                 matrix_component_norms,
-                                                 full_component_norms,
-                                                 matrix_err_component_norms,
-                                                 err_component_norms,
-                                                 sign_flip_err_component_norms);
-                logJacobianCheckComponentBreakdown(transient.system(),
-                                                  residual_scratch,
-                                                  u_backup,
-                                                  residual_base);
-                logJacobianCheckTopMismatchEntries(transient.system(), residual_scratch, u_backup, 8u);
+	                logJacobianCheckComponentDetails(component_filter_label,
+	                                                 sweep_index,
+	                                                 base_component_norms,
+	                                                 perturbed_component_norms,
+	                                                 fd_component_norms,
+	                                                 matrix_component_norms,
+	                                                 full_component_norms,
+	                                                 matrix_err_component_norms,
+	                                                 err_component_norms,
+	                                                 sign_flip_err_component_norms);
+	                logJacobianCheckComponentBreakdown(transient.system(),
+	                                                  residual_scratch,
+	                                                  u_backup,
+	                                                  residual_base,
+	                                                  component_filter_label,
+	                                                  sweep_index);
+	                logJacobianCheckTopMismatchEntries(transient.system(),
+	                                                   residual_scratch,
+	                                                   u_backup,
+	                                                   8u,
+	                                                   component_filter_label,
+	                                                   sweep_index);
+                }
             } else if (mpiRank() == 0) {
                 FE_LOG_INFO("NewtonSolver: Jacobian check skipped (invalid perturbation size).");
             }

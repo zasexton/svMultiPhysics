@@ -501,6 +501,15 @@ benchmark runs.
 - [x] Add smoke-script metrics and a require switch for marked interior-face
       fallback traces so MMS and D18 no-output probes can verify the fallback
       reason directly.
+- [x] Add component-sweep finite-difference Jacobian diagnostics so MMS probes
+      can perturb velocity and pressure columns separately and report
+      row-component block mismatch norms.
+- [x] Add smoke-script parsing and thresholds for Jacobian component-block
+      relative errors, including GMRES temporary-case backend normalization for
+      the MMS traveling-interface fixture.
+- [x] Record MMS GMRES component-sweep evidence showing velocity/pressure block
+      assembly agrees with fixed-geometry finite differences within the
+      diagnostic tolerance.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

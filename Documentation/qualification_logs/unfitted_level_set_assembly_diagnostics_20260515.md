@@ -52,6 +52,37 @@ Key diagnostics:
 This rules out a gross velocity/pressure residual-vs-Jacobian assembly
 sign or block-placement mismatch in the MMS fixed-geometry probe.
 
+## MMS GMRES Component-Sweep Probe
+
+The preserved no-output run in
+`/tmp/dam_break_mms2d_3ecrriz2/mms_traveling_interface_2d` used GMRES with
+separate finite-difference perturbation sweeps for `velocity` and `pressure`.
+
+Key diagnostics:
+
+- The smoke script parsed two component sweeps: `velocity` and `pressure`.
+- GMRES converged in `536` linear iterations to relative residual
+  `9.99808e-05` with diagonal FSILS preconditioning.
+- The latest whole-vector finite-difference Jacobian relative mismatch was
+  `2.84069e-09`.
+- The maximum active row/column component-block relative mismatch was
+  `2.622930704152584e-04`, from the `velocity -> Pressure` block.
+- The other active component-block relative mismatches were
+  `velocity -> Velocity[0] = 1.5417375999076666e-05`,
+  `velocity -> Velocity[1] = 9.12815679170967e-06`,
+  `pressure -> Velocity[0] = 4.533614704234893e-07`,
+  `pressure -> Velocity[1] = 2.8026322634344274e-07`, and
+  `pressure -> Pressure = 2.840199543899658e-09`.
+- The Newton direction check reported relative error `9.99808e-05`, matching
+  the requested GMRES residual scale.
+
+This narrows the assembly-mismatch investigation: the fixed-geometry
+velocity/pressure matrix action is consistent by block with finite-difference
+residual changes on the MMS traveling-interface case. Remaining nonlinear
+stagnation should be investigated in geometry coupling, stabilization
+conditioning, or solver/preconditioner behavior rather than as a gross
+velocity/pressure block assembly mismatch.
+
 ## Why `phi` Is Excluded From This Jacobian Filter
 
 The `velocity,pressure` filter intentionally excludes `phi` because this
