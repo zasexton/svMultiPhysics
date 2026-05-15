@@ -451,6 +451,9 @@ benchmark runs.
       require parseable finite-difference Jacobian checks, Newton direction
       checks, linear solve history, and component norms even when the solver
       exits before VTK output.
+- [x] Add a component-selectable finite-difference Jacobian diagnostic so MMS
+      probes can separate fixed-geometry velocity and pressure assembly checks
+      from level-set geometry perturbations.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

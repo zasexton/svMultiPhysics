@@ -327,6 +327,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             env["SVMP_FE_JACOBIAN_CHECK_IT"] = str(args.jacobian_check_iteration)
         if args.jacobian_check_step is not None:
             env["SVMP_FE_JACOBIAN_CHECK_STEP"] = f"{args.jacobian_check_step:.16g}"
+        if args.jacobian_check_components:
+            env["SVMP_FE_JACOBIAN_CHECK_COMPONENTS"] = args.jacobian_check_components
     if args.enable_newton_direction_check:
         env["SVMP_NEWTON_DIRECTION_CHECK"] = "1"
     if args.enable_linear_solve_history:
@@ -947,6 +949,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "newton_direction_checks": [],
         "jacobian_checks": [],
         "jacobian_check_component_norms": [],
+        "jacobian_check_component_filters": [],
         "linear_solve_histories": [],
         "time_loop": {
             "nonlinear_records": [],
@@ -998,6 +1001,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["jacobian_check_component_norms"].append({
                 "components": parse_jacobian_component_norms(line),
             })
+        elif "diagnostic=jacobian_check_component_filter" in line:
+            diagnostics["jacobian_check_component_filters"].append(parse_key_values(line))
         elif "NewtonSolver: linear solve history" in line:
             diagnostics["linear_solve_histories"].append(parse_key_values(line))
         elif "vector component norms" in line:
@@ -1365,6 +1370,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
     for name in (
         "jacobian_check_iteration",
         "jacobian_check_step",
+        "jacobian_check_components",
         "linear_solve_history_max_calls",
         "linear_solve_component_norms_max_newton_it",
     ):
@@ -2011,6 +2017,7 @@ def main() -> int:
     parser.add_argument("--enable-jacobian-check", action="store_true")
     parser.add_argument("--jacobian-check-iteration", type=int)
     parser.add_argument("--jacobian-check-step", type=float)
+    parser.add_argument("--jacobian-check-components")
     parser.add_argument("--enable-newton-direction-check", action="store_true")
     parser.add_argument("--enable-linear-solve-history", action="store_true")
     parser.add_argument("--linear-solve-history-max-calls", type=int)

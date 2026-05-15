@@ -791,6 +791,158 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
     return v;
 }
 
+[[nodiscard]] std::string lowerCopy(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+[[nodiscard]] std::string trimCopy(std::string value)
+{
+    const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    });
+    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char c) {
+        return std::isspace(c) != 0;
+    }).base();
+    if (begin >= end) {
+        return {};
+    }
+    return std::string(begin, end);
+}
+
+[[nodiscard]] const std::vector<std::string>& jacobianCheckComponentFilter()
+{
+    static const std::vector<std::string> tokens = [] {
+        std::vector<std::string> parsed;
+        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_COMPONENTS");
+        if (env == nullptr) {
+            return parsed;
+        }
+        std::stringstream ss(env);
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            token = lowerCopy(trimCopy(token));
+            if (!token.empty()) {
+                parsed.push_back(token);
+            }
+        }
+        return parsed;
+    }();
+    return tokens;
+}
+
+[[nodiscard]] std::string jacobianCheckComponentFilterLabel()
+{
+    const auto& tokens = jacobianCheckComponentFilter();
+    if (tokens.empty()) {
+        return "all";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < tokens.size(); ++i) {
+        if (i > 0u) {
+            oss << ",";
+        }
+        oss << tokens[i];
+    }
+    return oss.str();
+}
+
+[[nodiscard]] bool jacobianCheckDofSelected(const systems::FESystem& sys,
+                                            GlobalIndex dof,
+                                            std::span<const std::string> tokens)
+{
+    if (tokens.empty()) {
+        return true;
+    }
+    const auto comp = sys.fieldMap().getComponentOfDof(dof);
+    if (!comp) {
+        return false;
+    }
+    const auto field_idx = static_cast<std::size_t>(std::max(comp->first, 0));
+    if (field_idx >= sys.fieldMap().numFields()) {
+        return false;
+    }
+    const auto& field = sys.fieldMap().getField(field_idx);
+    const auto field_name = lowerCopy(field.name);
+    auto component_name = field_name;
+    if (field.n_components > 1) {
+        component_name += "[" + std::to_string(static_cast<int>(comp->second)) + "]";
+    }
+    const auto field_index = std::to_string(static_cast<int>(field_idx));
+    const auto component_index =
+        field_index + ":" + std::to_string(static_cast<int>(comp->second));
+    for (const auto& token : tokens) {
+        if (token == field_name || token == component_name ||
+            token == field_index || token == component_index) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void applyJacobianCheckComponentFilter(const systems::FESystem& sys,
+                                       backends::GenericVector& direction)
+{
+    const auto& tokens = jacobianCheckComponentFilter();
+    if (tokens.empty()) {
+        return;
+    }
+
+    const auto owned_dofs =
+        ownedDofsForVector(direction, sys.dofHandler().getPartition().locallyOwned());
+    std::vector<GlobalIndex> zero_dofs;
+    zero_dofs.reserve(owned_dofs.size());
+    unsigned long long selected_count = 0u;
+    for (const auto dof : owned_dofs) {
+        if (jacobianCheckDofSelected(sys, dof, tokens)) {
+            ++selected_count;
+        } else {
+            zero_dofs.push_back(dof);
+        }
+    }
+    if (!zero_dofs.empty()) {
+        auto view = direction.createAssemblyView();
+        FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: Jacobian check component filter view");
+        view->beginAssemblyPhase();
+        view->zeroVectorEntries(zero_dofs);
+        view->finalizeAssembly();
+    }
+
+    unsigned long long zeroed_count = static_cast<unsigned long long>(zero_dofs.size());
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        unsigned long long global_selected = 0u;
+        unsigned long long global_zeroed = 0u;
+        const unsigned long long local_zeroed = zeroed_count;
+        MPI_Allreduce(&selected_count,
+                      &global_selected,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_zeroed,
+                      &global_zeroed,
+                      1,
+                      MPI_UNSIGNED_LONG_LONG,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        selected_count = global_selected;
+        zeroed_count = global_zeroed;
+    }
+#endif
+
+    if (mpiRank() == 0) {
+        FE_LOG_INFO("NewtonSolver: Jacobian check component filter diagnostic=jacobian_check_component_filter components='" +
+                    jacobianCheckComponentFilterLabel() +
+                    "' selected_dofs=" + std::to_string(selected_count) +
+                    " zeroed_dofs=" + std::to_string(zeroed_count));
+    }
+}
+
 [[nodiscard]] int lineSearchIterationsNeededToReachAlphaMin(double alpha_min,
                                                             double shrink) noexcept
 {
@@ -4358,6 +4510,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     }
                 }
                 zeroVectorEntries(constrained_dofs, du);
+                applyJacobianCheckComponentFilter(transient.system(), du);
                 du.updateGhosts();
 
                 auto applyResidualFixups = [&](backends::GenericVector& vec) {
@@ -4507,6 +4660,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     std::ostringstream oss;
                     oss << "NewtonSolver: Jacobian check jacobian_op='" << options_.jacobian_op
                         << "' residual_op='" << options_.residual_op << "'"
+                        << " component_filter='" << jacobianCheckComponentFilterLabel() << "'"
                         << " it=" << it
                         << " h=" << h
                         << " ||J_matrix*v||=" << matrix_jv_norm
