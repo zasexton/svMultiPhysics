@@ -1634,6 +1634,15 @@ def assembly_topology_consistency_errors(diagnostics: dict[str, Any]) -> list[st
     return errors
 
 
+def has_marked_interior_face_fallback_trace(diagnostics: dict[str, Any]) -> bool:
+    return any(
+        record.get("event") == "runtime_skip" and
+        record.get("reason") == "marked_interior_face_fallback" and
+        record.get("domain") == "InteriorFace"
+        for record in diagnostics.get("jit_specialization_traces", [])
+    )
+
+
 def add_diagnostic_metrics(metrics: dict[str, Any],
                            diagnostics: dict[str, Any]) -> None:
     metrics["diagnostics"] = diagnostics
@@ -1768,8 +1777,10 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         event_counts: dict[str, int] = {}
         trigger_counts: dict[str, int] = {}
         event_trigger_domain_role_counts: dict[str, int] = {}
+        event_reason_domain_counts: dict[str, int] = {}
         compile_domain_role_counts: dict[str, int] = {}
         runtime_compile_domain_role_counts: dict[str, int] = {}
+        runtime_skip_reason_domain_counts: dict[str, int] = {}
         compile_shape_counts: dict[str, int] = {}
         generic_compile_kind_counts: dict[str, int] = {}
         for record in traces:
@@ -1782,6 +1793,10 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             increment_count(
                 event_trigger_domain_role_counts,
                 count_key(record, ("event", "trigger", "domain", "role")),
+            )
+            increment_count(
+                event_reason_domain_counts,
+                count_key(record, ("event", "reason", "domain")),
             )
             if event == "compile":
                 increment_count(
@@ -1796,17 +1811,28 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                     )
             elif event == "generic_compile":
                 increment_count(generic_compile_kind_counts, count_key(record, ("kind",)))
+            elif event == "runtime_skip":
+                increment_count(
+                    runtime_skip_reason_domain_counts,
+                    count_key(record, ("reason", "domain")),
+                )
         metrics["diagnostic_jit_specialization_trace_count"] = len(traces)
         metrics["diagnostic_jit_specialization_event_counts"] = event_counts
         metrics["diagnostic_jit_specialization_trigger_counts"] = trigger_counts
         metrics["diagnostic_jit_specialization_event_trigger_domain_role_counts"] = (
             top_counts(event_trigger_domain_role_counts)
         )
+        metrics["diagnostic_jit_specialization_event_reason_domain_counts"] = (
+            top_counts(event_reason_domain_counts)
+        )
         metrics["diagnostic_jit_specialization_compile_domain_role_counts"] = (
             top_counts(compile_domain_role_counts)
         )
         metrics["diagnostic_jit_specialization_runtime_compile_domain_role_counts"] = (
             top_counts(runtime_compile_domain_role_counts)
+        )
+        metrics["diagnostic_jit_specialization_runtime_skip_reason_domain_counts"] = (
+            top_counts(runtime_skip_reason_domain_counts)
         )
         metrics["diagnostic_jit_specialization_compile_shape_counts"] = (
             top_counts(compile_shape_counts)
@@ -1996,6 +2022,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_interior_face_timing_diagnostics",
         "require_cut_volume_timing_diagnostics",
         "require_jit_specialization_trace_diagnostics",
+        "require_marked_interior_face_fallback_diagnostics",
         "require_assembly_topology_consistency",
         "allow_failure_diagnostics",
     ):
@@ -2100,6 +2127,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("cut-volume timing diagnostics were not reported")
     if args.require_jit_specialization_trace_diagnostics and not diagnostics.get("jit_specialization_traces"):
         errors.append("JIT specialization trace diagnostics were not reported")
+    if (args.require_marked_interior_face_fallback_diagnostics and
+            not has_marked_interior_face_fallback_trace(diagnostics)):
+        errors.append("marked interior-face fallback diagnostics were not reported")
     if args.require_assembly_topology_consistency:
         errors.extend(assembly_topology_consistency_errors(diagnostics))
 
@@ -2373,6 +2403,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_jit_specialization_trace_diagnostics and
             not metrics["diagnostics"].get("jit_specialization_traces")):
         errors.append("JIT specialization trace diagnostics were not reported")
+    if (args.require_marked_interior_face_fallback_diagnostics and
+            not has_marked_interior_face_fallback_trace(metrics["diagnostics"])):
+        errors.append("marked interior-face fallback diagnostics were not reported")
     if args.require_assembly_topology_consistency:
         errors.extend(assembly_topology_consistency_errors(metrics["diagnostics"]))
     if not metrics["finite_velocity"]:
@@ -2703,6 +2736,7 @@ def main() -> int:
     parser.add_argument("--require-cut-volume-timing-diagnostics", action="store_true")
     parser.add_argument("--enable-jit-specialization-trace", action="store_true")
     parser.add_argument("--require-jit-specialization-trace-diagnostics", action="store_true")
+    parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
     args = parser.parse_args()
 

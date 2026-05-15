@@ -498,6 +498,9 @@ benchmark runs.
 - [x] Add a one-line JIT trace when marked cut-adjacent interior-face assembly
       intentionally uses the fallback kernel path, so smoke diagnostics can
       distinguish correctness-preserving marker fallback from missing topology.
+- [x] Add smoke-script metrics and a require switch for marked interior-face
+      fallback traces so MMS and D18 no-output probes can verify the fallback
+      reason directly.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
