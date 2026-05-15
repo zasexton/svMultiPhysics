@@ -7,12 +7,15 @@
 
 #include "Systems/FormsInstaller.h"
 
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 
 #include "Core/FEException.h"
 #include "Core/KernelTrace.h"
+#include "Core/Logger.h"
 
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 
@@ -86,6 +89,182 @@ struct DomainDispatch {
     };
     std::vector<CutVolumeRegion> cut_volume_regions{};
 };
+
+[[nodiscard]] bool formBlockDiagnosticsEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_FE_FORM_BLOCK_DIAGNOSTICS");
+        if (env == nullptr) {
+            return false;
+        }
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(value == "0" || value == "false" || value == "off" || value == "no");
+    }();
+    return enabled;
+}
+
+[[nodiscard]] std::string fieldDiagnosticLabel(const FESystem& system, FieldId field)
+{
+    if (field == INVALID_FIELD_ID) {
+        return "invalid";
+    }
+    const auto& rec = system.fieldRecord(field);
+    return std::to_string(field) + ":" + rec.name;
+}
+
+[[nodiscard]] std::string fieldSetDiagnosticLabel(
+    const FESystem& system,
+    const std::unordered_set<FieldId>& fields)
+{
+    std::vector<FieldId> sorted(fields.begin(), fields.end());
+    std::sort(sorted.begin(), sorted.end());
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+        if (i > 0u) {
+            oss << ",";
+        }
+        oss << fieldDiagnosticLabel(system, sorted[i]);
+    }
+    return oss.str();
+}
+
+template <typename T>
+[[nodiscard]] std::string joinedMarkers(const std::vector<T>& markers)
+{
+    if (markers.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < markers.size(); ++i) {
+        if (i > 0u) {
+            oss << "|";
+        }
+        oss << markers[i];
+    }
+    return oss.str();
+}
+
+[[nodiscard]] const char* sideLabel(forms::CutVolumeSide side) noexcept
+{
+    return side == forms::CutVolumeSide::Negative ? "negative" : "positive";
+}
+
+[[nodiscard]] std::string cutVolumeRegionLabel(
+    const std::vector<DomainDispatch::CutVolumeRegion>& regions)
+{
+    if (regions.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < regions.size(); ++i) {
+        if (i > 0u) {
+            oss << "|";
+        }
+        oss << regions[i].marker << ":" << sideLabel(regions[i].side);
+    }
+    return oss.str();
+}
+
+[[nodiscard]] const char* outputLabel(forms::NonlinearKernelOutput output) noexcept
+{
+    switch (output) {
+        case forms::NonlinearKernelOutput::Both:
+            return "both";
+        case forms::NonlinearKernelOutput::MatrixOnly:
+            return "matrix_only";
+        case forms::NonlinearKernelOutput::VectorOnly:
+            return "vector_only";
+    }
+    return "unknown";
+}
+
+void logMixedRowDiagnostic(const OperatorTag& op,
+                           const FESystem& system,
+                           std::size_t row,
+                           FieldId test_field,
+                           FieldId active_trial,
+                           const std::unordered_set<FieldId>& state_fields)
+{
+    if (!formBlockDiagnosticsEnabled()) {
+        return;
+    }
+    std::ostringstream oss;
+    oss << "FormsInstaller: coupled row diagnostic=form_block_dependencies"
+        << " op='" << op << "'"
+        << " row=" << row
+        << " test_field='" << fieldDiagnosticLabel(system, test_field) << "'"
+        << " state_fields='" << fieldSetDiagnosticLabel(system, state_fields) << "'"
+        << " active_trial='" << fieldDiagnosticLabel(system, active_trial) << "'";
+    FE_LOG_INFO(oss.str());
+}
+
+void logMixedBlockDiagnostic(const OperatorTag& op,
+                             const FESystem& system,
+                             std::size_t row,
+                             std::size_t col,
+                             FieldId test_field,
+                             FieldId trial_field,
+                             FieldId active_trial,
+                             const DomainDispatch& dispatch,
+                             forms::NonlinearKernelOutput output,
+                             bool symbolic_primary,
+                             bool tangent_kernel_ready,
+                             bool tangent_plan_ready,
+                             bool monolithic_cell_candidate)
+{
+    if (!formBlockDiagnosticsEnabled()) {
+        return;
+    }
+    std::ostringstream oss;
+    oss << "FormsInstaller: coupled block diagnostic=form_block_install"
+        << " op='" << op << "'"
+        << " row=" << row
+        << " col=" << col
+        << " test_field='" << fieldDiagnosticLabel(system, test_field) << "'"
+        << " trial_field='" << fieldDiagnosticLabel(system, trial_field) << "'"
+        << " active_trial='" << fieldDiagnosticLabel(system, active_trial) << "'"
+        << " owns_row_vector=" << (trial_field == active_trial ? 1 : 0)
+        << " output=" << outputLabel(output)
+        << " cell=" << (dispatch.has_cell ? 1 : 0)
+        << " boundary_markers='" << joinedMarkers(dispatch.boundary_markers) << "'"
+        << " interior=" << (dispatch.has_interior ? 1 : 0)
+        << " interior_markers='" << joinedMarkers(dispatch.interior_markers) << "'"
+        << " interface=" << (dispatch.has_interface ? 1 : 0)
+        << " interface_markers='" << joinedMarkers(dispatch.interface_markers) << "'"
+        << " cut_volume_regions='" << cutVolumeRegionLabel(dispatch.cut_volume_regions) << "'"
+        << " symbolic_primary=" << (symbolic_primary ? 1 : 0)
+        << " tangent_kernel=" << (tangent_kernel_ready ? 1 : 0)
+        << " tangent_plan=" << (tangent_plan_ready ? 1 : 0)
+        << " monolithic_cell_candidate=" << (monolithic_cell_candidate ? 1 : 0);
+    FE_LOG_INFO(oss.str());
+}
+
+void logMixedPlanDiagnostic(const OperatorTag& op,
+                            const MixedKernelPlan& plan,
+                            bool use_mixed_block_cell_kernel,
+                            std::size_t monolithic_cell_blocks,
+                            std::size_t mixed_block_cell_specs,
+                            const std::string& monolithic_disable_reason)
+{
+    if (!formBlockDiagnosticsEnabled()) {
+        return;
+    }
+    std::ostringstream oss;
+    oss << "FormsInstaller: coupled plan diagnostic=form_mixed_plan"
+        << " op='" << op << "'"
+        << " semantic='" << plan.describe() << "'"
+        << " monolithic_enabled=" << (plan.monolithic_cell_enabled ? 1 : 0)
+        << " mixed_block_cell=" << (use_mixed_block_cell_kernel ? 1 : 0)
+        << " plan_blocks=" << plan.blocks.size()
+        << " monolithic_cell_blocks=" << monolithic_cell_blocks
+        << " mixed_block_cell_specs=" << mixed_block_cell_specs;
+    if (!monolithic_disable_reason.empty()) {
+        oss << " disable_reason='" << monolithic_disable_reason << "'";
+    }
+    FE_LOG_INFO(oss.str());
+}
 
 [[nodiscard]] geometry::CutIntegrationSide toGeometrySide(forms::CutVolumeSide side) noexcept
 {
@@ -1390,6 +1569,7 @@ CoupledResidualKernels installCoupledResidual(
         }
 
         if (active_trial == INVALID_FIELD_ID) {
+            logMixedRowDiagnostic(op, system, i, test_fields[i], active_trial, state_fields);
             forms::FormCompiler compiler(options.compiler_options);
             auto linear_ir = compiler.compileLinear(base_expr);
             const auto dispatch = analyzeDispatch(linear_ir);
@@ -1443,6 +1623,8 @@ CoupledResidualKernels installCoupledResidual(
             }
             continue;
         }
+
+        logMixedRowDiagnostic(op, system, i, test_fields[i], active_trial, state_fields);
 
         for (std::size_t j = 0; j < trial_fields.size(); ++j) {
             const FieldId trial = trial_fields[j];
@@ -1946,6 +2128,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
 
         if (active_trial == INVALID_FIELD_ID) {
+            logMixedRowDiagnostic(op, system, i, test_fields[i], active_trial, state_fields);
             forms::FormCompiler compiler(options.compiler_options);
             auto linear_ir = compiler.compileLinear(base_expr);
             const auto dispatch = analyzeDispatch(linear_ir);
@@ -1999,6 +2182,8 @@ CoupledResidualKernels installCoupledResidualMixed(
             }
             continue;
         }
+
+        logMixedRowDiagnostic(op, system, i, test_fields[i], active_trial, state_fields);
 
         for (std::size_t j = 0; j < trial_fields.size(); ++j) {
             const FieldId trial = trial_fields[j];
@@ -2092,6 +2277,20 @@ CoupledResidualKernels installCoupledResidualMixed(
                                                       "installCoupledResidualMixed");
             }
 
+            logMixedBlockDiagnostic(op,
+                                    system,
+                                    i,
+                                    j,
+                                    test_fields[i],
+                                    trial,
+                                    active_trial,
+                                    dispatch,
+                                    output,
+                                    symbolic_primary,
+                                    tangent_ir_for_kernel.has_value(),
+                                    tangent_ir_for_plan.has_value(),
+                                    dispatch.has_cell && monolithic_cell_feasible);
+
             out.jacobian_blocks[i][j] = kernel;
             if (owns_row_vector) {
                 out.residual[i] = kernel;
@@ -2152,6 +2351,12 @@ CoupledResidualKernels installCoupledResidualMixed(
         !plan->monolithic_cell_enabled && mixed_block_cell_specs.size() >= 2u;
 
     traceMixedKernelPlan("installCoupledResidualMixed", *plan);
+    logMixedPlanDiagnostic(op,
+                           *plan,
+                           use_mixed_block_cell_kernel,
+                           monolithic_cell_blocks.size(),
+                           mixed_block_cell_specs.size(),
+                           monolithic_disable_reason);
     if (!monolithic_disable_reason.empty() &&
         core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
         core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);

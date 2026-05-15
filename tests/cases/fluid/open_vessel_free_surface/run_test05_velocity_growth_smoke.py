@@ -53,6 +53,9 @@ JACOBIAN_COMPONENT_DETAIL_RE = re.compile(
     r" matrix_err=([-+0-9.eE]+) total_err=([-+0-9.eE]+)"
     r" sign_flip_err=([-+0-9.eE]+)\]"
 )
+JACOBIAN_TOP_MISMATCH_RE = re.compile(
+    r"\[(.*?) fd=([-+0-9.eE]+) jv=([-+0-9.eE]+) err=([-+0-9.eE]+)\]"
+)
 DOUBLE_BAR_VALUE_RE = re.compile(r"\|\|([^|]+)\|\|=([-+0-9.eE]+)")
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
 LINEAR_SOLVER_RE = re.compile(
@@ -349,6 +352,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             env["SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT"] = str(
                 args.linear_solve_component_norms_max_newton_it
             )
+    if args.enable_form_block_diagnostics:
+        env["SVMP_FE_FORM_BLOCK_DIAGNOSTICS"] = "1"
     return env
 
 
@@ -939,6 +944,21 @@ def parse_jacobian_component_details(line: str) -> list[dict[str, Any]]:
     return components
 
 
+def parse_jacobian_top_mismatch(line: str) -> list[dict[str, Any]]:
+    entry_start = line.find(" [", line.find("diagnostic=jacobian_check_top_mismatch"))
+    if entry_start >= 0:
+        line = line[entry_start + 1:]
+    entries = []
+    for match in JACOBIAN_TOP_MISMATCH_RE.finditer(line):
+        entries.append({
+            "component": match.group(1),
+            "fd": float(match.group(2)),
+            "jv": float(match.group(3)),
+            "err": float(match.group(4)),
+        })
+    return entries
+
+
 def norm_key(label: str) -> str:
     key = label.strip().lower()
     key = re.sub(r"used_op=([^)]*)", r"used_op_\1", key)
@@ -979,6 +999,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "jacobian_check_component_norms": [],
         "jacobian_check_component_details": [],
         "jacobian_check_component_filters": [],
+        "jacobian_check_top_mismatches": [],
+        "form_block_dependencies": [],
+        "form_block_installs": [],
+        "form_mixed_plans": [],
         "linear_solve_histories": [],
         "time_loop": {
             "nonlinear_records": [],
@@ -1036,6 +1060,16 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["jacobian_check_component_details"].append(record)
         elif "diagnostic=jacobian_check_component_filter" in line:
             diagnostics["jacobian_check_component_filters"].append(parse_key_values(line))
+        elif "diagnostic=jacobian_check_top_mismatch" in line:
+            record = parse_key_values(line.split(" [", 1)[0])
+            record["entries"] = parse_jacobian_top_mismatch(line)
+            diagnostics["jacobian_check_top_mismatches"].append(record)
+        elif "diagnostic=form_block_dependencies" in line:
+            diagnostics["form_block_dependencies"].append(parse_key_values(line))
+        elif "diagnostic=form_block_install" in line:
+            diagnostics["form_block_installs"].append(parse_key_values(line))
+        elif "diagnostic=form_mixed_plan" in line:
+            diagnostics["form_mixed_plans"].append(parse_key_values(line))
         elif "NewtonSolver: linear solve history" in line:
             diagnostics["linear_solve_histories"].append(parse_key_values(line))
         elif "vector component norms" in line:
@@ -1358,6 +1392,14 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["latest_jacobian_check_component_details"] = (
             diagnostics["jacobian_check_component_details"][-1]
         )
+    if diagnostics.get("jacobian_check_top_mismatches"):
+        metrics["latest_jacobian_check_top_mismatch"] = (
+            diagnostics["jacobian_check_top_mismatches"][-1]
+        )
+    if diagnostics.get("form_mixed_plans"):
+        metrics["latest_form_mixed_plan"] = diagnostics["form_mixed_plans"][-1]
+    if diagnostics.get("form_block_installs"):
+        metrics["form_block_install_count"] = len(diagnostics["form_block_installs"])
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
     retry_counts = [
@@ -1400,6 +1442,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_newton_direction_check",
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
+        "enable_form_block_diagnostics",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -1483,8 +1526,13 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("Newton direction-check diagnostics were not reported")
     if args.require_jacobian_check_diagnostics and not diagnostics.get("jacobian_checks"):
         errors.append("Jacobian finite-difference diagnostics were not reported")
+    if args.require_jacobian_top_mismatch_diagnostics and not diagnostics.get("jacobian_check_top_mismatches"):
+        errors.append("Jacobian top-mismatch diagnostics were not reported")
     if args.require_linear_solve_history_diagnostics and not diagnostics.get("linear_solve_histories"):
         errors.append("linear solve history diagnostics were not reported")
+    if args.require_form_block_diagnostics and (
+            not diagnostics.get("form_block_installs") or not diagnostics.get("form_mixed_plans")):
+        errors.append("form block installation diagnostics were not reported")
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -2035,7 +2083,9 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-blockschur-true-residual-retries", type=int)
     parser.add_argument("--require-newton-direction-check-diagnostics", action="store_true")
     parser.add_argument("--require-jacobian-check-diagnostics", action="store_true")
+    parser.add_argument("--require-jacobian-top-mismatch-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-history-diagnostics", action="store_true")
+    parser.add_argument("--require-form-block-diagnostics", action="store_true")
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
@@ -2060,6 +2110,7 @@ def main() -> int:
     parser.add_argument("--linear-solve-history-max-calls", type=int)
     parser.add_argument("--enable-linear-solve-component-norms", action="store_true")
     parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
+    parser.add_argument("--enable-form-block-diagnostics", action="store_true")
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)

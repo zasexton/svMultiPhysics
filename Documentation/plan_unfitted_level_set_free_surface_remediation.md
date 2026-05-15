@@ -457,6 +457,10 @@ benchmark runs.
 - [x] Add finite-difference Jacobian component-detail diagnostics that report
       base residual, perturbed residual, FD action, matrix action, mismatch, and
       sign-flip mismatch norms by field component for assembly debugging.
+- [x] Add parseable mixed-form block installation diagnostics and top-mismatch
+      Jacobian entry diagnostics so MMS probes can confirm the discovered
+      residual couplings and the assembled matrix action at the largest
+      finite-difference mismatches.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

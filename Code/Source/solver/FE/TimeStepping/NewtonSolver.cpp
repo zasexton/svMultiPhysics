@@ -1396,9 +1396,10 @@ void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
     FE_LOG_INFO(oss.str());
 }
 
-void logJacobianCheckTopEntries(const systems::FESystem& sys,
-                                backends::GenericVector& err,
-                                std::size_t top_k)
+void logJacobianCheckTopMismatchEntries(const systems::FESystem& sys,
+                                        backends::GenericVector& fd,
+                                        backends::GenericVector& err,
+                                        std::size_t top_k)
 {
     const auto owned_dofs =
         ownedDofsForVector(err, sys.dofHandler().getPartition().locallyOwned());
@@ -1406,45 +1407,56 @@ void logJacobianCheckTopEntries(const systems::FESystem& sys,
         return;
     }
 
+    auto fd_view = fd.createAssemblyView();
     auto err_view = err.createAssemblyView();
+    FE_CHECK_NOT_NULL(fd_view.get(), "NewtonSolver: jacobian check top-mismatch fd view");
     FE_CHECK_NOT_NULL(err_view.get(), "NewtonSolver: jacobian check top-entry view");
 
     struct Entry {
         GlobalIndex dof{INVALID_GLOBAL_INDEX};
+        double fd{0.0};
+        double jv{0.0};
         double value{0.0};
     };
 
     std::vector<Entry> top_entries;
     top_entries.reserve(top_k);
-    const auto maybe_insert = [&](GlobalIndex dof, double value) {
+    const auto maybe_insert = [&](GlobalIndex dof, double fd_value, double value) {
         const double abs_value = std::abs(value);
         if (!(abs_value > 0.0) || !std::isfinite(abs_value)) {
             return;
         }
+        const double jv_value = fd_value + value;
         if (top_entries.size() < top_k) {
-            top_entries.push_back(Entry{dof, value});
+            top_entries.push_back(Entry{dof, fd_value, jv_value, value});
         } else {
             auto min_it = std::min_element(
                 top_entries.begin(), top_entries.end(),
                 [](const Entry& a, const Entry& b) { return std::abs(a.value) < std::abs(b.value); });
             if (min_it != top_entries.end() && abs_value > std::abs(min_it->value)) {
-                *min_it = Entry{dof, value};
+                *min_it = Entry{dof, fd_value, jv_value, value};
             }
         }
     };
 
     for (const auto dof : owned_dofs) {
-        maybe_insert(dof, static_cast<double>(err_view->getVectorEntry(dof)));
+        maybe_insert(dof,
+                     static_cast<double>(fd_view->getVectorEntry(dof)),
+                     static_cast<double>(err_view->getVectorEntry(dof)));
     }
 
     std::sort(top_entries.begin(), top_entries.end(),
               [](const Entry& a, const Entry& b) { return std::abs(a.value) > std::abs(b.value); });
 
     std::ostringstream oss;
-    oss << "NewtonSolver: Jacobian check top |Jv-FD| entries rank=" << mpiRank();
+    oss << "NewtonSolver: Jacobian check top mismatch entries"
+        << " diagnostic=jacobian_check_top_mismatch"
+        << " rank=" << mpiRank();
     for (const auto& entry : top_entries) {
         oss << " [" << describeFieldComponentDof(sys, entry.dof)
-            << " value=" << entry.value << "]";
+            << " fd=" << entry.fd
+            << " jv=" << entry.jv
+            << " err=" << entry.value << "]";
     }
     FE_LOG_INFO(oss.str());
 }
@@ -4854,7 +4866,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                                   residual_scratch,
                                                   u_backup,
                                                   residual_base);
-                logJacobianCheckTopEntries(transient.system(), u_backup, 8u);
+                logJacobianCheckTopMismatchEntries(transient.system(), residual_scratch, u_backup, 8u);
             } else if (mpiRank() == 0) {
                 FE_LOG_INFO("NewtonSolver: Jacobian check skipped (invalid perturbation size).");
             }
