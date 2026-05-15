@@ -170,6 +170,11 @@ centroid moment fitting for order 0 and order 1 rules. The generic
 builder stores the computed side centroid directly so topology metadata and
 side fractions stay deterministic.
 
+Degenerate-cut fallback policy: exact no-cut and full-zero cells remain inactive
+diagnostics, exact vertex and edge touches are tagged as degenerate, fragments
+below the measure tolerance are rejected, and near-tangent cuts with positive
+side volume keep active side-volume metadata.
+
 ### Quadrature Policy Checklist
 
 - [ ] Define a default cut-volume quadrature order as a function of FE order and
@@ -181,7 +186,7 @@ side fractions stay deterministic.
 - [x] Audit the existing `makeMomentFittedCutVolumeQuadrature(...)` utility and
       decide whether it can be promoted to the generated level-set interface
       path.
-- [ ] Define fallback behavior for degenerate cuts, near-zero volume fractions,
+- [x] Define fallback behavior for degenerate cuts, near-zero volume fractions,
       and interface cuts passing close to vertices.
 - [ ] Preserve exact total measure for constants even when higher-order
       quadrature is requested.
@@ -217,9 +222,9 @@ side fractions stay deterministic.
 - [x] Add exact linear integration tests for cut tetrahedra.
 - [ ] Add polynomial convergence tests for quadratic fields where exactness is
       not guaranteed.
-- [ ] Add tests where the interface cuts very close to a vertex.
-- [ ] Add tests where the interface cuts very close to an edge.
-- [ ] Add tests for small wet volume fractions.
+- [x] Add tests where the interface cuts very close to a vertex.
+- [x] Add tests where the interface cuts very close to an edge.
+- [x] Add tests for small wet volume fractions.
 - [x] Add tests for full-negative and full-positive cells.
 - [x] Add tests proving negative and positive measures sum to the parent measure.
 - [ ] Add a Navier-Stokes assembly test proving a nonconstant pressure or

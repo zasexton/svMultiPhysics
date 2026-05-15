@@ -124,6 +124,55 @@ struct RegionMoments {
     return add(scale(a, Real{1.0} - t), scale(b, t));
 }
 
+[[nodiscard]] CutInterfaceDegeneracy classifyZeroContact2D(
+    const std::vector<Real>& signed_values,
+    std::size_t count,
+    Real tolerance) noexcept
+{
+    bool has_zero = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        has_zero = has_zero || std::abs(signed_values[i]) <= tolerance;
+    }
+    if (!has_zero) {
+        return CutInterfaceDegeneracy::NoCut;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t j = (i + 1u) % count;
+        if (std::abs(signed_values[i]) <= tolerance &&
+            std::abs(signed_values[j]) <= tolerance) {
+            return CutInterfaceDegeneracy::EdgeTouch;
+        }
+    }
+    return CutInterfaceDegeneracy::VertexTouch;
+}
+
+[[nodiscard]] CutInterfaceDegeneracy classifyZeroContactTetrahedron(
+    const std::vector<Real>& signed_values,
+    Real tolerance) noexcept
+{
+    bool has_zero = false;
+    for (const Real value : signed_values) {
+        has_zero = has_zero || std::abs(value) <= tolerance;
+    }
+    if (!has_zero) {
+        return CutInterfaceDegeneracy::NoCut;
+    }
+    constexpr std::array<std::array<std::size_t, 2>, 6> edges{{
+        {{0u, 1u}},
+        {{0u, 2u}},
+        {{0u, 3u}},
+        {{1u, 2u}},
+        {{1u, 3u}},
+        {{2u, 3u}}}};
+    for (const auto& edge : edges) {
+        if (std::abs(signed_values[edge[0]]) <= tolerance &&
+            std::abs(signed_values[edge[1]]) <= tolerance) {
+            return CutInterfaceDegeneracy::EdgeTouch;
+        }
+    }
+    return CutInterfaceDegeneracy::VertexTouch;
+}
+
 void addUniqueCandidate(std::vector<CutPointCandidate>& points,
                         CutPointCandidate candidate,
                         Real tolerance) {
@@ -851,7 +900,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-negative-volume"));
-        result.degeneracy = CutInterfaceDegeneracy::NoCut;
+        result.degeneracy = classifyZeroContact2D(signed_values,
+                                                  count,
+                                                  request.tolerance);
         return result;
     }
     if (negative_count == 0u) {
@@ -867,7 +918,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-positive-volume"));
-        result.degeneracy = CutInterfaceDegeneracy::NoCut;
+        result.degeneracy = classifyZeroContact2D(signed_values,
+                                                  count,
+                                                  request.tolerance);
         return result;
     }
 
@@ -1103,7 +1156,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-negative-volume"));
-        result.degeneracy = CutInterfaceDegeneracy::NoCut;
+        result.degeneracy =
+            classifyZeroContactTetrahedron(signed_values, request.tolerance);
         return result;
     }
     if (negative_count == 0u) {
@@ -1119,7 +1173,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-positive-volume"));
-        result.degeneracy = CutInterfaceDegeneracy::NoCut;
+        result.degeneracy =
+            classifyZeroContactTetrahedron(signed_values, request.tolerance);
         return result;
     }
 

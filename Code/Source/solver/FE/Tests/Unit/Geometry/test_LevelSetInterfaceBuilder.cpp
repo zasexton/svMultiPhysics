@@ -615,6 +615,69 @@ TEST(LevelSetInterfaceBuilder, ClassifiesCutEdgeCases)
     EXPECT_FALSE(small_fragment_result.diagnostic.empty());
 }
 
+TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
+{
+    constexpr Real eps = 1.0e-7;
+    const Real t = eps / (Real{1.0} + eps);
+
+    LevelSetInterfaceDomain vertex_domain(make_request(/*marker=*/31));
+    appendLinearLevelSetCellCut2D(
+        vertex_domain,
+        LevelSetCellCutInput{.parent_cell = 6,
+                             .element_type = ElementType::Triangle3,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-eps, 1.0, 1.0}});
+
+    auto summary = vertex_domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.active_volume_region_count, 2u);
+    const Real expected_vertex_volume = Real{0.5} * t * t;
+    EXPECT_GT(summary.negative_volume_measure, 0.0);
+    EXPECT_NEAR(summary.negative_volume_measure,
+                expected_vertex_volume,
+                1.0e-20);
+    ASSERT_EQ(vertex_domain.fragments().size(), 1u);
+    EXPECT_EQ(vertex_domain.fragments().front().degeneracy,
+              CutInterfaceDegeneracy::NearlyTangent);
+
+    auto rules = vertex_domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
+    ASSERT_EQ(rules[0].points.size(), 1u);
+    EXPECT_NEAR(rules[0].points.front().point[0], t / Real{3.0}, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().point[1], t / Real{3.0}, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().weight,
+                expected_vertex_volume,
+                1.0e-20);
+
+    LevelSetInterfaceDomain edge_domain(make_request(/*marker=*/32));
+    appendLinearLevelSetCellCut2D(
+        edge_domain,
+        LevelSetCellCutInput{.parent_cell = 7,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-eps, -eps, 1.0, 1.0}});
+
+    summary = edge_domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.active_volume_region_count, 2u);
+    EXPECT_GT(summary.negative_volume_measure, 0.0);
+    EXPECT_NEAR(summary.negative_volume_measure, t, 1.0e-14);
+
+    rules = edge_domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 2u);
+    EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
+    ASSERT_EQ(rules[0].points.size(), 1u);
+    EXPECT_NEAR(rules[0].points.front().point[0], 0.5, 1.0e-10);
+    EXPECT_NEAR(rules[0].points.front().point[1], Real{0.5} * t, 1.0e-14);
+    EXPECT_NEAR(rules[0].points.front().weight, t, 1.0e-14);
+}
+
 TEST(LevelSetInterfaceBuilder, SerialGeneratedInterfaceFragmentCounts)
 {
     LevelSetInterfaceDomain triangle_domain(make_request(/*marker=*/60));
