@@ -115,7 +115,7 @@ preconditioner metadata.
       the accepted state restores the previous topology.
 - [x] Add a transient test proving accepted-step reinitialization or volume
       correction is reflected in output-time active volume.
-- [ ] Add a regression test that fails if `on_before_physics_solve` is the only
+- [x] Add a regression test that fails if `on_before_physics_solve` is the only
       cut-context rebuild point for a coupled level-set/fluid solve.
 
 ## 2. Require Or Correctly Default The Active Wet Domain

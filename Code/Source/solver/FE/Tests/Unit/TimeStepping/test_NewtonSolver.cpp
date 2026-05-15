@@ -1019,6 +1019,84 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
 }
 
+TEST(NewtonSolver, SynchronizesUpdatedCoupledGeometryBeforeResidualAssembly)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& phi,
+           const svmp::FE::forms::FormExpr& v) {
+            return ((phi - svmp::FE::forms::FormExpr::constant(2.0)) * v).dx();
+        },
+        /*dt=*/0.1,
+        /*u0=*/{0.0});
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct SyncRecord {
+        SyncPoint point;
+        double phi;
+        std::uint64_t topology_key;
+    };
+    std::vector<SyncRecord> sync_records;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 2;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.assemble_both_when_possible = true;
+    nopt.synchronize_state =
+        [&sync_records](const svmp::FE::systems::SystemStateView& state,
+                        SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto phi = static_cast<double>(state.u.front());
+            const auto topology_key =
+                phi > 1.0 ? std::uint64_t{0x220u} : std::uint64_t{0x110u};
+            sync_records.push_back(SyncRecord{point, phi, topology_key});
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(rep.converged);
+    bool saw_initial_residual_state = false;
+    bool saw_updated_residual_state = false;
+    for (const auto& rec : sync_records) {
+        const bool residual_assembly =
+            rec.point == SyncPoint::ResidualAssembly ||
+            rec.point == SyncPoint::JacobianAndResidualAssembly;
+        if (!residual_assembly) {
+            continue;
+        }
+        if (std::abs(rec.phi) < 1e-13) {
+            saw_initial_residual_state =
+                rec.topology_key == std::uint64_t{0x110u};
+        }
+        if (std::abs(rec.phi - 2.0) < 1e-13) {
+            saw_updated_residual_state =
+                rec.topology_key == std::uint64_t{0x220u};
+        }
+    }
+
+    EXPECT_TRUE(saw_initial_residual_state);
+    EXPECT_TRUE(saw_updated_residual_state);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
+}
+
 TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
