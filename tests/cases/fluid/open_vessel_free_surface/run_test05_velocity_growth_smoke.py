@@ -47,6 +47,12 @@ JACOBIAN_COMPONENT_NORM_RE = re.compile(
     r"\[(.*?) fd=([-+0-9.eE]+) total_err=([-+0-9.eE]+)"
     r" matrix_err=([-+0-9.eE]+)\]"
 )
+JACOBIAN_COMPONENT_DETAIL_RE = re.compile(
+    r"\[(.*?) base=([-+0-9.eE]+) perturbed=([-+0-9.eE]+)"
+    r" fd=([-+0-9.eE]+) matrix=([-+0-9.eE]+) full=([-+0-9.eE]+)"
+    r" matrix_err=([-+0-9.eE]+) total_err=([-+0-9.eE]+)"
+    r" sign_flip_err=([-+0-9.eE]+)\]"
+)
 DOUBLE_BAR_VALUE_RE = re.compile(r"\|\|([^|]+)\|\|=([-+0-9.eE]+)")
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
 LINEAR_SOLVER_RE = re.compile(
@@ -900,6 +906,8 @@ def parse_component_norms(line: str) -> list[dict[str, Any]]:
 
 
 def parse_jacobian_component_norms(line: str) -> list[dict[str, Any]]:
+    if "component norms " in line:
+        line = line.split("component norms ", 1)[1]
     components = []
     for match in JACOBIAN_COMPONENT_NORM_RE.finditer(line):
         components.append({
@@ -907,6 +915,26 @@ def parse_jacobian_component_norms(line: str) -> list[dict[str, Any]]:
             "fd": float(match.group(2)),
             "total_err": float(match.group(3)),
             "matrix_err": float(match.group(4)),
+        })
+    return components
+
+
+def parse_jacobian_component_details(line: str) -> list[dict[str, Any]]:
+    component_start = line.find(" [", line.find("diagnostic=jacobian_check_component_details"))
+    if component_start >= 0:
+        line = line[component_start + 1:]
+    components = []
+    for match in JACOBIAN_COMPONENT_DETAIL_RE.finditer(line):
+        components.append({
+            "component": match.group(1),
+            "base": float(match.group(2)),
+            "perturbed": float(match.group(3)),
+            "fd": float(match.group(4)),
+            "matrix": float(match.group(5)),
+            "full": float(match.group(6)),
+            "matrix_err": float(match.group(7)),
+            "total_err": float(match.group(8)),
+            "sign_flip_err": float(match.group(9)),
         })
     return components
 
@@ -949,6 +977,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "newton_direction_checks": [],
         "jacobian_checks": [],
         "jacobian_check_component_norms": [],
+        "jacobian_check_component_details": [],
         "jacobian_check_component_filters": [],
         "linear_solve_histories": [],
         "time_loop": {
@@ -1001,6 +1030,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["jacobian_check_component_norms"].append({
                 "components": parse_jacobian_component_norms(line),
             })
+        elif "diagnostic=jacobian_check_component_details" in line:
+            record = parse_key_values(line.split(" [", 1)[0])
+            record["components"] = parse_jacobian_component_details(line)
+            diagnostics["jacobian_check_component_details"].append(record)
         elif "diagnostic=jacobian_check_component_filter" in line:
             diagnostics["jacobian_check_component_filters"].append(parse_key_values(line))
         elif "NewtonSolver: linear solve history" in line:
@@ -1321,6 +1354,10 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         value = latest_jacobian_check.get("rel")
         if isinstance(value, (int, float)):
             metrics["diagnostic_jacobian_check_relative_error"] = float(value)
+    if diagnostics.get("jacobian_check_component_details"):
+        metrics["latest_jacobian_check_component_details"] = (
+            diagnostics["jacobian_check_component_details"][-1]
+        )
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
     retry_counts = [

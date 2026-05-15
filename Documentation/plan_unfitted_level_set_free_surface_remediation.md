@@ -454,6 +454,9 @@ benchmark runs.
 - [x] Add a component-selectable finite-difference Jacobian diagnostic so MMS
       probes can separate fixed-geometry velocity and pressure assembly checks
       from level-set geometry perturbations.
+- [x] Add finite-difference Jacobian component-detail diagnostics that report
+      base residual, perturbed residual, FD action, matrix action, mismatch, and
+      sign-flip mismatch norms by field component for assembly debugging.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

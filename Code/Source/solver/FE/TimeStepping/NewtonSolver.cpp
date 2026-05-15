@@ -1144,6 +1144,150 @@ struct JacobianCheckComponentStats {
     double matrix_err_sq{0.0};
 };
 
+struct ComponentNormSnapshot {
+    std::string label{};
+    double norm{0.0};
+};
+
+std::vector<ComponentNormSnapshot> zeroComponentNormSnapshot(const systems::FESystem& sys)
+{
+    const auto& fmap = sys.fieldMap();
+    std::vector<ComponentNormSnapshot> stats;
+    stats.reserve(fmap.numFields() * 3u);
+    for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+        const auto& field = fmap.getField(field_idx);
+        if (field.n_components <= 1) {
+            stats.push_back(ComponentNormSnapshot{field.name, 0.0});
+            continue;
+        }
+        for (LocalIndex comp = 0; comp < field.n_components; ++comp) {
+            stats.push_back(ComponentNormSnapshot{
+                field.name + "[" + std::to_string(static_cast<int>(comp)) + "]",
+                0.0
+            });
+        }
+    }
+    return stats;
+}
+
+std::vector<ComponentNormSnapshot> componentNormSnapshot(const systems::FESystem& sys,
+                                                         backends::GenericVector& vec)
+{
+    const auto& fmap = sys.fieldMap();
+    auto stats = zeroComponentNormSnapshot(sys);
+    const auto owned_dofs =
+        ownedDofsForVector(vec, sys.dofHandler().getPartition().locallyOwned());
+    if (owned_dofs.empty() || fmap.numFields() == 0 || stats.empty()) {
+        return stats;
+    }
+
+    std::vector<int> field_offsets(fmap.numFields(), -1);
+    int offset = 0;
+    for (std::size_t field_idx = 0; field_idx < fmap.numFields(); ++field_idx) {
+        field_offsets[field_idx] = offset;
+        offset += std::max(1, static_cast<int>(fmap.numComponents(field_idx)));
+    }
+
+    auto view = vec.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: component norm snapshot view");
+    for (const auto dof : owned_dofs) {
+        const auto comp = fmap.getComponentOfDof(dof);
+        if (!comp) {
+            continue;
+        }
+        const auto field_idx = static_cast<std::size_t>(std::max(comp->first, 0));
+        if (field_idx >= fmap.numFields()) {
+            continue;
+        }
+        int stat_idx = field_offsets[field_idx];
+        const auto n_comp = fmap.numComponents(field_idx);
+        if (n_comp > 1) {
+            const auto comp_idx = static_cast<int>(comp->second);
+            if (comp_idx < 0 || comp_idx >= n_comp) {
+                continue;
+            }
+            stat_idx += comp_idx;
+        }
+        if (stat_idx < 0 || static_cast<std::size_t>(stat_idx) >= stats.size()) {
+            continue;
+        }
+        const double value = static_cast<double>(view->getVectorEntry(dof));
+        stats[static_cast<std::size_t>(stat_idx)].norm += value * value;
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized && !stats.empty()) {
+        std::vector<double> local(stats.size(), 0.0);
+        std::vector<double> global(stats.size(), 0.0);
+        for (std::size_t i = 0; i < stats.size(); ++i) {
+            local[i] = stats[i].norm;
+        }
+        MPI_Allreduce(local.data(),
+                      global.data(),
+                      static_cast<int>(global.size()),
+                      MPI_DOUBLE,
+                      MPI_SUM,
+                      MPI_COMM_WORLD);
+        for (std::size_t i = 0; i < stats.size(); ++i) {
+            stats[i].norm = global[i];
+        }
+    }
+#endif
+
+    for (auto& stat : stats) {
+        stat.norm = std::sqrt(std::max(0.0, stat.norm));
+    }
+    return stats;
+}
+
+void logJacobianCheckComponentDetails(
+    std::string_view component_filter,
+    std::span<const ComponentNormSnapshot> base,
+    std::span<const ComponentNormSnapshot> perturbed,
+    std::span<const ComponentNormSnapshot> fd,
+    std::span<const ComponentNormSnapshot> matrix,
+    std::span<const ComponentNormSnapshot> full,
+    std::span<const ComponentNormSnapshot> matrix_err,
+    std::span<const ComponentNormSnapshot> err,
+    std::span<const ComponentNormSnapshot> sign_flip_err)
+{
+    if (mpiRank() != 0) {
+        return;
+    }
+    const auto count = std::min({
+        base.size(),
+        perturbed.size(),
+        fd.size(),
+        matrix.size(),
+        full.size(),
+        matrix_err.size(),
+        err.size(),
+        sign_flip_err.size()
+    });
+    if (count == 0u) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "NewtonSolver: Jacobian check component details"
+        << " diagnostic=jacobian_check_component_details"
+        << " component_filter='" << component_filter << "'";
+    for (std::size_t i = 0; i < count; ++i) {
+        oss << " [" << base[i].label
+            << " base=" << base[i].norm
+            << " perturbed=" << perturbed[i].norm
+            << " fd=" << fd[i].norm
+            << " matrix=" << matrix[i].norm
+            << " full=" << full[i].norm
+            << " matrix_err=" << matrix_err[i].norm
+            << " total_err=" << err[i].norm
+            << " sign_flip_err=" << sign_flip_err[i].norm << "]";
+    }
+    FE_LOG_INFO(oss.str());
+}
+
 void logJacobianCheckComponentBreakdown(const systems::FESystem& sys,
                                        backends::GenericVector& fd,
                                        backends::GenericVector& total_err,
@@ -4539,6 +4683,15 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     }
                 };
 
+                auto base_component_norms = zeroComponentNormSnapshot(transient.system());
+                auto perturbed_component_norms = base_component_norms;
+                auto fd_component_norms = base_component_norms;
+                auto matrix_component_norms = base_component_norms;
+                auto full_component_norms = base_component_norms;
+                auto matrix_err_component_norms = base_component_norms;
+                auto err_component_norms = base_component_norms;
+                auto sign_flip_err_component_norms = base_component_norms;
+
                 // Assemble r(u) with residual_op into residual_base.
                 residual_base.zero();
                 {
@@ -4558,6 +4711,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                 "NewtonSolver: Jacobian check base residual assembly failed: " + ar.error_message);
                 }
                 applyResidualFixups(residual_base);
+                base_component_norms = componentNormSnapshot(transient.system(), residual_base);
                 restoreDiagnosticState();
                 synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
 
@@ -4586,6 +4740,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                                 "NewtonSolver: Jacobian check perturbed residual assembly failed: " + ar.error_message);
                 }
                 applyResidualFixups(residual_scratch);
+                perturbed_component_norms =
+                    componentNormSnapshot(transient.system(), residual_scratch);
                 restoreDiagnosticState();
                 synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
 
@@ -4595,6 +4751,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 // residual_scratch <- (r(u+h*v) - r(u)) / h  (FD approximation of J*v).
                 axpy(residual_scratch, static_cast<Real>(-1.0), residual_base);
                 residual_scratch.scale(static_cast<Real>(1.0 / h));
+                syncOwnedRowHaloIfNeeded(residual_scratch);
+                fd_component_norms = componentNormSnapshot(transient.system(), residual_scratch);
 
                 // u_backup <- r_used - r_base (will overwrite u_backup).
                 copyVector(u_backup, r);
@@ -4607,6 +4765,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 J.mult(du, u_backup);
                 zeroVectorEntries(constrained_dofs, u_backup);
                 const double matrix_jv_norm = u_backup.norm();
+                matrix_component_norms = componentNormSnapshot(transient.system(), u_backup);
 
                 // residual_base keeps a copy of the matrix-only action so we can
                 // compare both the raw assembled matrix and the full effective
@@ -4614,6 +4773,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 copyVector(residual_base, u_backup);
                 axpy(u_backup, static_cast<Real>(-1.0), residual_scratch);
                 const double matrix_err_norm = u_backup.norm();
+                matrix_err_component_norms =
+                    componentNormSnapshot(transient.system(), u_backup);
 
                 copyVector(u_backup, residual_base);
                 if (!effective_rank_one_updates.empty()) {
@@ -4633,19 +4794,23 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
                 zeroVectorEntries(constrained_dofs, u_backup);
                 const double jv_norm = u_backup.norm();
+                full_component_norms = componentNormSnapshot(transient.system(), u_backup);
 
                 // residual_base <- -(rank-one contribution)
                 axpy(residual_base, static_cast<Real>(-1.0), u_backup);
                 const double rank_one_jv_norm = residual_base.norm();
 
-                // FD residuals follow the owned-row vector contract; sync halos
-                // only when the subsequent diagnostic consumes ghost values.
-                syncOwnedRowHaloIfNeeded(residual_scratch);
                 const double fd_norm = residual_scratch.norm();
 
-                // u_backup <- (J_matrix + rank1)*v - FD
-                axpy(u_backup, static_cast<Real>(-1.0), residual_scratch);
+                // Compare both signs so sign-convention errors are visible in
+                // one diagnostic record.
+                axpy(u_backup, static_cast<Real>(1.0), residual_scratch);
+                const double sign_flip_err_norm = u_backup.norm();
+                sign_flip_err_component_norms =
+                    componentNormSnapshot(transient.system(), u_backup);
+                axpy(u_backup, static_cast<Real>(-2.0), residual_scratch);
                 const double err_norm = u_backup.norm();
+                err_component_norms = componentNormSnapshot(transient.system(), u_backup);
                 const double denom = std::max({jv_norm, fd_norm, 1e-14});
                 const double rel_err = err_norm / denom;
 
@@ -4669,12 +4834,22 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " ||FD||=" << fd_norm
                         << " ||J_matrix*v-FD||=" << matrix_err_norm
                         << " ||Jv-FD||=" << err_norm
+                        << " ||Jv+FD||=" << sign_flip_err_norm
                         << " rel=" << rel_err
                         << " ||r(residual_op)||=" << r_base_norm
                         << " ||r(used_op=" << residual_op_used << ")||=" << r_used_norm
                         << " ||r_used-r_residual||=" << r_diff_norm;
                     FE_LOG_INFO(oss.str());
                 }
+                logJacobianCheckComponentDetails(jacobianCheckComponentFilterLabel(),
+                                                 base_component_norms,
+                                                 perturbed_component_norms,
+                                                 fd_component_norms,
+                                                 matrix_component_norms,
+                                                 full_component_norms,
+                                                 matrix_err_component_norms,
+                                                 err_component_norms,
+                                                 sign_flip_err_component_norms);
                 logJacobianCheckComponentBreakdown(transient.system(),
                                                   residual_scratch,
                                                   u_backup,
