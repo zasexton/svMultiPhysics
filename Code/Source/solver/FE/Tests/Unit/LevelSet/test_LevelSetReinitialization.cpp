@@ -176,6 +176,29 @@ struct ScalarFieldFixture {
     return coefficients;
 }
 
+[[nodiscard]] std::vector<FE::Real> signedDistancePlaneCoefficients(
+    const ScalarFieldFixture& fixture)
+{
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error("signedDistancePlaneCoefficients: field has no entity DOF map");
+    }
+
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        if (dofs.size() != 1u) {
+            throw std::runtime_error("signedDistancePlaneCoefficients: expected one vertex DOF");
+        }
+        const auto x = fixture.mesh->getNodeCoordinates(vertex);
+        coefficients[static_cast<std::size_t>(dofs.front())] =
+            x[0] - FE::Real{0.25};
+    }
+    return coefficients;
+}
+
 [[nodiscard]] FE::Real vertexValue(const FE::dofs::EntityDofMap& entity_map,
                                    const std::vector<FE::Real>& coefficients,
                                    FE::GlobalIndex vertex)
@@ -220,6 +243,41 @@ TEST(LevelSetReinitialization, ProjectionRepairsNodalField)
     EXPECT_GT(result.l2_interface_displacement, 0.0);
     EXPECT_LE(result.max_interface_displacement, result.max_abs_update);
 
+    EXPECT_NEAR(vertexValue(*entity_map, repaired, 0), -0.25, 1.0e-12);
+    EXPECT_NEAR(vertexValue(*entity_map, repaired, 1), 0.75, 1.0e-12);
+    EXPECT_NEAR(vertexValue(*entity_map, repaired, 2), -std::sqrt(0.125), 1.0e-12);
+    EXPECT_NEAR(vertexValue(*entity_map, repaired, 3), -std::sqrt(0.125), 1.0e-12);
+}
+
+TEST(LevelSetReinitialization, ProjectionReportsInterfaceMovementBeyondTolerance)
+{
+    const ScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto signed_distance = signedDistancePlaneCoefficients(fixture);
+
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 1.0;
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        signed_distance,
+        repaired);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_EQ(result.interface_displacement_samples, 4u);
+    EXPECT_GT(result.max_interface_displacement,
+              options.signed_distance_tolerance);
+    EXPECT_NEAR(result.max_interface_displacement,
+                std::sqrt(0.125) - 0.25,
+                1.0e-12);
+    ASSERT_EQ(repaired.size(), signed_distance.size());
     EXPECT_NEAR(vertexValue(*entity_map, repaired, 0), -0.25, 1.0e-12);
     EXPECT_NEAR(vertexValue(*entity_map, repaired, 1), 0.75, 1.0e-12);
     EXPECT_NEAR(vertexValue(*entity_map, repaired, 2), -std::sqrt(0.125), 1.0e-12);
