@@ -2296,6 +2296,107 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainCutVolumeSamplesNonconstantVel
     EXPECT_GT(vectorNorm(residual_delta), 1.0e-5);
 }
 
+TEST(MovingDomainPhysics, NavierStokesActiveDomainResidualFollowsNewtonLevelSetSignChange)
+{
+    constexpr int interface_marker = 52;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.viscosity = 1.0e-12;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_id = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setup({}, makeSingleTetraSetupInputs());
+
+    const FE::FieldId u_id = system.findFieldByName(opts.velocity_field_name);
+    ASSERT_NE(u_id, FE::INVALID_FIELD_ID);
+
+    FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    FE::level_set::LevelSetGeneratedInterfaceOptions cut_options;
+    cut_options.level_set_field_name = "phi";
+    cut_options.domain_id = "free_surface";
+    cut_options.requested_interface_marker = interface_marker;
+    cut_options.quadrature_order = 0;
+    cut_options.interface_quadrature_order = 0;
+    cut_options.volume_quadrature_order = 0;
+
+    struct ResidualSample {
+        std::vector<FE::Real> residual;
+        FE::Real negative_volume{0.0};
+        std::uint64_t value_revision{0};
+    };
+
+    const auto residual_for_phi = [&](const std::array<FE::Real, 4>& phi_values) {
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto x = mesh->getNodeCoordinates(vertex);
+            setFieldComponentValue(solution, system, u_id, vertex, 0, x[0]);
+            setFieldComponentValue(solution, system, phi_id, vertex, 0,
+                                   phi_values[static_cast<std::size_t>(vertex)]);
+        }
+
+        const auto result = lifecycle.build(system, cut_options, solution);
+        EXPECT_TRUE(result.success) << result.diagnostic;
+        auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
+        cut_context->addGeneratedInterfaceDomain(result.domain);
+        system.setCutIntegrationContext(std::move(cut_context));
+
+        const std::vector<FE::Real> previous_solution(solution.size(), 0.0);
+        FE::systems::SystemStateView state;
+        state.dt = 1.0;
+        state.u = std::span<const FE::Real>(solution);
+        state.u_prev = std::span<const FE::Real>(previous_solution);
+        const FE::systems::BackwardDifferenceIntegrator integrator;
+        const auto time_context =
+            integrator.buildContext(/*max_time_derivative_order=*/1, state);
+        state.time_integration = &time_context;
+
+        return ResidualSample{
+            .residual = residualVector(system, state, "equations"),
+            .negative_volume = result.summary.negative_volume_measure,
+            .value_revision = result.value_revision,
+        };
+    };
+
+    const auto initial = residual_for_phi({FE::Real{-0.1},
+                                           FE::Real{1.0},
+                                           FE::Real{1.0},
+                                           FE::Real{1.0}});
+    const auto updated = residual_for_phi({FE::Real{-1.0},
+                                           FE::Real{-1.0},
+                                           FE::Real{-1.0},
+                                           FE::Real{0.1}});
+
+    ASSERT_EQ(initial.residual.size(), updated.residual.size());
+    std::vector<FE::Real> residual_delta(initial.residual.size(), 0.0);
+    for (std::size_t i = 0; i < residual_delta.size(); ++i) {
+        residual_delta[i] = updated.residual[i] - initial.residual[i];
+    }
+
+    EXPECT_GT(updated.value_revision, initial.value_revision);
+    EXPECT_GT(updated.negative_volume, initial.negative_volume);
+    EXPECT_GT(vectorNorm(residual_delta), 1.0e-5);
+}
+
 TEST(MovingDomainPhysics, NavierStokesActiveDomainPositiveUsesPositiveCutVolumeSide)
 {
     constexpr int interface_marker = 49;

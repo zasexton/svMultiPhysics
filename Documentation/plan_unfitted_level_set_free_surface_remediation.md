@@ -109,7 +109,7 @@ preconditioner metadata.
 
 ### Tests
 
-- [ ] Add a unit test where a level-set field changes sign in one element during
+- [x] Add a unit test where a level-set field changes sign in one element during
       Newton and the next residual assembly sees the new active side.
 - [ ] Add a line-search test where a rejected trial changes the cut topology and
       the accepted state restores the previous topology.
