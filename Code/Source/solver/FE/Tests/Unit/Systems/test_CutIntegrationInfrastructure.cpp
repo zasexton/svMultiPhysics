@@ -2793,6 +2793,46 @@ TEST(CutIntegrationInfrastructure, BuildsCutAdjacentFacetSetFromGeneratedInterfa
     EXPECT_EQ(context.facetSetHandleForMarker(131), nullptr);
 }
 
+TEST(CutIntegrationInfrastructure, CapsCutAdjacentFacetStabilizationScales)
+{
+    CutIntegrationContext context;
+
+    CutCellAssemblyMetadata small_fragment;
+    small_fragment.cell = 4;
+    small_fragment.parent_entity = 4;
+    small_fragment.volume_fraction = 1.0e-10;
+    small_fragment.side = CutIntegrationSide::Negative;
+
+    CutQuadratureRule small_fragment_rule;
+    small_fragment_rule.side = CutIntegrationSide::Negative;
+    small_fragment_rule.measure = small_fragment.volume_fraction;
+    small_fragment_rule.parent_measure = 1.0;
+    small_fragment_rule.volume_fraction = small_fragment.volume_fraction;
+    context.addVolumeRule(small_fragment, small_fragment_rule);
+
+    CutFacetSetHandle handle;
+    handle.marker = 132;
+    handle.name = "capped-cut-facets";
+    handle.facets = {20, 21};
+    handle.facet_metadata = {
+        CutFacetSetFacetMetadata{.facet = 20,
+                                  .first_cell = 4,
+                                  .second_cell = 5,
+                                  .stabilization_scale = 0.0,
+                                  .stable_id = 1u},
+        CutFacetSetFacetMetadata{.facet = 21,
+                                  .first_cell = 6,
+                                  .second_cell = 7,
+                                  .stabilization_scale = 1.0e12,
+                                  .stable_id = 2u}};
+
+    const auto& stored = context.addFacetSetHandle(std::move(handle));
+    EXPECT_DOUBLE_EQ(stored.stabilizationScaleForFacet(20),
+                     CutIntegrationContext::maxCutCellStabilizationScale());
+    EXPECT_DOUBLE_EQ(stored.stabilizationScaleForFacet(21),
+                     CutIntegrationContext::maxCutCellStabilizationScale());
+}
+
 TEST(CutIntegrationInfrastructure, SmallGeneratedCutFragmentsFeedConditioningNeighborhoods)
 {
     CutInterfaceDomainRequest request;

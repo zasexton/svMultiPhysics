@@ -213,6 +213,10 @@ struct CutFacetSetHandle {
 
 class CutIntegrationContext {
 public:
+    [[nodiscard]] static constexpr Real maxCutCellStabilizationScale() noexcept {
+        return Real{1.0e8};
+    }
+
     void clear() {
         metadata_.clear();
         volume_rules_.clear();
@@ -1122,8 +1126,9 @@ private:
                 continue;
             }
 
-            const Real scale = Real{1.0} /
-                               std::max(entry.volume_fraction, fraction_floor);
+            const Real scale = std::min(
+                maxCutCellStabilizationScale(),
+                Real{1.0} / std::max(entry.volume_fraction, fraction_floor));
             auto [it, inserted] = scales.emplace(parent, scale);
             if (!inserted) {
                 it->second = std::max(it->second, scale);
@@ -1152,11 +1157,15 @@ private:
         for (auto& facet : handle.facet_metadata) {
             if (std::isfinite(facet.stabilization_scale) &&
                 facet.stabilization_scale > Real{0.0}) {
+                facet.stabilization_scale =
+                    std::min(facet.stabilization_scale,
+                             maxCutCellStabilizationScale());
                 continue;
             }
             facet.stabilization_scale =
-                std::max(cutCellStabilizationScale(scales, facet.first_cell),
-                         cutCellStabilizationScale(scales, facet.second_cell));
+                std::min(maxCutCellStabilizationScale(),
+                         std::max(cutCellStabilizationScale(scales, facet.first_cell),
+                                  cutCellStabilizationScale(scales, facet.second_cell)));
         }
     }
 

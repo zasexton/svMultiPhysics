@@ -1046,6 +1046,28 @@ def diagnostic_cut_volume_max_exact_order(diagnostics: dict[str, Any]) -> int | 
     return max(orders)
 
 
+def diagnostic_cut_adjacent_max_scale(diagnostics: dict[str, Any]) -> float | None:
+    scales = [
+        float(record["cut_adjacent_max_scale"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("cut_adjacent_max_scale"), (int, float))
+    ]
+    if not scales:
+        return None
+    return max(scales)
+
+
+def diagnostic_cut_adjacent_capped_scale_count(diagnostics: dict[str, Any]) -> int | None:
+    counts = [
+        int(record["cut_adjacent_capped_scale"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("cut_adjacent_capped_scale"), int)
+    ]
+    if not counts:
+        return None
+    return max(counts)
+
+
 def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None:
     for record in reversed(diagnostics.get("hydrostatic_initializations", [])):
         checked = record.get("checked_gauge_constraints")
@@ -1083,6 +1105,12 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     max_exact_order = diagnostic_cut_volume_max_exact_order(diagnostics)
     if max_exact_order is not None:
         metrics["diagnostic_cut_volume_max_exact_order"] = max_exact_order
+    cut_adjacent_max_scale = diagnostic_cut_adjacent_max_scale(diagnostics)
+    if cut_adjacent_max_scale is not None:
+        metrics["diagnostic_cut_adjacent_max_scale"] = cut_adjacent_max_scale
+    capped_scale_count = diagnostic_cut_adjacent_capped_scale_count(diagnostics)
+    if capped_scale_count is not None:
+        metrics["diagnostic_cut_adjacent_capped_scale_count"] = capped_scale_count
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
@@ -1220,6 +1248,24 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
             errors.append(
                 f"diagnostic cut-volume max exact order {exact_order} is below "
                 f"{args.min_diagnostic_cut_volume_max_exact_order}"
+            )
+    if args.max_diagnostic_cut_adjacent_scale is not None:
+        max_scale = metrics.get("diagnostic_cut_adjacent_max_scale")
+        if not isinstance(max_scale, (int, float)):
+            errors.append("diagnostic cut-adjacent max scale is unavailable")
+        elif max_scale > args.max_diagnostic_cut_adjacent_scale:
+            errors.append(
+                f"diagnostic cut-adjacent max scale {max_scale:.6g} exceeds "
+                f"{args.max_diagnostic_cut_adjacent_scale:.6g}"
+            )
+    if args.min_diagnostic_cut_adjacent_capped_scale_count is not None:
+        capped_count = metrics.get("diagnostic_cut_adjacent_capped_scale_count")
+        if not isinstance(capped_count, int):
+            errors.append("diagnostic cut-adjacent capped scale count is unavailable")
+        elif capped_count < args.min_diagnostic_cut_adjacent_capped_scale_count:
+            errors.append(
+                f"diagnostic cut-adjacent capped scale count {capped_count} is below "
+                f"{args.min_diagnostic_cut_adjacent_capped_scale_count}"
             )
     if args.stale_pressure_gauge_tolerance is not None:
         stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
@@ -1618,6 +1664,8 @@ def main() -> int:
     parser.add_argument("--max-diagnostic-active-volume-error", type=float)
     parser.add_argument("--min-diagnostic-cut-volume-exact-order", type=int)
     parser.add_argument("--min-diagnostic-cut-volume-max-exact-order", type=int)
+    parser.add_argument("--max-diagnostic-cut-adjacent-scale", type=float)
+    parser.add_argument("--min-diagnostic-cut-adjacent-capped-scale-count", type=int)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)

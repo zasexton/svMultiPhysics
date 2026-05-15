@@ -432,6 +432,7 @@ struct CutAdjacentFacetScaleSummary {
   std::size_t metadata_count{0};
   std::size_t zero_scale_count{0};
   std::size_t nonfinite_scale_count{0};
+  std::size_t capped_scale_count{0};
   svmp::FE::Real min_scale{std::numeric_limits<svmp::FE::Real>::infinity()};
   svmp::FE::Real max_scale{-std::numeric_limits<svmp::FE::Real>::infinity()};
   svmp::FE::Real mean_scale{0.0};
@@ -729,6 +730,10 @@ CutAdjacentFacetScaleSummary summarizeCutAdjacentFacetScales(
     }
     if (scale <= svmp::FE::Real{0.0}) {
       ++summary.zero_scale_count;
+    }
+    if (scale >=
+        svmp::FE::assembly::CutIntegrationContext::maxCutCellStabilizationScale()) {
+      ++summary.capped_scale_count;
     }
     summary.min_scale = std::min(summary.min_scale, scale);
     summary.max_scale = std::max(summary.max_scale, scale);
@@ -2227,6 +2232,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumSize(facet_scale_summary.zero_scale_count, comm);
     const auto global_nonfinite_scale_count =
         globalSumSize(facet_scale_summary.nonfinite_scale_count, comm);
+    const auto global_capped_scale_count =
+        globalSumSize(facet_scale_summary.capped_scale_count, comm);
     const auto local_min_scale =
         facet_scale_summary.metadata_count > 0u
             ? static_cast<double>(facet_scale_summary.min_scale)
@@ -2294,6 +2301,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << global_zero_scale_count
         << " cut_adjacent_nonfinite_scale="
         << global_nonfinite_scale_count
+        << " cut_adjacent_capped_scale="
+        << global_capped_scale_count
         << " cut_adjacent_min_scale="
         << global_min_scale
         << " cut_adjacent_max_scale="

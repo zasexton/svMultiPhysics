@@ -305,6 +305,9 @@ explicit stabilization policy change.
 - [x] Route cut-adjacent facet kernels through the assembler using that marker or
       handle.
 - [x] Bind cut metadata scale per cut-adjacent facet.
+- [x] Cap generated cut-adjacent stabilization scales for near-zero wet
+      fractions and report capped facet counts in cut-context rebuild
+      diagnostics.
 - [x] Ensure non-cut interior faces receive zero cut-cell stabilization
       contribution even when `Use_cut_metadata_scale=false`.
 - [x] Make the behavior of `Use_cut_metadata_scale=false` mean unscaled local
@@ -432,6 +435,8 @@ benchmark runs.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
+- [x] Add no-output smoke diagnostics for the cut-adjacent stabilization scale
+      cap so D18/D38 probes can verify bounded scale values before VTK output.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
