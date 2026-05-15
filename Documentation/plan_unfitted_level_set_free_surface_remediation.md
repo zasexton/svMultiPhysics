@@ -530,6 +530,14 @@ benchmark runs.
 - [x] Constrain inactive active-domain pressure vertex DOFs and finalize
       Dirichlet diagonals for constrained rows with no element support, so
       direct monolithic probes do not retain singular dry pressure rows.
+- [x] Filter smoke-script active-volume histories and consistency checks to the
+      configured active cut side, so inactive-side velocity-extension
+      diagnostics do not appear as wet-volume drift in no-output D18/D38
+      timeouts.
+- [x] Record a D18 GMRES reference-time timeout after inactive pressure support
+      constraints: the run advanced 12 accepted steps with converged nonlinear
+      and linear solves, and the remaining blocker was cut-adjacent
+      interior-face assembly cost rather than direct-factorization singularity.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

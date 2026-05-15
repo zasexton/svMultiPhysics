@@ -1005,6 +1005,39 @@ def aggregate_cut_volume_assemblies(records: list[dict[str, Any]]) -> list[dict[
     return groups
 
 
+def normalized_level_set_side(value: Any) -> str | None:
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if "negative" in text:
+        return "negative"
+    if "positive" in text:
+        return "positive"
+    return text
+
+
+def active_cut_volume_side(diagnostics: dict[str, Any]) -> str | None:
+    for record in reversed(diagnostics.get("cut_context_rebuilds", [])):
+        side = normalized_level_set_side(record.get("active_side"))
+        if side is not None:
+            return side
+    return None
+
+
+def active_cut_volume_records(diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    records = (
+        diagnostics.get("cut_volume_assembly_groups")
+        or diagnostics.get("cut_volume_assemblies", [])
+    )
+    active_side = active_cut_volume_side(diagnostics)
+    if active_side is None:
+        return list(records)
+    return [
+        record for record in records
+        if normalized_level_set_side(record.get("side")) == active_side
+    ]
+
+
 def summarize_time_loop(time_loop: dict[str, Any]) -> dict[str, Any]:
     nonlinear_records = time_loop.get("nonlinear_records", [])
     accepted_steps = time_loop.get("accepted_steps", [])
@@ -1418,7 +1451,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
     if diagnostics["cut_volume_assembly_groups"]:
         assembly_volumes = [
             float(record["active_wet_volume"])
-            for record in diagnostics["cut_volume_assembly_groups"]
+            for record in active_cut_volume_records(diagnostics)
             if isinstance(record.get("active_wet_volume"), (int, float))
         ]
         diagnostics["assembly_active_wet_volumes"] = assembly_volumes
@@ -1490,10 +1523,7 @@ def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
     ]
     assembly_volumes = [
         float(record["active_wet_volume"])
-        for record in (
-            diagnostics.get("cut_volume_assembly_groups")
-            or diagnostics.get("cut_volume_assemblies", [])
-        )
+        for record in active_cut_volume_records(diagnostics)
         if isinstance(record.get("active_wet_volume"), (int, float))
     ]
     if not context_volumes or not assembly_volumes:
@@ -1507,10 +1537,7 @@ def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
 def diagnostic_cut_volume_min_exact_order(diagnostics: dict[str, Any]) -> int | None:
     orders = [
         int(record["min_exact_order"])
-        for record in (
-            diagnostics.get("cut_volume_assembly_groups")
-            or diagnostics.get("cut_volume_assemblies", [])
-        )
+        for record in active_cut_volume_records(diagnostics)
         if isinstance(record.get("min_exact_order"), int)
     ]
     if not orders:
@@ -1521,10 +1548,7 @@ def diagnostic_cut_volume_min_exact_order(diagnostics: dict[str, Any]) -> int | 
 def diagnostic_cut_volume_max_exact_order(diagnostics: dict[str, Any]) -> int | None:
     orders = [
         int(record["max_exact_order"])
-        for record in (
-            diagnostics.get("cut_volume_assembly_groups")
-            or diagnostics.get("cut_volume_assemblies", [])
-        )
+        for record in active_cut_volume_records(diagnostics)
         if isinstance(record.get("max_exact_order"), int)
     ]
     if not orders:
