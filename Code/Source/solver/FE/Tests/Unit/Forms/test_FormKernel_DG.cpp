@@ -407,7 +407,17 @@ TEST(FormKernelDGTest, UnscaledMarkedCutAdjacentFacetIntegralSkipsNonCutInterior
     handle.marker = marker;
     handle.name = "single-cut-adjacent-facet";
     handle.facets = {0};
+    assembly::CutFacetSetFacetMetadata metadata;
+    metadata.facet = 0;
+    metadata.first_cell = 0;
+    metadata.second_cell = 1;
+    metadata.stabilization_scale = 1.0;
+    handle.facet_metadata.push_back(metadata);
     cut_context.addFacetSetHandle(std::move(handle));
+    const auto* stored_handle = cut_context.facetSetHandleForMarker(marker);
+    ASSERT_NE(stored_handle, nullptr);
+    EXPECT_TRUE(stored_handle->containsFacet(0));
+    EXPECT_FALSE(stored_handle->containsFacet(1));
 
     assembly::StandardAssembler assembler;
     assembler.setDofMap(dof_map);

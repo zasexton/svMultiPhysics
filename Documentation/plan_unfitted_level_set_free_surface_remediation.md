@@ -314,7 +314,7 @@ explicit stabilization policy change.
 
 ### Tests
 
-- [ ] Add a unit test where only one element is cut and only adjacent facets are
+- [x] Add a unit test where only one element is cut and only adjacent facets are
       visited by stabilization assembly.
 - [ ] Add a unit test where a far-field interior face receives zero contribution.
 - [ ] Add tests with `Use_cut_metadata_scale=true`.
