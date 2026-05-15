@@ -69,6 +69,7 @@ struct CutIntegrationRefreshDecision {
     bool rebuild_cut_classification{false};
     bool rebuild_quadrature{false};
     bool rebuild_sparsity_pattern{false};
+    bool refresh_full_cell_domain_caches{false};
     bool rebuild_matrix{false};
     bool rebuild_matrix_free_data{false};
     bool refresh_preconditioner{false};
@@ -78,8 +79,8 @@ struct CutIntegrationRefreshDecision {
 
     [[nodiscard]] bool any() const noexcept {
         return rebuild_cut_classification || rebuild_quadrature ||
-               rebuild_sparsity_pattern || rebuild_matrix ||
-               rebuild_matrix_free_data || refresh_preconditioner ||
+               rebuild_sparsity_pattern || refresh_full_cell_domain_caches ||
+               rebuild_matrix || rebuild_matrix_free_data || refresh_preconditioner ||
                refresh_restart_metadata || update_stabilization_hooks;
     }
 };

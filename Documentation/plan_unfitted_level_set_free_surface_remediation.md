@@ -102,7 +102,7 @@ preconditioner metadata.
       change.
 - [x] Invalidate cut-dependent sparsity assumptions only if topology changes can
       add or remove test/trial couplings.
-- [ ] Preserve state-independent full-cell `.dx()` caches when only cut metadata
+- [x] Preserve state-independent full-cell `.dx()` caches when only cut metadata
       changed.
 - [ ] Add an assertion that `dCutVolume(...)` assembly cannot run with a stale
       cut-context revision for the current nonlinear state.

@@ -89,6 +89,7 @@ CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
         decision.rebuild_cut_classification = true;
         decision.rebuild_quadrature = true;
         decision.rebuild_sparsity_pattern = true;
+        decision.refresh_full_cell_domain_caches = true;
         decision.rebuild_matrix = true;
         decision.rebuild_matrix_free_data = true;
         decision.refresh_preconditioner = true;
@@ -139,10 +140,19 @@ CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
         cached.fe_constraint_layout_revision != current.fe_constraint_layout_revision ||
         cached.fe_block_layout_revision != current.fe_block_layout_revision;
 
+    const bool full_cell_domain_cache_dependencies_changed =
+        cached.geometry_revision != current.geometry_revision ||
+        cached.topology_revision != current.topology_revision ||
+        cached.ownership_revision != current.ownership_revision ||
+        cached.numbering_revision != current.numbering_revision ||
+        cached.label_revision != current.label_revision ||
+        fe_layout_changed;
+
     if (mesh_or_embedded_changed) {
         decision.rebuild_cut_classification = true;
         decision.rebuild_quadrature = true;
         decision.rebuild_sparsity_pattern = cut_coupling_topology_changed;
+        decision.refresh_full_cell_domain_caches = full_cell_domain_cache_dependencies_changed;
         decision.rebuild_matrix = true;
         decision.rebuild_matrix_free_data = true;
         decision.refresh_preconditioner = true;
@@ -151,6 +161,7 @@ CutIntegrationRefreshDecision classifyCutIntegrationRefresh(
         decision.reason = "mesh, embedded geometry, or cut topology changed";
     } else if (fe_layout_changed) {
         decision.rebuild_sparsity_pattern = true;
+        decision.refresh_full_cell_domain_caches = true;
         decision.rebuild_matrix = true;
         decision.refresh_preconditioner = true;
         decision.refresh_restart_metadata = true;
