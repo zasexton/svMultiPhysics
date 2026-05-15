@@ -264,9 +264,17 @@ Problem: the current cut-adjacent stabilization helper lowers to plain `dS()`.
 When cut metadata scaling is disabled, this can apply ghost-penalty terms to all
 interior facets instead of only the cut neighborhood.
 
+Selected locality rule: generated interfaces use a marker-backed
+cut-adjacent interior facet set instead of plain `dS()`. The generated set
+contains every interior facet with at least one adjacent cut cell, including
+facets shared by two cut cells, and excludes facets whose adjacent cells are
+both uncut. Small-fragment conditioning uses the cut cell plus its immediate
+cell-neighbor patch as the extension neighborhood; wider patches require an
+explicit stabilization policy change.
+
 ### Form And Measure Checklist
 
-- [ ] Define a real cut-adjacent facet measure or marker-backed facet set for
+- [x] Define a real cut-adjacent facet measure or marker-backed facet set for
       generated interfaces.
 - [ ] Change `cutAdjacentFacetIntegral(...)` so it cannot silently mean all
       interior faces.
@@ -274,9 +282,9 @@ interior facets instead of only the cut neighborhood.
       binding when installing cut-cell stabilization.
 - [ ] Keep plain `dS()` available only for intentionally global DG terms, not
       cut-cell stabilization.
-- [ ] Decide whether cut-cell stabilization uses only facets with one cut cell or
+- [x] Decide whether cut-cell stabilization uses only facets with one cut cell or
       a wider extension patch.
-- [ ] Document the selected extension-patch rule.
+- [x] Document the selected extension-patch rule.
 
 ### Implementation Checklist
 
