@@ -21,6 +21,15 @@ Real integrateCoordinate(const CutQuadratureRule& rule, std::size_t component)
     return value;
 }
 
+Real integrateWeight(const CutQuadratureRule& rule)
+{
+    Real value = 0.0;
+    for (const auto& point : rule.points) {
+        value += point.weight;
+    }
+    return value;
+}
+
 } // namespace
 
 TEST(LevelSetInterfaceDomain, RequestCarriesFieldSourceAndMarker)
@@ -409,17 +418,11 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     EXPECT_FALSE(rules[1].full_cell_equivalent);
     EXPECT_NEAR(rules[0].measure, 0.5, 1.0e-14);
     EXPECT_NEAR(rules[1].measure, 0.5, 1.0e-14);
-    EXPECT_NEAR(rules[0].points.front().weight + rules[1].points.front().weight,
-                1.0,
-                1.0e-14);
+    EXPECT_NEAR(integrateWeight(rules[0]) + integrateWeight(rules[1]), 1.0, 1.0e-14);
     EXPECT_EQ(rules[0].exact_polynomial_order, 1);
     EXPECT_EQ(rules[0].policy.name, "linear-moment-fitted-level-set-volume");
-    ASSERT_EQ(rules[0].points.size(), 1u);
-    ASSERT_EQ(rules[1].points.size(), 1u);
-    EXPECT_NEAR(rules[0].points.front().point[0], 0.25, 1.0e-14);
-    EXPECT_NEAR(rules[0].points.front().point[1], 0.5, 1.0e-14);
-    EXPECT_NEAR(rules[1].points.front().point[0], 0.75, 1.0e-14);
-    EXPECT_NEAR(rules[1].points.front().point[1], 0.5, 1.0e-14);
+    ASSERT_EQ(rules[0].points.size(), 2u);
+    ASSERT_EQ(rules[1].points.size(), 2u);
     EXPECT_NEAR(integrateCoordinate(rules[0], 0), 0.125, 1.0e-14);
     EXPECT_NEAR(integrateCoordinate(rules[0], 1), 0.25, 1.0e-14);
     EXPECT_NEAR(integrateCoordinate(rules[1], 0), 0.375, 1.0e-14);
@@ -566,10 +569,8 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportTriangleVolumeCentroids)
     EXPECT_NEAR(rules[0].measure, 3.0 / 8.0, 1.0e-14);
     EXPECT_NEAR(rules[1].measure, 1.0 / 8.0, 1.0e-14);
     EXPECT_NEAR(rules[0].measure + rules[1].measure, 0.5, 1.0e-14);
-    ASSERT_EQ(rules[0].points.size(), 1u);
+    ASSERT_EQ(rules[0].points.size(), 2u);
     ASSERT_EQ(rules[1].points.size(), 1u);
-    EXPECT_NEAR(rules[0].points.front().point[0], 2.0 / 9.0, 1.0e-14);
-    EXPECT_NEAR(rules[0].points.front().point[1], 7.0 / 18.0, 1.0e-14);
     EXPECT_NEAR(rules[1].points.front().point[0], 2.0 / 3.0, 1.0e-14);
     EXPECT_NEAR(rules[1].points.front().point[1], 1.0 / 6.0, 1.0e-14);
     EXPECT_NEAR(integrateCoordinate(rules[0], 0), 1.0 / 12.0, 1.0e-14);

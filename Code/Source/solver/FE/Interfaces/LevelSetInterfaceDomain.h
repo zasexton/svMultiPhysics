@@ -294,6 +294,7 @@ struct CutInterfaceVolumeRegion {
     Real max_level_set_value{0.0};
     std::string topology_id{};
     bool full_cell_equivalent{false};
+    std::vector<geometry::CutQuadraturePoint> quadrature_points{};
 
     [[nodiscard]] bool active() const noexcept {
         return interface_marker >= 0 &&
@@ -338,7 +339,15 @@ struct CutInterfaceVolumeRegion {
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.full_cell_equivalent = full_cell_equivalent;
-        rule.points.push_back(geometry::CutQuadraturePoint{centroid, normal, measure});
+        if (quadrature_points.empty()) {
+            rule.points.push_back(geometry::CutQuadraturePoint{centroid, normal, measure});
+        } else {
+            rule.points.reserve(quadrature_points.size());
+            for (auto point : quadrature_points) {
+                point.normal = normal;
+                rule.points.push_back(point);
+            }
+        }
         return rule;
     }
 };

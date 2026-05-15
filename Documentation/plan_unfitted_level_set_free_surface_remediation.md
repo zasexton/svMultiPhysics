@@ -202,8 +202,11 @@ side volume keep active side-volume metadata.
 
 ### Implementation Checklist
 
-- [ ] Replace `constant-level-set-volume` with a policy that can generate more
+- [x] Replace `constant-level-set-volume` with a policy that can generate more
       than one point per cut side.
+      Cut side-volume regions now carry explicit quadrature points, and 2D cut
+      side polygons are triangulated so cut quadrilateral side volumes can export
+      multiple conservative points.
 - [x] Generate negative-side and positive-side quadrature rules with consistent
       parent cell ids, side labels, volume fractions, and provenance.
 - [x] For full negative and full positive cells, reuse normal element quadrature

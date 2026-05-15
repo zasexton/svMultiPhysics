@@ -522,7 +522,7 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     return polygonMoments2D(polygon);
 }
 
-[[nodiscard]] RegionMoments cutSideMoments2D(
+[[nodiscard]] std::vector<SignedPoint> cutSidePolygon2D(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     std::size_t count,
@@ -530,10 +530,59 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     Real tolerance)
 {
     const auto polygon = makeSignedPolygon(points, signed_values, count);
-    const auto clipped = side == geometry::CutIntegrationSide::Negative
-                             ? clipPolygonToNegativeLevelSet(polygon, tolerance)
-                             : clipPolygonToPositiveLevelSet(polygon, tolerance);
-    return polygonMoments2D(clipped);
+    return side == geometry::CutIntegrationSide::Negative
+               ? clipPolygonToNegativeLevelSet(polygon, tolerance)
+               : clipPolygonToPositiveLevelSet(polygon, tolerance);
+}
+
+[[nodiscard]] RegionMoments cutSideMoments2D(
+    const std::vector<std::array<Real, 3>>& points,
+    const std::vector<Real>& signed_values,
+    std::size_t count,
+    geometry::CutIntegrationSide side,
+    Real tolerance)
+{
+    return polygonMoments2D(
+        cutSidePolygon2D(points, signed_values, count, side, tolerance));
+}
+
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature2D(
+    const std::vector<SignedPoint>& polygon,
+    Real tolerance)
+{
+    std::vector<geometry::CutQuadraturePoint> points;
+    if (polygon.size() < 3u) {
+        return points;
+    }
+
+    const auto& origin = polygon.front().point;
+    points.reserve(polygon.size() - 2u);
+    for (std::size_t i = 1u; i + 1u < polygon.size(); ++i) {
+        const auto& b = polygon[i].point;
+        const auto& c = polygon[i + 1u].point;
+        const Real area =
+            Real{0.5} * norm3(cross(sub(b, origin), sub(c, origin)));
+        if (area <= tolerance) {
+            continue;
+        }
+        geometry::CutQuadraturePoint qp;
+        qp.point = scale(add(add(origin, b), c), Real{1.0} / Real{3.0});
+        qp.weight = area;
+        points.push_back(qp);
+    }
+    return points;
+}
+
+[[nodiscard]] std::vector<geometry::CutQuadraturePoint> cutSideQuadrature2D(
+    const std::vector<std::array<Real, 3>>& points,
+    const std::vector<Real>& signed_values,
+    std::size_t count,
+    geometry::CutIntegrationSide side,
+    Real tolerance)
+{
+    return polygonQuadrature2D(
+        cutSidePolygon2D(points, signed_values, count, side, tolerance),
+        tolerance);
 }
 
 void addUniquePoint(std::vector<std::array<Real, 3>>& points,
@@ -707,6 +756,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
     LocalIndex local_region_index,
     const std::string& suffix,
+    std::vector<geometry::CutQuadraturePoint> quadrature_points = {},
     bool full_cell_equivalent = false)
 {
     CutInterfaceVolumeRegion region;
@@ -725,6 +775,10 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     region.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     region.topology_id = "cell-" + std::to_string(input.parent_cell) + "-" + suffix;
     region.full_cell_equivalent = full_cell_equivalent;
+    for (auto& point : quadrature_points) {
+        point.normal = region.normal;
+    }
+    region.quadrature_points = std::move(quadrature_points);
     region.stable_id = cutVolumeStableId(request.interface_marker,
                                          input.parent_cell,
                                          local_region_index,
@@ -902,6 +956,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-negative-volume",
+                             {},
                              true));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
@@ -921,6 +976,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-positive-volume",
+                             {},
                              true));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
@@ -1036,6 +1092,18 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          count,
                          geometry::CutIntegrationSide::Positive,
                          request.tolerance);
+    const auto negative_quadrature =
+        cutSideQuadrature2D(input.node_coordinates,
+                            signed_values,
+                            count,
+                            geometry::CutIntegrationSide::Negative,
+                            request.tolerance);
+    const auto positive_quadrature =
+        cutSideQuadrature2D(input.node_coordinates,
+                            signed_values,
+                            count,
+                            geometry::CutIntegrationSide::Positive,
+                            request.tolerance);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)
@@ -1081,7 +1149,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          normal,
                          signed_values,
                          0u,
-                         "cut-negative-volume"));
+                         "cut-negative-volume",
+                         negative_quadrature));
     appendSideVolumeRegion(
         result,
         makeVolumeRegion(request,
@@ -1095,7 +1164,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          normal,
                          signed_values,
                          1u,
-                         "cut-positive-volume"));
+                         "cut-positive-volume",
+                         positive_quadrature));
     result.fragments.push_back(std::move(fragment));
     return result;
 }
@@ -1160,6 +1230,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-negative-volume",
+                             {},
                              true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
@@ -1178,6 +1249,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-positive-volume",
+                             {},
                              true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);

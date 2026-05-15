@@ -57,6 +57,15 @@ Real vector_error(const std::array<Real, 3>& a, const std::array<Real, 3>& b)
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+Real integrate_volume_weight(const svmp::FE::geometry::CutQuadratureRule& rule)
+{
+    Real value = 0.0;
+    for (const auto& point : rule.points) {
+        value += point.weight;
+    }
+    return value;
+}
+
 struct InterfaceApproximation {
     Real measure{0.0};
     Real weighted_normal_error{0.0};
@@ -686,10 +695,8 @@ TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
     rules = edge_domain.volumeQuadratureRules();
     ASSERT_EQ(rules.size(), 2u);
     EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
-    ASSERT_EQ(rules[0].points.size(), 1u);
-    EXPECT_NEAR(rules[0].points.front().point[0], 0.5, 1.0e-10);
-    EXPECT_NEAR(rules[0].points.front().point[1], Real{0.5} * t, 1.0e-14);
-    EXPECT_NEAR(rules[0].points.front().weight, t, 1.0e-14);
+    ASSERT_EQ(rules[0].points.size(), 2u);
+    EXPECT_NEAR(integrate_volume_weight(rules[0]), t, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceBuilder, SerialGeneratedInterfaceFragmentCounts)
