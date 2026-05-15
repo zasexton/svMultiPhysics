@@ -62,6 +62,12 @@ domain explicitly, normally `Active_domain=LevelSetNegative` with
 `Active_domain_method=CutVolume`; full-domain unfitted runs require an explicit
 diagnostic opt-in.
 
+Output naming note: `WetVolumeFraction` is the cell-centered generated
+cut-volume active-domain diagnostic and should be used for wet-area or
+wet-volume post-processing. `ActiveFluid` is a vertex-sign visualization mask
+only; it helps inspect dry-vertex masking and must not be interpreted as the
+integration active domain.
+
 ## Level-Set Maintenance Policy
 
 Reinitialization is a validation control, not a universal default. Cases that
