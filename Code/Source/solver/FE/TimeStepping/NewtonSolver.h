@@ -16,6 +16,8 @@
 #include "Systems/TransientSystem.h"
 #include "TimeStepping/TimeHistory.h"
 
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -24,6 +26,16 @@ namespace FE {
 namespace timestepping {
 
 struct NewtonOptions {
+    enum class StateSynchronizationPoint : std::uint8_t {
+        AcceptedNonlinearState,
+        ResidualAssembly,
+        JacobianAssembly,
+        JacobianAndResidualAssembly,
+        LineSearchTrialResidual,
+        RestoredNonlinearState,
+        FinalResidualAssembly
+    };
+
     systems::OperatorTag residual_op{"residual"};
     systems::OperatorTag jacobian_op{"jacobian"};
 
@@ -87,6 +99,9 @@ struct NewtonOptions {
     double line_search_alpha_min{1e-6};
     double line_search_shrink{0.5};
     double line_search_c1{1e-4};
+
+    std::function<void(const systems::SystemStateView&, StateSynchronizationPoint)>
+        synchronize_state{};
 };
 
 struct NewtonReport {

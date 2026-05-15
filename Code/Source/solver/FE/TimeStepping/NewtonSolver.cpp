@@ -3328,6 +3328,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
         return out;
     };
+    using StateSyncPoint = NewtonOptions::StateSynchronizationPoint;
+    auto synchronizeState = [&](const systems::SystemStateView& state,
+                                StateSyncPoint point) {
+        if (options_.synchronize_state) {
+            options_.synchronize_state(state, point);
+        }
+    };
 
     // Ensure time-dependent constraints (Dirichlet, etc.) are evaluated at the actual solve time.
     // This is required for multi-stage schemes (e.g., generalized-α) where the nonlinear solve
@@ -3339,6 +3346,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
     auto base_state_holder = makeNewtonState(history, solve_time);
     const auto& base_state = base_state_holder.view;
+    synchronizeState(base_state, StateSyncPoint::AcceptedNonlinearState);
     transient.system().acceptGeometricNonlinearityState(
         base_state,
         systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
@@ -3617,7 +3625,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         grouped_bordered_field_couplings.clear();
     };
 
-    auto assembleResidualOnly = [&](const systems::SystemStateView& state, const char* phase) -> double {
+    auto assembleResidualOnly = [&](const systems::SystemStateView& state,
+                                    const char* phase,
+                                    StateSyncPoint sync_point = StateSyncPoint::ResidualAssembly) -> double {
         residual_op_used = options_.residual_op;
         auto r_view = r.createAssemblyView();
         FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: residual assembly view");
@@ -3632,6 +3642,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             traceLog(msg);
         }
 
+        synchronizeState(state, sync_point);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -3673,6 +3684,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: beginTimeStep() + assemble (matrix) op='" + options_.jacobian_op + "'");
         }
+        synchronizeState(state, StateSyncPoint::JacobianAssembly);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -3707,6 +3719,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: beginTimeStep() + assemble (matrix+vector) op='" + options_.residual_op + "'");
         }
+        synchronizeState(state, StateSyncPoint::JacobianAndResidualAssembly);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -3752,6 +3765,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         if (oopTraceEnabled()) {
             traceLog("NewtonSolver: beginTimeStep() + assemble (matrix+vector) op='" + options_.jacobian_op + "'");
         }
+        synchronizeState(state, StateSyncPoint::JacobianAndResidualAssembly);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -4011,6 +4025,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         auto J_view = J.createAssemblyView();
         FE_CHECK_NOT_NULL(J_view.get(), "NewtonSolver: PTC dt-only Jacobian view");
 
+        synchronizeState(state_dt, StateSyncPoint::JacobianAssembly);
         transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                          /*invalidate_auxiliary_inputs=*/false);
         systems::AssemblyRequest req;
@@ -4347,6 +4362,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     auto r_view = residual_base.createAssemblyView();
                     FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: jacobian check residual base view");
 
+                    synchronizeState(state, StateSyncPoint::ResidualAssembly);
                     transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
                                                      /*invalidate_auxiliary_inputs=*/false);
                     systems::AssemblyRequest req;
@@ -4360,6 +4376,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
                 applyResidualFixups(residual_base);
                 restoreDiagnosticState();
+                synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
 
                 // Assemble r(u + h*v) with residual_op into residual_scratch.
                 axpy(history.u(), static_cast<Real>(h), du);
@@ -4378,6 +4395,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     req.suppress_constraint_inhomogeneity = true;
                     req.is_nonlinear_iteration = true;
                     auto perturbed_state_holder = makeNewtonState(history, solve_time);
+                    synchronizeState(perturbed_state_holder.view,
+                                     StateSyncPoint::ResidualAssembly);
                     const auto ar = transient.assemble(
                         req, perturbed_state_holder.view, nullptr, r_view.get());
                     FE_THROW_IF(!ar.success, FEException,
@@ -4385,6 +4404,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 }
                 applyResidualFixups(residual_scratch);
                 restoreDiagnosticState();
+                synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
 
                 const double r_base_norm = residualNormForConvergence(residual_base, u_backup);
                 const double r_used_norm = residualNormForConvergence(r, u_backup);
@@ -6169,6 +6189,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             axpy(history.u(), static_cast<Real>(-1.0), du);
             syncCurrentState();
             auto accepted_state_holder = makeNewtonState(history, solve_time);
+            synchronizeState(accepted_state_holder.view,
+                             StateSyncPoint::AcceptedNonlinearState);
             transient.system().acceptGeometricNonlinearityState(
                 accepted_state_holder.view,
                 systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
@@ -6233,7 +6255,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
             auto trial_state_holder = makeNewtonState(history, solve_time);
             transient.system().beginGeometricNonlinearityTrial(trial_state_holder.view);
-            return assembleResidualOnly(trial_state_holder.view, phase);
+            return assembleResidualOnly(
+                trial_state_holder.view,
+                phase,
+                StateSyncPoint::LineSearchTrialResidual);
         };
 
         double alpha = 1.0;
@@ -6346,8 +6371,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         // trial, or the restored original iterate.
         auto accepted_state_holder = makeNewtonState(history, solve_time);
         if (reverted_to_original) {
+            synchronizeState(accepted_state_holder.view,
+                             StateSyncPoint::RestoredNonlinearState);
             transient.system().rollbackGeometricNonlinearityTrial();
         } else {
+            synchronizeState(accepted_state_holder.view,
+                             StateSyncPoint::AcceptedNonlinearState);
             transient.system().acceptGeometricNonlinearityState(
                 accepted_state_holder.view,
                 systems::GeometricNonlinearityUpdatePoint::AcceptedNonlinearState);
@@ -6403,7 +6432,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         syncHistoryState();
         auto final_state_holder = makeNewtonState(history, solve_time);
         current_residual_norm = assembleResidualOnly(
-            final_state_holder.view, /*phase=*/"final_check");
+            final_state_holder.view,
+            /*phase=*/"final_check",
+            StateSyncPoint::FinalResidualAssembly);
         have_residual = true;
         updateResidualReport();
     }

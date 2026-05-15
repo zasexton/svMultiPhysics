@@ -930,6 +930,80 @@ TEST(NewtonSolverLineSearch, StepToleranceUsesLastTriedAlphaWhenMaxIterationsRea
     EXPECT_EQ(rep.iterations, 1);
 }
 
+TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u, const svmp::FE::forms::FormExpr& v) { return (u * v).dx(); },
+        /*dt=*/0.1,
+        /*u0=*/{1.0});
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct SyncRecord {
+        SyncPoint point;
+        double u;
+    };
+    std::vector<SyncRecord> sync_records;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.line_search_alpha_min = 1e-12;
+    nopt.synchronize_state =
+        [&sync_records](const svmp::FE::systems::SystemStateView& state,
+                        SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            sync_records.push_back(
+                SyncRecord{point, static_cast<double>(state.u.front())});
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/-1.0);
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_FALSE(rep.converged);
+    auto saw_trial_update = false;
+    auto saw_trial_restore = false;
+    auto saw_restored_state = false;
+    for (const auto& rec : sync_records) {
+        if (rec.point == SyncPoint::LineSearchTrialResidual &&
+            std::abs(rec.u - 2.0) < 1e-13) {
+            saw_trial_update = true;
+        }
+        if (rec.point == SyncPoint::LineSearchTrialResidual &&
+            std::abs(rec.u - 1.0) < 1e-13) {
+            saw_trial_restore = true;
+        }
+        if (rec.point == SyncPoint::RestoredNonlinearState &&
+            std::abs(rec.u - 1.0) < 1e-13) {
+            saw_restored_state = true;
+        }
+    }
+    EXPECT_TRUE(saw_trial_update);
+    EXPECT_TRUE(saw_trial_restore);
+    EXPECT_TRUE(saw_restored_state);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
+}
+
 TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

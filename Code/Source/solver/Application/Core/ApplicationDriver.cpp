@@ -6,7 +6,10 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
+#include "FE/LevelSet/LevelSetReinitialization.h"
+#include "FE/LevelSet/LevelSetVolume.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
 #include "FE/PostProcessing/DerivedResultEvaluator.h"
 #include "FE/Systems/TimeIntegrator.h"
@@ -22,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -29,6 +33,7 @@
 #include <iomanip>
 #include <iostream>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -279,6 +284,38 @@ std::optional<int> first_defined_int_parameter(
   return std::nullopt;
 }
 
+std::optional<bool> first_defined_bool_parameter(
+    const std::map<std::string, std::string>& params,
+    std::initializer_list<const char*> keys)
+{
+  if (const auto value = first_defined_parameter(params, keys)) {
+    return parse_bool_relaxed(*value);
+  }
+  return std::nullopt;
+}
+
+svmp::FE::level_set::LevelSetReinitializationMethod
+parseLevelSetReinitializationMethod(const std::string& raw)
+{
+  const auto value = normalized_token(raw);
+  using Method = svmp::FE::level_set::LevelSetReinitializationMethod;
+  if (value == "projection" || value == "signeddistanceprojection" ||
+      value == "repairprojection") {
+    return Method::Projection;
+  }
+  if (value == "hamiltonjacobi" || value == "hamiltonjacobipde" ||
+      value == "pde") {
+    return Method::HamiltonJacobiPDE;
+  }
+  if (value == "fastmarching" || value == "fastmarchingmethod" ||
+      value == "fmm") {
+    return Method::FastMarching;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Reinitialization_method must be one of "
+      "'Projection', 'HamiltonJacobiPDE', or 'FastMarching'.");
+}
+
 std::string step_reject_reason_to_string(svmp::FE::timestepping::StepRejectReason r)
 {
   using svmp::FE::timestepping::StepRejectReason;
@@ -319,17 +356,40 @@ const EquationParameters* primary_solver_equation(const Parameters& params)
   return first;
 }
 
+enum class LevelSetActiveSide {
+  Negative,
+  Positive,
+};
+
 struct ActiveCutVolumeRequest {
   std::string level_set_field_name{"level_set"};
   std::string domain_id{"free_surface"};
   int requested_interface_marker{-1};
   double isovalue{0.0};
+  LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
+};
+
+struct LevelSetMaintenanceRequest {
+  std::string level_set_field_name{"level_set"};
+  double isovalue{0.0};
+  svmp::FE::level_set::LevelSetReinitializationOptions reinitialization{};
+  svmp::FE::level_set::LevelSetVolumeCorrectionOptions volume_correction{};
+  bool volume_target_initialized{false};
+  svmp::FE::Real volume_target{0.0};
+};
+
+struct LevelSetAdvectionVelocityRequest {
+  std::string level_set_field_name{"level_set"};
+  std::string source_velocity_field_name{"Velocity"};
+  std::string target_velocity_field_name{"LevelSetAdvectionVelocity"};
+  double isovalue{0.0};
+  LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
 };
 
 std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& params)
 {
   std::vector<ActiveCutVolumeRequest> requests;
-  for (const auto* eq : params.equation_parameters) {
+  for (auto* eq : params.equation_parameters) {
     if (eq == nullptr || !eq->type.defined() ||
         normalized_token(eq->type.value()) != "fluid") {
       continue;
@@ -375,6 +435,13 @@ std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& pa
       }
 
       ActiveCutVolumeRequest request{};
+      if (active_token == "levelsetpositive" ||
+          active_token == "positive" ||
+          active_token == "phipositive") {
+        request.active_side = LevelSetActiveSide::Positive;
+      } else {
+        request.active_side = LevelSetActiveSide::Negative;
+      }
       if (const auto field =
               first_defined_parameter(bc_params, {"Level_set_field_name",
                                                  "Level_set_field",
@@ -401,6 +468,377 @@ std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& pa
                                                         "InterfaceIsovalue"})) {
         request.isovalue = *isovalue;
       }
+      requests.push_back(std::move(request));
+    }
+  }
+  return requests;
+}
+
+std::vector<LevelSetAdvectionVelocityRequest>
+levelSetAdvectionVelocityRequests(const Parameters& params)
+{
+  std::vector<LevelSetAdvectionVelocityRequest> requests;
+  const auto active_requests = activeCutVolumeRequests(params);
+
+  for (auto* eq : params.equation_parameters) {
+    if (eq == nullptr || !eq->type.defined()) {
+      continue;
+    }
+    const auto type = normalized_token(eq->type.value());
+    if (type != "levelset" && type != "levelsettransport") {
+      continue;
+    }
+
+    const auto eq_params = eq->get_parameter_list();
+    const bool enabled =
+        first_defined_bool_parameter(
+            eq_params,
+            {"Use_wet_extension_advection_velocity",
+             "UseWetExtensionAdvectionVelocity",
+             "Update_advection_velocity_from_wet_region",
+             "UpdateAdvectionVelocityFromWetRegion"})
+            .value_or(false);
+    const auto source_field =
+        first_defined_parameter(
+            eq_params,
+            {"Advection_velocity_from_field",
+             "AdvectionVelocityFromField",
+             "Source_velocity_field_name",
+             "SourceVelocityFieldName",
+             "Physical_velocity_field_name",
+             "PhysicalVelocityFieldName"});
+    if (!enabled && !source_field.has_value()) {
+      continue;
+    }
+
+    LevelSetAdvectionVelocityRequest request{};
+    if (const auto field =
+            first_defined_parameter(eq_params, {"Level_set_field_name",
+                                               "LevelSetFieldName",
+                                               "Level_set_field",
+                                               "LevelSetField",
+                                               "Field_name"})) {
+      request.level_set_field_name = trim_copy(*field);
+    }
+    if (source_field.has_value()) {
+      request.source_velocity_field_name = trim_copy(*source_field);
+    }
+    if (const auto target =
+            first_defined_parameter(eq_params, {"Velocity_field_name",
+                                               "VelocityFieldName",
+                                               "Advection_velocity_field",
+                                               "AdvectionVelocityField"})) {
+      request.target_velocity_field_name = trim_copy(*target);
+    }
+    if (request.target_velocity_field_name.empty()) {
+      request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+    }
+    if (request.target_velocity_field_name == request.source_velocity_field_name) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension level-set advection requires "
+          "Velocity_field_name to be distinct from the physical source velocity field.");
+    }
+
+    const auto velocity_source =
+        first_defined_parameter(eq_params, {"Velocity_source", "VelocitySource"});
+    if (!velocity_source.has_value() ||
+        normalized_token(*velocity_source) != "prescribeddata") {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension level-set advection requires "
+          "<Velocity_source>prescribed_data</Velocity_source> so the transport equation uses "
+          "the generated prescribed advection field.");
+    }
+
+    if (const auto isovalue =
+            first_defined_double_parameter(eq_params, {"Level_set_isovalue",
+                                                      "LevelSetIsovalue",
+                                                      "Interface_isovalue",
+                                                      "InterfaceIsovalue"})) {
+      request.isovalue = *isovalue;
+    }
+
+    for (const auto& active_request : active_requests) {
+      if (active_request.level_set_field_name != request.level_set_field_name) {
+        continue;
+      }
+      request.isovalue = active_request.isovalue;
+      request.active_side = active_request.active_side;
+      break;
+    }
+
+    requests.push_back(std::move(request));
+  }
+
+  return requests;
+}
+
+bool activeSideContains(double phi, const ActiveCutVolumeRequest& request)
+{
+  return request.active_side == LevelSetActiveSide::Negative
+             ? phi <= request.isovalue
+             : phi >= request.isovalue;
+}
+
+bool activeSideContains(double phi, const LevelSetAdvectionVelocityRequest& request)
+{
+  return request.active_side == LevelSetActiveSide::Negative
+             ? phi <= request.isovalue
+             : phi >= request.isovalue;
+}
+
+bool copyVertexFloat64Field(
+    svmp::Mesh& mesh,
+    const std::string& source_name,
+    const std::string& target_name)
+{
+  if (!mesh.has_field(svmp::EntityKind::Vertex, source_name)) {
+    return false;
+  }
+
+  const auto source_handle =
+      mesh.field_handle(svmp::EntityKind::Vertex, source_name);
+  if (mesh.field_type(source_handle) != svmp::FieldScalarType::Float64) {
+    return false;
+  }
+
+  if (mesh.has_field(svmp::EntityKind::Vertex, target_name)) {
+    const auto existing =
+        mesh.field_handle(svmp::EntityKind::Vertex, target_name);
+    mesh.remove_field(existing);
+  }
+
+  const auto components = mesh.field_components(source_handle);
+  const auto target_handle =
+      mesh.attach_field(svmp::EntityKind::Vertex,
+                        target_name,
+                        svmp::FieldScalarType::Float64,
+                        components);
+  const auto* source =
+      static_cast<const double*>(mesh.field_data(source_handle));
+  auto* target = static_cast<double*>(mesh.field_data(target_handle));
+  if (source == nullptr || target == nullptr) {
+    return false;
+  }
+
+  std::copy(source,
+            source + mesh.n_vertices() * components,
+            target);
+  return true;
+}
+
+std::size_t copyRawFreeSurfaceDebugOutput(svmp::Mesh& mesh)
+{
+  std::size_t copied = 0u;
+  copied += copyVertexFloat64Field(mesh, "Velocity", "RawVelocity") ? 1u : 0u;
+  copied += copyVertexFloat64Field(mesh, "Pressure", "RawPressure") ? 1u : 0u;
+  copied += copyVertexFloat64Field(mesh, "Divergence", "RawDivergence") ? 1u : 0u;
+  return copied;
+}
+
+std::size_t maskInactiveFreeSurfaceOutput(
+    svmp::Mesh& mesh,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    const std::vector<std::string>& field_names)
+{
+  if (requests.empty()) {
+    return 0u;
+  }
+
+  // The current OOP free-surface path supports one active-domain level set for
+  // the Navier-Stokes volume. If more are present, use the first one for output
+  // masking instead of inventing ambiguous multi-interface semantics here.
+  const auto& request = requests.front();
+  if (!mesh.has_field(svmp::EntityKind::Vertex, request.level_set_field_name)) {
+    return 0u;
+  }
+  const auto phi_handle =
+      mesh.field_handle(svmp::EntityKind::Vertex, request.level_set_field_name);
+  if (mesh.field_type(phi_handle) != svmp::FieldScalarType::Float64 ||
+      mesh.field_components(phi_handle) != 1u) {
+    return 0u;
+  }
+  const auto* phi = static_cast<const double*>(mesh.field_data(phi_handle));
+  if (phi == nullptr) {
+    return 0u;
+  }
+
+  svmp::FieldHandle active_handle;
+  if (mesh.has_field(svmp::EntityKind::Vertex, "ActiveFluid")) {
+    active_handle = mesh.field_handle(svmp::EntityKind::Vertex, "ActiveFluid");
+    if (mesh.field_type(active_handle) != svmp::FieldScalarType::Float64 ||
+        mesh.field_components(active_handle) != 1u) {
+      mesh.remove_field(active_handle);
+      active_handle = mesh.attach_field(svmp::EntityKind::Vertex, "ActiveFluid",
+                                        svmp::FieldScalarType::Float64, 1u);
+    }
+  } else {
+    active_handle = mesh.attach_field(svmp::EntityKind::Vertex, "ActiveFluid",
+                                      svmp::FieldScalarType::Float64, 1u);
+  }
+  auto* active = static_cast<double*>(mesh.field_data(active_handle));
+  if (active == nullptr) {
+    return 0u;
+  }
+
+  std::vector<std::uint8_t> dry(mesh.n_vertices(), 0u);
+  std::size_t dry_vertices = 0u;
+  for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+    const bool is_active = activeSideContains(phi[v], request);
+    active[v] = is_active ? 1.0 : 0.0;
+    dry[v] = is_active ? 0u : 1u;
+    dry_vertices += dry[v] ? 1u : 0u;
+  }
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (const auto& name : field_names) {
+    if (!mesh.has_field(svmp::EntityKind::Vertex, name)) {
+      continue;
+    }
+    const auto handle = mesh.field_handle(svmp::EntityKind::Vertex, name);
+    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64) {
+      continue;
+    }
+    auto* data = static_cast<double*>(mesh.field_data(handle));
+    if (data == nullptr) {
+      continue;
+    }
+    const auto components = mesh.field_components(handle);
+    for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
+      if (!dry[v]) {
+        continue;
+      }
+      for (std::size_t c = 0; c < components; ++c) {
+        data[v * components + c] = nan;
+      }
+    }
+  }
+
+  return dry_vertices;
+}
+
+std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parameters& params)
+{
+  std::vector<LevelSetMaintenanceRequest> requests;
+  for (auto* eq : params.equation_parameters) {
+    if (eq == nullptr || !eq->type.defined()) {
+      continue;
+    }
+    const auto type = normalized_token(eq->type.value());
+    if (type != "levelset" && type != "levelsettransport") {
+      continue;
+    }
+
+    auto eq_params = eq->get_parameter_list();
+    LevelSetMaintenanceRequest request{};
+    if (const auto field =
+            first_defined_parameter(eq_params, {"Level_set_field_name",
+                                               "LevelSetFieldName",
+                                               "Level_set_field",
+                                               "LevelSetField",
+                                               "Field_name"})) {
+      request.level_set_field_name = trim_copy(*field);
+    }
+    if (const auto isovalue =
+            first_defined_double_parameter(eq_params, {"Level_set_isovalue",
+                                                      "LevelSetIsovalue",
+                                                      "Interface_isovalue",
+                                                      "InterfaceIsovalue"})) {
+      request.isovalue = *isovalue;
+    }
+
+    if (const auto enabled =
+            first_defined_bool_parameter(eq_params, {"Enable_reinitialization",
+                                                    "Enable_level_set_reinitialization",
+                                                    "Reinitialization",
+                                                    "Reinitialization_enabled",
+                                                    "Reinitialize_level_set"})) {
+      request.reinitialization.enabled = *enabled;
+    }
+    if (const auto method =
+            first_defined_parameter(eq_params, {"Reinitialization_method",
+                                               "Level_set_reinitialization_method",
+                                               "ReinitializationMethod"})) {
+      request.reinitialization.method =
+          parseLevelSetReinitializationMethod(*method);
+    }
+    if (const auto cadence =
+            first_defined_int_parameter(eq_params, {"Reinitialization_cadence_steps",
+                                                   "Reinitialization_cadence",
+                                                   "Level_set_reinitialization_cadence_steps",
+                                                   "ReinitializationCadenceSteps"})) {
+      request.reinitialization.cadence_steps = *cadence;
+    }
+    if (const auto max_it =
+            first_defined_int_parameter(eq_params, {"Reinitialization_max_iterations",
+                                                   "Reinitialization_iterations",
+                                                   "ReinitializationMaxIterations"})) {
+      request.reinitialization.max_iterations = *max_it;
+    }
+    if (const auto scale =
+            first_defined_double_parameter(eq_params, {"Reinitialization_pseudo_time_step_scale",
+                                                      "ReinitializationPseudoTimeStepScale"})) {
+      request.reinitialization.pseudo_time_step_scale =
+          static_cast<svmp::FE::Real>(*scale);
+    }
+    if (const auto band =
+            first_defined_double_parameter(eq_params, {"Reinitialization_interface_band_width",
+                                                      "ReinitializationInterfaceBandWidth"})) {
+      request.reinitialization.interface_band_width =
+          static_cast<svmp::FE::Real>(*band);
+    }
+    if (const auto tol =
+            first_defined_double_parameter(eq_params, {"Reinitialization_signed_distance_tolerance",
+                                                      "ReinitializationSignedDistanceTolerance"})) {
+      request.reinitialization.signed_distance_tolerance =
+          static_cast<svmp::FE::Real>(*tol);
+    }
+
+    if (const auto enabled =
+            first_defined_bool_parameter(eq_params, {"Enable_volume_correction",
+                                                    "Enable_level_set_volume_correction",
+                                                    "Volume_correction",
+                                                    "VolumeCorrection",
+                                                    "Correct_level_set_volume"})) {
+      request.volume_correction.enabled = *enabled;
+    }
+    if (const auto cadence =
+            first_defined_int_parameter(eq_params, {"Volume_correction_cadence_steps",
+                                                   "Volume_correction_cadence",
+                                                   "Level_set_volume_correction_cadence_steps",
+                                                   "VolumeCorrectionCadenceSteps"})) {
+      request.volume_correction.cadence_steps = *cadence;
+    }
+    if (const auto use_initial =
+            first_defined_bool_parameter(eq_params, {"Volume_correction_use_initial_volume",
+                                                    "Use_initial_level_set_volume_as_target",
+                                                    "VolumeCorrectionUseInitialVolume"})) {
+      request.volume_correction.use_initial_negative_volume_as_target =
+          *use_initial;
+    }
+    if (const auto target =
+            first_defined_double_parameter(eq_params, {"Volume_correction_target_negative_volume",
+                                                      "Level_set_volume_correction_target_negative_volume",
+                                                      "VolumeCorrectionTargetNegativeVolume"})) {
+      request.volume_correction.target_negative_volume =
+          static_cast<svmp::FE::Real>(*target);
+      request.volume_correction.use_initial_negative_volume_as_target = false;
+    }
+    if (const auto tol =
+            first_defined_double_parameter(eq_params, {"Volume_correction_tolerance",
+                                                      "Volume_correction_volume_tolerance",
+                                                      "Level_set_volume_correction_tolerance",
+                                                      "VolumeCorrectionTolerance"})) {
+      request.volume_correction.volume_tolerance =
+          static_cast<svmp::FE::Real>(*tol);
+    }
+    if (const auto max_it =
+            first_defined_int_parameter(eq_params, {"Volume_correction_max_iterations",
+                                                   "VolumeCorrectionMaxIterations"})) {
+      request.volume_correction.max_iterations = *max_it;
+    }
+
+    if (request.reinitialization.enabled ||
+        request.volume_correction.enabled) {
       requests.push_back(std::move(request));
     }
   }
@@ -445,10 +883,459 @@ std::vector<svmp::FE::Real> gatherFeOrderedSolution(
   return values;
 }
 
-bool refreshActiveCutIntegrationContext(
+std::vector<svmp::FE::Real> gatherFeOrderedSolution(
+    const svmp::FE::systems::SystemStateView& state)
+{
+  if (state.u_vector != nullptr) {
+    auto* solution =
+        const_cast<svmp::FE::backends::GenericVector*>(state.u_vector);
+    return gatherFeOrderedSolution(*solution);
+  }
+  if (!state.u.empty()) {
+    return std::vector<svmp::FE::Real>(state.u.begin(), state.u.end());
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Could not gather FE-ordered state values.");
+}
+
+void scatterFeOrderedSolution(
+    svmp::FE::backends::GenericVector& solution,
+    std::span<const svmp::FE::Real> values)
+{
+  if (static_cast<std::size_t>(solution.size()) != values.size()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Cannot scatter FE-ordered solution values with mismatched size.");
+  }
+
+  auto view = solution.createAssemblyView();
+  if (!view) {
+    auto span = solution.localSpan();
+    if (span.size() != values.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Could not scatter FE-ordered solution values.");
+    }
+    std::copy(values.begin(), values.end(), span.begin());
+    solution.updateGhosts();
+    return;
+  }
+
+  constexpr svmp::FE::GlobalIndex chunk_size = 4096;
+  std::vector<svmp::FE::GlobalIndex> dofs;
+  dofs.reserve(static_cast<std::size_t>(std::min(solution.size(), chunk_size)));
+  view->beginAssemblyPhase();
+  for (svmp::FE::GlobalIndex offset = 0; offset < solution.size();
+       offset += chunk_size) {
+    const auto chunk =
+        std::min<svmp::FE::GlobalIndex>(chunk_size, solution.size() - offset);
+    dofs.resize(static_cast<std::size_t>(chunk));
+    for (svmp::FE::GlobalIndex i = 0; i < chunk; ++i) {
+      dofs[static_cast<std::size_t>(i)] = offset + i;
+    }
+    view->setVectorEntries(
+        std::span<const svmp::FE::GlobalIndex>(dofs.data(), dofs.size()),
+        values.subspan(static_cast<std::size_t>(offset),
+                       static_cast<std::size_t>(chunk)));
+  }
+  view->endAssemblyPhase();
+  view->finalizeAssembly();
+  solution.updateGhosts();
+}
+
+void initializeLevelSetMaintenanceTargets(
+    application::core::SimulationComponents& sim,
+    std::vector<LevelSetMaintenanceRequest>& requests)
+{
+  if (!sim.fe_system || !sim.time_history || requests.empty()) {
+    return;
+  }
+
+  const auto fe_solution = gatherFeOrderedSolution(sim.time_history->u());
+  for (auto& request : requests) {
+    if (!request.volume_correction.enabled ||
+        request.volume_target_initialized) {
+      continue;
+    }
+    if (!request.volume_correction.use_initial_negative_volume_as_target) {
+      request.volume_target =
+          request.volume_correction.target_negative_volume;
+      request.volume_target_initialized = true;
+      continue;
+    }
+
+    const auto field =
+        sim.fe_system->findFieldByName(request.level_set_field_name);
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set volume correction could not find field '" +
+          request.level_set_field_name + "'.");
+    }
+
+    svmp::FE::level_set::LevelSetVolumeOptions volume_options{};
+    volume_options.isovalue =
+        static_cast<svmp::FE::Real>(request.isovalue);
+    auto volume = svmp::FE::level_set::computeLevelSetCutCellVolume(
+        *sim.fe_system,
+        field,
+        volume_options,
+        fe_solution);
+    if (!volume.success) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Initial level-set volume calculation failed for field '" +
+          request.level_set_field_name + "': " + volume.diagnostic);
+    }
+    request.volume_target = volume.negative_volume;
+    request.volume_target_initialized = true;
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Level-set volume target field='"
+        << request.level_set_field_name << "' negative_volume="
+        << request.volume_target << std::endl;
+  }
+}
+
+bool applyLevelSetMaintenance(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    std::vector<LevelSetMaintenanceRequest>& requests)
+{
+  if (!sim.fe_system || requests.empty()) {
+    return false;
+  }
+
+  bool changed = false;
+  auto fe_solution = gatherFeOrderedSolution(history.u());
+  for (auto& request : requests) {
+    const int completed_step = history.stepIndex();
+    const bool do_reinit =
+        svmp::FE::level_set::shouldReinitializeLevelSet(
+            request.reinitialization,
+            completed_step);
+    const bool do_volume =
+        svmp::FE::level_set::shouldApplyLevelSetVolumeCorrection(
+            request.volume_correction,
+            completed_step);
+    if (!do_reinit && !do_volume) {
+      continue;
+    }
+
+    const auto field =
+        sim.fe_system->findFieldByName(request.level_set_field_name);
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set maintenance could not find field '" +
+          request.level_set_field_name + "'.");
+    }
+
+    if (do_reinit) {
+      if (request.reinitialization.method !=
+          svmp::FE::level_set::LevelSetReinitializationMethod::Projection) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Runtime level-set reinitialization currently supports Projection only.");
+      }
+      std::vector<svmp::FE::Real> repaired;
+      auto result =
+          svmp::FE::level_set::repairLevelSetSignedDistanceByProjection(
+              *sim.fe_system,
+              field,
+              request.reinitialization,
+              fe_solution,
+              repaired);
+      if (!result.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set reinitialization failed for field '" +
+            request.level_set_field_name + "': " + result.diagnostic);
+      }
+      fe_solution = std::move(repaired);
+      changed = true;
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Level-set reinitialized field='"
+          << request.level_set_field_name << "' step=" << completed_step
+          << " repaired_dofs=" << result.repaired_dofs
+          << " interface_fragments=" << result.interface_fragments
+          << " max_abs_update=" << result.max_abs_update << std::endl;
+    }
+
+    if (do_volume) {
+      if (!request.volume_target_initialized) {
+        request.volume_target =
+            request.volume_correction.target_negative_volume;
+        request.volume_target_initialized = true;
+      }
+      svmp::FE::level_set::LevelSetVolumeOptions volume_options{};
+      volume_options.isovalue =
+          static_cast<svmp::FE::Real>(request.isovalue);
+      svmp::FE::level_set::LevelSetGlobalShiftCorrectionOptions correction_options{};
+      correction_options.target_negative_volume = request.volume_target;
+      correction_options.volume_tolerance =
+          request.volume_correction.volume_tolerance;
+      correction_options.max_iterations =
+          request.volume_correction.max_iterations;
+
+      std::vector<svmp::FE::Real> corrected;
+      auto result =
+          svmp::FE::level_set::applyGlobalLevelSetShiftCorrection(
+              *sim.fe_system,
+              field,
+              volume_options,
+              correction_options,
+              fe_solution,
+              corrected);
+      if (!result.success) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set volume correction failed for field '" +
+            request.level_set_field_name + "': " + result.diagnostic);
+      }
+      fe_solution = std::move(corrected);
+      changed = true;
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Level-set volume corrected field='"
+          << request.level_set_field_name << "' step=" << completed_step
+          << " target_negative_volume=" << result.target_negative_volume
+          << " corrected_negative_volume="
+          << result.corrected_negative_volume
+          << " applied_shift=" << result.applied_shift << std::endl;
+    }
+  }
+
+  if (changed) {
+    scatterFeOrderedSolution(history.u(), fe_solution);
+    scatterFeOrderedSolution(history.uPrev(), fe_solution);
+    history.updateGhosts();
+  }
+  return changed;
+}
+
+svmp::FE::systems::SystemStateView stateViewForHistory(
+    svmp::FE::timestepping::TimeHistory& history)
+{
+  svmp::FE::systems::SystemStateView state;
+  state.time = history.time();
+  state.dt = history.dt();
+  state.dt_prev = history.dtPrev();
+  state.u = history.uSpan();
+  state.u_prev = history.uPrevSpan();
+  state.u_prev2 = history.uPrev2Span();
+  state.u_vector = &history.u();
+  state.u_prev_vector = &history.uPrev();
+  state.u_prev2_vector = &history.uPrev2();
+  state.u_history = history.uHistorySpans();
+  state.dt_history = history.dtHistory();
+  return state;
+}
+
+std::vector<double> evaluateVertexField(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::Mesh& mesh,
+    svmp::FE::FieldId field,
+    const svmp::FE::systems::SystemStateView& state,
+    std::size_t components)
+{
+  const auto n_vertices = mesh.n_vertices();
+  std::vector<double> values(n_vertices * components, 0.0);
+  if (system.evaluateFieldAtVertices(
+          field,
+          state,
+          static_cast<svmp::FE::GlobalIndex>(n_vertices),
+          std::span<double>(values.data(), values.size()))) {
+    return values;
+  }
+
+  const int mesh_dim = mesh.dim();
+  const auto& coords = mesh.X_ref();
+  for (std::size_t v = 0; v < n_vertices; ++v) {
+    std::array<svmp::FE::Real, 3> point{0.0, 0.0, 0.0};
+    for (int d = 0; d < mesh_dim; ++d) {
+      point[static_cast<std::size_t>(d)] =
+          static_cast<svmp::FE::Real>(
+              coords[v * static_cast<std::size_t>(mesh_dim) +
+                     static_cast<std::size_t>(d)]);
+    }
+    const auto value = system.evaluateFieldAtPoint(field, state, point);
+    if (!value) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Could not evaluate field at mesh vertex while updating level-set advection velocity.");
+    }
+    for (std::size_t c = 0; c < components; ++c) {
+      values[v * components + c] = static_cast<double>((*value)[c]);
+    }
+  }
+  return values;
+}
+
+bool updateLevelSetAdvectionVelocities(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    const std::vector<LevelSetAdvectionVelocityRequest>& requests)
+{
+  if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
+    return false;
+  }
+
+  auto& system = *sim.fe_system;
+  const auto& mesh = *sim.primary_mesh;
+  const auto state = stateViewForHistory(history);
+  const auto n_vertices = mesh.n_vertices();
+  const int mesh_dim = mesh.dim();
+  const auto& coords = mesh.X_ref();
+  const bool trace_updates =
+      parseBoolEnv("SVMP_TRACE_LEVEL_SET_ADVECTION", false) ||
+      application::core::oopTraceEnabled();
+
+  bool updated = false;
+  for (const auto& request : requests) {
+    const auto phi_field = system.findFieldByName(request.level_set_field_name);
+    const auto source_field =
+        system.findFieldByName(request.source_velocity_field_name);
+    const auto target_field =
+        system.findFieldByName(request.target_velocity_field_name);
+    if (phi_field == svmp::FE::INVALID_FIELD_ID ||
+        source_field == svmp::FE::INVALID_FIELD_ID ||
+        target_field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Could not find fields needed for wet-extension level-set advection velocity update.");
+    }
+
+    const auto& target_rec = system.fieldRecord(target_field);
+    if (target_rec.source_kind !=
+        svmp::FE::systems::FieldSourceKind::PrescribedData) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set advection velocity field '" +
+          target_rec.name + "' must be registered as PrescribedData.");
+    }
+
+    const auto& source_rec = system.fieldRecord(source_field);
+    const auto source_components =
+        static_cast<std::size_t>(std::max(1, source_rec.components));
+    const auto target_components =
+        static_cast<std::size_t>(std::max(1, target_rec.components));
+    const auto copy_components =
+        std::min(source_components, target_components);
+    if (copy_components == 0u) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set advection velocity update found an empty velocity field.");
+    }
+
+    const auto phi_values =
+        evaluateVertexField(system, mesh, phi_field, state, 1u);
+    const auto source_values =
+        evaluateVertexField(system, mesh, source_field, state, source_components);
+
+    std::vector<std::uint8_t> active(n_vertices, 0u);
+    std::vector<std::size_t> active_vertices;
+    active_vertices.reserve(n_vertices);
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      const bool is_active = activeSideContains(phi_values[v], request);
+      active[v] = is_active ? 1u : 0u;
+      if (is_active) {
+        active_vertices.push_back(v);
+      }
+    }
+    if (active_vertices.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension level-set advection velocity update found no active vertices.");
+    }
+
+    std::vector<double> extended(n_vertices * target_components, 0.0);
+    double max_active_speed = 0.0;
+    double max_dry_extended_speed = 0.0;
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      std::size_t source_vertex = v;
+      if (!active[v]) {
+        double best_d2 = std::numeric_limits<double>::infinity();
+        for (const auto candidate : active_vertices) {
+          double d2 = 0.0;
+          for (int d = 0; d < mesh_dim; ++d) {
+            const auto offset_v =
+                v * static_cast<std::size_t>(mesh_dim) +
+                static_cast<std::size_t>(d);
+            const auto offset_c =
+                candidate * static_cast<std::size_t>(mesh_dim) +
+                static_cast<std::size_t>(d);
+            const double delta = coords[offset_v] - coords[offset_c];
+            d2 += delta * delta;
+          }
+          if (d2 < best_d2) {
+            best_d2 = d2;
+            source_vertex = candidate;
+          }
+        }
+      }
+
+      double speed2 = 0.0;
+      for (std::size_t c = 0; c < copy_components; ++c) {
+        const auto value =
+            source_values[source_vertex * source_components + c];
+        extended[v * target_components + c] =
+            std::isfinite(value) ? value : 0.0;
+        speed2 += extended[v * target_components + c] *
+                  extended[v * target_components + c];
+      }
+      const double speed = std::sqrt(speed2);
+      if (active[v]) {
+        max_active_speed = std::max(max_active_speed, speed);
+      } else {
+        max_dry_extended_speed =
+            std::max(max_dry_extended_speed, speed);
+      }
+    }
+
+    const auto& target_dofs = system.fieldDofHandler(target_field);
+    const auto* entity_map = target_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Level-set advection velocity update requires vertex DOFs.");
+    }
+    std::vector<svmp::FE::Real> coefficients(
+        static_cast<std::size_t>(target_dofs.getNumDofs()),
+        svmp::FE::Real{0.0});
+    std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      const auto vertex_dofs =
+          entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+      if (vertex_dofs.size() < target_components) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set advection velocity update found a vertex with too few DOFs.");
+      }
+      for (std::size_t c = 0; c < target_components; ++c) {
+        const auto dof = static_cast<std::size_t>(vertex_dofs[c]);
+        if (dof >= coefficients.size()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set advection velocity update found an out-of-range vertex DOF.");
+        }
+        coefficients[dof] =
+            static_cast<svmp::FE::Real>(extended[v * target_components + c]);
+        assigned[dof] = 1u;
+      }
+    }
+
+    std::size_t unassigned = 0u;
+    for (const auto flag : assigned) {
+      unassigned += flag ? 0u : 1u;
+    }
+    system.setPrescribedFieldCoefficients(
+        target_field,
+        std::span<const svmp::FE::Real>(coefficients.data(),
+                                        coefficients.size()));
+    updated = true;
+    if (trace_updates) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] Updated level-set advection velocity field='"
+          << request.target_velocity_field_name << "' from source='"
+          << request.source_velocity_field_name << "' active_vertices="
+          << active_vertices.size() << " dry_vertices="
+          << (n_vertices - active_vertices.size())
+          << " max_active_speed=" << max_active_speed
+          << " max_dry_extended_speed=" << max_dry_extended_speed
+          << " unassigned_dofs=" << unassigned << std::endl;
+    }
+  }
+
+  return updated;
+}
+
+bool refreshActiveCutIntegrationContextFromSolution(
     application::core::SimulationComponents& sim,
     const Parameters& params,
-    svmp::FE::backends::GenericVector& solution,
+    std::span<const svmp::FE::Real> fe_solution,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
 {
   if (!sim.fe_system) {
@@ -462,7 +1349,6 @@ bool refreshActiveCutIntegrationContext(
 
   auto context =
       std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
-  const auto fe_solution = gatherFeOrderedSolution(solution);
 
   for (const auto& request : requests) {
     svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
@@ -493,6 +1379,34 @@ bool refreshActiveCutIntegrationContext(
 
   sim.fe_system->setCutIntegrationContext(std::move(context));
   return true;
+}
+
+bool refreshActiveCutIntegrationContext(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    svmp::FE::backends::GenericVector& solution,
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+{
+  const auto fe_solution = gatherFeOrderedSolution(solution);
+  return refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      params,
+      std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
+      lifecycle);
+}
+
+bool refreshActiveCutIntegrationContext(
+    application::core::SimulationComponents& sim,
+    const Parameters& params,
+    const svmp::FE::systems::SystemStateView& state,
+    svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
+{
+  const auto fe_solution = gatherFeOrderedSolution(state);
+  return refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      params,
+      std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
+      lifecycle);
 }
 
 class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {
@@ -797,6 +1711,17 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
     newton_opts.jacobian_rebuild_period = std::atoi(jrp);
   }
 
+  auto cut_lifecycle =
+      std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
+  using StateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  newton_opts.synchronize_state =
+      [&, cut_lifecycle](const svmp::FE::systems::SystemStateView& state,
+                         StateSyncPoint) {
+        (void)refreshActiveCutIntegrationContext(
+            sim, params, state, *cut_lifecycle);
+      };
+
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, integrator);
 
@@ -812,9 +1737,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   sim.time_history->repack(*sim.backend);
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
-  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle cut_lifecycle;
   (void)refreshActiveCutIntegrationContext(
-      sim, params, sim.time_history->u(), cut_lifecycle);
+      sim, params, sim.time_history->u(), *cut_lifecycle);
 
   const double solve_time = sim.time_history->time();
   oopCout() << "[svMultiPhysics::Application] Steady solve: time=" << solve_time
@@ -946,6 +1870,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 
   auto bdf1 = std::make_shared<const svmp::FE::systems::BDFIntegrator>(1);
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, std::move(bdf1));
+  auto level_set_maintenance = levelSetMaintenanceRequests(params);
+  const auto level_set_advection_velocity =
+      levelSetAdvectionVelocityRequests(params);
+  initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
@@ -954,8 +1882,18 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   };
   auto cut_lifecycle =
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
+  using TransientStateSyncPoint =
+      svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  opts.newton.synchronize_state =
+      [&, cut_lifecycle](const svmp::FE::systems::SystemStateView& state,
+                         TransientStateSyncPoint) {
+        (void)refreshActiveCutIntegrationContext(
+            sim, params, state, *cut_lifecycle);
+      };
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
+        (void)updateLevelSetAdvectionVelocities(
+            sim, h, level_set_advection_velocity);
         (void)refreshActiveCutIntegrationContext(
             sim, params, h.u(), *cut_lifecycle);
         return true;
@@ -972,9 +1910,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
   };
   double vtk_total_time = 0.0;
-  callbacks.on_step_accepted = [&](const svmp::FE::timestepping::TimeHistory& h) {
+  callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    (void)applyLevelSetMaintenance(sim, h, level_set_maintenance);
+    (void)updateLevelSetAdvectionVelocities(
+        sim, h, level_set_advection_velocity);
+    (void)refreshActiveCutIntegrationContext(
+        sim, params, h.u(), *cut_lifecycle);
     auto vtk_start = std::chrono::steady_clock::now();
     outputResults(sim, params, h.stepIndex(), h.time(), pvd);
     vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
@@ -1207,6 +2150,28 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
     if (oopTraceEnabled()) {
       oopCout() << "[svMultiPhysics::Application] VTK output: derived result fields done." << std::endl;
     }
+  }
+
+  const auto active_output_requests = activeCutVolumeRequests(params);
+  if (!active_output_requests.empty() &&
+      parseBoolEnv("SVMP_DEBUG_RAW_ACTIVE_DOMAIN_OUTPUT", false)) {
+    const auto raw_fields_copied = copyRawFreeSurfaceDebugOutput(mesh);
+    if (raw_fields_copied > 0u && is_root) {
+      oopCout() << "[svMultiPhysics::Application] VTK output: wrote "
+                << raw_fields_copied
+                << " raw active-domain debug field(s) before inactive masking."
+                << std::endl;
+    }
+  }
+  const auto dry_vertices_masked = maskInactiveFreeSurfaceOutput(
+      mesh,
+      active_output_requests,
+      {"Velocity", "Pressure", "Divergence"});
+  if (dry_vertices_masked > 0u && is_root) {
+    oopCout() << "[svMultiPhysics::Application] VTK output: masked "
+              << dry_vertices_masked
+              << " inactive free-surface vertex value(s) in Velocity/Pressure outputs."
+              << std::endl;
   }
 
   svmp::MeshIOOptions io{};
