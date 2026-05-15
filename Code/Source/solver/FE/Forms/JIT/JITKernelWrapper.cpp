@@ -1761,6 +1761,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 
     try {
         if (ctx_minus.interiorFaceMarker() >= 0) {
+            traceMarkedInteriorFaceFallbackOnce(ctx_minus.interiorFaceMarker());
             fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                            output_minus, output_plus,
                                            coupling_minus_plus, coupling_plus_minus);
@@ -2616,6 +2617,7 @@ void JITKernelWrapper::markDirty(std::string_view reason) noexcept
     traced_specialization_hits_.clear();
     traced_specialization_compiles_.clear();
     traced_specialization_skips_.clear();
+    traced_marked_interior_face_fallback_ = false;
     warned_specialization_failure_ = false;
 
     warned_compile_failure_ = false;
@@ -2629,6 +2631,42 @@ void JITKernelWrapper::markDirty(std::string_view reason) noexcept
 bool JITKernelWrapper::canUseJIT() const noexcept
 {
     return options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
+}
+
+void JITKernelWrapper::traceMarkedInteriorFaceFallbackOnce(int marker) noexcept
+{
+    if (!traceSpecializationEnabled() || !fallback_) {
+        return;
+    }
+
+    std::uint64_t revision = 0;
+    std::uint64_t compiled_revision = 0;
+    bool jit_ready = false;
+    std::uintptr_t residual_interior_face = 0;
+    std::uintptr_t tangent_interior_face = 0;
+    {
+        std::lock_guard<std::mutex> lock(jit_mutex_);
+        if (traced_marked_interior_face_fallback_) {
+            return;
+        }
+        traced_marked_interior_face_fallback_ = true;
+        revision = revision_;
+        compiled_revision = compiled_revision_;
+        jit_ready = options_.enable && compiled_revision_ == revision_ && !runtime_failed_;
+        residual_interior_face = compiled_residual_.interior_face;
+        tangent_interior_face = compiled_tangent_.interior_face;
+    }
+
+    std::ostringstream detail;
+    detail << "event=runtime_skip trigger=runtime"
+           << " reason=marked_interior_face_fallback"
+           << " domain=InteriorFace"
+           << " marker=" << marker
+           << " jit_ready=" << (jit_ready ? 1 : 0)
+           << " compiled_revision=" << compiled_revision
+           << " residual_interior_face=" << residual_interior_face
+           << " tangent_interior_face=" << tangent_interior_face;
+    traceSpecialization(this, *fallback_, revision, detail.str());
 }
 
 void JITKernelWrapper::ensureCompiled()

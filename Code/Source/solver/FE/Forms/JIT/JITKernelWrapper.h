@@ -263,6 +263,7 @@ private:
 	    void maybeCompile();
 	    [[nodiscard]] bool canUseJIT() const noexcept;
 	    void markRuntimeFailureOnce(std::string_view where, std::string_view msg) noexcept;
+        void traceMarkedInteriorFaceFallbackOnce(int marker) noexcept;
 	    [[nodiscard]] std::shared_ptr<const CompiledDispatch> getSpecializedDispatch(
 	        KernelRole role,
 	        const FormIR& ir,
@@ -314,6 +315,7 @@ private:
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_hits_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_compiles_{};
     std::unordered_set<SpecializationKey, SpecializationKeyHash> traced_specialization_skips_{};
+    bool traced_marked_interior_face_fallback_{false};
 	    bool warned_specialization_failure_{false};
 
 	    bool warned_unavailable_{false};
