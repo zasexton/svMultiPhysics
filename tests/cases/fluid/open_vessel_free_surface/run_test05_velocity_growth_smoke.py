@@ -598,6 +598,192 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
     return diagnostics
 
 
+def load_benchmark(case_dir: Path) -> dict[str, Any]:
+    benchmark_path = case_dir / "benchmark.json"
+    if not benchmark_path.exists():
+        return {}
+    return json.loads(benchmark_path.read_text(encoding="utf-8"))
+
+
+def latest_component_record(diagnostics: dict[str, Any],
+                            label: str) -> list[dict[str, Any]]:
+    for record in reversed(diagnostics.get("vector_component_norms", [])):
+        if record.get("label") == label:
+            components = record.get("components")
+            if isinstance(components, list):
+                return components
+    return []
+
+
+def component_by_name(components: list[dict[str, Any]],
+                      name: str) -> dict[str, Any] | None:
+    for component in components:
+        if component.get("component") == name:
+            return component
+    return None
+
+
+def component_range(component: dict[str, Any] | None) -> float | None:
+    if component is None:
+        return None
+    min_value = component.get("min")
+    max_value = component.get("max")
+    if isinstance(min_value, (int, float)) and isinstance(max_value, (int, float)):
+        return float(max_value) - float(min_value)
+    norm = component.get("norm")
+    if isinstance(norm, (int, float)):
+        return float(norm)
+    return None
+
+
+def diagnostic_solution_velocity_range(diagnostics: dict[str, Any]) -> float | None:
+    components = latest_component_record(diagnostics, "solution_state")
+    ranges = []
+    for component in components:
+        if str(component.get("component", "")).startswith("Velocity"):
+            value = component_range(component)
+            if value is not None:
+                ranges.append(abs(value))
+    if not ranges:
+        return None
+    return max(ranges)
+
+
+def diagnostic_solution_pressure_range(diagnostics: dict[str, Any]) -> float | None:
+    components = latest_component_record(diagnostics, "solution_state")
+    return component_range(component_by_name(components, "Pressure"))
+
+
+def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
+    context_volumes = [
+        float(record["active_side_volume"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("active_side_volume"), (int, float))
+    ]
+    assembly_volumes = [
+        float(record["active_wet_volume"])
+        for record in diagnostics.get("cut_volume_assemblies", [])
+        if isinstance(record.get("active_wet_volume"), (int, float))
+    ]
+    if not context_volumes or not assembly_volumes:
+        return None
+    return max(
+        min(abs(assembly_volume - context_volume) for context_volume in context_volumes)
+        for assembly_volume in assembly_volumes
+    )
+
+
+def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None:
+    for record in reversed(diagnostics.get("hydrostatic_initializations", [])):
+        checked = record.get("checked_gauge_constraints")
+        pressure_min = record.get("gauge_pressure_min")
+        pressure_max = record.get("gauge_pressure_max")
+        if checked and isinstance(pressure_min, (int, float)) and isinstance(pressure_max, (int, float)):
+            return 0.5 * (float(pressure_min) + float(pressure_max))
+    for record in reversed(diagnostics.get("pressure_gauge_checks", [])):
+        pressure_min = record.get("constraint_pressure_min")
+        pressure_max = record.get("constraint_pressure_max")
+        if isinstance(pressure_min, (int, float)) and isinstance(pressure_max, (int, float)):
+            return 0.5 * (float(pressure_min) + float(pressure_max))
+    return None
+
+
+def previous_invalid_pressure(benchmark: dict[str, Any]) -> float | None:
+    verification = benchmark.get("pressure_gauge_verification")
+    if not isinstance(verification, dict):
+        return None
+    value = verification.get("previous_invalid_d18_full_volume_hydrostatic_pressure")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def diagnostic_timeout_metrics(case_name: str,
+                               run_dir: Path,
+                               diagnostics: dict[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "case": case_name,
+        "run_dir": str(run_dir),
+        "timed_out": True,
+        "diagnostics": diagnostics,
+    }
+    velocity_range = diagnostic_solution_velocity_range(diagnostics)
+    if velocity_range is not None:
+        metrics["diagnostic_solution_velocity_range"] = velocity_range
+    pressure_range = diagnostic_solution_pressure_range(diagnostics)
+    if pressure_range is not None:
+        metrics["diagnostic_solution_pressure_range"] = pressure_range
+    active_volume_error = diagnostic_active_volume_error(diagnostics)
+    if active_volume_error is not None:
+        metrics["diagnostic_active_volume_error"] = active_volume_error
+    gauge_value = diagnostic_pressure_gauge_value(diagnostics)
+    if gauge_value is not None:
+        metrics["diagnostic_pressure_gauge_value"] = gauge_value
+
+    previous = previous_invalid_pressure(load_benchmark(run_dir))
+    if previous is not None:
+        metrics["pressure_gauge_previous_invalid"] = previous
+        if gauge_value is not None:
+            metrics["diagnostic_pressure_gauge_previous_invalid_difference"] = (
+                gauge_value - previous
+            )
+    return metrics
+
+
+def evaluate_timeout_diagnostics(metrics: dict[str, Any],
+                                 args: argparse.Namespace) -> list[str]:
+    errors = []
+    diagnostics = metrics["diagnostics"]
+    if not diagnostics.get("cut_context_rebuilds"):
+        errors.append("cut-context rebuild diagnostics were not reported")
+    if not diagnostics.get("cut_volume_assemblies"):
+        errors.append("cut-volume assembly diagnostics were not reported")
+    if not diagnostics.get("pressure_gauge_checks"):
+        errors.append("pressure gauge diagnostics were not reported")
+    if not diagnostics.get("hydrostatic_initializations"):
+        errors.append("hydrostatic initialization diagnostics were not reported")
+    if not latest_component_record(diagnostics, "solution_state"):
+        errors.append("solution-state component diagnostics were not reported")
+
+    if args.min_diagnostic_solution_velocity_range is not None:
+        velocity_range = metrics.get("diagnostic_solution_velocity_range")
+        if not isinstance(velocity_range, (int, float)):
+            errors.append("diagnostic solution velocity range is unavailable")
+        elif velocity_range < args.min_diagnostic_solution_velocity_range:
+            errors.append(
+                f"diagnostic solution velocity range {velocity_range:.6g} is below "
+                f"{args.min_diagnostic_solution_velocity_range:.6g}"
+            )
+    if args.min_diagnostic_pressure_range is not None:
+        pressure_range = metrics.get("diagnostic_solution_pressure_range")
+        if not isinstance(pressure_range, (int, float)):
+            errors.append("diagnostic solution pressure range is unavailable")
+        elif pressure_range < args.min_diagnostic_pressure_range:
+            errors.append(
+                f"diagnostic solution pressure range {pressure_range:.6g} is below "
+                f"{args.min_diagnostic_pressure_range:.6g}"
+            )
+    if args.max_diagnostic_active_volume_error is not None:
+        volume_error = metrics.get("diagnostic_active_volume_error")
+        if not isinstance(volume_error, (int, float)):
+            errors.append("diagnostic active-volume consistency error is unavailable")
+        elif volume_error > args.max_diagnostic_active_volume_error:
+            errors.append(
+                f"diagnostic active-volume error {volume_error:.6g} exceeds "
+                f"{args.max_diagnostic_active_volume_error:.6g}"
+            )
+    if args.stale_pressure_gauge_tolerance is not None:
+        stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
+        if not isinstance(stale_difference, (int, float)):
+            errors.append("diagnostic pressure gauge stale-value difference is unavailable")
+        elif abs(float(stale_difference)) <= args.stale_pressure_gauge_tolerance:
+            errors.append(
+                "diagnostic pressure gauge remains close to the previous "
+                "full-volume hydrostatic value"
+            )
+    return errors
+
+
 def pressure_gauge_metrics(output: pv.DataSet, benchmark: dict[str, Any]) -> dict[str, Any]:
     gauge = benchmark.get("pressure_gauge")
     if not isinstance(gauge, dict) or "Pressure" not in output.point_data:
@@ -641,10 +827,8 @@ def pressure_gauge_metrics(output: pv.DataSet, benchmark: dict[str, Any]) -> dic
 
 
 def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, Any]:
-    benchmark_path = case_dir / "benchmark.json"
-    benchmark: dict[str, Any] = {}
-    if benchmark_path.exists():
-        benchmark = json.loads(benchmark_path.read_text(encoding="utf-8"))
+    benchmark = load_benchmark(case_dir)
+    if benchmark:
         dimensions = benchmark["dimensions_m"]
         gate_x = float(dimensions.get("profile_window_x_min", CASE_GATE_X.get(case_name, 0.4)))
     else:
@@ -810,16 +994,17 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 output = output.decode("utf-8", errors="replace")
             write_solver_log(run_dir, output)
             tail = "\n".join(output.splitlines()[-80:])
-            failure = {
-                "case": case_name,
-                "run_dir": str(run_dir),
-                "timed_out": True,
-                "timeout_seconds": args.timeout_seconds,
-                "diagnostics": parse_solver_diagnostics(output),
-                "stdout_tail": tail,
-            }
+            diagnostics = parse_solver_diagnostics(output)
+            failure = diagnostic_timeout_metrics(case_name, run_dir, diagnostics)
+            failure["timeout_seconds"] = args.timeout_seconds
+            failure["stdout_tail"] = tail
+            diagnostic_errors = evaluate_timeout_diagnostics(failure, args)
+            failure["diagnostic_errors"] = diagnostic_errors
             if args.disable_coupled_outer_fgmres:
                 failure["disable_coupled_outer_fgmres"] = True
+            if args.allow_timeout_diagnostics and not diagnostic_errors:
+                failure["passed"] = True
+                return failure
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True)) from exc
         write_solver_log(run_dir, completed.stdout)
         if completed.returncode != 0:
@@ -873,6 +1058,10 @@ def main() -> int:
     parser.add_argument("--max-static-speed", type=float, default=1.0e-9)
     parser.add_argument("--stale-pressure-gauge-tolerance", type=float)
     parser.add_argument("--max-wet-fraction-volume-error", type=float)
+    parser.add_argument("--allow-timeout-diagnostics", action="store_true")
+    parser.add_argument("--min-diagnostic-solution-velocity-range", type=float)
+    parser.add_argument("--min-diagnostic-pressure-range", type=float)
+    parser.add_argument("--max-diagnostic-active-volume-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")

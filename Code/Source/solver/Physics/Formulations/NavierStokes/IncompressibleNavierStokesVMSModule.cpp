@@ -369,9 +369,13 @@ void validateActiveDomainPressureConstraints(
     const auto& bc = *active_pressure_domain->boundary;
     std::size_t checked_local_constraints = 0u;
     std::size_t skipped_nonlocal_constraints = 0u;
+    FE::Real constraint_pressure_min = std::numeric_limits<FE::Real>::infinity();
+    FE::Real constraint_pressure_max = -std::numeric_limits<FE::Real>::infinity();
     FE::Real min_signed_gap = std::numeric_limits<FE::Real>::infinity();
     FE::Real max_signed_gap = -std::numeric_limits<FE::Real>::infinity();
     for (const auto& constraint : options.node_pressure_constraints.values) {
+        constraint_pressure_min = std::min(constraint_pressure_min, constraint.pressure);
+        constraint_pressure_max = std::max(constraint_pressure_max, constraint.pressure);
         const auto local_vertex = pressureConstraintLocalVertex(
             system,
             options.node_pressure_constraints.id_type,
@@ -423,12 +427,20 @@ void validateActiveDomainPressureConstraints(
     if (!std::isfinite(max_signed_gap)) {
         max_signed_gap = FE::Real{0.0};
     }
+    if (!std::isfinite(constraint_pressure_min)) {
+        constraint_pressure_min = FE::Real{0.0};
+    }
+    if (!std::isfinite(constraint_pressure_max)) {
+        constraint_pressure_max = FE::Real{0.0};
+    }
     std::ostringstream oss;
     oss << "IncompressibleNavierStokesVMSModule: pressure gauge diagnostic"
         << " diagnostic=pressure_gauge_check"
         << " constraints=" << options.node_pressure_constraints.values.size()
         << " checked_local_constraints=" << checked_local_constraints
         << " skipped_nonlocal_constraints=" << skipped_nonlocal_constraints
+        << " constraint_pressure_min=" << constraint_pressure_min
+        << " constraint_pressure_max=" << constraint_pressure_max
         << " Active_domain="
         << pressureActiveDomainName(active_pressure_domain->active_domain)
         << " isovalue=" << bc.level_set_isovalue
@@ -491,6 +503,15 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
         -std::numeric_limits<FE::Real>::infinity();
     FE::Real wet_pressure_min = std::numeric_limits<FE::Real>::infinity();
     FE::Real wet_pressure_max = -std::numeric_limits<FE::Real>::infinity();
+    std::size_t checked_gauge_constraints = 0u;
+    std::size_t skipped_gauge_constraints = 0u;
+    FE::Real gauge_pressure_min = std::numeric_limits<FE::Real>::infinity();
+    FE::Real gauge_pressure_max = -std::numeric_limits<FE::Real>::infinity();
+    FE::Real gauge_initialized_pressure_min =
+        std::numeric_limits<FE::Real>::infinity();
+    FE::Real gauge_initialized_pressure_max =
+        -std::numeric_limits<FE::Real>::infinity();
+    FE::Real gauge_pressure_max_abs_error = FE::Real{0.0};
 
     for (FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto vertex_dofs = entity_map->getVertexDofs(vertex);
@@ -534,6 +555,52 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
         }
     }
 
+    for (const auto& constraint : options_.node_pressure_constraints.values) {
+        const auto local_vertex = pressureConstraintLocalVertex(
+            system,
+            options_.node_pressure_constraints.id_type,
+            constraint.node_id);
+        if (!local_vertex.has_value()) {
+            ++skipped_gauge_constraints;
+            continue;
+        }
+        if (*local_vertex < 0 || *local_vertex >= n_vertices) {
+            ++skipped_gauge_constraints;
+            continue;
+        }
+
+        const auto vertex = *local_vertex;
+        const auto x = mesh.getNodeCoordinates(vertex);
+        bool initialize_hydrostatic = true;
+        if (active_pressure_domain.has_value()) {
+            const auto vertex_offset =
+                static_cast<std::size_t>(vertex) * level_set_values->components;
+            const auto phi = level_set_values->values[vertex_offset];
+            initialize_hydrostatic = pressureVertexOnActiveSide(
+                phi,
+                active_pressure_domain->boundary->level_set_isovalue,
+                active_pressure_domain->active_domain);
+        }
+        const FE::Real initialized_pressure = initialize_hydrostatic
+            ? (pressure_initialization_field.has_value()
+                   ? pressure_initialization_field->values[
+                         static_cast<std::size_t>(vertex) *
+                         pressure_initialization_field->components]
+                   : hydrostaticPressureAt(x, options_, init))
+            : init.reference_pressure;
+
+        ++checked_gauge_constraints;
+        gauge_pressure_min = std::min(gauge_pressure_min, constraint.pressure);
+        gauge_pressure_max = std::max(gauge_pressure_max, constraint.pressure);
+        gauge_initialized_pressure_min =
+            std::min(gauge_initialized_pressure_min, initialized_pressure);
+        gauge_initialized_pressure_max =
+            std::max(gauge_initialized_pressure_max, initialized_pressure);
+        gauge_pressure_max_abs_error =
+            std::max(gauge_pressure_max_abs_error,
+                     std::abs(initialized_pressure - constraint.pressure));
+    }
+
     if (dofs.empty()) {
         throw std::runtime_error(
             "IncompressibleNavierStokesVMSModule: hydrostatic pressure initialization found no pressure vertex DOFs");
@@ -562,6 +629,18 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
         if (!std::isfinite(wet_pressure_max)) {
             wet_pressure_max = FE::Real{0.0};
         }
+        if (!std::isfinite(gauge_pressure_min)) {
+            gauge_pressure_min = FE::Real{0.0};
+        }
+        if (!std::isfinite(gauge_pressure_max)) {
+            gauge_pressure_max = FE::Real{0.0};
+        }
+        if (!std::isfinite(gauge_initialized_pressure_min)) {
+            gauge_initialized_pressure_min = FE::Real{0.0};
+        }
+        if (!std::isfinite(gauge_initialized_pressure_max)) {
+            gauge_initialized_pressure_max = FE::Real{0.0};
+        }
         std::ostringstream oss;
         oss << "IncompressibleNavierStokesVMSModule: hydrostatic pressure "
             << "initialization diagnostic=hydrostatic_initialization Active_domain="
@@ -572,7 +651,19 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(
             << " initialized_pressure_min=" << initialized_pressure_min
             << " initialized_pressure_max=" << initialized_pressure_max
             << " wet_pressure_min=" << wet_pressure_min
-            << " wet_pressure_max=" << wet_pressure_max;
+            << " wet_pressure_max=" << wet_pressure_max
+            << " gauge_constraints="
+            << options_.node_pressure_constraints.values.size()
+            << " checked_gauge_constraints=" << checked_gauge_constraints
+            << " skipped_gauge_constraints=" << skipped_gauge_constraints
+            << " gauge_pressure_min=" << gauge_pressure_min
+            << " gauge_pressure_max=" << gauge_pressure_max
+            << " gauge_initialized_pressure_min="
+            << gauge_initialized_pressure_min
+            << " gauge_initialized_pressure_max="
+            << gauge_initialized_pressure_max
+            << " gauge_pressure_max_abs_error="
+            << gauge_pressure_max_abs_error;
         if (!init.field_name.empty()) {
             oss << " pressure_field='" << init.field_name << "'";
         }

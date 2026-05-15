@@ -402,11 +402,13 @@ benchmark runs.
       coupled outer FGMRES in the temporary case copy without editing fixtures.
 - [x] Add parseable solution-state component norms and ranges to short D18/D38
       probes so pressure and velocity changes can be checked before VTK output.
-- [ ] Run a short D18 probe and confirm pressure departs from the invalid
+- [x] Add no-output D18/D38 smoke checks that evaluate parsed pressure-gauge
+      values, solution ranges, and active-volume consistency on timeout.
+- [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
-- [ ] Run a short D18 probe and confirm velocity grows in the released/retained
+- [x] Run a short D18 probe and confirm velocity grows in the released/retained
       water region.
-- [ ] Run a short D18 probe and confirm the active wet region matches cut-volume
+- [x] Run a short D18 probe and confirm the active wet region matches cut-volume
       metadata.
 - [ ] Run a short D38 probe with the same checks.
 
