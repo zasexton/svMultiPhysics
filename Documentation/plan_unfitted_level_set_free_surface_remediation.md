@@ -489,6 +489,9 @@ benchmark runs.
 - [x] Add smoke-script parsing and controls for JIT specialization traces so
       D18/D38 assembly probes can separate first-use kernel specialization from
       repeated assembly work.
+- [x] Add smoke-script phase summaries for JIT specialization and assembly
+      timing so D18/D38 diagnostics can localize slow or mismatched work by
+      operator mode, domain, role, and specialized shape.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

@@ -38,6 +38,12 @@ CASE_GATE_X = {
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
+JIT_MINUS_SHAPE_RE = re.compile(
+    r"minus\[qpts=([^,\]]+),test=([^,\]]+),trial=([^\]]+)\]"
+)
+JIT_PLUS_SHAPE_RE = re.compile(
+    r"plus\[qpts=([^,\]]+),test=([^,\]]+),trial=([^\]]+)\]"
+)
 RANK_RE = re.compile(r"\[R([0-9]+)\]")
 COMPONENT_NORM_RE = re.compile(
     r"\[(.*?) norm=([-+0-9.eE]+) mean=([-+0-9.eE]+)"
@@ -733,6 +739,21 @@ def parse_key_values(line: str) -> dict[str, Any]:
     return values
 
 
+def parse_jit_specialization_trace(line: str) -> dict[str, Any]:
+    values = parse_key_values(line)
+    for prefix, pattern in (
+        ("minus", JIT_MINUS_SHAPE_RE),
+        ("plus", JIT_PLUS_SHAPE_RE),
+    ):
+        match = pattern.search(line)
+        if match is None:
+            continue
+        values[f"{prefix}_qpts"] = parse_scalar(match.group(1))
+        values[f"{prefix}_test_dofs"] = parse_scalar(match.group(2))
+        values[f"{prefix}_trial_dofs"] = parse_scalar(match.group(3))
+    return values
+
+
 def parse_interior_face_timing(line: str) -> dict[str, Any]:
     values = {
         match.group(1): parse_scalar(match.group(2))
@@ -750,6 +771,76 @@ def parse_cut_volume_timing(line: str) -> dict[str, Any]:
     })
     values["diagnostic"] = "cut_volume_timing"
     return values
+
+
+def count_key(record: dict[str, Any], fields: tuple[str, ...]) -> str:
+    parts = []
+    for field in fields:
+        value = record.get(field)
+        if value is not None:
+            parts.append(f"{field}={value}")
+    return ",".join(parts) if parts else "unclassified"
+
+
+def top_counts(counts: dict[str, int], limit: int = 24) -> dict[str, int]:
+    return {
+        key: counts[key]
+        for key in sorted(counts, key=lambda item: (-counts[item], item))[:limit]
+    }
+
+
+def increment_count(counts: dict[str, int], key: str) -> None:
+    counts[key] = counts.get(key, 0) + 1
+
+
+def jit_shape_key(record: dict[str, Any]) -> str:
+    shape = count_key(record, ("trigger", "domain", "role"))
+    if "minus_qpts" in record:
+        shape += (
+            f",minus_qpts={record.get('minus_qpts')}"
+            f",minus_test={record.get('minus_test_dofs')}"
+            f",minus_trial={record.get('minus_trial_dofs')}"
+        )
+    elif "n_qpts" in record:
+        shape += (
+            f",qpts={record.get('n_qpts')}"
+            f",test={record.get('n_test_dofs')}"
+            f",trial={record.get('n_trial_dofs')}"
+        )
+    if "plus_qpts" in record:
+        shape += (
+            f",plus_qpts={record.get('plus_qpts')}"
+            f",plus_test={record.get('plus_test_dofs')}"
+            f",plus_trial={record.get('plus_trial_dofs')}"
+        )
+    if "affine" in record:
+        shape += f",affine={record.get('affine')}"
+    return shape
+
+
+def timing_mode_key(record: dict[str, Any]) -> str:
+    return f"matrix={record.get('matrix', '?')},vector={record.get('vector', '?')}"
+
+
+def summarize_timing_modes(records: list[dict[str, Any]],
+                           count_fields: tuple[str, ...],
+                           time_fields: tuple[str, ...]) -> dict[str, Any]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for record in records:
+        key = timing_mode_key(record)
+        summary = summaries.setdefault(key, {"records": 0})
+        summary["records"] += 1
+        for field in count_fields:
+            value = record.get(field)
+            if isinstance(value, int):
+                target = f"max_{field}"
+                summary[target] = max(int(summary.get(target, value)), value)
+        for field in time_fields:
+            value = record.get(field)
+            if isinstance(value, (int, float)):
+                target = f"max_{field}_seconds"
+                summary[target] = max(float(summary.get(target, value)), float(value))
+    return summaries
 
 
 def convert_match(match: re.Match[str]) -> dict[str, Any]:
@@ -1153,7 +1244,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         elif "NewtonSolver: linear solve history" in line:
             diagnostics["linear_solve_histories"].append(parse_key_values(line))
         elif "JIT specialization trace:" in line:
-            diagnostics["jit_specialization_traces"].append(parse_key_values(line))
+            diagnostics["jit_specialization_traces"].append(parse_jit_specialization_trace(line))
         elif "[INTERIOR_FACE_TIMING]" in line:
             diagnostics["interior_face_timings"].append(parse_interior_face_timing(line))
         elif "[CUT_VOLUME_TIMING]" in line:
@@ -1676,6 +1767,11 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["latest_jit_specialization_trace"] = traces[-1]
         event_counts: dict[str, int] = {}
         trigger_counts: dict[str, int] = {}
+        event_trigger_domain_role_counts: dict[str, int] = {}
+        compile_domain_role_counts: dict[str, int] = {}
+        runtime_compile_domain_role_counts: dict[str, int] = {}
+        compile_shape_counts: dict[str, int] = {}
+        generic_compile_kind_counts: dict[str, int] = {}
         for record in traces:
             event = record.get("event")
             if isinstance(event, str):
@@ -1683,9 +1779,41 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             trigger = record.get("trigger")
             if isinstance(trigger, str):
                 trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
+            increment_count(
+                event_trigger_domain_role_counts,
+                count_key(record, ("event", "trigger", "domain", "role")),
+            )
+            if event == "compile":
+                increment_count(
+                    compile_domain_role_counts,
+                    count_key(record, ("domain", "role")),
+                )
+                increment_count(compile_shape_counts, jit_shape_key(record))
+                if trigger == "runtime":
+                    increment_count(
+                        runtime_compile_domain_role_counts,
+                        count_key(record, ("domain", "role")),
+                    )
+            elif event == "generic_compile":
+                increment_count(generic_compile_kind_counts, count_key(record, ("kind",)))
         metrics["diagnostic_jit_specialization_trace_count"] = len(traces)
         metrics["diagnostic_jit_specialization_event_counts"] = event_counts
         metrics["diagnostic_jit_specialization_trigger_counts"] = trigger_counts
+        metrics["diagnostic_jit_specialization_event_trigger_domain_role_counts"] = (
+            top_counts(event_trigger_domain_role_counts)
+        )
+        metrics["diagnostic_jit_specialization_compile_domain_role_counts"] = (
+            top_counts(compile_domain_role_counts)
+        )
+        metrics["diagnostic_jit_specialization_runtime_compile_domain_role_counts"] = (
+            top_counts(runtime_compile_domain_role_counts)
+        )
+        metrics["diagnostic_jit_specialization_compile_shape_counts"] = (
+            top_counts(compile_shape_counts)
+        )
+        metrics["diagnostic_jit_specialization_generic_compile_kind_counts"] = (
+            top_counts(generic_compile_kind_counts)
+        )
         metrics["diagnostic_jit_specialization_compile_count"] = sum(
             count for event, count in event_counts.items()
             if event in {"compile", "generic_compile"}
@@ -1713,6 +1841,19 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     if diagnostics.get("interior_face_timings"):
         timings = diagnostics["interior_face_timings"]
         metrics["latest_interior_face_timing"] = timings[-1]
+        metrics["diagnostic_interior_face_timing_by_mode"] = summarize_timing_modes(
+            timings,
+            ("faces_considered", "faces_assembled"),
+            (
+                "total",
+                "kernel",
+                "insert",
+                "prepare_minus",
+                "prepare_plus",
+                "solution",
+                "field",
+            ),
+        )
         for name in (
             "faces_considered",
             "faces_assembled",
@@ -1752,6 +1893,20 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     if diagnostics.get("cut_volume_timings"):
         timings = diagnostics["cut_volume_timings"]
         metrics["latest_cut_volume_timing"] = timings[-1]
+        metrics["diagnostic_cut_volume_timing_by_mode"] = summarize_timing_modes(
+            timings,
+            ("rules_considered", "rules_assembled", "full_rules", "partial_rules", "qpts"),
+            (
+                "total",
+                "kernel",
+                "insert",
+                "rule",
+                "geometry",
+                "basis",
+                "solution",
+                "field",
+            ),
+        )
         for name in (
             "indexed",
             "rules_considered",
