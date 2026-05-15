@@ -83,6 +83,18 @@ Reinitialization policy by tracked validation case:
 | `unfitted_level_set/spheric_test05_wet_bed_d38/solver.xml` | Disabled for qualification probes | The D38 probe follows the same policy as D18 so both wet-bed depths compare the same solver controls. |
 | `unfitted_level_set/spheric_test02_dambreak_obstacle/solver.xml` | Enabled | The obstacle dam-break has severe interface distortion, so projection repair is required for long-running geometry quality. |
 
+Volume-correction policy by tracked validation case:
+
+| Case | Volume-correction policy | Rationale |
+| --- | --- | --- |
+| `unfitted_level_set/solver.xml` | Enabled | The open-tank fixture should preserve the initial wet area and expose any correction-induced movement of the flat interface. |
+| `unfitted_level_set/linear_sloshing_2d/solver.xml` | Disabled | The standing-wave verifier reports active-area drift directly; global correction would hide level-set transport error. |
+| `unfitted_level_set/mms_traveling_interface_2d/solver.xml` | Disabled | The manufactured solution should measure the prescribed transport error without a global area shift. |
+| `unfitted_level_set/spheric_test10_lateral_water_1x/solver.xml` | Enabled | The long sloshing-impact probe needs bounded mass drift while tank-motion forcing and pressure comparisons are developed. |
+| `unfitted_level_set/spheric_test05_wet_bed_d18/solver.xml` | Disabled for qualification probes | Wet-bed dam-break pressure and velocity probes should first measure uncorrected active-volume drift before any global correction changes the interface. |
+| `unfitted_level_set/spheric_test05_wet_bed_d38/solver.xml` | Disabled for qualification probes | The D38 run follows D18 so the two wet-bed depths use comparable active-volume controls. |
+| `unfitted_level_set/spheric_test02_dambreak_obstacle/solver.xml` | Enabled | The obstacle dam-break is a long, strongly deformed case where bounded wet-volume drift is required for useful probes. |
+
 ## Open Tank At Rest
 
 Purpose: verify that the half-filled open-vessel examples remain in hydrostatic
