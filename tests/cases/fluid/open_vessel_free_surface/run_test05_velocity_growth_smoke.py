@@ -28,10 +28,12 @@ CASES = {
     "static2d": None,
     "d18": CASE_ROOT / "spheric_test05_wet_bed_d18",
     "d38": CASE_ROOT / "spheric_test05_wet_bed_d38",
+    "mms2d": CASE_ROOT / "mms_traveling_interface_2d",
 }
 CASE_GATE_X = {
     "mini2d": 0.4,
     "static2d": 0.5,
+    "mms2d": 0.5,
 }
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
@@ -41,6 +43,11 @@ COMPONENT_NORM_RE = re.compile(
     r"\[(.*?) norm=([-+0-9.eE]+) mean=([-+0-9.eE]+)"
     r"(?: min=([-+0-9.eE]+) max=([-+0-9.eE]+))?\]"
 )
+JACOBIAN_COMPONENT_NORM_RE = re.compile(
+    r"\[(.*?) fd=([-+0-9.eE]+) total_err=([-+0-9.eE]+)"
+    r" matrix_err=([-+0-9.eE]+)\]"
+)
+DOUBLE_BAR_VALUE_RE = re.compile(r"\|\|([^|]+)\|\|=([-+0-9.eE]+)")
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
 LINEAR_SOLVER_RE = re.compile(
     r"SimulationBuilder: linear solver method=(?P<method>\S+)"
@@ -202,6 +209,8 @@ def configure_solver(solver_xml: Path,
 
     set_text(general, "Number_of_time_steps", str(steps))
     set_text(general, "Save_results_to_VTK_format", "false" if disable_vtk_output else "true")
+    if disable_vtk_output:
+        set_text(general, "Combine_time_series", "false")
     set_text(general, "Name_prefix_of_saved_VTK_files", "result")
     save_increment = vtk_save_increment if vtk_save_increment is not None else 1
     start_step = start_saving_after_step if start_saving_after_step is not None else 1
@@ -312,6 +321,26 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
     env = os.environ.copy()
     if args.enable_blockschur_true_residual_retry:
         env["SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY"] = "1"
+    if args.enable_jacobian_check:
+        env["SVMP_FE_JACOBIAN_CHECK"] = "1"
+        if args.jacobian_check_iteration is not None:
+            env["SVMP_FE_JACOBIAN_CHECK_IT"] = str(args.jacobian_check_iteration)
+        if args.jacobian_check_step is not None:
+            env["SVMP_FE_JACOBIAN_CHECK_STEP"] = f"{args.jacobian_check_step:.16g}"
+    if args.enable_newton_direction_check:
+        env["SVMP_NEWTON_DIRECTION_CHECK"] = "1"
+    if args.enable_linear_solve_history:
+        env["SVMP_DEBUG_LINEAR_SOLVE_HISTORY"] = "1"
+        if args.linear_solve_history_max_calls is not None:
+            env["SVMP_DEBUG_LINEAR_SOLVE_HISTORY_MAX_CALLS"] = str(
+                args.linear_solve_history_max_calls
+            )
+    if args.enable_linear_solve_component_norms:
+        env["SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS"] = "1"
+        if args.linear_solve_component_norms_max_newton_it is not None:
+            env["SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT"] = str(
+                args.linear_solve_component_norms_max_newton_it
+            )
     return env
 
 
@@ -868,6 +897,34 @@ def parse_component_norms(line: str) -> list[dict[str, Any]]:
     return components
 
 
+def parse_jacobian_component_norms(line: str) -> list[dict[str, Any]]:
+    components = []
+    for match in JACOBIAN_COMPONENT_NORM_RE.finditer(line):
+        components.append({
+            "component": match.group(1),
+            "fd": float(match.group(2)),
+            "total_err": float(match.group(3)),
+            "matrix_err": float(match.group(4)),
+        })
+    return components
+
+
+def norm_key(label: str) -> str:
+    key = label.strip().lower()
+    key = re.sub(r"used_op=([^)]*)", r"used_op_\1", key)
+    key = key.replace("*", "_")
+    key = key.replace("-", "_minus_")
+    key = re.sub(r"[^a-z0-9]+", "_", key).strip("_")
+    return f"{key}_norm" if key else "norm"
+
+
+def parse_norm_key_values(line: str) -> dict[str, Any]:
+    values = parse_key_values(DOUBLE_BAR_VALUE_RE.sub("", line))
+    for match in DOUBLE_BAR_VALUE_RE.finditer(line):
+        values[norm_key(match.group(1))] = parse_scalar(match.group(2))
+    return values
+
+
 def vector_component_header(line: str) -> str:
     label_match = VECTOR_COMPONENT_LABEL_RE.search(line)
     if label_match is None:
@@ -887,6 +944,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "fsils_solve_summaries": [],
         "fsils_blockschur_retries": [],
         "vector_component_norms": [],
+        "newton_direction_checks": [],
+        "jacobian_checks": [],
+        "jacobian_check_component_norms": [],
+        "linear_solve_histories": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
@@ -929,6 +990,16 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["fsils_solve_summaries"].append(parse_key_values(line))
         elif "diagnostic=fsils_blockschur_true_residual_retry" in line:
             diagnostics["fsils_blockschur_retries"].append(parse_key_values(line))
+        elif "NewtonSolver: direction check" in line:
+            diagnostics["newton_direction_checks"].append(parse_norm_key_values(line))
+        elif "NewtonSolver: Jacobian check jacobian_op=" in line:
+            diagnostics["jacobian_checks"].append(parse_norm_key_values(line))
+        elif "NewtonSolver: Jacobian check component norms" in line:
+            diagnostics["jacobian_check_component_norms"].append({
+                "components": parse_jacobian_component_norms(line),
+            })
+        elif "NewtonSolver: linear solve history" in line:
+            diagnostics["linear_solve_histories"].append(parse_key_values(line))
         elif "vector component norms" in line:
             record = parse_key_values(vector_component_header(line))
             record["components"] = parse_component_norms(line)
@@ -1233,6 +1304,20 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             value = latest_solve_summary.get(name)
             if isinstance(value, (int, float)):
                 metrics[f"latest_fsils_{name}"] = value
+    if diagnostics.get("newton_direction_checks"):
+        latest_direction_check = diagnostics["newton_direction_checks"][-1]
+        metrics["latest_newton_direction_check"] = latest_direction_check
+        value = latest_direction_check.get("rel")
+        if isinstance(value, (int, float)):
+            metrics["diagnostic_newton_direction_relative_error"] = float(value)
+    if diagnostics.get("jacobian_checks"):
+        latest_jacobian_check = diagnostics["jacobian_checks"][-1]
+        metrics["latest_jacobian_check"] = latest_jacobian_check
+        value = latest_jacobian_check.get("rel")
+        if isinstance(value, (int, float)):
+            metrics["diagnostic_jacobian_check_relative_error"] = float(value)
+    if diagnostics.get("linear_solve_histories"):
+        metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
     retry_counts = [
         int(record["true_residual_retries"])
         for record in diagnostics.get("fsils_solve_summaries", [])
@@ -1264,6 +1349,24 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "ns_gm_tolerance",
         "ns_cg_tolerance",
         "linear_solver_type",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            metrics[name] = value
+    for name in (
+        "enable_jacobian_check",
+        "enable_newton_direction_check",
+        "enable_linear_solve_history",
+        "enable_linear_solve_component_norms",
+        "allow_failure_diagnostics",
+    ):
+        if getattr(args, name):
+            metrics[name] = True
+    for name in (
+        "jacobian_check_iteration",
+        "jacobian_check_step",
+        "linear_solve_history_max_calls",
+        "linear_solve_component_norms_max_newton_it",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -1319,19 +1422,26 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
                                  args: argparse.Namespace) -> list[str]:
     errors = []
     diagnostics = metrics["diagnostics"]
+    gauge_required = metrics.get("case") in {"d18", "d38", "mini2d", "static2d"}
     if not diagnostics.get("cut_context_rebuilds"):
         errors.append("cut-context rebuild diagnostics were not reported")
     if not diagnostics.get("cut_volume_assemblies"):
         errors.append("cut-volume assembly diagnostics were not reported")
-    if not diagnostics.get("pressure_gauge_checks"):
+    if gauge_required and not diagnostics.get("pressure_gauge_checks"):
         errors.append("pressure gauge diagnostics were not reported")
-    if not diagnostics.get("hydrostatic_initializations"):
+    if gauge_required and not diagnostics.get("hydrostatic_initializations"):
         errors.append("hydrostatic initialization diagnostics were not reported")
     if not latest_component_record(diagnostics, "solution_state"):
         errors.append("solution-state component diagnostics were not reported")
     if (diagnostics.get("true_residual_failure_count", 0) > 0 and
             not diagnostics.get("fsils_true_residuals")):
         errors.append("FSILS true-residual diagnostics were not reported")
+    if args.require_newton_direction_check_diagnostics and not diagnostics.get("newton_direction_checks"):
+        errors.append("Newton direction-check diagnostics were not reported")
+    if args.require_jacobian_check_diagnostics and not diagnostics.get("jacobian_checks"):
+        errors.append("Jacobian finite-difference diagnostics were not reported")
+    if args.require_linear_solve_history_diagnostics and not diagnostics.get("linear_solve_histories"):
+        errors.append("linear solve history diagnostics were not reported")
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -1432,6 +1542,24 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
                 f"diagnostic BlockSchur true-residual retry count {retries} is below "
                 f"{args.min_diagnostic_blockschur_true_residual_retries}"
             )
+    if args.max_newton_direction_relative_error is not None:
+        value = metrics.get("diagnostic_newton_direction_relative_error")
+        if not isinstance(value, (int, float)):
+            errors.append("Newton direction-check relative error is unavailable")
+        elif value > args.max_newton_direction_relative_error:
+            errors.append(
+                f"Newton direction-check relative error {value:.6g} exceeds "
+                f"{args.max_newton_direction_relative_error:.6g}"
+            )
+    if args.max_jacobian_check_relative_error is not None:
+        value = metrics.get("diagnostic_jacobian_check_relative_error")
+        if not isinstance(value, (int, float)):
+            errors.append("Jacobian finite-difference relative error is unavailable")
+        elif value > args.max_jacobian_check_relative_error:
+            errors.append(
+                f"Jacobian finite-difference relative error {value:.6g} exceeds "
+                f"{args.max_jacobian_check_relative_error:.6g}"
+            )
     if args.stale_pressure_gauge_tolerance is not None:
         stale_difference = metrics.get("diagnostic_pressure_gauge_previous_invalid_difference")
         if not isinstance(stale_difference, (int, float)):
@@ -1489,7 +1617,7 @@ def pressure_gauge_metrics(output: pv.DataSet, benchmark: dict[str, Any]) -> dic
 def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, Any]:
     benchmark = load_benchmark(case_dir)
     if benchmark:
-        dimensions = benchmark["dimensions_m"]
+        dimensions = benchmark.get("dimensions_m", {})
         gate_x = float(dimensions.get("profile_window_x_min", CASE_GATE_X.get(case_name, 0.4)))
     else:
         gate_x = CASE_GATE_X[case_name]
@@ -1780,6 +1908,10 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 diagnostic_errors
                 or [f"solver exited with return code {completed.returncode}"]
             )
+            if args.allow_failure_diagnostics and not diagnostic_errors:
+                failure["passed"] = True
+                failure["errors"] = []
+                return failure
             write_failure(failure)
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
 
@@ -1846,6 +1978,7 @@ def main() -> int:
     parser.add_argument("--stale-pressure-gauge-tolerance", type=float)
     parser.add_argument("--max-wet-fraction-volume-error", type=float)
     parser.add_argument("--allow-timeout-diagnostics", action="store_true")
+    parser.add_argument("--allow-failure-diagnostics", action="store_true")
     parser.add_argument("--min-diagnostic-solution-velocity-range", type=float)
     parser.add_argument("--min-diagnostic-pressure-range", type=float)
     parser.add_argument("--max-diagnostic-active-volume-error", type=float)
@@ -1857,6 +1990,11 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-active-min-volume-fraction", type=float)
     parser.add_argument("--min-diagnostic-generated-pruned-volume-rules", type=int)
     parser.add_argument("--min-diagnostic-blockschur-true-residual-retries", type=int)
+    parser.add_argument("--require-newton-direction-check-diagnostics", action="store_true")
+    parser.add_argument("--require-jacobian-check-diagnostics", action="store_true")
+    parser.add_argument("--require-linear-solve-history-diagnostics", action="store_true")
+    parser.add_argument("--max-newton-direction-relative-error", type=float)
+    parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
@@ -1870,6 +2008,14 @@ def main() -> int:
     parser.add_argument("--linear-solver-type")
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     parser.add_argument("--enable-blockschur-true-residual-retry", action="store_true")
+    parser.add_argument("--enable-jacobian-check", action="store_true")
+    parser.add_argument("--jacobian-check-iteration", type=int)
+    parser.add_argument("--jacobian-check-step", type=float)
+    parser.add_argument("--enable-newton-direction-check", action="store_true")
+    parser.add_argument("--enable-linear-solve-history", action="store_true")
+    parser.add_argument("--linear-solve-history-max-calls", type=int)
+    parser.add_argument("--enable-linear-solve-component-norms", action="store_true")
+    parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
     args = parser.parse_args()
 
     solver = resolve_solver(args.solver)

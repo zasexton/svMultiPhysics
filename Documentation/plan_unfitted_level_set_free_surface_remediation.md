@@ -447,6 +447,10 @@ benchmark runs.
 - [x] Add a smoke-script linear solver type override so D18/D38 probes can test
       monolithic and split FSILS paths from temporary case copies without
       editing validation fixtures.
+- [x] Add an MMS traveling-interface GMRES diagnostic probe path that can
+      require parseable finite-difference Jacobian checks, Newton direction
+      checks, linear solve history, and component norms even when the solver
+      exits before VTK output.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
