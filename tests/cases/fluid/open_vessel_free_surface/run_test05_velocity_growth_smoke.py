@@ -41,6 +41,49 @@ COMPONENT_NORM_RE = re.compile(
     r"(?: min=([-+0-9.eE]+) max=([-+0-9.eE]+))?\]"
 )
 VECTOR_COMPONENT_LABEL_RE = re.compile(r"label=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
+LINEAR_SOLVER_RE = re.compile(
+    r"SimulationBuilder: linear solver method=(?P<method>\S+)"
+    r" preconditioner=(?P<preconditioner>\S+)"
+    r" rel_tol=(?P<rel_tol>[-+0-9.eE]+)"
+    r" abs_tol=(?P<abs_tol>[-+0-9.eE]+)"
+    r" max_iter=(?P<max_iter>[0-9]+)"
+    r"(?: block_layout=(?P<block_layout>\[[^\]]+\]))?"
+    r"(?: saddle_point=\((?P<saddle_momentum>[0-9]+),(?P<saddle_constraint>[0-9]+)\))?"
+)
+TIME_STEPPING_RE = re.compile(
+    r"Time stepping: Number_of_time_steps=(?P<number_of_time_steps>[0-9]+)"
+    r" Time_step_size=(?P<time_step_size>[-+0-9.eE]+)"
+)
+TRANSIENT_SOLVE_RE = re.compile(
+    r"Transient solve: t0=(?P<t0>[-+0-9.eE]+)"
+    r" dt=(?P<dt>[-+0-9.eE]+)"
+    r" t_end=(?P<t_end>[-+0-9.eE]+)"
+    r" max_steps=(?P<max_steps>[0-9]+)"
+    r" scheme=(?P<scheme>\S+)"
+    r" rho_inf=(?P<rho_inf>[-+0-9.eE]+)"
+    r" newton\(max_it=(?P<newton_max_it>[0-9]+),"
+    r" min_it=(?P<newton_min_it>[0-9]+),"
+    r" abs_tol=(?P<newton_abs_tol>[-+0-9.eE]+),"
+    r" rel_tol=(?P<newton_rel_tol>[-+0-9.eE]+)\)"
+)
+TIMELOOP_NONLINEAR_RE = re.compile(
+    r"TimeLoop: nonlinear_done step=(?P<step>[0-9]+)"
+    r" time=(?P<time>[-+0-9.eE]+)"
+    r" converged=(?P<converged>[01])"
+    r" iters=(?P<nonlinear_iterations>[0-9]+)"
+    r" \|\|r\|\|=(?P<residual>[-+0-9.eE]+)"
+    r" \|\|r_field\|\|=(?P<field_residual>[-+0-9.eE]+)"
+    r" \|\|r_aux\|\|=(?P<aux_residual>[-+0-9.eE]+)"
+    r" \(linear: converged=(?P<linear_converged>[01])"
+    r" iters=(?P<linear_iterations>[0-9]+)"
+    r" rel=(?P<linear_relative_residual>[-+0-9.eE]+)\)"
+)
+TIMELOOP_ACCEPTED_RE = re.compile(
+    r"TimeLoop: step_accepted step=(?P<step>[0-9]+)"
+    r" time=(?P<time>[-+0-9.eE]+)"
+    r" dt=(?P<dt>[-+0-9.eE]+)"
+)
+VTK_WRITE_RE = re.compile(r"Wrote VTK: (?P<path>.+)$")
 STATIC_INTERFACE_HEIGHT = 0.53
 
 
@@ -137,7 +180,11 @@ def configure_solver(solver_xml: Path,
                      disable_cut_stabilization: bool = False,
                      max_nonlinear_iterations: int | None = None,
                      disable_coupled_outer_fgmres: bool = False,
-                     disable_cut_metadata_scale: bool = False) -> None:
+                     disable_cut_metadata_scale: bool = False,
+                     disable_vtk_output: bool = False,
+                     final_output_only: bool = False,
+                     vtk_save_increment: int | None = None,
+                     start_saving_after_step: int | None = None) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -145,10 +192,15 @@ def configure_solver(solver_xml: Path,
         raise ValueError("missing GeneralSimulationParameters")
 
     set_text(general, "Number_of_time_steps", str(steps))
-    set_text(general, "Save_results_to_VTK_format", "true")
+    set_text(general, "Save_results_to_VTK_format", "false" if disable_vtk_output else "true")
     set_text(general, "Name_prefix_of_saved_VTK_files", "result")
-    set_text(general, "Increment_in_saving_VTK_files", "1")
-    set_text(general, "Start_saving_after_time_step", "1")
+    save_increment = vtk_save_increment if vtk_save_increment is not None else 1
+    start_step = start_saving_after_step if start_saving_after_step is not None else 1
+    if final_output_only:
+        save_increment = steps
+        start_step = steps
+    set_text(general, "Increment_in_saving_VTK_files", str(save_increment))
+    set_text(general, "Start_saving_after_time_step", str(start_step))
     set_text(general, "Increment_in_saving_restart_files", str(steps))
     if time_step_size is not None:
         set_text(general, "Time_step_size", f"{time_step_size:.16g}")
@@ -543,6 +595,88 @@ def parse_key_values(line: str) -> dict[str, Any]:
     }
 
 
+def convert_match(match: re.Match[str]) -> dict[str, Any]:
+    return {
+        name: parse_scalar(value)
+        for name, value in match.groupdict().items()
+        if value is not None
+    }
+
+
+def distribution(values: list[int]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def numeric_range(values: list[float]) -> dict[str, float] | None:
+    if not values:
+        return None
+    return {
+        "min": float(min(values)),
+        "max": float(max(values)),
+        "mean": float(sum(values) / len(values)),
+    }
+
+
+def summarize_time_loop(time_loop: dict[str, Any]) -> dict[str, Any]:
+    nonlinear_records = time_loop.get("nonlinear_records", [])
+    accepted_steps = time_loop.get("accepted_steps", [])
+    summary: dict[str, Any] = {
+        "nonlinear_records": len(nonlinear_records),
+        "accepted_steps": len(accepted_steps),
+        "vtk_outputs": len(time_loop.get("vtk_outputs", [])),
+    }
+    if accepted_steps:
+        final_step = accepted_steps[-1]
+        summary["final_accepted_step"] = final_step.get("step")
+        summary["final_accepted_time"] = final_step.get("time")
+    if nonlinear_records:
+        nonlinear_iterations = [
+            int(record["nonlinear_iterations"])
+            for record in nonlinear_records
+            if isinstance(record.get("nonlinear_iterations"), int)
+        ]
+        linear_iterations = [
+            int(record["linear_iterations"])
+            for record in nonlinear_records
+            if isinstance(record.get("linear_iterations"), int)
+        ]
+        nonlinear_residuals = [
+            float(record["residual"])
+            for record in nonlinear_records
+            if isinstance(record.get("residual"), (int, float))
+        ]
+        linear_residuals = [
+            float(record["linear_relative_residual"])
+            for record in nonlinear_records
+            if isinstance(record.get("linear_relative_residual"), (int, float))
+        ]
+        summary["all_nonlinear_converged"] = all(
+            bool(record.get("converged")) for record in nonlinear_records
+        )
+        summary["all_linear_converged"] = all(
+            bool(record.get("linear_converged")) for record in nonlinear_records
+        )
+        if nonlinear_iterations:
+            summary["nonlinear_iterations_total"] = int(sum(nonlinear_iterations))
+            summary["nonlinear_iterations_max"] = int(max(nonlinear_iterations))
+            summary["nonlinear_iteration_distribution"] = distribution(nonlinear_iterations)
+        if linear_iterations:
+            summary["linear_iterations_total"] = int(sum(linear_iterations))
+            summary["linear_iterations_max"] = int(max(linear_iterations))
+            summary["linear_iteration_distribution"] = distribution(linear_iterations)
+        nonlinear_range = numeric_range(nonlinear_residuals)
+        if nonlinear_range is not None:
+            summary["nonlinear_residual"] = nonlinear_range
+        linear_range = numeric_range(linear_residuals)
+        if linear_range is not None:
+            summary["linear_relative_residual"] = linear_range
+    return summary
+
+
 def parse_component_norms(line: str) -> list[dict[str, Any]]:
     label_match = VECTOR_COMPONENT_LABEL_RE.search(line)
     if label_match is not None:
@@ -570,15 +704,39 @@ def vector_component_header(line: str) -> str:
 
 def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {
+        "solver_controls": {},
         "cut_context_rebuilds": [],
         "cut_volume_assemblies": [],
         "hydrostatic_initializations": [],
         "pressure_gauge_checks": [],
         "residual_block_norms": [],
         "vector_component_norms": [],
+        "time_loop": {
+            "nonlinear_records": [],
+            "accepted_steps": [],
+            "vtk_outputs": [],
+        },
     }
     for line in solver_output.splitlines():
-        if "Active-domain cut context" in line:
+        linear_match = LINEAR_SOLVER_RE.search(line)
+        time_stepping_match = TIME_STEPPING_RE.search(line)
+        transient_match = TRANSIENT_SOLVE_RE.search(line)
+        nonlinear_match = TIMELOOP_NONLINEAR_RE.search(line)
+        accepted_match = TIMELOOP_ACCEPTED_RE.search(line)
+        vtk_match = VTK_WRITE_RE.search(line)
+        if linear_match is not None:
+            diagnostics["solver_controls"]["linear_solver"] = convert_match(linear_match)
+        elif time_stepping_match is not None:
+            diagnostics["solver_controls"]["time_stepping"] = convert_match(time_stepping_match)
+        elif transient_match is not None:
+            diagnostics["solver_controls"]["transient_solve"] = convert_match(transient_match)
+        elif nonlinear_match is not None:
+            diagnostics["time_loop"]["nonlinear_records"].append(convert_match(nonlinear_match))
+        elif accepted_match is not None:
+            diagnostics["time_loop"]["accepted_steps"].append(convert_match(accepted_match))
+        elif vtk_match is not None:
+            diagnostics["time_loop"]["vtk_outputs"].append(vtk_match.group("path").strip())
+        elif "Active-domain cut context" in line:
             diagnostics["cut_context_rebuilds"].append(parse_key_values(line))
         elif "cut-volume active-domain diagnostics" in line:
             diagnostics["cut_volume_assemblies"].append(parse_key_values(line))
@@ -598,6 +756,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         for name, records in diagnostics.items()
         if isinstance(records, list)
     }
+    diagnostics["time_loop"]["summary"] = summarize_time_loop(diagnostics["time_loop"])
     diagnostics.update(parse_active_volume_history(solver_output))
     return diagnostics
 
@@ -714,25 +873,13 @@ def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None
     return None
 
 
-def previous_invalid_pressure(benchmark: dict[str, Any]) -> float | None:
-    verification = benchmark.get("pressure_gauge_verification")
-    if not isinstance(verification, dict):
-        return None
-    value = verification.get("previous_invalid_d18_full_volume_hydrostatic_pressure")
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
+def add_diagnostic_metrics(metrics: dict[str, Any],
+                           diagnostics: dict[str, Any]) -> None:
+    metrics["diagnostics"] = diagnostics
+    metrics["solver_controls"] = diagnostics.get("solver_controls", {})
+    metrics["time_loop"] = diagnostics.get("time_loop", {})
+    metrics.update(parse_active_volume_history_from_diagnostics(diagnostics))
 
-
-def diagnostic_timeout_metrics(case_name: str,
-                               run_dir: Path,
-                               diagnostics: dict[str, Any]) -> dict[str, Any]:
-    metrics: dict[str, Any] = {
-        "case": case_name,
-        "run_dir": str(run_dir),
-        "timed_out": True,
-        "diagnostics": diagnostics,
-    }
     velocity_range = diagnostic_solution_velocity_range(diagnostics)
     if velocity_range is not None:
         metrics["diagnostic_solution_velocity_range"] = velocity_range
@@ -752,9 +899,52 @@ def diagnostic_timeout_metrics(case_name: str,
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
 
+    wet_fraction_volume = metrics.get("wet_fraction_volume")
+    context_volumes = metrics.get("cut_context_active_side_volumes", [])
+    if isinstance(wet_fraction_volume, (int, float)) and context_volumes:
+        metrics["wet_fraction_volume_drift_vs_initial_cut_context"] = (
+            float(wet_fraction_volume) - float(context_volumes[0])
+        )
+
+
+def parse_active_volume_history_from_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "cut_context_active_side_volumes",
+        "assembly_active_wet_volumes",
+        "cut_context_active_side_volume_change",
+        "assembly_active_wet_volume_change",
+    ]
+    return {
+        key: diagnostics[key]
+        for key in keys
+        if key in diagnostics
+    }
+
+
+def previous_invalid_pressure(benchmark: dict[str, Any]) -> float | None:
+    verification = benchmark.get("pressure_gauge_verification")
+    if not isinstance(verification, dict):
+        return None
+    value = verification.get("previous_invalid_d18_full_volume_hydrostatic_pressure")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def diagnostic_timeout_metrics(case_name: str,
+                               run_dir: Path,
+                               diagnostics: dict[str, Any]) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "case": case_name,
+        "run_dir": str(run_dir),
+        "timed_out": True,
+    }
+    add_diagnostic_metrics(metrics, diagnostics)
+
     previous = previous_invalid_pressure(load_benchmark(run_dir))
     if previous is not None:
         metrics["pressure_gauge_previous_invalid"] = previous
+        gauge_value = metrics.get("diagnostic_pressure_gauge_value")
         if gauge_value is not None:
             metrics["diagnostic_pressure_gauge_previous_invalid_difference"] = (
                 gauge_value - previous
@@ -915,6 +1105,37 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
         "gate_nodes": int(np.count_nonzero(gate_region)),
         "front_nodes": int(np.count_nonzero(front_region)),
     }
+    if "Pressure" in output.point_data:
+        pressure = np.asarray(output.point_data["Pressure"], dtype=float).reshape(-1)
+        pressure_min = float(np.nanmin(pressure))
+        pressure_max = float(np.nanmax(pressure))
+        metrics["pressure_min"] = pressure_min
+        metrics["pressure_max"] = pressure_max
+        metrics["pressure_range"] = pressure_max - pressure_min
+        metrics["pressure_mean"] = float(np.nanmean(pressure))
+    if "Velocity" in output.point_data:
+        output_velocity = np.asarray(output.point_data["Velocity"], dtype=float)
+        if output_velocity.ndim == 1:
+            output_velocity = output_velocity.reshape((-1, 1))
+        output_speed = np.linalg.norm(output_velocity, axis=1)
+        metrics["velocity_max"] = float(np.nanmax(output_speed))
+        metrics["velocity_mean"] = float(np.nanmean(output_speed))
+        component_ranges = []
+        for component in range(output_velocity.shape[1]):
+            values = output_velocity[:, component]
+            component_ranges.append(float(np.nanmax(values) - np.nanmin(values)))
+        metrics["velocity_component_ranges"] = component_ranges
+        metrics["velocity_range"] = float(max(component_ranges)) if component_ranges else 0.0
+    if "phi" in output.point_data:
+        try:
+            interface = output.contour(isosurfaces=[0.0], scalars="phi")
+            interface_points = np.asarray(interface.points, dtype=float)
+            metrics["interface_points"] = int(interface.n_points)
+            if interface_points.size:
+                metrics["interface_peak_height"] = float(np.nanmax(interface_points[:, 1]))
+                metrics["interface_front_x"] = float(np.nanmax(interface_points[:, 0]))
+        except Exception as exc:
+            metrics["interface_extraction_error"] = str(exc)
     if "WetVolumeFraction" in output.cell_data:
         fractions = np.asarray(output.cell_data["WetVolumeFraction"], dtype=float).reshape(-1)
         measures = cell_measure(output)
@@ -929,6 +1150,8 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
 
 def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors = []
+    if metrics.get("output_metrics_skipped"):
+        return evaluate_timeout_diagnostics(metrics, args)
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
     if metrics.get("case") == "static2d":
@@ -997,6 +1220,22 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     return errors
 
 
+def write_qualification_log(path: Path | None,
+                            solver: Path,
+                            probes: list[dict[str, Any]],
+                            complete: bool) -> None:
+    if path is None:
+        return
+    payload = {
+        "solver": str(solver),
+        "complete": complete,
+        "probes": probes,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+
+
 def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str, Any]:
     source = CASES[case_name]
     if source is not None and not source.exists():
@@ -1011,6 +1250,10 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
 
     def write_solver_log(run_dir: Path, output: str) -> None:
         (run_dir / "solver_run.log").write_text(output, encoding="utf-8")
+
+    def write_failure(failure: dict[str, Any]) -> None:
+        failure.setdefault("passed", False)
+        write_qualification_log(args.qualification_log, solver, [failure], complete=False)
 
     try:
         run_dir = Path(temp_name) / case_name
@@ -1027,6 +1270,10 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 max_nonlinear_iterations=args.max_nonlinear_iterations,
                 disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
                 disable_cut_metadata_scale=args.disable_cut_metadata_scale,
+                disable_vtk_output=args.disable_vtk_output,
+                final_output_only=args.final_output_only,
+                vtk_save_increment=args.vtk_save_increment,
+                start_saving_after_step=args.start_saving_after_step,
             )
 
         try:
@@ -1055,9 +1302,14 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
                 failure["disable_cut_metadata_scale"] = True
+            if args.disable_vtk_output:
+                failure["disable_vtk_output"] = True
             if args.allow_timeout_diagnostics and not diagnostic_errors:
                 failure["passed"] = True
+                failure["errors"] = []
                 return failure
+            failure["errors"] = diagnostic_errors or ["solver timed out"]
+            write_failure(failure)
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True)) from exc
         write_solver_log(run_dir, completed.stdout)
         if completed.returncode != 0:
@@ -1069,15 +1321,25 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "diagnostics": parse_solver_diagnostics(completed.stdout),
                 "stdout_tail": tail,
             }
+            add_diagnostic_metrics(failure, failure["diagnostics"])
             if args.disable_coupled_outer_fgmres:
                 failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
                 failure["disable_cut_metadata_scale"] = True
+            if args.disable_vtk_output:
+                failure["disable_vtk_output"] = True
+            write_failure(failure)
             raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
 
-        metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
-        metrics["diagnostics"] = parse_solver_diagnostics(completed.stdout)
-        metrics.update(parse_active_volume_history(completed.stdout))
+        diagnostics = parse_solver_diagnostics(completed.stdout)
+        if args.disable_vtk_output:
+            metrics = {
+                "output_metrics_skipped": True,
+                "output_metrics_skip_reason": "VTK output disabled",
+            }
+        else:
+            metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
+        add_diagnostic_metrics(metrics, diagnostics)
         metrics["case"] = case_name
         metrics["run_dir"] = str(run_dir)
         metrics["steps"] = args.steps
@@ -1087,10 +1349,15 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics["disable_coupled_outer_fgmres"] = True
         if args.disable_cut_metadata_scale:
             metrics["disable_cut_metadata_scale"] = True
+        if args.disable_vtk_output:
+            metrics["disable_vtk_output"] = True
+        if args.final_output_only:
+            metrics["final_output_only"] = True
         errors = evaluate(metrics, args)
         metrics["passed"] = not errors
         metrics["errors"] = errors
         if errors:
+            write_failure(metrics)
             raise RuntimeError(json.dumps(metrics, indent=2, sort_keys=True))
         return metrics
     finally:
@@ -1107,6 +1374,11 @@ def main() -> int:
     parser.add_argument("--time-step-size", type=float)
     parser.add_argument("--timeout-seconds", type=float)
     parser.add_argument("--preserve-run-dir", action="store_true")
+    parser.add_argument("--qualification-log", type=Path)
+    parser.add_argument("--disable-vtk-output", action="store_true")
+    parser.add_argument("--final-output-only", action="store_true")
+    parser.add_argument("--vtk-save-increment", type=int)
+    parser.add_argument("--start-saving-after-step", type=int)
     parser.add_argument("--min-max-speed", type=float, default=1.0e-2)
     parser.add_argument("--min-wet-mean-speed", type=float, default=2.5e-4)
     parser.add_argument("--min-gate-mean-ux", type=float, default=1.0e-4)
@@ -1129,7 +1401,11 @@ def main() -> int:
 
     solver = resolve_solver(args.solver)
     cases = args.case or ["mini2d"]
-    report = [run_case(case_name, solver, args) for case_name in cases]
+    report = []
+    for case_name in cases:
+        report.append(run_case(case_name, solver, args))
+        write_qualification_log(args.qualification_log, solver, report, complete=False)
+    write_qualification_log(args.qualification_log, solver, report, complete=True)
     print(json.dumps({"solver": str(solver), "probes": report}, indent=2, sort_keys=True))
     return 0
 

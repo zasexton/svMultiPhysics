@@ -409,6 +409,10 @@ benchmark runs.
 - [x] Add no-output D18/D38 smoke checks that verify parsed cut-volume
       diagnostics include quadratic exact-order rules after quadratic subcell
       quadrature is enabled.
+- [x] Add smoke-script qualification logging that records solver controls,
+      nonlinear and linear iteration summaries, wet-volume histories, output
+      diagnostics, and parsed timeout diagnostics even when VTK output is
+      disabled or unavailable.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
