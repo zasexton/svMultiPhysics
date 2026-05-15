@@ -486,6 +486,9 @@ benchmark runs.
 - [x] Add smoke-script assembly topology consistency checks so no-output probes
       can verify cut-adjacent interior-face counts and cut-volume timing rule
       counts match the generated cut-context diagnostics.
+- [x] Add smoke-script parsing and controls for JIT specialization traces so
+      D18/D38 assembly probes can separate first-use kernel specialization from
+      repeated assembly work.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

@@ -383,6 +383,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
         env["SVMP_INTERIOR_FACE_TIMING"] = "1"
     if args.enable_cut_volume_timing:
         env["SVMP_CUT_VOLUME_TIMING"] = "1"
+    if args.enable_jit_specialization_trace:
+        env["SVMP_JIT_TRACE_SPECIALIZATION"] = "1"
     return env
 
 
@@ -1058,6 +1060,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "form_block_installs": [],
         "form_mixed_plans": [],
         "linear_solve_histories": [],
+        "jit_specialization_traces": [],
         "assembly_timings": [],
         "interior_face_timings": [],
         "cut_volume_timings": [],
@@ -1149,6 +1152,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["form_mixed_plans"].append(parse_key_values(line))
         elif "NewtonSolver: linear solve history" in line:
             diagnostics["linear_solve_histories"].append(parse_key_values(line))
+        elif "JIT specialization trace:" in line:
+            diagnostics["jit_specialization_traces"].append(parse_key_values(line))
         elif "[INTERIOR_FACE_TIMING]" in line:
             diagnostics["interior_face_timings"].append(parse_interior_face_timing(line))
         elif "[CUT_VOLUME_TIMING]" in line:
@@ -1666,6 +1671,25 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["form_block_install_count"] = len(diagnostics["form_block_installs"])
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
+    if diagnostics.get("jit_specialization_traces"):
+        traces = diagnostics["jit_specialization_traces"]
+        metrics["latest_jit_specialization_trace"] = traces[-1]
+        event_counts: dict[str, int] = {}
+        trigger_counts: dict[str, int] = {}
+        for record in traces:
+            event = record.get("event")
+            if isinstance(event, str):
+                event_counts[event] = event_counts.get(event, 0) + 1
+            trigger = record.get("trigger")
+            if isinstance(trigger, str):
+                trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
+        metrics["diagnostic_jit_specialization_trace_count"] = len(traces)
+        metrics["diagnostic_jit_specialization_event_counts"] = event_counts
+        metrics["diagnostic_jit_specialization_trigger_counts"] = trigger_counts
+        metrics["diagnostic_jit_specialization_compile_count"] = sum(
+            count for event, count in event_counts.items()
+            if event in {"compile", "generic_compile"}
+        )
     if diagnostics.get("assembly_timings"):
         timings = diagnostics["assembly_timings"]
         metrics["latest_assembly_timing"] = timings[-1]
@@ -1811,10 +1835,12 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_form_block_diagnostics",
         "enable_interior_face_timing",
         "enable_cut_volume_timing",
+        "enable_jit_specialization_trace",
         "require_cut_context_solution_source_diagnostics",
         "require_assembly_timing_diagnostics",
         "require_interior_face_timing_diagnostics",
         "require_cut_volume_timing_diagnostics",
+        "require_jit_specialization_trace_diagnostics",
         "require_assembly_topology_consistency",
         "allow_failure_diagnostics",
     ):
@@ -1917,6 +1943,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
         errors.append("cut-volume timing diagnostics were not reported")
+    if args.require_jit_specialization_trace_diagnostics and not diagnostics.get("jit_specialization_traces"):
+        errors.append("JIT specialization trace diagnostics were not reported")
     if args.require_assembly_topology_consistency:
         errors.extend(assembly_topology_consistency_errors(diagnostics))
 
@@ -2187,6 +2215,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_cut_volume_timing_diagnostics and
             not metrics["diagnostics"].get("cut_volume_timings")):
         errors.append("cut-volume timing diagnostics were not reported")
+    if (args.require_jit_specialization_trace_diagnostics and
+            not metrics["diagnostics"].get("jit_specialization_traces")):
+        errors.append("JIT specialization trace diagnostics were not reported")
     if args.require_assembly_topology_consistency:
         errors.extend(assembly_topology_consistency_errors(metrics["diagnostics"]))
     if not metrics["finite_velocity"]:
@@ -2515,6 +2546,8 @@ def main() -> int:
     parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")
     parser.add_argument("--enable-cut-volume-timing", action="store_true")
     parser.add_argument("--require-cut-volume-timing-diagnostics", action="store_true")
+    parser.add_argument("--enable-jit-specialization-trace", action="store_true")
+    parser.add_argument("--require-jit-specialization-trace-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
     args = parser.parse_args()
 
