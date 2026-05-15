@@ -434,12 +434,16 @@ TEST(FormKernelDGTest, UnscaledMarkedCutAdjacentFacetIntegralSkipsNonCutInterior
     EXPECT_NEAR(mat.getMatrixEntry(1, 1), area / 6.0, 5e-11);
     EXPECT_NEAR(mat.getMatrixEntry(1, 4), -area / 6.0, 5e-11);
 
+    const std::array<GlobalIndex, 4> far_field_cell_dofs{{8, 9, 10, 11}};
     for (GlobalIndex i = 0; i < 12; ++i) {
+        for (const GlobalIndex j : far_field_cell_dofs) {
+            SCOPED_TRACE(::testing::Message() << "row=" << i << ", far_field_col=" << j);
+            EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
+        }
+    }
+    for (const GlobalIndex i : far_field_cell_dofs) {
         for (GlobalIndex j = 0; j < 12; ++j) {
-            if (i < 8 && j < 8) {
-                continue;
-            }
-            SCOPED_TRACE(::testing::Message() << "i=" << i << ", j=" << j);
+            SCOPED_TRACE(::testing::Message() << "far_field_row=" << i << ", col=" << j);
             EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
         }
     }
