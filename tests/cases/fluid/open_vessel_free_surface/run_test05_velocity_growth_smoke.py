@@ -102,6 +102,21 @@ TIMELOOP_ACCEPTED_RE = re.compile(
 )
 VTK_WRITE_RE = re.compile(r"Wrote VTK: (?P<path>.+)$")
 STATIC_INTERFACE_HEIGHT = 0.53
+STATE_SYNC_CUT_CONTEXT_PROVENANCES = {
+    "accepted",
+    "residual",
+    "jacobian",
+    "jacobian_and_residual",
+    "line_search_trial",
+    "restored",
+    "final_residual",
+}
+VECTOR_CUT_CONTEXT_PROVENANCES = {
+    "before_physics_solve",
+    "accepted_step",
+    "steady_initial",
+    "steady_accepted",
+}
 
 
 def point_array(mesh: pv.DataSet, name: str) -> np.ndarray:
@@ -1299,6 +1314,95 @@ def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None
     return None
 
 
+def cut_context_solution_source_summary(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    records = diagnostics.get("cut_context_rebuilds", [])
+    if not isinstance(records, list):
+        return {}
+    source_counts: dict[str, int] = {}
+    state_refresh_count = 0
+    vector_refresh_count = 0
+    missing_source_count = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        source = record.get("solution_source")
+        if isinstance(source, str) and source:
+            source_counts[source] = source_counts.get(source, 0) + 1
+        else:
+            missing_source_count += 1
+        provenance = record.get("provenance")
+        if provenance in STATE_SYNC_CUT_CONTEXT_PROVENANCES:
+            state_refresh_count += 1
+        elif provenance in VECTOR_CUT_CONTEXT_PROVENANCES:
+            vector_refresh_count += 1
+    return {
+        "source_counts": source_counts,
+        "state_refresh_count": state_refresh_count,
+        "vector_refresh_count": vector_refresh_count,
+        "missing_source_count": missing_source_count,
+    }
+
+
+def cut_context_solution_source_errors(diagnostics: dict[str, Any]) -> list[str]:
+    records = diagnostics.get("cut_context_rebuilds", [])
+    if not records:
+        return ["cut-context rebuild diagnostics were not reported"]
+
+    errors = []
+    missing = [
+        record for record in records
+        if isinstance(record, dict) and "solution_source" not in record
+    ]
+    if missing:
+        errors.append(
+            f"{len(missing)} cut-context rebuild diagnostic(s) do not report solution_source"
+        )
+
+    state_records = [
+        record for record in records
+        if isinstance(record, dict) and
+        record.get("provenance") in STATE_SYNC_CUT_CONTEXT_PROVENANCES
+    ]
+    if not state_records:
+        errors.append(
+            "cut-context diagnostics did not include a Newton state-refresh rebuild"
+        )
+    else:
+        bad_state = [
+            record for record in state_records
+            if record.get("solution_source") != "state_vector_fe_ordered"
+        ]
+        if bad_state:
+            examples = ", ".join(
+                f"{record.get('provenance', 'unknown')}:{record.get('solution_source', 'missing')}"
+                for record in bad_state[:3]
+            )
+            errors.append(
+                "Newton cut-context refreshes did not all use state_vector_fe_ordered "
+                f"({examples})"
+            )
+
+    vector_records = [
+        record for record in records
+        if isinstance(record, dict) and
+        record.get("provenance") in VECTOR_CUT_CONTEXT_PROVENANCES
+    ]
+    bad_vector = [
+        record for record in vector_records
+        if record.get("solution_source") != "fe_vector"
+    ]
+    if bad_vector:
+        examples = ", ".join(
+            f"{record.get('provenance', 'unknown')}:{record.get('solution_source', 'missing')}"
+            for record in bad_vector[:3]
+        )
+        errors.append(
+            "vector cut-context refreshes did not all use fe_vector "
+            f"({examples})"
+        )
+    return errors
+
+
 def add_diagnostic_metrics(metrics: dict[str, Any],
                            diagnostics: dict[str, Any]) -> None:
     metrics["diagnostics"] = diagnostics
@@ -1345,6 +1449,9 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
+    solution_source_summary = cut_context_solution_source_summary(diagnostics)
+    if solution_source_summary:
+        metrics["diagnostic_cut_context_solution_sources"] = solution_source_summary
     if diagnostics.get("fsils_true_residuals"):
         latest_true_residual = diagnostics["fsils_true_residuals"][-1]
         metrics["latest_fsils_true_residual"] = latest_true_residual
@@ -1443,6 +1550,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
         "enable_form_block_diagnostics",
+        "require_cut_context_solution_source_diagnostics",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -1533,6 +1641,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if args.require_form_block_diagnostics and (
             not diagnostics.get("form_block_installs") or not diagnostics.get("form_mixed_plans")):
         errors.append("form block installation diagnostics were not reported")
+    if args.require_cut_context_solution_source_diagnostics:
+        errors.extend(cut_context_solution_source_errors(diagnostics))
 
     if args.min_diagnostic_solution_velocity_range is not None:
         velocity_range = metrics.get("diagnostic_solution_velocity_range")
@@ -1791,6 +1901,8 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors = []
     if metrics.get("output_metrics_skipped"):
         return evaluate_timeout_diagnostics(metrics, args)
+    if args.require_cut_context_solution_source_diagnostics:
+        errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
     if metrics.get("case") == "static2d":
@@ -2086,6 +2198,7 @@ def main() -> int:
     parser.add_argument("--require-jacobian-top-mismatch-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-history-diagnostics", action="store_true")
     parser.add_argument("--require-form-block-diagnostics", action="store_true")
+    parser.add_argument("--require-cut-context-solution-source-diagnostics", action="store_true")
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")

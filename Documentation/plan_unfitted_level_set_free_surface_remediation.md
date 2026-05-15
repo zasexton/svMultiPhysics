@@ -465,6 +465,9 @@ benchmark runs.
       report the refresh solution source in cut-context rebuild diagnostics so
       MMS probes can separate geometry-state ordering defects from assembly
       defects.
+- [x] Add smoke-script validation for cut-context solution-source diagnostics so
+      no-output MMS and D18/D38 probes can fail when nonlinear assembly refreshes
+      are not fed by FE-ordered state vectors.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
