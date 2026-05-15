@@ -335,7 +335,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
       without it.
 - [x] Decide which validation cases require volume correction and which should
       run without it.
-- [ ] Document that plain level-set advection is not conservative by itself.
+- [x] Document that plain level-set advection is not conservative by itself.
 - [ ] Add an option for conservative level-set transport or document why it is
       deferred.
 - [ ] If projection-based reinitialization remains the default, add diagnostics

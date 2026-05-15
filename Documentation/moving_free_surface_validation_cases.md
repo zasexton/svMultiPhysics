@@ -71,6 +71,12 @@ effect. Cases that exercise long, strongly deformed free surfaces should use
 reinitialization until a conservative transport formulation is available, with
 the interface displacement reported as a diagnostic.
 
+Plain level-set advection transports the level-set field as a scalar and is not
+conservative by itself. SUPG stabilization can reduce oscillations, but it does
+not enforce wet-volume conservation. Validation cases therefore either report
+uncorrected wet-volume drift as an error metric or enable explicit volume
+correction and report the applied global shift.
+
 Reinitialization policy by tracked validation case:
 
 | Case | Reinitialization policy | Rationale |
