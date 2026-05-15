@@ -383,7 +383,7 @@ benchmark runs.
 - [x] Rejected line-search trial does not leave stale trial cut context installed.
 - [x] Missing active domain is rejected for validation unfitted free-surface
       cases.
-- [ ] Cut-volume quadrature integrates constants exactly.
+- [x] Cut-volume quadrature integrates constants exactly.
 - [ ] Cut-volume quadrature integrates linear fields to the selected exactness
       target.
 - [ ] Cut-adjacent stabilization is local to the generated cut-neighborhood.
