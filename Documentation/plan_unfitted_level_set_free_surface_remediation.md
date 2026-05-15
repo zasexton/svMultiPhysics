@@ -431,15 +431,15 @@ benchmark runs.
 
 Use these as numerical-method guardrails while implementing the fixes.
 
-- [ ] Confirm the chosen geometry update strategy is explicitly monolithic,
+- [x] Confirm the chosen geometry update strategy is explicitly monolithic,
       outer-iterated, or explicit, rather than accidentally stale.
 - [ ] Confirm cut-cell quadrature is adequate for the finite-element order and
       nonlinear Navier-Stokes/VMS integrands.
-- [ ] Confirm ghost penalties are restricted to a cut-neighborhood or documented
+- [x] Confirm ghost penalties are restricted to a cut-neighborhood or documented
       extension patch.
-- [ ] Confirm level-set mass loss is either controlled by a conservative method,
+- [x] Confirm level-set mass loss is either controlled by a conservative method,
       monitored and corrected, or accepted with a documented tolerance.
-- [ ] Confirm output diagnostics report the actual integration wet region, not
+- [x] Confirm output diagnostics report the actual integration wet region, not
       only vertex signs.
 
 Relevant methods to compare against include Sussman-Smereka-Osher level-set
@@ -449,14 +449,14 @@ moment-fitted or subcell quadrature for implicitly cut finite elements.
 
 ## Recommended Work Order
 
-- [ ] First, implement nonlinear-state-consistent cut-context rebuilding.
-- [ ] Second, make missing active-domain configuration a hard validation error
+- [x] First, implement nonlinear-state-consistent cut-context rebuilding.
+- [x] Second, make missing active-domain configuration a hard validation error
       for unfitted one-fluid free-surface validation cases.
-- [ ] Third, localize cut-cell stabilization so solver probes are not affected by
+- [x] Third, localize cut-cell stabilization so solver probes are not affected by
       global artificial damping.
-- [ ] Fourth, replace constant-only cut-volume quadrature with higher-order
+- [x] Fourth, replace constant-only cut-volume quadrature with higher-order
       cut-cell quadrature.
-- [ ] Fifth, add wet-fraction diagnostics and maintenance/cut-context consistency
+- [x] Fifth, add wet-fraction diagnostics and maintenance/cut-context consistency
       checks.
 - [ ] Finally, rerun D18/D38 qualification only after the unit and smoke tests
       pass.
