@@ -82,7 +82,7 @@ remain reusable when only cut metadata changes.
 - [x] Add logging that reports the cut-context revision, negative volume,
       positive volume, active volume-region count, and interface-fragment count
       at each accepted step.
-- [ ] Add debug logging for Newton iterations that reports when cut topology
+- [x] Add debug logging for Newton iterations that reports when cut topology
       changes during the nonlinear solve.
 
 ### Cache And Invalidation Checklist

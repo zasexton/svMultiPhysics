@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
@@ -386,6 +387,16 @@ struct LevelSetAdvectionVelocityRequest {
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
 };
 
+struct ActiveCutContextRefreshReport {
+  bool refreshed{false};
+  std::uint64_t topology_key{0};
+  std::uint64_t value_revision{0};
+  std::size_t interface_fragments{0};
+  std::size_t active_volume_regions{0};
+  svmp::FE::Real negative_volume{0.0};
+  svmp::FE::Real positive_volume{0.0};
+};
+
 std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& params)
 {
   std::vector<ActiveCutVolumeRequest> requests;
@@ -591,6 +602,100 @@ const char* activeSideName(LevelSetActiveSide side) noexcept
   return side == LevelSetActiveSide::Negative
              ? "LevelSetNegative"
              : "LevelSetPositive";
+}
+
+constexpr std::uint64_t kCutContextHashOffset = 1469598103934665603ull;
+constexpr std::uint64_t kCutContextHashPrime = 1099511628211ull;
+
+void mixCutContextHash(std::uint64_t& h, std::uint64_t value) noexcept
+{
+  h ^= value;
+  h *= kCutContextHashPrime;
+}
+
+void mixCutContextHash(std::uint64_t& h, const std::string& value) noexcept
+{
+  for (const char c : value) {
+    mixCutContextHash(h, static_cast<unsigned char>(c));
+  }
+  mixCutContextHash(h, 0xffu);
+}
+
+std::uint64_t cutContextTopologyKey(
+    const svmp::FE::interfaces::LevelSetInterfaceDomain& domain) noexcept
+{
+  std::uint64_t h = kCutContextHashOffset;
+  mixCutContextHash(h, static_cast<std::uint64_t>(domain.marker()));
+  for (const auto& fragment : domain.fragments()) {
+    if (!fragment.active()) {
+      continue;
+    }
+    mixCutContextHash(h, static_cast<std::uint64_t>(fragment.parent_cell));
+    mixCutContextHash(h, static_cast<std::uint64_t>(fragment.kind));
+    mixCutContextHash(h, static_cast<std::uint64_t>(fragment.degeneracy));
+    mixCutContextHash(h, fragment.topology_id);
+  }
+  for (const auto& region : domain.volumeRegions()) {
+    if (!region.active()) {
+      continue;
+    }
+    mixCutContextHash(h, static_cast<std::uint64_t>(region.parent_cell));
+    mixCutContextHash(h, static_cast<std::uint64_t>(region.side));
+    mixCutContextHash(h, region.full_cell_equivalent ? 1u : 0u);
+    mixCutContextHash(h, region.topology_id);
+  }
+  return h;
+}
+
+const char* stateSyncPointName(
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point) noexcept
+{
+  using Point = svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+  switch (point) {
+  case Point::AcceptedNonlinearState:
+    return "accepted";
+  case Point::ResidualAssembly:
+    return "residual";
+  case Point::JacobianAssembly:
+    return "jacobian";
+  case Point::JacobianAndResidualAssembly:
+    return "jacobian_and_residual";
+  case Point::LineSearchTrialResidual:
+    return "line_search_trial";
+  case Point::RestoredNonlinearState:
+    return "restored";
+  case Point::FinalResidualAssembly:
+    return "final_residual";
+  }
+  return "unknown";
+}
+
+void logCutTopologyChange(
+    const ActiveCutContextRefreshReport& report,
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point,
+    std::optional<std::uint64_t>& previous_topology_key,
+    const char* solve_kind)
+{
+  if (!report.refreshed) {
+    return;
+  }
+  const bool changed =
+      previous_topology_key.has_value() &&
+      *previous_topology_key != report.topology_key;
+  if (changed && application::core::oopTraceEnabled()) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Cut topology changed during "
+        << solve_kind << " nonlinear solve sync_point="
+        << stateSyncPointName(point)
+        << " previous_topology_key=" << *previous_topology_key
+        << " topology_key=" << report.topology_key
+        << " cut_context_revision=" << report.value_revision
+        << " interface_fragments=" << report.interface_fragments
+        << " active_volume_regions=" << report.active_volume_regions
+        << " negative_volume=" << report.negative_volume
+        << " positive_volume=" << report.positive_volume << std::endl;
+  }
+  previous_topology_key = report.topology_key;
 }
 
 bool copyVertexFloat64Field(
@@ -1339,23 +1444,26 @@ bool updateLevelSetAdvectionVelocities(
   return updated;
 }
 
-bool refreshActiveCutIntegrationContextFromSolution(
+ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     std::span<const svmp::FE::Real> fe_solution,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
 {
+  ActiveCutContextRefreshReport report{};
   if (!sim.fe_system) {
-    return false;
+    return report;
   }
 
   const auto requests = activeCutVolumeRequests(params);
   if (requests.empty()) {
-    return false;
+    return report;
   }
 
   auto context =
       std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+  report.refreshed = true;
+  report.topology_key = kCutContextHashOffset;
 
   for (const auto& request : requests) {
     svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
@@ -1385,6 +1493,13 @@ bool refreshActiveCutIntegrationContextFromSolution(
           "' active_side=" + activeSideName(request.active_side) +
           " has zero active wet volume.");
     }
+    const auto topology_key = cutContextTopologyKey(result.domain);
+    mixCutContextHash(report.topology_key, topology_key);
+    report.value_revision = result.value_revision;
+    report.interface_fragments += summary.fragment_count;
+    report.active_volume_regions += summary.active_volume_region_count;
+    report.negative_volume += summary.negative_volume_measure;
+    report.positive_volume += summary.positive_volume_measure;
     context->addGeneratedInterfaceDomain(result.domain);
     application::core::oopCout()
         << "[svMultiPhysics::Application] Active-domain cut context marker="
@@ -1402,10 +1517,10 @@ bool refreshActiveCutIntegrationContextFromSolution(
   }
 
   sim.fe_system->setCutIntegrationContext(std::move(context));
-  return true;
+  return report;
 }
 
-bool refreshActiveCutIntegrationContext(
+ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     svmp::FE::backends::GenericVector& solution,
@@ -1419,14 +1534,14 @@ bool refreshActiveCutIntegrationContext(
       lifecycle);
 }
 
-bool refreshActiveCutIntegrationContext(
+ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
     application::core::SimulationComponents& sim,
     const Parameters& params,
     const svmp::FE::systems::SystemStateView& state,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle)
 {
   if (!sim.fe_system) {
-    return false;
+    return {};
   }
   const auto required_dofs =
       static_cast<std::size_t>(sim.fe_system->dofHandler().getNumDofs());
@@ -1746,13 +1861,16 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   auto cut_lifecycle =
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
+  auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   newton_opts.synchronize_state =
-      [&, cut_lifecycle](const svmp::FE::systems::SystemStateView& state,
-                         StateSyncPoint) {
-        (void)refreshActiveCutIntegrationContext(
+      [&, cut_lifecycle, cut_topology_key](
+          const svmp::FE::systems::SystemStateView& state,
+          StateSyncPoint point) {
+        const auto report = refreshActiveCutIntegrationContext(
             sim, params, state, *cut_lifecycle);
+        logCutTopologyChange(report, point, *cut_topology_key, "steady");
       };
 
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
@@ -1917,13 +2035,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   };
   auto cut_lifecycle =
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
+  auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
   using TransientStateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   opts.newton.synchronize_state =
-      [&, cut_lifecycle](const svmp::FE::systems::SystemStateView& state,
-                         TransientStateSyncPoint) {
-        (void)refreshActiveCutIntegrationContext(
+      [&, cut_lifecycle, cut_topology_key](
+          const svmp::FE::systems::SystemStateView& state,
+          TransientStateSyncPoint point) {
+        const auto report = refreshActiveCutIntegrationContext(
             sim, params, state, *cut_lifecycle);
+        logCutTopologyChange(report, point, *cut_topology_key, "transient");
       };
   callbacks.on_before_physics_solve =
       [&](svmp::FE::timestepping::TimeHistory& h, double /*solve_time*/, double /*dt*/) {
