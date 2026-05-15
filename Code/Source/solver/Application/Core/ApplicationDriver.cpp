@@ -2125,7 +2125,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const Parameters& params,
     std::span<const svmp::FE::Real> fe_solution,
     svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle& lifecycle,
-    const char* provenance)
+    const char* provenance,
+    const char* solution_source = nullptr)
 {
   ActiveCutContextRefreshReport report{};
   if (!sim.fe_system) {
@@ -2304,6 +2305,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << "[svMultiPhysics::Application] Active-domain cut context"
         << " diagnostic=cut_context_rebuild"
         << " provenance=" << (provenance != nullptr ? provenance : "unknown")
+        << " solution_source="
+        << (solution_source != nullptr ? solution_source : "unknown")
         << " marker="
         << result.interface_marker << " field='" << request.level_set_field_name
         << "' domain_id='" << request.domain_id
@@ -2380,7 +2383,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
       params,
       std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
       lifecycle,
-      provenance);
+      provenance,
+      "fe_vector");
 }
 
 ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
@@ -2393,19 +2397,17 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContext(
   if (!sim.fe_system) {
     return {};
   }
-  const auto required_dofs =
-      static_cast<std::size_t>(sim.fe_system->dofHandler().getNumDofs());
-  if (!state.u.empty() && state.u.size() >= required_dofs) {
-    return refreshActiveCutIntegrationContextFromSolution(
-        sim, params, state.u, lifecycle, provenance);
-  }
+  const char* solution_source =
+      state.u_vector != nullptr ? "state_vector_fe_ordered"
+                                : "state_span_assumed_fe_ordered";
   const auto fe_solution = gatherFeOrderedSolution(state);
   return refreshActiveCutIntegrationContextFromSolution(
       sim,
       params,
       std::span<const svmp::FE::Real>(fe_solution.data(), fe_solution.size()),
       lifecycle,
-      provenance);
+      provenance,
+      solution_source);
 }
 
 class ZeroTimeDerivativeIntegrator final : public svmp::FE::systems::TimeIntegrator {

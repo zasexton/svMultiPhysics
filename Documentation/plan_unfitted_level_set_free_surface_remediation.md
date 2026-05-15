@@ -461,6 +461,10 @@ benchmark runs.
       Jacobian entry diagnostics so MMS probes can confirm the discovered
       residual couplings and the assembled matrix action at the largest
       finite-difference mismatches.
+- [x] Route Newton cut-context refreshes through FE-ordered state vectors and
+      report the refresh solution source in cut-context rebuild diagnostics so
+      MMS probes can separate geometry-state ordering defects from assembly
+      defects.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
