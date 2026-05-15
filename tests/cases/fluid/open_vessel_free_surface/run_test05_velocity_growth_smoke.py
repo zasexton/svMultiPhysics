@@ -36,6 +36,7 @@ CASE_GATE_X = {
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
+RANK_RE = re.compile(r"\[R([0-9]+)\]")
 COMPONENT_NORM_RE = re.compile(
     r"\[(.*?) norm=([-+0-9.eE]+) mean=([-+0-9.eE]+)"
     r"(?: min=([-+0-9.eE]+) max=([-+0-9.eE]+))?\]"
@@ -559,6 +560,12 @@ def result_path(case_dir: Path, step: int) -> Path:
     raise FileNotFoundError(f"no result file found under {case_dir}")
 
 
+def value_span(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    return float(max(values) - min(values))
+
+
 def parse_active_volume_history(solver_output: str) -> dict[str, Any]:
     context_volumes = [
         float(match.group(1))
@@ -569,16 +576,11 @@ def parse_active_volume_history(solver_output: str) -> dict[str, Any]:
         for match in CUT_ASSEMBLY_VOLUME_RE.finditer(solver_output)
     ]
 
-    def span(values: list[float]) -> float:
-        if len(values) < 2:
-            return 0.0
-        return float(max(values) - min(values))
-
     return {
         "cut_context_active_side_volumes": context_volumes,
         "assembly_active_wet_volumes": assembly_volumes,
-        "cut_context_active_side_volume_change": span(context_volumes),
-        "assembly_active_wet_volume_change": span(assembly_volumes),
+        "cut_context_active_side_volume_change": value_span(context_volumes),
+        "assembly_active_wet_volume_change": value_span(assembly_volumes),
     }
 
 
@@ -597,10 +599,14 @@ def parse_scalar(value: str) -> Any:
 
 
 def parse_key_values(line: str) -> dict[str, Any]:
-    return {
+    values = {
         match.group(1): parse_scalar(match.group(2))
         for match in KEY_VALUE_RE.finditer(line)
     }
+    rank_match = RANK_RE.search(line)
+    if rank_match is not None:
+        values["rank"] = int(rank_match.group(1))
+    return values
 
 
 def convert_match(match: re.Match[str]) -> dict[str, Any]:
@@ -627,6 +633,114 @@ def numeric_range(values: list[float]) -> dict[str, float] | None:
         "max": float(max(values)),
         "mean": float(sum(values) / len(values)),
     }
+
+
+def sum_numeric(records: list[dict[str, Any]], key: str) -> float:
+    return float(sum(
+        float(record[key])
+        for record in records
+        if isinstance(record.get(key), (int, float))
+    ))
+
+
+def sum_integer(records: list[dict[str, Any]], key: str) -> int:
+    return int(sum(
+        int(record[key])
+        for record in records
+        if isinstance(record.get(key), int)
+    ))
+
+
+def finite_min(values: list[float], default: float = 0.0) -> float:
+    finite = [value for value in values if np.isfinite(value)]
+    return float(min(finite)) if finite else default
+
+
+def finite_max(values: list[float], default: float = 0.0) -> float:
+    finite = [value for value in values if np.isfinite(value)]
+    return float(max(finite)) if finite else default
+
+
+def group_rank_records(records: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    groups: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    ranks_seen: set[int] = set()
+    for record in records:
+        rank = record.get("rank")
+        if isinstance(rank, int):
+            if rank in ranks_seen and current:
+                groups.append(current)
+                current = []
+                ranks_seen = set()
+            ranks_seen.add(rank)
+        elif current:
+            groups.append(current)
+            current = []
+            ranks_seen = set()
+        current.append(record)
+        if not isinstance(rank, int):
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    return groups
+
+
+def aggregate_cut_volume_assemblies(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups = []
+    for group_index, group in enumerate(group_rank_records(records)):
+        active_records = [
+            record for record in group
+            if float(record.get("rules", 0) or 0) > 0.0
+        ]
+        records_for_extrema = active_records or group
+        aggregate: dict[str, Any] = {
+            "diagnostic": "cut_volume_assembly_global",
+            "group_index": group_index,
+            "rank_records": len(group),
+        }
+        first = group[0]
+        for key in ("marker", "side"):
+            if key in first:
+                aggregate[key] = first[key]
+        for key in (
+            "active_wet_volume",
+            "cut_cell_active_wet_volume",
+            "full_cell_active_wet_volume",
+        ):
+            aggregate[key] = sum_numeric(group, key)
+        for key in (
+            "rules",
+            "cut_cell_rules",
+            "full_cell_rules",
+            "quadrature_points",
+            "null_rules",
+            "zero_quadrature_rules",
+            "nonfinite_measure_rules",
+            "negative_measure_rules",
+            "nonfinite_volume_fraction_rules",
+        ):
+            aggregate[key] = sum_integer(group, key)
+        for key in ("min_rule_measure", "min_volume_fraction", "min_exact_order"):
+            values = [
+                float(record[key])
+                for record in records_for_extrema
+                if isinstance(record.get(key), (int, float))
+            ]
+            aggregate[key] = finite_min(values)
+        for key in ("max_rule_measure", "max_volume_fraction", "max_exact_order"):
+            values = [
+                float(record[key])
+                for record in records_for_extrema
+                if isinstance(record.get(key), (int, float))
+            ]
+            aggregate[key] = finite_max(values)
+        if "min_exact_order" in aggregate:
+            aggregate["min_exact_order"] = int(aggregate["min_exact_order"])
+        if "max_exact_order" in aggregate:
+            aggregate["max_exact_order"] = int(aggregate["max_exact_order"])
+        groups.append(aggregate)
+    return groups
 
 
 def summarize_time_loop(time_loop: dict[str, Any]) -> dict[str, Any]:
@@ -766,6 +880,20 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
     }
     diagnostics["time_loop"]["summary"] = summarize_time_loop(diagnostics["time_loop"])
     diagnostics.update(parse_active_volume_history(solver_output))
+    diagnostics["cut_volume_assembly_groups"] = aggregate_cut_volume_assemblies(
+        diagnostics["cut_volume_assemblies"]
+    )
+    diagnostics["counts"]["cut_volume_assembly_groups"] = len(
+        diagnostics["cut_volume_assembly_groups"]
+    )
+    if diagnostics["cut_volume_assembly_groups"]:
+        assembly_volumes = [
+            float(record["active_wet_volume"])
+            for record in diagnostics["cut_volume_assembly_groups"]
+            if isinstance(record.get("active_wet_volume"), (int, float))
+        ]
+        diagnostics["assembly_active_wet_volumes"] = assembly_volumes
+        diagnostics["assembly_active_wet_volume_change"] = value_span(assembly_volumes)
     return diagnostics
 
 
@@ -833,7 +961,10 @@ def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
     ]
     assembly_volumes = [
         float(record["active_wet_volume"])
-        for record in diagnostics.get("cut_volume_assemblies", [])
+        for record in (
+            diagnostics.get("cut_volume_assembly_groups")
+            or diagnostics.get("cut_volume_assemblies", [])
+        )
         if isinstance(record.get("active_wet_volume"), (int, float))
     ]
     if not context_volumes or not assembly_volumes:
@@ -847,7 +978,10 @@ def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
 def diagnostic_cut_volume_min_exact_order(diagnostics: dict[str, Any]) -> int | None:
     orders = [
         int(record["min_exact_order"])
-        for record in diagnostics.get("cut_volume_assemblies", [])
+        for record in (
+            diagnostics.get("cut_volume_assembly_groups")
+            or diagnostics.get("cut_volume_assemblies", [])
+        )
         if isinstance(record.get("min_exact_order"), int)
     ]
     if not orders:
@@ -858,7 +992,10 @@ def diagnostic_cut_volume_min_exact_order(diagnostics: dict[str, Any]) -> int | 
 def diagnostic_cut_volume_max_exact_order(diagnostics: dict[str, Any]) -> int | None:
     orders = [
         int(record["max_exact_order"])
-        for record in diagnostics.get("cut_volume_assemblies", [])
+        for record in (
+            diagnostics.get("cut_volume_assembly_groups")
+            or diagnostics.get("cut_volume_assemblies", [])
+        )
         if isinstance(record.get("max_exact_order"), int)
     ]
     if not orders:

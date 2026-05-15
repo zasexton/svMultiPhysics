@@ -420,6 +420,9 @@ benchmark runs.
       with no local wet cells do not abort when the global active wet volume is
       positive, and report global cut-context volumes and counts in the rebuild
       diagnostic.
+- [x] Aggregate rank-local MPI cut-volume assembly diagnostics in the smoke
+      script so active-volume, quadrature-order, and wet-volume checks compare
+      global assembly summaries against global cut-context rebuild summaries.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
