@@ -492,6 +492,9 @@ benchmark runs.
 - [x] Add smoke-script phase summaries for JIT specialization and assembly
       timing so D18/D38 diagnostics can localize slow or mismatched work by
       operator mode, domain, role, and specialized shape.
+- [x] Record MMS GMRES and D18 assembly diagnostic findings, including the
+      fixed-geometry reason for excluding level-set `phi` from the
+      velocity/pressure Jacobian filter.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
