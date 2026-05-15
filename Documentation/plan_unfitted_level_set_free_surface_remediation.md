@@ -236,8 +236,10 @@ side volume keep active side-volume metadata.
 - [x] Add exact linear integration tests for cut triangles.
 - [x] Add exact linear integration tests for cut quads.
 - [x] Add exact linear integration tests for cut tetrahedra.
-- [ ] Add polynomial convergence tests for quadratic fields where exactness is
+- [x] Add polynomial convergence tests for quadratic fields where exactness is
       not guaranteed.
+      A refinement test integrates a quadratic field over a triangular cut-volume
+      region and checks that the generated cut-volume quadrature error decreases.
 - [x] Add tests where the interface cuts very close to a vertex.
 - [x] Add tests where the interface cuts very close to an edge.
 - [x] Add tests for small wet volume fractions.

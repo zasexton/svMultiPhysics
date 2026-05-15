@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
@@ -27,6 +28,54 @@ Real integrateWeight(const CutQuadratureRule& rule)
     Real value = 0.0;
     for (const auto& point : rule.points) {
         value += point.weight;
+    }
+    return value;
+}
+
+Real integrateQuadraticCutVolumeOnUnitTriangle(int cells_per_axis)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("quadratic-convergence-source");
+    request.interface_marker = 89;
+    request.volume_quadrature_order = 2;
+
+    LevelSetInterfaceDomain domain(request);
+    MeshIndex parent_cell = 0;
+    const Real h = Real{1.0} / static_cast<Real>(cells_per_axis);
+    for (int j = 0; j < cells_per_axis; ++j) {
+        for (int i = 0; i < cells_per_axis; ++i) {
+            const Real x0 = h * static_cast<Real>(i);
+            const Real y0 = h * static_cast<Real>(j);
+            const Real x1 = x0 + h;
+            const Real y1 = y0 + h;
+            const std::vector<std::array<Real, 3>> nodes{
+                {{x0, y0, 0.0}},
+                {{x1, y0, 0.0}},
+                {{x1, y1, 0.0}},
+                {{x0, y1, 0.0}}};
+            appendLinearLevelSetCellCut2D(
+                domain,
+                LevelSetCellCutInput{
+                    .parent_cell = parent_cell++,
+                    .element_type = ElementType::Quad4,
+                    .node_coordinates = nodes,
+                    .level_set_values = {x0 + y0 - 1.0,
+                                         x1 + y0 - 1.0,
+                                         x1 + y1 - 1.0,
+                                         x0 + y1 - 1.0}});
+        }
+    }
+
+    Real value = 0.0;
+    for (const auto& rule : domain.volumeQuadratureRules()) {
+        if (rule.side != CutIntegrationSide::Negative) {
+            continue;
+        }
+        for (const auto& point : rule.points) {
+            const Real x = point.point[0];
+            const Real y = point.point[1];
+            value += point.weight * (x * x + y * y);
+        }
     }
     return value;
 }
@@ -621,6 +670,19 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         EXPECT_NEAR(measure_sum, c.parent_measure, 1.0e-14);
         EXPECT_NEAR(weight_sum, c.parent_measure, 1.0e-14);
     }
+}
+
+TEST(LevelSetInterfaceDomain, CutVolumeQuadratureConvergesForQuadraticFields)
+{
+    constexpr Real exact = Real{1.0} / Real{6.0};
+    const Real coarse_error =
+        std::abs(integrateQuadraticCutVolumeOnUnitTriangle(/*cells_per_axis=*/8) - exact);
+    const Real fine_error =
+        std::abs(integrateQuadraticCutVolumeOnUnitTriangle(/*cells_per_axis=*/16) - exact);
+
+    EXPECT_GT(coarse_error, 0.0);
+    EXPECT_LT(fine_error, 0.55 * coarse_error);
+    EXPECT_LT(fine_error, 1.0e-3);
 }
 
 TEST(LevelSetInterfaceDomain, LinearCellCutsExportTriangleVolumeCentroids)
