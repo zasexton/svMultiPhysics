@@ -340,7 +340,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
       deferred.
 - [x] If projection-based reinitialization remains the default, add diagnostics
       reporting interface displacement caused by reinitialization.
-- [ ] If global-shift volume correction remains the default, add diagnostics
+- [x] If global-shift volume correction remains the default, add diagnostics
       reporting shift magnitude and achieved volume error.
 - [ ] Ensure reinitialization and volume correction update the accepted solution,
       previous-state history, and cut context consistently.

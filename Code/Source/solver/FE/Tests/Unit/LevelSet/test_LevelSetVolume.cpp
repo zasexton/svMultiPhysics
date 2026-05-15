@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -270,9 +271,13 @@ TEST(LevelSetVolume, GlobalShiftCorrectionMatchesTargetVolume)
     EXPECT_GT(result.iterations, 0);
     EXPECT_NEAR(result.applied_shift, 0.25, 1.0e-8);
     EXPECT_NEAR(result.initial_negative_volume, 1.0 / 48.0, 1.0e-12);
+    EXPECT_GT(std::abs(result.initial_negative_volume -
+                       result.target_negative_volume),
+              correction_opts.volume_tolerance);
     EXPECT_NEAR(result.corrected_negative_volume,
                 correction_opts.target_negative_volume,
                 correction_opts.volume_tolerance);
+    EXPECT_NEAR(result.volume_error, 0.0, correction_opts.volume_tolerance);
     ASSERT_EQ(corrected.size(), coefficients.size());
     for (std::size_t i = 0; i < coefficients.size(); ++i) {
         EXPECT_NEAR(corrected[i], coefficients[i] + result.applied_shift, 1.0e-12);
@@ -301,6 +306,7 @@ TEST(LevelSetVolume, GlobalShiftCorrectionLeavesMatchedVolumeUnchanged)
     ASSERT_TRUE(result.success) << result.diagnostic;
     EXPECT_EQ(result.iterations, 0);
     EXPECT_DOUBLE_EQ(result.applied_shift, 0.0);
+    EXPECT_NEAR(result.volume_error, 0.0, correction_opts.volume_tolerance);
     EXPECT_EQ(corrected, coefficients);
 }
 

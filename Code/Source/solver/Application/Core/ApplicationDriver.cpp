@@ -1263,9 +1263,15 @@ bool applyLevelSetMaintenance(
           << "[svMultiPhysics::Application] Level-set volume corrected field='"
           << request.level_set_field_name << "' step=" << completed_step
           << " target_negative_volume=" << result.target_negative_volume
+          << " initial_negative_volume=" << result.initial_negative_volume
+          << " initial_volume_error="
+          << (result.initial_negative_volume - result.target_negative_volume)
           << " corrected_negative_volume="
           << result.corrected_negative_volume
-          << " applied_shift=" << result.applied_shift << std::endl;
+          << " achieved_volume_error=" << result.volume_error
+          << " applied_shift=" << result.applied_shift
+          << " applied_shift_magnitude=" << std::abs(result.applied_shift)
+          << " iterations=" << result.iterations << std::endl;
     }
   }
 
