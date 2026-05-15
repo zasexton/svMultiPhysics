@@ -1876,6 +1876,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           std::to_string(result.interface_marker) + " field='" +
           request.level_set_field_name + "' domain_id='" + request.domain_id +
           "' active_side=" + activeSideName(request.active_side) +
+          " isovalue=" + std::to_string(request.isovalue) +
           " has zero active wet volume.");
     }
     const auto topology_key = cutContextTopologyKey(result.domain);
@@ -1895,6 +1896,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << result.interface_marker << " field='" << request.level_set_field_name
         << "' domain_id='" << request.domain_id
         << "' active_side=" << activeSideName(request.active_side)
+        << " isovalue=" << request.isovalue
         << " cut_context_revision=" << result.value_revision
         << " active_side_volume=" << active_volume
         << " interface_fragments=" << summary.fragment_count
