@@ -518,6 +518,9 @@ benchmark runs.
 - [x] Add no-output smoke parsing for generated cut-volume sliver pruning,
       including retained minimum active volume fraction and pruned region
       counts.
+- [x] Add direct Eigen factorization diagnostics for unfitted free-surface
+      probes so singular monolithic systems report zero-row, zero-column,
+      diagonal, RHS, and field-block summaries before aborting.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
