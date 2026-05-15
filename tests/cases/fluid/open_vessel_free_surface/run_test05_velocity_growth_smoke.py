@@ -1115,7 +1115,19 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
     if diagnostics.get("fsils_true_residuals"):
-        metrics["latest_fsils_true_residual"] = diagnostics["fsils_true_residuals"][-1]
+        latest_true_residual = diagnostics["fsils_true_residuals"][-1]
+        metrics["latest_fsils_true_residual"] = latest_true_residual
+        for name in (
+            "constraint_solution_mean",
+            "constraint_solution_rms",
+            "constraint_solution_fluctuation_rms",
+            "constraint_solution_mean_dominance",
+            "constraint_residual_mean",
+            "constraint_residual_rms",
+        ):
+            value = latest_true_residual.get(name)
+            if isinstance(value, (int, float)):
+                metrics[f"latest_fsils_{name}"] = value
 
     wet_fraction_volume = metrics.get("wet_fraction_volume")
     context_volumes = metrics.get("cut_context_active_side_volumes", [])

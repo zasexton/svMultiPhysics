@@ -4623,6 +4623,74 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
         return global_sq;
     };
 
+    auto componentMeanStats =
+        [&](const FsilsVector& vec, int component) -> FsilsConstraintMeanStats {
+        FsilsConstraintMeanStats stats;
+        if (component < 0 || component >= dof) {
+            return stats;
+        }
+
+        long double local_sum = 0.0L;
+        long double local_sq = 0.0L;
+        unsigned long long local_count = 0ull;
+        const auto span = vec.localSpan();
+        for (int old = 0; old < lhs.nNo; ++old) {
+            const int internal = lhs.map(old);
+            if (internal < 0 || internal >= lhs.mynNo) {
+                continue;
+            }
+            const std::size_t idx =
+                static_cast<std::size_t>(old) * static_cast<std::size_t>(dof) +
+                static_cast<std::size_t>(component);
+            const Real value = span[idx];
+            local_sum += static_cast<long double>(value);
+            local_sq += static_cast<long double>(value) * static_cast<long double>(value);
+            ++local_count;
+        }
+
+        long double global_sum = local_sum;
+        long double global_sq = local_sq;
+        unsigned long long global_count = local_count;
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_sum, &global_sum, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_sq, &global_sq, 1, MPI_LONG_DOUBLE, lhs.commu);
+            fe_fsi_linear_solver::fsils_allreduce_sum(
+                &local_count, &global_count, 1, MPI_UNSIGNED_LONG_LONG, lhs.commu);
+        }
+
+        if (global_count == 0ull) {
+            return stats;
+        }
+
+        const long double inv_count = 1.0L / static_cast<long double>(global_count);
+        const long double mean = global_sum * inv_count;
+        const long double mean_sq = mean * mean;
+        const long double rms_sq = std::max<long double>(0.0L, global_sq * inv_count);
+        const long double fluct_sq = std::max<long double>(0.0L, rms_sq - mean_sq);
+
+        stats.valid = std::isfinite(static_cast<double>(mean)) &&
+                      std::isfinite(static_cast<double>(rms_sq)) &&
+                      std::isfinite(static_cast<double>(fluct_sq));
+        stats.count = static_cast<std::uint64_t>(global_count);
+        stats.mean = static_cast<Real>(mean);
+        stats.rms = static_cast<Real>(std::sqrt(rms_sq));
+        stats.fluctuation_rms = static_cast<Real>(std::sqrt(fluct_sq));
+        return stats;
+    };
+
+    auto meanDominance = [](const FsilsConstraintMeanStats& stats) -> Real {
+        if (!stats.valid || stats.count == 0u) {
+            return Real{0.0};
+        }
+        const Real fluctuation_floor =
+            std::max<Real>(stats.rms * static_cast<Real>(1e-12),
+                           static_cast<Real>(1e-14));
+        const Real fluctuation = std::max(stats.fluctuation_rms, fluctuation_floor);
+        return std::abs(stats.mean) / fluctuation;
+    };
+
     auto blockNormFromComponentSquares =
         [](const std::vector<double>& component_sq, int start, int n_components) {
             double sq_sum = 0.0;
@@ -4667,6 +4735,25 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             const auto ax_correction_sq = componentSquaredNorms(ax_correction);
             const auto ax_full_sq = componentSquaredNorms(ax_full);
             const auto residual_sq = componentSquaredNorms(residual_true);
+            const bool report_constraint_stats =
+                has_saddle_point && con_ncomp == 1 && con_start >= 0 &&
+                con_start < dof;
+            const auto constraint_solution_stats =
+                report_constraint_stats
+                    ? componentMeanStats(solution, con_start)
+                    : FsilsConstraintMeanStats{};
+            const auto constraint_rhs_stats =
+                report_constraint_stats
+                    ? componentMeanStats(rhs_true, con_start)
+                    : FsilsConstraintMeanStats{};
+            const auto constraint_ax_full_stats =
+                report_constraint_stats
+                    ? componentMeanStats(ax_full, con_start)
+                    : FsilsConstraintMeanStats{};
+            const auto constraint_residual_stats =
+                report_constraint_stats
+                    ? componentMeanStats(residual_true, con_start)
+                    : FsilsConstraintMeanStats{};
 
             if (lhs.commu.task != 0) {
                 return;
@@ -4694,6 +4781,40 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
                 << " grouped_bordered_field_couplings="
                 << grouped_bordered_field_couplings_.size()
                 << " stage_scale=" << stage_scale;
+            if (constraint_solution_stats.valid) {
+                oss << " constraint_component=" << con_start
+                    << " constraint_count=" << constraint_solution_stats.count
+                    << " constraint_solution_mean="
+                    << constraint_solution_stats.mean
+                    << " constraint_solution_rms="
+                    << constraint_solution_stats.rms
+                    << " constraint_solution_fluctuation_rms="
+                    << constraint_solution_stats.fluctuation_rms
+                    << " constraint_solution_mean_dominance="
+                    << meanDominance(constraint_solution_stats);
+            }
+            if (constraint_rhs_stats.valid) {
+                oss << " constraint_rhs_mean=" << constraint_rhs_stats.mean
+                    << " constraint_rhs_rms=" << constraint_rhs_stats.rms
+                    << " constraint_rhs_fluctuation_rms="
+                    << constraint_rhs_stats.fluctuation_rms;
+            }
+            if (constraint_ax_full_stats.valid) {
+                oss << " constraint_ax_full_mean="
+                    << constraint_ax_full_stats.mean
+                    << " constraint_ax_full_rms="
+                    << constraint_ax_full_stats.rms
+                    << " constraint_ax_full_fluctuation_rms="
+                    << constraint_ax_full_stats.fluctuation_rms;
+            }
+            if (constraint_residual_stats.valid) {
+                oss << " constraint_residual_mean="
+                    << constraint_residual_stats.mean
+                    << " constraint_residual_rms="
+                    << constraint_residual_stats.rms
+                    << " constraint_residual_fluctuation_rms="
+                    << constraint_residual_stats.fluctuation_rms;
+            }
 
             for (int c = 0; c < dof; ++c) {
                 const auto index = static_cast<std::size_t>(c);

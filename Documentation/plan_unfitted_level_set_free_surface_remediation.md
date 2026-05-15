@@ -429,6 +429,9 @@ benchmark runs.
 - [x] Add parseable FSILS true-residual diagnostics and smoke parsing for
       failed BlockSchur D18/D38 probes so formulation-block residual
       contributions are captured before additional solver changes.
+- [x] Add constraint-component mean, RMS, fluctuation, and residual mean
+      diagnostics to failed FSILS true-residual records so pressure nullspace
+      drift can be separated from pressure-block residual error.
 - [x] Add smoke-script linear and BlockSchur subsolver override switches so
       D18/D38 solver-control probes can be run from temporary case copies
       without editing validation fixtures.
