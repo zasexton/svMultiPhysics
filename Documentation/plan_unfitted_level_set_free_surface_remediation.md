@@ -349,7 +349,7 @@ and output uses vertex sign masking rather than cut-volume wet fractions.
 
 ### Diagnostic Output Checklist
 
-- [ ] Add cell-centered wet volume fraction output from generated cut-volume
+- [x] Add cell-centered wet volume fraction output from generated cut-volume
       metadata.
 - [ ] Add total wet volume output per accepted step.
 - [ ] Add wet-volume drift output relative to the initial accepted volume.

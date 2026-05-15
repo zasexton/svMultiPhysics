@@ -607,6 +607,47 @@ const char* activeSideName(LevelSetActiveSide side) noexcept
              : "LevelSetPositive";
 }
 
+svmp::FE::geometry::CutIntegrationSide cutIntegrationSide(
+    LevelSetActiveSide side) noexcept
+{
+  return side == LevelSetActiveSide::Negative
+             ? svmp::FE::geometry::CutIntegrationSide::Negative
+             : svmp::FE::geometry::CutIntegrationSide::Positive;
+}
+
+std::string fieldNameToken(std::string value)
+{
+  value = trim_copy(std::move(value));
+  for (auto& c : value) {
+    const auto uc = static_cast<unsigned char>(c);
+    if (!std::isalnum(uc)) {
+      c = '_';
+    }
+  }
+  value.erase(std::unique(value.begin(), value.end(),
+                          [](char a, char b) {
+                            return a == '_' && b == '_';
+                          }),
+              value.end());
+  while (!value.empty() && value.front() == '_') {
+    value.erase(value.begin());
+  }
+  while (!value.empty() && value.back() == '_') {
+    value.pop_back();
+  }
+  return value.empty() ? std::string{"free_surface"} : value;
+}
+
+std::string wetVolumeFractionFieldName(
+    const ActiveCutVolumeRequest& request,
+    std::size_t request_index)
+{
+  if (request_index == 0u) {
+    return "WetVolumeFraction";
+  }
+  return "WetVolumeFraction_" + fieldNameToken(request.domain_id);
+}
+
 std::vector<svmp::FE::systems::CutInteriorFacetAdjacency>
 collectInteriorFacetAdjacencies(const svmp::FE::assembly::IMeshAccess& mesh)
 {
@@ -800,6 +841,83 @@ std::size_t copyRawFreeSurfaceDebugOutput(svmp::Mesh& mesh)
   copied += copyVertexFloat64Field(mesh, "Pressure", "RawPressure") ? 1u : 0u;
   copied += copyVertexFloat64Field(mesh, "Divergence", "RawDivergence") ? 1u : 0u;
   return copied;
+}
+
+svmp::FieldHandle ensureVolumeFloat64Field(svmp::Mesh& mesh,
+                                           const std::string& name,
+                                           std::size_t components)
+{
+  if (mesh.has_field(svmp::EntityKind::Volume, name)) {
+    auto handle = mesh.field_handle(svmp::EntityKind::Volume, name);
+    if (mesh.field_type(handle) == svmp::FieldScalarType::Float64 &&
+        mesh.field_components(handle) == components) {
+      return handle;
+    }
+    mesh.remove_field(handle);
+  }
+  return mesh.attach_field(svmp::EntityKind::Volume,
+                           name,
+                           svmp::FieldScalarType::Float64,
+                           components);
+}
+
+std::size_t writeWetVolumeFractionOutput(
+    svmp::Mesh& mesh,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    const svmp::FE::assembly::CutIntegrationContext* cut_context)
+{
+  if (requests.empty() || cut_context == nullptr) {
+    return 0u;
+  }
+
+  const auto& markers = cut_context->generatedVolumeMarkers();
+  std::size_t fields_written = 0u;
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& request = requests[i];
+    int marker = request.requested_interface_marker;
+    if (marker < 0) {
+      if (i >= markers.size()) {
+        continue;
+      }
+      marker = markers[i];
+    }
+
+    const auto side = cutIntegrationSide(request.active_side);
+    const auto rules =
+        cut_context->generatedVolumeRulesForMarkerAndSide(marker, side);
+    if (rules.empty()) {
+      continue;
+    }
+
+    const auto field_name = wetVolumeFractionFieldName(request, i);
+    const auto handle = ensureVolumeFloat64Field(mesh, field_name, 1u);
+    auto* data = static_cast<double*>(mesh.field_data(handle));
+    if (data == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Failed to allocate VTK cell field '" +
+          field_name + "'.");
+    }
+    std::fill(data, data + mesh.n_cells(), 0.0);
+
+    for (const auto* rule : rules) {
+      if (rule == nullptr) {
+        continue;
+      }
+      const auto cell = rule->provenance.parent_entity;
+      if (cell < 0 ||
+          static_cast<std::size_t>(cell) >= mesh.n_cells()) {
+        continue;
+      }
+      auto& fraction = data[static_cast<std::size_t>(cell)];
+      fraction = std::clamp(
+          fraction + static_cast<double>(rule->volume_fraction),
+          0.0,
+          1.0);
+    }
+    ++fields_written;
+  }
+
+  return fields_written;
 }
 
 std::size_t maskInactiveFreeSurfaceOutput(
@@ -2456,6 +2574,16 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   }
 
   const auto active_output_requests = activeCutVolumeRequests(params);
+  const auto wet_fraction_fields = writeWetVolumeFractionOutput(
+      mesh,
+      active_output_requests,
+      sim.fe_system->cutIntegrationContext());
+  if (wet_fraction_fields > 0u && is_root) {
+    oopCout() << "[svMultiPhysics::Application] VTK output: wrote "
+              << wet_fraction_fields
+              << " wet volume fraction cell field(s) from generated cut metadata."
+              << std::endl;
+  }
   if (!active_output_requests.empty() &&
       parseBoolEnv("SVMP_DEBUG_RAW_ACTIVE_DOMAIN_OUTPUT", false)) {
     const auto raw_fields_copied = copyRawFreeSurfaceDebugOutput(mesh);
