@@ -22,6 +22,7 @@
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Assembly/StandardAssembler.h"
 #include "FE/Analysis/FormExprScanner.h"
+#include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Dofs/DofMap.h"
 #include "FE/Dofs/EntityDofMap.h"
@@ -583,6 +584,43 @@ std::vector<FE::Real> affineXVectorTetraCoefficients()
     coeffs[2] = 0.0;
     coeffs[3] = 0.0;
     return coeffs;
+}
+
+std::shared_ptr<FE::assembly::CutIntegrationContext>
+makeSingleTetraCutVolumeContext(
+    int marker,
+    std::vector<FE::geometry::CutQuadraturePoint> points)
+{
+    auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
+
+    FE::geometry::CutQuadratureRule rule;
+    rule.kind = FE::geometry::CutQuadratureKind::Volume;
+    rule.side = FE::geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = FE::Real{1.0} / FE::Real{6.0};
+    rule.frame = FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.embedded_geometry_id = "single_tetra_cut_volume";
+    rule.provenance.cut_topology_id = "single_tetra_cut_volume";
+    rule.provenance.cut_topology_revision = 1u;
+    rule.points = std::move(points);
+    for (const auto& point : rule.points) {
+        rule.measure += point.weight;
+    }
+    rule.volume_fraction = rule.measure / rule.parent_measure;
+
+    FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.side = rule.side;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.provenance_id = rule.provenance.embedded_geometry_id;
+    metadata.cut_topology_id = rule.provenance.cut_topology_id;
+    metadata.revision_key = rule.provenance.cut_topology_revision;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+
+    cut_context->addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+    return cut_context;
 }
 
 FE::Real residualNorm(FE::systems::FESystem& system,
@@ -2165,6 +2203,97 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainInstallsCutVolumeKernels)
     }
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellIntegral));
+}
+
+TEST(MovingDomainPhysics, NavierStokesActiveDomainCutVolumeSamplesNonconstantVelocity)
+{
+    constexpr int interface_marker = 51;
+    constexpr FE::Real measure = FE::Real{1.0} / FE::Real{12.0};
+    auto constant_only_context = makeSingleTetraCutVolumeContext(
+        interface_marker,
+        {FE::geometry::CutQuadraturePoint{
+            .point = {{0.25, 0.25, 0.25}},
+            .weight = measure,
+        }});
+    auto split_context = makeSingleTetraCutVolumeContext(
+        interface_marker,
+        {
+            FE::geometry::CutQuadraturePoint{
+                .point = {{0.10, 0.20, 0.25}},
+                .weight = measure / FE::Real{2.0},
+            },
+            FE::geometry::CutQuadraturePoint{
+                .point = {{0.40, 0.30, 0.25}},
+                .weight = measure / FE::Real{2.0},
+            },
+        });
+
+    const auto assemble_with_context =
+        [&](const std::shared_ptr<FE::assembly::CutIntegrationContext>& cut_context) {
+            const auto mesh = makeMesh();
+            auto u_space = makeVelocitySpace(mesh);
+            auto p_space = makePressureSpace(mesh);
+            auto opts = baseNavierStokesOptions();
+            opts.enable_convection = false;
+            opts.enable_vms = false;
+            opts.viscosity = 1.0e-12;
+
+            opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+                .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = interface_marker,
+                .level_set_field_name = "phi",
+                .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+            });
+
+            FE::systems::FESystem system(mesh);
+            system.addField(FE::systems::FieldSpec{
+                .name = "phi",
+                .space = p_space,
+                .components = 1,
+                .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+            });
+
+            ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+            module.registerOn(system);
+            system.setCutIntegrationContext(cut_context);
+            system.setup({}, makeSingleTetraSetupInputs());
+
+            const FE::FieldId u_id = system.findFieldByName(opts.velocity_field_name);
+            if (u_id == FE::INVALID_FIELD_ID) {
+                ADD_FAILURE() << "velocity field was not registered";
+                return std::vector<FE::Real>{};
+            }
+
+            std::vector<FE::Real> solution(
+                static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+            for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+                const auto x = mesh->getNodeCoordinates(vertex);
+                setFieldComponentValue(solution, system, u_id, vertex, 0, x[0]);
+            }
+            const std::vector<FE::Real> previous_solution(
+                static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+
+            FE::systems::SystemStateView state;
+            state.dt = 1.0;
+            state.u = std::span<const FE::Real>(solution);
+            state.u_prev = std::span<const FE::Real>(previous_solution);
+            const FE::systems::BackwardDifferenceIntegrator integrator;
+            const auto time_context =
+                integrator.buildContext(/*max_time_derivative_order=*/1, state);
+            state.time_integration = &time_context;
+
+            return residualVector(system, state, "equations");
+        };
+
+    const auto constant_only_residual = assemble_with_context(constant_only_context);
+    const auto split_residual = assemble_with_context(split_context);
+
+    std::vector<FE::Real> residual_delta(constant_only_residual.size(), 0.0);
+    for (std::size_t i = 0; i < residual_delta.size(); ++i) {
+        residual_delta[i] = split_residual[i] - constant_only_residual[i];
+    }
+
+    EXPECT_GT(vectorNorm(residual_delta), 1.0e-5);
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainPositiveUsesPositiveCutVolumeSide)

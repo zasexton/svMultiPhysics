@@ -245,7 +245,7 @@ side volume keep active side-volume metadata.
 - [x] Add tests for small wet volume fractions.
 - [x] Add tests for full-negative and full-positive cells.
 - [x] Add tests proving negative and positive measures sum to the parent measure.
-- [ ] Add a Navier-Stokes assembly test proving a nonconstant pressure or
+- [x] Add a Navier-Stokes assembly test proving a nonconstant pressure or
       velocity field changes when constant-only quadrature is replaced.
 
 ## 4. Localize Cut-Cell Stabilization
