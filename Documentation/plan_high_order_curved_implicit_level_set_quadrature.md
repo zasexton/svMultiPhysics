@@ -1274,7 +1274,16 @@ methods and volume correction remain separate numerical-method choices.
       then writes VTK output. A high-order Saye regression verifies that a Q2
       maintained field rebuilds a HighOrderImplicit cut context whose output
       wet volume follows the corrected coefficients rather than a stale context.
-- [ ] Log maintenance-induced geometry changes.
+- [x] Log maintenance-induced geometry changes.
+      Runtime logs now expose the quantities needed to audit maintenance-driven
+      interface motion: projection reinitialization reports interface
+      displacement samples, maximum and L2 displacement, and maximum field
+      update; volume correction reports target, initial and corrected volumes,
+      achieved volume error, applied shift, and iterations; history
+      synchronization reports modified fields and current/previous deltas; the
+      accepted-step cut-context refresh reports cut-context revision, retained
+      cells, reference and physical wet volumes, and cut-adjacent facets before
+      wet-volume diagnostics and VTK output are written.
 
 ### Tests
 
