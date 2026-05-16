@@ -1396,13 +1396,18 @@ linear-solver problems.
       quadrature point counts, cut-adjacent scale summaries, process memory,
       basis-cache size, and side-specific positive/negative volume summaries.
 - [x] Extend smoke-script parsing for high-order backend diagnostics.
-- [ ] Extend `WetVolumeFraction` output to use high-order retained active rules.
+- [x] Extend `WetVolumeFraction` output to use high-order retained active rules.
+      Output selects generated retained cut-volume rules from the active cut
+      context by generated marker and active side, then writes the per-cell sum
+      of retained `volume_fraction` values. The path is independent of
+      vertex-sign `ActiveFluid` data and accepts high-order curved-rule
+      provenance, including Saye-style backend metadata and achieved order.
 - [ ] Add optional curved-interface surface output for inspection.
 - [ ] Warn when vertex-sign `ActiveFluid` and high-order wet fractions disagree.
 
 ### Tests
 
-- [ ] Output writes high-order `WetVolumeFraction`.
+- [x] Output writes high-order `WetVolumeFraction`.
 - [ ] Debug output identifies fallback cells.
 - [x] Curved-interface visualization contains nonzero surface data.
 - [x] Smoke parsing fails when high-order mode silently falls back too often.

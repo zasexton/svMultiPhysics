@@ -141,6 +141,49 @@ TEST(ActiveDomainOutput, WetFractionsMatchGeneratedCutVolumeMetadata)
   }
 }
 
+TEST(ActiveDomainOutput, WritesHighOrderWetVolumeFractionFromRetainedRules)
+{
+  auto mesh = makeTwoQuadCellMesh();
+
+  std::vector<svmp::FE::geometry::CutQuadratureRule> generated_rules(2);
+  for (auto& rule : generated_rules) {
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+    rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+    rule.curved_geometry = true;
+    rule.policy.kind =
+        svmp::FE::geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+    rule.policy.polynomial_order = 4;
+    rule.policy.moment_fitted = true;
+    rule.provenance.implicit_geometry_mode = "HighOrderImplicit";
+    rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
+    rule.provenance.implicit_fallback_policy = "Fail";
+    rule.provenance.achieved_quadrature_order = 4;
+  }
+  generated_rules[0].volume_fraction = 0.375;
+  generated_rules[0].provenance.parent_entity = 0;
+  generated_rules[1].volume_fraction = 0.625;
+  generated_rules[1].provenance.parent_entity = 1;
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &generated_rules[0],
+      &generated_rules[1],
+  };
+
+  const auto fields_written =
+      application::core::writeWetVolumeFractionField(
+          *mesh, "WetVolumeFraction", rules);
+
+  EXPECT_EQ(fields_written, 1u);
+  ASSERT_TRUE(mesh->has_field(svmp::EntityKind::Volume, "WetVolumeFraction"));
+  const auto handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeFraction");
+  const auto* data = static_cast<const double*>(mesh->field_data(handle));
+  ASSERT_NE(data, nullptr);
+  EXPECT_DOUBLE_EQ(data[0], 0.375);
+  EXPECT_DOUBLE_EQ(data[1], 0.625);
+}
+
 TEST(ActiveDomainOutput, WritesFullWetAndFullDryFractions)
 {
   auto mesh = makeTwoQuadCellMesh();
