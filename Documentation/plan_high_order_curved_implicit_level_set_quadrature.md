@@ -1293,7 +1293,12 @@ methods and volume correction remain separate numerical-method choices.
       which builds stale and corrected HighOrderImplicit Saye contexts from a
       Q2 level-set field and verifies the corrected context has a new revision
       and changed high-order cut-volume diagnostic before output consumption.
-- [ ] Reinitialization does not move the zero contour beyond tolerance.
+- [x] Reinitialization does not move the zero contour beyond tolerance.
+      Covered by
+      `LevelSetReinitialization.ProjectionPreservesZeroContourWithinTolerance`,
+      which repairs a signed-distance plane whose interface spans a full quad
+      cut segment and verifies the reported maximum and L2 interface
+      displacement remain below the default `max(tol, 0.05*h_min)` gate.
 - [ ] Long-run wet-volume drift reports physical high-order wet volume.
 - [ ] Conservative and nonconservative level-set runs are distinguishable in
       diagnostics.
