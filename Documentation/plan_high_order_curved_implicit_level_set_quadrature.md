@@ -624,17 +624,50 @@ for curved physical elements. Saye-style rules define the implicit geometry in
 the reference integration domain; the parent FE mapping then controls physical
 measure.
 
+### Reference-To-Physical Mapping Contract
+
+All current high-order implicit backends define the level-set polynomial as a
+reference-cell FE field, `phi_h(xi)`. The generated cut quadrature points,
+weights, and normals are therefore reference-frame data until assembly maps
+them through the parent cell.
+
+Reference interface normals are
+`n_ref = grad_xi(phi_h) / ||grad_xi(phi_h)||`, oriented by the existing
+negative/positive side convention. A zero, singular, or nonfinite reference
+gradient is a diagnostic condition; it must not silently produce a usable normal.
+
+Physical normals are computed from the inverse-transpose geometry map:
+`n_x = normalize(J^{-T} n_ref)`. The sign remains tied to the reference-side
+orientation, so negative-side and positive-side forms see opposite normals only
+through the existing side convention.
+
+Reference volume weights map to physical volume weights by
+`w_x = w_ref * abs(det J(xi))`. Reference interface weights map by the cofactor
+surface scaling
+`w_surface_x = w_surface_ref * abs(det J(xi)) * ||J^{-T}(xi) n_ref||`.
+This formula covers line interfaces in 2D parent cells and surface interfaces in
+3D parent cells. Assemblers must reject nonfinite or singular geometry Jacobians
+for active high-order cut rules instead of falling back to stale linear rules.
+
+Diagnostics should keep reference and physical measures separate:
+
+- reference cut volume and reference interface measure from the backend rule,
+- physical cut volume and physical interface measure after parent mapping,
+- maximum normal-transform residual or nonfinite-normal count when checks are
+  enabled,
+- rule frame, parent geometry revision, and backend policy fields.
+
 ### Design Checklist
 
-- [ ] Define reference normals as normalized `grad_xi(phi_h)`.
-- [ ] Define physical normals as inverse-transpose mapped reference normals.
-- [ ] Define physical surface measure scaling for 2D and 3D.
-- [ ] Define volume weight mapping through `abs(det J)`.
-- [ ] Define behavior for singular or nonfinite parent geometry Jacobians.
-- [ ] Define whether `phi_h` is a function of reference coordinates or physical
+- [x] Define reference normals as normalized `grad_xi(phi_h)`.
+- [x] Define physical normals as inverse-transpose mapped reference normals.
+- [x] Define physical surface measure scaling for 2D and 3D.
+- [x] Define volume weight mapping through `abs(det J)`.
+- [x] Define behavior for singular or nonfinite parent geometry Jacobians.
+- [x] Define whether `phi_h` is a function of reference coordinates or physical
       coordinates for each backend. Recommended first milestone: reference-cell
       FE field `phi_h(xi)`.
-- [ ] Define diagnostic fields for reference and physical measure separately.
+- [x] Define diagnostic fields for reference and physical measure separately.
 
 ### Implementation Checklist
 
