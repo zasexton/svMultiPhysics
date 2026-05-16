@@ -157,6 +157,15 @@ struct Rectangle2D {
     Real ymax{0.0};
 };
 
+struct Box3D {
+    Real xmin{0.0};
+    Real xmax{0.0};
+    Real ymin{0.0};
+    Real ymax{0.0};
+    Real zmin{0.0};
+    Real zmax{0.0};
+};
+
 struct Triangle2D {
     std::array<Real, 3> a{{0.0, 0.0, 0.0}};
     std::array<Real, 3> b{{0.0, 0.0, 0.0}};
@@ -183,6 +192,13 @@ struct SayeHyperrectangleDiagnostics {
 {
     return std::max(Real{0.0}, rect.xmax - rect.xmin) *
            std::max(Real{0.0}, rect.ymax - rect.ymin);
+}
+
+[[nodiscard]] Real boxMeasure(const Box3D& box) noexcept
+{
+    return std::max(Real{0.0}, box.xmax - box.xmin) *
+           std::max(Real{0.0}, box.ymax - box.ymin) *
+           std::max(Real{0.0}, box.zmax - box.zmin);
 }
 
 [[nodiscard]] Real triangleMeasure(const Triangle2D& tri) noexcept
@@ -230,6 +246,13 @@ struct SayeHyperrectangleDiagnostics {
     return {{Real{0.5} * (rect.xmin + rect.xmax),
              Real{0.5} * (rect.ymin + rect.ymax),
              0.0}};
+}
+
+[[nodiscard]] std::array<Real, 3> boxCentroid(const Box3D& box) noexcept
+{
+    return {{Real{0.5} * (box.xmin + box.xmax),
+             Real{0.5} * (box.ymin + box.ymax),
+             Real{0.5} * (box.zmin + box.zmax)}};
 }
 
 [[nodiscard]] std::array<Real, 3> triangleCentroid(
@@ -310,6 +333,27 @@ struct SayeHyperrectangleDiagnostics {
     };
 }
 
+[[nodiscard]] std::vector<std::array<Real, 3>> boxSamplePoints(
+    const Box3D& box)
+{
+    const Real xm = Real{0.5} * (box.xmin + box.xmax);
+    const Real ym = Real{0.5} * (box.ymin + box.ymax);
+    const Real zm = Real{0.5} * (box.zmin + box.zmax);
+    const std::array<Real, 3> xs{{box.xmin, xm, box.xmax}};
+    const std::array<Real, 3> ys{{box.ymin, ym, box.ymax}};
+    const std::array<Real, 3> zs{{box.zmin, zm, box.zmax}};
+    std::vector<std::array<Real, 3>> points;
+    points.reserve(27u);
+    for (const Real z : zs) {
+        for (const Real y : ys) {
+            for (const Real x : xs) {
+                points.push_back({{x, y, z}});
+            }
+        }
+    }
+    return points;
+}
+
 [[nodiscard]] std::vector<std::array<Real, 3>> triangleSamplePoints(
     const Triangle2D& tri)
 {
@@ -387,6 +431,54 @@ void appendFullRectangleRegion(
     region.normal = normal;
     region.parent_measure = parent_measure;
     region.measure = rectangleMeasure(rect);
+    region.volume_fraction =
+        parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+    region.min_level_set_value = min_signed_value;
+    region.max_level_set_value = max_signed_value;
+    region.full_cell_equivalent = std::abs(region.measure - parent_measure) <=
+                                  std::max(request.tolerance,
+                                           request.tolerance * parent_measure);
+    if (region.measure > Real{0.0}) {
+        geometry::CutQuadraturePoint qp;
+        qp.point = region.centroid;
+        qp.normal = region.normal;
+        qp.weight = region.measure;
+        region.quadrature_points.push_back(qp);
+        cut.volume_regions.push_back(std::move(region));
+    }
+}
+
+void appendFullBoxRegion(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Box3D& box,
+    geometry::CutIntegrationSide side,
+    Real parent_measure,
+    Real min_signed_value,
+    Real max_signed_value,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    if (side == geometry::CutIntegrationSide::Negative) {
+        ++diagnostics.full_negative_region_count;
+    } else if (side == geometry::CutIntegrationSide::Positive) {
+        ++diagnostics.full_positive_region_count;
+    }
+
+    const auto centroid = boxCentroid(box);
+    auto normal = interfaceNormalAt(input, centroid);
+    if (side == geometry::CutIntegrationSide::Positive) {
+        normal = {{-normal[0], -normal[1], -normal[2]}};
+    }
+
+    interfaces::CutInterfaceVolumeRegion region;
+    region.interface_marker = request.interface_marker;
+    region.parent_cell = input.linearized_input.parent_cell;
+    region.side = side;
+    region.centroid = centroid;
+    region.normal = normal;
+    region.parent_measure = parent_measure;
+    region.measure = boxMeasure(box);
     region.volume_fraction =
         parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
     region.min_level_set_value = min_signed_value;
@@ -636,6 +728,44 @@ void appendLinearizedTetrahedronCut(
     }
 }
 
+[[nodiscard]] std::array<std::array<Real, 3>, 8> boxVertices(
+    const Box3D& box) noexcept
+{
+    return {{
+        {{box.xmin, box.ymin, box.zmin}},
+        {{box.xmax, box.ymin, box.zmin}},
+        {{box.xmax, box.ymax, box.zmin}},
+        {{box.xmin, box.ymax, box.zmin}},
+        {{box.xmin, box.ymin, box.zmax}},
+        {{box.xmax, box.ymin, box.zmax}},
+        {{box.xmax, box.ymax, box.zmax}},
+        {{box.xmin, box.ymax, box.zmax}},
+    }};
+}
+
+void appendLinearizedBoxCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Box3D& box,
+    Real parent_measure,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    const auto v = boxVertices(box);
+    const std::array<Tetrahedron3D, 6> tetrahedra{{
+        Tetrahedron3D{v[0], v[1], v[2], v[6]},
+        Tetrahedron3D{v[0], v[2], v[3], v[6]},
+        Tetrahedron3D{v[0], v[3], v[7], v[6]},
+        Tetrahedron3D{v[0], v[7], v[4], v[6]},
+        Tetrahedron3D{v[0], v[4], v[5], v[6]},
+        Tetrahedron3D{v[0], v[5], v[1], v[6]},
+    }};
+    for (const auto& tet : tetrahedra) {
+        appendLinearizedTetrahedronCut(
+            cut, request, input, tet, parent_measure, diagnostics);
+    }
+}
+
 void appendAdaptiveRectangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -701,6 +831,78 @@ void appendAdaptiveRectangleCut(
             depth + 1,
             max_depth,
             diagnostics);
+    }
+}
+
+void appendAdaptiveBoxCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Box3D& box,
+    Real parent_measure,
+    int depth,
+    int max_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    diagnostics.max_depth_reached =
+        std::max(diagnostics.max_depth_reached, depth);
+    const auto samples = boxSamplePoints(box);
+    bool has_negative = false;
+    bool has_positive = false;
+    Real min_signed = std::numeric_limits<Real>::infinity();
+    Real max_signed = -std::numeric_limits<Real>::infinity();
+    for (const auto& point : samples) {
+        const Real value = signedLevelSetValue(input, point);
+        min_signed = std::min(min_signed, value);
+        max_signed = std::max(max_signed, value);
+        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
+        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
+    }
+
+    if (!has_negative || !has_positive) {
+        appendFullBoxRegion(
+            cut,
+            request,
+            input,
+            box,
+            has_negative ? geometry::CutIntegrationSide::Negative
+                         : geometry::CutIntegrationSide::Positive,
+            parent_measure,
+            min_signed,
+            max_signed,
+            diagnostics);
+        return;
+    }
+
+    if (depth >= max_depth) {
+        appendLinearizedBoxCut(
+            cut, request, input, box, parent_measure, diagnostics);
+        return;
+    }
+
+    ++diagnostics.subdivision_count;
+    const Real xm = Real{0.5} * (box.xmin + box.xmax);
+    const Real ym = Real{0.5} * (box.ymin + box.ymax);
+    const Real zm = Real{0.5} * (box.zmin + box.zmax);
+    const std::array<Real, 3> xs{{box.xmin, xm, box.xmax}};
+    const std::array<Real, 3> ys{{box.ymin, ym, box.ymax}};
+    const std::array<Real, 3> zs{{box.zmin, zm, box.zmax}};
+    for (std::size_t iz = 0u; iz < 2u; ++iz) {
+        for (std::size_t iy = 0u; iy < 2u; ++iy) {
+            for (std::size_t ix = 0u; ix < 2u; ++ix) {
+                appendAdaptiveBoxCut(
+                    cut,
+                    request,
+                    input,
+                    Box3D{xs[ix], xs[ix + 1u],
+                          ys[iy], ys[iy + 1u],
+                          zs[iz], zs[iz + 1u]},
+                    parent_measure,
+                    depth + 1,
+                    max_depth,
+                    diagnostics);
+            }
+        }
     }
 }
 
@@ -868,6 +1070,25 @@ void appendAdaptiveTetrahedronCut(
            std::to_string(diagnostics.interface_fragment_count);
 }
 
+[[nodiscard]] std::string formatSayeHyperrectangle3DDiagnostics(
+    const SayeHyperrectangleDiagnostics& diagnostics,
+    int max_depth_limit)
+{
+    return "SayeHyperrectangle recursive 3D hyperrectangle quadrature"
+           "; max_depth_limit=" + std::to_string(max_depth_limit) +
+           "; max_depth_reached=" +
+           std::to_string(diagnostics.max_depth_reached) +
+           "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; linearized_leaves=" +
+           std::to_string(diagnostics.linearized_leaf_count) +
+           "; full_negative_regions=" +
+           std::to_string(diagnostics.full_negative_region_count) +
+           "; full_positive_regions=" +
+           std::to_string(diagnostics.full_positive_region_count) +
+           "; interface_fragments=" +
+           std::to_string(diagnostics.interface_fragment_count);
+}
+
 [[nodiscard]] std::string formatHighOrderSubcellDiagnostics(
     const SayeHyperrectangleDiagnostics& diagnostics,
     int max_depth_limit)
@@ -951,7 +1172,7 @@ public:
             result.cut.supported = false;
             result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
             result.cut.diagnostic =
-                "SayeHyperrectangle implicit cut quadrature backend supports only quadrilateral cells in two dimensions";
+                "SayeHyperrectangle implicit cut quadrature backend supports only quadrilateral cells in two dimensions and hexahedron cells in three dimensions";
             result.diagnostic_status =
                 ImplicitCutQuadratureDiagnosticStatus::Unsupported;
             return result;
@@ -967,35 +1188,75 @@ public:
         }
         if (input.evaluator->interpolationOrder(
                 input.linearized_input.parent_cell) <= 1) {
-            result.cut =
-                interfaces::cutLinearLevelSetCell2D(
-                    request, input.linearized_input);
+            if (mesh_dimension == 2) {
+                result.cut =
+                    interfaces::cutLinearLevelSetCell2D(
+                        request, input.linearized_input);
+            } else {
+                const Box3D root{
+                    input.reference_min[0],
+                    input.reference_max[0],
+                    input.reference_min[1],
+                    input.reference_max[1],
+                    input.reference_min[2],
+                    input.reference_max[2]};
+                SayeHyperrectangleDiagnostics diagnostics;
+                appendLinearizedBoxCut(
+                    result.cut,
+                    request,
+                    input,
+                    root,
+                    boxMeasure(root),
+                    diagnostics);
+                result.cut.diagnostic =
+                    formatSayeHyperrectangle3DDiagnostics(diagnostics, 0);
+            }
             result.diagnostic_status =
                 classifyCutStatus(result.cut, result.fallback_used);
             return result;
         }
 
-        const Rectangle2D root{
-            input.reference_min[0],
-            input.reference_max[0],
-            input.reference_min[1],
-            input.reference_max[1]};
-        const Real parent_measure = rectangleMeasure(root);
         const int max_depth =
             std::max(0, std::min(request.implicit_cut_max_subdivision_depth, 8));
         SayeHyperrectangleDiagnostics diagnostics;
-        appendAdaptiveRectangleCut(
-            result.cut,
-            request,
-            input,
-            root,
-            parent_measure,
-            0,
-            max_depth,
-            diagnostics);
+        if (mesh_dimension == 2) {
+            const Rectangle2D root{
+                input.reference_min[0],
+                input.reference_max[0],
+                input.reference_min[1],
+                input.reference_max[1]};
+            appendAdaptiveRectangleCut(
+                result.cut,
+                request,
+                input,
+                root,
+                rectangleMeasure(root),
+                0,
+                max_depth,
+                diagnostics);
+            result.cut.diagnostic =
+                formatSayeHyperrectangleDiagnostics(diagnostics, max_depth);
+        } else {
+            const Box3D root{
+                input.reference_min[0],
+                input.reference_max[0],
+                input.reference_min[1],
+                input.reference_max[1],
+                input.reference_min[2],
+                input.reference_max[2]};
+            appendAdaptiveBoxCut(
+                result.cut,
+                request,
+                input,
+                root,
+                boxMeasure(root),
+                0,
+                max_depth,
+                diagnostics);
+            result.cut.diagnostic =
+                formatSayeHyperrectangle3DDiagnostics(diagnostics, max_depth);
+        }
         result.cut.supported = true;
-        result.cut.diagnostic =
-            formatSayeHyperrectangleDiagnostics(diagnostics, max_depth);
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
         return result;
@@ -1135,17 +1396,27 @@ public:
     int mesh_dimension,
     ElementType element_type) noexcept
 {
-    if (mesh_dimension != 2) {
-        return false;
+    if (mesh_dimension == 2) {
+        switch (element_type) {
+        case ElementType::Quad4:
+        case ElementType::Quad8:
+        case ElementType::Quad9:
+            return true;
+        default:
+            return false;
+        }
     }
-    switch (element_type) {
-    case ElementType::Quad4:
-    case ElementType::Quad8:
-    case ElementType::Quad9:
-        return true;
-    default:
-        return false;
+    if (mesh_dimension == 3) {
+        switch (element_type) {
+        case ElementType::Hex8:
+        case ElementType::Hex20:
+        case ElementType::Hex27:
+            return true;
+        default:
+            return false;
+        }
     }
+    return false;
 }
 
 [[nodiscard]] bool supportsHighOrderSubcellMilestone(

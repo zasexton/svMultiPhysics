@@ -80,6 +80,10 @@ struct GeneratedInterfaceCellDiagnostics {
     case ElementType::Tetra4:
     case ElementType::Tetra10:
         return 4u;
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return 8u;
     default:
         return 0u;
     }
@@ -102,6 +106,12 @@ struct GeneratedInterfaceCellDiagnostics {
         return "Tetra4";
     case ElementType::Tetra10:
         return "Tetra10";
+    case ElementType::Hex8:
+        return "Hex8";
+    case ElementType::Hex20:
+        return "Hex20";
+    case ElementType::Hex27:
+        return "Hex27";
     default:
         return "Unsupported";
     }

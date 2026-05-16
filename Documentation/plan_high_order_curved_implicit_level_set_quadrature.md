@@ -317,15 +317,20 @@ good match for quadrilateral and hexahedral reference cells.
 Milestone status: the current 2D backend is an initial recursive
 hyperrectangle proof for quadrilateral cells. It evaluates high-order level-set
 fields in reference space, recursively subdivides cut rectangles, and uses
-linear leaf cuts for the unresolved interface. Until the full Saye Gaussian
-base rules and root-polishing strategy are implemented, it reports interface
-quadrature as achieved order 1 and volume quadrature as achieved order 2.
+linear leaf cuts for the unresolved interface. The current 3D backend extends
+the same milestone design to Hex8, Hex20, and Hex27 reference cells over
+`[-1,1]^3`. Terminal cut boxes are decomposed into deterministic Tetra4 leaves
+and then evaluated by the simplex linearized cut path. Until the full Saye
+Gaussian base rules and root-polishing strategy are implemented, it reports
+interface quadrature as achieved order 1 and volume quadrature as achieved
+order 2.
 
-### Phase 1 Limitation And Fallback Contract
+### Current Limitation And Fallback Contract
 
-- Supported cells: two-dimensional quadrilateral cells only. The backend rejects
-  triangles, tetrahedra, and hexahedra until separate validated strategies are
-  implemented.
+- Supported cells: two-dimensional quadrilateral cells and three-dimensional
+  hexahedral cells. Triangles and tetrahedra are handled by the separate
+  simplex backend, and unsupported element/backend combinations fail
+  explicitly.
 - Supported level-set fields: scalar H1/C0 fields evaluated by
   `LevelSetCellEvaluator`. P1 fields reproduce the existing linear corner cut
   path through the backend abstraction. P2+ fields are evaluated at adaptive
@@ -352,7 +357,7 @@ quadrature as achieved order 1 and volume quadrature as achieved order 2.
 
 - [x] Define how svMultiPhysics reference quads map to the hyperrectangle used by
       the algorithm.
-- [ ] Define how svMultiPhysics reference hexes map to the hyperrectangle used by
+- [x] Define how svMultiPhysics reference hexes map to the hyperrectangle used by
       the algorithm.
 - [ ] Decide Gaussian base order from requested FE/form order.
 - [ ] Define root-finding tolerance and maximum iterations.
@@ -368,7 +373,7 @@ quadrature as achieved order 1 and volume quadrature as achieved order 2.
 
 - [x] Implement 2D hyperrectangle volume and interface quadrature.
 - [x] Validate 2D on analytic curves before implementing 3D.
-- [ ] Implement 3D hyperrectangle volume and interface quadrature.
+- [x] Implement 3D hyperrectangle volume and interface quadrature.
 - [x] Expose first-milestone per-cell diagnostics for recursion depth,
       subdivision count, linearized leaves, full-region counts, and fragment
       counts.
@@ -386,8 +391,9 @@ quadrature as achieved order 1 and volume quadrature as achieved order 2.
 - [ ] 2D circle/ellipse cuts integrate area and arc length to requested order.
 - [ ] 2D curved interface tests demonstrate convergence under h-refinement and
       p-refinement.
-- [ ] 3D plane cut through a hex reproduces known volume and area.
-- [ ] 3D sphere/ellipsoid cuts integrate volume and surface area to tolerance.
+- [x] 3D plane cut through a hex reproduces known volume and area.
+- [x] 3D sphere cut integrates volume and surface area to tolerance.
+- [ ] 3D ellipsoid cuts integrate volume and surface area to tolerance.
 - [ ] Near-tangent tests produce either a valid high-order rule or an explicit
       fallback/failure diagnostic.
 
@@ -397,6 +403,9 @@ quadrature as achieved order 1 and volume quadrature as achieved order 2.
   implicit surfaces and volumes in hyperrectangles.
 - Saye's research summary notes use in embedded-boundary and unfitted finite
   element methods, which matches the intended integration role here.
+- The first 3D milestone keeps Saye's hyperrectangle recursion as the outer
+  structure but uses a deterministic tetrahedral terminal split until the full
+  root-polished Gaussian construction is implemented.
 
 ## 5. Simplex Backend Strategy
 
@@ -1111,8 +1120,9 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 ### Phase 3: 3D Hyperrectangle Support
 
-- [ ] Implement hex support.
-- [ ] Add sphere/ellipsoid volume and surface tests.
+- [x] Implement hex support.
+- [x] Add sphere volume and surface tests.
+- [ ] Add ellipsoid volume and surface tests.
 - [ ] Add curved physical geometry mapping tests.
 - [ ] Add MPI determinism tests.
 

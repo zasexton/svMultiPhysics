@@ -337,6 +337,134 @@ private:
     }};
 };
 
+class SingleHexMeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    explicit SingleHexMeshAccess(FE::ElementType type = FE::ElementType::Hex8)
+        : type_(type)
+    {
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override { return 8; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return 7; }
+    [[nodiscard]] std::uint64_t topologyRevision() const override { return 11; }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override { return 13; }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override { return 17; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex /*cell_id*/) const override
+    {
+        return type_;
+    }
+
+    void getCellNodes(FE::GlobalIndex /*cell_id*/,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        if (type_ == FE::ElementType::Hex8) {
+            nodes = {0, 1, 2, 3, 4, 5, 6, 7};
+        } else {
+            nodes.resize(nodes_.size());
+            for (std::size_t i = 0; i < nodes_.size(); ++i) {
+                nodes[i] = static_cast<FE::GlobalIndex>(i);
+            }
+        }
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex /*cell_id*/,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        if (type_ == FE::ElementType::Hex8) {
+            coords.assign(nodes_.begin(), nodes_.begin() + 8);
+        } else {
+            coords.assign(nodes_.begin(), nodes_.end());
+        }
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face_id*/,
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    FE::ElementType type_{FE::ElementType::Hex8};
+    std::array<std::array<FE::Real, 3>, 27> nodes_{{
+        {{-1.0, -1.0, -1.0}},
+        {{1.0, -1.0, -1.0}},
+        {{1.0, 1.0, -1.0}},
+        {{-1.0, 1.0, -1.0}},
+        {{-1.0, -1.0, 1.0}},
+        {{1.0, -1.0, 1.0}},
+        {{1.0, 1.0, 1.0}},
+        {{-1.0, 1.0, 1.0}},
+        {{0.0, -1.0, -1.0}},
+        {{1.0, 0.0, -1.0}},
+        {{0.0, 1.0, -1.0}},
+        {{-1.0, 0.0, -1.0}},
+        {{0.0, -1.0, 1.0}},
+        {{1.0, 0.0, 1.0}},
+        {{0.0, 1.0, 1.0}},
+        {{-1.0, 0.0, 1.0}},
+        {{-1.0, -1.0, 0.0}},
+        {{1.0, -1.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{-1.0, 1.0, 0.0}},
+        {{0.0, 0.0, -1.0}},
+        {{0.0, 0.0, 1.0}},
+        {{0.0, -1.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+        {{-1.0, 0.0, 0.0}},
+        {{0.0, 0.0, 0.0}},
+    }};
+};
+
 class SingleTriangleMeshAccess final : public FE::assembly::IMeshAccess {
 public:
     explicit SingleTriangleMeshAccess(
@@ -576,6 +704,26 @@ private:
     topo.cell2vertex_offsets = {0, 4};
     topo.cell2vertex_data = {0, 1, 2, 3};
     topo.vertex_gids = {0, 1, 2, 3};
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+[[nodiscard]] FE::systems::SetupInputs makeSingleHexSetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 8;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, 8};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4, 5, 6, 7};
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5, 6, 7};
     topo.cell_gids = {0};
     topo.cell_owner_ranks = {0};
 
@@ -1303,7 +1451,11 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
             level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
             3,
             FE::ElementType::Hex27);
-    EXPECT_FALSE(saye_hex.supports_element_type);
+    EXPECT_TRUE(saye_hex.implemented);
+    EXPECT_TRUE(saye_hex.supports_element_type);
+    EXPECT_TRUE(saye_hex.supports_high_order_geometry);
+    EXPECT_EQ(saye_hex.maximum_reported_interface_order, 1);
+    EXPECT_EQ(saye_hex.maximum_reported_volume_order, 2);
 }
 
 TEST(LevelSetInterfaceLifecycle, BackendDiagnosticStatusNamesAreStable)
@@ -1551,6 +1703,52 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1LineMatchesLinearMeasures)
     EXPECT_NEAR(result.summary.negative_volume_measure, 2.0, 1.0e-12);
     EXPECT_NEAR(result.summary.positive_volume_measure, 2.0, 1.0e-12);
     EXPECT_NEAR(result.summary.measure, 2.0, 1.0e-12);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1PlaneMatchesHexMeasures)
+{
+    constexpr int interface_marker = 91;
+    const auto mesh = std::make_shared<SingleHexMeshAccess>(FE::ElementType::Hex8);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleHexSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 8; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, x[0]);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+    EXPECT_EQ(result.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+    EXPECT_NEAR(result.summary.negative_volume_measure, 4.0, 1.0e-12);
+    EXPECT_NEAR(result.summary.positive_volume_measure, 4.0, 1.0e-12);
+    EXPECT_NEAR(result.summary.measure, 4.0, 1.0e-12);
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1LineMatchesLinearTriangleMeasures)
@@ -1903,6 +2101,80 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
               std::string::npos);
     EXPECT_NE(vtp.find("Name=\"negative_volume_fraction\""), std::string::npos);
     EXPECT_NE(vtp.find("Name=\"interface_marker\""), std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAndArea)
+{
+    constexpr int interface_marker = 92;
+    constexpr FE::Real radius = 0.5;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const auto mesh = std::make_shared<SingleHexMeshAccess>(FE::ElementType::Hex27);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleHexSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 27u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 27u; ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x[0] * x[0] + x[1] * x[1] + x[2] * x[2] - radius * radius;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = 4;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+    EXPECT_NE(result.diagnostic.find("SayeHyperrectangle"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("max_depth_reached="), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("linearized_leaves="), std::string::npos);
+    EXPECT_GT(result.summary.active_fragment_count, 1u);
+    EXPECT_NEAR(result.summary.negative_volume_measure,
+                4.0 * pi * radius * radius * radius / 3.0,
+                8.0e-2);
+    EXPECT_NEAR(result.summary.measure,
+                4.0 * pi * radius * radius,
+                2.5e-1);
+
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    EXPECT_EQ(interface_rules.front().provenance.implicit_quadrature_backend,
+              "SayeHyperrectangle");
+    EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 1);
+
+    const auto volume_rules = result.domain.volumeQuadratureRules();
+    ASSERT_FALSE(volume_rules.empty());
+    EXPECT_EQ(volume_rules.front().provenance.implicit_quadrature_backend,
+              "SayeHyperrectangle");
+    EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleRulesAssembleFixedGeometryMeasures)
