@@ -594,6 +594,12 @@ benchmark runs.
 
 ### Benchmark Acceptance Tests
 
+- [x] Record a resource-blocked D18 configured-time GMRES attempt after the
+      dynamic active pressure support refresh: the run reached 47 accepted
+      steps with converged nonlinear and linear solves, active pressure support
+      diagnostics remained present, and RSS grew to about 3.78 GB before the
+      probe was stopped because the root filesystem had only about 237 MiB
+      free for final VTK output.
 - [ ] Complete a D18 run to the configured comparison time without nonlinear
       stalls.
 - [ ] Complete a D38 run to the configured comparison time without nonlinear
