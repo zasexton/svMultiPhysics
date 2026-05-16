@@ -2,6 +2,7 @@
 
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -54,6 +55,9 @@ parseGeometryTangentPolicy(const std::string& raw);
 activeCutVolumeRequests(const Parameters& params);
 
 [[nodiscard]] bool hasHighOrderGeneratedInterfaceGeometry(
+    const std::vector<ActiveCutVolumeRequest>& requests) noexcept;
+
+[[nodiscard]] std::uint64_t activeCutVolumeRequestPolicyKey(
     const std::vector<ActiveCutVolumeRequest>& requests) noexcept;
 
 } // namespace core

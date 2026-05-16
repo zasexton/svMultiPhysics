@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <initializer_list>
 #include <map>
 #include <optional>
@@ -51,6 +53,28 @@ std::string normalizedToken(std::string value)
                              }),
               value.end());
   return value;
+}
+
+void mixRequestPolicyHash(std::uint64_t& h, std::uint64_t value) noexcept
+{
+  h ^= value;
+  h *= 1099511628211ull;
+}
+
+void mixRequestPolicyHash(std::uint64_t& h, const std::string& value) noexcept
+{
+  for (const char c : value) {
+    mixRequestPolicyHash(h, static_cast<unsigned char>(c));
+  }
+  mixRequestPolicyHash(h, 0xffu);
+}
+
+void mixRequestPolicyHash(std::uint64_t& h, double value) noexcept
+{
+  std::uint64_t bits = 0u;
+  static_assert(sizeof(value) <= sizeof(bits));
+  std::memcpy(&bits, &value, sizeof(value));
+  mixRequestPolicyHash(h, bits);
 }
 
 std::optional<std::string> firstDefinedParameter(
@@ -386,6 +410,61 @@ bool hasHighOrderGeneratedInterfaceGeometry(
       [](const ActiveCutVolumeRequest& request) {
         return request.geometry_mode == Mode::HighOrderImplicit;
       });
+}
+
+std::uint64_t activeCutVolumeRequestPolicyKey(
+    const std::vector<ActiveCutVolumeRequest>& requests) noexcept
+{
+  std::uint64_t h = 1469598103934665603ull;
+  mixRequestPolicyHash(h, static_cast<std::uint64_t>(requests.size()));
+  for (const auto& request : requests) {
+    mixRequestPolicyHash(h, request.level_set_field_name);
+    mixRequestPolicyHash(h, request.domain_id);
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.requested_interface_marker));
+    mixRequestPolicyHash(h, request.isovalue);
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.quadrature_order.has_value()));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.quadrature_order.value_or(-1)));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.interface_quadrature_order.has_value()));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.interface_quadrature_order.value_or(-1)));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.volume_quadrature_order.has_value()));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.volume_quadrature_order.value_or(-1)));
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.geometry_mode));
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.implicit_cut_backend));
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.implicit_cut_fallback_policy));
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.geometry_tangent_policy));
+    mixRequestPolicyHash(h, request.implicit_cut_root_tolerance);
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.implicit_cut_max_subdivision_depth));
+    mixRequestPolicyHash(h, static_cast<std::uint64_t>(request.active_side));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.allow_corner_linearized_geometry));
+  }
+  return h;
 }
 
 } // namespace core

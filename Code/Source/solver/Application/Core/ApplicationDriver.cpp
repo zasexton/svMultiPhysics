@@ -428,6 +428,7 @@ struct LevelSetAdvectionVelocityRequest {
 struct ActiveCutContextRefreshReport {
   bool refreshed{false};
   std::uint64_t topology_key{0};
+  std::uint64_t request_policy_key{0};
   std::uint64_t value_revision{0};
   std::size_t cell_count{0};
   std::size_t corner_linearized_cell_count{0};
@@ -966,6 +967,7 @@ void logCutTopologyChange(
         << stateSyncPointName(point)
         << " previous_topology_key=" << *previous_topology_key
         << " topology_key=" << report.topology_key
+        << " active_cut_request_policy_key=" << report.request_policy_key
         << " cut_context_revision=" << report.value_revision
         << " cell_count=" << report.cell_count
         << " corner_linearized_cells=" << report.corner_linearized_cell_count
@@ -2500,6 +2502,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   if (requests.empty()) {
     return report;
   }
+  report.request_policy_key = activeCutVolumeRequestPolicyKey(requests);
 
   const auto synchronized_level_set_fields =
       syncActiveLevelSetVertexFieldsFromSolution(sim, requests, fe_solution);
@@ -2803,6 +2806,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " isovalue=" << request.isovalue
         << " cut_context_revision=" << result.value_revision
         << " cut_context_topology_key=" << topology_key
+        << " active_cut_request_policy_key=" << report.request_policy_key
         << " quadrature_policy_key="
         << domain_request.quadrature_policy_key
         << " source_layout_revision="
@@ -3436,8 +3440,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
+  const auto transient_active_cut_requests = activeCutVolumeRequests(params);
   const bool high_order_cut_geometry =
-      hasHighOrderGeneratedInterfaceGeometry(activeCutVolumeRequests(params));
+      hasHighOrderGeneratedInterfaceGeometry(transient_active_cut_requests);
+  const auto expected_cut_request_policy_key =
+      activeCutVolumeRequestPolicyKey(transient_active_cut_requests);
   using TransientStateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   opts.newton.synchronize_state =
@@ -3451,6 +3458,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         }
         const auto report = refreshActiveCutIntegrationContext(
             sim, params, state, *cut_lifecycle, stateSyncPointName(point));
+        if (report.refreshed &&
+            report.request_policy_key != expected_cut_request_policy_key) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Active cut request policy changed during transient Newton synchronization.");
+        }
         logCutTopologyChange(report, point, *cut_topology_key, "transient");
       };
   callbacks.on_before_physics_solve =

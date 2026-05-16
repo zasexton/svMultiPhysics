@@ -255,6 +255,43 @@ TEST(LevelSetCutConfiguration, RejectsUnknownGeometryTangentPolicy)
                std::runtime_error);
 }
 
+TEST(LevelSetCutConfiguration, ActiveCutRequestPolicyKeyTracksBackendOptions)
+{
+  application::core::ActiveCutVolumeRequest base;
+  base.level_set_field_name = "phi";
+  base.domain_id = "water_air";
+  base.geometry_mode =
+      level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+  base.implicit_cut_backend =
+      level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+  base.geometry_tangent_policy =
+      level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature;
+
+  const auto base_key =
+      application::core::activeCutVolumeRequestPolicyKey({base});
+  ASSERT_NE(base_key, 0u);
+
+  auto changed_backend = base;
+  changed_backend.implicit_cut_backend =
+      level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+  EXPECT_NE(base_key,
+            application::core::activeCutVolumeRequestPolicyKey(
+                {changed_backend}));
+
+  auto changed_tangent = base;
+  changed_tangent.geometry_tangent_policy =
+      level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+  EXPECT_NE(base_key,
+            application::core::activeCutVolumeRequestPolicyKey(
+                {changed_tangent}));
+
+  auto changed_order = base;
+  changed_order.interface_quadrature_order = 5;
+  EXPECT_NE(base_key,
+            application::core::activeCutVolumeRequestPolicyKey(
+                {changed_order}));
+}
+
 TEST(LevelSetCutConfiguration, IgnoresSmoothedIndicatorRequests)
 {
   auto params = parseParametersXml(R"xml(
