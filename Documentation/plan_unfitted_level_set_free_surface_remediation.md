@@ -662,6 +662,9 @@ benchmark runs.
       verify the same Newton assembly pattern: one matrix assembly per accepted
       step, post-update residual-only convergence checks, and no post-update
       matrix assemblies on converged steps.
+- [x] Set the D18/D38 Test05 free-surface fixture fluid solves to monolithic
+      GMRES with the FSILS backend so checked-in benchmark settings match the
+      GMRES smoke-probe policy.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Compare D38 peak height, front position if applicable, pressure range,

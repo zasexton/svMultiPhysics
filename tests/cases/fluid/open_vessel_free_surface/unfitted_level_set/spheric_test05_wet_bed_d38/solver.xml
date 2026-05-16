@@ -123,7 +123,7 @@
     <Volume>true</Volume>
   </Output>
 
-  <LS type="NS">
+  <LS type="GMRES">
     <Linear_algebra type="fsils">
       <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
