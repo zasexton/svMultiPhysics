@@ -693,7 +693,11 @@ material state storage is keyed by generated interface quadrature shape.
       `assembleCutInterfaces(...)` assumptions for high-order rule point counts.
 - [x] Extend interface remapping tests to high-order and curved parent geometry.
 - [x] Add optional backend-provided normal consistency checks.
-- [ ] Keep physical wet-volume diagnostics based on mapped cut-volume rules.
+- [x] Keep physical wet-volume diagnostics based on mapped cut-volume rules.
+      `ActiveDomainOutput::collectCutVolumeMeasures(...)` accumulates reference
+      rule measures separately from physical measures and maps every retained
+      reference-frame cut-volume quadrature point through the parent geometry
+      Jacobian before wet-volume drift diagnostics choose the physical frame.
 - [ ] Ensure high-order rules do not reuse stale linear full-cell-equivalent
       assumptions.
 
