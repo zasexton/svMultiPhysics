@@ -1,0 +1,38 @@
+{
+  "name": "mms_traveling_interface_2d",
+  "type": "fluid_free_surface_unfitted_level_set_mms",
+  "solver": "new_oop",
+  "description": "Manufactured horizontally translating wavy free surface with exact fields and source audit.",
+  "mesh": {
+    "nx": 16,
+    "ny": 16,
+    "element_order": 2
+  },
+  "run": {
+    "dt": 0.02,
+    "steps": 50,
+    "final_time": 1.0
+  },
+  "targets": {
+    "k": 6.283185307179586,
+    "period": 1.0,
+    "most_important_metrics": [
+      "phi_rms_error",
+      "interface_shift_error",
+      "velocity_relative_l2_error",
+      "pressure_relative_rms_error",
+      "interface_pressure_rms",
+      "manufactured_residual_x_max"
+    ]
+  },
+  "solver_features": {
+    "momentum_source_field": "ManufacturedSource",
+    "spatial_temporal_momentum_source_from_xml": true,
+    "generated_interface_geometry": "HighOrderImplicit",
+    "implicit_cut_quadrature_backend": "SayeHyperrectangle",
+    "implicit_cut_fallback_policy": "Fail",
+    "quadrature_order": 2,
+    "interface_quadrature_order": 2,
+    "volume_quadrature_order": 2
+  }
+}

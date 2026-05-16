@@ -1,0 +1,126 @@
+{
+  "case": "mms_traveling_interface_2d",
+  "purpose": "Exact manufactured moving free-surface test for OOP unfitted level-set infrastructure.",
+  "mesh": {
+    "nx": 16,
+    "ny": 16,
+    "element_order": 2,
+    "length": 1.0,
+    "mean_depth": 0.5,
+    "tank_height": 0.75,
+    "element_size": 0.0625
+  },
+  "fluid": {
+    "density": 998.2,
+    "dynamic_viscosity": 0.02,
+    "kinematic_viscosity": 2.003606491685033e-05,
+    "gravity": 9.81,
+    "body_force": [
+      0.0,
+      -9.81,
+      0.0
+    ],
+    "force_sign_convention": "OOP residual uses rho*(... - f) + grad(p) - div(stress), so hydrostatic balance is grad(p)=rho*f."
+  },
+  "run": {
+    "time_step": 0.02,
+    "time_steps": 50,
+    "final_time": 1.0,
+    "output_cadence": 1,
+    "combine_time_series": true
+  },
+  "analytic_solution": {
+    "L": 1.0,
+    "H0": 0.5,
+    "H_tank": 0.75,
+    "amplitude": 0.02,
+    "k": 6.283185307179586,
+    "U0": 0.1,
+    "Omega": 6.283185307179586,
+    "period": 1.0,
+    "X(t)": "(U0/Omega)*sin(Omega*t)",
+    "U(t)": "U0*cos(Omega*t)",
+    "Udot(t)": "-U0*Omega*sin(Omega*t)",
+    "h(x,t)": "H0 + A*cos(k*(x-X(t)))",
+    "phi": "y - h(x,t)",
+    "velocity": "[U(t), 0, 0]",
+    "pressure": "rho*g*(h(x,t)-y)",
+    "momentum_source": {
+      "s_x": "Udot(t) + g*h_x(x,t)",
+      "h_x": "-A*k*sin(k*(x-X(t)))",
+      "s_y": "0"
+    },
+    "expected_area": 0.5,
+    "expected_y_centroid": 0.2502
+  },
+  "boundary_conditions": {
+    "preferred": "periodic x plus bottom velocity [U(t),0,0]",
+    "implemented_xml_fallback": "exact time/space Dirichlet velocity on left, right, and bottom walls",
+    "free_surface": {
+      "implementation": "UnfittedLevelSet",
+      "active_domain": "LevelSetNegative",
+      "external_pressure": 0.0,
+      "surface_tension": 0.0,
+      "generated_interface_geometry": "HighOrderImplicit",
+      "implicit_cut_quadrature_backend": "SayeHyperrectangle",
+      "implicit_cut_fallback_policy": "Fail",
+      "quadrature_order": 2,
+      "interface_quadrature_order": 2,
+      "volume_quadrature_order": 2,
+      "implicit_cut_root_tolerance": 1e-10,
+      "implicit_cut_max_subdivision_depth": 8
+    }
+  },
+  "solver_feature_status": {
+    "periodic_x_boundary_from_xml": false,
+    "spatial_temporal_momentum_source_from_xml": true,
+    "time_dependent_boundary_data": true,
+    "high_order_implicit_geometry_from_xml": true,
+    "solver_xml_is_full_exact_mms": true,
+    "blocker": ""
+  },
+  "verification": {
+    "checked_fields": [
+      "phi",
+      "Velocity",
+      "Pressure"
+    ],
+    "wet_region": "phi_exact < -2*h_mesh and finite result values",
+    "suggested_tolerances": {
+      "phi_l2_abs": 0.01,
+      "phi_max_abs": 0.03,
+      "interface_mean_abs": 0.005,
+      "interface_amplitude_relative": 0.15,
+      "interface_shift_abs": 0.02,
+      "interface_l2_height_abs": 0.01,
+      "interface_max_height_abs": 0.03,
+      "area_relative": 0.03,
+      "centroid_y_abs": 0.01,
+      "velocity_relative_l2": 0.15,
+      "velocity_mean_abs": 0.02,
+      "pressure_relative_rms": 0.15,
+      "pressure_rms_after_offset_relative": 0.1,
+      "interface_pressure_abs": 10.0,
+      "manufactured_residual_abs": 1e-12,
+      "level_set_residual_abs": 1e-12
+    }
+  },
+  "suggested_tolerances": {
+    "phi_l2_abs": 0.01,
+    "phi_max_abs": 0.03,
+    "interface_mean_abs": 0.005,
+    "interface_amplitude_relative": 0.15,
+    "interface_shift_abs": 0.02,
+    "interface_l2_height_abs": 0.01,
+    "interface_max_height_abs": 0.03,
+    "area_relative": 0.03,
+    "centroid_y_abs": 0.01,
+    "velocity_relative_l2": 0.15,
+    "velocity_mean_abs": 0.02,
+    "pressure_relative_rms": 0.15,
+    "pressure_rms_after_offset_relative": 0.1,
+    "interface_pressure_abs": 10.0,
+    "manufactured_residual_abs": 1e-12,
+    "level_set_residual_abs": 1e-12
+  }
+}

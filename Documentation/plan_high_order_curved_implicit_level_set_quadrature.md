@@ -1044,7 +1044,7 @@ finite-difference component checks are valuable for isolating assembly defects.
       - VMS terms,
       - cut-adjacent stabilization.
 - [ ] Define component-selectable finite-difference checks.
-- [ ] Define moving-interface MMS cases for high-order geometry.
+- [x] Define moving-interface MMS cases for high-order geometry.
 - [ ] Define D18/D38 qualification policy: only after unit, component, and smoke
       gates pass.
 
@@ -1055,7 +1055,7 @@ finite-difference component checks are valuable for isolating assembly defects.
 - [x] Add fixed-geometry finite-difference tests for high-order `dCutVolume`.
 - [x] Add fixed-geometry finite-difference tests for high-order `dI`.
 - [x] Add high-order cut-adjacent stabilization assembly tests.
-- [ ] Add a compact high-order MMS traveling-interface fixture.
+- [x] Add a compact high-order MMS traveling-interface fixture.
 - [ ] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
@@ -1164,7 +1164,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 ### Phase 5: Solver Validation
 
-- [ ] Add high-order MMS traveling-interface fixture.
+- [x] Add high-order MMS traveling-interface fixture.
 - [ ] Run fixed-geometry Jacobian component sweeps.
 - [ ] Run quasi-Newton moving-geometry smoke tests.
 - [ ] Run short open-vessel probes with high-order diagnostics.
