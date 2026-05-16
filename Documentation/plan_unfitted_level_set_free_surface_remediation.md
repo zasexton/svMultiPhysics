@@ -584,6 +584,10 @@ benchmark runs.
       solution during active cut-context rebuilds, and parse support diagnostics
       in the smoke script so inactive pressure DOFs are checked against current
       wet cell support without VTK output.
+- [x] Extend active-domain pressure support constraints from vertex-only
+      pressure DOFs to all scalar H1 pressure DOFs with no active cell support,
+      including higher-order edge, face, and cell-interior DOFs; record a
+      no-output D18 GMRES probe with parsed active pressure DOF support counts.
 - [x] Add basis-cache entry counts to process-memory diagnostics and record a
       three-step D18 no-output probe showing basis-cache entries grow from 1 to
       9933 while RSS grows by about 364 MiB, identifying transient cut-volume

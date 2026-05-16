@@ -16,6 +16,7 @@
 #include "Systems/FESystem.h"
 
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 namespace svmp {
@@ -163,6 +164,54 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     ConstrainsHigherOrderDofsWithoutActiveCellSupport)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/2);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0}));
+
+    ASSERT_NO_THROW(system.setup());
+
+    const auto& pressure_dofs = system.fieldDofHandler(pressure);
+    const auto offset = system.fieldDofOffset(pressure);
+    const auto active_cell_dofs = pressure_dofs.getCellDofs(0);
+    const auto dry_cell_dofs = pressure_dofs.getCellDofs(1);
+    ASSERT_FALSE(active_cell_dofs.empty());
+    ASSERT_FALSE(dry_cell_dofs.empty());
+
+    std::unordered_set<GlobalIndex> active_support(
+        active_cell_dofs.begin(), active_cell_dofs.end());
+    for (const auto local_dof : active_cell_dofs) {
+        EXPECT_FALSE(system.constraints().isConstrained(offset + local_dof));
+    }
+
+    std::size_t dry_only_dofs = 0u;
+    for (const auto local_dof : dry_cell_dofs) {
+        if (active_support.find(local_dof) != active_support.end()) {
+            continue;
+        }
+        ++dry_only_dofs;
+        EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
+    }
+    EXPECT_GT(dry_only_dofs, 0u);
 #endif
 }
 

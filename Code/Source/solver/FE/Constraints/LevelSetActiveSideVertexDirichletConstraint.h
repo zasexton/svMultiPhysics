@@ -10,7 +10,7 @@
 
 /**
  * @file LevelSetActiveSideVertexDirichletConstraint.h
- * @brief Dirichlet constraints for scalar vertex DOFs outside a level-set side.
+ * @brief Dirichlet constraints for scalar H1 DOFs outside a level-set side.
  */
 
 #include "Constraints/SystemConstraint.h"

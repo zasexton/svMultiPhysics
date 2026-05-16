@@ -194,11 +194,14 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     const auto level_set = levelSetVertexView(system, level_set_field_name_, n_vertices);
     const auto offset = system.fieldDofOffset(field_);
     const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    const auto n_field_dofs = dh.getNumDofs();
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     const auto& mesh = system.mesh()->local_mesh();
     std::vector<unsigned char> has_active_support(
         static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
+    std::vector<unsigned char> has_active_dof_support(
+        static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
     std::size_t active_support_cells = 0u;
     for (GlobalIndex cell = 0;
          cell < static_cast<GlobalIndex>(mesh.n_cells());
@@ -233,6 +236,17 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         }
 
         ++active_support_cells;
+        for (const auto local_dof : dh.getCellDofs(cell)) {
+            if (local_dof < 0 || local_dof >= n_field_dofs) {
+                std::ostringstream oss;
+                oss << "LevelSetActiveSideVertexDirichletConstraint: cell "
+                    << cell << " references field DOF " << local_dof
+                    << " outside field '" << rec.name << "'";
+                throw std::runtime_error(oss.str());
+            }
+            has_active_dof_support[static_cast<std::size_t>(local_dof)] =
+                static_cast<unsigned char>(1);
+        }
         for (std::size_t i = 0; i < count; ++i) {
             const auto vertex = static_cast<GlobalIndex>(vertices[i]);
             if (vertex >= 0 && vertex < n_vertices) {
@@ -244,13 +258,18 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
 #else
     std::vector<unsigned char> has_active_support(
         static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
+    std::vector<unsigned char> has_active_dof_support(
+        static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
     std::size_t active_support_cells = 0u;
 #endif
 
     std::vector<GlobalIndex> inactive_vertices;
     inactive_vertices.reserve(static_cast<std::size_t>(n_vertices));
+    std::vector<GlobalIndex> inactive_dofs;
+    inactive_dofs.reserve(static_cast<std::size_t>(n_field_dofs));
     std::size_t active_sign_vertices = 0u;
     std::size_t active_support_vertices = 0u;
+    std::size_t active_support_dofs = 0u;
     std::size_t inactive_sign_vertices_with_support = 0u;
     std::size_t active_sign_vertices_without_support = 0u;
     std::size_t constrained_dofs = 0u;
@@ -277,15 +296,17 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         }
 
         inactive_vertices.push_back(vertex);
-        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
-        if (vertex_dofs.size() != 1u) {
-            std::ostringstream oss;
-            oss << "LevelSetActiveSideVertexDirichletConstraint: expected one scalar vertex DOF for vertex "
-                << vertex << ", found " << vertex_dofs.size();
-            throw std::invalid_argument(oss.str());
+    }
+
+    for (GlobalIndex local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
+        if (has_active_dof_support[static_cast<std::size_t>(local_dof)] !=
+            static_cast<unsigned char>(0)) {
+            ++active_support_dofs;
+            continue;
         }
 
-        const GlobalIndex dof = offset + vertex_dofs.front();
+        inactive_dofs.push_back(local_dof);
+        const GlobalIndex dof = offset + local_dof;
         if (owned.contains(dof)) {
             constraints.addDirichlet(dof, inactive_value_);
             ++constrained_dofs;
@@ -303,11 +324,15 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         << " active_sign_vertices=" << active_sign_vertices
         << " active_support_cells=" << active_support_cells
         << " active_support_vertices=" << active_support_vertices
+        << " total_dofs=" << n_field_dofs
+        << " active_support_dofs=" << active_support_dofs
         << " active_sign_vertices_without_support=" << active_sign_vertices_without_support
         << " inactive_sign_vertices_with_support=" << inactive_sign_vertices_with_support
         << " inactive_vertices=" << inactive_vertices.size()
+        << " inactive_dofs=" << inactive_dofs.size()
         << " constrained_owned_dofs=" << constrained_dofs
-        << " inactive_vertex_runs=" << formatRuns(inactive_vertices);
+        << " inactive_vertex_runs=" << formatRuns(inactive_vertices)
+        << " inactive_dof_runs=" << formatRuns(inactive_dofs);
     FE_LOG_INFO(oss.str());
 }
 
