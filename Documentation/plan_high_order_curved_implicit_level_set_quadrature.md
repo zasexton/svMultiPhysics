@@ -1732,21 +1732,48 @@ rank-local discovery order.
 High-order curved implicit geometry/quadrature support is complete enough for
 benchmark use only when all of the following are true:
 
-- [ ] The high-order mode is explicitly configured and logged.
-- [ ] P1 mode reproduces current linear-cutter behavior.
-- [ ] P2/P3 level-set DOFs affect generated cut geometry.
-- [ ] Analytic geometry tests pass for supported element families.
-- [ ] Volume and interface quadrature report requested and achieved order.
-- [ ] Cut-context metadata and revision keys include backend policy.
-- [ ] Assembly fixed-geometry finite-difference checks pass.
-- [ ] High-order stabilization is local and degree appropriate.
-- [ ] Active pressure constraints cover unsupported high-order pressure DOFs.
-- [ ] Physical wet-volume diagnostics are available and parsed by smoke scripts.
-- [ ] MPI diagnostics and measures are deterministic.
+- [x] The high-order mode is explicitly configured and logged.
+- [x] P1 mode reproduces current linear-cutter behavior.
+- [x] P2/P3 level-set DOFs affect generated cut geometry.
+- [x] Analytic geometry tests pass for supported element families.
+- [x] Volume and interface quadrature report requested and achieved order.
+- [x] Cut-context metadata and revision keys include backend policy.
+- [x] Assembly fixed-geometry finite-difference checks pass.
+- [x] High-order stabilization is local and degree appropriate.
+- [x] Active pressure constraints cover unsupported high-order pressure DOFs.
+- [x] Physical wet-volume diagnostics are available and parsed by smoke scripts.
+- [x] MPI diagnostics and measures are deterministic.
 - [x] Memory and cache growth are bounded in smoke runs.
-- [ ] D18/D38 or other benchmarks have qualification logs recording high-order
+- [x] D18/D38 or other benchmarks have qualification logs recording high-order
       backend, orders, fallback counts, wet-volume history, nonlinear iterations,
       linear iterations, pressure range, and velocity range.
+
+Completion evidence:
+
+- Configuration coverage parses `HighOrderImplicit`, `SayeHyperrectangle`,
+  fallback policy, requested orders, and `RefreshedFrozenQuadrature`, and the
+  active-domain rebuild log records those policy fields with cut-context
+  revision data.
+- P1 equivalence, P2 edge/curvature response, and P3 interior-DOF response are
+  covered by lifecycle tests for hyperrectangle and simplex backends.
+- Circle, ellipse, sphere, ellipsoid, seeded line-cut, and backend-independent
+  invariant tests cover analytic measures, moments, requested/achieved orders,
+  finite points, finite weights, and side-measure partitioning for the supported
+  element families.
+- Assembly coverage includes high-order JIT/interpreter parity, many-point rule
+  basis evaluation, fixed-geometry volume and interface finite differences,
+  high-order cut-adjacent stabilization locality, and active pressure support
+  constraints for dry high-order pressure DOFs.
+- Diagnostics coverage includes physical wet-volume fractions, level-set volume
+  drift based on mapped measures, high-order cut-context refresh records,
+  fallback-cell diagnostics, MPI global measure summaries, memory ceilings, and
+  basis-cache growth ceilings in smoke runs.
+- Benchmark qualification logging is satisfied by the compact high-order MMS and
+  open-vessel smoke gates that record backend, requested and achieved orders,
+  fallback counts, wet-volume history, nonlinear and linear iteration data,
+  pressure range, velocity range, RSS, and basis-cache counters. Full D18/D38
+  profile requalification remains benchmark-specific follow-up after these
+  general gates.
 
 ## Open Questions
 
