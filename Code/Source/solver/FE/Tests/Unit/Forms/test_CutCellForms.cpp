@@ -1095,6 +1095,7 @@ TEST(CutCellForms, HighOrderCutVolumeManyPointRuleKeepsBasisEvaluation)
                                 marker,
                                 "many-point-fixed-geometry-volume",
                                 /*quadrature_order=*/6);
+    const Real expected_measure = rule.measure;
 
     std::vector<Real> expected(16u, Real(0.0));
     for (const auto& qp : rule.points) {
@@ -1144,12 +1145,16 @@ TEST(CutCellForms, HighOrderCutVolumeManyPointRuleKeepsBasisEvaluation)
 
     ASSERT_EQ(assembled.elements_assembled, svmp::FE::GlobalIndex{1});
     ASSERT_EQ(cut_context.volumeRules().front().points.size(), 64u);
+    Real assembled_measure = Real(0.0);
     for (svmp::FE::GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
         for (svmp::FE::GlobalIndex j = 0; j < dof_map.getNumDofs(); ++j) {
             const auto idx = static_cast<std::size_t>(i * dof_map.getNumDofs() + j);
-            EXPECT_NEAR(mass.getMatrixEntry(i, j), expected[idx], Real(1.0e-13));
+            const Real entry = mass.getMatrixEntry(i, j);
+            EXPECT_NEAR(entry, expected[idx], Real(1.0e-13));
+            assembled_measure += entry;
         }
     }
+    EXPECT_NEAR(assembled_measure, expected_measure, Real(1.0e-13));
 }
 
 TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDifference)

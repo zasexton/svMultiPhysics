@@ -980,7 +980,7 @@ Cut-adjacent facet-set locality audit:
 
 - [x] Dispatch high-order generated cut-volume and interface rules through
       fixed-geometry assembly loops.
-- [ ] Assemble a scalar mass form over a curved cut volume and compare to
+- [x] Assemble a scalar mass form over a curved cut volume and compare to
       analytic measure.
 - [ ] Assemble linear and quadratic polynomial moments over curved cut volumes.
 - [ ] Assemble a surface traction over a curved interface and compare to analytic
