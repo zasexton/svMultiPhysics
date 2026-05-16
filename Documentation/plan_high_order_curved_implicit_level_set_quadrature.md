@@ -1115,14 +1115,32 @@ iterations per accepted step, 4 cut-context rebuilds per accepted step,
 300000 KB maximum RSS, 100000 KB RSS growth, 4 basis-cache entries, and 3
 basis-cache entries of growth.
 
+Cache and invalidation policy: generated high-order rules are owned by the cut
+context and are invalidated by the same geometry revision that invalidates
+linear rules. The revision key must include the geometry mode, backend name,
+requested volume and surface orders, tolerance, subdivision/root policy,
+fallback policy, active side, marker, parent topology, parent geometry revision,
+and level-set source revision. A Newton trial may reuse generated rules only
+when all revision-key fields and the level-set coefficient source revision are
+unchanged; rejected trial states must not replace the accepted cut context.
+Longer-lived caches are limited to stable FE basis tabulations keyed by element
+family, order, derivative order, and reference point set.
+
+Determinism policy: each rank emits rules and diagnostics in a stable local
+order sorted by global parent cell id, active side, marker id, parent topology,
+and backend-local fragment id. Global diagnostics are formed with explicit MPI
+reductions over numeric counters and with deterministic field ordering in logs.
+No diagnostic may depend on pointer order, unordered container iteration, or
+rank-local discovery order.
+
 ### Design Checklist
 
 - [x] Define per-cell and per-step cost diagnostics.
 - [x] Define maximum allowed basis-cache growth.
-- [ ] Define quadrature rule cache lifetime and invalidation.
-- [ ] Define MPI deterministic ordering for rules, metadata, and diagnostics.
+- [x] Define quadrature rule cache lifetime and invalidation.
+- [x] Define MPI deterministic ordering for rules, metadata, and diagnostics.
 - [x] Define memory ceilings for smoke runs.
-- [ ] Define whether high-order quadrature can be cached across Newton states
+- [x] Define whether high-order quadrature can be cached across Newton states
       when `phi_h` does not change.
 
 ### Implementation Checklist
