@@ -411,9 +411,32 @@ and multi-component work, high-order implicit meshing, and moment-fitting
 literature provide options for simplices, but each option has different
 robustness and implementation cost.
 
+### Triangle Strategy
+
+The first triangle milestone will use a `HighOrderSubcell` backend on reference
+triangles. Triangle3 fields must reproduce the existing linear triangle cutter.
+Triangle6+ fields should recursively split the reference triangle into
+orientation-preserving subtriangles, evaluate `phi_h` through
+`LevelSetCellEvaluator`, classify subtriangles from deterministic vertex,
+edge-midpoint, and centroid samples, and linearize only terminal cut leaves.
+
+This keeps all generated quadrature in the parent reference frame, preserves the
+positive-weight rule contract used by current assembly, and avoids introducing
+moment-fit signed weights before the active-side, stabilization, and pressure
+constraint paths are validated. It follows the subcell-decomposition direction
+used by high-order unfitted FEM work for implicit geometries, while leaving
+polynomial implicit quadrature and moment fitting as later accuracy upgrades once
+the topology and metadata contracts are stable.
+
+Triangle support must be selected explicitly through `HighOrderSubcell`; the
+`SayeHyperrectangle` backend remains limited to quadrilateral hyperrectangles.
+Until this backend is implemented, mixed quad/triangle meshes using
+`HighOrderImplicit` should report unsupported triangle cells rather than silently
+falling back to `LinearCorner`.
+
 ### Design Checklist
 
-- [ ] Decide first simplex milestone:
+- [x] Decide first simplex milestone:
       - high-order curved subcell decomposition,
       - moment fitting,
       - polynomial implicit quadrature,
@@ -1031,7 +1054,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 ### Phase 2: Simplex And Mixed Mesh Support
 
-- [ ] Select triangle strategy.
+- [x] Select triangle strategy.
 - [ ] Implement triangle support.
 - [ ] Select tetrahedron strategy.
 - [ ] Implement tetrahedron support.
