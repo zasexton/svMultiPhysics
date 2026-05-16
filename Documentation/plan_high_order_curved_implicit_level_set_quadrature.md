@@ -1387,7 +1387,14 @@ linear-solver problems.
 
 ### Implementation Checklist
 
-- [ ] Extend cut-context rebuild log fields.
+- [x] Extend cut-context rebuild log fields.
+      The active-domain rebuild log now emits high-order geometry mode,
+      backend, backend timing, fallback policy/count, tangent policy/warning,
+      root tolerance, subdivision depth, requested and achieved orders,
+      revisions and policy keys, source revisions, retained/pruned reference and
+      physical volumes, min/max retained volume fraction, active cell classes,
+      quadrature point counts, cut-adjacent scale summaries, process memory,
+      basis-cache size, and side-specific positive/negative volume summaries.
 - [x] Extend smoke-script parsing for high-order backend diagnostics.
 - [ ] Extend `WetVolumeFraction` output to use high-order retained active rules.
 - [ ] Add optional curved-interface surface output for inspection.
