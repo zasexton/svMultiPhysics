@@ -411,6 +411,32 @@ struct CutNewtonResult {
     return max_abs;
 }
 
+[[nodiscard]] svmp::FE::dofs::DofMap createSingleCellDofMap(std::size_t n_dofs)
+{
+    const auto local_n = static_cast<svmp::FE::LocalIndex>(n_dofs);
+    const auto global_n = static_cast<svmp::FE::GlobalIndex>(n_dofs);
+    svmp::FE::dofs::DofMap dof_map(1, global_n, local_n);
+    std::vector<svmp::FE::GlobalIndex> cell_dofs(n_dofs);
+    for (std::size_t i = 0u; i < n_dofs; ++i) {
+        cell_dofs[i] = static_cast<svmp::FE::GlobalIndex>(i);
+    }
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(global_n);
+    dof_map.setNumLocalDofs(global_n);
+    dof_map.finalize();
+    return dof_map;
+}
+
+[[nodiscard]] std::vector<Real> deterministicScalarCoefficients(std::size_t n_dofs)
+{
+    std::vector<Real> coeffs(n_dofs);
+    for (std::size_t i = 0u; i < n_dofs; ++i) {
+        const Real sign = (i % 2u == 0u) ? Real(1.0) : Real(-1.0);
+        coeffs[i] = sign * (Real(0.07) + Real(0.011) * static_cast<Real>(i));
+    }
+    return coeffs;
+}
+
 [[nodiscard]] CutQuadratureRule makeReferenceTetraCutRule(
     CutIntegrationSide side,
     std::vector<svmp::FE::geometry::CutQuadraturePoint> points,
@@ -432,6 +458,57 @@ struct CutNewtonResult {
         side == CutIntegrationSide::Negative ? "negative-reference-tetra-cut"
                                              : "positive-reference-tetra-cut";
     rule.points = std::move(points);
+    return rule;
+}
+
+void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
+                                 int marker,
+                                 const std::string& topology_id,
+                                 int quadrature_order)
+{
+    rule.exact_polynomial_order = quadrature_order;
+    rule.curved_geometry = true;
+    rule.policy.kind = svmp::FE::geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+    rule.policy.polynomial_order = quadrature_order;
+    rule.policy.moment_fitted = true;
+    rule.policy.name = "fixed-geometry-high-order-implicit";
+    rule.provenance.marker = marker;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.cut_topology_id = topology_id;
+    rule.provenance.cut_topology_revision = 401u;
+    rule.provenance.construction =
+        svmp::FE::geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+    rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.implicit_geometry_mode = "curved-level-set";
+    rule.provenance.implicit_quadrature_backend = "moment-fitted-implicit";
+    rule.provenance.implicit_fallback_policy = "none";
+    rule.provenance.requested_quadrature_order = quadrature_order;
+    rule.provenance.achieved_quadrature_order = quadrature_order;
+    rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+}
+
+[[nodiscard]] CutQuadratureRule makeHighOrderReferenceTetraInterfaceRule(int marker)
+{
+    CutQuadratureRule rule;
+    rule.kind = CutQuadratureKind::Interface;
+    rule.side = CutIntegrationSide::Interface;
+    rule.parent_measure = Real(1.0) / Real(6.0);
+    rule.points = {
+        {{{0.22, 0.18, 0.12}}, {{1.0, 0.0, 0.0}}, Real(0.019)},
+        {{{0.24, 0.32, 0.10}}, {{1.0, 0.0, 0.0}}, Real(0.017)},
+        {{{0.20, 0.15, 0.30}}, {{1.0, 0.0, 0.0}}, Real(0.016)},
+        {{{0.28, 0.20, 0.19}}, {{1.0, 0.0, 0.0}}, Real(0.013)}
+    };
+    for (const auto& qp : rule.points) {
+        rule.measure += qp.weight;
+    }
+    rule.volume_fraction = Real(0.0);
+    rule.exact_for_constants = true;
+    rule.provenance_id = "fixed-geometry-interface";
+    markRuleAsHighOrderImplicit(rule,
+                                marker,
+                                "fixed-geometry-interface",
+                                /*quadrature_order=*/4);
     return rule;
 }
 
@@ -587,6 +664,138 @@ struct ManualResidualTangent {
     }
 
     return manual;
+}
+
+void expectHighOrderCutVolumeJacobianMatchesCentralFD(
+    const svmp::FE::assembly::CutIntegrationContext& cut_context,
+    int marker,
+    CutIntegrationSide side,
+    const svmp::FE::spaces::FunctionSpace& space,
+    const FormExpr& residual,
+    const std::vector<Real>& solution,
+    Real eps,
+    Real tol)
+{
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    const auto n_dofs = dof_map.getNumDofs();
+
+    FormCompiler compiler;
+    auto matrix_ir = compiler.compileResidual(residual);
+    auto vector_ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel matrix_kernel(
+        std::move(matrix_ir), NonlinearKernelOutput::Both);
+    SymbolicNonlinearFormKernel vector_kernel(
+        std::move(vector_ir), NonlinearKernelOutput::VectorOnly);
+    matrix_kernel.resolveInlinableConstitutives();
+    vector_kernel.resolveInlinableConstitutives();
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    svmp::FE::assembly::DenseMatrixView jacobian(n_dofs);
+    svmp::FE::assembly::DenseVectorView residual_vector(n_dofs);
+    jacobian.zero();
+    residual_vector.zero();
+
+    assembler.setCurrentSolution(solution);
+    const auto assembled = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, side, space, space, matrix_kernel,
+        &jacobian, &residual_vector, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_EQ(assembled.elements_assembled, svmp::FE::GlobalIndex{1});
+
+    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto solution_plus = solution;
+        auto solution_minus = solution;
+        solution_plus[static_cast<std::size_t>(j)] += eps;
+        solution_minus[static_cast<std::size_t>(j)] -= eps;
+
+        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
+        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
+        residual_plus.zero();
+        residual_minus.zero();
+
+        assembler.setCurrentSolution(solution_plus);
+        (void)assembler.assembleCutVolumes(
+            mesh, cut_context, marker, side, space, space, vector_kernel,
+            nullptr, &residual_plus, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+        assembler.setCurrentSolution(solution_minus);
+        (void)assembler.assembleCutVolumes(
+            mesh, cut_context, marker, side, space, space, vector_kernel,
+            nullptr, &residual_minus, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real finite_difference =
+                (residual_plus.getVectorEntry(i) - residual_minus.getVectorEntry(i)) /
+                (Real(2.0) * eps);
+            EXPECT_NEAR(jacobian.getMatrixEntry(i, j), finite_difference, tol);
+        }
+    }
+}
+
+void expectHighOrderCutInterfaceJacobianMatchesCentralFD(
+    const svmp::FE::assembly::CutIntegrationContext& cut_context,
+    const svmp::FE::spaces::FunctionSpace& space,
+    const FormExpr& residual,
+    const std::vector<Real>& solution,
+    Real eps,
+    Real tol)
+{
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    const auto n_dofs = dof_map.getNumDofs();
+
+    FormCompiler compiler;
+    auto matrix_ir = compiler.compileResidual(residual);
+    auto vector_ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel matrix_kernel(
+        std::move(matrix_ir), NonlinearKernelOutput::Both);
+    SymbolicNonlinearFormKernel vector_kernel(
+        std::move(vector_ir), NonlinearKernelOutput::VectorOnly);
+    matrix_kernel.resolveInlinableConstitutives();
+    vector_kernel.resolveInlinableConstitutives();
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    svmp::FE::assembly::DenseMatrixView jacobian(n_dofs);
+    svmp::FE::assembly::DenseVectorView residual_vector(n_dofs);
+    jacobian.zero();
+    residual_vector.zero();
+
+    assembler.setCurrentSolution(solution);
+    const auto assembled = assembler.assembleCutInterfaces(
+        mesh, cut_context, /*interface_marker=*/-1, space, space, matrix_kernel,
+        &jacobian, &residual_vector, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_EQ(assembled.interface_faces_assembled, svmp::FE::GlobalIndex{1});
+
+    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto solution_plus = solution;
+        auto solution_minus = solution;
+        solution_plus[static_cast<std::size_t>(j)] += eps;
+        solution_minus[static_cast<std::size_t>(j)] -= eps;
+
+        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
+        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
+        residual_plus.zero();
+        residual_minus.zero();
+
+        assembler.setCurrentSolution(solution_plus);
+        (void)assembler.assembleCutInterfaces(
+            mesh, cut_context, /*interface_marker=*/-1, space, space, vector_kernel,
+            nullptr, &residual_plus, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+        assembler.setCurrentSolution(solution_minus);
+        (void)assembler.assembleCutInterfaces(
+            mesh, cut_context, /*interface_marker=*/-1, space, space, vector_kernel,
+            nullptr, &residual_minus, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real finite_difference =
+                (residual_plus.getVectorEntry(i) - residual_minus.getVectorEntry(i)) /
+                (Real(2.0) * eps);
+            EXPECT_NEAR(jacobian.getMatrixEntry(i, j), finite_difference, tol);
+        }
+    }
 }
 
 } // namespace
@@ -768,6 +977,92 @@ TEST(CutCellForms, SymbolicTangentPreservesCutVolumeMeasure)
         EXPECT_EQ(term.interface_marker, 73);
         EXPECT_EQ(term.cut_volume_side, CutVolumeSide::Positive);
     }
+}
+
+TEST(CutCellForms, HighOrderCutVolumeTangentMatchesFixedGeometryFiniteDifference)
+{
+    constexpr int marker = 81;
+    auto rule = makeReferenceTetraCutRule(
+        CutIntegrationSide::Negative,
+        {
+            {{{0.10, 0.20, 0.15}}, {{0.0, 0.0, 1.0}}, Real(0.010)},
+            {{{0.28, 0.12, 0.18}}, {{0.0, 0.0, 1.0}}, Real(0.012)},
+            {{{0.18, 0.30, 0.11}}, {{0.0, 0.0, 1.0}}, Real(0.014)},
+            {{{0.12, 0.15, 0.32}}, {{0.0, 0.0, 1.0}}, Real(0.011)},
+            {{{0.24, 0.18, 0.20}}, {{0.0, 0.0, 1.0}}, Real(0.009)}
+        });
+    markRuleAsHighOrderImplicit(rule,
+                                marker,
+                                "fixed-geometry-volume",
+                                /*quadrature_order=*/4);
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.side = CutIntegrationSide::Negative;
+    metadata.embedded_normal = rule.points.front().normal;
+    metadata.cut_topology_id = rule.provenance.cut_topology_id;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addVolumeRule(std::move(metadata), std::move(rule));
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto x = FormExpr::coordinate();
+    const auto terminals = cutCellTerminals();
+    const auto coefficient =
+        FormExpr::constant(Real(1.15)) +
+        terminals.volume_fraction * Real(0.35) +
+        terminals.side_indicator * Real(0.075) +
+        x.component(0) * Real(0.20) +
+        x.component(1) * Real(0.10);
+    const auto residual =
+        (coefficient *
+         ((u * u + u * u * u * Real(0.08)) * v +
+          Real(0.12) * (FormExpr::constant(Real(1.0)) + u * Real(0.25)) *
+              inner(grad(u), grad(v)))).dCutVolume(marker, CutVolumeSide::Negative);
+
+    expectHighOrderCutVolumeJacobianMatchesCentralFD(
+        cut_context,
+        marker,
+        CutIntegrationSide::Negative,
+        space,
+        residual,
+        deterministicScalarCoefficients(space.dofs_per_element()),
+        /*eps=*/Real(2.0e-6),
+        /*tol=*/Real(2.0e-6));
+}
+
+TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDifference)
+{
+    constexpr int marker = 82;
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addInterfaceRule(makeHighOrderReferenceTetraInterfaceRule(marker));
+
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto x = FormExpr::coordinate();
+    const auto n = FormExpr::normal();
+    const auto coefficient =
+        FormExpr::constant(Real(0.80)) +
+        x.component(0) * Real(0.15) +
+        x.component(1) * Real(0.05) +
+        n.component(0) * Real(0.10);
+    const auto residual =
+        (coefficient * (u * u + u * Real(0.20)) * v +
+         Real(0.06) * (FormExpr::constant(Real(1.0)) + u * Real(0.15)) *
+             inner(grad(u), n) * v).dI(marker);
+
+    expectHighOrderCutInterfaceJacobianMatchesCentralFD(
+        cut_context,
+        space,
+        residual,
+        deterministicScalarCoefficients(space.dofs_per_element()),
+        /*eps=*/Real(2.0e-6),
+        /*tol=*/Real(2.0e-6));
 }
 
 TEST(CutCellForms, ZeroTangentProbeSupportsMixedCutVolumeBlocks)

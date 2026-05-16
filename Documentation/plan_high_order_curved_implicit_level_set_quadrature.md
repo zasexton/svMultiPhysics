@@ -742,7 +742,7 @@ plan.
 
 ### Tests
 
-- [ ] Fixed-geometry finite-difference Jacobian checks pass for high-order rules.
+- [x] Fixed-geometry finite-difference Jacobian checks pass for high-order rules.
 - [ ] Refreshed-geometry finite-difference checks report the expected
       quasi-Newton mismatch rather than silently passing or failing unclearly.
 - [ ] Line-search rejection restores accepted high-order cut context.
@@ -1052,8 +1052,8 @@ finite-difference component checks are valuable for isolating assembly defects.
 
 - [x] Add a fixed-geometry measure dispatch test for high-order generated
       `dCutVolume` and `dI` rules.
-- [ ] Add fixed-geometry finite-difference tests for high-order `dCutVolume`.
-- [ ] Add fixed-geometry finite-difference tests for high-order `dI`.
+- [x] Add fixed-geometry finite-difference tests for high-order `dCutVolume`.
+- [x] Add fixed-geometry finite-difference tests for high-order `dI`.
 - [x] Add high-order cut-adjacent stabilization assembly tests.
 - [ ] Add a compact high-order MMS traveling-interface fixture.
 - [ ] Add smoke-script switches for high-order backend and fallback thresholds.
