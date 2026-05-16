@@ -321,6 +321,33 @@ linear leaf cuts for the unresolved interface. Until the full Saye Gaussian
 base rules and root-polishing strategy are implemented, it reports interface
 quadrature as achieved order 1 and volume quadrature as achieved order 2.
 
+### Phase 1 Limitation And Fallback Contract
+
+- Supported cells: two-dimensional quadrilateral cells only. The backend rejects
+  triangles, tetrahedra, and hexahedra until separate validated strategies are
+  implemented.
+- Supported level-set fields: scalar H1/C0 fields evaluated by
+  `LevelSetCellEvaluator`. P1 fields reproduce the existing linear corner cut
+  path through the backend abstraction. P2+ fields are evaluated at adaptive
+  reference points, but unresolved cut leaves are still linearized.
+- Achieved order: the current recursive 2D proof reports achieved interface
+  order 1 and achieved volume order 2. Requests above those orders remain
+  accepted for diagnostics, but downstream quadrature rule provenance records
+  the lower achieved order.
+- Recursion policy: the backend uses the requested subdivision depth capped at
+  the current implementation limit, classifies rectangles from deterministic
+  corner, edge-midpoint, and centroid samples, and linearizes cut leaves at the
+  terminal depth.
+- Fallback policy: unsupported element/backend combinations fail explicitly.
+  There is no silent downgrade from `HighOrderImplicit` to `LinearCorner`; any
+  future fallback must be policy-selected and counted in diagnostics.
+- Degeneracy policy: multiple roots, near-tangent cuts, and singular gradients
+  are not yet handled by Saye root polishing. The current diagnostics expose
+  recursion depth, subdivision count, linearized leaves, full-region counts, and
+  fragment counts so validation can identify cells that need the full algorithm.
+- Output policy: diagnostic VTP output is the leaf-segment visualization of the
+  generated rule, not an exact curved-interface reconstruction.
+
 ### Design Checklist
 
 - [x] Define how svMultiPhysics reference quads map to the hyperrectangle used by
@@ -1000,7 +1027,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Add fixed-geometry assembly tests.
 - [x] Add diagnostics tests.
 - [x] Add output tests.
-- [ ] Document limitations and fallback behavior.
+- [x] Document limitations and fallback behavior.
 
 ### Phase 2: Simplex And Mixed Mesh Support
 
