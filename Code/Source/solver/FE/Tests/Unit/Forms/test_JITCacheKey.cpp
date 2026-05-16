@@ -292,6 +292,55 @@ TEST(JITCacheKey, MatchedSpecializationInputsChangeKey)
                                           });
 }
 
+TEST(JITCacheKey, CutVolumeQuadratureShapeInputsChangeKey)
+{
+    auto spec = matchedSpecialization();
+    spec.domain = IntegralDomain::CutVolume;
+    spec.n_qpts_minus = 64u;
+    spec.n_test_dofs_minus = 10u;
+    spec.n_trial_dofs_minus = 10u;
+    spec.n_qpts_plus.reset();
+    spec.n_test_dofs_plus.reset();
+    spec.n_trial_dofs_plus.reset();
+    spec.baked_basis.enabled = true;
+    spec.baked_basis.geometry_affine = true;
+    spec.baked_basis.hash = 0x2468'ace0'1357'9bdfULL;
+
+    auto base = baseInputs();
+    base.domain = IntegralDomain::CutVolume;
+    base.interface_marker = 83;
+    base.cut_volume_side = CutVolumeSide::Negative;
+    base.specialization = &spec;
+
+    auto changed_side = base;
+    changed_side.cut_volume_side = CutVolumeSide::Positive;
+    EXPECT_NE(keyFor(changed_side), keyFor(base));
+
+    auto changed_qpts_spec = spec;
+    auto changed_qpts = base;
+    changed_qpts.specialization = &changed_qpts_spec;
+    changed_qpts_spec.n_qpts_minus = 65u;
+    EXPECT_NE(keyFor(changed_qpts), keyFor(base));
+
+    auto changed_dofs_spec = spec;
+    auto changed_dofs = base;
+    changed_dofs.specialization = &changed_dofs_spec;
+    changed_dofs_spec.n_test_dofs_minus = 11u;
+    EXPECT_NE(keyFor(changed_dofs), keyFor(base));
+
+    auto changed_baked_spec = spec;
+    auto changed_baked = base;
+    changed_baked.specialization = &changed_baked_spec;
+    changed_baked_spec.baked_basis.hash ^= 0x10ULL;
+    EXPECT_NE(keyFor(changed_baked), keyFor(base));
+
+    auto removed_baked_spec = spec;
+    auto removed_baked = base;
+    removed_baked.specialization = &removed_baked_spec;
+    removed_baked_spec.baked_basis.enabled = false;
+    EXPECT_NE(keyFor(removed_baked), keyFor(base));
+}
+
 TEST(JITCacheKey, UnmatchedSpecializationInputsAreIgnored)
 {
     const auto no_spec = baseInputs();

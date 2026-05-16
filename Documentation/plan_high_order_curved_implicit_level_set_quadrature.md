@@ -938,6 +938,13 @@ Many-point generated-interface remapping policy:
   geometry before the form kernel runs. The remapping loop must be point-count
   agnostic and cannot assume legacy face quadrature sizes.
 
+JIT specialization key contract:
+- Cut-volume JIT cache keys must distinguish the integral domain, interface
+  marker, selected side, specialized quadrature point count, test and trial DOF
+  counts, affine-geometry mode, and baked-basis hash. Baked-basis hashes are the
+  contract boundary for rule-specific basis and quadrature tables, including
+  high-order generated rules.
+
 ### Design Checklist
 
 - [x] Preserve the public form vocabulary:
@@ -958,7 +965,7 @@ Many-point generated-interface remapping policy:
 - [x] Ensure cut-volume rules with many points do not disable needed basis
       evaluation caching.
 - [x] Ensure interface rules with many points are remapped correctly.
-- [ ] Ensure JIT specialization keys include enough quadrature shape metadata.
+- [x] Ensure JIT specialization keys include enough quadrature shape metadata.
 - [ ] Keep marked cut-adjacent interior-face assembly local to the generated
       facet set.
 
