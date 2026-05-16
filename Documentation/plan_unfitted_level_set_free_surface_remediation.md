@@ -552,6 +552,10 @@ benchmark runs.
       configured active cut side, so inactive exterior slivers no longer inflate
       one-fluid wet-support stabilization; the D18 one-step GMRES probe reduced
       the parsed maximum cut-adjacent scale to about 34.37.
+- [x] Record D18 GMRES active-side-scale reference-time resource evidence: the
+      run advanced 53 accepted steps with bounded cut-adjacent scales and parsed
+      nonlinear and linear convergence, but solver resident memory grew past
+      4.6 GB before the run was stopped.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
