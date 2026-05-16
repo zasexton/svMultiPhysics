@@ -1064,6 +1064,8 @@ finite-difference component checks are valuable for isolating assembly defects.
       are retained for solver boundary work.
 - [x] Extract endpoint corners from high-order 2D face geometry when deriving
       reference edge ordering.
+- [x] Sync prescribed high-order mesh point fields into vertex, edge, and cell
+      FE coefficients for MMS source data.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 

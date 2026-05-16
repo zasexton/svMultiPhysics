@@ -6953,22 +6953,79 @@ std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
             static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs()),
             Real{0});
 
+        bool all_mesh_vertices_have_vertex_dofs = true;
         for (GlobalIndex v = 0; v < n_vertices; ++v) {
             const auto vertex_dofs = entity_map->getVertexDofs(v);
-            FE_THROW_IF(vertex_dofs.size() < components, InvalidStateException,
-                        "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
-                            rec.name + "' vertex DOF component count mismatch");
-            const auto v_base = static_cast<std::size_t>(v) * mesh_components;
-            for (std::size_t c = 0; c < components; ++c) {
-                const auto dof = vertex_dofs[c];
-                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >=
-                                         buffer.coefficients.size(),
-                            InvalidStateException,
-                            "FESystem::syncPrescribedVertexFieldsFromMeshFields: field DOF index out of range");
-                buffer.coefficients[static_cast<std::size_t>(dof)] =
-                    static_cast<Real>(values[v_base + c]);
-                ++values_written;
+            if (vertex_dofs.size() < components) {
+                all_mesh_vertices_have_vertex_dofs = false;
+                break;
             }
+        }
+
+        if (all_mesh_vertices_have_vertex_dofs) {
+            for (GlobalIndex v = 0; v < n_vertices; ++v) {
+                const auto vertex_dofs = entity_map->getVertexDofs(v);
+                const auto v_base = static_cast<std::size_t>(v) * mesh_components;
+                for (std::size_t c = 0; c < components; ++c) {
+                    const auto dof = vertex_dofs[c];
+                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >=
+                                             buffer.coefficients.size(),
+                                InvalidStateException,
+                                "FESystem::syncPrescribedVertexFieldsFromMeshFields: field DOF index out of range");
+                    buffer.coefficients[static_cast<std::size_t>(dof)] =
+                        static_cast<Real>(values[v_base + c]);
+                    ++values_written;
+                }
+            }
+        } else {
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+            std::vector<std::uint8_t> coefficient_written(buffer.coefficients.size(), 0u);
+            for (GlobalIndex cell = 0;
+                 cell < static_cast<GlobalIndex>(local_mesh.n_cells());
+                 ++cell) {
+                auto [cell_vertices, n_cell_vertices] =
+                    local_mesh.cell_vertices_span(static_cast<svmp::index_t>(cell));
+                FE_THROW_IF(cell_vertices == nullptr || n_cell_vertices == 0u,
+                            InvalidStateException,
+                            "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
+                                rec.name + "' cannot sync from empty cell connectivity");
+
+                const auto cell_dofs = field_dof_handlers_[field_idx].getCellDofs(cell);
+                const auto expected_cell_dofs = n_cell_vertices * components;
+                FE_THROW_IF(cell_dofs.size() != expected_cell_dofs,
+                            InvalidStateException,
+                            "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
+                                rec.name + "' cell DOF count does not match mesh point field connectivity");
+
+                for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
+                    const auto vertex = cell_vertices[local_node];
+                    FE_THROW_IF(vertex < 0 || static_cast<std::size_t>(vertex) >=
+                                             static_cast<std::size_t>(n_vertices),
+                                InvalidStateException,
+                                "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh vertex index out of range");
+                    const auto v_base = static_cast<std::size_t>(vertex) * mesh_components;
+                    for (std::size_t c = 0; c < components; ++c) {
+                        const auto cell_dof_position =
+                            c * n_cell_vertices + local_node;
+                        const auto dof = cell_dofs[cell_dof_position];
+                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >=
+                                                 buffer.coefficients.size(),
+                                    InvalidStateException,
+                                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: field DOF index out of range");
+                        const auto sdof = static_cast<std::size_t>(dof);
+                        buffer.coefficients[sdof] =
+                            static_cast<Real>(values[v_base + c]);
+                        if (coefficient_written[sdof] == 0u) {
+                            coefficient_written[sdof] = 1u;
+                            ++values_written;
+                        }
+                    }
+                }
+            }
+#else
+            FE_THROW(InvalidStateException,
+                     "FESystem::syncPrescribedVertexFieldsFromMeshFields: high-order mesh point sync requires Mesh support");
+#endif
         }
         ++buffer.revision;
     }

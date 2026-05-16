@@ -94,6 +94,34 @@ std::shared_ptr<Mesh> build_single_quad_mesh()
     return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<Mesh> build_single_biquadratic_quad_mesh()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+        0.5, 0.0,
+        1.0, 0.5,
+        0.5, 1.0,
+        0.0, 0.5,
+        0.5, 0.5
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<Mesh> build_two_quad_mesh()
 {
     auto base = std::make_shared<MeshBase>();
@@ -941,6 +969,52 @@ TEST(FESystem, StandardMeshMotionFieldsSyncFromMeshStorageToPrescribedBuffers)
         EXPECT_NEAR(coeffs[static_cast<std::size_t>(vdofs[1])],
                     velocity_data[v * ncomp + 1],
                     1e-12);
+    }
+}
+
+TEST(FESystem, PrescribedVertexFieldSyncsHighOrderMeshPointData)
+{
+    auto mesh = build_single_biquadratic_quad_mesh();
+    const auto handle = svmp::MeshFields::attach_field(
+        mesh->local_mesh(),
+        svmp::EntityKind::Vertex,
+        "ManufacturedSource",
+        svmp::FieldScalarType::Float64,
+        2);
+    auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handle);
+    ASSERT_NE(values, nullptr);
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        values[2u * vertex] = static_cast<svmp::real_t>(1.0 + vertex);
+        values[2u * vertex + 1u] = static_cast<svmp::real_t>(10.0 + vertex);
+    }
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/2);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto source = sys.addField(FieldSpec{
+        .name = "ManufacturedSource",
+        .space = vector_space,
+        .components = 2,
+        .source_kind = FieldSourceKind::PrescribedData});
+    ASSERT_NO_THROW(sys.setup());
+
+    EXPECT_EQ(sys.syncPrescribedVertexFieldsFromMeshFields(), 18u);
+
+    const auto coefficients = sys.prescribedFieldCoefficients(source);
+    const auto cell_dofs = sys.fieldDofHandler(source).getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), 18u);
+    auto [cell_vertices, n_cell_vertices] = mesh->local_mesh().cell_vertices_span(0);
+    ASSERT_NE(cell_vertices, nullptr);
+    ASSERT_EQ(n_cell_vertices, 9u);
+
+    for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
+        const auto vertex = static_cast<std::size_t>(cell_vertices[local_node]);
+        const auto dof_x = static_cast<std::size_t>(cell_dofs[local_node]);
+        const auto dof_y = static_cast<std::size_t>(cell_dofs[n_cell_vertices + local_node]);
+        EXPECT_DOUBLE_EQ(coefficients[dof_x], 1.0 + static_cast<double>(vertex));
+        EXPECT_DOUBLE_EQ(coefficients[dof_y], 10.0 + static_cast<double>(vertex));
     }
 }
 
