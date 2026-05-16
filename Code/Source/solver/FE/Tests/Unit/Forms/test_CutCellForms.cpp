@@ -1157,6 +1157,77 @@ TEST(CutCellForms, HighOrderCutVolumeManyPointRuleKeepsBasisEvaluation)
     EXPECT_NEAR(assembled_measure, expected_measure, Real(1.0e-13));
 }
 
+TEST(CutCellForms, HighOrderCutVolumePolynomialMomentsMatchGeneratedRule)
+{
+    constexpr int marker = 85;
+    auto rule = makeManyPointReferenceTetraCutRule(CutIntegrationSide::Negative);
+    markRuleAsHighOrderImplicit(rule,
+                                marker,
+                                "polynomial-moment-fixed-geometry-volume",
+                                /*quadrature_order=*/6);
+
+    Real expected_linear = Real(0.0);
+    Real expected_quadratic = Real(0.0);
+    for (const auto& qp : rule.points) {
+        const Real x = qp.point[0];
+        const Real y = qp.point[1];
+        const Real z = qp.point[2];
+        expected_linear += qp.weight * (x + Real(2.0) * y - Real(0.5) * z);
+        expected_quadratic += qp.weight * (x * x + y * z + Real(0.25));
+    }
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.side = CutIntegrationSide::Negative;
+    metadata.embedded_normal = rule.points.front().normal;
+    metadata.cut_topology_id = rule.provenance.cut_topology_id;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addVolumeRule(std::move(metadata), std::move(rule));
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto x = FormExpr::coordinate();
+
+    const auto assemble_moment = [&](const FormExpr& coefficient) {
+        FormCompiler compiler;
+        FormKernel kernel(
+            compiler.compileBilinear((coefficient * u * v).dCutVolume(marker, CutVolumeSide::Negative)));
+        svmp::FE::assembly::DenseMatrixView mass(dof_map.getNumDofs());
+        mass.zero();
+        const auto assembled = assembler.assembleCutVolumes(
+            mesh, cut_context, marker, CutIntegrationSide::Negative, space, space, kernel,
+            &mass, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+        EXPECT_EQ(assembled.elements_assembled, svmp::FE::GlobalIndex{1});
+        Real sum = Real(0.0);
+        for (svmp::FE::GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
+            for (svmp::FE::GlobalIndex j = 0; j < dof_map.getNumDofs(); ++j) {
+                sum += mass.getMatrixEntry(i, j);
+            }
+        }
+        return sum;
+    };
+
+    const auto linear =
+        x.component(0) + Real(2.0) * x.component(1) - Real(0.5) * x.component(2);
+    const auto quadratic =
+        x.component(0) * x.component(0) +
+        x.component(1) * x.component(2) +
+        FormExpr::constant(Real(0.25));
+
+    EXPECT_NEAR(assemble_moment(linear), expected_linear, Real(1.0e-13));
+    EXPECT_NEAR(assemble_moment(quadratic), expected_quadratic, Real(1.0e-13));
+}
+
 TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDifference)
 {
     constexpr int marker = 82;

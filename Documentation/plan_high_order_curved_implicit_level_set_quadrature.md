@@ -982,7 +982,7 @@ Cut-adjacent facet-set locality audit:
       fixed-geometry assembly loops.
 - [x] Assemble a scalar mass form over a curved cut volume and compare to
       analytic measure.
-- [ ] Assemble linear and quadratic polynomial moments over curved cut volumes.
+- [x] Assemble linear and quadratic polynomial moments over curved cut volumes.
 - [ ] Assemble a surface traction over a curved interface and compare to analytic
       surface integral.
 - [x] Verify high quadrature point counts do not corrupt local DOF insertion.
