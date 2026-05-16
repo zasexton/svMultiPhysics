@@ -1105,13 +1105,23 @@ Rationale: recent D18/D38 work showed that basis-cache growth, repeated cut
 context rebuilds, and cut-adjacent traversal density can dominate solver
 behavior. High-order quadrature adds more points and more per-cell work.
 
+Current smoke policy: the high-order MMS diagnostic shortcut records per-cell
+cut statistics through the cut-context log (`cell_count`, `active_cut_cells`,
+rule counts, quadrature point counts, and fragment counts), per-step assembly
+density through assembly timings per accepted step, and resource bounds through
+process RSS and basis-cache counters. The compact smoke ceiling is 4 assembly
+timing records per accepted step, 3 extra assembly timings beyond nonlinear
+iterations per accepted step, 4 cut-context rebuilds per accepted step,
+300000 KB maximum RSS, 100000 KB RSS growth, 4 basis-cache entries, and 3
+basis-cache entries of growth.
+
 ### Design Checklist
 
-- [ ] Define per-cell and per-step cost diagnostics.
-- [ ] Define maximum allowed basis-cache growth.
+- [x] Define per-cell and per-step cost diagnostics.
+- [x] Define maximum allowed basis-cache growth.
 - [ ] Define quadrature rule cache lifetime and invalidation.
 - [ ] Define MPI deterministic ordering for rules, metadata, and diagnostics.
-- [ ] Define memory ceilings for smoke runs.
+- [x] Define memory ceilings for smoke runs.
 - [ ] Define whether high-order quadrature can be cached across Newton states
       when `phi_h` does not change.
 
@@ -1130,7 +1140,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [ ] Repeated identical state rebuilds do not grow memory unbounded.
 - [ ] MPI and serial runs produce matching global measure summaries.
 - [ ] Rule ordering is deterministic across runs.
-- [ ] High-order smoke run reports timing, memory, and cache diagnostics.
+- [x] High-order smoke run reports timing, memory, and cache diagnostics.
 
 ### Literature Support
 
@@ -1206,7 +1216,7 @@ benchmark use only when all of the following are true:
 - [ ] Active pressure constraints cover unsupported high-order pressure DOFs.
 - [ ] Physical wet-volume diagnostics are available and parsed by smoke scripts.
 - [ ] MPI diagnostics and measures are deterministic.
-- [ ] Memory and cache growth are bounded in smoke runs.
+- [x] Memory and cache growth are bounded in smoke runs.
 - [ ] D18/D38 or other benchmarks have qualification logs recording high-order
       backend, orders, fallback counts, wet-volume history, nonlinear iterations,
       linear iterations, pressure range, and velocity range.

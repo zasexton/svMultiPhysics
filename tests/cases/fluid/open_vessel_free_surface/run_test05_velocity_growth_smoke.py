@@ -1938,6 +1938,34 @@ def assembly_efficiency_errors(metrics: dict[str, Any],
     return errors
 
 
+def resource_ceiling_errors(metrics: dict[str, Any],
+                            args: argparse.Namespace) -> list[str]:
+    checks = (
+        ("max_diagnostic_process_rss_kb",
+         "diagnostic_process_max_rss_kb",
+         "process RSS"),
+        ("max_diagnostic_process_rss_growth_kb",
+         "diagnostic_process_rss_growth_kb",
+         "process RSS growth"),
+        ("max_diagnostic_process_basis_cache_entry_growth",
+         "diagnostic_process_basis_cache_entry_growth",
+         "basis-cache entry growth"),
+    )
+    errors = []
+    for arg_name, metric_name, label in checks:
+        threshold = getattr(args, arg_name)
+        if threshold is None:
+            continue
+        value = metrics.get(metric_name)
+        if not isinstance(value, (int, float)):
+            errors.append(f"{label} diagnostic is unavailable")
+        elif float(value) > float(threshold):
+            errors.append(
+                f"{label} {float(value):.6g} exceeds {float(threshold):.6g}"
+            )
+    return errors
+
+
 def cut_context_policy_errors(metrics: dict[str, Any],
                               args: argparse.Namespace) -> list[str]:
     errors = []
@@ -2792,6 +2820,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_cut_volume_timing_diagnostics",
         "require_jit_specialization_trace_diagnostics",
         "require_process_memory_diagnostics",
+        "require_basis_cache_diagnostics",
         "require_marked_interior_face_fallback_diagnostics",
         "require_jacobian_component_block_diagnostics",
         "require_fsils_matrix_diagnostics",
@@ -2814,6 +2843,10 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_diagnostic_extra_assembly_timings_per_step",
         "max_diagnostic_cut_context_rebuilds_per_step",
         "max_diagnostic_newton_matrix_assemblies_per_step",
+        "max_diagnostic_process_rss_kb",
+        "max_diagnostic_process_rss_growth_kb",
+        "max_diagnostic_process_basis_cache_entries",
+        "max_diagnostic_process_basis_cache_entry_growth",
         "max_fsils_matrix_zero_rows",
         "max_fsils_matrix_missing_diag",
         "max_fsils_matrix_zero_diag",
@@ -3000,6 +3033,7 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
                 f"basis-cache entries {basis_cache_entries} exceed "
                 f"{args.max_diagnostic_process_basis_cache_entries}"
             )
+    errors.extend(resource_ceiling_errors(metrics, args))
     if args.require_interior_face_timing_diagnostics and not diagnostics.get("interior_face_timings"):
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
@@ -3399,6 +3433,7 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
                 f"basis-cache entries {basis_cache_entries} exceed "
                 f"{args.max_diagnostic_process_basis_cache_entries}"
             )
+    errors.extend(resource_ceiling_errors(metrics, args))
     if (args.require_interior_face_timing_diagnostics and
             not metrics["diagnostics"].get("interior_face_timings")):
         errors.append("interior-face timing diagnostics were not reported")
@@ -3751,6 +3786,22 @@ def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
         args.mms_nx = 2
     if args.mms_ny is None:
         args.mms_ny = args.mms_nx
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    if args.max_diagnostic_assembly_timings_per_step is None:
+        args.max_diagnostic_assembly_timings_per_step = 4.0
+    if args.max_diagnostic_extra_assembly_timings_per_step is None:
+        args.max_diagnostic_extra_assembly_timings_per_step = 3.0
+    if args.max_diagnostic_cut_context_rebuilds_per_step is None:
+        args.max_diagnostic_cut_context_rebuilds_per_step = 4.0
+    if args.max_diagnostic_process_rss_kb is None:
+        args.max_diagnostic_process_rss_kb = 300000.0
+    if args.max_diagnostic_process_rss_growth_kb is None:
+        args.max_diagnostic_process_rss_growth_kb = 100000.0
+    if args.max_diagnostic_process_basis_cache_entries is None:
+        args.max_diagnostic_process_basis_cache_entries = 4
+    if args.max_diagnostic_process_basis_cache_entry_growth is None:
+        args.max_diagnostic_process_basis_cache_entry_growth = 3
     if args.expect_generated_interface_geometry is None:
         args.expect_generated_interface_geometry = args.generated_interface_geometry
     if args.expect_implicit_cut_quadrature_backend is None:
@@ -3898,6 +3949,9 @@ def main() -> int:
     parser.add_argument("--max-fsils-matrix-nonfinite-entries", type=int)
     parser.add_argument("--require-basis-cache-diagnostics", action="store_true")
     parser.add_argument("--max-diagnostic-process-basis-cache-entries", type=int)
+    parser.add_argument("--max-diagnostic-process-rss-kb", type=float)
+    parser.add_argument("--max-diagnostic-process-rss-growth-kb", type=float)
+    parser.add_argument("--max-diagnostic-process-basis-cache-entry-growth", type=int)
     parser.add_argument("--enable-form-block-diagnostics", action="store_true")
     parser.add_argument("--enable-interior-face-timing", action="store_true")
     parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")
