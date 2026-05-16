@@ -2325,22 +2325,78 @@ bool updateLevelSetAdvectionVelocities(
         static_cast<std::size_t>(target_dofs.getNumDofs()),
         svmp::FE::Real{0.0});
     std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+
+    bool all_mesh_vertices_have_vertex_dofs = true;
     for (std::size_t v = 0; v < n_vertices; ++v) {
       const auto vertex_dofs =
           entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
       if (vertex_dofs.size() < target_components) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set advection velocity update found a vertex with too few DOFs.");
+        all_mesh_vertices_have_vertex_dofs = false;
+        break;
       }
-      for (std::size_t c = 0; c < target_components; ++c) {
-        const auto dof = static_cast<std::size_t>(vertex_dofs[c]);
-        if (dof >= coefficients.size()) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set advection velocity update found an out-of-range vertex DOF.");
+    }
+
+    if (all_mesh_vertices_have_vertex_dofs) {
+      for (std::size_t v = 0; v < n_vertices; ++v) {
+        const auto vertex_dofs =
+            entity_map->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+        for (std::size_t c = 0; c < target_components; ++c) {
+          const auto dof = vertex_dofs[c];
+          if (dof < 0 ||
+              static_cast<std::size_t>(dof) >= coefficients.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set advection velocity update found an out-of-range vertex DOF.");
+          }
+          const auto sdof = static_cast<std::size_t>(dof);
+          coefficients[sdof] =
+              static_cast<svmp::FE::Real>(extended[v * target_components + c]);
+          assigned[sdof] = 1u;
         }
-        coefficients[dof] =
-            static_cast<svmp::FE::Real>(extended[v * target_components + c]);
-        assigned[dof] = 1u;
+      }
+    } else {
+      const auto& local_mesh = mesh.local_mesh();
+      for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
+        auto [cell_vertices, n_cell_vertices] =
+            local_mesh.cell_vertices_span(cell);
+        if (cell_vertices == nullptr || n_cell_vertices == 0u) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set advection velocity update found empty cell connectivity.");
+        }
+        const auto cell_dofs = target_dofs.getCellDofs(
+            static_cast<svmp::FE::GlobalIndex>(cell));
+        const auto expected_cell_dofs =
+            n_cell_vertices * target_components;
+        if (cell_dofs.size() != expected_cell_dofs) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set advection velocity update found incompatible high-order cell DOFs.");
+        }
+
+        for (std::size_t local_node = 0;
+             local_node < n_cell_vertices;
+             ++local_node) {
+          const auto vertex = cell_vertices[local_node];
+          if (vertex < 0 ||
+              static_cast<std::size_t>(vertex) >= n_vertices) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set advection velocity update found an out-of-range mesh vertex.");
+          }
+          for (std::size_t c = 0; c < target_components; ++c) {
+            const auto cell_dof_position =
+                c * n_cell_vertices + local_node;
+            const auto dof = cell_dofs[cell_dof_position];
+            if (dof < 0 ||
+                static_cast<std::size_t>(dof) >= coefficients.size()) {
+              throw std::runtime_error(
+                  "[svMultiPhysics::Application] Level-set advection velocity update found an out-of-range cell DOF.");
+            }
+            const auto sdof = static_cast<std::size_t>(dof);
+            coefficients[sdof] = static_cast<svmp::FE::Real>(
+                extended[static_cast<std::size_t>(vertex) *
+                             target_components +
+                         c]);
+            assigned[sdof] = 1u;
+          }
+        }
       }
     }
 

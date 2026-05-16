@@ -1066,6 +1066,8 @@ finite-difference component checks are valuable for isolating assembly defects.
       reference edge ordering.
 - [x] Sync prescribed high-order mesh point fields into vertex, edge, and cell
       FE coefficients for MMS source data.
+- [x] Sync wet-extension level-set advection velocity data into high-order mesh
+      point coefficients.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
