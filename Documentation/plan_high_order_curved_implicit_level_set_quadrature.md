@@ -1363,10 +1363,19 @@ linear-solver problems.
       runs aggregate these into cut-context rebuild logs; smoke scripts assert
       aggregate/backend substrings, while detailed JSON and VTP debug output
       remain opt-in inspection tools.
-- [ ] Define high-order curved interface visualization strategy:
+- [x] Define high-order curved interface visualization strategy:
       - tessellated interface output,
       - sample points,
       - or backend debug dumps.
+      Curved-interface inspection uses VTP interface fragments as the primary
+      visualization surface and per-parent-cell quadrature JSON as the detailed
+      backend dump. The VTP path carries fragment points, segment or polygon
+      connectivity, normals, curvature estimates, parent cells, interface
+      markers, and retained side volume fractions. The JSON dump carries the
+      generated volume and interface quadrature rules, provenance, frame,
+      requested and achieved orders, policy, construction kind, and individual
+      quadrature points. This keeps routine visualization lightweight while
+      preserving enough backend state for debugging curved implicit cuts.
 - [ ] Define how `ActiveFluid` remains a vertex-sign visualization only.
 
 ### Implementation Checklist
