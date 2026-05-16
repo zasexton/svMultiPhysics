@@ -255,7 +255,7 @@ assembly and physics code backend-agnostic.
       - isovalue,
       - requested volume and interface orders,
       - tolerances and fallback policy.
-- [ ] Output:
+- [x] Output:
       - negative-side volume rule,
       - positive-side volume rule,
       - interface rule,
@@ -264,11 +264,11 @@ assembly and physics code backend-agnostic.
       - interface normals in reference coordinates,
       - achieved orders and policy name,
       - diagnostic string and fallback reason.
-- [ ] Preserve reference-frame output so existing assembly can map rules through
+- [x] Preserve reference-frame output so existing assembly can map rules through
       parent physical geometry.
-- [ ] Preserve deterministic rule ordering.
-- [ ] Require strictly finite points and weights.
-- [ ] Require positive volume weights unless a backend explicitly documents
+- [x] Preserve deterministic rule ordering.
+- [x] Require strictly finite points and weights.
+- [x] Require positive volume weights unless a backend explicitly documents
       signed moment-fit weights and downstream acceptance permits them.
 
 ### Implementation Checklist
@@ -277,22 +277,22 @@ assembly and physics code backend-agnostic.
 - [x] Move current linear cutter behind the same abstraction.
 - [x] Add backend metadata fields to `CutQuadratureRule` provenance or adjacent
       metadata.
-- [ ] Add a standard diagnostic enum:
+- [x] Add a standard diagnostic enum:
       `ExactNoCut`, `Cut`, `Tangent`, `Degenerate`, `Fallback`, `Unsupported`,
       `Failed`.
-- [ ] Add common validation for finite weights, finite points, valid side
+- [x] Add common validation for finite weights, finite points, valid side
       labels, and parent-cell ids.
-- [ ] Add common measure consistency checks:
+- [x] Add common measure consistency checks:
       negative plus positive reference measure equals parent measure within
       tolerance.
 
 ### Tests
 
 - [x] Backend factory returns the linear backend for legacy settings.
-- [ ] Backend metadata reaches `CutIntegrationContext`.
-- [ ] Invalid backend output is rejected with clear diagnostics.
-- [ ] Negative and positive side measures sum to the parent measure.
-- [ ] Interface rule marker/provenance matches volume rule marker/provenance.
+- [x] Backend metadata reaches `CutIntegrationContext`.
+- [x] Invalid backend output is rejected with clear diagnostics.
+- [x] Negative and positive side measures sum to the parent measure.
+- [x] Interface rule marker/provenance matches volume rule marker/provenance.
 
 ### Literature Support
 

@@ -3,6 +3,7 @@
 #include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Spaces/SpaceFactory.h"
@@ -11,10 +12,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -723,6 +726,167 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
             3,
             FE::ElementType::Hex27);
     EXPECT_FALSE(saye_hex.supports_element_type);
+}
+
+TEST(LevelSetInterfaceLifecycle, BackendDiagnosticStatusNamesAreStable)
+{
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::ExactNoCut),
+        "ExactNoCut");
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::Cut),
+        "Cut");
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::Tangent),
+        "Tangent");
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::Degenerate),
+        "Degenerate");
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::Fallback),
+        "Fallback");
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::Unsupported),
+        "Unsupported");
+    EXPECT_STREQ(
+        level_set::implicitCutQuadratureDiagnosticStatusName(
+            level_set::ImplicitCutQuadratureDiagnosticStatus::Failed),
+        "Failed");
+}
+
+TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
+{
+    FE::interfaces::CutInterfaceDomainRequest request{};
+    request.source = FE::interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "validation-level-set", 0, 1);
+    request.interface_marker = 99;
+    request.tolerance = 1.0e-12;
+    request.quadrature_order = 2;
+    request.interface_quadrature_order = 1;
+    request.volume_quadrature_order = 2;
+
+    FE::interfaces::LevelSetCellCutInput input{};
+    input.parent_cell = 5;
+    input.element_type = FE::ElementType::Tetra4;
+    input.node_coordinates = {
+        std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+        std::array<FE::Real, 3>{1.0, 0.0, 0.0},
+        std::array<FE::Real, 3>{0.0, 1.0, 0.0},
+        std::array<FE::Real, 3>{0.0, 0.0, 1.0},
+    };
+    input.level_set_values = {-0.25, 0.75, 0.75, 0.75};
+
+    const auto& backend =
+        level_set::implicitCutQuadratureBackendDriver(
+            level_set::ImplicitCutQuadratureBackend::LinearCorner);
+    const auto result = backend.cut(3, request, input);
+    const auto validation =
+        level_set::validateImplicitCutQuadratureBackendCellResult(
+            request, input, result);
+    EXPECT_TRUE(validation.ok) << validation.diagnostic;
+    EXPECT_EQ(validation.status,
+              level_set::ImplicitCutQuadratureDiagnosticStatus::Cut);
+
+    FE::Real parent_measure = 0.0;
+    FE::Real side_measure = 0.0;
+    for (const auto& region : result.cut.volume_regions) {
+        parent_measure = std::max(parent_measure, region.parent_measure);
+        side_measure += region.measure;
+    }
+    EXPECT_NEAR(side_measure, parent_measure, 1.0e-12);
+}
+
+TEST(LevelSetInterfaceLifecycle, InvalidBackendOutputIsRejected)
+{
+    FE::interfaces::CutInterfaceDomainRequest request{};
+    request.source = FE::interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "validation-level-set", 0, 1);
+    request.interface_marker = 12;
+    request.tolerance = 1.0e-12;
+
+    FE::interfaces::LevelSetCellCutInput input{};
+    input.parent_cell = 2;
+    input.element_type = FE::ElementType::Tetra4;
+
+    level_set::ImplicitCutQuadratureBackendCellResult result{};
+    result.cut.supported = true;
+    result.achieved_interface_quadrature_order = 1;
+    result.achieved_volume_quadrature_order = 1;
+    result.diagnostic_status =
+        level_set::ImplicitCutQuadratureDiagnosticStatus::Cut;
+
+    FE::interfaces::CutInterfaceVolumeRegion bad_region{};
+    bad_region.interface_marker = request.interface_marker;
+    bad_region.parent_cell = input.parent_cell;
+    bad_region.side = FE::geometry::CutIntegrationSide::Negative;
+    bad_region.parent_measure = 1.0;
+    bad_region.measure = std::numeric_limits<FE::Real>::quiet_NaN();
+    bad_region.volume_fraction = 0.5;
+    result.cut.volume_regions.push_back(bad_region);
+
+    const auto validation =
+        level_set::validateImplicitCutQuadratureBackendCellResult(
+            request, input, result);
+    EXPECT_FALSE(validation.ok);
+    EXPECT_NE(validation.diagnostic.find("invalid volume region"),
+              std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, BackendMetadataReachesCutIntegrationContext)
+{
+    constexpr int interface_marker = 83;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.interface_quadrature_order = 0;
+    options.volume_quadrature_order = 1;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+
+    FE::assembly::CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(result.domain);
+
+    ASSERT_FALSE(context.volumeRules().empty());
+    EXPECT_EQ(context.volumeRules().front().provenance.implicit_geometry_mode,
+              "LinearCorner");
+    EXPECT_EQ(context.volumeRules().front().provenance.implicit_quadrature_backend,
+              "LinearCorner");
+    EXPECT_EQ(context.volumeRules().front().provenance.predicate_policy_key,
+              result.domain.request().quadrature_policy_key);
+    ASSERT_FALSE(context.interfaceRules().empty());
+    EXPECT_EQ(context.interfaceRules().front().provenance.marker,
+              interface_marker);
+    EXPECT_EQ(context.interfaceRules().front().provenance.implicit_fallback_policy,
+              "Fail");
 }
 
 TEST(LevelSetInterfaceLifecycle, UnimplementedBackendFactoryThrows)

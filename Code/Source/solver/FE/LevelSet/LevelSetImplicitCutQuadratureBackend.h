@@ -11,11 +11,33 @@
 
 namespace svmp::FE::level_set {
 
+enum class ImplicitCutQuadratureDiagnosticStatus {
+    ExactNoCut,
+    Cut,
+    Tangent,
+    Degenerate,
+    Fallback,
+    Unsupported,
+    Failed,
+};
+
+[[nodiscard]] const char* implicitCutQuadratureDiagnosticStatusName(
+    ImplicitCutQuadratureDiagnosticStatus status) noexcept;
+
 struct ImplicitCutQuadratureBackendCellResult {
     interfaces::LevelSetCellCutResult cut{};
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
     bool fallback_used{false};
+    ImplicitCutQuadratureDiagnosticStatus diagnostic_status{
+        ImplicitCutQuadratureDiagnosticStatus::Failed};
+};
+
+struct ImplicitCutQuadratureBackendValidation {
+    bool ok{true};
+    ImplicitCutQuadratureDiagnosticStatus status{
+        ImplicitCutQuadratureDiagnosticStatus::Cut};
+    std::string diagnostic{};
 };
 
 struct ImplicitCutQuadratureBackendCapability {
@@ -68,5 +90,11 @@ implicitCutQuadratureBackendDriver(ImplicitCutQuadratureBackend backend);
 implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
                                        int mesh_dimension,
                                        ElementType element_type) noexcept;
+
+[[nodiscard]] ImplicitCutQuadratureBackendValidation
+validateImplicitCutQuadratureBackendCellResult(
+    const interfaces::CutInterfaceDomainRequest& request,
+    const interfaces::LevelSetCellCutInput& input,
+    const ImplicitCutQuadratureBackendCellResult& result);
 
 } // namespace svmp::FE::level_set

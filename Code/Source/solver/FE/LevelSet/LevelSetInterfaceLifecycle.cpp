@@ -204,6 +204,12 @@ struct GeneratedInterfaceCellDiagnostics {
             "generated level-set interface requires a 2D or 3D mesh");
     }
     auto backend_result = backend.cut(mesh.dimension(), domain.request(), input);
+    const auto validation =
+        validateImplicitCutQuadratureBackendCellResult(
+            domain.request(), input, backend_result);
+    if (!validation.ok) {
+        throw std::invalid_argument(validation.diagnostic);
+    }
     if (!backend_result.cut.supported) {
         throw std::invalid_argument(backend_result.cut.diagnostic);
     }
