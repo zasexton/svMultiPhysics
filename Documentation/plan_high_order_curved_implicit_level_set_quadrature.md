@@ -1441,17 +1441,35 @@ prevents solver behavior from hiding geometry errors.
 
 ### Design Checklist
 
-- [ ] Define analytic 2D cases:
+- [x] Define analytic 2D cases:
       - line through quad,
       - circle segment,
       - ellipse segment,
       - polynomial interface.
-- [ ] Define analytic 3D cases:
+      The 2D validation suite uses P1 line cuts as the linear-regression anchor,
+      P2 circles for area/length/moment and h/p-refinement checks, P2 ellipses
+      for anisotropic curvature and second moments, and polynomial level-set
+      fields to prove that higher-order DOFs change generated geometry.
+- [x] Define analytic 3D cases:
       - plane through hex,
       - sphere cap,
       - ellipsoid-like polynomial where feasible.
-- [ ] Define polynomial moment tests up to the achieved quadrature order.
-- [ ] Define convergence criteria under h-refinement and p-refinement.
+      The 3D validation suite uses P1 plane cuts through hex/tet cells as the
+      linear-regression anchor, quadratic sphere/sphere-cap cases for
+      volume/area checks, and axis-aligned ellipsoid polynomials for curved
+      hyperrectangle volume and surface validation.
+- [x] Define polynomial moment tests up to the achieved quadrature order.
+      Moment checks integrate constants, first moments, and second moments only
+      up to the backend-reported achieved order for each rule family. Current
+      high-order backends report interface order 1 and volume order 2, so tests
+      assert linear interface moments and quadratic volume moments for the
+      supported analytic shapes.
+- [x] Define convergence criteria under h-refinement and p-refinement.
+      h-refinement checks require smaller subdivision-depth errors for circle
+      area and interface length. p-refinement checks compare P1 corner geometry
+      against P2 high-order geometry and require the P2 error to drop by at
+      least a fixed factor for both area and length while preserving reported
+      achieved-order metadata.
 - [x] Define tests for non-affine physical parent mappings.
 
 ### Implementation Checklist
