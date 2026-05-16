@@ -255,6 +255,7 @@ def configure_solver(solver_xml: Path,
                      linear_solver_type: str | None = None,
                      disable_coupled_outer_fgmres: bool = False,
                      disable_cut_metadata_scale: bool = False,
+                     disable_velocity_extension: bool = False,
                      disable_vtk_output: bool = False,
                      final_output_only: bool = False,
                      vtk_save_increment: int | None = None,
@@ -340,6 +341,10 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Enable_cut_cell_stabilization", "false")
     else:
         require_text(free_surface, "Enable_cut_cell_stabilization", "true")
+    if disable_velocity_extension:
+        set_text(free_surface, "Enable_velocity_extension", "false")
+    else:
+        require_text(free_surface, "Enable_velocity_extension", "true")
 
     if disable_coupled_outer_fgmres:
         assert ns_solver is not None
@@ -3120,6 +3125,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 linear_solver_type=args.linear_solver_type,
                 disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
                 disable_cut_metadata_scale=args.disable_cut_metadata_scale,
+                disable_velocity_extension=args.disable_velocity_extension,
                 disable_vtk_output=args.disable_vtk_output,
                 final_output_only=args.final_output_only,
                 vtk_save_increment=args.vtk_save_increment,
@@ -3155,6 +3161,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
                 failure["disable_cut_metadata_scale"] = True
+            if args.disable_velocity_extension:
+                failure["disable_velocity_extension"] = True
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
             if args.enable_blockschur_true_residual_retry:
@@ -3193,6 +3201,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["disable_coupled_outer_fgmres"] = True
             if args.disable_cut_metadata_scale:
                 failure["disable_cut_metadata_scale"] = True
+            if args.disable_velocity_extension:
+                failure["disable_velocity_extension"] = True
             if args.disable_vtk_output:
                 failure["disable_vtk_output"] = True
             if args.enable_blockschur_true_residual_retry:
@@ -3228,6 +3238,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics["disable_coupled_outer_fgmres"] = True
         if args.disable_cut_metadata_scale:
             metrics["disable_cut_metadata_scale"] = True
+        if args.disable_velocity_extension:
+            metrics["disable_velocity_extension"] = True
         if args.disable_vtk_output:
             metrics["disable_vtk_output"] = True
         if args.enable_blockschur_true_residual_retry:
@@ -3300,6 +3312,7 @@ def main() -> int:
     parser.add_argument("--max-jacobian-component-block-relative-error", type=float)
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
+    parser.add_argument("--disable-velocity-extension", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
     parser.add_argument("--linear-relative-tolerance", type=float)
     parser.add_argument("--linear-absolute-tolerance", type=float)

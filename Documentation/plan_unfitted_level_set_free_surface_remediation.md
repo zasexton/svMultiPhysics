@@ -645,6 +645,11 @@ benchmark runs.
       three-step D18 no-output GMRES probe reduced cut-context rebuild density
       from 6.0 to 4.0 per accepted step and passed a 4.1 rebuilds-per-step
       smoke threshold.
+- [x] Add a smoke-script velocity-extension disable switch and record a
+      three-step D18 no-output GMRES comparison: disabling inactive-side
+      velocity extension did not reduce assembly density or materially reduce
+      cut-volume and cut-adjacent interior-face cost, so the remaining
+      throughput blocker is repeated full assembly traversal.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Compare D38 peak height, front position if applicable, pressure range,
