@@ -571,6 +571,8 @@ them.
 
 ### Tests
 
+- [x] Dispatch high-order generated cut-volume and interface rules through
+      fixed-geometry assembly loops.
 - [ ] Assemble a scalar mass form over a curved cut volume and compare to
       analytic measure.
 - [ ] Assemble linear and quadratic polynomial moments over curved cut volumes.
@@ -908,6 +910,8 @@ finite-difference component checks are valuable for isolating assembly defects.
 
 ### Implementation Checklist
 
+- [x] Add a fixed-geometry measure dispatch test for high-order generated
+      `dCutVolume` and `dI` rules.
 - [ ] Add fixed-geometry finite-difference tests for high-order `dCutVolume`.
 - [ ] Add fixed-geometry finite-difference tests for high-order `dI`.
 - [ ] Add high-order cut-adjacent stabilization assembly tests.
@@ -990,7 +994,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 - [x] Implement initial Saye-style 2D quad backend.
 - [x] Add analytic area, length, and moment tests.
-- [ ] Add fixed-geometry assembly tests.
+- [x] Add fixed-geometry assembly tests.
 - [ ] Add diagnostics and output tests.
 - [ ] Document limitations and fallback behavior.
 

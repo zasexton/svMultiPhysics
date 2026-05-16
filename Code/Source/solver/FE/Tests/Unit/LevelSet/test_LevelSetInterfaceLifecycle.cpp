@@ -3,6 +3,7 @@
 #include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/CutDomainAssembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
@@ -426,6 +427,61 @@ FE::Real integrateInterfaceMoment(
         }
     }
     return value;
+}
+
+class CutMeasureAssemblyKernel final : public FE::assembly::AssemblyKernel {
+public:
+    [[nodiscard]] FE::assembly::RequiredData getRequiredData() const override
+    {
+        return FE::assembly::RequiredData::IntegrationWeights;
+    }
+
+    void computeCell(const FE::assembly::AssemblyContext& ctx,
+                     FE::assembly::KernelOutput& output) override
+    {
+        integrate(ctx, output);
+    }
+
+    void computeBoundaryFace(const FE::assembly::AssemblyContext& ctx,
+                             int /*boundary_marker*/,
+                             FE::assembly::KernelOutput& output) override
+    {
+        integrate(ctx, output);
+    }
+
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+private:
+    static void integrate(const FE::assembly::AssemblyContext& ctx,
+                          FE::assembly::KernelOutput& output)
+    {
+        output.reserve(/*n_test=*/1, /*n_trial=*/0, /*need_matrix=*/false,
+                       /*need_vector=*/true);
+        for (FE::LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            output.vectorEntry(0) += ctx.integrationWeight(q);
+        }
+    }
+};
+
+void populateMeasureAssemblyContext(
+    const FE::geometry::CutQuadratureRule& rule,
+    FE::assembly::AssemblyContext& ctx)
+{
+    std::vector<std::array<FE::Real, 3>> points;
+    std::vector<std::array<FE::Real, 3>> normals;
+    std::vector<FE::Real> weights;
+    points.reserve(rule.points.size());
+    normals.reserve(rule.points.size());
+    weights.reserve(rule.points.size());
+    for (const auto& point : rule.points) {
+        points.push_back(point.point);
+        normals.push_back(point.normal);
+        weights.push_back(point.weight);
+    }
+    ctx.setQuadratureData(points, weights);
+    ctx.setPhysicalPoints(points);
+    ctx.setIntegrationWeights(weights);
+    ctx.setNormals(normals);
 }
 
 } // namespace
@@ -1235,6 +1291,98 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
     ASSERT_FALSE(interface_rules.empty());
     EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 2);
     EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 1);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleRulesAssembleFixedGeometryMeasures)
+{
+    constexpr int interface_marker = 86;
+    constexpr FE::Real radius = 0.5;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 9u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 9u; ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x[0] * x[0] + x[1] * x[1] - radius * radius;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = 6;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+
+    FE::assembly::CutIntegrationContext context;
+    ASSERT_NO_THROW(context.addGeneratedInterfaceDomain(result.domain));
+
+    CutMeasureAssemblyKernel kernel;
+    const auto build_context =
+        [](const FE::assembly::CutRuleAssemblyRequest& request,
+           FE::assembly::AssemblyContext& ctx) {
+            ASSERT_NE(request.rule, nullptr);
+            populateMeasureAssemblyContext(*request.rule, ctx);
+        };
+
+    FE::assembly::CutDomainAssemblyOptions volume_options;
+    volume_options.include_interface_rules = false;
+    volume_options.volume_marker = interface_marker;
+    volume_options.volume_side = FE::geometry::CutIntegrationSide::Negative;
+    const auto volume_summary =
+        FE::assembly::assembleCutDomains(
+            context, kernel, build_context, volume_options);
+
+    ASSERT_GT(volume_summary.volume_rule_count, 0u);
+    ASSERT_TRUE(volume_summary.hasVector());
+    ASSERT_EQ(volume_summary.total_output.local_vector.size(), 1u);
+    EXPECT_NEAR(volume_summary.total_output.local_vector[0],
+                result.summary.negative_volume_measure,
+                1.0e-12);
+    EXPECT_NEAR(volume_summary.total_output.local_vector[0],
+                pi * radius * radius,
+                6.0e-2);
+
+    FE::assembly::CutDomainAssemblyOptions interface_options;
+    interface_options.include_volume_rules = false;
+    interface_options.interface_marker = interface_marker;
+    const auto interface_summary =
+        FE::assembly::assembleCutDomains(
+            context, kernel, build_context, interface_options);
+
+    ASSERT_GT(interface_summary.interface_rule_count, 0u);
+    ASSERT_TRUE(interface_summary.hasVector());
+    ASSERT_EQ(interface_summary.total_output.local_vector.size(), 1u);
+    EXPECT_NEAR(interface_summary.total_output.local_vector[0],
+                result.summary.measure,
+                1.0e-12);
+    EXPECT_NEAR(interface_summary.total_output.local_vector[0],
+                2.0 * pi * radius,
+                1.2e-1);
 }
 
 TEST(LevelSetInterfaceLifecycle, UnimplementedBackendFactoryThrows)
