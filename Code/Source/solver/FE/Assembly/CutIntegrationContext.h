@@ -214,7 +214,7 @@ struct CutFacetSetHandle {
 class CutIntegrationContext {
 public:
     [[nodiscard]] static constexpr Real maxCutCellStabilizationScale() noexcept {
-        return Real{1.0e8};
+        return Real{1.0e3};
     }
 
     [[nodiscard]] static constexpr Real minGeneratedCutVolumeFraction() noexcept {

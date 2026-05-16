@@ -309,8 +309,8 @@ explicit stabilization policy change.
       handle.
 - [x] Bind cut metadata scale per cut-adjacent facet.
 - [x] Cap generated cut-adjacent stabilization scales for near-zero wet
-      fractions and report capped facet counts in cut-context rebuild
-      diagnostics.
+      fractions at a finite production ceiling and report capped facet counts
+      in cut-context rebuild diagnostics.
 - [x] Ensure non-cut interior faces receive zero cut-cell stabilization
       contribution even when `Use_cut_metadata_scale=false`.
 - [x] Make the behavior of `Use_cut_metadata_scale=false` mean unscaled local
@@ -605,6 +605,11 @@ benchmark runs.
       at 5, but the run failed at step 74 when a retained active sliver with
       minimum volume fraction about 1.37e-7 drove cut-adjacent stabilization
       scale to about 7.3e6 and the nonlinear residual rose to about 110.7.
+- [x] Lower the generated cut-adjacent stabilization scale ceiling and cap the
+      assembler fallback scale consistently; the 90-step D18 no-output GMRES
+      probe passed through the prior step-74 failure point with all nonlinear
+      and linear solves converged, maximum cut-adjacent scale 1000, and parsed
+      capped-scale count 12.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

@@ -169,7 +169,9 @@ using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
         }
 
         const auto cell = static_cast<GlobalIndex>(parent);
-        const Real scale = Real{1.0} / std::max(metadata.volume_fraction, fraction_floor);
+        const Real scale = std::min(
+            CutIntegrationContext::maxCutCellStabilizationScale(),
+            Real{1.0} / std::max(metadata.volume_fraction, fraction_floor));
         auto [it, inserted] = scales.emplace(cell, scale);
         if (!inserted) {
             it->second = std::max(it->second, scale);

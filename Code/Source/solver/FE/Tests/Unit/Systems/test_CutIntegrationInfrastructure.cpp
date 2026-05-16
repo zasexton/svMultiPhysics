@@ -2881,7 +2881,8 @@ TEST(CutIntegrationInfrastructure, BindsCutAdjacentFacetScalesFromSelectedSideMe
     inactive_handle.facet_metadata[0].stabilization_scale = 0.0;
     context.bindFacetStabilizationScalesForMarkerAndSide(
         inactive_handle, 133, CutIntegrationSide::Positive);
-    EXPECT_DOUBLE_EQ(inactive_handle.stabilizationScaleForFacet(20), 1.0e6);
+    EXPECT_DOUBLE_EQ(inactive_handle.stabilizationScaleForFacet(20),
+                     CutIntegrationContext::maxCutCellStabilizationScale());
 }
 
 TEST(CutIntegrationInfrastructure, PrunesGeneratedSliverVolumeRules)
