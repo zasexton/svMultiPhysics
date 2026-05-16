@@ -657,6 +657,24 @@ Diagnostics should keep reference and physical measures separate:
   enabled,
 - rule frame, parent geometry revision, and backend policy fields.
 
+### Standard Assembler Audit Notes
+
+`StandardAssembler::assembleCutVolumes(...)` accepts high-order cut-volume
+rules through `CutVolumeQuadratureRule`, which copies every backend point and
+weight into a transient quadrature rule. The initial `AssemblyContext::reserve`
+call is only a capacity hint; `setQuadratureData(...)` grows the arena to the
+actual point count. The volume path already rejects non-reference-frame rules,
+empty rules, and out-of-range parent cells. Full-side rules intentionally use
+the parent element's standard full-cell quadrature and should remain reserved
+for `full_cell_equivalent` rules only.
+
+`StandardAssembler::assembleCutInterfaces(...)` uses the same transient
+quadrature wrapper for generated interface rules, remaps reference normals and
+surface weights through `remapCutInterfaceSurfaceGeometry(...)`, and checks the
+rule/context point-count match. Generated interface assembly still rejects
+material state on cut interfaces; this remains an explicit limitation until
+material state storage is keyed by generated interface quadrature shape.
+
 ### Design Checklist
 
 - [x] Define reference normals as normalized `grad_xi(phi_h)`.
@@ -671,7 +689,7 @@ Diagnostics should keep reference and physical measures separate:
 
 ### Implementation Checklist
 
-- [ ] Audit `StandardAssembler::assembleCutVolumes(...)` and
+- [x] Audit `StandardAssembler::assembleCutVolumes(...)` and
       `assembleCutInterfaces(...)` assumptions for high-order rule point counts.
 - [ ] Extend interface remapping tests to high-order and curved parent geometry.
 - [ ] Add optional backend-provided normal consistency checks.
