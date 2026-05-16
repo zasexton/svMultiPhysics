@@ -1334,7 +1334,7 @@ linear-solver problems.
 
 ### Design Checklist
 
-- [ ] Define per-run diagnostics:
+- [x] Define per-run diagnostics:
       - geometry mode,
       - backend,
       - requested/achieved orders,
@@ -1344,6 +1344,16 @@ linear-solver problems.
       - min/max volume fraction,
       - physical wet volume,
       - reference wet volume.
+      The per-run diagnostic contract is split between the active-domain
+      `diagnostic=cut_context_rebuild` line and the wet-volume diagnostic line.
+      The rebuild log reports geometry mode, backend, fallback policy, tangent
+      policy, root tolerance, subdivision depth, requested and achieved
+      interface/volume orders, fallback counts, corner-linearized cells,
+      topology and policy keys, min/max retained volume fraction, active-side
+      reference and physical volume, retained cell counts, and physical-measure
+      skipped counts. The wet-volume diagnostic logs the selected wet volume,
+      frame, reference wet volume, physical wet volume, drift, relative drift,
+      rule counts, and wet/dry cell classification.
 - [ ] Define optional per-cell diagnostics for debug builds or smoke scripts.
 - [ ] Define high-order curved interface visualization strategy:
       - tessellated interface output,
