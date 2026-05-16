@@ -157,6 +157,21 @@ private:
     return dof_map;
 }
 
+[[nodiscard]] dofs::DofMap createThreeTetraDG_P2_DofMap()
+{
+    dofs::DofMap dof_map(3, 30, 10);
+    dof_map.setCellDofs(
+        0, std::vector<GlobalIndex>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+    dof_map.setCellDofs(
+        1, std::vector<GlobalIndex>{10, 11, 12, 13, 14, 15, 16, 17, 18, 19});
+    dof_map.setCellDofs(
+        2, std::vector<GlobalIndex>{20, 21, 22, 23, 24, 25, 26, 27, 28, 29});
+    dof_map.setNumDofs(30);
+    dof_map.setNumLocalDofs(30);
+    dof_map.finalize();
+    return dof_map;
+}
+
 } // namespace
 
 TEST(FormKernelDGTest, PenaltyJumpJumpProducesExpectedBlocks)
@@ -444,6 +459,70 @@ TEST(FormKernelDGTest, UnscaledMarkedCutAdjacentFacetIntegralSkipsNonCutInterior
     for (const GlobalIndex i : far_field_cell_dofs) {
         for (GlobalIndex j = 0; j < 12; ++j) {
             SCOPED_TRACE(::testing::Message() << "far_field_row=" << i << ", col=" << j);
+            EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
+        }
+    }
+}
+
+TEST(FormKernelDGTest, HighOrderMarkedCutAdjacentFacetIntegralSkipsFarFieldCell)
+{
+    ThreeTetraChainMeshAccess mesh;
+    auto dof_map = createThreeTetraDG_P2_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 2);
+
+    constexpr int marker = 23;
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (FormExpr::constant(1.0) * inner(jump(u), jump(v))).dS(marker);
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = "p2-single-cut-adjacent-facet";
+    handle.facets = {0};
+    assembly::CutFacetSetFacetMetadata metadata;
+    metadata.facet = 0;
+    metadata.first_cell = 0;
+    metadata.second_cell = 1;
+    metadata.stabilization_scale = 1.0;
+    handle.facet_metadata.push_back(metadata);
+    cut_context.addFacetSetHandle(std::move(handle));
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&cut_context);
+
+    assembly::DenseMatrixView mat(30);
+    mat.zero();
+
+    const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                        mat, nullptr, marker);
+    EXPECT_EQ(result.interior_faces_assembled, 1);
+
+    Real active_block_norm = 0.0;
+    for (GlobalIndex i = 0; i < 20; ++i) {
+        for (GlobalIndex j = 0; j < 20; ++j) {
+            active_block_norm += std::abs(mat.getMatrixEntry(i, j));
+        }
+    }
+    EXPECT_GT(active_block_norm, 0.0);
+
+    for (GlobalIndex i = 0; i < 30; ++i) {
+        for (GlobalIndex j = 20; j < 30; ++j) {
+            SCOPED_TRACE(::testing::Message() << "row=" << i
+                                              << ", far_field_col=" << j);
+            EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
+        }
+    }
+    for (GlobalIndex i = 20; i < 30; ++i) {
+        for (GlobalIndex j = 0; j < 30; ++j) {
+            SCOPED_TRACE(::testing::Message() << "far_field_row=" << i
+                                              << ", col=" << j);
             EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
         }
     }

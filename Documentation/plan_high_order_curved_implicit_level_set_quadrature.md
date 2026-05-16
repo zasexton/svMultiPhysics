@@ -777,6 +777,8 @@ available.
 Small-cut conditioning probes now verify finite conditioning indicators and
 capped cut-adjacent stabilization scales as retained cut fractions decrease to
 the generated-volume pruning threshold.
+High-order marked-facet assembly now has an explicit P2 regression proving that
+unmarked far-field cells receive zero cut-adjacent stabilization contribution.
 
 ### Design Checklist
 
@@ -806,7 +808,7 @@ the generated-volume pruning threshold.
 ### Tests
 
 - [x] Only cut-adjacent facets receive stabilization.
-- [ ] Far-field interior faces receive zero contribution.
+- [x] Far-field interior faces receive zero contribution.
 - [ ] Derivative-order terms scale correctly with `h`.
 - [x] Small-cut conditioning probes remain bounded under refinement.
 - [ ] Direct factorization diagnostics show no dry unsupported pressure rows.
