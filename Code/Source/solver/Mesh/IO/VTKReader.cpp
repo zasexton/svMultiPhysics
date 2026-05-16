@@ -834,8 +834,10 @@ CellShape VTKReader::vtk_to_cellshape(int vtk_cell_type) {
     case VTK_QUADRATIC_EDGE: shape.num_corners = 2; break;
     case VTK_QUADRATIC_TRIANGLE: shape.num_corners = 3; break;
     case VTK_QUADRATIC_QUAD: shape.num_corners = 4; break;
+    case VTK_BIQUADRATIC_QUAD: shape.num_corners = 4; break;
     case VTK_QUADRATIC_TETRA: shape.num_corners = 4; break;
     case VTK_QUADRATIC_HEXAHEDRON: shape.num_corners = 8; break;
+    case VTK_TRIQUADRATIC_HEXAHEDRON: shape.num_corners = 8; break;
     case VTK_QUADRATIC_WEDGE: shape.num_corners = 6; break;
     case VTK_QUADRATIC_PYRAMID: shape.num_corners = 5; break;
     case VTK_LAGRANGE_CURVE: shape.num_corners = 2; break;

@@ -143,6 +143,18 @@ MeshTopologyInfo makeSingleQuadVerticesOnly() {
     return topo;
 }
 
+MeshTopologyInfo makeSingleQuad9VerticesOnly() {
+    MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 9;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 9};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    return topo;
+}
+
 MeshTopologyInfo makeTwoQuadMeshWithEdges() {
     MeshTopologyInfo topo;
     topo.n_cells = 2;
@@ -657,6 +669,27 @@ TEST(DofHandler, CGDistributionSingleQuadQ2RequireCompleteSucceedsWithEdges) {
     handler.finalize();
 
     EXPECT_EQ(handler.getNumDofs(), 9);
+}
+
+TEST(DofHandler, CGDistributionSingleQuadQ2UsesReferenceCornersForQuad9Topology) {
+    DofHandler handler;
+    auto topo = makeSingleQuad9VerticesOnly();
+    H1Space space(ElementType::Quad4, 2);
+
+    handler.distributeDofs(topo, space);
+    handler.finalize();
+
+    EXPECT_EQ(handler.getNumDofs(), 9);
+    ASSERT_EQ(handler.getCellDofs(0).size(), 9u);
+
+    const auto* entity = handler.getEntityDofMap();
+    ASSERT_NE(entity, nullptr);
+    for (GlobalIndex v = 0; v < 4; ++v) {
+        EXPECT_EQ(entity->getVertexDofs(v).size(), 1u);
+    }
+    for (GlobalIndex v = 4; v < 9; ++v) {
+        EXPECT_TRUE(entity->getVertexDofs(v).empty());
+    }
 }
 
 TEST(DofHandler, CGDistributionSingleHexQ2CountsAndOrdering) {
@@ -1371,6 +1404,22 @@ TEST(DofLayoutInfo, LagrangeAcceptsHighOrderElementAlias) {
     EXPECT_EQ(layout.dofs_per_face, 1);
     EXPECT_EQ(layout.dofs_per_cell, 1);
     EXPECT_EQ(layout.total_dofs_per_element, 27);
+}
+
+TEST(DofLayoutInfo, LagrangeInfersHighOrderElementAliasesFromNodeCount) {
+    const auto quad = DofLayoutInfo::Lagrange(2, /*dim=*/2, /*num_verts_per_cell=*/9);
+    const auto hex = DofLayoutInfo::Lagrange(2, /*dim=*/3, /*num_verts_per_cell=*/27);
+
+    EXPECT_EQ(quad.total_dofs_per_element, 9);
+    EXPECT_EQ(quad.dofs_per_vertex, 1);
+    EXPECT_EQ(quad.dofs_per_edge, 1);
+    EXPECT_EQ(quad.dofs_per_cell, 1);
+
+    EXPECT_EQ(hex.total_dofs_per_element, 27);
+    EXPECT_EQ(hex.dofs_per_vertex, 1);
+    EXPECT_EQ(hex.dofs_per_edge, 1);
+    EXPECT_EQ(hex.dofs_per_face, 1);
+    EXPECT_EQ(hex.dofs_per_cell, 1);
 }
 
 TEST(DofHandler, IgnoresInactiveHighOrderGeometryVertices) {

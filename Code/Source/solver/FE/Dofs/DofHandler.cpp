@@ -39,6 +39,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -2757,13 +2758,30 @@ static void assign_global_ordinals_with_neighbors(
 namespace {
 
 ElementType infer_element_type_from_cell(int dim, std::size_t n_verts) {
-    if (dim == 1 && n_verts == 2) return ElementType::Line2;
-    if (dim == 2 && n_verts == 3) return ElementType::Triangle3;
-    if (dim == 2 && n_verts == 4) return ElementType::Quad4;
-    if (dim == 3 && n_verts == 4) return ElementType::Tetra4;
-    if (dim == 3 && n_verts == 8) return ElementType::Hex8;
-    if (dim == 3 && n_verts == 6) return ElementType::Wedge6;
-    if (dim == 3 && n_verts == 5) return ElementType::Pyramid5;
+    if (dim == 1) {
+        if (n_verts == 2) return ElementType::Line2;
+        if (n_verts == 3) return ElementType::Line3;
+    }
+    if (dim == 2) {
+        if (n_verts == 3) return ElementType::Triangle3;
+        if (n_verts == 6) return ElementType::Triangle6;
+        if (n_verts == 4) return ElementType::Quad4;
+        if (n_verts == 8) return ElementType::Quad8;
+        if (n_verts == 9) return ElementType::Quad9;
+    }
+    if (dim == 3) {
+        if (n_verts == 4) return ElementType::Tetra4;
+        if (n_verts == 10) return ElementType::Tetra10;
+        if (n_verts == 8) return ElementType::Hex8;
+        if (n_verts == 20) return ElementType::Hex20;
+        if (n_verts == 27) return ElementType::Hex27;
+        if (n_verts == 6) return ElementType::Wedge6;
+        if (n_verts == 15) return ElementType::Wedge15;
+        if (n_verts == 18) return ElementType::Wedge18;
+        if (n_verts == 5) return ElementType::Pyramid5;
+        if (n_verts == 13) return ElementType::Pyramid13;
+        if (n_verts == 14) return ElementType::Pyramid14;
+    }
     return ElementType::Unknown;
 }
 
@@ -2812,6 +2830,63 @@ int reference_dimension(ElementType type) noexcept {
         case ElementType::Unknown:
         default: return -1;
     }
+}
+
+std::optional<MeshTopologyInfo> reference_vertex_topology_if_needed(
+    const MeshTopologyInfo& topology,
+    int reference_vertices,
+    const char* context) {
+    if (reference_vertices <= 0 || topology.n_cells <= 0) {
+        return std::nullopt;
+    }
+
+    bool needs_corner_view = false;
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        const auto cell_verts = topology.getCellVertices(c);
+        FE_THROW_IF(cell_verts.empty(), FEException,
+                    std::string(context) + ": cell has no vertices");
+        FE_THROW_IF(cell_verts.size() < static_cast<std::size_t>(reference_vertices),
+                    FEException,
+                    std::string(context) +
+                        ": cell has fewer vertices than the reference topology");
+        needs_corner_view =
+            needs_corner_view ||
+            cell_verts.size() > static_cast<std::size_t>(reference_vertices);
+    }
+    if (!needs_corner_view) {
+        return std::nullopt;
+    }
+
+    MeshTopologyInfo corner_topology = topology;
+    corner_topology.cell2vertex_offsets.assign(
+        static_cast<std::size_t>(topology.n_cells) + 1u, MeshOffset{0});
+    corner_topology.cell2vertex_data.clear();
+    for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
+        const auto cell_verts = topology.getCellVertices(c);
+        corner_topology.cell2vertex_offsets[static_cast<std::size_t>(c)] =
+            static_cast<MeshOffset>(corner_topology.cell2vertex_data.size());
+        corner_topology.cell2vertex_data.insert(
+            corner_topology.cell2vertex_data.end(),
+            cell_verts.begin(),
+            cell_verts.begin() + reference_vertices);
+    }
+    corner_topology.cell2vertex_offsets[static_cast<std::size_t>(topology.n_cells)] =
+        static_cast<MeshOffset>(corner_topology.cell2vertex_data.size());
+
+    corner_topology.n_edges = 0;
+    corner_topology.edge_gids.clear();
+    corner_topology.edge2vertex_data.clear();
+    corner_topology.cell2edge_offsets.clear();
+    corner_topology.cell2edge_data.clear();
+
+    corner_topology.n_faces = 0;
+    corner_topology.face_gids.clear();
+    corner_topology.face2vertex_offsets.clear();
+    corner_topology.face2vertex_data.clear();
+    corner_topology.cell2face_offsets.clear();
+    corner_topology.cell2face_data.clear();
+
+    return corner_topology;
 }
 
 std::vector<std::uint8_t> active_vertices_from_topology(const MeshTopologyView& topology) {
@@ -3968,8 +4043,21 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
         return distributeVariableOrderDofs(view, space, options);
     }
 
+    auto reference_vertices = reference_vertex_count(space.element_type());
+    if (reference_vertices <= 0 && topology.n_cells > 0) {
+        const auto cell0 = topology.getCellVertices(0);
+        const auto inferred_type =
+            infer_element_type_from_cell(topology.dim, cell0.size());
+        reference_vertices = reference_vertex_count(inferred_type);
+    }
+    auto reference_topology = reference_vertex_topology_if_needed(
+        topology,
+        reference_vertices,
+        "DofHandler::distributeDofs(MeshTopologyInfo, FunctionSpace)");
+    const auto& dof_topology = reference_topology.has_value() ? *reference_topology : topology;
+
     // Infer cell vertex count from cell 0.
-    const auto cell0 = topology.getCellVertices(0);
+    const auto cell0 = dof_topology.getCellVertices(0);
     FE_THROW_IF(cell0.empty(), FEException,
                 "DofHandler::distributeDofs(MeshTopologyInfo, FunctionSpace): cell 0 has no vertices");
     const int n_verts = static_cast<int>(cell0.size());
@@ -3991,7 +4079,7 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
         layout = DofLayoutInfo::Lagrange(order, dim, n_verts);
         layout.total_dofs_per_element = total_dofs;
         layout.num_components = space.value_dimension();
-        return distributeDofs(topology, layout, options);
+        return distributeDofs(dof_topology, layout, options);
     }
 
     if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
@@ -4069,7 +4157,7 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
         layout.total_dofs_per_element = total_dofs;
         layout.tensor_face_dof_layout = false;
 
-        return distributeDofs(topology, layout, options);
+        return distributeDofs(dof_topology, layout, options);
     }
 
     // Default: treat as DG.
@@ -8232,6 +8320,28 @@ void DofHandler::distributeDGDofsParallel(const MeshTopologyView& topology,
 
 #if DOFHANDLER_HAS_MESH
 
+static void append_reference_face_vertices(const MeshIndex* face_nodes,
+                                           std::size_t n_face_nodes,
+                                           const svmp::CellShape& shape,
+                                           std::vector<MeshIndex>& out) {
+    if (face_nodes == nullptr || n_face_nodes == 0u) {
+        return;
+    }
+
+    std::size_t n_corners = n_face_nodes;
+    if (shape.num_corners > 0) {
+        n_corners = std::min(n_face_nodes, static_cast<std::size_t>(shape.num_corners));
+    }
+
+    if (shape.family == svmp::CellFamily::Line && n_corners == 2u && n_face_nodes > 2u) {
+        out.push_back(face_nodes[0]);
+        out.push_back(face_nodes[n_face_nodes - 1u]);
+        return;
+    }
+
+    out.insert(out.end(), face_nodes, face_nodes + n_corners);
+}
+
 #if 0
 struct DofHandler::MeshCacheState : MeshObserver {
     struct PointerSnapshot {
@@ -8589,12 +8699,19 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
         const auto& face_shapes = mesh.face_shapes();
         for (index_t f = 0; f < static_cast<index_t>(mesh.n_faces()); ++f) {
             auto [face_nodes, n_face_nodes] = mesh.face_vertices_span(f);
-            std::size_t n_corners = n_face_nodes;
+            svmp::CellShape fallback_shape{};
+            fallback_shape.num_corners = static_cast<int>(n_face_nodes);
             if (static_cast<std::size_t>(f) < face_shapes.size() && face_shapes[static_cast<std::size_t>(f)].num_corners > 0) {
-                n_corners = std::min(n_face_nodes,
-                                     static_cast<std::size_t>(face_shapes[static_cast<std::size_t>(f)].num_corners));
+                append_reference_face_vertices(face_nodes,
+                                               n_face_nodes,
+                                               face_shapes[static_cast<std::size_t>(f)],
+                                               corner_face2vertex_data);
+            } else {
+                append_reference_face_vertices(face_nodes,
+                                               n_face_nodes,
+                                               fallback_shape,
+                                               corner_face2vertex_data);
             }
-            corner_face2vertex_data.insert(corner_face2vertex_data.end(), face_nodes, face_nodes + n_corners);
             corner_face2vertex_offsets.push_back(static_cast<MeshOffset>(corner_face2vertex_data.size()));
         }
     }
@@ -8611,12 +8728,13 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     if (need_edges) {
         if (topo.dim == 2) {
             // In the Mesh library, (n-1)-entities are stored as faces; for 2D meshes, those faces are edges.
-            const bool have_edges = (mesh.n_faces() > 0) &&
-                                    !mesh.face2vertex_offsets().empty() &&
-                                    !mesh.face2vertex().empty();
-            if (!have_edges) {
-                missing_edges = true;
-            } else {
+            const bool have_full_face_edges =
+                mesh.codim1_storage_mode() == MeshCodim1StorageMode::Full &&
+                (mesh.n_faces() > 0) &&
+                !mesh.face2vertex_offsets().empty() &&
+                !mesh.face2vertex().empty();
+            const bool have_edge_storage = (mesh.n_edges() > 0) && !mesh.edge2vertex().empty();
+            if (have_full_face_edges) {
                 topo.n_edges = static_cast<GlobalIndex>(mesh.n_faces());
                 topo.edge_gids = mesh.face_gids();
                 topo.edge2vertex_data = std::span<const MeshIndex>(corner_face2vertex_data.data(),
@@ -8644,6 +8762,22 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
                                                      std::span<const std::array<MeshIndex, 2>>(pairs, static_cast<std::size_t>(mesh.n_faces())));
                 topo.cell2edge_offsets = cell2edge.offsets;
                 topo.cell2edge_data = cell2edge.data;
+            } else if (have_edge_storage) {
+                topo.n_edges = static_cast<GlobalIndex>(mesh.n_edges());
+                topo.edge_gids = mesh.edge_gids();
+                const auto& e2v = mesh.edge2vertex();
+                static_assert(sizeof(std::array<MeshIndex, 2>) == sizeof(MeshIndex) * 2,
+                              "std::array<MeshIndex,2> must be tightly packed");
+                const auto* flat = e2v.empty() ? nullptr : reinterpret_cast<const MeshIndex*>(e2v.data());
+                topo.edge2vertex_data = std::span<const MeshIndex>(flat, static_cast<std::size_t>(2u * e2v.size()));
+                cell2edge = buildCellToEdgesRefOrder(topo.dim,
+                                                     topo.cell2vertex_offsets,
+                                                     topo.cell2vertex_data,
+                                                     std::span<const std::array<MeshIndex, 2>>(e2v.data(), e2v.size()));
+                topo.cell2edge_offsets = cell2edge.offsets;
+                topo.cell2edge_data = cell2edge.data;
+            } else {
+                missing_edges = true;
             }
         } else {
             const bool have_edges = (mesh.n_edges() > 0) && !mesh.edge2vertex().empty();
@@ -8888,12 +9022,19 @@ void DofHandler::distributeDofs(const Mesh& mesh,
         const auto& face_shapes = local_mesh.face_shapes();
         for (index_t f = 0; f < static_cast<index_t>(local_mesh.n_faces()); ++f) {
             auto [face_nodes, n_face_nodes] = local_mesh.face_vertices_span(f);
-            std::size_t n_corners = n_face_nodes;
+            svmp::CellShape fallback_shape{};
+            fallback_shape.num_corners = static_cast<int>(n_face_nodes);
             if (static_cast<std::size_t>(f) < face_shapes.size() && face_shapes[static_cast<std::size_t>(f)].num_corners > 0) {
-                n_corners = std::min(n_face_nodes,
-                                     static_cast<std::size_t>(face_shapes[static_cast<std::size_t>(f)].num_corners));
+                append_reference_face_vertices(face_nodes,
+                                               n_face_nodes,
+                                               face_shapes[static_cast<std::size_t>(f)],
+                                               corner_face2vertex_data);
+            } else {
+                append_reference_face_vertices(face_nodes,
+                                               n_face_nodes,
+                                               fallback_shape,
+                                               corner_face2vertex_data);
             }
-            corner_face2vertex_data.insert(corner_face2vertex_data.end(), face_nodes, face_nodes + n_corners);
             corner_face2vertex_offsets.push_back(static_cast<MeshOffset>(corner_face2vertex_data.size()));
         }
     }
@@ -8928,12 +9069,13 @@ void DofHandler::distributeDofs(const Mesh& mesh,
 
     if (need_edges) {
         if (topo.dim == 2) {
-            const bool have_edges = (local_mesh.n_faces() > 0) &&
-                                    !local_mesh.face2vertex_offsets().empty() &&
-                                    !local_mesh.face2vertex().empty();
-            if (!have_edges) {
-                missing_edges = true;
-            } else {
+            const bool have_full_face_edges =
+                local_mesh.codim1_storage_mode() == MeshCodim1StorageMode::Full &&
+                (local_mesh.n_faces() > 0) &&
+                !local_mesh.face2vertex_offsets().empty() &&
+                !local_mesh.face2vertex().empty();
+            const bool have_edge_storage = (local_mesh.n_edges() > 0) && !local_mesh.edge2vertex().empty();
+            if (have_full_face_edges) {
                 topo.n_edges = static_cast<GlobalIndex>(local_mesh.n_faces());
                 topo.edge_gids = local_mesh.face_gids();
                 topo.edge2vertex_data = std::span<const MeshIndex>(corner_face2vertex_data.data(),
@@ -8961,6 +9103,22 @@ void DofHandler::distributeDofs(const Mesh& mesh,
                                                      std::span<const std::array<MeshIndex, 2>>(pairs, static_cast<std::size_t>(local_mesh.n_faces())));
                 topo.cell2edge_offsets = cell2edge.offsets;
                 topo.cell2edge_data = cell2edge.data;
+            } else if (have_edge_storage) {
+                topo.n_edges = static_cast<GlobalIndex>(local_mesh.n_edges());
+                topo.edge_gids = local_mesh.edge_gids();
+                const auto& e2v = local_mesh.edge2vertex();
+                static_assert(sizeof(std::array<MeshIndex, 2>) == sizeof(MeshIndex) * 2,
+                              "std::array<MeshIndex,2> must be tightly packed");
+                const auto* flat = e2v.empty() ? nullptr : reinterpret_cast<const MeshIndex*>(e2v.data());
+                topo.edge2vertex_data = std::span<const MeshIndex>(flat, static_cast<std::size_t>(2u * e2v.size()));
+                cell2edge = buildCellToEdgesRefOrder(topo.dim,
+                                                     topo.cell2vertex_offsets,
+                                                     topo.cell2vertex_data,
+                                                     std::span<const std::array<MeshIndex, 2>>(e2v.data(), e2v.size()));
+                topo.cell2edge_offsets = cell2edge.offsets;
+                topo.cell2edge_data = cell2edge.data;
+            } else {
+                missing_edges = true;
             }
         } else {
             const bool have_edges = (local_mesh.n_edges() > 0) && !local_mesh.edge2vertex().empty();

@@ -468,6 +468,7 @@ TEST(VTKParity, HighOrder_ReorderAndRoundTrip) {
       default: nc = 0; break;
     }
     ASSERT_GE((int)conn_read.size(), nc);
+    EXPECT_EQ(m2.cell_shape(0).num_corners, nc) << cs.name;
     for (int i=0;i<nc;++i) EXPECT_EQ(conn_read[i], (index_t)i) << cs.name;
 
     // Size should match expected high-order node counts

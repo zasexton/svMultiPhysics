@@ -1056,6 +1056,14 @@ finite-difference component checks are valuable for isolating assembly defects.
 - [x] Add fixed-geometry finite-difference tests for high-order `dI`.
 - [x] Add high-order cut-adjacent stabilization assembly tests.
 - [x] Add a compact high-order MMS traveling-interface fixture.
+- [x] Preserve reference-corner topology for high-order geometry meshes during
+      DOF distribution.
+- [x] Preserve biquadratic and triquadratic VTK reference corner counts for
+      high-order fixture meshes.
+- [x] Use full 2D edge storage for Q2 DOF distribution when only boundary faces
+      are retained for solver boundary work.
+- [x] Extract endpoint corners from high-order 2D face geometry when deriving
+      reference edge ordering.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
