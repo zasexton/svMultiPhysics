@@ -711,7 +711,7 @@ material state storage is keyed by generated interface quadrature shape.
       computed by mapped quadrature.
       Covered by
       `LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry`.
-- [ ] Normal orientation test for negative and positive active sides.
+- [x] Normal orientation test for negative and positive active sides.
 - [ ] Surface traction sign test using a simple embedded interface with known
       normal.
 

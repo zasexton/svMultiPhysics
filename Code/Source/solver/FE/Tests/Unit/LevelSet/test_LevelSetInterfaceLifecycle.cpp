@@ -2645,6 +2645,45 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
     EXPECT_NE(vtp.find("Name=\"interface_marker\""), std::string::npos);
 }
 
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleVolumeNormalsFollowSideConvention)
+{
+    constexpr int interface_marker = 94;
+    const auto result = buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                                 /*level_set_order=*/2,
+                                                 /*subdivision_depth=*/6,
+                                                 /*interface_order=*/1,
+                                                 /*volume_order=*/2,
+                                                 interface_marker);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    std::size_t checked_negative_regions = 0u;
+    std::size_t checked_positive_regions = 0u;
+    for (const auto& region : result.domain.volumeRegions()) {
+        if (!region.active()) {
+            continue;
+        }
+        const FE::Real radius =
+            std::sqrt(region.centroid[0] * region.centroid[0] +
+                      region.centroid[1] * region.centroid[1]);
+        if (radius <= FE::Real{1.0e-10}) {
+            continue;
+        }
+        const FE::Real radial_dot =
+            region.normal[0] * region.centroid[0] +
+            region.normal[1] * region.centroid[1];
+        if (region.side == FE::geometry::CutIntegrationSide::Negative) {
+            EXPECT_GT(radial_dot, 0.0);
+            ++checked_negative_regions;
+        } else if (region.side == FE::geometry::CutIntegrationSide::Positive) {
+            EXPECT_LT(radial_dot, 0.0);
+            ++checked_positive_regions;
+        }
+    }
+
+    EXPECT_GT(checked_negative_regions, 0u);
+    EXPECT_GT(checked_positive_regions, 0u);
+}
+
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength)
 {
     constexpr int interface_marker = 87;
