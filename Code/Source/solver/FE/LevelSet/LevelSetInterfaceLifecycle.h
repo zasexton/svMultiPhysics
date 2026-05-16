@@ -39,6 +39,26 @@ enum class GeometryTangentPolicy {
     DifferentiatedQuadrature,
 };
 
+struct GeometryQuadratureSensitivitySupport {
+    GeometryTangentPolicy policy{
+        GeometryTangentPolicy::RefreshedFrozenQuadrature};
+    bool point_location_sensitivity_available{false};
+    bool quadrature_weight_sensitivity_available{false};
+    bool measure_sensitivity_available{false};
+    bool normal_sensitivity_available{false};
+    bool topology_transition_sensitivity_available{false};
+    std::string diagnostic{};
+
+    [[nodiscard]] bool complete() const noexcept
+    {
+        return point_location_sensitivity_available &&
+               quadrature_weight_sensitivity_available &&
+               measure_sensitivity_available &&
+               normal_sensitivity_available &&
+               topology_transition_sensitivity_available;
+    }
+};
+
 [[nodiscard]] const char* generatedInterfaceGeometryModeName(
     GeneratedInterfaceGeometryMode mode) noexcept;
 
@@ -50,6 +70,9 @@ enum class GeometryTangentPolicy {
 
 [[nodiscard]] const char* geometryTangentPolicyName(
     GeometryTangentPolicy policy) noexcept;
+
+[[nodiscard]] GeometryQuadratureSensitivitySupport
+geometryQuadratureSensitivitySupport(GeometryTangentPolicy policy);
 
 [[nodiscard]] std::string levelSetImplicitCutBackendCellDiagnostic(
     ImplicitCutQuadratureBackend backend,

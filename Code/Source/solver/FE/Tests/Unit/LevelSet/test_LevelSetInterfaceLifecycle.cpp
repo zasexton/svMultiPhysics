@@ -1321,6 +1321,34 @@ TEST(LevelSetInterfaceLifecycle,
     }
 }
 
+TEST(LevelSetInterfaceLifecycle, ReportsQuadratureSensitivityCapabilityStub)
+{
+    const auto refreshed =
+        level_set::geometryQuadratureSensitivitySupport(
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+    EXPECT_EQ(refreshed.policy,
+              level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
+    EXPECT_FALSE(refreshed.complete());
+    EXPECT_FALSE(refreshed.point_location_sensitivity_available);
+    EXPECT_FALSE(refreshed.quadrature_weight_sensitivity_available);
+    EXPECT_FALSE(refreshed.measure_sensitivity_available);
+    EXPECT_FALSE(refreshed.normal_sensitivity_available);
+    EXPECT_FALSE(refreshed.topology_transition_sensitivity_available);
+    EXPECT_NE(refreshed.diagnostic.find("fixed during tangent assembly"),
+              std::string::npos);
+
+    const auto differentiated =
+        level_set::geometryQuadratureSensitivitySupport(
+            level_set::GeometryTangentPolicy::DifferentiatedQuadrature);
+    EXPECT_EQ(differentiated.policy,
+              level_set::GeometryTangentPolicy::DifferentiatedQuadrature);
+    EXPECT_FALSE(differentiated.complete());
+    EXPECT_NE(differentiated.diagnostic.find("reserved"),
+              std::string::npos);
+    EXPECT_NE(differentiated.diagnostic.find("sensitivities"),
+              std::string::npos);
+}
+
 TEST(LevelSetCellEvaluator, P1ReproducesCornerValuesAndReferenceGradient)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();

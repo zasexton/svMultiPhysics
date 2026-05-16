@@ -67,6 +67,21 @@ const char* geometryTangentPolicyName(GeometryTangentPolicy policy) noexcept
     return "Unknown";
 }
 
+GeometryQuadratureSensitivitySupport geometryQuadratureSensitivitySupport(
+    GeometryTangentPolicy policy)
+{
+    GeometryQuadratureSensitivitySupport support;
+    support.policy = policy;
+    if (policy == GeometryTangentPolicy::RefreshedFrozenQuadrature) {
+        support.diagnostic =
+            "RefreshedFrozenQuadrature refreshes generated quadrature before assembly but treats quadrature points, weights, measures, normals, and topology as fixed during tangent assembly";
+        return support;
+    }
+    support.diagnostic =
+        "DifferentiatedQuadrature is reserved until quadrature point, weight, measure, normal, and topology-transition sensitivities are implemented";
+    return support;
+}
+
 namespace {
 
 struct GeneratedInterfaceCellDiagnostics {
