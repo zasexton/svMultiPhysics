@@ -1718,10 +1718,14 @@ rank-local discovery order.
 ### Phase 5: Solver Validation
 
 - [x] Add high-order MMS traveling-interface fixture.
-- [ ] Run fixed-geometry Jacobian component sweeps.
-- [ ] Run quasi-Newton moving-geometry smoke tests.
+- [x] Run fixed-geometry Jacobian component sweeps.
+- [x] Run quasi-Newton moving-geometry smoke tests.
 - [x] Run short open-vessel probes with high-order diagnostics.
-- [ ] Only then consider D18/D38 high-order qualification.
+- [x] Only then consider D18/D38 high-order qualification.
+      D18/D38 remains a post-gate benchmark qualification activity: benchmark
+      logs may be considered only after the analytic, fixed-geometry,
+      quasi-Newton, smoke, stabilization, pressure-support, and diagnostics
+      gates are all passing.
 
 ## 18. Definition Of Done
 
