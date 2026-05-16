@@ -442,6 +442,28 @@ cut leaves. The current backend reports achieved interface order 1 and achieved
 volume order 2; higher-order simplex root polishing and curved leaf rules remain
 future work.
 
+### Tetrahedron Strategy
+
+The first tetrahedron milestone should use the same explicit `HighOrderSubcell`
+backend on reference tetrahedra. Tetra4 fields must reproduce the existing
+linear tetrahedron cutter. Tetra10+ fields should recursively split the
+reference tetrahedron with a deterministic edge-midpoint refinement, evaluate
+`phi_h` through `LevelSetCellEvaluator`, classify sub-tetrahedra from vertices,
+edge midpoints, face centroids, and the cell centroid, and linearize terminal
+cut leaves through the existing Tetra4 cutter.
+
+The first implementation should retain the same conservative contract as the
+triangle backend: positive volume weights only, reference-frame rules, negative
+plus positive measures summing to the parent tetrahedron measure, and provenance
+that reports `HighOrderSubcell` with requested and achieved quadrature orders.
+Moment fitting and polynomial implicit quadrature remain later options after the
+positive-weight subcell path is stable in 3D.
+
+Degenerate vertex, edge, and near-tangent cases should initially inherit the
+linear leaf diagnostics and be counted in backend diagnostics. Mixed tetrahedron
+and hexahedron meshes should continue to fail unsupported high-order cells until
+per-cell backend selection and mixed-mesh diagnostics are implemented.
+
 ### Design Checklist
 
 - [x] Decide first simplex milestone:
@@ -1064,7 +1086,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 - [x] Select triangle strategy.
 - [x] Implement triangle support.
-- [ ] Select tetrahedron strategy.
+- [x] Select tetrahedron strategy.
 - [ ] Implement tetrahedron support.
 - [ ] Add mixed-element diagnostics.
 
