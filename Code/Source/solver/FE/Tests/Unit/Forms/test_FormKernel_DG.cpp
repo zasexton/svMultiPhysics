@@ -18,6 +18,7 @@
 #include "Forms/CutCellForms.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -526,6 +527,59 @@ TEST(FormKernelDGTest, HighOrderMarkedCutAdjacentFacetIntegralSkipsFarFieldCell)
             EXPECT_DOUBLE_EQ(mat.getMatrixEntry(i, j), 0.0);
         }
     }
+}
+
+TEST(FormKernelDGTest, CutAdjacentGradientPenaltyScalesWithTraceHeight)
+{
+    constexpr int marker = 24;
+
+    const auto assemble_entry = [](Real scale, int h_power) {
+        TwoTetraSharedFaceMeshAccess mesh(scale);
+        auto dof_map = createTwoTetraDG_DofMap();
+        spaces::H1Space space(ElementType::Tetra4, 1);
+
+        FormCompiler compiler;
+        const auto u = FormExpr::trialFunction(space, "u");
+        const auto v = FormExpr::testFunction(space, "v");
+        auto h_factor = avg(hNormal());
+        for (int power = 1; power < h_power; ++power) {
+            h_factor = h_factor * avg(hNormal());
+        }
+        const auto form =
+            (h_factor * inner(cutAdjacentFacetGradientJump(u),
+                              cutAdjacentFacetGradientJump(v))).dS(marker);
+
+        auto ir = compiler.compileBilinear(form);
+        FormKernel kernel(std::move(ir));
+
+        assembly::CutIntegrationContext cut_context;
+        assembly::CutFacetSetHandle handle;
+        handle.marker = marker;
+        handle.name = "height-scaled-cut-adjacent-facet";
+        handle.facets = {0};
+        cut_context.addFacetSetHandle(std::move(handle));
+
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setCutIntegrationContext(&cut_context);
+
+        assembly::DenseMatrixView mat(8);
+        mat.zero();
+        const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                            mat, nullptr, marker);
+        EXPECT_EQ(result.interior_faces_assembled, 1);
+        return mat.getMatrixEntry(1, 1);
+    };
+
+    const Real velocity_base = assemble_entry(/*scale=*/1.0, /*h_power=*/1);
+    const Real velocity_scaled = assemble_entry(/*scale=*/2.0, /*h_power=*/1);
+    ASSERT_GT(std::abs(velocity_base), 1.0e-12);
+    EXPECT_NEAR(velocity_scaled / velocity_base, 2.0, 1.0e-12);
+
+    const Real pressure_base = assemble_entry(/*scale=*/1.0, /*h_power=*/3);
+    const Real pressure_scaled = assemble_entry(/*scale=*/2.0, /*h_power=*/3);
+    ASSERT_GT(std::abs(pressure_base), 1.0e-12);
+    EXPECT_NEAR(pressure_scaled / pressure_base, 8.0, 1.0e-12);
 }
 
 TEST(FormKernelDGTest, CutStabilizationScaleUsesAdjacentCutCellMetadata)

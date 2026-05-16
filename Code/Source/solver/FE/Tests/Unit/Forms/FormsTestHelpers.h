@@ -490,14 +490,14 @@ private:
 
 class TwoTetraSharedFaceMeshAccess final : public assembly::IMeshAccess {
 public:
-    TwoTetraSharedFaceMeshAccess()
+    explicit TwoTetraSharedFaceMeshAccess(Real scale = 1.0)
     {
         nodes_ = {
             {0.0, 0.0, 0.0},  // 0
-            {1.0, 0.0, 0.0},  // 1
-            {0.0, 1.0, 0.0},  // 2
-            {0.0, 0.0, 1.0},  // 3
-            {1.0, 1.0, 1.0}   // 4
+            {scale, 0.0, 0.0},  // 1
+            {0.0, scale, 0.0},  // 2
+            {0.0, 0.0, scale},  // 3
+            {scale, scale, scale}  // 4
         };
         cells_ = {
             {0, 1, 2, 3},  // cell 0

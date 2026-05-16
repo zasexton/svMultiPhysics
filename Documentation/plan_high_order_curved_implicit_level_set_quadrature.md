@@ -779,6 +779,9 @@ capped cut-adjacent stabilization scales as retained cut fractions decrease to
 the generated-volume pruning threshold.
 High-order marked-facet assembly now has an explicit P2 regression proving that
 unmarked far-field cells receive zero cut-adjacent stabilization contribution.
+Form-level cut-adjacent gradient-penalty tests verify the implemented trace
+height scaling: first-gradient velocity penalties scale with `h`, while the
+pressure-gradient path scales with `h^3`.
 
 ### Design Checklist
 
@@ -809,7 +812,7 @@ unmarked far-field cells receive zero cut-adjacent stabilization contribution.
 
 - [x] Only cut-adjacent facets receive stabilization.
 - [x] Far-field interior faces receive zero contribution.
-- [ ] Derivative-order terms scale correctly with `h`.
+- [x] Derivative-order terms scale correctly with `h`.
 - [x] Small-cut conditioning probes remain bounded under refinement.
 - [x] Direct factorization diagnostics show no dry unsupported pressure rows.
 
