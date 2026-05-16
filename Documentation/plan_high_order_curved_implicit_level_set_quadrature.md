@@ -1376,7 +1376,14 @@ linear-solver problems.
       requested and achieved orders, policy, construction kind, and individual
       quadrature points. This keeps routine visualization lightweight while
       preserving enough backend state for debugging curved implicit cuts.
-- [ ] Define how `ActiveFluid` remains a vertex-sign visualization only.
+- [x] Define how `ActiveFluid` remains a vertex-sign visualization only.
+      `ActiveFluid` remains a vertex field computed from nodal level-set signs
+      for quick visualization and backward-compatible output. It is not a
+      measure diagnostic and must not be used to infer high-order retained wet
+      volume. `WetVolumeFraction` is the cell field tied to generated retained
+      cut-volume rules; the output path logs this distinction and emits a
+      warning when cut-cell vertex-sign fractions strongly disagree with the
+      generated wet fractions.
 
 ### Implementation Checklist
 
