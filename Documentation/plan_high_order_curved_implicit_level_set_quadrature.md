@@ -768,12 +768,13 @@ of quadrature accuracy. The current gradient-jump path is appropriate for low
 order. Higher-order spaces generally need higher derivative control or a
 carefully justified alternative such as aggregation.
 
-Milestone status: the current implementation still assembles only the
-first-gradient cut-adjacent ghost penalties. Stabilization setup now records the
-velocity and pressure polynomial orders, the derivative order currently applied,
-and the implemented scaling. Runs with polynomial order above one receive an
-explicit warning that higher-normal-derivative ghost penalties are not yet
-available.
+Milestone status: the implementation assembles first-gradient cut-adjacent
+ghost penalties for all supported spaces and second-normal-derivative
+cut-adjacent ghost penalties for quadratic velocity and pressure spaces.
+Stabilization setup records the velocity and pressure polynomial orders,
+derivative orders applied to each field, and implemented scaling. Runs requiring
+derivative orders above two receive an explicit warning that additional
+higher-normal-derivative penalties are not yet available.
 Small-cut conditioning probes now verify finite conditioning indicators and
 capped cut-adjacent stabilization scales as retained cut fractions decrease to
 the generated-volume pruning threshold.
@@ -795,7 +796,7 @@ cut-adjacent facet forms request basis Hessians.
 - [x] Define default penalty terms by velocity and pressure polynomial order.
 - [x] Define scaling, including `h^(2*j - 1)` style factors for derivative order
       `j`.
-- [ ] Define which terms are required for equal-order velocity-pressure pairs.
+- [x] Define which terms are required for equal-order velocity-pressure pairs.
 - [x] Define how cut-volume fraction scale/cap interacts with high-order
       stabilization.
 - [x] Define local facet set scope for high-order mode.
@@ -1156,7 +1157,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 ### Phase 4: Stabilization And Pressure Support
 
-- [ ] Extend ghost penalties for higher-order spaces.
+- [x] Extend ghost penalties for higher-order spaces.
 - [x] Validate pressure support constraints for high-order pressure DOFs.
 - [x] Add small-cut conditioning tests.
 - [x] Add stabilization diagnostics.

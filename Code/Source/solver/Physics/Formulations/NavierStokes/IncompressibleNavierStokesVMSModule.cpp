@@ -1019,13 +1019,27 @@ void applyFreeSurfaceCutCellStabilization(
 
     namespace bc_forms = FE::forms::bc;
     const auto& cut = bc.cut_cell_stabilization;
-    constexpr int supported_derivative_order = 1;
-    const bool uses_high_order_space =
-        velocity_polynomial_order > 1 || pressure_polynomial_order > 1;
+    constexpr int supported_derivative_order = 2;
+    const auto derivative_order_label = [](int max_order) -> const char* {
+        return max_order > 1 ? "1,2" : "1";
+    };
+    const int velocity_derivative_order =
+        velocity_polynomial_order > 1 ? supported_derivative_order : 1;
+    const int pressure_derivative_order =
+        pressure_polynomial_order > 1 ? supported_derivative_order : 1;
+    const int max_derivative_order =
+        velocity_derivative_order > pressure_derivative_order
+            ? velocity_derivative_order
+            : pressure_derivative_order;
+    const bool has_unsupported_derivative_order =
+        velocity_polynomial_order > supported_derivative_order ||
+        pressure_polynomial_order > supported_derivative_order;
     const auto cut_scale = cut.use_cut_metadata_scale
         ? FE::forms::cutStabilizationScale()
         : FE::forms::FormExpr::constant(1.0);
     const auto h_f = FE::forms::avg(FE::forms::hNormal());
+    const auto h3 = h_f * h_f * h_f;
+    const auto h5 = h3 * h_f * h_f;
     const auto interface_side =
         bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
             ? "Plus"
@@ -1051,15 +1065,21 @@ void applyFreeSurfaceCutCellStabilization(
         << " facet_scope=cut-adjacent"
         << " velocity_polynomial_order=" << velocity_polynomial_order
         << " pressure_polynomial_order=" << pressure_polynomial_order
-        << " derivative_orders=1"
-        << " velocity_scaling=h"
-        << " pressure_scaling=h^3/mu";
+        << " derivative_orders=" << derivative_order_label(max_derivative_order)
+        << " velocity_derivative_orders="
+        << derivative_order_label(velocity_derivative_order)
+        << " pressure_derivative_orders="
+        << derivative_order_label(pressure_derivative_order)
+        << " velocity_scaling="
+        << (velocity_derivative_order > 1 ? "h,h^3" : "h")
+        << " pressure_scaling="
+        << (pressure_derivative_order > 1 ? "h^3/mu,h^5/mu" : "h^3/mu");
     FE_LOG_INFO(oss.str());
 
-    if (uses_high_order_space) {
+    if (has_unsupported_derivative_order) {
         FE_LOG_WARNING(
             "IncompressibleNavierStokesVMSModule: high-order cut-cell "
-            "stabilization currently uses first-gradient ghost penalties only; "
+            "stabilization currently supports derivative_orders=1,2; "
             "higher-normal-derivative penalties above derivative_order=" +
             std::to_string(supported_derivative_order) +
             " are not yet available");
@@ -1084,13 +1104,33 @@ void applyFreeSurfaceCutCellStabilization(
                 cut_scale * velocity_penalty * mu * h_f *
                     velocity_jump_term,
                 bc.interface_marker);
+
+        if (velocity_derivative_order > 1) {
+            auto velocity_second_normal_jump_term =
+                FE::forms::FormExpr::constant(0.0);
+            for (int component = 0; component < velocity_components; ++component) {
+                const auto velocity_jump_u =
+                    FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(
+                        FE::forms::component(u, component));
+                const auto velocity_jump_v =
+                    FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(
+                        FE::forms::component(v, component));
+                velocity_second_normal_jump_term =
+                    velocity_second_normal_jump_term + velocity_jump_u * velocity_jump_v;
+            }
+            momentum_form =
+                momentum_form +
+                FE::forms::cutAdjacentFacetIntegral(
+                    cut_scale * velocity_penalty * mu * h3 *
+                        velocity_second_normal_jump_term,
+                    bc.interface_marker);
+        }
     }
 
     if (!bc_forms::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
         const auto pressure_penalty = bc_forms::toScalarExpr(
             cut.pressure_gradient_penalty,
             freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", bc));
-        const auto h3 = h_f * h_f * h_f;
         const auto pressure_jump_p =
             FE::forms::cutAdjacentFacetGradientJump(p);
         const auto pressure_jump_q =
@@ -1102,6 +1142,20 @@ void applyFreeSurfaceCutCellStabilization(
                 (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
                     FE::forms::inner(pressure_jump_p, pressure_jump_q),
                 bc.interface_marker);
+
+        if (pressure_derivative_order > 1) {
+            const auto pressure_second_jump_p =
+                FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(p);
+            const auto pressure_second_jump_q =
+                FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(q);
+            continuity_form =
+                continuity_form +
+                FE::forms::cutAdjacentFacetIntegral(
+                    cut_scale * pressure_penalty * h5 /
+                    (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                        pressure_second_jump_p * pressure_second_jump_q,
+                    bc.interface_marker);
+        }
     }
 }
 

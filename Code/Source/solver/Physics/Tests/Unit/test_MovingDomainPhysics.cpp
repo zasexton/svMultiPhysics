@@ -2357,7 +2357,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesCutMetadataScale)
     EXPECT_NE(log_output.find("use_cut_metadata_scale=true"), std::string::npos);
 }
 
-TEST(MovingDomainPhysics, NavierStokesUnfittedHighOrderCutCellStabilizationWarns)
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedHighOrderCutCellStabilizationAddsSecondDerivativeTerms)
 {
     const auto mesh = makeMesh();
     auto u_space = FE::spaces::VectorSpace(
@@ -2396,10 +2397,15 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedHighOrderCutCellStabilizationWarns
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Hessian));
     EXPECT_NE(log_output.find("velocity_polynomial_order=2"), std::string::npos);
     EXPECT_NE(log_output.find("pressure_polynomial_order=2"), std::string::npos);
-    EXPECT_NE(log_output.find("derivative_orders=1"), std::string::npos);
-    EXPECT_NE(log_output.find("first-gradient ghost penalties only"), std::string::npos);
+    EXPECT_NE(log_output.find("derivative_orders=1,2"), std::string::npos);
+    EXPECT_NE(log_output.find("velocity_derivative_orders=1,2"), std::string::npos);
+    EXPECT_NE(log_output.find("pressure_derivative_orders=1,2"), std::string::npos);
+    EXPECT_NE(log_output.find("velocity_scaling=h,h^3"), std::string::npos);
+    EXPECT_NE(log_output.find("pressure_scaling=h^3/mu,h^5/mu"), std::string::npos);
+    EXPECT_EQ(log_output.find("first-gradient ghost penalties only"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInterfaceIntegral)
