@@ -2965,6 +2965,93 @@ TEST(CutIntegrationInfrastructure, SmallGeneratedCutFragmentsFeedConditioningNei
     EXPECT_GT(neighborhoods.front().conditioning_indicator, 1.0e5);
 }
 
+TEST(CutIntegrationInfrastructure, RefinedSmallCutConditioningScalesStayBounded)
+{
+    constexpr int marker = 134;
+    const std::vector<MeshIndex> cells{10, 11, 12, 13};
+    const std::vector<Real> fractions{1.0e-2, 1.0e-4, 1.0e-8,
+                                      CutIntegrationContext::minGeneratedCutVolumeFraction()};
+
+    const auto diagnostic =
+        diagnoseCutConditioning(fractions, /*small_fraction_threshold=*/1.0e-3,
+                                /*degenerate_threshold=*/1.0e-13);
+    EXPECT_TRUE(diagnostic.ok);
+    EXPECT_EQ(diagnostic.small_cut_cell_count, 3u);
+    EXPECT_EQ(diagnostic.degenerate_cut_count, 0u);
+
+    const auto neighborhoods = buildCutConditioningNeighborhoods(
+        cells,
+        fractions,
+        {{10, 20}, {11, 21}, {12, 22}, {13, 23}},
+        /*small_fraction_threshold=*/1.0e-3);
+    ASSERT_EQ(neighborhoods.size(), 3u);
+    for (const auto& neighborhood : neighborhoods) {
+        EXPECT_TRUE(std::isfinite(neighborhood.conditioning_indicator));
+        EXPECT_GT(neighborhood.conditioning_indicator, 1.0e3);
+        EXPECT_FALSE(neighborhood.adjacent_cells.empty());
+    }
+
+    CutIntegrationContext context;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        CutCellAssemblyMetadata metadata;
+        metadata.cell = cells[i];
+        metadata.parent_entity = cells[i];
+        metadata.volume_fraction = fractions[i];
+        metadata.side = CutIntegrationSide::Negative;
+
+        CutQuadratureRule rule;
+        rule.kind = CutQuadratureKind::Volume;
+        rule.side = CutIntegrationSide::Negative;
+        rule.measure = fractions[i];
+        rule.parent_measure = 1.0;
+        rule.volume_fraction = fractions[i];
+        context.addGeneratedVolumeRule(marker, metadata, rule);
+    }
+
+    CutCellAssemblyMetadata pruned_metadata;
+    pruned_metadata.cell = 14;
+    pruned_metadata.parent_entity = 14;
+    pruned_metadata.volume_fraction =
+        CutIntegrationContext::minGeneratedCutVolumeFraction() * 0.5;
+    pruned_metadata.side = CutIntegrationSide::Negative;
+    CutQuadratureRule pruned_rule;
+    pruned_rule.kind = CutQuadratureKind::Volume;
+    pruned_rule.side = CutIntegrationSide::Negative;
+    pruned_rule.measure = pruned_metadata.volume_fraction;
+    pruned_rule.parent_measure = 1.0;
+    pruned_rule.volume_fraction = pruned_metadata.volume_fraction;
+    context.addGeneratedVolumeRule(marker, pruned_metadata, pruned_rule);
+    EXPECT_EQ(context.generatedPrunedVolumeRuleCount(), 1u);
+
+    CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = "refined-small-cut-facets";
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        const auto facet = static_cast<MeshIndex>(200 + i);
+        handle.facets.push_back(facet);
+        handle.facet_metadata.push_back(CutFacetSetFacetMetadata{
+            .facet = facet,
+            .first_cell = cells[i],
+            .second_cell = static_cast<MeshIndex>(300 + i),
+            .stabilization_scale = 0.0,
+            .stable_id = static_cast<std::uint64_t>(i + 1)});
+    }
+
+    context.bindFacetStabilizationScalesForMarkerAndSide(
+        handle, marker, CutIntegrationSide::Negative);
+
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+        const auto facet = static_cast<MeshIndex>(200 + i);
+        const Real expected =
+            std::min(CutIntegrationContext::maxCutCellStabilizationScale(),
+                     Real{1.0} / fractions[i]);
+        const Real scale = handle.stabilizationScaleForFacet(facet);
+        EXPECT_TRUE(std::isfinite(scale));
+        EXPECT_LE(scale, CutIntegrationContext::maxCutCellStabilizationScale());
+        EXPECT_DOUBLE_EQ(scale, expected);
+    }
+}
+
 TEST(CutIntegrationInfrastructure, IntegratesScalarOperatorsOverCutAdjacentFacetSet)
 {
     CutIntegrationContext context;

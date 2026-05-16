@@ -774,6 +774,9 @@ velocity and pressure polynomial orders, the derivative order currently applied,
 and the implemented scaling. Runs with polynomial order above one receive an
 explicit warning that higher-normal-derivative ghost penalties are not yet
 available.
+Small-cut conditioning probes now verify finite conditioning indicators and
+capped cut-adjacent stabilization scales as retained cut fractions decrease to
+the generated-volume pruning threshold.
 
 ### Design Checklist
 
@@ -785,7 +788,7 @@ available.
 - [x] Define scaling, including `h^(2*j - 1)` style factors for derivative order
       `j`.
 - [ ] Define which terms are required for equal-order velocity-pressure pairs.
-- [ ] Define how cut-volume fraction scale/cap interacts with high-order
+- [x] Define how cut-volume fraction scale/cap interacts with high-order
       stabilization.
 - [x] Define local facet set scope for high-order mode.
 
@@ -805,7 +808,7 @@ available.
 - [x] Only cut-adjacent facets receive stabilization.
 - [ ] Far-field interior faces receive zero contribution.
 - [ ] Derivative-order terms scale correctly with `h`.
-- [ ] Small-cut conditioning probes remain bounded under refinement.
+- [x] Small-cut conditioning probes remain bounded under refinement.
 - [ ] Direct factorization diagnostics show no dry unsupported pressure rows.
 
 ### Literature Support
@@ -1145,7 +1148,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 - [ ] Extend ghost penalties for higher-order spaces.
 - [x] Validate pressure support constraints for high-order pressure DOFs.
-- [ ] Add small-cut conditioning tests.
+- [x] Add small-cut conditioning tests.
 - [x] Add stabilization diagnostics.
 
 ### Phase 5: Solver Validation
