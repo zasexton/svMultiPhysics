@@ -1254,7 +1254,13 @@ methods and volume correction remain separate numerical-method choices.
       The active-domain output path integrates retained reference-frame
       high-order cut rules through the current parent-cell geometry and records
       physical wet volume separately from reference measure.
-- [ ] Ensure reinitialization updates current and previous history consistently.
+- [x] Ensure reinitialization updates current and previous history consistently.
+      Runtime maintenance copies the repaired FE-ordered coefficients for each
+      modified level-set field into both the accepted state and the previous
+      state, then refreshes ghosts and reports current/previous and older
+      history deltas. A Q2 regression test verifies that the complete
+      high-order field slice, not only vertex coefficients, is synchronized
+      while unrelated fields are left unchanged.
 - [ ] Ensure volume correction updates the high-order field coefficients.
 - [ ] Rebuild high-order cut context after maintenance and before output.
 - [ ] Log maintenance-induced geometry changes.
