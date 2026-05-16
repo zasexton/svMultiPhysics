@@ -828,6 +828,65 @@ FE::Real integrateInterfaceMoment(
     return value;
 }
 
+void expectSingleParentVolumeRulesPartitionMeasure(
+    const FE::interfaces::LevelSetInterfaceDomain& domain,
+    FE::Real tolerance)
+{
+    const auto rules = domain.volumeQuadratureRules();
+    ASSERT_FALSE(rules.empty());
+
+    const auto parent_cell = rules.front().provenance.parent_entity;
+    FE::Real parent_measure = 0.0;
+    FE::Real total_measure = 0.0;
+    for (const auto& rule : rules) {
+        EXPECT_EQ(rule.provenance.parent_entity, parent_cell);
+        EXPECT_TRUE(std::isfinite(rule.measure));
+        EXPECT_TRUE(std::isfinite(rule.parent_measure));
+        EXPECT_GE(rule.measure, 0.0);
+        EXPECT_GE(rule.parent_measure, 0.0);
+        parent_measure = std::max(parent_measure, rule.parent_measure);
+        total_measure += rule.measure;
+    }
+
+    EXPECT_GT(parent_measure, 0.0);
+    EXPECT_NEAR(total_measure, parent_measure, tolerance);
+}
+
+void expectGeneratedCutRulesAreFinite(
+    const FE::interfaces::LevelSetInterfaceDomain& domain)
+{
+    const auto check_rule =
+        [](const FE::geometry::CutQuadratureRule& rule) {
+            EXPECT_TRUE(std::isfinite(rule.measure));
+            EXPECT_TRUE(std::isfinite(rule.parent_measure));
+            EXPECT_TRUE(std::isfinite(rule.volume_fraction));
+            EXPECT_GE(rule.measure, 0.0);
+            EXPECT_GE(rule.volume_fraction, 0.0);
+            EXPECT_LE(rule.volume_fraction, 1.0);
+            ASSERT_FALSE(rule.points.empty());
+            for (const auto& point : rule.points) {
+                EXPECT_TRUE(std::isfinite(point.weight));
+                EXPECT_GT(point.weight, 0.0);
+                for (int d = 0; d < 3; ++d) {
+                    EXPECT_TRUE(std::isfinite(point.point[static_cast<std::size_t>(d)]));
+                    EXPECT_TRUE(std::isfinite(point.normal[static_cast<std::size_t>(d)]));
+                }
+            }
+        };
+
+    const auto volume_rules = domain.volumeQuadratureRules();
+    ASSERT_FALSE(volume_rules.empty());
+    for (const auto& rule : volume_rules) {
+        check_rule(rule);
+    }
+
+    const auto interface_rules = domain.interfaceQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    for (const auto& rule : interface_rules) {
+        check_rule(rule);
+    }
+}
+
 FE::geometry::Matrix3x3 toGeometryMatrix(
     const FE::math::Matrix<FE::Real, 3, 3>& matrix)
 {
@@ -2520,6 +2579,31 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleVertexAndEdgeTouchesAre
               std::string::npos);
     EXPECT_NE(edge_touch.diagnostic.find("fallback_used=false"),
               std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, BackendIndependentValidationFixturesCheckRuleInvariants)
+{
+    const auto saye_circle =
+        buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                 /*level_set_order=*/2,
+                                 /*subdivision_depth=*/6,
+                                 /*interface_order=*/1,
+                                 /*volume_order=*/2,
+                                 /*interface_marker=*/1893);
+    ASSERT_TRUE(saye_circle.success) << saye_circle.diagnostic;
+    expectSingleParentVolumeRulesPartitionMeasure(saye_circle.domain, 1.0e-10);
+    expectGeneratedCutRulesAreFinite(saye_circle.domain);
+
+    const auto subcell_circle =
+        buildSingleTriangleHighOrderSubcellCut(
+            [](const std::array<FE::Real, 3>& x) {
+                constexpr FE::Real radius = 0.5;
+                return x[0] * x[0] + x[1] * x[1] - radius * radius;
+            },
+            /*interface_marker=*/1894);
+    ASSERT_TRUE(subcell_circle.success) << subcell_circle.diagnostic;
+    expectSingleParentVolumeRulesPartitionMeasure(subcell_circle.domain, 1.0e-10);
+    expectGeneratedCutRulesAreFinite(subcell_circle.domain);
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1PlaneMatchesLinearTetraMeasures)

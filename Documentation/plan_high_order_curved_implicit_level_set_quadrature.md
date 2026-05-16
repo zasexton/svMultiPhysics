@@ -1475,7 +1475,10 @@ prevents solver behavior from hiding geometry errors.
 ### Implementation Checklist
 
 - [x] Add unit-test helpers for analytic measures and polynomial moments.
-- [ ] Add backend-independent quadrature validation fixtures.
+- [x] Add backend-independent quadrature validation fixtures.
+      Shared lifecycle-test helpers now validate rule invariants on generated
+      domains regardless of whether the backend is Saye hyperrectangle or
+      high-order subcell decomposition.
 - [x] Add separate tests for reference measure and physical mapped measure.
 - [ ] Add deterministic randomized cut-position tests with fixed seeds.
 - [ ] Add failure-mode tests for near-tangent and tiny sliver cuts.
@@ -1485,8 +1488,8 @@ prevents solver behavior from hiding geometry errors.
 - [x] Constant integration exactness over both cut sides.
 - [x] Linear and quadratic moment accuracy.
 - [x] Interface length/area accuracy.
-- [ ] Negative plus positive measures sum to parent measure.
-- [ ] Rule weights and points are finite.
+- [x] Negative plus positive measures sum to parent measure.
+- [x] Rule weights and points are finite.
 - [ ] Achieved-order diagnostics match measured convergence.
 
 ### Literature Support
