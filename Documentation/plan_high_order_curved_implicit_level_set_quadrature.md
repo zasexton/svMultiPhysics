@@ -1066,7 +1066,7 @@ Tangent policy contract:
 - [x] Fixed-geometry finite-difference Jacobian checks pass for high-order rules.
 - [x] Refreshed-geometry finite-difference checks report the expected
       quasi-Newton mismatch rather than silently passing or failing unclearly.
-- [ ] Line-search rejection restores accepted high-order cut context.
+- [x] Line-search rejection restores accepted high-order cut context.
 - [ ] A moving curved-interface MMS case converges under documented tolerances.
 
 ### Literature Support

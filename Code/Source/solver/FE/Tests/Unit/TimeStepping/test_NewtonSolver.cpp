@@ -1145,6 +1145,107 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
 }
 
+TEST(NewtonSolverLineSearch, RestoresAcceptedHighOrderCutContextAfterRejectedTrial)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) { return (u * v).dx(); },
+        /*dt=*/0.1,
+        /*u0=*/{1.0});
+
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+    struct CutContextState {
+        SyncPoint point;
+        double u;
+        std::uint64_t topology_key;
+        std::uint64_t request_policy_key;
+    };
+
+    constexpr std::uint64_t kAcceptedTopology = 0x5101u;
+    constexpr std::uint64_t kTrialTopology = 0x5202u;
+    constexpr std::uint64_t kHighOrderPolicy = 0x5a7e0001u;
+    CutContextState installed{
+        SyncPoint::AcceptedNonlinearState,
+        1.0,
+        kAcceptedTopology,
+        kHighOrderPolicy};
+    std::vector<CutContextState> sync_records;
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.assemble_both_when_possible = false;
+    nopt.use_line_search = true;
+    nopt.line_search_max_iterations = 1;
+    nopt.line_search_alpha_min = 1e-12;
+    nopt.synchronize_state =
+        [&installed, &sync_records](const svmp::FE::systems::SystemStateView& state,
+                                    SyncPoint point) {
+            ASSERT_FALSE(state.u.empty());
+            const auto u = static_cast<double>(state.u.front());
+            const auto topology =
+                u > 1.5 ? kTrialTopology : kAcceptedTopology;
+            installed = CutContextState{point, u, topology, kHighOrderPolicy};
+            sync_records.push_back(installed);
+        };
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    ScalingLinearSolver linear(*problem.linear, /*scale=*/-1.0);
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_FALSE(rep.converged);
+    bool saw_rejected_trial_context = false;
+    bool saw_trial_restore_context = false;
+    bool saw_restored_context = false;
+    bool saw_policy_change = false;
+    for (const auto& rec : sync_records) {
+        saw_policy_change =
+            saw_policy_change || rec.request_policy_key != kHighOrderPolicy;
+        if (rec.point == SyncPoint::LineSearchTrialResidual &&
+            std::abs(rec.u - 2.0) < 1e-13) {
+            saw_rejected_trial_context =
+                rec.topology_key == kTrialTopology &&
+                rec.request_policy_key == kHighOrderPolicy;
+        }
+        if (rec.point == SyncPoint::LineSearchTrialResidual &&
+            std::abs(rec.u - 1.0) < 1e-13) {
+            saw_trial_restore_context =
+                rec.topology_key == kAcceptedTopology &&
+                rec.request_policy_key == kHighOrderPolicy;
+        }
+        if (rec.point == SyncPoint::RestoredNonlinearState &&
+            std::abs(rec.u - 1.0) < 1e-13) {
+            saw_restored_context =
+                rec.topology_key == kAcceptedTopology &&
+                rec.request_policy_key == kHighOrderPolicy;
+        }
+    }
+    EXPECT_TRUE(saw_rejected_trial_context);
+    EXPECT_TRUE(saw_trial_restore_context);
+    EXPECT_TRUE(saw_restored_context);
+    EXPECT_FALSE(saw_policy_change);
+    EXPECT_EQ(installed.topology_key, kAcceptedTopology);
+    EXPECT_EQ(installed.request_policy_key, kHighOrderPolicy);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
+}
+
 TEST(NewtonSolver, SynchronizesUpdatedCoupledGeometryBeforeResidualAssembly)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
