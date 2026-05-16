@@ -2741,6 +2741,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumSize(result.cell_count, comm);
     const auto global_corner_linearized_cells =
         globalSumSize(result.corner_linearized_cell_count, comm);
+    const auto global_implicit_cut_fallback_cells =
+        globalSumSize(result.implicit_cut_fallback_cell_count, comm);
     report.interface_fragments += global_interface_fragments;
     report.cell_count += global_cell_count;
     report.corner_linearized_cell_count += global_corner_linearized_cells;
@@ -2912,6 +2914,12 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << options.interface_quadrature_order
         << " volume_quadrature_order="
         << options.volume_quadrature_order
+        << " achieved_interface_quadrature_order="
+        << result.achieved_interface_quadrature_order
+        << " achieved_volume_quadrature_order="
+        << result.achieved_volume_quadrature_order
+        << " implicit_cut_fallback_cells="
+        << global_implicit_cut_fallback_cells
         << " allow_corner_linearized_geometry="
         << (request.allow_corner_linearized_geometry ? "true" : "false")
         << " isovalue=" << request.isovalue

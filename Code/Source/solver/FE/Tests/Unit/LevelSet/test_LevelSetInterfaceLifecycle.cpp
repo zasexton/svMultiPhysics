@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include "Assembly/Assembler.h"
 #include "Dofs/DofHandler.h"
@@ -377,6 +378,38 @@ TEST(LevelSetInterfaceLifecycle, RejectsNonlinearBackendForLinearCornerMode)
         const std::string message = ex.what();
         EXPECT_NE(message.find("LinearCorner"), std::string::npos);
     }
+}
+
+TEST(LevelSetInterfaceLifecycle, LinearBackendDriverReportsSupportAndOrders)
+{
+    const auto& backend =
+        level_set::implicitCutQuadratureBackendDriver(
+            level_set::ImplicitCutQuadratureBackend::LinearCorner);
+    EXPECT_EQ(backend.kind(),
+              level_set::ImplicitCutQuadratureBackend::LinearCorner);
+    EXPECT_STREQ(backend.name(), "LinearCorner");
+    EXPECT_TRUE(backend.supports(2, FE::ElementType::Quad4));
+    EXPECT_TRUE(backend.supports(3, FE::ElementType::Tetra4));
+    EXPECT_FALSE(backend.supports(3, FE::ElementType::Hex8));
+
+    FE::interfaces::CutInterfaceDomainRequest request{};
+    request.source = FE::interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "test-level-set", 0, 1);
+    request.interface_marker = 10;
+    request.quadrature_order = 3;
+    request.interface_quadrature_order = 2;
+    request.volume_quadrature_order = 3;
+
+    EXPECT_EQ(backend.achievedInterfaceQuadratureOrder(request), 1);
+    EXPECT_EQ(backend.achievedVolumeQuadratureOrder(request), 2);
+}
+
+TEST(LevelSetInterfaceLifecycle, UnimplementedBackendFactoryThrows)
+{
+    EXPECT_THROW(
+        (void)level_set::implicitCutQuadratureBackendDriver(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle),
+        std::invalid_argument);
 }
 
 TEST(LevelSetInterfaceLifecycle, FullSideVolumeRegionSucceedsWithoutInterfaceFragment)

@@ -81,6 +81,11 @@ struct LevelSetGeneratedInterfaceResult {
     std::size_t corner_linearized_cell_count{0};
     std::size_t max_cell_node_count{0};
     std::size_t max_corner_node_count{0};
+    ImplicitCutQuadratureBackend implicit_cut_quadrature_backend{
+        ImplicitCutQuadratureBackend::LinearCorner};
+    int achieved_interface_quadrature_order{0};
+    int achieved_volume_quadrature_order{0};
+    std::size_t implicit_cut_fallback_cell_count{0};
 };
 
 class LevelSetGeneratedInterfaceLifecycle {

@@ -803,6 +803,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetInterfaceLifecycle.h
+    LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetReinitialization.h
     LevelSet/LevelSetDiagnostics.h
@@ -812,6 +813,7 @@ set(FE_LEVELSET_HEADERS
 set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
+    LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetReinitialization.cpp
     LevelSet/LevelSetDiagnostics.cpp

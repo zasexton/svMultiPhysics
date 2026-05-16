@@ -3,6 +3,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include <algorithm>
 #include <array>
@@ -58,6 +59,9 @@ namespace {
 struct GeneratedInterfaceCellDiagnostics {
     std::size_t node_count{0};
     std::size_t corner_count{0};
+    int achieved_interface_quadrature_order{0};
+    int achieved_volume_quadrature_order{0};
+    bool fallback_used{false};
 };
 
 [[nodiscard]] std::size_t cornerCount(ElementType type)
@@ -124,6 +128,7 @@ struct GeneratedInterfaceCellDiagnostics {
     interfaces::LevelSetInterfaceDomain& domain,
     const assembly::IMeshAccess& mesh,
     const dofs::EntityDofMap& entity_map,
+    const ImplicitCutQuadratureBackendDriver& backend,
     std::span<const Real> coefficients,
     GlobalIndex cell_id)
 {
@@ -152,28 +157,29 @@ struct GeneratedInterfaceCellDiagnostics {
             coefficientAtVertex(entity_map, cell_nodes[i], coefficients));
     }
 
-    interfaces::LevelSetCellCutResult cut_result;
-    if (mesh.dimension() == 2) {
-        cut_result = interfaces::cutLinearLevelSetCell2D(domain.request(), input);
-    } else if (mesh.dimension() == 3) {
-        cut_result = interfaces::cutLinearLevelSetCell3D(domain.request(), input);
-    } else {
+    if (mesh.dimension() != 2 && mesh.dimension() != 3) {
         throw std::invalid_argument(
             "generated level-set interface requires a 2D or 3D mesh");
     }
-    if (!cut_result.supported) {
-        throw std::invalid_argument(cut_result.diagnostic);
+    auto backend_result = backend.cut(mesh.dimension(), domain.request(), input);
+    if (!backend_result.cut.supported) {
+        throw std::invalid_argument(backend_result.cut.diagnostic);
     }
-    for (auto& fragment : cut_result.fragments) {
+    for (auto& fragment : backend_result.cut.fragments) {
         domain.addFragment(std::move(fragment));
     }
-    for (auto& region : cut_result.volume_regions) {
+    for (auto& region : backend_result.cut.volume_regions) {
         domain.addVolumeRegion(std::move(region));
     }
 
     return GeneratedInterfaceCellDiagnostics{
         .node_count = cell_nodes.size(),
-        .corner_count = count};
+        .corner_count = count,
+        .achieved_interface_quadrature_order =
+            backend_result.achieved_interface_quadrature_order,
+        .achieved_volume_quadrature_order =
+            backend_result.achieved_volume_quadrature_order,
+        .fallback_used = backend_result.fallback_used};
 }
 
 } // namespace
@@ -224,6 +230,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             "high-order implicit generated level-set interface geometry is not implemented yet; "
             "use Generated_interface_geometry=LinearCorner until a high-order backend is available");
     }
+    const auto& backend = implicitCutQuadratureBackendDriver(
+        options.implicit_cut_quadrature_backend);
     const int interface_quadrature_order =
         options.interface_quadrature_order >= 0 ? options.interface_quadrature_order
                                                 : options.quadrature_order;
@@ -289,12 +297,27 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     std::size_t corner_linearized_cell_count = 0u;
     std::size_t max_cell_node_count = 0u;
     std::size_t max_corner_node_count = 0u;
+    int achieved_interface_quadrature_order =
+        backend.achievedInterfaceQuadratureOrder(request);
+    int achieved_volume_quadrature_order =
+        backend.achievedVolumeQuadratureOrder(request);
+    std::size_t implicit_cut_fallback_cell_count = 0u;
     mesh.forEachCell([&](GlobalIndex cell_id) {
         const auto diagnostics =
-            appendGeneratedInterfaceCell(domain, mesh, *entity_map, coefficients, cell_id);
+            appendGeneratedInterfaceCell(
+                domain, mesh, *entity_map, backend, coefficients, cell_id);
         ++cell_count;
         if (diagnostics.node_count > diagnostics.corner_count) {
             ++corner_linearized_cell_count;
+        }
+        achieved_interface_quadrature_order =
+            std::min(achieved_interface_quadrature_order,
+                     diagnostics.achieved_interface_quadrature_order);
+        achieved_volume_quadrature_order =
+            std::min(achieved_volume_quadrature_order,
+                     diagnostics.achieved_volume_quadrature_order);
+        if (diagnostics.fallback_used) {
+            ++implicit_cut_fallback_cell_count;
         }
         max_cell_node_count = std::max(max_cell_node_count, diagnostics.node_count);
         max_corner_node_count = std::max(max_corner_node_count, diagnostics.corner_count);
@@ -315,6 +338,14 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     result.corner_linearized_cell_count = corner_linearized_cell_count;
     result.max_cell_node_count = max_cell_node_count;
     result.max_corner_node_count = max_corner_node_count;
+    result.implicit_cut_quadrature_backend =
+        options.implicit_cut_quadrature_backend;
+    result.achieved_interface_quadrature_order =
+        achieved_interface_quadrature_order;
+    result.achieved_volume_quadrature_order =
+        achieved_volume_quadrature_order;
+    result.implicit_cut_fallback_cell_count =
+        implicit_cut_fallback_cell_count;
     result.success =
         result.summary.active_fragment_count > 0u ||
         result.summary.active_volume_region_count > 0u;

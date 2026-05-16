@@ -141,7 +141,7 @@ is qualified.
 - [x] Add parser support for geometry mode, backend, requested orders, root
       tolerance, subdivision depth, and fallback policy.
 - [x] Thread the options into `LevelSetGeneratedInterfaceOptions`.
-- [ ] Log the selected geometry mode, backend, requested order, achieved order,
+- [x] Log the selected geometry mode, backend, requested order, achieved order,
       tolerance, and fallback count in cut-context rebuild diagnostics.
 - [x] Reject incompatible combinations early, such as high-order implicit mode
       with a non-scalar level-set field.
@@ -245,7 +245,7 @@ assembly and physics code backend-agnostic.
 
 ### Design Checklist
 
-- [ ] Define an interface such as `ImplicitCutQuadratureBackend`.
+- [x] Define an interface such as `ImplicitCutQuadratureBackend`.
 - [ ] Input:
       - parent cell id,
       - element type,
@@ -273,8 +273,8 @@ assembly and physics code backend-agnostic.
 
 ### Implementation Checklist
 
-- [ ] Add backend registry or factory.
-- [ ] Move current linear cutter behind the same abstraction.
+- [x] Add backend registry or factory.
+- [x] Move current linear cutter behind the same abstraction.
 - [ ] Add backend metadata fields to `CutQuadratureRule` provenance or adjacent
       metadata.
 - [ ] Add a standard diagnostic enum:
@@ -288,7 +288,7 @@ assembly and physics code backend-agnostic.
 
 ### Tests
 
-- [ ] Backend factory returns the linear backend for legacy settings.
+- [x] Backend factory returns the linear backend for legacy settings.
 - [ ] Backend metadata reaches `CutIntegrationContext`.
 - [ ] Invalid backend output is rejected with clear diagnostics.
 - [ ] Negative and positive side measures sum to the parent measure.
@@ -972,9 +972,9 @@ behavior. High-order quadrature adds more points and more per-cell work.
 ### Phase 0: Contracts And Infrastructure
 
 - [x] Add options and feature gate.
-- [ ] Add backend abstraction.
+- [x] Add backend abstraction.
 - [ ] Add high-order level-set evaluator.
-- [ ] Move linear cutter behind the backend interface.
+- [x] Move linear cutter behind the backend interface.
 - [ ] Add metadata and diagnostics plumbing.
 - [ ] Keep production fixtures on the current linear path.
 
