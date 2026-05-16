@@ -5,8 +5,11 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutDomainAssembler.h"
 #include "Assembly/CutIntegrationContext.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Geometry/FrameGeometry.h"
+#include "Geometry/MappingFactory.h"
 #include "Interfaces/LevelSetInterfaceGeometryWriter.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
@@ -823,6 +826,125 @@ FE::Real integrateInterfaceMoment(
         }
     }
     return value;
+}
+
+FE::geometry::Matrix3x3 toGeometryMatrix(
+    const FE::math::Matrix<FE::Real, 3, 3>& matrix)
+{
+    FE::geometry::Matrix3x3 out{};
+    for (std::size_t i = 0; i < 3u; ++i) {
+        for (std::size_t j = 0; j < 3u; ++j) {
+            out[i][j] = matrix(i, j);
+        }
+    }
+    return out;
+}
+
+FE::math::Vector<FE::Real, 3> toMathPoint(
+    const std::array<FE::Real, 3>& point)
+{
+    FE::math::Vector<FE::Real, 3> out{};
+    out[0] = point[0];
+    out[1] = point[1];
+    out[2] = point[2];
+    return out;
+}
+
+FE::math::Vector<FE::Real, 3> curvedHexPhysicalPoint(
+    const FE::math::Vector<FE::Real, 3>& xi)
+{
+    constexpr FE::Real sx = 1.25;
+    constexpr FE::Real sy = 0.75;
+    constexpr FE::Real sz = 1.5;
+    constexpr FE::Real bend = 0.35;
+    FE::math::Vector<FE::Real, 3> out{};
+    out[0] = sx * xi[0];
+    out[1] = sy * xi[1];
+    out[2] = sz * xi[2] + bend * xi[0] * xi[1];
+    return out;
+}
+
+std::shared_ptr<FE::geometry::GeometryMapping> makeCurvedHex27Mapping()
+{
+    std::vector<FE::math::Vector<FE::Real, 3>> nodes;
+    nodes.reserve(FE::basis::NodeOrdering::num_nodes(FE::ElementType::Hex27));
+    for (std::size_t i = 0;
+         i < FE::basis::NodeOrdering::num_nodes(FE::ElementType::Hex27);
+         ++i) {
+        nodes.push_back(curvedHexPhysicalPoint(
+            FE::basis::NodeOrdering::get_node_coords(FE::ElementType::Hex27, i)));
+    }
+
+    FE::geometry::MappingRequest request{};
+    request.element_type = FE::ElementType::Hex27;
+    request.geometry_order = 2;
+    request.use_affine = false;
+    return FE::geometry::MappingFactory::create(request, nodes);
+}
+
+FE::Real mappedVolumeMeasure(
+    const FE::geometry::CutQuadratureRule& rule,
+    const FE::geometry::GeometryMapping& mapping)
+{
+    FE::Real measure = 0.0;
+    for (const auto& point : rule.points) {
+        measure += point.weight *
+                   std::abs(mapping.jacobian_determinant(toMathPoint(point.point)));
+    }
+    return measure;
+}
+
+FE::Real mappedInterfaceMeasure(
+    const FE::geometry::CutQuadratureRule& rule,
+    const FE::geometry::GeometryMapping& mapping)
+{
+    FE::Real measure = 0.0;
+    for (const auto& point : rule.points) {
+        const auto xi = toMathPoint(point.point);
+        const auto transform =
+            FE::geometry::surfaceTransformFromJacobianInverse(
+                point.normal,
+                point.weight,
+                toGeometryMatrix(mapping.jacobian_inverse(xi)),
+                mapping.jacobian_determinant(xi));
+        measure += transform.measure;
+    }
+    return measure;
+}
+
+FE::Real expectedCurvedHexMidplaneArea()
+{
+    constexpr FE::Real sx = 1.25;
+    constexpr FE::Real sy = 0.75;
+    constexpr FE::Real bend = 0.35;
+    constexpr std::array<FE::Real, 5> points{{
+        -0.9061798459386640,
+        -0.5384693101056831,
+        0.0,
+        0.5384693101056831,
+        0.9061798459386640,
+    }};
+    constexpr std::array<FE::Real, 5> weights{{
+        0.2369268850561891,
+        0.4786286704993665,
+        0.5688888888888889,
+        0.4786286704993665,
+        0.2369268850561891,
+    }};
+
+    FE::Real area = 0.0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        for (std::size_t j = 0; j < points.size(); ++j) {
+            const FE::Real xi = points[i];
+            const FE::Real eta = points[j];
+            const FE::Real density =
+                std::sqrt((sx * sy) * (sx * sy) +
+                          (bend * sy * eta) * (bend * sy * eta) +
+                          (bend * sx * xi) * (bend * sx * xi));
+            area += weights[i] * weights[j] * density;
+        }
+    }
+    return area;
 }
 
 class CutMeasureAssemblyKernel final : public FE::assembly::AssemblyKernel {
@@ -2485,6 +2607,94 @@ TEST(LevelSetInterfaceLifecycle, GeneratedRulesUseReferenceCoordinatesOnPhysical
         }
     }
     EXPECT_NEAR(measure, FE::Real(1.0) / FE::Real(6.0), 1.0e-12);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry)
+{
+    constexpr int interface_marker = 94;
+    constexpr FE::Real sx = 1.25;
+    constexpr FE::Real sy = 0.75;
+    constexpr FE::Real sz = 1.5;
+    constexpr FE::Real cut_zeta = 0.125;
+    constexpr FE::Real physical_jacobian = sx * sy * sz;
+    constexpr FE::Real reference_negative_volume = 4.0 * (1.0 + cut_zeta);
+    constexpr FE::Real reference_positive_volume = 4.0 * (1.0 - cut_zeta);
+    const auto mesh = std::make_shared<SingleHexMeshAccess>(FE::ElementType::Hex27);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleHexSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 27u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 27u; ++i) {
+        const auto xi =
+            FE::basis::NodeOrdering::get_node_coords(FE::ElementType::Hex27, i);
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            xi[2] - cut_zeta;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = 3;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_NEAR(result.summary.negative_volume_measure,
+                reference_negative_volume,
+                1.0e-12);
+    ASSERT_NEAR(result.summary.positive_volume_measure,
+                reference_positive_volume,
+                1.0e-12);
+    ASSERT_NEAR(result.summary.measure, 4.0, 1.0e-12);
+
+    const auto mapping = makeCurvedHex27Mapping();
+    ASSERT_FALSE(mapping->isAffine());
+
+    FE::Real physical_negative_volume = 0.0;
+    FE::Real physical_positive_volume = 0.0;
+    for (const auto& rule : result.domain.volumeQuadratureRules()) {
+        EXPECT_EQ(rule.frame, FE::geometry::CutGeometryFrame::Reference);
+        if (rule.side == FE::geometry::CutIntegrationSide::Negative) {
+            physical_negative_volume += mappedVolumeMeasure(rule, *mapping);
+        } else if (rule.side == FE::geometry::CutIntegrationSide::Positive) {
+            physical_positive_volume += mappedVolumeMeasure(rule, *mapping);
+        }
+    }
+    EXPECT_NEAR(physical_negative_volume,
+                physical_jacobian * reference_negative_volume,
+                1.0e-10);
+    EXPECT_NEAR(physical_positive_volume,
+                physical_jacobian * reference_positive_volume,
+                1.0e-10);
+
+    FE::Real physical_interface_measure = 0.0;
+    for (const auto& rule : result.domain.interfaceQuadratureRules()) {
+        EXPECT_EQ(rule.frame, FE::geometry::CutGeometryFrame::Reference);
+        physical_interface_measure += mappedInterfaceMeasure(rule, *mapping);
+    }
+    EXPECT_GT(physical_interface_measure, sx * sy * 4.0);
+    EXPECT_NEAR(physical_interface_measure, expectedCurvedHexMidplaneArea(), 5.0e-3);
 }
 
 TEST(LevelSetInterfaceLifecycle, PreservesMarkerIdentity)

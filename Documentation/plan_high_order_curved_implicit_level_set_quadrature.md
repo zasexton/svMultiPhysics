@@ -394,6 +394,8 @@ order 2.
 - [x] 3D plane cut through a hex reproduces known volume and area.
 - [x] 3D sphere cut integrates volume and surface area to tolerance.
 - [x] 3D ellipsoid cuts integrate volume and surface area to tolerance.
+- [x] Reference-frame hex rules map through a non-affine Hex27 physical
+      geometry with the expected volume scaling and surface measure transform.
 - [ ] Near-tangent tests produce either a valid high-order rule or an explicit
       fallback/failure diagnostic.
 
@@ -971,13 +973,13 @@ prevents solver behavior from hiding geometry errors.
       - ellipsoid-like polynomial where feasible.
 - [ ] Define polynomial moment tests up to the achieved quadrature order.
 - [ ] Define convergence criteria under h-refinement and p-refinement.
-- [ ] Define tests for non-affine physical parent mappings.
+- [x] Define tests for non-affine physical parent mappings.
 
 ### Implementation Checklist
 
 - [x] Add unit-test helpers for analytic measures and polynomial moments.
 - [ ] Add backend-independent quadrature validation fixtures.
-- [ ] Add separate tests for reference measure and physical mapped measure.
+- [x] Add separate tests for reference measure and physical mapped measure.
 - [ ] Add deterministic randomized cut-position tests with fixed seeds.
 - [ ] Add failure-mode tests for near-tangent and tiny sliver cuts.
 
@@ -1123,7 +1125,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Implement hex support.
 - [x] Add sphere volume and surface tests.
 - [x] Add ellipsoid volume and surface tests.
-- [ ] Add curved physical geometry mapping tests.
+- [x] Add curved physical geometry mapping tests.
 - [ ] Add MPI determinism tests.
 
 ### Phase 4: Stabilization And Pressure Support
