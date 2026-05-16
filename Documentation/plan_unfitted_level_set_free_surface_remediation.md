@@ -584,6 +584,10 @@ benchmark runs.
       solution during active cut-context rebuilds, and parse support diagnostics
       in the smoke script so inactive pressure DOFs are checked against current
       wet cell support without VTK output.
+- [x] Add basis-cache entry counts to process-memory diagnostics and record a
+      three-step D18 no-output probe showing basis-cache entries grow from 1 to
+      9933 while RSS grows by about 364 MiB, identifying transient cut-volume
+      quadrature basis caching as the next memory-lifecycle target.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

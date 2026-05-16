@@ -18,6 +18,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
+#include "Basis/BasisCache.h"
 #include "Systems/SystemsExceptions.h"
 
 #if defined(FE_HAS_FSILS)
@@ -5727,7 +5728,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                     + " matrix_rows=" + std::to_string(J.numRows())
                     + " matrix_cols=" + std::to_string(J.numCols())
                     + " process_vm_kb=" + std::to_string(memory.vm_kb)
-                    + " process_rss_kb=" + std::to_string(memory.rss_kb));
+                    + " process_rss_kb=" + std::to_string(memory.rss_kb)
+                    + " basis_cache_entries="
+                    + std::to_string(basis::BasisCache::instance().size()));
             };
             log_linear_solve_memory("before_linear_solve");
             if (linearProbeDumpEnabled() && !linear_probe_dumped && it == 0 && ptc_retries == 0) {

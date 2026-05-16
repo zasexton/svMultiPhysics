@@ -7,6 +7,7 @@
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Basis/BasisCache.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
@@ -2535,6 +2536,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << global_mean_scale
         << " process_vm_kb=" << memory.vm_kb
         << " process_rss_kb=" << memory.rss_kb
+        << " basis_cache_entries="
+        << svmp::FE::basis::BasisCache::instance().size()
         << " negative_volume=" << global_negative_volume
         << " negative_volume_local=" << summary.negative_volume_measure
         << " positive_volume=" << global_positive_volume

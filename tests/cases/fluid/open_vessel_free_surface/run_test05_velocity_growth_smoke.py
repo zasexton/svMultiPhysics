@@ -2161,6 +2161,16 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         if vm_values:
             metrics["diagnostic_process_vm_kb"] = numeric_range(vm_values)
             metrics["diagnostic_process_max_vm_kb"] = max(vm_values)
+        basis_cache_values = [
+            int(record["basis_cache_entries"])
+            for record in process_memory_records
+            if isinstance(record.get("basis_cache_entries"), (int, float))
+        ]
+        if basis_cache_values:
+            metrics["diagnostic_process_max_basis_cache_entries"] = max(basis_cache_values)
+            metrics["diagnostic_process_basis_cache_entry_growth"] = (
+                basis_cache_values[-1] - basis_cache_values[0]
+            )
     if diagnostics.get("jit_cache_diagnostics"):
         jit_records = diagnostics["jit_cache_diagnostics"]
         metrics["latest_jit_cache_diagnostics"] = jit_records[-1]
@@ -2475,6 +2485,13 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if (args.require_linear_solve_memory_diagnostics and
             not has_linear_solve_memory_diagnostics(diagnostics)):
         errors.append("linear-solve memory diagnostics were not reported")
+    if args.require_basis_cache_diagnostics:
+        has_basis_cache = any(
+            isinstance(record.get("basis_cache_entries"), (int, float))
+            for record in diagnostics.get("process_memory", [])
+        )
+        if not has_basis_cache:
+            errors.append("basis-cache diagnostics were not reported")
     if args.require_interior_face_timing_diagnostics and not diagnostics.get("interior_face_timings"):
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
@@ -2810,6 +2827,13 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_linear_solve_memory_diagnostics and
             not has_linear_solve_memory_diagnostics(metrics["diagnostics"])):
         errors.append("linear-solve memory diagnostics were not reported")
+    if args.require_basis_cache_diagnostics:
+        has_basis_cache = any(
+            isinstance(record.get("basis_cache_entries"), (int, float))
+            for record in metrics["diagnostics"].get("process_memory", [])
+        )
+        if not has_basis_cache:
+            errors.append("basis-cache diagnostics were not reported")
     if (args.require_interior_face_timing_diagnostics and
             not metrics["diagnostics"].get("interior_face_timings")):
         errors.append("interior-face timing diagnostics were not reported")
@@ -3190,6 +3214,7 @@ def main() -> int:
     parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
     parser.add_argument("--enable-linear-solve-memory-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-memory-diagnostics", action="store_true")
+    parser.add_argument("--require-basis-cache-diagnostics", action="store_true")
     parser.add_argument("--enable-form-block-diagnostics", action="store_true")
     parser.add_argument("--enable-interior-face-timing", action="store_true")
     parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")
