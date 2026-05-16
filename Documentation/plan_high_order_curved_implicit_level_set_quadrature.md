@@ -426,7 +426,7 @@ order 2.
 - [x] 3D ellipsoid cuts integrate volume and surface area to tolerance.
 - [x] Reference-frame hex rules map through a non-affine Hex27 physical
       geometry with the expected volume scaling and surface measure transform.
-- [ ] Near-tangent tests produce either a valid high-order rule or an explicit
+- [x] Near-tangent tests produce either a valid high-order rule or an explicit
       fallback/failure diagnostic.
 
 ### Literature Support

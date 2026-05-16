@@ -972,9 +972,9 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadCircleCut(
     int subdivision_depth,
     int interface_order,
     int volume_order,
-    int interface_marker)
+    int interface_marker,
+    FE::Real radius = 0.5)
 {
-    constexpr FE::Real radius = 0.5;
     const auto mesh = std::make_shared<SingleQuadMeshAccess>(element_type);
     auto scalar_space = FE::spaces::Space(FE::spaces::SpaceType::H1,
                                           mesh,
@@ -2618,6 +2618,66 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleCircleErrorsDecreaseUnderHAnd
     EXPECT_GT(fine_p.summary.active_fragment_count, 0u);
     EXPECT_EQ(fine_p.achieved_interface_quadrature_order, 1);
     EXPECT_EQ(fine_p.achieved_volume_quadrature_order, 2);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleNearTangentCircleReturnsRulesOrDiagnostic)
+{
+    const auto result = buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                                /*level_set_order=*/2,
+                                                /*subdivision_depth=*/7,
+                                                /*interface_order=*/1,
+                                                /*volume_order=*/2,
+                                                /*interface_marker=*/1885,
+                                                /*radius=*/1.0);
+
+    EXPECT_NE(result.diagnostic.find("status="), std::string::npos);
+    if (!result.success) {
+        const bool explicit_diagnostic =
+            result.diagnostic.find("Tangent") != std::string::npos ||
+            result.diagnostic.find("Fallback") != std::string::npos ||
+            result.diagnostic.find("Failed") != std::string::npos ||
+            result.diagnostic.find("Degenerate") != std::string::npos;
+        EXPECT_TRUE(explicit_diagnostic) << result.diagnostic;
+        return;
+    }
+
+    EXPECT_EQ(result.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    const auto volume_rules = result.domain.volumeQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    ASSERT_FALSE(volume_rules.empty());
+    for (const auto& rule : interface_rules) {
+        EXPECT_GT(rule.measure, 0.0);
+        EXPECT_FALSE(rule.points.empty());
+        EXPECT_EQ(rule.provenance.implicit_quadrature_backend,
+                  "SayeHyperrectangle");
+        for (const auto& point : rule.points) {
+            EXPECT_TRUE(std::isfinite(point.weight));
+            EXPECT_GT(point.weight, 0.0);
+            EXPECT_TRUE(std::isfinite(point.point[0]));
+            EXPECT_TRUE(std::isfinite(point.point[1]));
+            EXPECT_TRUE(std::isfinite(point.normal[0]));
+            EXPECT_TRUE(std::isfinite(point.normal[1]));
+        }
+    }
+    for (const auto& rule : volume_rules) {
+        EXPECT_GE(rule.measure, 0.0);
+        EXPECT_EQ(rule.provenance.implicit_quadrature_backend,
+                  "SayeHyperrectangle");
+        for (const auto& point : rule.points) {
+            EXPECT_TRUE(std::isfinite(point.weight));
+            EXPECT_GT(point.weight, 0.0);
+            EXPECT_TRUE(std::isfinite(point.point[0]));
+            EXPECT_TRUE(std::isfinite(point.point[1]));
+            EXPECT_TRUE(std::isfinite(point.normal[0]));
+            EXPECT_TRUE(std::isfinite(point.normal[1]));
+        }
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAndArea)
