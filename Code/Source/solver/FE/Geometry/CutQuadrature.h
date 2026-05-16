@@ -67,6 +67,11 @@ struct CutQuadratureProvenance {
     std::uint64_t predicate_policy_key{0};
     CutQuadratureConstructionKind construction{CutQuadratureConstructionKind::AxisAlignedBoxClip};
     CutGeometryFrame frame{CutGeometryFrame::Reference};
+    std::string implicit_geometry_mode{};
+    std::string implicit_quadrature_backend{};
+    std::string implicit_fallback_policy{};
+    int requested_quadrature_order{-1};
+    int achieved_quadrature_order{-1};
 };
 
 struct CutQuadratureConstructionPolicy {

@@ -275,7 +275,7 @@ assembly and physics code backend-agnostic.
 
 - [x] Add backend registry or factory.
 - [x] Move current linear cutter behind the same abstraction.
-- [ ] Add backend metadata fields to `CutQuadratureRule` provenance or adjacent
+- [x] Add backend metadata fields to `CutQuadratureRule` provenance or adjacent
       metadata.
 - [ ] Add a standard diagnostic enum:
       `ExactNoCut`, `Cut`, `Tangent`, `Degenerate`, `Fallback`, `Unsupported`,
@@ -504,8 +504,8 @@ topology changes during Newton or line-search trials.
 
 ### Implementation Checklist
 
-- [ ] Extend `CutQuadratureProvenance` or `CutCellAssemblyMetadata`.
-- [ ] Add revision-key tests covering backend option changes.
+- [x] Extend `CutQuadratureProvenance` or `CutCellAssemblyMetadata`.
+- [x] Add revision-key tests covering backend option changes.
 - [ ] Add stale-rule assertions for high-order marker/side rules.
 - [ ] Ensure full-cell rules still carry enough metadata for diagnostics.
 - [ ] Add cut-context rebuild logging for high-order fields.
@@ -513,7 +513,7 @@ topology changes during Newton or line-search trials.
 ### Tests
 
 - [ ] Changing requested quadrature order changes the cut-context revision.
-- [ ] Changing backend tolerance changes the cut-context revision.
+- [x] Changing backend tolerance changes the cut-context revision.
 - [ ] Changing a high-order level-set edge DOF changes the source revision and
       generated rules.
 - [ ] Rejected line-search trial geometry is not left installed.
@@ -975,7 +975,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Add backend abstraction.
 - [x] Add high-order level-set evaluator.
 - [x] Move linear cutter behind the backend interface.
-- [ ] Add metadata and diagnostics plumbing.
+- [x] Add metadata and diagnostics plumbing.
 - [ ] Keep production fixtures on the current linear path.
 
 ### Phase 1: 2D Hyperrectangle Proof

@@ -142,6 +142,11 @@ struct CutInterfaceDomainRequest {
     std::uint64_t mesh_topology_revision{0};
     std::uint64_t ownership_revision{0};
     std::uint64_t quadrature_policy_key{0};
+    std::string implicit_geometry_mode{};
+    std::string implicit_quadrature_backend{};
+    std::string implicit_fallback_policy{};
+    int achieved_interface_quadrature_order{-1};
+    int achieved_volume_quadrature_order{-1};
     bool keep_degenerate_fragments{false};
 
     [[nodiscard]] int resolvedInterfaceQuadratureOrder() const noexcept {
@@ -345,6 +350,14 @@ struct CutInterfaceVolumeRegion {
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
         rule.provenance.construction = rule.policy.kind;
         rule.provenance.frame = request.frame;
+        rule.provenance.implicit_geometry_mode =
+            request.implicit_geometry_mode;
+        rule.provenance.implicit_quadrature_backend =
+            request.implicit_quadrature_backend;
+        rule.provenance.implicit_fallback_policy =
+            request.implicit_fallback_policy;
+        rule.provenance.requested_quadrature_order = volume_order;
+        rule.provenance.achieved_quadrature_order = exact_order;
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.full_cell_equivalent = full_cell_equivalent;
@@ -429,6 +442,17 @@ struct CutInterfaceFragment {
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
         rule.provenance.construction = rule.policy.kind;
         rule.provenance.frame = request.frame;
+        rule.provenance.implicit_geometry_mode =
+            request.implicit_geometry_mode;
+        rule.provenance.implicit_quadrature_backend =
+            request.implicit_quadrature_backend;
+        rule.provenance.implicit_fallback_policy =
+            request.implicit_fallback_policy;
+        rule.provenance.requested_quadrature_order = quadrature_order;
+        rule.provenance.achieved_quadrature_order =
+            request.achieved_interface_quadrature_order >= 0
+                ? request.achieved_interface_quadrature_order
+                : quadrature_order;
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.curved_geometry = kind == CutInterfaceFragmentKind::CurvedPatch;
@@ -503,6 +527,10 @@ public:
     }
 
     [[nodiscard]] const CutInterfaceDomainRequest& request() const noexcept {
+        return request_;
+    }
+
+    [[nodiscard]] CutInterfaceDomainRequest& mutableRequest() noexcept {
         return request_;
     }
 

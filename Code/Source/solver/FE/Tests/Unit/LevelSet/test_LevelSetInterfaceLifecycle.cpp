@@ -318,6 +318,10 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(result.domain.request().mesh_geometry_revision, 7u);
     EXPECT_EQ(result.domain.request().mesh_topology_revision, 11u);
     EXPECT_EQ(result.domain.request().ownership_revision, 13u);
+    EXPECT_NE(result.domain.request().quadrature_policy_key, 0u);
+    EXPECT_EQ(result.domain.request().implicit_geometry_mode, "LinearCorner");
+    EXPECT_EQ(result.domain.request().implicit_quadrature_backend, "LinearCorner");
+    EXPECT_EQ(result.domain.request().implicit_fallback_policy, "Fail");
     EXPECT_EQ(result.domain.request().resolvedInterfaceQuadratureOrder(), 0);
     EXPECT_EQ(result.domain.request().resolvedVolumeQuadratureOrder(), 1);
     EXPECT_EQ(result.summary.interface_marker, interface_marker);
@@ -332,11 +336,65 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_EQ(interface_rules.size(), 1u);
     EXPECT_EQ(interface_rules.front().exact_polynomial_order, 0);
+    EXPECT_EQ(interface_rules.front().provenance.predicate_policy_key,
+              result.domain.request().quadrature_policy_key);
+    EXPECT_EQ(interface_rules.front().provenance.implicit_quadrature_backend,
+              "LinearCorner");
+    EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 0);
+    EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 0);
     ASSERT_EQ(result.domain.volumeRegions().size(), 2u);
     EXPECT_EQ(result.domain.volumeRegions().front().interface_marker, interface_marker);
     const auto volume_rules = result.domain.volumeQuadratureRules();
     ASSERT_EQ(volume_rules.size(), 2u);
     EXPECT_EQ(volume_rules.front().exact_polynomial_order, 1);
+    EXPECT_EQ(volume_rules.front().provenance.predicate_policy_key,
+              result.domain.request().quadrature_policy_key);
+    EXPECT_EQ(volume_rules.front().provenance.implicit_geometry_mode,
+              "LinearCorner");
+    EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 1);
+    EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 1);
+}
+
+TEST(LevelSetInterfaceLifecycle, QuadraturePolicyKeyChangesWithBackendOptions)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions base_options{};
+    base_options.level_set_field_name = "phi";
+    base_options.requested_interface_marker = 74;
+    base_options.domain_id = "water-air";
+    base_options.interface_quadrature_order = 0;
+    base_options.volume_quadrature_order = 1;
+
+    auto changed_options = base_options;
+    changed_options.implicit_cut_root_tolerance = 1.0e-8;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto base = lifecycle.build(system, base_options, solution);
+    const auto changed = lifecycle.build(system, changed_options, solution);
+
+    ASSERT_TRUE(base.success) << base.diagnostic;
+    ASSERT_TRUE(changed.success) << changed.diagnostic;
+    EXPECT_NE(base.domain.request().quadrature_policy_key,
+              changed.domain.request().quadrature_policy_key);
 }
 
 TEST(LevelSetCellEvaluator, P1ReproducesCornerValuesAndReferenceGradient)

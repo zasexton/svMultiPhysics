@@ -1164,6 +1164,7 @@ std::uint64_t cutContextTopologyKey(
 {
   std::uint64_t h = kCutContextHashOffset;
   mixCutContextHash(h, static_cast<std::uint64_t>(domain.marker()));
+  mixCutContextHash(h, domain.request().quadrature_policy_key);
   for (const auto& fragment : domain.fragments()) {
     if (!fragment.active()) {
       continue;

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cstddef>
 #include <stdexcept>
 #include <utility>
@@ -122,6 +123,37 @@ struct GeneratedInterfaceCellDiagnostics {
             options.level_set_field_name + "' must be scalar");
     }
     return field;
+}
+
+[[nodiscard]] std::uint64_t generatedInterfaceQuadraturePolicyKey(
+    const LevelSetGeneratedInterfaceOptions& options,
+    int interface_quadrature_order,
+    int volume_quadrature_order) noexcept
+{
+    std::uint64_t h = 1469598103934665603ull;
+    const auto mix = [&h](std::uint64_t value) noexcept {
+        h ^= value;
+        h *= 1099511628211ull;
+    };
+    const auto mix_real = [&mix](Real value) noexcept {
+        std::uint64_t bits = 0u;
+        static_assert(sizeof(value) <= sizeof(bits));
+        std::memcpy(&bits, &value, sizeof(value));
+        mix(bits);
+    };
+
+    mix(static_cast<std::uint64_t>(options.geometry_mode));
+    mix(static_cast<std::uint64_t>(options.implicit_cut_quadrature_backend));
+    mix(static_cast<std::uint64_t>(options.implicit_cut_fallback_policy));
+    mix(static_cast<std::uint64_t>(options.quadrature_order));
+    mix(static_cast<std::uint64_t>(interface_quadrature_order));
+    mix(static_cast<std::uint64_t>(volume_quadrature_order));
+    mix_real(options.tolerance);
+    mix_real(options.implicit_cut_root_tolerance);
+    mix(static_cast<std::uint64_t>(options.implicit_cut_max_subdivision_depth));
+    mix(options.keep_degenerate_fragments ? 1u : 0u);
+    mix(options.allow_corner_linearized_geometry ? 1u : 0u);
+    return h;
 }
 
 [[nodiscard]] GeneratedInterfaceCellDiagnostics appendGeneratedInterfaceCell(
@@ -289,6 +321,15 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     request.mesh_geometry_revision = mesh.geometryRevision();
     request.mesh_topology_revision = mesh.topologyRevision();
     request.ownership_revision = mesh.ownershipRevision();
+    request.quadrature_policy_key =
+        generatedInterfaceQuadraturePolicyKey(
+            options, interface_quadrature_order, volume_quadrature_order);
+    request.implicit_geometry_mode =
+        generatedInterfaceGeometryModeName(options.geometry_mode);
+    request.implicit_quadrature_backend =
+        backend.name();
+    request.implicit_fallback_policy =
+        implicitCutFallbackPolicyName(options.implicit_cut_fallback_policy);
     request.keep_degenerate_fragments = options.keep_degenerate_fragments;
 
     interfaces::LevelSetInterfaceDomain domain(request);
@@ -343,6 +384,10 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     result.achieved_interface_quadrature_order =
         achieved_interface_quadrature_order;
     result.achieved_volume_quadrature_order =
+        achieved_volume_quadrature_order;
+    result.domain.mutableRequest().achieved_interface_quadrature_order =
+        achieved_interface_quadrature_order;
+    result.domain.mutableRequest().achieved_volume_quadrature_order =
         achieved_volume_quadrature_order;
     result.implicit_cut_fallback_cell_count =
         implicit_cut_fallback_cell_count;
