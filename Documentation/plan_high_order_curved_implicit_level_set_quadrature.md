@@ -1777,14 +1777,100 @@ Completion evidence:
 
 ## Open Questions
 
-- [ ] Should the first simplex backend use high-order subcell decomposition or
+- [x] Should the first simplex backend use high-order subcell decomposition or
       moment fitting?
-- [ ] Do D18/D38 meshes require high-order triangle/tet support before any
+
+      Decision: use high-order subcell decomposition first for triangles and
+      tetrahedra. Moment fitting remains a later optional backend, not the first
+      production path.
+
+      Rationale and support: the implemented `HighOrderSubcell` path preserves
+      positive weights, reference-frame provenance, deterministic partitioning,
+      and the existing active-side assembly contracts. Fries et al. 2017 and
+      Joulaian et al. 2016 support subcell and implicit-geometry integration as
+      practical high-order unfitted FEM strategies, while Muller et al. 2013
+      supports moment fitting as a separate accurate option with different
+      weight and conditioning policy requirements.
+
+- [x] Do D18/D38 meshes require high-order triangle/tet support before any
       high-order benchmark work is meaningful?
-- [ ] What exact fallback rate is acceptable in validation runs?
-- [ ] Are signed moment-fit weights acceptable anywhere in Navier-Stokes/VMS
+
+      Decision: yes, if the benchmark mesh contains triangles or tetrahedra and
+      the run is intended to qualify high-order cut geometry over the whole
+      active domain. A benchmark may exclude those elements only if the
+      qualification log states the exclusion and the backend diagnostics show
+      that no unsupported high-order cut cells participated.
+
+      Rationale and support: D18/D38-style open-vessel cases exercise mixed
+      active-domain topology, pressure constraints, cut-adjacent stabilization,
+      and moving wet volume. CutFEM validation practice requires the integrated
+      active domain to be the tested domain, not an unreported subset. The
+      current minimum meaningful gate is the supported `HighOrderSubcell`
+      triangle/tetrahedron path plus explicit unsupported-cell diagnostics.
+
+- [x] What exact fallback rate is acceptable in validation runs?
+
+      Decision: high-order validation and benchmark qualification use zero
+      unexpected implicit-cut fallback cells by default. A nonzero fallback rate
+      is acceptable only in tests that explicitly exercise fallback behavior or
+      in a documented benchmark log with a configured threshold, absolute count,
+      cell fraction, affected element families, and physical measure fraction.
+
+      Rationale and support: Saye-style and CutFEM validation literature treats
+      geometry/quadrature accuracy as a primary verification target. Silent or
+      unbounded fallback would mix geometry models and obscure whether solver
+      behavior comes from high-order quadrature, linearized cuts, or unsupported
+      cells. The smoke-script default therefore keeps
+      `max_diagnostic_implicit_cut_fallback_cells=0`.
+
+- [x] Are signed moment-fit weights acceptable anywhere in Navier-Stokes/VMS
       assembly, or should production require positive weights?
-- [ ] Should exact geometry sensitivities be required before high-order mode is
+
+      Decision: production Navier-Stokes/VMS assembly requires finite
+      nonnegative cut-volume and interface weights. Signed moment-fit rules are
+      allowed only in isolated research or diagnostic tests until a separate
+      stability, conditioning, and conservation qualification plan approves
+      them for production.
+
+      Rationale and support: the active-domain, stabilization, pressure-support,
+      wet-volume, and conservation diagnostics assume positive physical
+      measures. Muller et al. 2013 establishes moment fitting as an accurate
+      implicit-domain integration technique, but the CutFEM conditioning
+      literature and the current pressure/stabilization constraints make
+      positive production weights the conservative policy.
+
+- [x] Should exact geometry sensitivities be required before high-order mode is
       allowed in fully coupled level-set/fluid Newton solves?
-- [ ] How should surface-tension curvature be projected or smoothed for
+
+      Decision: exact geometry sensitivities are required before enabling or
+      advertising a fully consistent `DifferentiatedQuadrature` Newton mode.
+      The current high-order mode is allowed only under the documented
+      `RefreshedFrozenQuadrature` quasi-Newton policy, with current-geometry
+      residuals, trial-state geometry refreshes, rejected-trial restore, and
+      warning-level tangent diagnostics when coupled geometry derivatives are
+      omitted.
+
+      Rationale and support: time-dependent CutFEM work supports updating the
+      level-set-defined active domain consistently in time, while Saye-style
+      implicit quadrature makes quadrature points, weights, normals, and
+      topology geometry-dependent. The implemented fixed-geometry checks and
+      refreshed-geometry diagnostics therefore qualify the current quasi-Newton
+      policy without claiming exact Newton convergence.
+
+- [x] How should surface-tension curvature be projected or smoothed for
       high-order unfitted free surfaces?
+
+      Decision: surface-tension production support remains outside this
+      milestone. When enabled, curvature should be recovered through a
+      documented FE projection or patch recovery on the generated interface,
+      smoothed with bounded local operators, and checked by mass, force, and
+      capillary-wave diagnostics before coupling to Navier-Stokes. Raw pointwise
+      curvature from the level-set field should not be used directly in
+      production high-order unfitted free-surface assembly.
+
+      Rationale and support: bulk-surface CutFEM work motivates treating
+      interface fields as projected finite-element quantities on the cut
+      surface, and higher-order XFEM/implicit-geometry literature emphasizes
+      accurate curved interface representation. The present quadrature plan
+      supplies reliable integration geometry first; curvature force modeling
+      needs a separate stability and smoothing policy.
