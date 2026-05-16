@@ -932,6 +932,12 @@ Many-point cut-volume basis policy:
   valid as long as the context reserves enough storage and the local DOF
   insertion receives the same row and column maps as ordinary cell assembly.
 
+Many-point generated-interface remapping policy:
+- Generated interface rules use the same parent-cell basis evaluation as
+  cut-volume rules, then remap reference normals and weights through the parent
+  geometry before the form kernel runs. The remapping loop must be point-count
+  agnostic and cannot assume legacy face quadrature sizes.
+
 ### Design Checklist
 
 - [x] Preserve the public form vocabulary:
@@ -951,7 +957,7 @@ Many-point cut-volume basis policy:
       point counts.
 - [x] Ensure cut-volume rules with many points do not disable needed basis
       evaluation caching.
-- [ ] Ensure interface rules with many points are remapped correctly.
+- [x] Ensure interface rules with many points are remapped correctly.
 - [ ] Ensure JIT specialization keys include enough quadrature shape metadata.
 - [ ] Keep marked cut-adjacent interior-face assembly local to the generated
       facet set.

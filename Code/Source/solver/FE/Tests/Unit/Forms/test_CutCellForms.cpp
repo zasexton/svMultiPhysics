@@ -532,6 +532,38 @@ void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
     return rule;
 }
 
+[[nodiscard]] CutQuadratureRule makeManyPointReferenceTetraInterfaceRule(int marker,
+                                                                         std::size_t points_per_axis = 4u)
+{
+    CutQuadratureRule rule;
+    rule.kind = CutQuadratureKind::Interface;
+    rule.side = CutIntegrationSide::Interface;
+    rule.parent_measure = Real(1.0) / Real(6.0);
+    rule.points.reserve(points_per_axis * points_per_axis * points_per_axis);
+    const Real weight = Real(0.00125);
+    for (std::size_t i = 0u; i < points_per_axis; ++i) {
+        for (std::size_t j = 0u; j < points_per_axis; ++j) {
+            for (std::size_t k = 0u; k < points_per_axis; ++k) {
+                const Real xi = Real(0.05) + Real(0.10) * static_cast<Real>(i);
+                const Real eta = Real(0.04) + Real(0.08) * static_cast<Real>(j);
+                const Real zeta = Real(0.03) + Real(0.06) * static_cast<Real>(k);
+                rule.points.push_back({{{xi, eta, zeta}}, {{1.0, 0.0, 0.0}}, weight});
+            }
+        }
+    }
+    for (const auto& qp : rule.points) {
+        rule.measure += qp.weight;
+    }
+    rule.volume_fraction = Real(0.0);
+    rule.exact_for_constants = true;
+    rule.provenance_id = "many-point-fixed-geometry-interface";
+    markRuleAsHighOrderImplicit(rule,
+                                marker,
+                                "many-point-fixed-geometry-interface",
+                                /*quadrature_order=*/6);
+    return rule;
+}
+
 void populateP1ReferenceTetraCutContext(AssemblyContext& ctx,
                                         const CutQuadratureRule& rule,
                                         const svmp::FE::spaces::FunctionSpace& space,
@@ -1148,6 +1180,58 @@ TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDiffere
         deterministicScalarCoefficients(space.dofs_per_element()),
         /*eps=*/Real(2.0e-6),
         /*tol=*/Real(2.0e-6));
+}
+
+TEST(CutCellForms, HighOrderCutInterfaceManyPointRuleRemapsBasisEvaluation)
+{
+    constexpr int marker = 84;
+    auto rule = makeManyPointReferenceTetraInterfaceRule(marker);
+
+    std::vector<Real> expected(16u, Real(0.0));
+    for (const auto& qp : rule.points) {
+        const Real xi = qp.point[0];
+        const Real eta = qp.point[1];
+        const Real zeta = qp.point[2];
+        const std::array<Real, 4> phi{{
+            Real(1.0) - xi - eta - zeta,
+            xi,
+            eta,
+            zeta}};
+        for (std::size_t i = 0u; i < phi.size(); ++i) {
+            for (std::size_t j = 0u; j < phi.size(); ++j) {
+                expected[i * phi.size() + j] += qp.weight * phi[i] * phi[j];
+            }
+        }
+    }
+
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addInterfaceRule(std::move(rule));
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    svmp::FE::assembly::DenseMatrixView mass(dof_map.getNumDofs());
+    mass.zero();
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    FormCompiler compiler;
+    FormKernel kernel(compiler.compileBilinear((u * v).dI(marker)));
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    const auto assembled = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        &mass, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+
+    ASSERT_EQ(assembled.interface_faces_assembled, svmp::FE::GlobalIndex{1});
+    ASSERT_EQ(cut_context.interfaceRules().front().points.size(), 64u);
+    for (svmp::FE::GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
+        for (svmp::FE::GlobalIndex j = 0; j < dof_map.getNumDofs(); ++j) {
+            const auto idx = static_cast<std::size_t>(i * dof_map.getNumDofs() + j);
+            EXPECT_NEAR(mass.getMatrixEntry(i, j), expected[idx], Real(1.0e-13));
+        }
+    }
 }
 
 TEST(CutCellForms, ZeroTangentProbeSupportsMixedCutVolumeBlocks)
