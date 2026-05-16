@@ -596,6 +596,11 @@ benchmark runs.
       cut-basis cache fix: all nonlinear and linear solves converged to time
       0.03, maximum nonlinear iterations stayed at 2, maximum basis-cache
       entries stayed at 5, and maximum RSS stayed about 368 MiB.
+- [x] Record a configured-time D18 no-output GMRES attempt after the transient
+      cut-basis cache fix: memory remained stable and basis-cache entries stayed
+      at 5, but the run failed at step 74 when a retained active sliver with
+      minimum volume fraction about 1.37e-7 drove cut-adjacent stabilization
+      scale to about 7.3e6 and the nonlinear residual rose to about 110.7.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
