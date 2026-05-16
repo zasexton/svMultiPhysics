@@ -564,6 +564,10 @@ benchmark runs.
       vertices remain unconstrained when their basis has wet support; record
       mini direct-Eigen pressure-block diagnostics and a two-step
       linear-sloshing verification.
+- [x] Record the post-active-support D18 no-output GMRES process-memory probe:
+      the short run converged for 5 accepted steps with bounded cut-adjacent
+      scales and no missing cut-context solution sources, but resident memory
+      still grew by about 507 MiB, making memory lifecycle the next blocker.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
