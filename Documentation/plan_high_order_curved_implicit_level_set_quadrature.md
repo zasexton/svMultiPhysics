@@ -1054,7 +1054,7 @@ finite-difference component checks are valuable for isolating assembly defects.
       `dCutVolume` and `dI` rules.
 - [ ] Add fixed-geometry finite-difference tests for high-order `dCutVolume`.
 - [ ] Add fixed-geometry finite-difference tests for high-order `dI`.
-- [ ] Add high-order cut-adjacent stabilization assembly tests.
+- [x] Add high-order cut-adjacent stabilization assembly tests.
 - [ ] Add a compact high-order MMS traveling-interface fixture.
 - [ ] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
