@@ -626,7 +626,7 @@ benchmark runs.
       diagnostics remained present, and RSS grew to about 3.78 GB before the
       probe was stopped because the root filesystem had only about 237 MiB
       free for final VTK output.
-- [ ] Complete a D18 run to the configured comparison time without nonlinear
+- [x] Complete a D18 run to the configured comparison time without nonlinear
       stalls.
 - [ ] Complete a D38 run to the configured comparison time without nonlinear
       stalls.
