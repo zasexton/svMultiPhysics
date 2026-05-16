@@ -2169,25 +2169,82 @@ std::size_t syncActiveLevelSetVertexFieldsFromSolution(
 
     const auto components = mesh.field_components(handle);
     bool field_changed = false;
+    bool all_mesh_vertices_have_scalar_vertex_dof = true;
     for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
       const auto vertex_dofs = entity_map->getVertexDofs(vertex);
       if (vertex_dofs.size() != 1u) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Active level-set support refresh requires one scalar vertex DOF.");
+        all_mesh_vertices_have_scalar_vertex_dof = false;
+        break;
       }
-      const auto dof = field_offset + vertex_dofs.front();
-      if (dof < 0 ||
-          static_cast<std::size_t>(dof) >= fe_solution.size()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Active level-set support refresh found a vertex DOF outside the solution span.");
+    }
+
+    if (all_mesh_vertices_have_scalar_vertex_dof) {
+      for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        const auto dof = field_offset + vertex_dofs.front();
+        if (dof < 0 ||
+            static_cast<std::size_t>(dof) >= fe_solution.size()) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Active level-set support refresh found a vertex DOF outside the solution span.");
+        }
+        const auto value = static_cast<double>(
+            fe_solution[static_cast<std::size_t>(dof)]);
+        auto& target =
+            data[static_cast<std::size_t>(vertex) * components];
+        if (target != value) {
+          target = value;
+          field_changed = true;
+        }
       }
-      const auto value = static_cast<double>(
-          fe_solution[static_cast<std::size_t>(dof)]);
-      auto& target =
-          data[static_cast<std::size_t>(vertex) * components];
-      if (target != value) {
-        target = value;
-        field_changed = true;
+    } else {
+      const auto& local_mesh = mesh.local_mesh();
+      std::vector<std::uint8_t> vertex_written(
+          static_cast<std::size_t>(n_vertices),
+          0u);
+      for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
+        auto [cell_vertices, n_cell_vertices] =
+            local_mesh.cell_vertices_span(cell);
+        if (cell_vertices == nullptr || n_cell_vertices == 0u) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Active level-set support refresh found empty cell connectivity.");
+        }
+        const auto cell_dofs = field_dofs.getCellDofs(
+            static_cast<svmp::FE::GlobalIndex>(cell));
+        if (cell_dofs.size() != n_cell_vertices) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Active level-set support refresh found incompatible high-order cell DOFs.");
+        }
+
+        for (std::size_t local_node = 0;
+             local_node < n_cell_vertices;
+             ++local_node) {
+          const auto vertex = cell_vertices[local_node];
+          if (vertex < 0 ||
+              vertex >= static_cast<svmp::index_t>(n_vertices)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Active level-set support refresh found an out-of-range mesh vertex.");
+          }
+          const auto dof = field_offset + cell_dofs[local_node];
+          if (dof < 0 ||
+              static_cast<std::size_t>(dof) >= fe_solution.size()) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Active level-set support refresh found a cell DOF outside the solution span.");
+          }
+          const auto value = static_cast<double>(
+              fe_solution[static_cast<std::size_t>(dof)]);
+          const auto vertex_index = static_cast<std::size_t>(vertex);
+          auto& target = data[vertex_index * components];
+          if (target != value) {
+            target = value;
+            field_changed = true;
+          }
+          vertex_written[vertex_index] = 1u;
+        }
+      }
+      if (std::find(vertex_written.begin(), vertex_written.end(), 0u) !=
+          vertex_written.end()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Active level-set support refresh left a mesh vertex without FE data.");
       }
     }
     if (field_changed) {

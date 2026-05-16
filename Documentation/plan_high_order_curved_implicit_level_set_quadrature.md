@@ -1068,6 +1068,8 @@ finite-difference component checks are valuable for isolating assembly defects.
       FE coefficients for MMS source data.
 - [x] Sync wet-extension level-set advection velocity data into high-order mesh
       point coefficients.
+- [x] Refresh active level-set mesh point fields from high-order FE solution
+      coefficients before cut-context rebuilds.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
