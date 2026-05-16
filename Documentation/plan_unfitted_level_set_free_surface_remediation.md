@@ -650,6 +650,10 @@ benchmark runs.
       velocity extension did not reduce assembly density or materially reduce
       cut-volume and cut-adjacent interior-face cost, so the remaining
       throughput blocker is repeated full assembly traversal.
+- [x] Add opt-in Newton assembly phase diagnostics and smoke-script parsing;
+      the three-step D18 no-output GMRES probe reported six Newton assemblies
+      for three accepted steps, all `jacobian_and_residual`, with three
+      post-update matrix assemblies used only to verify convergence.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Compare D38 peak height, front position if applicable, pressure range,

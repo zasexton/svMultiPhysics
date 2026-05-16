@@ -404,6 +404,9 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             )
     if args.enable_newton_direction_check:
         env["SVMP_NEWTON_DIRECTION_CHECK"] = "1"
+    if (args.enable_newton_assembly_diagnostics or
+            args.require_newton_assembly_diagnostics):
+        env["SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS"] = "1"
     if args.enable_linear_solve_history:
         env["SVMP_DEBUG_LINEAR_SOLVE_HISTORY"] = "1"
         if args.linear_solve_history_max_calls is not None:
@@ -1315,6 +1318,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "fsils_solve_summaries": [],
         "fsils_blockschur_retries": [],
         "vector_component_norms": [],
+        "newton_assemblies": [],
         "newton_direction_checks": [],
         "jacobian_checks": [],
         "jacobian_check_component_norms": [],
@@ -1397,6 +1401,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["pressure_gauge_checks"].append(parse_key_values(line))
         elif "residual block norms" in line:
             diagnostics["residual_block_norms"].append(parse_key_values(line))
+        elif "diagnostic=newton_assembly" in line:
+            diagnostics["newton_assemblies"].append(parse_key_values(line))
         elif "true residual diagnostics" in line:
             diagnostics["fsils_true_residuals"].append(parse_key_values(line))
         elif "diagnostic=fsils_solve_summary" in line:
@@ -1781,6 +1787,9 @@ def assembly_efficiency_errors(metrics: dict[str, Any],
         ("max_diagnostic_cut_context_rebuilds_per_step",
          "diagnostic_cut_context_rebuilds_per_accepted_step",
          "cut-context rebuilds per accepted step"),
+        ("max_diagnostic_newton_matrix_assemblies_per_step",
+         "diagnostic_newton_matrix_assemblies_per_accepted_step",
+         "Newton matrix assemblies per accepted step"),
     )
     errors = []
     for arg_name, metric_name, label in checks:
@@ -2013,6 +2022,42 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         value = latest_direction_check.get("rel")
         if isinstance(value, (int, float)):
             metrics["diagnostic_newton_direction_relative_error"] = float(value)
+    if diagnostics.get("newton_assemblies"):
+        records = diagnostics["newton_assemblies"]
+        metrics["latest_newton_assembly"] = records[-1]
+        metrics["diagnostic_newton_assembly_count"] = len(records)
+        phase_counts: dict[str, int] = {}
+        sync_point_counts: dict[str, int] = {}
+        matrix_count = 0
+        vector_count = 0
+        post_first_iteration_matrix_count = 0
+        for record in records:
+            increment_count(
+                phase_counts, str(record.get("phase", "unknown"))
+            )
+            increment_count(
+                sync_point_counts, str(record.get("sync_point", "unknown"))
+            )
+            want_matrix = bool(record.get("want_matrix"))
+            want_vector = bool(record.get("want_vector"))
+            if want_matrix:
+                matrix_count += 1
+                iteration = record.get("iteration")
+                if isinstance(iteration, (int, float)) and int(iteration) > 0:
+                    post_first_iteration_matrix_count += 1
+            if want_vector:
+                vector_count += 1
+        metrics["diagnostic_newton_assembly_phase_counts"] = (
+            top_counts(phase_counts)
+        )
+        metrics["diagnostic_newton_assembly_sync_point_counts"] = (
+            top_counts(sync_point_counts)
+        )
+        metrics["diagnostic_newton_matrix_assembly_count"] = matrix_count
+        metrics["diagnostic_newton_vector_assembly_count"] = vector_count
+        metrics[
+            "diagnostic_newton_post_first_iteration_matrix_assembly_count"
+        ] = post_first_iteration_matrix_count
     if diagnostics.get("jacobian_checks"):
         latest_jacobian_check = diagnostics["jacobian_checks"][-1]
         metrics["latest_jacobian_check"] = latest_jacobian_check
@@ -2211,10 +2256,20 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         nonlinear_iterations = summary.get("nonlinear_iterations_total")
         assembly_count = metrics.get("diagnostic_assembly_timing_count")
         cut_rebuild_count = metrics.get("diagnostic_cut_context_rebuild_count")
+        newton_assembly_count = metrics.get("diagnostic_newton_assembly_count")
+        newton_matrix_count = metrics.get("diagnostic_newton_matrix_assembly_count")
         if isinstance(accepted_steps, (int, float)) and accepted_steps > 0:
             if isinstance(assembly_count, (int, float)):
                 metrics["diagnostic_assembly_timings_per_accepted_step"] = (
                     float(assembly_count) / float(accepted_steps)
+                )
+            if isinstance(newton_assembly_count, (int, float)):
+                metrics["diagnostic_newton_assemblies_per_accepted_step"] = (
+                    float(newton_assembly_count) / float(accepted_steps)
+                )
+            if isinstance(newton_matrix_count, (int, float)):
+                metrics["diagnostic_newton_matrix_assemblies_per_accepted_step"] = (
+                    float(newton_matrix_count) / float(accepted_steps)
                 )
             if isinstance(cut_rebuild_count, (int, float)):
                 metrics["diagnostic_cut_context_rebuilds_per_accepted_step"] = (
@@ -2432,6 +2487,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
     for name in (
         "enable_jacobian_check",
         "enable_newton_direction_check",
+        "enable_newton_assembly_diagnostics",
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
         "enable_form_block_diagnostics",
@@ -2439,6 +2495,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_cut_volume_timing",
         "enable_jit_specialization_trace",
         "require_cut_context_solution_source_diagnostics",
+        "require_newton_assembly_diagnostics",
         "require_assembly_timing_diagnostics",
         "require_interior_face_timing_diagnostics",
         "require_cut_volume_timing_diagnostics",
@@ -2461,6 +2518,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_diagnostic_assembly_timings_per_step",
         "max_diagnostic_extra_assembly_timings_per_step",
         "max_diagnostic_cut_context_rebuilds_per_step",
+        "max_diagnostic_newton_matrix_assemblies_per_step",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -2561,6 +2619,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("form block installation diagnostics were not reported")
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(diagnostics))
+    if (args.require_newton_assembly_diagnostics and
+            not diagnostics.get("newton_assemblies")):
+        errors.append("Newton assembly diagnostics were not reported")
     if args.require_assembly_timing_diagnostics and not diagnostics.get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
     errors.extend(assembly_efficiency_errors(metrics, args))
@@ -2912,6 +2973,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         return evaluate_timeout_diagnostics(metrics, args)
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
+    if (args.require_newton_assembly_diagnostics and
+            not metrics["diagnostics"].get("newton_assemblies")):
+        errors.append("Newton assembly diagnostics were not reported")
     if args.require_assembly_timing_diagnostics and not metrics["diagnostics"].get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
     errors.extend(assembly_efficiency_errors(metrics, args))
@@ -3303,10 +3367,13 @@ def main() -> int:
     parser.add_argument("--require-linear-solve-history-diagnostics", action="store_true")
     parser.add_argument("--require-form-block-diagnostics", action="store_true")
     parser.add_argument("--require-cut-context-solution-source-diagnostics", action="store_true")
+    parser.add_argument("--enable-newton-assembly-diagnostics", action="store_true")
+    parser.add_argument("--require-newton-assembly-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-timing-diagnostics", action="store_true")
     parser.add_argument("--max-diagnostic-assembly-timings-per-step", type=float)
     parser.add_argument("--max-diagnostic-extra-assembly-timings-per-step", type=float)
     parser.add_argument("--max-diagnostic-cut-context-rebuilds-per-step", type=float)
+    parser.add_argument("--max-diagnostic-newton-matrix-assemblies-per-step", type=float)
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--max-jacobian-component-block-relative-error", type=float)

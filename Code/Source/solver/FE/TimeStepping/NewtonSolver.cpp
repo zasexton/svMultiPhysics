@@ -164,6 +164,21 @@ namespace {
     return enabled;
 }
 
+[[nodiscard]] bool newtonAssemblyDiagnosticsEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS");
+        if (env == nullptr) {
+            return false;
+        }
+        while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+            ++env;
+        }
+        return *env != '\0' && *env != '0';
+    }();
+    return enabled;
+}
+
 struct ProcessMemorySnapshot {
     long vm_kb{-1};
     long rss_kb{-1};
@@ -259,6 +274,29 @@ void logPostTangentAnalysisReport(const systems::FESystem& system,
 #else
     return 0;
 #endif
+}
+
+[[nodiscard]] const char* stateSyncPointName(
+    NewtonOptions::StateSynchronizationPoint point) noexcept
+{
+    using Point = NewtonOptions::StateSynchronizationPoint;
+    switch (point) {
+    case Point::AcceptedNonlinearState:
+        return "accepted_nonlinear_state";
+    case Point::ResidualAssembly:
+        return "residual";
+    case Point::JacobianAssembly:
+        return "jacobian";
+    case Point::JacobianAndResidualAssembly:
+        return "jacobian_and_residual";
+    case Point::LineSearchTrialResidual:
+        return "line_search_trial";
+    case Point::RestoredNonlinearState:
+        return "restored_nonlinear_state";
+    case Point::FinalResidualAssembly:
+        return "final_residual";
+    }
+    return "unknown";
 }
 
 [[nodiscard]] bool mpiMultiTaskActive() noexcept
@@ -3867,6 +3905,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     }
 
     const bool same_op = (options_.residual_op == options_.jacobian_op);
+    const bool newton_assembly_diagnostics =
+        newtonAssemblyDiagnosticsEnabled();
+    int current_newton_iteration = -1;
     bool has_monolithic_auxiliary_unknowns = false;
     if (const auto* aux_registry = transient.system().auxiliaryOperatorRegistryIfPresent();
         aux_registry && aux_registry->isLayoutFinalized()) {
@@ -4111,6 +4152,41 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         grouped_bordered_field_couplings.clear();
     };
 
+    auto logNewtonAssemblyDiagnostic =
+        [&](const char* phase,
+            StateSyncPoint sync_point,
+            const systems::AssemblyRequest& req,
+            const auto& result) {
+            if (!newton_assembly_diagnostics) {
+                return;
+            }
+            std::ostringstream oss;
+            oss << "[svMultiPhysics::FE] NewtonSolver assembly"
+                << " diagnostic=newton_assembly"
+                << " rank=" << mpiRank()
+                << " iteration=" << current_newton_iteration
+                << " phase=" << (phase != nullptr ? phase : "unknown")
+                << " sync_point=" << stateSyncPointName(sync_point)
+                << " op='" << req.op << "'"
+                << " want_matrix=" << (req.want_matrix ? 1 : 0)
+                << " want_vector=" << (req.want_vector ? 1 : 0)
+                << " zero_outputs=" << (req.zero_outputs ? 1 : 0)
+                << " nonlinear_iteration="
+                << (req.is_nonlinear_iteration ? 1 : 0)
+                << " same_op=" << (same_op ? 1 : 0)
+                << " solve_time=" << solve_time
+                << " dt=" << base_state.dt
+                << " success=" << (result.success ? 1 : 0)
+                << " elements=" << result.elements_assembled
+                << " boundary_faces=" << result.boundary_faces_assembled
+                << " interior_faces=" << result.interior_faces_assembled
+                << " interface_faces=" << result.interface_faces_assembled
+                << " matrix_entries=" << result.matrix_entries_inserted
+                << " vector_entries=" << result.vector_entries_inserted
+                << " elapsed_seconds=" << result.elapsed_time_seconds;
+            FE_LOG_INFO(oss.str());
+        };
+
     auto assembleResidualOnly = [&](const systems::SystemStateView& state,
                                     const char* phase,
                                     StateSyncPoint sync_point = StateSyncPoint::ResidualAssembly) -> double {
@@ -4137,6 +4213,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.suppress_constraint_inhomogeneity = true;
         req.is_nonlinear_iteration = true;
         const auto ar = transient.assemble(req, state, nullptr, r_view.get());
+        logNewtonAssemblyDiagnostic(
+            phase != nullptr ? phase : "residual", sync_point, req, ar);
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: residual assembly failed: " + ar.error_message);
 
@@ -4178,6 +4256,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.want_matrix = true;
         req.is_nonlinear_iteration = true;
         const auto aj = transient.assemble(req, state, J_view.get(), nullptr);
+        logNewtonAssemblyDiagnostic(
+            "jacobian", StateSyncPoint::JacobianAssembly, req, aj);
         FE_THROW_IF(!aj.success, FEException,
                     "NewtonSolver: jacobian assembly failed: " + aj.error_message);
         captureRankOneUpdates();
@@ -4215,6 +4295,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.suppress_constraint_inhomogeneity = true;
         req.is_nonlinear_iteration = true;
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
+        logNewtonAssemblyDiagnostic(
+            "jacobian_and_residual",
+            StateSyncPoint::JacobianAndResidualAssembly,
+            req,
+            ar);
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
         captureRankOneUpdates();
@@ -4261,6 +4346,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         req.suppress_constraint_inhomogeneity = true;
         req.is_nonlinear_iteration = true;
         const auto ar = transient.assemble(req, state, J_view.get(), r_view.get());
+        logNewtonAssemblyDiagnostic(
+            "jacobian_op_combined",
+            StateSyncPoint::JacobianAndResidualAssembly,
+            req,
+            ar);
         FE_THROW_IF(!ar.success, FEException,
                     "NewtonSolver: combined (matrix+vector) assembly failed: " + ar.error_message);
         captureRankOneUpdates();
@@ -4625,6 +4715,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     double prev_residual_norm = -1.0;
     bool tangent_analysis_report_logged = false;
     for (int it = 0; it < max_it; ++it) {
+        current_newton_iteration = it;
         ntp0 = NTP();
         syncHistoryState();
         ntp_constraints += NTP() - ntp0;
@@ -6977,6 +7068,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     // exit due to reaching `max_it`, capture the final residual norm for reporting, but do
     // not override the explicit iteration limit with a late convergence declaration.
     if (!have_residual) {
+        current_newton_iteration = max_it;
         syncHistoryState();
         auto final_state_holder = makeNewtonState(history, solve_time);
         current_residual_norm = assembleResidualOnly(
