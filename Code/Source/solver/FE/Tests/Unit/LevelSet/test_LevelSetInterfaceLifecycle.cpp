@@ -3266,10 +3266,17 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleReferenceRulesMapToCurvedHexG
                 1.0e-10);
 
     FE::Real physical_interface_measure = 0.0;
-    for (const auto& rule : result.domain.interfaceQuadratureRules()) {
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    for (const auto& rule : interface_rules) {
         EXPECT_EQ(rule.frame, FE::geometry::CutGeometryFrame::Reference);
+        EXPECT_EQ(rule.provenance.implicit_quadrature_backend,
+                  "SayeHyperrectangle");
+        EXPECT_EQ(rule.provenance.requested_quadrature_order, 1);
+        EXPECT_EQ(rule.provenance.achieved_quadrature_order, 1);
         physical_interface_measure += mappedInterfaceMeasure(rule, *mapping);
     }
+    EXPECT_NE(physical_interface_measure, result.summary.measure);
     EXPECT_GT(physical_interface_measure, sx * sy * 4.0);
     EXPECT_NEAR(physical_interface_measure, expectedCurvedHexMidplaneArea(), 5.0e-3);
 }
