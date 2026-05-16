@@ -1402,7 +1402,12 @@ linear-solver problems.
       of retained `volume_fraction` values. The path is independent of
       vertex-sign `ActiveFluid` data and accepts high-order curved-rule
       provenance, including Saye-style backend metadata and achieved order.
-- [ ] Add optional curved-interface surface output for inspection.
+- [x] Add optional curved-interface surface output for inspection.
+      The FE interface geometry writer provides an opt-in VTP path for generated
+      line and surface fragments plus a per-parent-cell quadrature JSON dump.
+      These helpers are intentionally separate from routine solution VTK output
+      so inspection can be enabled by tests, debug tools, or smoke scripts
+      without changing production field output.
 - [ ] Warn when vertex-sign `ActiveFluid` and high-order wet fractions disagree.
 
 ### Tests
