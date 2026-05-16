@@ -195,7 +195,11 @@ algorithms need repeated pointwise evaluation of the implicit function.
 - [ ] Keep a separate synchronization path for visualization mesh fields.
 - [x] Ensure vector/state ordering is identical to the current cut-context
       refresh path used during Newton residual and Jacobian assembly.
-- [ ] Define behavior for ghost cells and non-owned cells in MPI.
+- [x] Define behavior for ghost cells and non-owned cells in MPI.
+      Locally present ghost cells evaluate the same FE-ordered level-set
+      coefficients as owned cells and may build identical cut rules for
+      deterministic diagnostics; ownership filtering remains a downstream
+      assembly/reduction responsibility.
 - [x] Define performance caching for basis values without reintroducing
       process-wide transient cut-quadrature basis growth.
 
@@ -218,7 +222,7 @@ algorithms need repeated pointwise evaluation of the implicit function.
 - [x] P2 evaluator responds to edge DOFs in the cell interior.
 - [x] P3 evaluator responds to interior DOFs where available.
 - [x] Gradient checks against finite differences in reference coordinates.
-- [ ] MPI/ghost test proving deterministic values on shared cells.
+- [x] MPI/ghost test proving deterministic values on shared cells.
 - [x] State-ordering test proving Newton trial states feed the evaluator, not
       stale mesh vertex fields.
 

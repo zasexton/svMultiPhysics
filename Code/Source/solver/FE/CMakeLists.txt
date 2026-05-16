@@ -2828,6 +2828,27 @@ if(FE_BUILD_TESTS)
             endif()
         endif()
 
+        file(GLOB FE_LEVELSET_MPI_TEST_SOURCES
+            Tests/Unit/LevelSet/test_*MPI*.cpp
+        )
+        if(FE_LEVELSET_MPI_TEST_SOURCES)
+            add_executable(test_fe_levelset_mpi ${FE_LEVELSET_MPI_TEST_SOURCES})
+            _svmp_fe_target_enable_warnings(test_fe_levelset_mpi)
+            if(TARGET GTest::gtest)
+                target_link_libraries(test_fe_levelset_mpi PRIVATE svfe GTest::gtest)
+            else()
+                set(_fe_levelset_mpi_gtest_libs ${GTEST_LIBRARIES})
+                list(REMOVE_ITEM _fe_levelset_mpi_gtest_libs gtest_main GTest::gtest_main)
+                target_link_libraries(test_fe_levelset_mpi PRIVATE svfe ${_fe_levelset_mpi_gtest_libs})
+            endif()
+            set_target_properties(test_fe_levelset_mpi PROPERTIES
+                SKIP_BUILD_RPATH TRUE
+                BUILD_RPATH ""
+                INSTALL_RPATH ""
+            )
+            add_fe_mpi_test(test_fe_levelset_mpi 2)
+        endif()
+
 	        if(FE_ENABLE_ASSEMBLY)
 	            file(GLOB FE_BACKENDS_MPI_TEST_SOURCES
 	                Tests/Unit/Backends/test_*MPI*.cpp
