@@ -305,6 +305,15 @@ public:
         if (metadata.side != rule.side) {
             throw std::invalid_argument("generated level-set volume metadata side must match the rule side");
         }
+        if (metadata.source_value_revision != 0u &&
+            rule.provenance.source_value_revision != 0u &&
+            metadata.source_value_revision != rule.provenance.source_value_revision) {
+            throw std::invalid_argument(
+                "generated level-set volume rule source revision must match metadata");
+        }
+        if (rule.provenance.source_value_revision == 0u) {
+            rule.provenance.source_value_revision = metadata.source_value_revision;
+        }
         if (shouldPruneGeneratedVolumeRule(rule)) {
             ++generated_pruned_volume_rule_count_;
             if (std::isfinite(rule.measure) && rule.measure > Real{0.0}) {
@@ -423,6 +432,29 @@ public:
         return it == expected_source_value_revision_by_marker_.end() ? 0u : it->second;
     }
 
+    void assertGeneratedInterfaceRulesCurrentForMarker(int marker) const {
+        const auto expected_it = expected_source_value_revision_by_marker_.find(marker);
+        if (expected_it == expected_source_value_revision_by_marker_.end()) {
+            return;
+        }
+        const auto rule_it = generated_interface_rule_indices_by_marker_.find(marker);
+        if (rule_it == generated_interface_rule_indices_by_marker_.end()) {
+            return;
+        }
+        for (const auto index : rule_it->second) {
+            if (index >= interface_rules_.size()) {
+                throw std::invalid_argument(
+                    "generated cut-interface rule is missing source revision metadata");
+            }
+            const auto actual =
+                interface_rules_[index].provenance.source_value_revision;
+            if (actual == 0u || actual != expected_it->second) {
+                throw std::invalid_argument(
+                    "generated cut-interface rule revision does not match the current source value revision");
+            }
+        }
+    }
+
     void assertGeneratedVolumeRulesCurrentForMarkerAndSide(
         int marker,
         geometry::CutIntegrationSide side) const {
@@ -445,7 +477,12 @@ public:
                     "generated cut-volume rule is missing source revision metadata");
             }
             const auto actual = metadata_[index].source_value_revision;
-            if (actual == 0u || actual != expected_it->second) {
+            const auto rule_revision =
+                index < volume_rules_.size()
+                    ? volume_rules_[index].provenance.source_value_revision
+                    : 0u;
+            if (actual == 0u || actual != expected_it->second ||
+                rule_revision == 0u || rule_revision != expected_it->second) {
                 throw std::invalid_argument(
                     "generated cut-volume rule revision does not match the current source value revision");
             }
@@ -524,6 +561,7 @@ public:
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
     interfaceRulesForMarker(int marker) const {
         std::vector<const geometry::CutQuadratureRule*> rules;
+        assertGeneratedInterfaceRulesCurrentForMarker(marker);
         const auto it = generated_interface_rule_indices_by_marker_.find(marker);
         if (it == generated_interface_rule_indices_by_marker_.end()) {
             return rules;

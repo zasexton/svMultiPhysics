@@ -350,6 +350,7 @@ struct CutInterfaceVolumeRegion {
         rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+        rule.provenance.source_value_revision = request.source.value_revision;
         rule.provenance.construction = rule.policy.kind;
         rule.provenance.frame = request.frame;
         rule.provenance.implicit_geometry_mode =
@@ -447,6 +448,7 @@ struct CutInterfaceFragment {
         rule.provenance.marker = interface_marker;
         rule.provenance.cut_topology_revision = stable_id;
         rule.provenance.predicate_policy_key = request.quadrature_policy_key;
+        rule.provenance.source_value_revision = request.source.value_revision;
         rule.provenance.construction = rule.policy.kind;
         rule.provenance.frame = request.frame;
         rule.provenance.implicit_geometry_mode =

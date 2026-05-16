@@ -65,6 +65,7 @@ struct CutQuadratureProvenance {
     int marker{-1};
     std::uint64_t cut_topology_revision{0};
     std::uint64_t predicate_policy_key{0};
+    std::uint64_t source_value_revision{0};
     CutQuadratureConstructionKind construction{CutQuadratureConstructionKind::AxisAlignedBoxClip};
     CutGeometryFrame frame{CutGeometryFrame::Reference};
     std::string implicit_geometry_mode{};

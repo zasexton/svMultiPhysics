@@ -746,10 +746,11 @@ Each exported `CutQuadratureRule` must mirror enough request metadata in
 `CutQuadratureProvenance` to make a rule self-describing outside the domain:
 parent cell, marker, frame, topology id and revision, policy key, construction
 kind, implicit geometry mode, implicit backend name, fallback policy, requested
-order, and achieved order. The assembly-facing `CutCellAssemblyMetadata` mirrors
-the parent entity, side, active volume fraction, embedded normal, topology id,
-topology revision, quadrature policy key, and source value revision so stale
-generated rules can be rejected after a rebuild.
+order, achieved order, and source value revision. The assembly-facing
+`CutCellAssemblyMetadata` mirrors the parent entity, side, active volume
+fraction, embedded normal, topology id, topology revision, quadrature policy
+key, and source value revision so stale generated rules can be rejected after a
+rebuild.
 
 Per-cell backend status and fallback reason are diagnostic metadata. They should
 use `ImplicitCutQuadratureDiagnosticStatus` names and backend diagnostic strings
@@ -863,7 +864,7 @@ rule.
 
 - [x] Extend `CutQuadratureProvenance` or `CutCellAssemblyMetadata`.
 - [x] Add revision-key tests covering backend option changes.
-- [ ] Add stale-rule assertions for high-order marker/side rules.
+- [x] Add stale-rule assertions for high-order marker/side rules.
 - [ ] Ensure full-cell rules still carry enough metadata for diagnostics.
 - [ ] Add cut-context rebuild logging for high-order fields.
 

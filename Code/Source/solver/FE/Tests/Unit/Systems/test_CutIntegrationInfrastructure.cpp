@@ -2100,6 +2100,7 @@ TEST(CutIntegrationInfrastructure, GeneratedCutVolumesRejectStaleSourceRevision)
     EXPECT_EQ(context.expectedGeneratedSourceValueRevision(51), 3u);
     ASSERT_EQ(context.metadata().size(), 2u);
     EXPECT_EQ(context.metadata().front().source_value_revision, 3u);
+    EXPECT_EQ(context.volumeRules().front().provenance.source_value_revision, 3u);
     EXPECT_NO_THROW({
         const auto indices = context.generatedVolumeRuleIndicesForMarkerAndSide(
             51, CutIntegrationSide::Negative);
@@ -2135,6 +2136,53 @@ TEST(CutIntegrationInfrastructure, GeneratedCutVolumesRejectStaleSourceRevision)
             [](const CutRuleAssemblyRequest&, AssemblyContext&) {},
             options);
         (void)summary;
+    }, std::invalid_argument);
+}
+
+TEST(CutIntegrationInfrastructure, GeneratedInterfaceRulesRejectStaleSourceRevision)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/9);
+    request.interface_marker = 61;
+    request.interface_quadrature_order = 0;
+    request.quadrature_policy_key = 23;
+    request.implicit_geometry_mode = "HighOrderImplicit";
+    request.implicit_quadrature_backend = "SayeHyperrectangle";
+    request.implicit_fallback_policy = "Fail";
+
+    LevelSetInterfaceDomain domain(request);
+    CutInterfaceFragment fragment;
+    fragment.parent_cell = 7;
+    fragment.local_fragment_index = 0;
+    fragment.kind = CutInterfaceFragmentKind::CurvedPatch;
+    fragment.measure = 0.25;
+    fragment.topology_id = "curved-cell-7-fragment-0";
+    fragment.quadrature_points = {
+        CutInterfaceQuadraturePoint{
+            .point = {{0.25, 0.5, 0.0}},
+            .parent_coordinate = {{0.25, 0.5, 0.0}},
+            .normal = {{1.0, 0.0, 0.0}},
+            .weight = 0.25}};
+    domain.addFragment(std::move(fragment));
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+
+    ASSERT_TRUE(context.hasExpectedGeneratedSourceValueRevision(61));
+    EXPECT_EQ(context.expectedGeneratedSourceValueRevision(61), 9u);
+    const auto rules = context.interfaceRulesForMarker(61);
+    ASSERT_EQ(rules.size(), 1u);
+    ASSERT_NE(rules.front(), nullptr);
+    EXPECT_EQ(rules.front()->provenance.source_value_revision, 9u);
+    EXPECT_EQ(rules.front()->provenance.implicit_geometry_mode,
+              "HighOrderImplicit");
+
+    context.setExpectedGeneratedSourceValueRevision(61, 10u);
+    EXPECT_THROW({
+        const auto stale_rules = context.interfaceRulesForMarker(61);
+        (void)stale_rules;
     }, std::invalid_argument);
 }
 
