@@ -236,6 +236,49 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
   EXPECT_DOUBLE_EQ(wet_fraction[0], 0.5);
 }
 
+TEST(ActiveDomainOutput, CollectsPhysicalMeasureForHighOrderCurvedCutRule)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      2.0, 0.0,
+      2.0, 3.0,
+      0.0, 3.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule cut_rule;
+  cut_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  cut_rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  cut_rule.measure = 2.0;
+  cut_rule.parent_measure = 4.0;
+  cut_rule.volume_fraction = 0.5;
+  cut_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  cut_rule.curved_geometry = true;
+  cut_rule.policy.kind =
+      svmp::FE::geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+  cut_rule.policy.polynomial_order = 4;
+  cut_rule.policy.moment_fitted = true;
+  cut_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  cut_rule.provenance.parent_entity = 0;
+  cut_rule.provenance.implicit_geometry_mode = "HighOrderImplicit";
+  cut_rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
+  cut_rule.provenance.achieved_quadrature_order = 4;
+  cut_rule.points.push_back(
+      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &cut_rule,
+  };
+  const auto summary =
+      application::core::collectCutVolumeMeasures(mesh_access, rules);
+
+  EXPECT_EQ(summary.rule_count, 1u);
+  EXPECT_EQ(summary.physical_rule_count, 1u);
+  EXPECT_EQ(summary.skipped_physical_rule_count, 0u);
+  EXPECT_NEAR(summary.reference_measure, 2.0, 1.0e-12);
+  EXPECT_NEAR(summary.physical_measure, 3.0, 1.0e-12);
+}
+
 TEST(ActiveDomainOutput, CollectsPhysicalFullCellMeasureOnDistortedQuad)
 {
   auto mesh = makeSingleQuadCellMesh({

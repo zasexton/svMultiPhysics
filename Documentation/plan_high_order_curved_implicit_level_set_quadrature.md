@@ -1250,7 +1250,10 @@ methods and volume correction remain separate numerical-method choices.
 
 ### Implementation Checklist
 
-- [ ] Update wet-volume diagnostics to use high-order physical cut measures.
+- [x] Update wet-volume diagnostics to use high-order physical cut measures.
+      The active-domain output path integrates retained reference-frame
+      high-order cut rules through the current parent-cell geometry and records
+      physical wet volume separately from reference measure.
 - [ ] Ensure reinitialization updates current and previous history consistently.
 - [ ] Ensure volume correction updates the high-order field coefficients.
 - [ ] Rebuild high-order cut context after maintenance and before output.
