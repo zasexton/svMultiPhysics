@@ -17,6 +17,7 @@ namespace {
 {
   using svmp::FE::Real;
   if (rule.kind != svmp::FE::geometry::CutQuadratureKind::Volume ||
+      !rule.full_cell_equivalent ||
       !std::isfinite(rule.measure) ||
       !std::isfinite(rule.parent_measure) ||
       !std::isfinite(rule.volume_fraction) ||

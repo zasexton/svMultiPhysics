@@ -277,4 +277,39 @@ TEST(ActiveDomainOutput, CollectsPhysicalFullCellMeasureOnDistortedQuad)
   EXPECT_DOUBLE_EQ(wet_fraction[0], 1.0);
 }
 
+TEST(ActiveDomainOutput, UnflaggedFullMeasureRuleUsesMappedQuadraturePoints)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      2.0, 0.0,
+      2.5, 3.0,
+      0.0, 2.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule rule;
+  rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  rule.measure = 4.0;
+  rule.parent_measure = 4.0;
+  rule.volume_fraction = 1.0;
+  rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  rule.provenance.parent_entity = 0;
+  rule.points.push_back(
+      {{{-1.0, -1.0, 0.0}}, {{0.0, 0.0, 1.0}}, 4.0});
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &rule,
+  };
+  const auto summary =
+      application::core::collectCutVolumeMeasures(mesh_access, rules);
+
+  EXPECT_EQ(summary.rule_count, 1u);
+  EXPECT_EQ(summary.physical_rule_count, 1u);
+  EXPECT_EQ(summary.skipped_physical_rule_count, 0u);
+  EXPECT_NEAR(summary.reference_measure, 4.0, 1.0e-12);
+  EXPECT_NEAR(summary.physical_measure, 4.0, 1.0e-12);
+}
+
 #endif

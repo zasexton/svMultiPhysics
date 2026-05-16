@@ -281,8 +281,6 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
     Real max_volume_fraction = -std::numeric_limits<Real>::infinity();
     int min_exact_order = std::numeric_limits<int>::max();
     int max_exact_order = std::numeric_limits<int>::min();
-    constexpr Real full_cell_tol = Real{1.0e-12};
-
     for (const auto* rule : rules) {
         if (rule == nullptr) {
             ++null_rules;
@@ -313,13 +311,12 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
         }
         min_exact_order = std::min(min_exact_order, rule->exact_polynomial_order);
         max_exact_order = std::max(max_exact_order, rule->exact_polynomial_order);
-        if (rule->volume_fraction > full_cell_tol &&
-            rule->volume_fraction < Real{1.0} - full_cell_tol) {
-            cut_cell_active_volume += rule->measure;
-            ++cut_cell_rules;
-        } else {
+        if (rule->full_cell_equivalent) {
             full_cell_active_volume += rule->measure;
             ++full_cell_rules;
+        } else {
+            cut_cell_active_volume += rule->measure;
+            ++cut_cell_rules;
         }
     }
     if (!std::isfinite(min_rule_measure)) {

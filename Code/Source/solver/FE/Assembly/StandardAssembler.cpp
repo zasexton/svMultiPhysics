@@ -255,6 +255,7 @@ void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
 [[nodiscard]] bool isFullSideVolumeRule(const geometry::CutQuadratureRule& rule) noexcept
 {
     if (rule.kind != geometry::CutQuadratureKind::Volume ||
+        !rule.full_cell_equivalent ||
         !std::isfinite(rule.measure) ||
         !std::isfinite(rule.parent_measure) ||
         !std::isfinite(rule.volume_fraction) ||

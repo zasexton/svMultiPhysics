@@ -698,7 +698,7 @@ material state storage is keyed by generated interface quadrature shape.
       rule measures separately from physical measures and maps every retained
       reference-frame cut-volume quadrature point through the parent geometry
       Jacobian before wet-volume drift diagnostics choose the physical frame.
-- [ ] Ensure high-order rules do not reuse stale linear full-cell-equivalent
+- [x] Ensure high-order rules do not reuse stale linear full-cell-equivalent
       assumptions.
 
 ### Tests
