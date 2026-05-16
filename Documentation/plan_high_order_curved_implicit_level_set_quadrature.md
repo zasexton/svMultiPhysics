@@ -800,6 +800,22 @@ debug counters, and visualization labels. These fields may be written to restart
 or diagnostic output, but by themselves they do not force a sparsity rebuild,
 matrix rebuild, matrix-free rebuild, or preconditioner refresh.
 
+### MPI Ordering Contract
+
+Generated cut metadata must be deterministic before it reaches MPI-visible
+assembly, output, or diagnostics. Interface and volume rules are exported in a
+canonical order: parent entity, side, marker, topology id, then topology
+revision. Stable ids are derived from marker, parent entity, local cut index,
+side for volume regions, and source value revision; they must not depend on
+rank-local insertion order or ownership revision.
+
+Global summaries should aggregate commutative scalar totals and counts only
+after local rules have been canonicalized. Debug output that lists per-cell or
+per-rule metadata must use the same canonical order so rank-to-rank comparisons
+and restart diffs remain meaningful. Existing deterministic ordering tests in
+`LevelSetInterfaceDomain` and the high-order MPI rule-hash test in
+`LevelSetInterfaceBuilderMPI` are the regression anchors for this contract.
+
 ### Design Checklist
 
 - [x] Extend cut metadata with:
@@ -816,7 +832,7 @@ matrix rebuild, matrix-free rebuild, or preconditioner refresh.
 - [x] Include backend policy fields in the topology/revision key.
 - [x] Define which metadata affects operator sparsity, matrix-free data,
       preconditioner metadata, and output only.
-- [ ] Define deterministic metadata ordering for MPI.
+- [x] Define deterministic metadata ordering for MPI.
 - [ ] Define pruning policy for high-order tiny slivers.
 - [ ] Define whether pruned high-order slivers are included in diagnostics but
       excluded from assembly.
