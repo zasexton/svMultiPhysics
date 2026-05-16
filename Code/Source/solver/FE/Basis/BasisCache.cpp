@@ -55,6 +55,14 @@ const BasisCacheEntry& BasisCache::prewarm(
     return get_or_compute(basis, quad, gradients, hessians);
 }
 
+BasisCacheEntry BasisCache::compute_uncached(
+    const BasisFunction& basis,
+    const quadrature::QuadratureRule& quad,
+    bool gradients,
+    bool hessians) const {
+    return compute(basis, quad, gradients, hessians);
+}
+
 void BasisCache::clear() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     cache_.clear();

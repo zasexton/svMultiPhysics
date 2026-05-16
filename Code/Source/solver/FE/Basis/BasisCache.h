@@ -81,6 +81,12 @@ public:
         bool gradients = true,
         bool hessians = false);
 
+    BasisCacheEntry compute_uncached(
+        const BasisFunction& basis,
+        const quadrature::QuadratureRule& quad,
+        bool gradients = true,
+        bool hessians = false) const;
+
     /**
      * @brief Eagerly populate the cache for the given (basis, quadrature) key (D5)
      *

@@ -2492,6 +2492,15 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         )
         if not has_basis_cache:
             errors.append("basis-cache diagnostics were not reported")
+    if args.max_diagnostic_process_basis_cache_entries is not None:
+        basis_cache_entries = metrics.get("diagnostic_process_max_basis_cache_entries")
+        if not isinstance(basis_cache_entries, (int, float)):
+            errors.append("basis-cache entry diagnostics are unavailable")
+        elif basis_cache_entries > args.max_diagnostic_process_basis_cache_entries:
+            errors.append(
+                f"basis-cache entries {basis_cache_entries} exceed "
+                f"{args.max_diagnostic_process_basis_cache_entries}"
+            )
     if args.require_interior_face_timing_diagnostics and not diagnostics.get("interior_face_timings"):
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
@@ -2834,6 +2843,15 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         )
         if not has_basis_cache:
             errors.append("basis-cache diagnostics were not reported")
+    if args.max_diagnostic_process_basis_cache_entries is not None:
+        basis_cache_entries = metrics.get("diagnostic_process_max_basis_cache_entries")
+        if not isinstance(basis_cache_entries, (int, float)):
+            errors.append("basis-cache entry diagnostics are unavailable")
+        elif basis_cache_entries > args.max_diagnostic_process_basis_cache_entries:
+            errors.append(
+                f"basis-cache entries {basis_cache_entries} exceed "
+                f"{args.max_diagnostic_process_basis_cache_entries}"
+            )
     if (args.require_interior_face_timing_diagnostics and
             not metrics["diagnostics"].get("interior_face_timings")):
         errors.append("interior-face timing diagnostics were not reported")
@@ -3215,6 +3233,7 @@ def main() -> int:
     parser.add_argument("--enable-linear-solve-memory-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-memory-diagnostics", action="store_true")
     parser.add_argument("--require-basis-cache-diagnostics", action="store_true")
+    parser.add_argument("--max-diagnostic-process-basis-cache-entries", type=int)
     parser.add_argument("--enable-form-block-diagnostics", action="store_true")
     parser.add_argument("--enable-interior-face-timing", action="store_true")
     parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")

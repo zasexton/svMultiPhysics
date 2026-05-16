@@ -123,6 +123,12 @@ public:
     }
 };
 
+[[nodiscard]] bool isTransientCutVolumeQuadratureRule(
+    const quadrature::QuadratureRule& rule) noexcept
+{
+    return dynamic_cast<const CutVolumeQuadratureRule*>(&rule) != nullptr;
+}
+
 [[nodiscard]] bool isFullSideVolumeRule(const geometry::CutQuadratureRule& rule) noexcept
 {
     if (rule.kind != geometry::CutQuadratureKind::Volume ||
@@ -4869,6 +4875,13 @@ void StandardAssembler::prepareGeometry(
     }
     const auto n_nodes = cell_coords_.size();
 
+    const bool transient_cut_quad_rule = isTransientCutVolumeQuadratureRule(quad_rule);
+    const bool quadrature_rule_changed = cached_quad_rule_.get() != &quad_rule;
+    if (quadrature_rule_changed || transient_cut_quad_rule) {
+        cached_geom_bcache_ = nullptr;
+        cached_field_bcache_.clear();
+        cached_field_recipes_valid_ = false;
+    }
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_setup += PC_TP() - pc_t0;
 #endif
@@ -4930,11 +4943,20 @@ void StandardAssembler::prepareGeometry(
     const auto& quad_points = quad_rule.points();
     const auto& quad_weights = quad_rule.weights();
 
-    if (!cached_geom_bcache_) {
-        cached_geom_bcache_ = &basis::BasisCache::instance().get_or_compute(
-            mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false);
+    std::optional<basis::BasisCacheEntry> local_geom_bcache;
+    const basis::BasisCacheEntry* geom_bcache_ptr = cached_geom_bcache_;
+    if (!geom_bcache_ptr) {
+        if (transient_cut_quad_rule) {
+            local_geom_bcache.emplace(basis::BasisCache::instance().compute_uncached(
+                mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false));
+            geom_bcache_ptr = &*local_geom_bcache;
+        } else {
+            cached_geom_bcache_ = &basis::BasisCache::instance().get_or_compute(
+                mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false);
+            geom_bcache_ptr = cached_geom_bcache_;
+        }
     }
-    const auto& geom_bcache = *cached_geom_bcache_;
+    const auto& geom_bcache = *geom_bcache_ptr;
     const auto& geom_nodes = mapping->nodes();
     const auto n_geom_dofs = geom_bcache.num_dofs;
 
@@ -5093,7 +5115,11 @@ void StandardAssembler::prepareGeometry(
 
     // Cache quad_rule for populateFieldSolutionData BasisCache lookups. If a
     // caller already installed an owning shared_ptr for this rule, preserve it.
-    if (cached_quad_rule_.get() != &quad_rule) {
+    if (transient_cut_quad_rule) {
+        cached_quad_rule_.reset();
+        cached_field_bcache_.clear();
+        cached_field_recipes_valid_ = false;
+    } else if (cached_quad_rule_.get() != &quad_rule) {
         cached_quad_rule_ = std::shared_ptr<const quadrature::QuadratureRule>(
             std::shared_ptr<const quadrature::QuadratureRule>{}, &quad_rule);
     }
@@ -5341,15 +5367,18 @@ void StandardAssembler::prepareBasis(
     const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
     const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
     const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
+    const bool transient_cut_quad_rule = isTransientCutVolumeQuadratureRule(quad_rule);
 
     // Invalidate cached BasisCacheEntry pointers when quad rule or hessian requirement changes.
-    if (&quad_rule != cached_quad_rule_ptr_ || need_basis_hessians != cached_need_hessians_) {
+    if (transient_cut_quad_rule ||
+        &quad_rule != cached_quad_rule_ptr_ ||
+        need_basis_hessians != cached_need_hessians_) {
         cached_geom_bcache_ = nullptr;
         cached_test_bcache_ = nullptr;
         cached_trial_bcache_ = nullptr;
         cached_field_bcache_.clear();
         cached_field_recipes_valid_ = false;
-        cached_quad_rule_ptr_ = &quad_rule;
+        cached_quad_rule_ptr_ = transient_cut_quad_rule ? nullptr : &quad_rule;
         cached_need_hessians_ = need_basis_hessians;
         basis_scratch_valid_ = false;
         cached_qpt_test_valid_ = false;
@@ -5396,7 +5425,8 @@ void StandardAssembler::prepareBasis(
          &trial_space == cached_basis_trial_space_ptr_ &&
          n_trial_dofs == cached_basis_n_trial_dofs_ &&
          !trial_is_vector_basis);
-    if (basis_scratch_valid_ &&
+    if (!transient_cut_quad_rule &&
+        basis_scratch_valid_ &&
         spaces_match_cached &&
         !test_is_vector_basis &&
         cell_type == cached_basis_cell_type_ &&
@@ -5756,16 +5786,36 @@ void StandardAssembler::prepareBasis(
     pc_t0 = PC_TP();
 #endif
 
-    if (!test_is_vector_basis && !cached_test_bcache_) {
-        cached_test_bcache_ = &basis::BasisCache::instance().get_or_compute(
-            test_basis, quad_rule, true, need_basis_hessians);
+    std::optional<basis::BasisCacheEntry> local_test_bcache;
+    std::optional<basis::BasisCacheEntry> local_trial_bcache;
+    const basis::BasisCacheEntry* test_bcache = nullptr;
+    const basis::BasisCacheEntry* trial_bcache = nullptr;
+    if (!test_is_vector_basis) {
+        if (transient_cut_quad_rule) {
+            local_test_bcache.emplace(basis::BasisCache::instance().compute_uncached(
+                test_basis, quad_rule, true, need_basis_hessians));
+            test_bcache = &*local_test_bcache;
+        } else {
+            if (!cached_test_bcache_) {
+                cached_test_bcache_ = &basis::BasisCache::instance().get_or_compute(
+                    test_basis, quad_rule, true, need_basis_hessians);
+            }
+            test_bcache = cached_test_bcache_;
+        }
     }
-    if (&test_space != &trial_space && !trial_is_vector_basis && !cached_trial_bcache_) {
-        cached_trial_bcache_ = &basis::BasisCache::instance().get_or_compute(
-            trial_basis, quad_rule, true, need_basis_hessians);
+    if (&test_space != &trial_space && !trial_is_vector_basis) {
+        if (transient_cut_quad_rule) {
+            local_trial_bcache.emplace(basis::BasisCache::instance().compute_uncached(
+                trial_basis, quad_rule, true, need_basis_hessians));
+            trial_bcache = &*local_trial_bcache;
+        } else {
+            if (!cached_trial_bcache_) {
+                cached_trial_bcache_ = &basis::BasisCache::instance().get_or_compute(
+                    trial_basis, quad_rule, true, need_basis_hessians);
+            }
+            trial_bcache = cached_trial_bcache_;
+        }
     }
-    const basis::BasisCacheEntry* test_bcache = cached_test_bcache_;
-    const basis::BasisCacheEntry* trial_bcache = cached_trial_bcache_;
 
     const auto& mapping = cached_mapping_;
 
@@ -6208,7 +6258,8 @@ void StandardAssembler::prepareBasis(
     }
 
     // Update basis topology cache for fast-path reuse on next cell
-    if (!test_is_vector_basis && (!trial_is_vector_basis || &test_space == &trial_space)) {
+    if (!transient_cut_quad_rule &&
+        !test_is_vector_basis && (!trial_is_vector_basis || &test_space == &trial_space)) {
         basis_scratch_valid_ = true;
         cached_basis_cell_type_ = cell_type;
         cached_basis_n_test_dofs_ = n_test_dofs;

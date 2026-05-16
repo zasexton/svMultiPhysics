@@ -588,6 +588,10 @@ benchmark runs.
       three-step D18 no-output probe showing basis-cache entries grow from 1 to
       9933 while RSS grows by about 364 MiB, identifying transient cut-volume
       quadrature basis caching as the next memory-lifecycle target.
+- [x] Keep transient generated cut-quadrature basis evaluations out of the
+      process-wide basis cache, and add a smoke-script ceiling for parsed
+      basis-cache entries; the three-step D18 no-output GMRES probe now reports
+      a maximum of 5 basis-cache entries and only 4 new entries.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
