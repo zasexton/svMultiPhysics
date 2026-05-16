@@ -179,18 +179,18 @@ algorithms need repeated pointwise evaluation of the implicit function.
 
 ### Design Checklist
 
-- [ ] Define `LevelSetCellEvaluator` or equivalent service.
-- [ ] Input contract:
+- [x] Define `LevelSetCellEvaluator` or equivalent service.
+- [x] Input contract:
       - `FESystem`,
       - `FieldId` or field name,
       - FE-ordered coefficient span,
       - parent cell id.
-- [ ] Output contract:
+- [x] Output contract:
       - `value(xi)`,
       - `referenceGradient(xi)`,
       - optional `referenceHessian(xi)`,
       - polynomial/order metadata.
-- [ ] Support scalar H1/C0 nodal fields first.
+- [x] Support scalar H1/C0 nodal fields first.
 - [ ] Avoid mesh vertex-field reads inside the high-order cutter.
 - [ ] Keep a separate synchronization path for visualization mesh fields.
 - [ ] Ensure vector/state ordering is identical to the current cut-context
@@ -201,21 +201,21 @@ algorithms need repeated pointwise evaluation of the implicit function.
 
 ### Implementation Checklist
 
-- [ ] Add a field evaluator under `FE/LevelSet` or a generic FE field-evaluation
+- [x] Add a field evaluator under `FE/LevelSet` or a generic FE field-evaluation
       module if an existing service can be reused.
-- [ ] Resolve field DOFs through `DofHandler`, including vertex, edge, face, and
+- [x] Resolve field DOFs through `DofHandler`, including vertex, edge, face, and
       cell-interior DOFs.
-- [ ] Gather cell coefficients from the FE-ordered state span.
-- [ ] Evaluate basis values and gradients in the parent reference frame.
-- [ ] Report the level-set interpolation order and geometry order.
+- [x] Gather cell coefficients from the FE-ordered state span.
+- [x] Evaluate basis values and gradients in the parent reference frame.
+- [x] Report the level-set interpolation order and geometry order.
 - [ ] Add a cell-local cache for repeated quadrature backend calls.
 - [ ] Add explicit diagnostics if a field has no entity DOF map or cannot be
       evaluated in the requested cell family.
 
 ### Tests
 
-- [ ] P1 evaluator reproduces current vertex-interpolated values at corners.
-- [ ] P2 evaluator responds to edge DOFs in the cell interior.
+- [x] P1 evaluator reproduces current vertex-interpolated values at corners.
+- [x] P2 evaluator responds to edge DOFs in the cell interior.
 - [ ] P3 evaluator responds to interior DOFs where available.
 - [ ] Gradient checks against finite differences in reference coordinates.
 - [ ] MPI/ghost test proving deterministic values on shared cells.
@@ -973,7 +973,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 - [x] Add options and feature gate.
 - [x] Add backend abstraction.
-- [ ] Add high-order level-set evaluator.
+- [x] Add high-order level-set evaluator.
 - [x] Move linear cutter behind the backend interface.
 - [ ] Add metadata and diagnostics plumbing.
 - [ ] Keep production fixtures on the current linear path.

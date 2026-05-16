@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include "Assembly/Assembler.h"
@@ -336,6 +337,78 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     const auto volume_rules = result.domain.volumeQuadratureRules();
     ASSERT_EQ(volume_rules.size(), 2u);
     EXPECT_EQ(volume_rules.front().exact_polynomial_order, 1);
+}
+
+TEST(LevelSetCellEvaluator, P1ReproducesCornerValuesAndReferenceGradient)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+    const auto at_origin = evaluator.evaluate(0, {{0.0, 0.0, 0.0}});
+    EXPECT_EQ(at_origin.interpolation_order, 1);
+    EXPECT_EQ(at_origin.implicit_geometry_order, 1);
+    EXPECT_NEAR(at_origin.value, -0.5, 1.0e-12);
+    EXPECT_NEAR(at_origin.reference_gradient[0], 1.0, 1.0e-12);
+    EXPECT_NEAR(at_origin.reference_gradient[1], 1.0, 1.0e-12);
+    EXPECT_NEAR(at_origin.reference_gradient[2], 1.0, 1.0e-12);
+
+    const auto at_vertex_one = evaluator.evaluate(0, {{1.0, 0.0, 0.0}});
+    EXPECT_NEAR(at_vertex_one.value, 0.5, 1.0e-12);
+}
+
+TEST(LevelSetCellEvaluator, P2RespondsToEdgeDofsAtInteriorNodes)
+{
+    const auto mesh = std::make_shared<SingleTetra10GeometryMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 10u);
+
+    const auto offset = system.fieldDofOffset(phi);
+    solution[static_cast<std::size_t>(offset + cell_dofs[4])] = 2.0;
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+    const auto at_edge_node = evaluator.evaluate(0, {{0.5, 0.0, 0.0}});
+    EXPECT_EQ(at_edge_node.interpolation_order, 2);
+    EXPECT_EQ(at_edge_node.implicit_geometry_order, 2);
+    EXPECT_NEAR(at_edge_node.value, 2.0, 1.0e-12);
+
+    const auto at_vertex = evaluator.evaluate(0, {{0.0, 0.0, 0.0}});
+    EXPECT_NEAR(at_vertex.value, 0.0, 1.0e-12);
 }
 
 TEST(LevelSetInterfaceLifecycle, RejectsHighOrderImplicitModeUntilBackendExists)
