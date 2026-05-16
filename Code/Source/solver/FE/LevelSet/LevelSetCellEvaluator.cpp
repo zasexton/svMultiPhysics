@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 
 namespace svmp::FE::level_set {
 namespace {
@@ -53,6 +54,16 @@ int LevelSetCellEvaluator::interpolationOrder(GlobalIndex cell_id) const noexcep
 std::vector<Real> LevelSetCellEvaluator::gatherCellCoefficients(
     GlobalIndex cell_id) const
 {
+    return cachedCellCoefficients(cell_id);
+}
+
+const std::vector<Real>& LevelSetCellEvaluator::cachedCellCoefficients(
+    GlobalIndex cell_id) const
+{
+    if (cached_cell_valid_ && cached_cell_id_ == cell_id) {
+        return cached_cell_coefficients_;
+    }
+
     const auto dofs = dof_handler_->getCellDofs(cell_id);
     const auto expected = space_->dofs_per_element(cell_id);
     if (dofs.size() != expected) {
@@ -60,33 +71,42 @@ std::vector<Real> LevelSetCellEvaluator::gatherCellCoefficients(
             "level-set cell evaluator found a cell DOF count that does not match the field space");
     }
 
-    std::vector<Real> coefficients;
-    coefficients.reserve(dofs.size());
+    cached_cell_coefficients_.clear();
+    cached_cell_coefficients_.reserve(dofs.size());
     for (const auto dof : dofs) {
         if (dof < 0 ||
             static_cast<std::size_t>(dof) >= field_coefficients_.size()) {
             throw std::invalid_argument(
                 "level-set cell evaluator found a cell DOF outside the coefficient span");
         }
-        coefficients.push_back(field_coefficients_[static_cast<std::size_t>(dof)]);
+        cached_cell_coefficients_.push_back(
+            field_coefficients_[static_cast<std::size_t>(dof)]);
     }
-    return coefficients;
+    cached_cell_id_ = cell_id;
+    cached_cell_valid_ = true;
+    return cached_cell_coefficients_;
 }
 
 LevelSetCellEvaluation LevelSetCellEvaluator::evaluate(
     GlobalIndex cell_id,
     const std::array<Real, 3>& parent_coordinate) const
 {
-    const auto coefficients = gatherCellCoefficients(cell_id);
-    const auto point = toSpacePoint(parent_coordinate);
-    const auto gradient = space_->evaluate_gradient(point, coefficients);
+    try {
+        const auto& coefficients = cachedCellCoefficients(cell_id);
+        const auto point = toSpacePoint(parent_coordinate);
+        const auto gradient = space_->evaluate_gradient(point, coefficients);
 
-    LevelSetCellEvaluation evaluation;
-    evaluation.value = space_->evaluate_scalar(point, coefficients);
-    evaluation.reference_gradient = {{gradient[0], gradient[1], gradient[2]}};
-    evaluation.interpolation_order = interpolationOrder(cell_id);
-    evaluation.implicit_geometry_order = evaluation.interpolation_order;
-    return evaluation;
+        LevelSetCellEvaluation evaluation;
+        evaluation.value = space_->evaluate_scalar(point, coefficients);
+        evaluation.reference_gradient = {{gradient[0], gradient[1], gradient[2]}};
+        evaluation.interpolation_order = interpolationOrder(cell_id);
+        evaluation.implicit_geometry_order = evaluation.interpolation_order;
+        return evaluation;
+    } catch (const std::exception& ex) {
+        throw std::invalid_argument(
+            "level-set cell evaluator could not evaluate cell " +
+            std::to_string(cell_id) + ": " + ex.what());
+    }
 }
 
 LevelSetCellEvaluator makeLevelSetCellEvaluator(
@@ -102,6 +122,10 @@ LevelSetCellEvaluator makeLevelSetCellEvaluator(
     validateScalarC0Space(*record.space);
 
     const auto& field_dofs = system.fieldDofHandler(field);
+    if (field_dofs.getEntityDofMap() == nullptr) {
+        throw std::invalid_argument(
+            "level-set cell evaluator requires a field entity DOF map for cell-local evaluation");
+    }
     const auto n_field_dofs =
         static_cast<std::size_t>(field_dofs.getNumDofs());
     const auto offset = static_cast<std::size_t>(system.fieldDofOffset(field));

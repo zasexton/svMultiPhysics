@@ -40,9 +40,15 @@ public:
         const std::array<Real, 3>& parent_coordinate) const;
 
 private:
+    [[nodiscard]] const std::vector<Real>& cachedCellCoefficients(
+        GlobalIndex cell_id) const;
+
     const spaces::FunctionSpace* space_{nullptr};
     const dofs::DofHandler* dof_handler_{nullptr};
     std::span<const Real> field_coefficients_{};
+    mutable bool cached_cell_valid_{false};
+    mutable GlobalIndex cached_cell_id_{static_cast<GlobalIndex>(-1)};
+    mutable std::vector<Real> cached_cell_coefficients_{};
 };
 
 [[nodiscard]] LevelSetCellEvaluator makeLevelSetCellEvaluator(

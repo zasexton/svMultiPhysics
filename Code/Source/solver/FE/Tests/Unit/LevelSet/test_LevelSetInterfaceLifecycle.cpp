@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -467,6 +468,119 @@ TEST(LevelSetCellEvaluator, P2RespondsToEdgeDofsAtInteriorNodes)
 
     const auto at_vertex = evaluator.evaluate(0, {{0.0, 0.0, 0.0}});
     EXPECT_NEAR(at_vertex.value, 0.0, 1.0e-12);
+}
+
+TEST(LevelSetCellEvaluator, ReferenceGradientMatchesFiniteDifference)
+{
+    const auto mesh = std::make_shared<SingleTetra10GeometryMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 10u);
+
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            FE::Real(0.1) * static_cast<FE::Real>(i + 1u);
+    }
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+    const std::array<FE::Real, 3> xi{{0.2, 0.2, 0.2}};
+    const auto evaluation = evaluator.evaluate(0, xi);
+    constexpr FE::Real eps = 1.0e-6;
+    for (std::size_t d = 0; d < 3u; ++d) {
+        auto plus = xi;
+        auto minus = xi;
+        plus[d] += eps;
+        minus[d] -= eps;
+        const auto value_plus = evaluator.evaluate(0, plus).value;
+        const auto value_minus = evaluator.evaluate(0, minus).value;
+        const auto finite_difference =
+            (value_plus - value_minus) / (FE::Real{2.0} * eps);
+        EXPECT_NEAR(evaluation.reference_gradient[d],
+                    finite_difference,
+                    1.0e-8);
+    }
+}
+
+TEST(LevelSetCellEvaluator, UsesFieldOffsetInFullStateVector)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto velocity_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/3);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "Velocity",
+        .space = velocity_space,
+        .components = 3,
+    });
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 1000.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+    const auto at_origin = evaluator.evaluate(0, {{0.0, 0.0, 0.0}});
+    EXPECT_NEAR(at_origin.value, -0.5, 1.0e-12);
+    EXPECT_NEAR(at_origin.reference_gradient[0], 1.0, 1.0e-12);
+    EXPECT_NEAR(at_origin.reference_gradient[1], 1.0, 1.0e-12);
+    EXPECT_NEAR(at_origin.reference_gradient[2], 1.0, 1.0e-12);
+}
+
+TEST(LevelSetCellEvaluator, ReportsCellEvaluationFailure)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+    try {
+        (void)evaluator.evaluate(99, {{0.0, 0.0, 0.0}});
+        FAIL() << "Expected invalid cell evaluation to fail";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("could not evaluate cell 99"), std::string::npos);
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, RejectsHighOrderImplicitModeUntilBackendExists)

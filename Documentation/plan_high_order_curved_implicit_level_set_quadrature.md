@@ -193,10 +193,10 @@ algorithms need repeated pointwise evaluation of the implicit function.
 - [x] Support scalar H1/C0 nodal fields first.
 - [ ] Avoid mesh vertex-field reads inside the high-order cutter.
 - [ ] Keep a separate synchronization path for visualization mesh fields.
-- [ ] Ensure vector/state ordering is identical to the current cut-context
+- [x] Ensure vector/state ordering is identical to the current cut-context
       refresh path used during Newton residual and Jacobian assembly.
 - [ ] Define behavior for ghost cells and non-owned cells in MPI.
-- [ ] Define performance caching for basis values without reintroducing
+- [x] Define performance caching for basis values without reintroducing
       process-wide transient cut-quadrature basis growth.
 
 ### Implementation Checklist
@@ -208,8 +208,8 @@ algorithms need repeated pointwise evaluation of the implicit function.
 - [x] Gather cell coefficients from the FE-ordered state span.
 - [x] Evaluate basis values and gradients in the parent reference frame.
 - [x] Report the level-set interpolation order and geometry order.
-- [ ] Add a cell-local cache for repeated quadrature backend calls.
-- [ ] Add explicit diagnostics if a field has no entity DOF map or cannot be
+- [x] Add a cell-local cache for repeated quadrature backend calls.
+- [x] Add explicit diagnostics if a field has no entity DOF map or cannot be
       evaluated in the requested cell family.
 
 ### Tests
@@ -217,9 +217,9 @@ algorithms need repeated pointwise evaluation of the implicit function.
 - [x] P1 evaluator reproduces current vertex-interpolated values at corners.
 - [x] P2 evaluator responds to edge DOFs in the cell interior.
 - [ ] P3 evaluator responds to interior DOFs where available.
-- [ ] Gradient checks against finite differences in reference coordinates.
+- [x] Gradient checks against finite differences in reference coordinates.
 - [ ] MPI/ghost test proving deterministic values on shared cells.
-- [ ] State-ordering test proving Newton trial states feed the evaluator, not
+- [x] State-ordering test proving Newton trial states feed the evaluator, not
       stale mesh vertex fields.
 
 ### Literature Support
