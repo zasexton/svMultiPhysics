@@ -1077,7 +1077,7 @@ finite-difference component checks are valuable for isolating assembly defects.
       unstabilized solve so the high-order implicit cut path advances an
       accepted step without modifying the canonical MMS fixture.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
-- [ ] Add benchmark qualification logs that record backend diagnostics.
+- [x] Add benchmark qualification logs that record backend diagnostics.
 
 ### Tests
 
@@ -1187,7 +1187,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Add high-order MMS traveling-interface fixture.
 - [ ] Run fixed-geometry Jacobian component sweeps.
 - [ ] Run quasi-Newton moving-geometry smoke tests.
-- [ ] Run short open-vessel probes with high-order diagnostics.
+- [x] Run short open-vessel probes with high-order diagnostics.
 - [ ] Only then consider D18/D38 high-order qualification.
 
 ## 18. Definition Of Done

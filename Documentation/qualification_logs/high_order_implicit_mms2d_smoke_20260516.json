@@ -1,0 +1,89 @@
+{
+  "date": "2026-05-16",
+  "case": "mms2d",
+  "description": "Compact high-order implicit-cut MMS smoke qualification for the open-vessel free-surface driver.",
+  "command": [
+    "python3",
+    "tests/cases/fluid/open_vessel_free_surface/run_test05_velocity_growth_smoke.py",
+    "--solver",
+    "build/svMultiPhysics-build/bin/svmultiphysics",
+    "--case",
+    "mms2d",
+    "--steps",
+    "1",
+    "--disable-vtk-output",
+    "--use-high-order-implicit-cuts",
+    "--qualification-log",
+    "/tmp/svmp_high_order_mms2d_smoke_default.json",
+    "--timeout-seconds",
+    "120"
+  ],
+  "result": {
+    "passed": true,
+    "accepted_steps": 1,
+    "all_linear_converged": true,
+    "all_nonlinear_converged": true,
+    "linear_iterations_total": 1,
+    "nonlinear_iterations_total": 1
+  },
+  "high_order_cut_configuration": {
+    "generated_interface_geometry": "HighOrderImplicit",
+    "implicit_cut_quadrature_backend": "SayeHyperrectangle",
+    "implicit_cut_fallback_policy": "Fail",
+    "implicit_cut_root_tolerance": 1.0e-10,
+    "implicit_cut_max_subdivision_depth": 8,
+    "generated_interface_quadrature_order": 2,
+    "interface_quadrature_order": 2,
+    "volume_quadrature_order": 2,
+    "mms_nx": 2,
+    "mms_ny": 2,
+    "element_order": 2
+  },
+  "solver_configuration": {
+    "linear_algebra_backend": "eigen",
+    "linear_solver_method": "direct",
+    "linear_preconditioner": "none",
+    "disable_cut_stabilization": true,
+    "disable_vtk_output": true
+  },
+  "backend_diagnostics": {
+    "implicit_cut_fallback_cells": 0,
+    "achieved_volume_quadrature_order_min": 2,
+    "cut_volume_min_exact_order": 2,
+    "cut_volume_max_exact_order": 2,
+    "generated_interface_geometry_counts": {
+      "HighOrderImplicit": 4
+    },
+    "implicit_cut_quadrature_backend_counts": {
+      "SayeHyperrectangle": 4
+    },
+    "implicit_cut_fallback_policy_counts": {
+      "Fail": 4
+    }
+  },
+  "geometry_and_stability_diagnostics": {
+    "cut_adjacent_max_scale": 1000.0,
+    "cut_adjacent_capped_scale_count": 4,
+    "active_volume_error": 4.960569786049973e-07,
+    "active_min_volume_fraction": 1.205241475433695e-10,
+    "active_pruned_volume_regions": 2,
+    "generated_pruned_volume_rules": 2,
+    "cut_context_rebuild_count": 4,
+    "cut_context_solution_source_counts": {
+      "fe_vector": 2,
+      "state_vector_fe_ordered": 2
+    }
+  },
+  "resource_diagnostics": {
+    "assembly_timing_count": 4,
+    "assembly_timing_max_total_seconds": 1.728636,
+    "assembly_timing_max_cut_volumes_seconds": 1.564758,
+    "assembly_timing_max_interface_faces_seconds": 0.173024,
+    "process_max_rss_kb": 181560.0,
+    "process_max_basis_cache_entries": 3
+  },
+  "notes": [
+    "The smoke path intentionally uses a compact temporary MMS mesh and the serial Eigen direct backend so the high-order implicit-cut geometry path can be qualified independently of the heavier FSILS stabilized transient path.",
+    "Cut-cell stabilization remains covered by dedicated high-order stabilization assembly regressions."
+  ]
+}
