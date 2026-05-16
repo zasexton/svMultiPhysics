@@ -875,7 +875,7 @@ rule.
 - [x] Changing a high-order level-set edge DOF changes the source revision and
       generated rules.
 - [x] Rejected line-search trial geometry is not left installed.
-- [ ] MPI ranks produce matching global cut-context summaries.
+- [x] MPI ranks produce matching global cut-context summaries.
 
 ### Literature Support
 

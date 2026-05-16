@@ -1541,9 +1541,31 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     auto fsilsPreconditionerName = [](consts::PreconditionerType prec) {
-        const auto it = consts::preconditioner_type_to_name.find(prec);
-        if (it != consts::preconditioner_type_to_name.end()) {
-            return it->second;
+        switch (prec) {
+        case consts::PreconditionerType::PREC_FSILS:
+            return std::string("fsils");
+        case consts::PreconditionerType::PREC_NONE:
+            return std::string("none");
+        case consts::PreconditionerType::PREC_RCS:
+            return std::string("row-column-scaling");
+        case consts::PreconditionerType::PREC_TRILINOS_DIAGONAL:
+            return std::string("trilinos-diagonal");
+        case consts::PreconditionerType::PREC_TRILINOS_BLOCK_JACOBI:
+            return std::string("trilinos-blockjacobi");
+        case consts::PreconditionerType::PREC_TRILINOS_ILU:
+            return std::string("trilinos-ilu");
+        case consts::PreconditionerType::PREC_TRILINOS_ILUT:
+            return std::string("trilinos-ilut");
+        case consts::PreconditionerType::PREC_TRILINOS_IC:
+            return std::string("trilinos-ic");
+        case consts::PreconditionerType::PREC_TRILINOS_ICT:
+            return std::string("trilinos-ict");
+        case consts::PreconditionerType::PREC_TRILINOS_ML:
+            return std::string("trilinos-ml");
+        case consts::PreconditionerType::PREC_PETSC_JACOBI:
+            return std::string("petsc-jacobi");
+        case consts::PreconditionerType::PREC_PETSC_RCS:
+            return std::string("petsc-rcs");
         }
         return std::string("unknown");
     };
