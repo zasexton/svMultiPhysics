@@ -707,8 +707,10 @@ material state storage is keyed by generated interface quadrature shape.
       Jacobian scaling.
       Covered by
       `ActiveDomainOutput.CollectsPhysicalCutVolumeMeasureOnScaledQuad`.
-- [ ] Curved parent cell: physical measure differs from reference measure and is
+- [x] Curved parent cell: physical measure differs from reference measure and is
       computed by mapped quadrature.
+      Covered by
+      `LevelSetInterfaceLifecycle.SayeHyperrectangleReferenceRulesMapToCurvedHexGeometry`.
 - [ ] Normal orientation test for negative and positive active sides.
 - [ ] Surface traction sign test using a simple embedded interface with known
       normal.
