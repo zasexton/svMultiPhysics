@@ -1354,7 +1354,15 @@ linear-solver problems.
       skipped counts. The wet-volume diagnostic logs the selected wet volume,
       frame, reference wet volume, physical wet volume, drift, relative drift,
       rule counts, and wet/dry cell classification.
-- [ ] Define optional per-cell diagnostics for debug builds or smoke scripts.
+- [x] Define optional per-cell diagnostics for debug builds or smoke scripts.
+      Optional per-cell diagnostics are carried by high-order backend diagnostic
+      strings and the single-cell quadrature debug dump path. Cell-local records
+      include parent cell identity, element type, backend, diagnostic status,
+      fallback use, recursion depth, linearized leaf counts, root-finder
+      iteration summaries, achieved orders, and generated rule counts. Normal
+      runs aggregate these into cut-context rebuild logs; smoke scripts assert
+      aggregate/backend substrings, while detailed JSON and VTP debug output
+      remain opt-in inspection tools.
 - [ ] Define high-order curved interface visualization strategy:
       - tessellated interface output,
       - sample points,
