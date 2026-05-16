@@ -524,6 +524,26 @@ the lifecycle error must report the backend name, parent cell id, element type,
 and backend diagnostic. This keeps mixed-mesh failures actionable until explicit
 per-cell backend selection is implemented.
 
+### Simplex Fallback Hierarchy
+
+The initial simplex hierarchy is:
+
+1. Use `HighOrderSubcell` recursive simplex decomposition for supported
+   Triangle3/Triangle6 and Tetra4/Tetra10 cells.
+2. At terminal recursive leaves, use the existing linear simplex cutter on
+   Triangle3 or Tetra4 subcells. This is a local subcell fallback inside the
+   high-order backend, not a request-level `LinearCorner` fallback.
+3. If a selected simplex backend cannot support the cell type, lacks the
+   evaluator data, lacks enough corner coordinates, or fails common quadrature
+   validation, fail the generated-interface build with a cell-local diagnostic.
+4. Do not fall through to request-level `LinearCorner` unless a future option
+   explicitly permits that behavior and records `fallback_used=true` in the
+   per-cell diagnostics.
+
+Moment fitting is not part of the first simplex fallback chain. It remains a
+future backend and must be selected explicitly once positive-weight and
+diagnostic contracts are available for simplex cells.
+
 ### Design Checklist
 
 - [x] Decide first simplex milestone:
@@ -535,7 +555,7 @@ per-cell backend selection is implemented.
       high-order mode in mixed-element meshes.
 - [x] Define conservative measure requirements for simplex cut volumes.
 - [x] Define whether simplex backends may use signed weights.
-- [ ] Define simplex fallback hierarchy:
+- [x] Define simplex fallback hierarchy:
       high-order subcell -> linear subcell -> fail, or
       high-order implicit -> moment fit -> fail.
 - [ ] Define edge/corner degeneracy handling.
