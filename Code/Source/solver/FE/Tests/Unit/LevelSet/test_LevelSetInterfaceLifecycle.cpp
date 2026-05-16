@@ -398,6 +398,36 @@ void setFieldComponentValue(std::vector<FE::Real>& solution,
     solution[index] = value;
 }
 
+FE::Real integrateVolumeMoment(
+    const FE::interfaces::LevelSetInterfaceDomain& domain,
+    FE::geometry::CutIntegrationSide side,
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& moment)
+{
+    FE::Real value = 0.0;
+    for (const auto& rule : domain.volumeQuadratureRules()) {
+        if (rule.side != side) {
+            continue;
+        }
+        for (const auto& point : rule.points) {
+            value += moment(point.point) * point.weight;
+        }
+    }
+    return value;
+}
+
+FE::Real integrateInterfaceMoment(
+    const FE::interfaces::LevelSetInterfaceDomain& domain,
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& moment)
+{
+    FE::Real value = 0.0;
+    for (const auto& rule : domain.interfaceQuadratureRules()) {
+        for (const auto& point : rule.points) {
+            value += moment(point.point) * point.weight;
+        }
+    }
+    return value;
+}
+
 } // namespace
 
 TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
@@ -853,8 +883,8 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_TRUE(saye_quad.supports_high_order_geometry);
     EXPECT_EQ(saye_quad.minimum_level_set_order, 1);
     EXPECT_EQ(saye_quad.validation_level_set_order, 3);
-    EXPECT_EQ(saye_quad.maximum_reported_interface_order, -1);
-    EXPECT_EQ(saye_quad.maximum_reported_volume_order, -1);
+    EXPECT_EQ(saye_quad.maximum_reported_interface_order, 1);
+    EXPECT_EQ(saye_quad.maximum_reported_volume_order, 2);
     EXPECT_TRUE(saye_quad.requires_scalar_h1_c0_level_set);
 
     const auto saye_tri =
@@ -1165,6 +1195,8 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
 
     ASSERT_TRUE(result.success) << result.diagnostic;
     EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 pi * radius * radius,
@@ -1172,6 +1204,37 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
     EXPECT_NEAR(result.summary.measure,
                 2.0 * pi * radius,
                 1.2e-1);
+
+    const auto x_moment = [](const std::array<FE::Real, 3>& x) { return x[0]; };
+    const auto y_moment = [](const std::array<FE::Real, 3>& x) { return x[1]; };
+    const auto r2_moment = [](const std::array<FE::Real, 3>& x) {
+        return x[0] * x[0] + x[1] * x[1];
+    };
+    EXPECT_NEAR(integrateVolumeMoment(result.domain,
+                                      FE::geometry::CutIntegrationSide::Negative,
+                                      x_moment),
+                0.0,
+                2.0e-2);
+    EXPECT_NEAR(integrateVolumeMoment(result.domain,
+                                      FE::geometry::CutIntegrationSide::Negative,
+                                      y_moment),
+                0.0,
+                2.0e-2);
+    EXPECT_NEAR(integrateVolumeMoment(result.domain,
+                                      FE::geometry::CutIntegrationSide::Negative,
+                                      r2_moment),
+                pi * radius * radius * radius * radius / 2.0,
+                3.0e-2);
+    EXPECT_NEAR(integrateInterfaceMoment(result.domain, x_moment), 0.0, 2.0e-2);
+    EXPECT_NEAR(integrateInterfaceMoment(result.domain, y_moment), 0.0, 2.0e-2);
+    EXPECT_NEAR(integrateInterfaceMoment(result.domain, r2_moment),
+                2.0 * pi * radius * radius * radius,
+                6.0e-2);
+
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 1);
 }
 
 TEST(LevelSetInterfaceLifecycle, UnimplementedBackendFactoryThrows)

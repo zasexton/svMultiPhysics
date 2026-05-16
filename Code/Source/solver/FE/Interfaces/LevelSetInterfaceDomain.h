@@ -411,9 +411,14 @@ struct CutInterfaceFragment {
     [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRule(
         const CutInterfaceDomainRequest& request) const {
         const int supported_order = kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1;
-        const int quadrature_order = request.resolvedInterfaceQuadratureOrder();
-        if (quadrature_order < 0) {
+        const int requested_order = request.resolvedInterfaceQuadratureOrder();
+        if (requested_order < 0) {
             throw std::invalid_argument("cut-interface quadrature order must be nonnegative");
+        }
+        int quadrature_order = requested_order;
+        if (request.achieved_interface_quadrature_order >= 0) {
+            quadrature_order =
+                std::min(quadrature_order, request.achieved_interface_quadrature_order);
         }
         if (quadrature_order > supported_order) {
             throw std::invalid_argument("cut-interface quadrature order is not supported for this fragment");
@@ -450,11 +455,8 @@ struct CutInterfaceFragment {
             request.implicit_quadrature_backend;
         rule.provenance.implicit_fallback_policy =
             request.implicit_fallback_policy;
-        rule.provenance.requested_quadrature_order = quadrature_order;
-        rule.provenance.achieved_quadrature_order =
-            request.achieved_interface_quadrature_order >= 0
-                ? request.achieved_interface_quadrature_order
-                : quadrature_order;
+        rule.provenance.requested_quadrature_order = requested_order;
+        rule.provenance.achieved_quadrature_order = quadrature_order;
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.curved_geometry = kind == CutInterfaceFragmentKind::CurvedPatch;

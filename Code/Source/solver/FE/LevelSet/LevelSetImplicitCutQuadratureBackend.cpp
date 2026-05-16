@@ -379,13 +379,14 @@ public:
     [[nodiscard]] int achievedInterfaceQuadratureOrder(
         const interfaces::CutInterfaceDomainRequest& request) const noexcept override
     {
-        return std::max(0, request.resolvedInterfaceQuadratureOrder());
+        return std::min(1, std::max(0, request.resolvedInterfaceQuadratureOrder()));
     }
 
     [[nodiscard]] int achievedVolumeQuadratureOrder(
         const interfaces::CutInterfaceDomainRequest& request) const noexcept override
     {
-        return std::max(0, request.resolvedVolumeQuadratureOrder());
+        return interfaces::implementedLevelSetCutVolumeExactOrder(
+            std::max(0, request.resolvedVolumeQuadratureOrder()));
     }
 
     [[nodiscard]] ImplicitCutQuadratureBackendCellResult cut(
@@ -513,8 +514,8 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
         capability.supports_element_type =
             supportsSayeHyperrectangleMilestone(mesh_dimension, element_type);
         capability.supports_high_order_geometry = true;
-        capability.maximum_reported_interface_order = -1;
-        capability.maximum_reported_volume_order = -1;
+        capability.maximum_reported_interface_order = 1;
+        capability.maximum_reported_volume_order = 2;
         return capability;
     case ImplicitCutQuadratureBackend::HighOrderSubcell:
     case ImplicitCutQuadratureBackend::MomentFit:

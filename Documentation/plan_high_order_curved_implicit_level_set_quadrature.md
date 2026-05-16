@@ -314,6 +314,13 @@ Rationale: Saye 2015 is directly designed for implicitly defined surfaces and
 volumes in hyperrectangles and produces positive quadrature weights. This is a
 good match for quadrilateral and hexahedral reference cells.
 
+Milestone status: the current 2D backend is an initial recursive
+hyperrectangle proof for quadrilateral cells. It evaluates high-order level-set
+fields in reference space, recursively subdivides cut rectangles, and uses
+linear leaf cuts for the unresolved interface. Until the full Saye Gaussian
+base rules and root-polishing strategy are implemented, it reports interface
+quadrature as achieved order 1 and volume quadrature as achieved order 2.
+
 ### Design Checklist
 
 - [x] Define how svMultiPhysics reference quads map to the hyperrectangle used by
@@ -855,7 +862,7 @@ prevents solver behavior from hiding geometry errors.
 
 ### Implementation Checklist
 
-- [ ] Add unit-test helpers for analytic measures and polynomial moments.
+- [x] Add unit-test helpers for analytic measures and polynomial moments.
 - [ ] Add backend-independent quadrature validation fixtures.
 - [ ] Add separate tests for reference measure and physical mapped measure.
 - [ ] Add deterministic randomized cut-position tests with fixed seeds.
@@ -863,9 +870,9 @@ prevents solver behavior from hiding geometry errors.
 
 ### Tests
 
-- [ ] Constant integration exactness over both cut sides.
-- [ ] Linear and quadratic moment accuracy.
-- [ ] Interface length/area accuracy.
+- [x] Constant integration exactness over both cut sides.
+- [x] Linear and quadratic moment accuracy.
+- [x] Interface length/area accuracy.
 - [ ] Negative plus positive measures sum to parent measure.
 - [ ] Rule weights and points are finite.
 - [ ] Achieved-order diagnostics match measured convergence.
@@ -982,7 +989,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 ### Phase 1: 2D Hyperrectangle Proof
 
 - [x] Implement initial Saye-style 2D quad backend.
-- [ ] Add analytic area, length, and moment tests.
+- [x] Add analytic area, length, and moment tests.
 - [ ] Add fixed-geometry assembly tests.
 - [ ] Add diagnostics and output tests.
 - [ ] Document limitations and fallback behavior.
