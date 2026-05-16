@@ -2011,6 +2011,11 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2CircleSegmentApproximatesArea
     EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
     EXPECT_NE(result.diagnostic.find("HighOrderSubcell"), std::string::npos);
     EXPECT_NE(result.diagnostic.find("linearized_leaves="), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("root_finder_iterations=0"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("fallback_used=false"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("achieved_interface_order=1"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("achieved_volume_order=2"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("status="), std::string::npos);
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 pi * radius * radius / 4.0,
@@ -2332,6 +2337,11 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
     EXPECT_NE(result.diagnostic.find("max_depth_reached="), std::string::npos);
     EXPECT_NE(result.diagnostic.find("linearized_leaves="), std::string::npos);
     EXPECT_NE(result.diagnostic.find("interface_fragments="), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("root_finder_iterations=0"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("fallback_used=false"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("achieved_interface_order=1"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("achieved_volume_order=2"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("status="), std::string::npos);
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 pi * radius * radius,

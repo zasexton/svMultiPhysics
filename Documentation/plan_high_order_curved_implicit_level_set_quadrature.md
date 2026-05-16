@@ -407,7 +407,7 @@ order 2.
 - [x] Expose first-milestone per-cell diagnostics for recursion depth,
       subdivision count, linearized leaves, full-region counts, and fragment
       counts.
-- [ ] Expose detailed per-cell diagnostics for recursion depth, root-finder
+- [x] Expose detailed per-cell diagnostics for recursion depth, root-finder
       iterations, fallback usage, and achieved order.
 - [x] Preserve deterministic point ordering.
 - [x] Keep the backend independent from physics-specific free-surface concepts.

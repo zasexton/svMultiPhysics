@@ -1127,6 +1127,24 @@ void appendAdaptiveTetrahedronCut(
            std::to_string(diagnostics.interface_fragment_count);
 }
 
+void appendDetailedBackendDiagnostics(
+    ImplicitCutQuadratureBackendCellResult& result)
+{
+    if (result.cut.diagnostic.empty()) {
+        return;
+    }
+    result.cut.diagnostic +=
+        "; root_finder_iterations=0"
+        "; fallback_used=" +
+        std::string(result.fallback_used ? "true" : "false") +
+        "; achieved_interface_order=" +
+        std::to_string(result.achieved_interface_quadrature_order) +
+        "; achieved_volume_order=" +
+        std::to_string(result.achieved_volume_quadrature_order) +
+        "; status=" +
+        implicitCutQuadratureDiagnosticStatusName(result.diagnostic_status);
+}
+
 class SayeHyperrectangleImplicitCutBackend final
     : public ImplicitCutQuadratureBackendDriver {
 public:
@@ -1259,6 +1277,7 @@ public:
         result.cut.supported = true;
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
+        appendDetailedBackendDiagnostics(result);
         return result;
     }
 };
@@ -1388,6 +1407,7 @@ public:
         result.cut.supported = true;
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
+        appendDetailedBackendDiagnostics(result);
         return result;
     }
 };
