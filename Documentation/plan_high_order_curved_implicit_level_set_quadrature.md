@@ -926,6 +926,12 @@ Reserve-size audit:
   cell loops to avoid hidden reallocations and to make high-order point-count
   assumptions explicit.
 
+Many-point cut-volume basis policy:
+- Transient generated cut-volume rules must use uncached basis evaluations keyed
+  only to the rule instance in the current assembly pass. High point counts are
+  valid as long as the context reserves enough storage and the local DOF
+  insertion receives the same row and column maps as ordinary cell assembly.
+
 ### Design Checklist
 
 - [x] Preserve the public form vocabulary:
@@ -943,7 +949,7 @@ Reserve-size audit:
 
 - [x] Review `AssemblyContext::reserve(...)` assumptions for max quadrature
       point counts.
-- [ ] Ensure cut-volume rules with many points do not disable needed basis
+- [x] Ensure cut-volume rules with many points do not disable needed basis
       evaluation caching.
 - [ ] Ensure interface rules with many points are remapped correctly.
 - [ ] Ensure JIT specialization keys include enough quadrature shape metadata.
@@ -959,7 +965,7 @@ Reserve-size audit:
 - [ ] Assemble linear and quadratic polynomial moments over curved cut volumes.
 - [ ] Assemble a surface traction over a curved interface and compare to analytic
       surface integral.
-- [ ] Verify high quadrature point counts do not corrupt local DOF insertion.
+- [x] Verify high quadrature point counts do not corrupt local DOF insertion.
 - [ ] Verify JIT and interpreter paths agree.
 
 ### Literature Support

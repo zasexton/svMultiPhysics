@@ -461,6 +461,26 @@ struct CutNewtonResult {
     return rule;
 }
 
+[[nodiscard]] CutQuadratureRule makeManyPointReferenceTetraCutRule(
+    CutIntegrationSide side,
+    std::size_t points_per_axis = 4u)
+{
+    std::vector<svmp::FE::geometry::CutQuadraturePoint> points;
+    points.reserve(points_per_axis * points_per_axis * points_per_axis);
+    const Real weight = Real(0.0015);
+    for (std::size_t i = 0u; i < points_per_axis; ++i) {
+        for (std::size_t j = 0u; j < points_per_axis; ++j) {
+            for (std::size_t k = 0u; k < points_per_axis; ++k) {
+                const Real xi = Real(0.05) + Real(0.10) * static_cast<Real>(i);
+                const Real eta = Real(0.04) + Real(0.08) * static_cast<Real>(j);
+                const Real zeta = Real(0.03) + Real(0.06) * static_cast<Real>(k);
+                points.push_back({{{xi, eta, zeta}}, {{0.0, 0.0, 1.0}}, weight});
+            }
+        }
+    }
+    return makeReferenceTetraCutRule(side, std::move(points));
+}
+
 void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
                                  int marker,
                                  const std::string& topology_id,
@@ -1033,6 +1053,71 @@ TEST(CutCellForms, HighOrderCutVolumeTangentMatchesFixedGeometryFiniteDifference
         deterministicScalarCoefficients(space.dofs_per_element()),
         /*eps=*/Real(2.0e-6),
         /*tol=*/Real(2.0e-6));
+}
+
+TEST(CutCellForms, HighOrderCutVolumeManyPointRuleKeepsBasisEvaluation)
+{
+    constexpr int marker = 83;
+    auto rule = makeManyPointReferenceTetraCutRule(CutIntegrationSide::Negative);
+    markRuleAsHighOrderImplicit(rule,
+                                marker,
+                                "many-point-fixed-geometry-volume",
+                                /*quadrature_order=*/6);
+
+    std::vector<Real> expected(16u, Real(0.0));
+    for (const auto& qp : rule.points) {
+        const Real xi = qp.point[0];
+        const Real eta = qp.point[1];
+        const Real zeta = qp.point[2];
+        const std::array<Real, 4> phi{{
+            Real(1.0) - xi - eta - zeta,
+            xi,
+            eta,
+            zeta}};
+        for (std::size_t i = 0u; i < phi.size(); ++i) {
+            for (std::size_t j = 0u; j < phi.size(); ++j) {
+                expected[i * phi.size() + j] += qp.weight * phi[i] * phi[j];
+            }
+        }
+    }
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.side = CutIntegrationSide::Negative;
+    metadata.embedded_normal = rule.points.front().normal;
+    metadata.cut_topology_id = rule.provenance.cut_topology_id;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addVolumeRule(std::move(metadata), std::move(rule));
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    svmp::FE::assembly::DenseMatrixView mass(dof_map.getNumDofs());
+    mass.zero();
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    FormCompiler compiler;
+    FormKernel kernel(
+        compiler.compileBilinear((u * v).dCutVolume(marker, CutVolumeSide::Negative)));
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    const auto assembled = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, CutIntegrationSide::Negative, space, space, kernel,
+        &mass, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+
+    ASSERT_EQ(assembled.elements_assembled, svmp::FE::GlobalIndex{1});
+    ASSERT_EQ(cut_context.volumeRules().front().points.size(), 64u);
+    for (svmp::FE::GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
+        for (svmp::FE::GlobalIndex j = 0; j < dof_map.getNumDofs(); ++j) {
+            const auto idx = static_cast<std::size_t>(i * dof_map.getNumDofs() + j);
+            EXPECT_NEAR(mass.getMatrixEntry(i, j), expected[idx], Real(1.0e-13));
+        }
+    }
 }
 
 TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDifference)
