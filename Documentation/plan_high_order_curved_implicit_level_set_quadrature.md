@@ -1640,16 +1640,28 @@ rank-local discovery order.
 
 - [x] Add backend timing counters.
 - [x] Add point-count summaries by volume/interface rules.
-- [ ] Keep transient basis evaluations out of process-wide caches unless keyed
+- [x] Keep transient basis evaluations out of process-wide caches unless keyed
       by stable persistent data.
+      Generated high-order rules live in the cut context and transient basis
+      evaluations stay local to assembly contexts. The only long-lived basis
+      cache is keyed by stable element/order/point-set data and is bounded by
+      the smoke cache-growth ceiling.
 - [x] Sort generated rules by parent cell, side, marker, and topology id.
-- [ ] Aggregate MPI diagnostics globally.
-- [ ] Add cache hit/miss counters for high-order quadrature if caching is used.
+- [x] Aggregate MPI diagnostics globally.
+      Active-domain rebuild diagnostics use explicit global reductions for
+      measures, rule counts, physical-rule counts, fallback counts, cell
+      classes, quadrature point counts, cut-adjacent metadata, and min/max
+      retained fractions.
+- [x] Add cache hit/miss counters for high-order quadrature if caching is used.
+      No persistent high-order quadrature rule cache is currently used; rule
+      lifetime is the cut context. The required observable is therefore
+      `basis_cache_entries` plus smoke-tested cache-growth ceilings. Any future
+      persistent rule cache must add hit/miss counters before qualification.
 
 ### Tests
 
-- [ ] Repeated identical state rebuilds do not grow memory unbounded.
-- [ ] MPI and serial runs produce matching global measure summaries.
+- [x] Repeated identical state rebuilds do not grow memory unbounded.
+- [x] MPI and serial runs produce matching global measure summaries.
 - [x] Rule ordering is deterministic across runs.
 - [x] High-order smoke run reports timing, memory, and cache diagnostics.
 
