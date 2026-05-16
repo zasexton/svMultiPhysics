@@ -100,6 +100,22 @@ struct LevelSetTransportOptions {
     LevelSetBoundaryOptions boundaries{};
 };
 
+enum class LevelSetConservationDiagnostic {
+    PlainAdvectionNotConservative,
+    ReinitializedAdvectionNotConservative,
+    VolumeCorrectedConservative
+};
+
+[[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
+    const LevelSetReinitializationOptions& reinitialization,
+    const LevelSetVolumeCorrectionOptions& volume_correction) noexcept;
+
+[[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
+    const LevelSetTransportOptions& options) noexcept;
+
+[[nodiscard]] const char* levelSetConservationDiagnosticName(
+    LevelSetConservationDiagnostic diagnostic) noexcept;
+
 [[nodiscard]] bool shouldReinitializeLevelSet(
     const LevelSetReinitializationOptions& options,
     int completed_step_index) noexcept;

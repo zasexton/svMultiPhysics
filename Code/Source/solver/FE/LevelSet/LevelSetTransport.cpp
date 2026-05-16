@@ -213,6 +213,41 @@ bool shouldReinitializeLevelSet(
            completed_step_index % options.cadence_steps == 0;
 }
 
+LevelSetConservationDiagnostic levelSetConservationDiagnostic(
+    const LevelSetReinitializationOptions& reinitialization,
+    const LevelSetVolumeCorrectionOptions& volume_correction) noexcept
+{
+    if (volume_correction.enabled) {
+        return LevelSetConservationDiagnostic::VolumeCorrectedConservative;
+    }
+    if (reinitialization.enabled) {
+        return LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative;
+    }
+    return LevelSetConservationDiagnostic::PlainAdvectionNotConservative;
+}
+
+LevelSetConservationDiagnostic levelSetConservationDiagnostic(
+    const LevelSetTransportOptions& options) noexcept
+{
+    return levelSetConservationDiagnostic(
+        options.reinitialization,
+        options.volume_correction);
+}
+
+const char* levelSetConservationDiagnosticName(
+    LevelSetConservationDiagnostic diagnostic) noexcept
+{
+    switch (diagnostic) {
+    case LevelSetConservationDiagnostic::PlainAdvectionNotConservative:
+        return "plain_level_set_advection_not_conservative";
+    case LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative:
+        return "reinitialized_level_set_advection_not_conservative";
+    case LevelSetConservationDiagnostic::VolumeCorrectedConservative:
+        return "volume_corrected_level_set_conservative";
+    }
+    return "unknown_level_set_conservation";
+}
+
 bool shouldApplyLevelSetVolumeCorrection(
     const LevelSetVolumeCorrectionOptions& options,
     int completed_step_index) noexcept

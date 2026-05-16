@@ -1623,6 +1623,11 @@ void logLevelSetMaintenanceCoverageDiagnostics(
         << (request.reinitialization.enabled ? "enabled" : "disabled")
         << " volume_correction="
         << (request.volume_correction.enabled ? "enabled" : "disabled")
+        << " conservation_diagnostic="
+        << svmp::FE::level_set::levelSetConservationDiagnosticName(
+               svmp::FE::level_set::levelSetConservationDiagnostic(
+                   request.reinitialization,
+                   request.volume_correction))
         << " reinitialization_cadence="
         << request.reinitialization.cadence_steps
         << " volume_correction_cadence="

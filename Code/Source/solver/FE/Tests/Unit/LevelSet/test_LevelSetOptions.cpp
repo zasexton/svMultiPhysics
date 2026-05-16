@@ -110,6 +110,45 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
     EXPECT_EQ(options.boundaries.outflow.front().boundary_marker, 12);
 }
 
+TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
+{
+    const level_set::LevelSetTransportOptions plain{};
+    EXPECT_EQ(
+        level_set::levelSetConservationDiagnostic(plain),
+        level_set::LevelSetConservationDiagnostic::PlainAdvectionNotConservative);
+    EXPECT_STREQ(
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(plain)),
+        "plain_level_set_advection_not_conservative");
+
+    level_set::LevelSetTransportOptions reinitialized{};
+    reinitialized.reinitialization.enabled = true;
+    EXPECT_EQ(
+        level_set::levelSetConservationDiagnostic(reinitialized),
+        level_set::LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative);
+    EXPECT_STREQ(
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(reinitialized)),
+        "reinitialized_level_set_advection_not_conservative");
+
+    level_set::LevelSetTransportOptions corrected{};
+    corrected.reinitialization.enabled = true;
+    corrected.volume_correction.enabled = true;
+    EXPECT_EQ(
+        level_set::levelSetConservationDiagnostic(corrected),
+        level_set::LevelSetConservationDiagnostic::VolumeCorrectedConservative);
+    EXPECT_STREQ(
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(corrected)),
+        "volume_corrected_level_set_conservative");
+
+    EXPECT_NE(
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(plain)),
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(corrected)));
+}
+
 TEST(LevelSetOptions, ReinitializationCadence)
 {
     level_set::LevelSetReinitializationOptions options{};

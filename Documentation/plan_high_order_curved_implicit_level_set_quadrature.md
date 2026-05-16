@@ -1305,8 +1305,14 @@ methods and volume correction remain separate numerical-method choices.
       routes high-order Saye-style cut-volume measures through the shared drift
       volume selector and verifies accepted-step drift is computed in the
       physical frame when no physical-measure rules are skipped.
-- [ ] Conservative and nonconservative level-set runs are distinguishable in
+- [x] Conservative and nonconservative level-set runs are distinguishable in
       diagnostics.
+      Covered by
+      `LevelSetOptions.ConservationDiagnosticsDistinguishRunModes`, which
+      verifies plain advection, reinitialized advection without volume
+      correction, and volume-corrected conservative runs emit distinct
+      conservation diagnostic tokens. Runtime maintenance diagnostics now log
+      that token alongside the enabled maintenance modes.
 
 ### Literature Support
 
