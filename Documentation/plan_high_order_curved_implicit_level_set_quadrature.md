@@ -957,7 +957,7 @@ linear-solver problems.
 ### Implementation Checklist
 
 - [ ] Extend cut-context rebuild log fields.
-- [ ] Extend smoke-script parsing for high-order backend diagnostics.
+- [x] Extend smoke-script parsing for high-order backend diagnostics.
 - [ ] Extend `WetVolumeFraction` output to use high-order retained active rules.
 - [ ] Add optional curved-interface surface output for inspection.
 - [ ] Warn when vertex-sign `ActiveFluid` and high-order wet fractions disagree.
@@ -967,7 +967,7 @@ linear-solver problems.
 - [ ] Output writes high-order `WetVolumeFraction`.
 - [ ] Debug output identifies fallback cells.
 - [x] Curved-interface visualization contains nonzero surface data.
-- [ ] Smoke parsing fails when high-order mode silently falls back too often.
+- [x] Smoke parsing fails when high-order mode silently falls back too often.
 
 ### Literature Support
 
@@ -1056,7 +1056,7 @@ finite-difference component checks are valuable for isolating assembly defects.
 - [x] Add fixed-geometry finite-difference tests for high-order `dI`.
 - [x] Add high-order cut-adjacent stabilization assembly tests.
 - [x] Add a compact high-order MMS traveling-interface fixture.
-- [ ] Add smoke-script switches for high-order backend and fallback thresholds.
+- [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
 ### Tests

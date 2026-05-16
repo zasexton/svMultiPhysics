@@ -260,7 +260,15 @@ def configure_solver(solver_xml: Path,
                      disable_vtk_output: bool = False,
                      final_output_only: bool = False,
                      vtk_save_increment: int | None = None,
-                     start_saving_after_step: int | None = None) -> None:
+                     start_saving_after_step: int | None = None,
+                     generated_interface_geometry: str | None = None,
+                     implicit_cut_quadrature_backend: str | None = None,
+                     implicit_cut_fallback_policy: str | None = None,
+                     implicit_cut_root_tolerance: float | None = None,
+                     implicit_cut_max_subdivision_depth: int | None = None,
+                     generated_interface_quadrature_order: int | None = None,
+                     interface_quadrature_order: int | None = None,
+                     volume_quadrature_order: int | None = None) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -354,6 +362,22 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Enable_velocity_extension", "false")
     else:
         require_text(free_surface, "Enable_velocity_extension", "true")
+    if generated_interface_geometry is not None:
+        set_text(free_surface, "Generated_interface_geometry", generated_interface_geometry)
+    if implicit_cut_quadrature_backend is not None:
+        set_text(free_surface, "Implicit_cut_quadrature_backend", implicit_cut_quadrature_backend)
+    if implicit_cut_fallback_policy is not None:
+        set_text(free_surface, "Implicit_cut_fallback_policy", implicit_cut_fallback_policy)
+    if implicit_cut_root_tolerance is not None:
+        set_text(free_surface, "Implicit_cut_root_tolerance", f"{implicit_cut_root_tolerance:.16g}")
+    if implicit_cut_max_subdivision_depth is not None:
+        set_text(free_surface, "Implicit_cut_max_subdivision_depth", str(implicit_cut_max_subdivision_depth))
+    if generated_interface_quadrature_order is not None:
+        set_text(free_surface, "Generated_interface_quadrature_order", str(generated_interface_quadrature_order))
+    if interface_quadrature_order is not None:
+        set_text(free_surface, "Interface_quadrature_order", str(interface_quadrature_order))
+    if volume_quadrature_order is not None:
+        set_text(free_surface, "Volume_quadrature_order", str(volume_quadrature_order))
 
     if disable_coupled_outer_fgmres:
         assert ns_solver is not None
@@ -1686,6 +1710,37 @@ def diagnostic_generated_pruned_volume(diagnostics: dict[str, Any]) -> float | N
     return max(volumes)
 
 
+def diagnostic_implicit_cut_fallback_cells(diagnostics: dict[str, Any]) -> int | None:
+    counts = [
+        int(record["implicit_cut_fallback_cells"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("implicit_cut_fallback_cells"), int)
+    ]
+    if not counts:
+        return None
+    return max(counts)
+
+
+def diagnostic_cut_context_min_int(diagnostics: dict[str, Any], key: str) -> int | None:
+    values = [
+        int(record[key])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get(key), int)
+    ]
+    if not values:
+        return None
+    return min(values)
+
+
+def diagnostic_cut_context_value_counts(diagnostics: dict[str, Any], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in diagnostics.get("cut_context_rebuilds", []):
+        value = record.get(key)
+        if value is not None:
+            increment_count(counts, str(value))
+    return counts
+
+
 def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None:
     for record in reversed(diagnostics.get("hydrostatic_initializations", [])):
         checked = record.get("checked_gauge_constraints")
@@ -1828,6 +1883,82 @@ def assembly_efficiency_errors(metrics: dict[str, Any],
     return errors
 
 
+def cut_context_policy_errors(metrics: dict[str, Any],
+                              args: argparse.Namespace) -> list[str]:
+    errors = []
+    diagnostics = metrics["diagnostics"]
+    records = diagnostics.get("cut_context_rebuilds", [])
+    if args.require_high_order_cut_context_diagnostics:
+        if not records:
+            errors.append("cut-context rebuild diagnostics were not reported")
+        else:
+            required = (
+                "generated_interface_geometry",
+                "implicit_cut_quadrature_backend",
+                "implicit_cut_fallback_policy",
+                "implicit_cut_fallback_cells",
+                "achieved_interface_quadrature_order",
+                "achieved_volume_quadrature_order",
+            )
+            missing = [
+                key for key in required
+                if not any(key in record for record in records)
+            ]
+            if missing:
+                errors.append(
+                    "cut-context diagnostics are missing high-order policy field(s): "
+                    + ", ".join(missing)
+                )
+    for arg_name, metric_name, label in (
+            ("expect_generated_interface_geometry",
+             "diagnostic_generated_interface_geometry_counts",
+             "generated interface geometry"),
+            ("expect_implicit_cut_quadrature_backend",
+             "diagnostic_implicit_cut_quadrature_backend_counts",
+             "implicit cut quadrature backend"),
+            ("expect_implicit_cut_fallback_policy",
+             "diagnostic_implicit_cut_fallback_policy_counts",
+             "implicit cut fallback policy")):
+        expected = getattr(args, arg_name)
+        if expected is None:
+            continue
+        counts = metrics.get(metric_name)
+        if not isinstance(counts, dict) or not counts:
+            errors.append(f"diagnostic {label} counts are unavailable")
+        elif expected not in counts:
+            observed = ", ".join(str(key) for key in sorted(counts))
+            errors.append(
+                f"diagnostic {label} {observed or 'unavailable'} does not include {expected}"
+            )
+    if args.max_diagnostic_implicit_cut_fallback_cells is not None:
+        fallback_cells = metrics.get("diagnostic_implicit_cut_fallback_cells")
+        if not isinstance(fallback_cells, int):
+            errors.append("diagnostic implicit-cut fallback cell count is unavailable")
+        elif fallback_cells > args.max_diagnostic_implicit_cut_fallback_cells:
+            errors.append(
+                f"diagnostic implicit-cut fallback cells {fallback_cells} exceed "
+                f"{args.max_diagnostic_implicit_cut_fallback_cells}"
+            )
+    for arg_name, metric_name, label in (
+            ("min_diagnostic_achieved_interface_quadrature_order",
+             "diagnostic_achieved_interface_quadrature_order_min",
+             "achieved interface quadrature order"),
+            ("min_diagnostic_achieved_volume_quadrature_order",
+             "diagnostic_achieved_volume_quadrature_order_min",
+             "achieved volume quadrature order")):
+        minimum = getattr(args, arg_name)
+        if minimum is None:
+            continue
+        value = metrics.get(metric_name)
+        if not isinstance(value, int):
+            errors.append(f"diagnostic {label} is unavailable")
+        elif value < minimum:
+            errors.append(
+                f"diagnostic {label} {value} is below {minimum}"
+            )
+    return errors
+
+
 def timeout_before_solution_state(diagnostics: dict[str, Any]) -> bool:
     summary = diagnostics.get("time_loop", {}).get("summary", {})
     if not isinstance(summary, dict):
@@ -1960,6 +2091,27 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     generated_pruned_volume = diagnostic_generated_pruned_volume(diagnostics)
     if generated_pruned_volume is not None:
         metrics["diagnostic_generated_pruned_volume"] = generated_pruned_volume
+    implicit_fallback_cells = diagnostic_implicit_cut_fallback_cells(diagnostics)
+    if implicit_fallback_cells is not None:
+        metrics["diagnostic_implicit_cut_fallback_cells"] = implicit_fallback_cells
+    for source, target in (
+            ("achieved_interface_quadrature_order",
+             "diagnostic_achieved_interface_quadrature_order_min"),
+            ("achieved_volume_quadrature_order",
+             "diagnostic_achieved_volume_quadrature_order_min")):
+        value = diagnostic_cut_context_min_int(diagnostics, source)
+        if value is not None:
+            metrics[target] = value
+    for source, target in (
+            ("generated_interface_geometry",
+             "diagnostic_generated_interface_geometry_counts"),
+            ("implicit_cut_quadrature_backend",
+             "diagnostic_implicit_cut_quadrature_backend_counts"),
+            ("implicit_cut_fallback_policy",
+             "diagnostic_implicit_cut_fallback_policy_counts")):
+        counts = diagnostic_cut_context_value_counts(diagnostics, source)
+        if counts:
+            metrics[target] = top_counts(counts)
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
@@ -2545,6 +2697,20 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "ns_cg_tolerance",
         "linear_solver_type",
         "linear_preconditioner",
+        "generated_interface_geometry",
+        "implicit_cut_quadrature_backend",
+        "implicit_cut_fallback_policy",
+        "implicit_cut_root_tolerance",
+        "implicit_cut_max_subdivision_depth",
+        "generated_interface_quadrature_order",
+        "interface_quadrature_order",
+        "volume_quadrature_order",
+        "max_diagnostic_implicit_cut_fallback_cells",
+        "min_diagnostic_achieved_interface_quadrature_order",
+        "min_diagnostic_achieved_volume_quadrature_order",
+        "expect_generated_interface_geometry",
+        "expect_implicit_cut_quadrature_backend",
+        "expect_implicit_cut_fallback_policy",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -2571,6 +2737,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_jacobian_component_block_diagnostics",
         "require_fsils_matrix_diagnostics",
         "require_assembly_topology_consistency",
+        "require_high_order_cut_context_diagnostics",
+        "use_high_order_implicit_cuts",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -2691,6 +2859,7 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("form block installation diagnostics were not reported")
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(diagnostics))
+    errors.extend(cut_context_policy_errors(metrics, args))
     if (args.require_newton_assembly_diagnostics and
             not diagnostics.get("newton_assemblies")):
         errors.append("Newton assembly diagnostics were not reported")
@@ -3091,6 +3260,7 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         return evaluate_timeout_diagnostics(metrics, args)
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
+    errors.extend(cut_context_policy_errors(metrics, args))
     if (args.require_newton_assembly_diagnostics and
             not metrics["diagnostics"].get("newton_assemblies")):
         errors.append("Newton assembly diagnostics were not reported")
@@ -3356,6 +3526,14 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 final_output_only=args.final_output_only,
                 vtk_save_increment=args.vtk_save_increment,
                 start_saving_after_step=args.start_saving_after_step,
+                generated_interface_geometry=args.generated_interface_geometry,
+                implicit_cut_quadrature_backend=args.implicit_cut_quadrature_backend,
+                implicit_cut_fallback_policy=args.implicit_cut_fallback_policy,
+                implicit_cut_root_tolerance=args.implicit_cut_root_tolerance,
+                implicit_cut_max_subdivision_depth=args.implicit_cut_max_subdivision_depth,
+                generated_interface_quadrature_order=args.generated_interface_quadrature_order,
+                interface_quadrature_order=args.interface_quadrature_order,
+                volume_quadrature_order=args.volume_quadrature_order,
             )
 
         try:
@@ -3485,6 +3663,51 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             temp_context.cleanup()
 
 
+def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
+    if not args.use_high_order_implicit_cuts:
+        return
+    if args.generated_interface_geometry is None:
+        args.generated_interface_geometry = "HighOrderImplicit"
+    if args.implicit_cut_quadrature_backend is None:
+        args.implicit_cut_quadrature_backend = "SayeHyperrectangle"
+    if args.implicit_cut_fallback_policy is None:
+        args.implicit_cut_fallback_policy = "Fail"
+    if args.implicit_cut_root_tolerance is None:
+        args.implicit_cut_root_tolerance = 1.0e-10
+    if args.implicit_cut_max_subdivision_depth is None:
+        args.implicit_cut_max_subdivision_depth = 8
+    if args.generated_interface_quadrature_order is None:
+        args.generated_interface_quadrature_order = 2
+    if args.interface_quadrature_order is None:
+        args.interface_quadrature_order = 2
+    if args.volume_quadrature_order is None:
+        args.volume_quadrature_order = 2
+    if args.expect_generated_interface_geometry is None:
+        args.expect_generated_interface_geometry = args.generated_interface_geometry
+    if args.expect_implicit_cut_quadrature_backend is None:
+        args.expect_implicit_cut_quadrature_backend = args.implicit_cut_quadrature_backend
+    if args.expect_implicit_cut_fallback_policy is None:
+        args.expect_implicit_cut_fallback_policy = args.implicit_cut_fallback_policy
+    if args.max_diagnostic_implicit_cut_fallback_cells is None:
+        args.max_diagnostic_implicit_cut_fallback_cells = 0
+    if args.min_diagnostic_achieved_volume_quadrature_order is None:
+        args.min_diagnostic_achieved_volume_quadrature_order = 2
+    args.require_high_order_cut_context_diagnostics = True
+
+
+def validate_high_order_implicit_cases(cases: list[str],
+                                       args: argparse.Namespace) -> None:
+    if not args.use_high_order_implicit_cuts:
+        return
+    synthetic = [name for name in cases if CASES[name] is None]
+    if synthetic:
+        names = ", ".join(synthetic)
+        raise ValueError(
+            "--use-high-order-implicit-cuts requires solver.xml-backed cases; "
+            f"synthetic case(s) cannot be rewritten: {names}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--solver", type=Path)
@@ -3521,6 +3744,13 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-active-pruned-volume-regions", type=int)
     parser.add_argument("--min-diagnostic-active-min-volume-fraction", type=float)
     parser.add_argument("--min-diagnostic-generated-pruned-volume-rules", type=int)
+    parser.add_argument("--max-diagnostic-implicit-cut-fallback-cells", type=int)
+    parser.add_argument("--min-diagnostic-achieved-interface-quadrature-order", type=int)
+    parser.add_argument("--min-diagnostic-achieved-volume-quadrature-order", type=int)
+    parser.add_argument("--expect-generated-interface-geometry")
+    parser.add_argument("--expect-implicit-cut-quadrature-backend")
+    parser.add_argument("--expect-implicit-cut-fallback-policy")
+    parser.add_argument("--require-high-order-cut-context-diagnostics", action="store_true")
     parser.add_argument("--min-diagnostic-blockschur-true-residual-retries", type=int)
     parser.add_argument("--require-newton-direction-check-diagnostics", action="store_true")
     parser.add_argument("--require-jacobian-check-diagnostics", action="store_true")
@@ -3558,6 +3788,15 @@ def main() -> int:
     parser.add_argument("--linear-solver-type")
     parser.add_argument("--linear-preconditioner")
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
+    parser.add_argument("--use-high-order-implicit-cuts", action="store_true")
+    parser.add_argument("--generated-interface-geometry")
+    parser.add_argument("--implicit-cut-quadrature-backend")
+    parser.add_argument("--implicit-cut-fallback-policy")
+    parser.add_argument("--implicit-cut-root-tolerance", type=float)
+    parser.add_argument("--implicit-cut-max-subdivision-depth", type=int)
+    parser.add_argument("--generated-interface-quadrature-order", type=int)
+    parser.add_argument("--interface-quadrature-order", type=int)
+    parser.add_argument("--volume-quadrature-order", type=int)
     parser.add_argument("--enable-blockschur-true-residual-retry", action="store_true")
     parser.add_argument("--enable-jacobian-check", action="store_true")
     parser.add_argument("--jacobian-check-iteration", type=int)
@@ -3599,9 +3838,11 @@ def main() -> int:
     parser.add_argument("--max-eigen-factorization-pressure-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-nonfinite-entries", type=int)
     args = parser.parse_args()
+    apply_high_order_implicit_defaults(args)
 
     solver = resolve_solver(args.solver)
     cases = args.case or ["mini2d"]
+    validate_high_order_implicit_cases(cases, args)
     report = []
     for case_name in cases:
         report.append(run_case(case_name, solver, args))
