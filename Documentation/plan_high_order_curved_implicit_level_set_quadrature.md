@@ -1480,7 +1480,10 @@ prevents solver behavior from hiding geometry errors.
       domains regardless of whether the backend is Saye hyperrectangle or
       high-order subcell decomposition.
 - [x] Add separate tests for reference measure and physical mapped measure.
-- [ ] Add deterministic randomized cut-position tests with fixed seeds.
+- [x] Add deterministic randomized cut-position tests with fixed seeds.
+      A fixed-seed line-cut sweep samples multiple cut positions through the
+      reference quad and checks exact analytic area, interface length, retained
+      rule partitioning, and finite point/weight data.
 - [ ] Add failure-mode tests for near-tangent and tiny sliver cuts.
 
 ### Tests

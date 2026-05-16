@@ -24,6 +24,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -2270,6 +2271,66 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1LineMatchesLinearMeasures)
     EXPECT_NEAR(result.summary.negative_volume_measure, 2.0, 1.0e-12);
     EXPECT_NEAR(result.summary.positive_volume_measure, 2.0, 1.0e-12);
     EXPECT_NEAR(result.summary.measure, 2.0, 1.0e-12);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleSeededLineCutsMatchAnalyticAreas)
+{
+    constexpr int interface_marker = 184;
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 4u);
+    const auto offset = system.fieldDofOffset(phi);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    std::mt19937_64 rng(0x5eed1234ull);
+    std::uniform_real_distribution<FE::Real> cut_distribution(-0.75, 0.75);
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    for (int sample = 0; sample < 6; ++sample) {
+        const FE::Real cut = cut_distribution(rng);
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (std::size_t i = 0; i < 4u; ++i) {
+            const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+            solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+                x[0] - cut;
+        }
+
+        const auto result = lifecycle.build(system, options, solution);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+        EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+        EXPECT_NEAR(result.summary.negative_volume_measure,
+                    2.0 * (cut + 1.0),
+                    1.0e-12);
+        EXPECT_NEAR(result.summary.positive_volume_measure,
+                    2.0 * (1.0 - cut),
+                    1.0e-12);
+        EXPECT_NEAR(result.summary.measure, 2.0, 1.0e-12);
+        expectSingleParentVolumeRulesPartitionMeasure(result.domain, 1.0e-12);
+        expectGeneratedCutRulesAreFinite(result.domain);
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1PlaneMatchesHexMeasures)
