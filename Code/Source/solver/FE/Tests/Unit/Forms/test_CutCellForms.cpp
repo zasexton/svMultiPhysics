@@ -1524,3 +1524,40 @@ TEST(CutCellForms, CutInterfaceIntegralJITMatchesInterpreterOnSameCutQuadrature)
     EXPECT_NEAR(jit, expected, 1.0e-13);
     EXPECT_NEAR(jit, interp, 1.0e-13);
 }
+
+TEST(CutCellForms, CutInterfaceSurfaceTractionSignFollowsQuadratureNormal)
+{
+    auto rule = svmp::FE::geometry::makeAxisAlignedBoxCutInterfaceQuadrature(
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 1.0, 1.0}},
+        /*axis=*/0,
+        /*cut_coordinate=*/Real(0.25),
+        "traction-plane");
+    ASSERT_EQ(rule.kind, CutQuadratureKind::Interface);
+    ASSERT_FALSE(rule.points.empty());
+
+    for (auto& point : rule.points) {
+        point.normal = {{1.0, 0.0, 0.0}};
+    }
+    const auto traction = FormExpr::asVector({
+        FormExpr::constant(2.0),
+        FormExpr::constant(-3.0),
+        FormExpr::constant(0.5),
+    });
+    const auto normal_traction = inner(traction, FormExpr::normal());
+    std::vector<Real> constants;
+
+    const auto positive_ctx = makeCutAssemblyContext(rule, constants);
+    const Real positive =
+        assembleInterpreterInterfaceTotal(normal_traction, positive_ctx, /*marker=*/19);
+
+    for (auto& point : rule.points) {
+        point.normal = {{-1.0, 0.0, 0.0}};
+    }
+    const auto negative_ctx = makeCutAssemblyContext(rule, constants);
+    const Real negative =
+        assembleInterpreterInterfaceTotal(normal_traction, negative_ctx, /*marker=*/19);
+
+    EXPECT_NEAR(positive, 2.0 * rule.measure, 1.0e-13);
+    EXPECT_NEAR(negative, -2.0 * rule.measure, 1.0e-13);
+}
