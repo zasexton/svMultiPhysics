@@ -578,6 +578,7 @@ public:
 
     // ---- Constraints lifecycle ----
     void updateConstraints(double time, double dt = 0.0);
+    void rebuildConstraintState();
     [[nodiscard]] constraints::ConstraintDependencyDeclaration constraintDependencyDeclaration() const;
     [[nodiscard]] constraints::ConstraintRevisionSnapshot constraintRevisionSnapshot() const noexcept;
     [[nodiscard]] bool constraintStateStaleForCurrentRevisions() const;

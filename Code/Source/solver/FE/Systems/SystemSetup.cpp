@@ -5375,6 +5375,49 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     is_setup_ = true;
 }
 
+void FESystem::rebuildConstraintState()
+{
+    requireSetup();
+
+    affine_constraints_.clear();
+    for (auto& c : system_constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: system constraint");
+        c->apply(*this, affine_constraints_);
+    }
+    for (const auto& c : constraint_defs_) {
+        FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: constraint");
+        c->apply(affine_constraints_);
+    }
+
+#if FE_HAS_MPI
+    int mpi_initialized_constraints = 0;
+    MPI_Initialized(&mpi_initialized_constraints);
+    std::optional<constraints::ParallelConstraints> parallel;
+    if (mpi_initialized_constraints) {
+        parallel.emplace(dof_handler_.mpiComm(), dof_handler_.getPartition());
+    } else {
+        parallel.emplace(dof_handler_.getPartition());
+    }
+#else
+    std::optional<constraints::ParallelConstraints> parallel;
+    parallel.emplace(dof_handler_.getPartition());
+#endif
+    if (parallel && parallel->isParallel()) {
+        parallel->synchronize(affine_constraints_);
+        if (!parallel->validateConsistency(affine_constraints_)) {
+            FE_THROW(FEException,
+                     "FESystem::rebuildConstraintState: algebraic constraints are inconsistent across MPI ranks "
+                     "after synchronization.");
+        }
+    }
+
+    affine_constraints_.close();
+    bumpConstraintLayoutRevision();
+    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
+    buildConstraintSummary();
+    invalidateAnalysisCache();
+}
+
 void FESystem::buildAssemblyPlans()
 {
     assembly_plan_by_op_.clear();

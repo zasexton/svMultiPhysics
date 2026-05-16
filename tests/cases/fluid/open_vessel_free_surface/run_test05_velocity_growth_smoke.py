@@ -1328,6 +1328,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "interior_face_timings": [],
         "cut_volume_timings": [],
         "eigen_factorization_diagnostics": [],
+        "active_pressure_support_constraints": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
@@ -1434,6 +1435,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         elif "Eigen direct factorization diagnostic" in line:
             diagnostics["eigen_factorization_diagnostics"].append(
                 parse_eigen_factorization_diagnostic(line)
+            )
+        elif "diagnostic=level_set_active_side_vertex_constraint" in line:
+            diagnostics["active_pressure_support_constraints"].append(
+                parse_key_values(line)
             )
         elif "JIT specialization trace:" in line:
             diagnostics["jit_specialization_traces"].append(parse_jit_specialization_trace(line))
@@ -2015,6 +2020,34 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             value = latest_eigen.get(key)
             if isinstance(value, str):
                 metrics[f"diagnostic_eigen_factorization_latest_{key}"] = value
+    if diagnostics.get("active_pressure_support_constraints"):
+        records = diagnostics["active_pressure_support_constraints"]
+        latest_support = records[-1]
+        metrics["latest_active_pressure_support_constraint"] = latest_support
+        metrics["diagnostic_active_pressure_support_constraint_count"] = len(records)
+        for source, target in (
+                ("active_support_cells",
+                 "diagnostic_active_pressure_support_max_active_support_cells"),
+                ("active_support_vertices",
+                 "diagnostic_active_pressure_support_max_active_support_vertices"),
+                ("inactive_vertices",
+                 "diagnostic_active_pressure_support_max_inactive_vertices"),
+                ("constrained_owned_dofs",
+                 "diagnostic_active_pressure_support_max_constrained_owned_dofs"),
+                ("inactive_sign_vertices_with_support",
+                 "diagnostic_active_pressure_support_max_inactive_sign_vertices_with_support"),
+                ("active_sign_vertices_without_support",
+                 "diagnostic_active_pressure_support_max_active_sign_vertices_without_support")):
+            values = [
+                record.get(source)
+                for record in records
+                if isinstance(record.get(source), (int, float))
+            ]
+            if values:
+                metrics[target] = max(values)
+        value = latest_support.get("inactive_vertex_runs")
+        if isinstance(value, str):
+            metrics["diagnostic_active_pressure_support_latest_inactive_vertex_runs"] = value
     if diagnostics.get("jit_specialization_traces"):
         traces = diagnostics["jit_specialization_traces"]
         metrics["latest_jit_specialization_trace"] = traces[-1]
@@ -2458,6 +2491,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if (args.require_eigen_factorization_diagnostics and
             not diagnostics.get("eigen_factorization_diagnostics")):
         errors.append("Eigen factorization diagnostics were not reported")
+    if (args.require_active_pressure_support_diagnostics and
+            not diagnostics.get("active_pressure_support_constraints")):
+        errors.append("active pressure support diagnostics were not reported")
     if args.max_eigen_factorization_zero_rows is not None:
         zero_rows = metrics.get("diagnostic_eigen_factorization_max_zero_rows")
         if not isinstance(zero_rows, (int, float)):
@@ -2794,6 +2830,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_eigen_factorization_diagnostics and
             not metrics["diagnostics"].get("eigen_factorization_diagnostics")):
         errors.append("Eigen factorization diagnostics were not reported")
+    if (args.require_active_pressure_support_diagnostics and
+            not metrics["diagnostics"].get("active_pressure_support_constraints")):
+        errors.append("active pressure support diagnostics were not reported")
     if args.max_eigen_factorization_zero_rows is not None:
         zero_rows = metrics.get("diagnostic_eigen_factorization_max_zero_rows")
         if not isinstance(zero_rows, (int, float)):
@@ -3164,6 +3203,7 @@ def main() -> int:
     parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
     parser.add_argument("--require-eigen-factorization-diagnostics", action="store_true")
+    parser.add_argument("--require-active-pressure-support-diagnostics", action="store_true")
     parser.add_argument("--max-eigen-factorization-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-pressure-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-nonfinite-entries", type=int)

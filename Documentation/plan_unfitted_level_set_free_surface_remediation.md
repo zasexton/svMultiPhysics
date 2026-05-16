@@ -580,6 +580,10 @@ benchmark runs.
       D18 probe showing before/after GMRES solve resident memory is unchanged;
       the remaining growth occurs before the solve call, across assembly and
       accepted cut-context refresh boundaries.
+- [x] Refresh active-domain pressure constraints from the current level-set
+      solution during active cut-context rebuilds, and parse support diagnostics
+      in the smoke script so inactive pressure DOFs are checked against current
+      wet cell support without VTK output.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

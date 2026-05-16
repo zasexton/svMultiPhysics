@@ -2010,6 +2010,101 @@ std::vector<double> evaluateVertexField(
   return values;
 }
 
+std::size_t syncActiveLevelSetVertexFieldsFromSolution(
+    application::core::SimulationComponents& sim,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    std::span<const svmp::FE::Real> fe_solution)
+{
+  if (!sim.fe_system || !sim.primary_mesh || requests.empty()) {
+    return 0u;
+  }
+
+  auto& system = *sim.fe_system;
+  auto& mesh = *sim.primary_mesh;
+  const auto n_vertices =
+      static_cast<svmp::FE::GlobalIndex>(mesh.n_vertices());
+  std::set<std::string> visited_fields;
+  std::size_t changed_fields = 0u;
+
+  for (const auto& request : requests) {
+    if (!visited_fields.insert(request.level_set_field_name).second) {
+      continue;
+    }
+    if (!mesh.has_field(svmp::EntityKind::Vertex,
+                        request.level_set_field_name)) {
+      continue;
+    }
+
+    const auto field = system.findFieldByName(request.level_set_field_name);
+    if (field == svmp::FE::INVALID_FIELD_ID) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active level-set support refresh could not find FE field '" +
+          request.level_set_field_name + "'.");
+    }
+    const auto& field_dofs = system.fieldDofHandler(field);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    if (entity_map == nullptr ||
+        entity_map->numVertices() != n_vertices) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active level-set support refresh requires one vertex DOF map matching the mesh.");
+    }
+
+    const auto field_offset = system.fieldDofOffset(field);
+    const auto n_field_dofs = field_dofs.getNumDofs();
+    if (field_offset < 0 ||
+        n_field_dofs < 0 ||
+        static_cast<std::size_t>(field_offset + n_field_dofs) >
+            fe_solution.size()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active level-set support refresh received an incompatible solution span.");
+    }
+
+    const auto handle = mesh.field_handle(
+        svmp::EntityKind::Vertex, request.level_set_field_name);
+    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64 ||
+        mesh.field_components(handle) < 1u ||
+        mesh.field_entity_count(handle) <
+            static_cast<std::size_t>(n_vertices)) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active level-set support refresh requires a scalar Float64 vertex mesh field.");
+    }
+    auto* data = static_cast<double*>(mesh.field_data(handle));
+    if (data == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Active level-set support refresh found an empty vertex mesh field.");
+    }
+
+    const auto components = mesh.field_components(handle);
+    bool field_changed = false;
+    for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+      const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+      if (vertex_dofs.size() != 1u) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Active level-set support refresh requires one scalar vertex DOF.");
+      }
+      const auto dof = field_offset + vertex_dofs.front();
+      if (dof < 0 ||
+          static_cast<std::size_t>(dof) >= fe_solution.size()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Active level-set support refresh found a vertex DOF outside the solution span.");
+      }
+      const auto value = static_cast<double>(
+          fe_solution[static_cast<std::size_t>(dof)]);
+      auto& target =
+          data[static_cast<std::size_t>(vertex) * components];
+      if (target != value) {
+        target = value;
+        field_changed = true;
+      }
+    }
+    if (field_changed) {
+      ++changed_fields;
+    }
+  }
+
+  return changed_fields;
+}
+
 bool updateLevelSetAdvectionVelocities(
     application::core::SimulationComponents& sim,
     svmp::FE::timestepping::TimeHistory& history,
@@ -2197,6 +2292,22 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   const auto requests = activeCutVolumeRequests(params);
   if (requests.empty()) {
     return report;
+  }
+
+  const auto synchronized_level_set_fields =
+      syncActiveLevelSetVertexFieldsFromSolution(sim, requests, fe_solution);
+  if (synchronized_level_set_fields > 0u) {
+    sim.fe_system->rebuildConstraintState();
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Active pressure support constraint refresh"
+        << " diagnostic=active_pressure_constraint_refresh"
+        << " provenance=" << (provenance != nullptr ? provenance : "unknown")
+        << " solution_source="
+        << (solution_source != nullptr ? solution_source : "unknown")
+        << " synchronized_level_set_fields="
+        << synchronized_level_set_fields
+        << " constraints=" << sim.fe_system->constraints().numConstraints()
+        << std::endl;
   }
 
   auto context =
