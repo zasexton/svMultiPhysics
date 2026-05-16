@@ -1982,6 +1982,10 @@ def cut_context_policy_errors(metrics: dict[str, Any],
                 "implicit_cut_fallback_cells",
                 "achieved_interface_quadrature_order",
                 "achieved_volume_quadrature_order",
+                "interface_rule_count",
+                "interface_quadrature_point_count",
+                "active_volume_rule_count",
+                "active_volume_quadrature_point_count",
             )
             missing = [
                 key for key in required

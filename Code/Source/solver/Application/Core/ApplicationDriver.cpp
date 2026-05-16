@@ -2577,6 +2577,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumSize(summary.fragment_count, comm);
     const auto global_active_interface_fragments =
         globalSumSize(summary.active_fragment_count, comm);
+    const auto global_interface_quadrature_points =
+        globalSumSize(summary.quadrature_point_count, comm);
     const auto global_active_volume_regions =
         globalSumSize(active_summary.active_volume_regions, comm);
     const auto global_raw_active_volume_regions =
@@ -2792,7 +2794,12 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " active_side_raw_volume_local=" << raw_active_volume
         << " interface_fragments=" << global_interface_fragments
         << " active_interface_fragments=" << global_active_interface_fragments
+        << " interface_rule_count=" << global_active_interface_fragments
+        << " interface_quadrature_point_count="
+        << global_interface_quadrature_points
         << " active_volume_regions="
+        << global_active_volume_regions
+        << " active_volume_rule_count="
         << global_active_volume_regions
         << " active_raw_volume_regions="
         << global_raw_active_volume_regions
@@ -2807,6 +2814,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " active_full_wet_cells=" << global_full_wet_cells
         << " active_full_dry_cells=" << global_full_dry_cells
         << " active_quadrature_points="
+        << global_active_quadrature_points
+        << " active_volume_quadrature_point_count="
         << global_active_quadrature_points
         << " active_empty_quadrature_regions="
         << global_empty_quadrature_regions
