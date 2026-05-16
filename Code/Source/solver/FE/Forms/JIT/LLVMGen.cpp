@@ -11931,6 +11931,35 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 return makeVector(shape.dims[0], x, y, z);
                             };
 
+                            auto gradFromCoeffs =
+                                [&](llvm::Value* coeffs,
+                                    const std::string& loop_base) -> CodeValue {
+                                if (shape.kind == Shape::Kind::Vector) {
+                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                    const auto sums =
+                                        emitReduceSum(side.n_trial_dofs, loop_base, dim, [&](llvm::Value* j) {
+                                            auto* j64 = builder.CreateZExt(j, i64);
+                                            auto* cj = loadRealPtrAt(coeffs, j64);
+                                            const auto g =
+                                                loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                            std::vector<llvm::Value*> terms;
+                                            terms.reserve(dim);
+                                            for (std::size_t d = 0; d < dim; ++d) {
+                                                terms.push_back(builder.CreateFMul(cj, g[d]));
+                                            }
+                                            return terms;
+                                        });
+                                    auto* x = sums[0];
+                                    auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+                                    auto* z = (dim > 2u) ? sums[2] : rc(0.0);
+                                    return makeVector(shape.dims[0], x, y, z);
+                                }
+                                if (shape.kind == Shape::Kind::Matrix) {
+                                    return reduceCurrentGradientMatrix(side, coeffs, q_index, shape, loop_base);
+                                }
+                                throw std::runtime_error("LLVMGen: cached face grad(u_h) unsupported shape");
+                            };
+
                             auto gradComponentFromField = [&](int fid, std::size_t component) -> CodeValue {
                                 if (shape.kind != Shape::Kind::Vector) {
                                     throw std::runtime_error("LLVMGen: cached face grad(component(field)) expects vector gradient shape");
@@ -12002,6 +12031,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     const int fid = unpackFieldIdImm1(base_op.imm1);
                                     return gradComponentFromField(fid, component);
                                 }
+                                if (base_op.type == FormExprType::TrialFunction) {
+                                    if (!is_residual) {
+                                        throw std::runtime_error(
+                                            "LLVMGen: cached face grad(component(TrialFunction)) only supports residual");
+                                    }
+                                    return gradComponentFromCoeffs(
+                                        side.solution_coefficients, component, value_dim, "face_grad_trial_comp");
+                                }
                                 if (base_op.type == FormExprType::PreviousSolutionRef) {
                                     const int k = static_cast<int>(static_cast<std::int64_t>(base_op.imm0));
                                     auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
@@ -12013,6 +12050,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     return makeZero(shape);
                                 }
                                 throw std::runtime_error("LLVMGen: cached face grad(component(...)) operand not supported");
+                            }
+
+                            if (kid.type == FormExprType::TrialFunction) {
+                                if (!is_residual) {
+                                    throw std::runtime_error(
+                                        "LLVMGen: cached face grad(TrialFunction) only supports residual");
+                                }
+                                return gradFromCoeffs(side.solution_coefficients, "face_grad_trial");
                             }
 
 		                            if (kid.type == FormExprType::PreviousSolutionRef) {
@@ -12073,6 +12118,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
 	                            if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
 	                                const int fid = unpackFieldIdImm1(kid.imm1);
+                                    if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
+                                        return gradFromCoeffs(side.solution_coefficients, "face_grad_state");
+                                    }
 	                                if (shape.kind == Shape::Kind::Vector) {
 	                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
 	                                    auto* entry = fieldEntryPtrFor(plus_side, fid);

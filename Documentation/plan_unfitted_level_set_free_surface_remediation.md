@@ -512,6 +512,18 @@ benchmark runs.
 - [x] Record MMS GMRES component-sweep evidence showing velocity/pressure block
       assembly agrees with fixed-geometry finite differences within the
       diagnostic tolerance.
+- [x] Fix symbolic JIT marked cut-adjacent gradient-jump residual assembly so
+      pressure-stabilization residual and tangent kernels agree with
+      finite-difference checks, and bump the kernel cache schema so stale
+      generated objects are not reused.
+- [x] Record the fresh MMS GMRES component-sweep result after the marked
+      cut-adjacent residual fix: the pressure-pressure block relative mismatch
+      dropped from order one to about 4.7e-9, with object-cache misses and new
+      generated kernel objects confirming the fixed generator path was used.
+- [ ] Investigate the remaining MMS fixed-geometry velocity-column mismatch,
+      led by `column=velocity,row=Pressure` at about 0.91 relative error, and
+      the resulting GMRES true-residual failure before returning to D18/D38
+      qualification.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

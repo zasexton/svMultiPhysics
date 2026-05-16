@@ -14,7 +14,9 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Forms/BoundaryConditions.h"
+#include "Forms/CutCellForms.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -157,17 +159,27 @@ void expectInteriorFaceJitJacobianMatchesCentralFD(const assembly::IMeshAccess& 
                                                    const FormExpr& residual,
                                                    const std::vector<Real>& U,
                                                    Real eps,
-                                                   Real tol)
+                                                   Real tol,
+                                                   int interior_facet_marker = -1,
+                                                   const assembly::CutIntegrationContext* cut_context = nullptr,
+                                                   bool disable_jit_cache = false)
 {
     FormCompiler compiler;
     auto ir = compiler.compileResidual(residual);
 
     auto fallback = std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir), NonlinearKernelOutput::Both);
-    forms::jit::JITKernelWrapper jit_kernel(fallback, makeUnitTestJITOptions());
+    auto jit_options = makeUnitTestJITOptions();
+    if (disable_jit_cache) {
+        jit_options.cache_kernels = false;
+    }
+    forms::jit::JITKernelWrapper jit_kernel(fallback, std::move(jit_options));
     jit_kernel.resolveInlinableConstitutives();
 
     assembly::StandardAssembler assembler;
     assembler.setDofMap(dof_map);
+    if (cut_context != nullptr) {
+        assembler.setCutIntegrationContext(cut_context);
+    }
 
     const GlobalIndex n_dofs = dof_map.getNumDofs();
     assembly::DenseMatrixView J(n_dofs);
@@ -176,7 +188,7 @@ void expectInteriorFaceJitJacobianMatchesCentralFD(const assembly::IMeshAccess& 
     R.zero();
 
     assembler.setCurrentSolution(U);
-    (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, J, &R);
+    (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, J, &R, interior_facet_marker);
 
     for (GlobalIndex j = 0; j < n_dofs; ++j) {
         auto U_plus = U;
@@ -189,14 +201,16 @@ void expectInteriorFaceJitJacobianMatchesCentralFD(const assembly::IMeshAccess& 
         assembly::DenseVectorView Rp(n_dofs);
         M_dummy_p.zero();
         Rp.zero();
-        (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, M_dummy_p, &Rp);
+        (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, M_dummy_p, &Rp,
+                                              interior_facet_marker);
 
         assembler.setCurrentSolution(U_minus);
         assembly::DenseMatrixView M_dummy_m(n_dofs);
         assembly::DenseVectorView Rm(n_dofs);
         M_dummy_m.zero();
         Rm.zero();
-        (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, M_dummy_m, &Rm);
+        (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, M_dummy_m, &Rm,
+                                              interior_facet_marker);
 
         for (GlobalIndex i = 0; i < n_dofs; ++i) {
             const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps);
@@ -457,6 +471,36 @@ TEST(JITTangentFiniteDifferences, DGPenaltyInteriorFaceTangentMatchesCentralDiff
 
     const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1, -0.05, 0.07, -0.11, 0.13};
     expectInteriorFaceJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U, /*eps=*/1e-6, /*tol=*/1e-8);
+}
+
+TEST(JITTangentFiniteDifferences, CutAdjacentGradientPenaltyTangentMatchesCentralDifferences)
+{
+    requireLLVMJITOrSkip();
+
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto residual = cutAdjacentFacetIntegral(
+        FormExpr::constant(Real{2.5}) *
+            inner(cutAdjacentFacetGradientJump(u), cutAdjacentFacetGradientJump(v)),
+        /*facet_set_marker=*/12);
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = 12;
+    handle.name = "test-cut-adjacent-facets";
+    handle.facets = {0};
+    cut_context.addFacetSetHandle(std::move(handle));
+
+    const std::vector<Real> U = {0.12, -0.05, 0.08, 0.02, -0.07, 0.2, 0.05, -0.15};
+    expectInteriorFaceJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U,
+                                                  /*eps=*/1e-6, /*tol=*/5e-7,
+                                                  /*interior_facet_marker=*/12,
+                                                  &cut_context,
+                                                  /*disable_jit_cache=*/true);
 }
 
 TEST(JITTangentFiniteDifferences, MatrixExpCellTangentMatchesCentralDifferences)
