@@ -1119,13 +1119,10 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
         measure_summary.physical_rule_count;
     diagnostic.skipped_physical_volume_rule_count =
         measure_summary.skipped_physical_rule_count;
-    if (measure_summary.skipped_physical_rule_count == 0u) {
-      diagnostic.wet_volume = diagnostic.physical_wet_volume;
-      diagnostic.wet_volume_frame = "physical";
-    } else {
-      diagnostic.wet_volume = diagnostic.reference_wet_volume;
-      diagnostic.wet_volume_frame = "reference_fallback";
-    }
+    const auto selected_wet_volume =
+        application::core::selectWetVolumeForDrift(measure_summary);
+    diagnostic.wet_volume = selected_wet_volume.wet_volume;
+    diagnostic.wet_volume_frame = selected_wet_volume.frame;
     for (const auto* rule : rules) {
       if (rule != nullptr) {
         const auto cell = rule->provenance.parent_entity;

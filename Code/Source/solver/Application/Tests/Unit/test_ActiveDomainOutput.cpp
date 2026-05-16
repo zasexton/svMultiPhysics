@@ -279,6 +279,80 @@ TEST(ActiveDomainOutput, CollectsPhysicalMeasureForHighOrderCurvedCutRule)
   EXPECT_NEAR(summary.physical_measure, 3.0, 1.0e-12);
 }
 
+TEST(ActiveDomainOutput, HighOrderWetVolumeDriftUsesPhysicalMeasure)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      2.0, 0.0,
+      2.0, 3.0,
+      0.0, 3.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule initial_rule;
+  initial_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  initial_rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  initial_rule.measure = 2.0;
+  initial_rule.parent_measure = 4.0;
+  initial_rule.volume_fraction = 0.5;
+  initial_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  initial_rule.curved_geometry = true;
+  initial_rule.policy.kind =
+      svmp::FE::geometry::CutQuadratureConstructionKind::MomentFittedImplicit;
+  initial_rule.policy.polynomial_order = 4;
+  initial_rule.policy.moment_fitted = true;
+  initial_rule.provenance.frame =
+      svmp::FE::geometry::CutGeometryFrame::Reference;
+  initial_rule.provenance.parent_entity = 0;
+  initial_rule.provenance.implicit_geometry_mode = "HighOrderImplicit";
+  initial_rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
+  initial_rule.provenance.achieved_quadrature_order = 4;
+  initial_rule.points.push_back(
+      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+
+  auto later_rule = initial_rule;
+  later_rule.measure = 2.2;
+  later_rule.points.front().weight = 2.2;
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> initial_rules = {
+      &initial_rule,
+  };
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> later_rules = {
+      &later_rule,
+  };
+  const auto initial_summary =
+      application::core::collectCutVolumeMeasures(mesh_access, initial_rules);
+  const auto later_summary =
+      application::core::collectCutVolumeMeasures(mesh_access, later_rules);
+  const auto initial_selection =
+      application::core::selectWetVolumeForDrift(initial_summary);
+  const auto later_selection =
+      application::core::selectWetVolumeForDrift(later_summary);
+
+  EXPECT_EQ(initial_selection.frame, "physical");
+  EXPECT_EQ(later_selection.frame, "physical");
+  EXPECT_NEAR(initial_selection.wet_volume, 3.0, 1.0e-12);
+  EXPECT_NEAR(later_selection.wet_volume, 3.3, 1.0e-12);
+
+  std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
+  const auto first =
+      application::core::computeWetVolumeDrift(
+          "phi|high_order|917",
+          initial_selection.wet_volume,
+          initial_wet_volume_by_key);
+  const auto later =
+      application::core::computeWetVolumeDrift(
+          "phi|high_order|917",
+          later_selection.wet_volume,
+          initial_wet_volume_by_key);
+
+  EXPECT_NEAR(first.initial_wet_volume, 3.0, 1.0e-12);
+  EXPECT_NEAR(first.wet_volume_drift, 0.0, 1.0e-12);
+  EXPECT_NEAR(later.initial_wet_volume, 3.0, 1.0e-12);
+  EXPECT_NEAR(later.wet_volume_drift, 0.3, 1.0e-12);
+  EXPECT_NEAR(later.relative_wet_volume_drift, 0.1, 1.0e-12);
+}
+
 TEST(ActiveDomainOutput, CollectsPhysicalFullCellMeasureOnDistortedQuad)
 {
   auto mesh = makeSingleQuadCellMesh({

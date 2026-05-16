@@ -1299,7 +1299,12 @@ methods and volume correction remain separate numerical-method choices.
       which repairs a signed-distance plane whose interface spans a full quad
       cut segment and verifies the reported maximum and L2 interface
       displacement remain below the default `max(tol, 0.05*h_min)` gate.
-- [ ] Long-run wet-volume drift reports physical high-order wet volume.
+- [x] Long-run wet-volume drift reports physical high-order wet volume.
+      Covered by
+      `ActiveDomainOutput.HighOrderWetVolumeDriftUsesPhysicalMeasure`, which
+      routes high-order Saye-style cut-volume measures through the shared drift
+      volume selector and verifies accepted-step drift is computed in the
+      physical frame when no physical-measure rules are skipped.
 - [ ] Conservative and nonconservative level-set runs are distinguishable in
       diagnostics.
 

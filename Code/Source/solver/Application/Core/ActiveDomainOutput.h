@@ -31,9 +31,17 @@ struct CutVolumeMeasureSummary {
   std::size_t skipped_physical_rule_count{0};
 };
 
+struct WetVolumeMeasureSelection {
+  svmp::FE::Real wet_volume{0.0};
+  std::string frame{"physical"};
+};
+
 CutVolumeMeasureSummary collectCutVolumeMeasures(
     const svmp::FE::assembly::IMeshAccess& mesh,
     const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
+
+WetVolumeMeasureSelection selectWetVolumeForDrift(
+    const CutVolumeMeasureSummary& summary);
 
 std::size_t writeWetVolumeFractionField(
     svmp::Mesh& mesh,

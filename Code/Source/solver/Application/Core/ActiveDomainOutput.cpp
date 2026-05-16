@@ -173,6 +173,20 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
   return summary;
 }
 
+WetVolumeMeasureSelection selectWetVolumeForDrift(
+    const CutVolumeMeasureSummary& summary)
+{
+  WetVolumeMeasureSelection selection;
+  if (summary.skipped_physical_rule_count == 0u) {
+    selection.wet_volume = summary.physical_measure;
+    selection.frame = "physical";
+  } else {
+    selection.wet_volume = summary.reference_measure;
+    selection.frame = "reference_fallback";
+  }
+  return selection;
+}
+
 std::size_t writeWetVolumeFractionField(
     svmp::Mesh& mesh,
     const std::string& field_name,
