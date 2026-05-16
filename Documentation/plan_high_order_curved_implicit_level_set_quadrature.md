@@ -866,7 +866,7 @@ rule.
 - [x] Add revision-key tests covering backend option changes.
 - [x] Add stale-rule assertions for high-order marker/side rules.
 - [x] Ensure full-cell rules still carry enough metadata for diagnostics.
-- [ ] Add cut-context rebuild logging for high-order fields.
+- [x] Add cut-context rebuild logging for high-order fields.
 
 ### Tests
 

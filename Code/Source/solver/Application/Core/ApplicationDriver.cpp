@@ -2574,6 +2574,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           " has zero retained active wet volume after generated cut-volume pruning.");
     }
     const auto topology_key = cutContextTopologyKey(result.domain);
+    const auto& domain_request = result.domain.request();
     mixCutContextHash(report.topology_key, topology_key);
     report.value_revision = result.value_revision;
     const auto global_interface_fragments =
@@ -2785,6 +2786,19 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << (request.allow_corner_linearized_geometry ? "true" : "false")
         << " isovalue=" << request.isovalue
         << " cut_context_revision=" << result.value_revision
+        << " cut_context_topology_key=" << topology_key
+        << " quadrature_policy_key="
+        << domain_request.quadrature_policy_key
+        << " source_layout_revision="
+        << domain_request.source.layout_revision
+        << " source_value_revision="
+        << domain_request.source.value_revision
+        << " mesh_geometry_revision="
+        << domain_request.mesh_geometry_revision
+        << " mesh_topology_revision="
+        << domain_request.mesh_topology_revision
+        << " ownership_revision="
+        << domain_request.ownership_revision
         << " cell_count=" << global_cell_count
         << " corner_linearized_cells="
         << global_corner_linearized_cells
