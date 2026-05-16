@@ -434,6 +434,14 @@ Until this backend is implemented, mixed quad/triangle meshes using
 `HighOrderImplicit` should report unsupported triangle cells rather than silently
 falling back to `LinearCorner`.
 
+Milestone status: the first 2D `HighOrderSubcell` triangle backend is
+implemented for Triangle3 and Triangle6 cells. Triangle3 delegates through the
+existing linear cutter. Triangle6+ fields use deterministic recursive reference
+triangle subdivision with positive-weight full-subcell rules and linear terminal
+cut leaves. The current backend reports achieved interface order 1 and achieved
+volume order 2; higher-order simplex root polishing and curved leaf rules remain
+future work.
+
 ### Design Checklist
 
 - [x] Decide first simplex milestone:
@@ -443,8 +451,8 @@ falling back to `LinearCorner`.
       - or explicit unsupported diagnostics.
 - [ ] Define whether simplex support must be available before enabling
       high-order mode in mixed-element meshes.
-- [ ] Define conservative measure requirements for simplex cut volumes.
-- [ ] Define whether simplex backends may use signed weights.
+- [x] Define conservative measure requirements for simplex cut volumes.
+- [x] Define whether simplex backends may use signed weights.
 - [ ] Define simplex fallback hierarchy:
       high-order subcell -> linear subcell -> fail, or
       high-order implicit -> moment fit -> fail.
@@ -453,15 +461,15 @@ falling back to `LinearCorner`.
 ### Implementation Checklist
 
 - [x] Add backend capability reporting by element type.
-- [ ] Add triangle curved-interface tests before tetrahedron work.
+- [x] Add triangle curved-interface tests before tetrahedron work.
 - [ ] Add tetrahedron curved-interface tests before solver integration.
-- [ ] Ensure simplex rule provenance matches hyperrectangle rule provenance.
+- [x] Ensure simplex rule provenance matches hyperrectangle rule provenance.
 - [ ] Ensure mixed quads/triangles or hexes/tets can report per-cell backend
       choices.
 
 ### Tests
 
-- [ ] Triangle circle-segment area tests.
+- [x] Triangle circle-segment area tests.
 - [ ] Tetra sphere-cap volume tests.
 - [ ] P2 level-set edge DOF changes the cut location in triangles and tets.
 - [ ] Degenerate vertex/edge touch tests.
@@ -1055,7 +1063,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 ### Phase 2: Simplex And Mixed Mesh Support
 
 - [x] Select triangle strategy.
-- [ ] Implement triangle support.
+- [x] Implement triangle support.
 - [ ] Select tetrahedron strategy.
 - [ ] Implement tetrahedron support.
 - [ ] Add mixed-element diagnostics.

@@ -70,6 +70,10 @@ classifyCutStatus(const interfaces::LevelSetCellCutResult& cut,
     int mesh_dimension,
     ElementType element_type) noexcept;
 
+[[nodiscard]] bool supportsHighOrderSubcellTriangleMilestone(
+    int mesh_dimension,
+    ElementType element_type) noexcept;
+
 class LinearCornerImplicitCutBackend final
     : public ImplicitCutQuadratureBackendDriver {
 public:
@@ -153,6 +157,12 @@ struct Rectangle2D {
     Real ymax{0.0};
 };
 
+struct Triangle2D {
+    std::array<Real, 3> a{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> b{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> c{{0.0, 0.0, 0.0}};
+};
+
 struct SayeHyperrectangleDiagnostics {
     int max_depth_reached{0};
     int subdivision_count{0};
@@ -168,12 +178,38 @@ struct SayeHyperrectangleDiagnostics {
            std::max(Real{0.0}, rect.ymax - rect.ymin);
 }
 
+[[nodiscard]] Real triangleMeasure(const Triangle2D& tri) noexcept
+{
+    const Real x0 = tri.b[0] - tri.a[0];
+    const Real y0 = tri.b[1] - tri.a[1];
+    const Real x1 = tri.c[0] - tri.a[0];
+    const Real y1 = tri.c[1] - tri.a[1];
+    return Real{0.5} * std::abs(x0 * y1 - y0 * x1);
+}
+
 [[nodiscard]] std::array<Real, 3> rectangleCentroid(
     const Rectangle2D& rect) noexcept
 {
     return {{Real{0.5} * (rect.xmin + rect.xmax),
              Real{0.5} * (rect.ymin + rect.ymax),
              0.0}};
+}
+
+[[nodiscard]] std::array<Real, 3> triangleCentroid(
+    const Triangle2D& tri) noexcept
+{
+    return {{(tri.a[0] + tri.b[0] + tri.c[0]) / Real{3.0},
+             (tri.a[1] + tri.b[1] + tri.c[1]) / Real{3.0},
+             (tri.a[2] + tri.b[2] + tri.c[2]) / Real{3.0}}};
+}
+
+[[nodiscard]] std::array<Real, 3> midpoint(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b) noexcept
+{
+    return {{Real{0.5} * (a[0] + b[0]),
+             Real{0.5} * (a[1] + b[1]),
+             Real{0.5} * (a[2] + b[2])}};
 }
 
 [[nodiscard]] std::array<Real, 3> normalizedOrDefault(
@@ -229,6 +265,20 @@ struct SayeHyperrectangleDiagnostics {
     };
 }
 
+[[nodiscard]] std::vector<std::array<Real, 3>> triangleSamplePoints(
+    const Triangle2D& tri)
+{
+    return {
+        tri.a,
+        tri.b,
+        tri.c,
+        midpoint(tri.a, tri.b),
+        midpoint(tri.b, tri.c),
+        midpoint(tri.c, tri.a),
+        triangleCentroid(tri),
+    };
+}
+
 void appendFullRectangleRegion(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -260,6 +310,54 @@ void appendFullRectangleRegion(
     region.normal = normal;
     region.parent_measure = parent_measure;
     region.measure = rectangleMeasure(rect);
+    region.volume_fraction =
+        parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+    region.min_level_set_value = min_signed_value;
+    region.max_level_set_value = max_signed_value;
+    region.full_cell_equivalent = std::abs(region.measure - parent_measure) <=
+                                  std::max(request.tolerance,
+                                           request.tolerance * parent_measure);
+    if (region.measure > Real{0.0}) {
+        geometry::CutQuadraturePoint qp;
+        qp.point = region.centroid;
+        qp.normal = region.normal;
+        qp.weight = region.measure;
+        region.quadrature_points.push_back(qp);
+        cut.volume_regions.push_back(std::move(region));
+    }
+}
+
+void appendFullTriangleRegion(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Triangle2D& tri,
+    geometry::CutIntegrationSide side,
+    Real parent_measure,
+    Real min_signed_value,
+    Real max_signed_value,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    if (side == geometry::CutIntegrationSide::Negative) {
+        ++diagnostics.full_negative_region_count;
+    } else if (side == geometry::CutIntegrationSide::Positive) {
+        ++diagnostics.full_positive_region_count;
+    }
+
+    const auto centroid = triangleCentroid(tri);
+    auto normal = interfaceNormalAt(input, centroid);
+    if (side == geometry::CutIntegrationSide::Positive) {
+        normal = {{-normal[0], -normal[1], -normal[2]}};
+    }
+
+    interfaces::CutInterfaceVolumeRegion region;
+    region.interface_marker = request.interface_marker;
+    region.parent_cell = input.linearized_input.parent_cell;
+    region.side = side;
+    region.centroid = centroid;
+    region.normal = normal;
+    region.parent_measure = parent_measure;
+    region.measure = triangleMeasure(tri);
     region.volume_fraction =
         parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
     region.min_level_set_value = min_signed_value;
@@ -321,6 +419,50 @@ void appendLinearizedRectangleCut(
         cut.volume_regions.push_back(std::move(region));
     }
     if (cut.degeneracy == interfaces::CutInterfaceDegeneracy::None) {
+        cut.degeneracy = leaf_cut.degeneracy;
+    }
+}
+
+void appendLinearizedTriangleCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Triangle2D& tri,
+    Real parent_measure,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    ++diagnostics.linearized_leaf_count;
+
+    interfaces::LevelSetCellCutInput leaf;
+    leaf.parent_cell = input.linearized_input.parent_cell;
+    leaf.element_type = ElementType::Triangle3;
+    leaf.node_coordinates = {tri.a, tri.b, tri.c};
+    leaf.level_set_values.reserve(leaf.node_coordinates.size());
+    for (const auto& point : leaf.node_coordinates) {
+        leaf.level_set_values.push_back(
+            input.evaluator
+                ->evaluate(input.linearized_input.parent_cell, point)
+                .value);
+    }
+
+    auto leaf_cut = interfaces::cutLinearLevelSetCell2D(request, leaf);
+    diagnostics.interface_fragment_count +=
+        static_cast<int>(leaf_cut.fragments.size());
+    for (auto& fragment : leaf_cut.fragments) {
+        fragment.parent_cell = input.linearized_input.parent_cell;
+        fragment.interface_marker = request.interface_marker;
+        cut.fragments.push_back(std::move(fragment));
+    }
+    for (auto& region : leaf_cut.volume_regions) {
+        region.parent_cell = input.linearized_input.parent_cell;
+        region.interface_marker = request.interface_marker;
+        region.parent_measure = parent_measure;
+        region.volume_fraction =
+            parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+        cut.volume_regions.push_back(std::move(region));
+    }
+    if (leaf_cut.hasActiveFragments() &&
+        cut.degeneracy == interfaces::CutInterfaceDegeneracy::None) {
         cut.degeneracy = leaf_cut.degeneracy;
     }
 }
@@ -393,11 +535,99 @@ void appendAdaptiveRectangleCut(
     }
 }
 
+void appendAdaptiveTriangleCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Triangle2D& tri,
+    Real parent_measure,
+    int depth,
+    int max_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    diagnostics.max_depth_reached =
+        std::max(diagnostics.max_depth_reached, depth);
+    const auto samples = triangleSamplePoints(tri);
+    bool has_negative = false;
+    bool has_positive = false;
+    Real min_signed = std::numeric_limits<Real>::infinity();
+    Real max_signed = -std::numeric_limits<Real>::infinity();
+    for (const auto& point : samples) {
+        const Real value = signedLevelSetValue(input, point);
+        min_signed = std::min(min_signed, value);
+        max_signed = std::max(max_signed, value);
+        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
+        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
+    }
+
+    if (!has_negative || !has_positive) {
+        appendFullTriangleRegion(
+            cut,
+            request,
+            input,
+            tri,
+            has_negative ? geometry::CutIntegrationSide::Negative
+                         : geometry::CutIntegrationSide::Positive,
+            parent_measure,
+            min_signed,
+            max_signed,
+            diagnostics);
+        return;
+    }
+
+    if (depth >= max_depth) {
+        appendLinearizedTriangleCut(
+            cut, request, input, tri, parent_measure, diagnostics);
+        return;
+    }
+
+    ++diagnostics.subdivision_count;
+    const auto ab = midpoint(tri.a, tri.b);
+    const auto bc = midpoint(tri.b, tri.c);
+    const auto ca = midpoint(tri.c, tri.a);
+    const std::array<Triangle2D, 4> children{{
+        Triangle2D{tri.a, ab, ca},
+        Triangle2D{ab, tri.b, bc},
+        Triangle2D{ca, bc, tri.c},
+        Triangle2D{ab, bc, ca},
+    }};
+    for (const auto& child : children) {
+        appendAdaptiveTriangleCut(
+            cut,
+            request,
+            input,
+            child,
+            parent_measure,
+            depth + 1,
+            max_depth,
+            diagnostics);
+    }
+}
+
 [[nodiscard]] std::string formatSayeHyperrectangleDiagnostics(
     const SayeHyperrectangleDiagnostics& diagnostics,
     int max_depth_limit)
 {
     return "SayeHyperrectangle recursive 2D hyperrectangle quadrature"
+           "; max_depth_limit=" + std::to_string(max_depth_limit) +
+           "; max_depth_reached=" +
+           std::to_string(diagnostics.max_depth_reached) +
+           "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; linearized_leaves=" +
+           std::to_string(diagnostics.linearized_leaf_count) +
+           "; full_negative_regions=" +
+           std::to_string(diagnostics.full_negative_region_count) +
+           "; full_positive_regions=" +
+           std::to_string(diagnostics.full_positive_region_count) +
+           "; interface_fragments=" +
+           std::to_string(diagnostics.interface_fragment_count);
+}
+
+[[nodiscard]] std::string formatHighOrderSubcellDiagnostics(
+    const SayeHyperrectangleDiagnostics& diagnostics,
+    int max_depth_limit)
+{
+    return "HighOrderSubcell recursive 2D triangle quadrature"
            "; max_depth_limit=" + std::to_string(max_depth_limit) +
            "; max_depth_reached=" +
            std::to_string(diagnostics.max_depth_reached) +
@@ -508,6 +738,110 @@ public:
     }
 };
 
+class HighOrderSubcellImplicitCutBackend final
+    : public ImplicitCutQuadratureBackendDriver {
+public:
+    [[nodiscard]] ImplicitCutQuadratureBackend kind() const noexcept override {
+        return ImplicitCutQuadratureBackend::HighOrderSubcell;
+    }
+
+    [[nodiscard]] const char* name() const noexcept override {
+        return implicitCutQuadratureBackendName(kind());
+    }
+
+    [[nodiscard]] bool supports(int mesh_dimension,
+                                ElementType element_type) const noexcept override
+    {
+        return supportsHighOrderSubcellTriangleMilestone(mesh_dimension, element_type);
+    }
+
+    [[nodiscard]] int achievedInterfaceQuadratureOrder(
+        const interfaces::CutInterfaceDomainRequest& request) const noexcept override
+    {
+        return std::min(1, std::max(0, request.resolvedInterfaceQuadratureOrder()));
+    }
+
+    [[nodiscard]] int achievedVolumeQuadratureOrder(
+        const interfaces::CutInterfaceDomainRequest& request) const noexcept override
+    {
+        return interfaces::implementedLevelSetCutVolumeExactOrder(
+            std::max(0, request.resolvedVolumeQuadratureOrder()));
+    }
+
+    [[nodiscard]] ImplicitCutQuadratureBackendCellResult cut(
+        int mesh_dimension,
+        const interfaces::CutInterfaceDomainRequest& request,
+        const ImplicitCutQuadratureBackendCellInput& input) const override
+    {
+        ImplicitCutQuadratureBackendCellResult result;
+        result.achieved_interface_quadrature_order =
+            achievedInterfaceQuadratureOrder(request);
+        result.achieved_volume_quadrature_order =
+            achievedVolumeQuadratureOrder(request);
+
+        if (!supports(mesh_dimension, input.linearized_input.element_type)) {
+            result.cut.supported = false;
+            result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
+            result.cut.diagnostic =
+                "HighOrderSubcell implicit cut quadrature backend supports only triangular cells in two dimensions";
+            result.diagnostic_status =
+                ImplicitCutQuadratureDiagnosticStatus::Unsupported;
+            return result;
+        }
+        if (input.evaluator == nullptr) {
+            result.cut.supported = false;
+            result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
+            result.cut.diagnostic =
+                "HighOrderSubcell implicit cut quadrature backend requires a level-set evaluator";
+            result.diagnostic_status =
+                ImplicitCutQuadratureDiagnosticStatus::Failed;
+            return result;
+        }
+        if (input.evaluator->interpolationOrder(
+                input.linearized_input.parent_cell) <= 1) {
+            result.cut =
+                interfaces::cutLinearLevelSetCell2D(
+                    request, input.linearized_input);
+            result.diagnostic_status =
+                classifyCutStatus(result.cut, result.fallback_used);
+            return result;
+        }
+        if (input.linearized_input.node_coordinates.size() < 3u) {
+            result.cut.supported = false;
+            result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
+            result.cut.diagnostic =
+                "HighOrderSubcell implicit cut quadrature backend requires triangle corner coordinates";
+            result.diagnostic_status =
+                ImplicitCutQuadratureDiagnosticStatus::Failed;
+            return result;
+        }
+
+        const Triangle2D root{
+            input.linearized_input.node_coordinates[0],
+            input.linearized_input.node_coordinates[1],
+            input.linearized_input.node_coordinates[2]};
+        const Real parent_measure = triangleMeasure(root);
+        const int max_depth =
+            std::max(0, std::min(request.implicit_cut_max_subdivision_depth, 8));
+        SayeHyperrectangleDiagnostics diagnostics;
+        appendAdaptiveTriangleCut(
+            result.cut,
+            request,
+            input,
+            root,
+            parent_measure,
+            0,
+            max_depth,
+            diagnostics);
+        result.cut.supported = true;
+        result.cut.diagnostic =
+            formatHighOrderSubcellDiagnostics(diagnostics, max_depth);
+        result.diagnostic_status =
+            classifyCutStatus(result.cut, result.fallback_used);
+        return result;
+    }
+};
+
 [[nodiscard]] bool supportsSayeHyperrectangleMilestone(
     int mesh_dimension,
     ElementType element_type) noexcept
@@ -525,6 +859,22 @@ public:
     }
 }
 
+[[nodiscard]] bool supportsHighOrderSubcellTriangleMilestone(
+    int mesh_dimension,
+    ElementType element_type) noexcept
+{
+    if (mesh_dimension != 2) {
+        return false;
+    }
+    switch (element_type) {
+    case ElementType::Triangle3:
+    case ElementType::Triangle6:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 const ImplicitCutQuadratureBackendDriver&
@@ -532,6 +882,7 @@ implicitCutQuadratureBackendDriver(ImplicitCutQuadratureBackend backend)
 {
     static const LinearCornerImplicitCutBackend linear_corner_backend;
     static const SayeHyperrectangleImplicitCutBackend saye_hyperrectangle_backend;
+    static const HighOrderSubcellImplicitCutBackend high_order_subcell_backend;
 
     switch (backend) {
     case ImplicitCutQuadratureBackend::LinearCorner:
@@ -539,6 +890,7 @@ implicitCutQuadratureBackendDriver(ImplicitCutQuadratureBackend backend)
     case ImplicitCutQuadratureBackend::SayeHyperrectangle:
         return saye_hyperrectangle_backend;
     case ImplicitCutQuadratureBackend::HighOrderSubcell:
+        return high_order_subcell_backend;
     case ImplicitCutQuadratureBackend::MomentFit:
         throw std::invalid_argument(
             std::string(implicitCutQuadratureBackendName(backend)) +
@@ -579,6 +931,13 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
         capability.maximum_reported_volume_order = 2;
         return capability;
     case ImplicitCutQuadratureBackend::HighOrderSubcell:
+        capability.implemented = true;
+        capability.supports_element_type =
+            supportsHighOrderSubcellTriangleMilestone(mesh_dimension, element_type);
+        capability.supports_high_order_geometry = true;
+        capability.maximum_reported_interface_order = 1;
+        capability.maximum_reported_volume_order = 2;
+        return capability;
     case ImplicitCutQuadratureBackend::MomentFit:
         capability.implemented = false;
         capability.supports_element_type = false;
