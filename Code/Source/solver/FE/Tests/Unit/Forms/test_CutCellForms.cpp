@@ -960,6 +960,41 @@ TEST(CutCellForms, CutVolumeIntegralJITMatchesInterpreterOnSameCutQuadrature)
     EXPECT_NEAR(jit, interp, 1.0e-13);
 }
 
+TEST(CutCellForms, HighOrderGeneratedCutRulesJITMatchInterpreter)
+{
+    requireLLVMJITOrSkip();
+
+    auto volume_rule = makeManyPointReferenceTetraCutRule(CutIntegrationSide::Negative);
+    markRuleAsHighOrderImplicit(volume_rule,
+                                /*marker=*/87,
+                                "jit-parity-high-order-volume",
+                                /*quadrature_order=*/6);
+    const auto volume_constants = makeCutConstants(
+        volume_rule, /*side_indicator=*/Real(-1.0), /*stabilization_scale=*/Real(0.25),
+        /*quadrature_weight_sensitivity=*/Real(0.0625));
+    auto volume_ctx = makeCutAssemblyContext(volume_rule, volume_constants);
+    const auto volume_integrand = cutMetadataIntegrand(/*include_quadrature_normal=*/false);
+
+    const Real volume_interp = assembleInterpreterCellTotal(volume_integrand, volume_ctx);
+    const Real volume_jit = assembleJITCellTotal(volume_integrand, volume_ctx);
+    EXPECT_NEAR(volume_jit, volume_interp, Real(1.0e-13));
+
+    auto interface_rule = makeManyPointReferenceTetraInterfaceRule(/*marker=*/88);
+    const auto interface_constants = makeCutConstants(
+        interface_rule, /*side_indicator=*/Real(0.0), /*stabilization_scale=*/Real(0.125),
+        /*quadrature_weight_sensitivity=*/Real(0.03125));
+    auto interface_ctx = makeCutAssemblyContext(interface_rule, interface_constants);
+    const auto interface_integrand =
+        cutMetadataIntegrand(/*include_quadrature_normal=*/true) +
+        FormExpr::facetArea() * Real(0.015625);
+
+    const Real interface_interp =
+        assembleInterpreterInterfaceTotal(interface_integrand, interface_ctx, /*marker=*/88);
+    const Real interface_jit =
+        assembleJITInterfaceTotal(interface_integrand, interface_ctx, /*marker=*/88);
+    EXPECT_NEAR(interface_jit, interface_interp, Real(1.0e-13));
+}
+
 TEST(CutCellForms, CutVolumeIntegralJITCompilerEmitsMarkerSideKernels)
 {
     requireLLVMJITOrSkip();

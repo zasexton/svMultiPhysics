@@ -986,7 +986,7 @@ Cut-adjacent facet-set locality audit:
 - [x] Assemble a surface traction over a curved interface and compare to analytic
       surface integral.
 - [x] Verify high quadrature point counts do not corrupt local DOF insertion.
-- [ ] Verify JIT and interpreter paths agree.
+- [x] Verify JIT and interpreter paths agree.
 
 ### Literature Support
 
