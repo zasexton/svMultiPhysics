@@ -210,6 +210,12 @@ def set_linear_algebra_backend(solver: ET.Element,
     set_text(element, "Preconditioner", preconditioner)
 
 
+def default_preconditioner_for_backend(backend: str) -> str:
+    if backend.strip().lower() == "fsils":
+        return "fsils"
+    return "none"
+
+
 def free_surface_bc(root: ET.Element) -> ET.Element:
     for equation in root.findall("Add_equation"):
         if equation.attrib.get("type") != "fluid":
@@ -253,6 +259,7 @@ def configure_solver(solver_xml: Path,
                      ns_gm_tolerance: float | None = None,
                      ns_cg_tolerance: float | None = None,
                      linear_solver_type: str | None = None,
+                     linear_algebra_backend: str | None = None,
                      linear_preconditioner: str | None = None,
                      disable_coupled_outer_fgmres: bool = False,
                      disable_cut_metadata_scale: bool = False,
@@ -308,6 +315,7 @@ def configure_solver(solver_xml: Path,
         ns_gm_tolerance is not None or
         ns_cg_tolerance is not None or
         linear_solver_type is not None or
+        linear_algebra_backend is not None or
         linear_preconditioner is not None or
         disable_coupled_outer_fgmres
     )
@@ -315,12 +323,21 @@ def configure_solver(solver_xml: Path,
     if linear_solver_type is not None:
         assert ns_solver is not None
         ns_solver.set("type", linear_solver_type)
-        if linear_solver_type.strip().lower() != "direct":
+        if (linear_solver_type.strip().lower() != "direct" and
+                linear_algebra_backend is None):
             set_linear_algebra_backend(
                 ns_solver,
                 "fsils",
                 linear_preconditioner or "fsils",
             )
+    if linear_algebra_backend is not None:
+        assert ns_solver is not None
+        set_linear_algebra_backend(
+            ns_solver,
+            linear_algebra_backend,
+            linear_preconditioner or
+            default_preconditioner_for_backend(linear_algebra_backend),
+        )
     elif linear_preconditioner is not None:
         assert ns_solver is not None
         set_linear_algebra_backend(ns_solver, "fsils", linear_preconditioner)
@@ -384,6 +401,44 @@ def configure_solver(solver_xml: Path,
         set_text(ns_solver, "NS_Use_coupled_outer_FGMRES", "false")
 
     tree.write(solver_xml, encoding="UTF-8", xml_declaration=True)
+
+
+def regenerate_mms_case_if_requested(case_name: str,
+                                     run_dir: Path,
+                                     args: argparse.Namespace) -> None:
+    if case_name != "mms2d" or (args.mms_nx is None and args.mms_ny is None):
+        return
+    generator = run_dir / "generate_case.py"
+    if not generator.exists():
+        raise FileNotFoundError(generator)
+    nx = args.mms_nx if args.mms_nx is not None else args.mms_ny
+    ny = args.mms_ny if args.mms_ny is not None else args.mms_nx
+    if nx is None or ny is None:
+        raise ValueError("MMS grid regeneration requires nx and ny")
+    if nx < 2 or ny < 2:
+        raise ValueError("MMS grid regeneration requires nx and ny to be at least 2")
+    command = [
+        sys.executable,
+        str(generator),
+        "--nx",
+        str(nx),
+        "--ny",
+        str(ny),
+        "--element-order",
+        "2",
+    ]
+    completed = subprocess.run(
+        command,
+        cwd=run_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "failed to regenerate compact MMS case:\n" + completed.stdout
+        )
 
 
 def solver_candidates() -> list[Path]:
@@ -2696,6 +2751,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "ns_gm_tolerance",
         "ns_cg_tolerance",
         "linear_solver_type",
+        "linear_algebra_backend",
         "linear_preconditioner",
         "generated_interface_geometry",
         "implicit_cut_quadrature_backend",
@@ -2705,6 +2761,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "generated_interface_quadrature_order",
         "interface_quadrature_order",
         "volume_quadrature_order",
+        "mms_nx",
+        "mms_ny",
         "max_diagnostic_implicit_cut_fallback_cells",
         "min_diagnostic_achieved_interface_quadrature_order",
         "min_diagnostic_achieved_volume_quadrature_order",
@@ -2719,6 +2777,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_jacobian_check",
         "enable_newton_direction_check",
         "enable_newton_assembly_diagnostics",
+        "disable_cut_stabilization",
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
         "enable_fsils_matrix_diagnostics",
@@ -3504,6 +3563,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
         else:
             run_dir = Path(temp_name) / source.name
             copy_case(source, run_dir, args.source_ref)
+            regenerate_mms_case_if_requested(case_name, run_dir, args)
             configure_solver(
                 run_dir / "solver.xml",
                 args.steps,
@@ -3518,6 +3578,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 ns_gm_tolerance=args.ns_gm_tolerance,
                 ns_cg_tolerance=args.ns_cg_tolerance,
                 linear_solver_type=args.linear_solver_type,
+                linear_algebra_backend=args.linear_algebra_backend,
                 linear_preconditioner=args.linear_preconditioner,
                 disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
                 disable_cut_metadata_scale=args.disable_cut_metadata_scale,
@@ -3682,6 +3743,14 @@ def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
         args.interface_quadrature_order = 2
     if args.volume_quadrature_order is None:
         args.volume_quadrature_order = 2
+    if args.linear_algebra_backend is None:
+        args.linear_algebra_backend = "eigen"
+    if args.disable_cut_stabilization is None:
+        args.disable_cut_stabilization = True
+    if args.mms_nx is None:
+        args.mms_nx = 2
+    if args.mms_ny is None:
+        args.mms_ny = args.mms_nx
     if args.expect_generated_interface_geometry is None:
         args.expect_generated_interface_geometry = args.generated_interface_geometry
     if args.expect_implicit_cut_quadrature_backend is None:
@@ -3774,7 +3843,13 @@ def main() -> int:
         choices=("forward", "central"),
         help="Finite-difference scheme used by the solver Jacobian diagnostic.",
     )
-    parser.add_argument("--disable-cut-stabilization", action="store_true")
+    parser.add_argument("--disable-cut-stabilization",
+                        dest="disable_cut_stabilization",
+                        action="store_true",
+                        default=None)
+    parser.add_argument("--enable-cut-stabilization",
+                        dest="disable_cut_stabilization",
+                        action="store_false")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--disable-velocity-extension", action="store_true")
     parser.add_argument("--max-nonlinear-iterations", type=int)
@@ -3786,9 +3861,12 @@ def main() -> int:
     parser.add_argument("--ns-gm-tolerance", type=float)
     parser.add_argument("--ns-cg-tolerance", type=float)
     parser.add_argument("--linear-solver-type")
+    parser.add_argument("--linear-algebra-backend")
     parser.add_argument("--linear-preconditioner")
     parser.add_argument("--disable-coupled-outer-fgmres", action="store_true")
     parser.add_argument("--use-high-order-implicit-cuts", action="store_true")
+    parser.add_argument("--mms-nx", type=int)
+    parser.add_argument("--mms-ny", type=int)
     parser.add_argument("--generated-interface-geometry")
     parser.add_argument("--implicit-cut-quadrature-backend")
     parser.add_argument("--implicit-cut-fallback-policy")

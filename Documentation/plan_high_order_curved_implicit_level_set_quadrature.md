@@ -1072,6 +1072,10 @@ finite-difference component checks are valuable for isolating assembly defects.
       coefficients before cut-context rebuilds.
 - [x] Match high-order face connectivity through reference corners for
       cell-to-face assembly ordering.
+- [x] Regenerate compact high-order MMS smoke meshes in temporary run
+      directories and route the diagnostic shortcut through a serial
+      unstabilized solve so the high-order implicit cut path advances an
+      accepted step without modifying the canonical MMS fixture.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
@@ -1081,7 +1085,7 @@ finite-difference component checks are valuable for isolating assembly defects.
 - [ ] Fixed-geometry finite-difference Jacobian checks pass by component block.
 - [ ] Quasi-Newton moving-geometry checks report expected geometry-tangent
       residual differences.
-- [ ] Short high-order free-surface smoke run advances accepted steps with
+- [x] Short high-order free-surface smoke run advances accepted steps with
       bounded cut-adjacent scales.
 - [ ] D18/D38 are not requalified until high-order diagnostics are stable.
 
