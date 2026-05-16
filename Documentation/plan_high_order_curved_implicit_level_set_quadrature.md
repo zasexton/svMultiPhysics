@@ -768,34 +768,41 @@ of quadrature accuracy. The current gradient-jump path is appropriate for low
 order. Higher-order spaces generally need higher derivative control or a
 carefully justified alternative such as aggregation.
 
+Milestone status: the current implementation still assembles only the
+first-gradient cut-adjacent ghost penalties. Stabilization setup now records the
+velocity and pressure polynomial orders, the derivative order currently applied,
+and the implemented scaling. Runs with polynomial order above one receive an
+explicit warning that higher-normal-derivative ghost penalties are not yet
+available.
+
 ### Design Checklist
 
-- [ ] Define stabilization families:
+- [x] Define stabilization families:
       - current first-gradient jump,
       - higher-normal-derivative ghost penalty,
       - aggregation/discrete extension as future option.
-- [ ] Define default penalty terms by velocity and pressure polynomial order.
-- [ ] Define scaling, including `h^(2*j - 1)` style factors for derivative order
+- [x] Define default penalty terms by velocity and pressure polynomial order.
+- [x] Define scaling, including `h^(2*j - 1)` style factors for derivative order
       `j`.
 - [ ] Define which terms are required for equal-order velocity-pressure pairs.
 - [ ] Define how cut-volume fraction scale/cap interacts with high-order
       stabilization.
-- [ ] Define local facet set scope for high-order mode.
+- [x] Define local facet set scope for high-order mode.
 
 ### Implementation Checklist
 
 - [ ] Extend form vocabulary or kernels for higher normal-derivative jumps if not
       already available.
-- [ ] Include polynomial order in stabilization setup.
-- [ ] Preserve active-side facet-set generation.
-- [ ] Add diagnostics for each derivative-order penalty used.
-- [ ] Ensure `Use_cut_metadata_scale=false` remains local, not global.
-- [ ] Add a stability warning if high-order geometry is enabled without adequate
+- [x] Include polynomial order in stabilization setup.
+- [x] Preserve active-side facet-set generation.
+- [x] Add diagnostics for each derivative-order penalty used.
+- [x] Ensure `Use_cut_metadata_scale=false` remains local, not global.
+- [x] Add a stability warning if high-order geometry is enabled without adequate
       high-order stabilization.
 
 ### Tests
 
-- [ ] Only cut-adjacent facets receive stabilization.
+- [x] Only cut-adjacent facets receive stabilization.
 - [ ] Far-field interior faces receive zero contribution.
 - [ ] Derivative-order terms scale correctly with `h`.
 - [ ] Small-cut conditioning probes remain bounded under refinement.
@@ -1133,7 +1140,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [ ] Extend ghost penalties for higher-order spaces.
 - [ ] Validate pressure support constraints for high-order pressure DOFs.
 - [ ] Add small-cut conditioning tests.
-- [ ] Add stabilization diagnostics.
+- [x] Add stabilization diagnostics.
 
 ### Phase 5: Solver Validation
 

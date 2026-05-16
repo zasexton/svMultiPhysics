@@ -1009,7 +1009,9 @@ void applyFreeSurfaceCutCellStabilization(
     const FE::forms::FormExpr& q,
     const FE::forms::FormExpr& mu,
     FE::Real stabilization_epsilon,
-    int velocity_components)
+    int velocity_components,
+    int velocity_polynomial_order,
+    int pressure_polynomial_order)
 {
     if (!isUnfittedLevelSet(bc) || !bc.cut_cell_stabilization.enabled) {
         return;
@@ -1017,6 +1019,9 @@ void applyFreeSurfaceCutCellStabilization(
 
     namespace bc_forms = FE::forms::bc;
     const auto& cut = bc.cut_cell_stabilization;
+    constexpr int supported_derivative_order = 1;
+    const bool uses_high_order_space =
+        velocity_polynomial_order > 1 || pressure_polynomial_order > 1;
     const auto cut_scale = cut.use_cut_metadata_scale
         ? FE::forms::cutStabilizationScale()
         : FE::forms::FormExpr::constant(1.0);
@@ -1043,8 +1048,22 @@ void applyFreeSurfaceCutCellStabilization(
         << activeDomainMethodName(bc.active_domain_method)
         << " use_cut_metadata_scale="
         << (cut.use_cut_metadata_scale ? "true" : "false")
-        << " facet_scope=cut-adjacent";
+        << " facet_scope=cut-adjacent"
+        << " velocity_polynomial_order=" << velocity_polynomial_order
+        << " pressure_polynomial_order=" << pressure_polynomial_order
+        << " derivative_orders=1"
+        << " velocity_scaling=h"
+        << " pressure_scaling=h^3/mu";
     FE_LOG_INFO(oss.str());
+
+    if (uses_high_order_space) {
+        FE_LOG_WARNING(
+            "IncompressibleNavierStokesVMSModule: high-order cut-cell "
+            "stabilization currently uses first-gradient ghost penalties only; "
+            "higher-normal-derivative penalties above derivative_order=" +
+            std::to_string(supported_derivative_order) +
+            " are not yet available");
+    }
 
     if (!bc_forms::isZeroConstantScalarValue(cut.velocity_gradient_penalty)) {
         const auto velocity_penalty = bc_forms::toScalarExpr(
@@ -2035,7 +2054,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             q,
             mu,
             options_.stabilization_epsilon,
-            dim);
+            dim,
+            velocity_space_->polynomial_order(),
+            pressure_space_->polynomial_order());
     }
 
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim); });
