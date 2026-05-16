@@ -4735,9 +4735,17 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             (!can_reuse_state_independent_jacobian &&
              ((jacobian_period == 1) || ((it - last_jacobian_it) >= jacobian_period)));
         bool jacobian_ready = have_jacobian && !need_jacobian;
+        const bool residual_first_convergence_check =
+            !options_.use_line_search &&
+            it > 0 &&
+            need_jacobian &&
+            options_.assemble_both_when_possible &&
+            same_op &&
+            !has_monolithic_auxiliary_unknowns;
         if (!have_residual) {
             ntp0 = NTP();
-            if (need_jacobian && options_.assemble_both_when_possible && same_op) {
+            if (need_jacobian && options_.assemble_both_when_possible && same_op &&
+                !residual_first_convergence_check) {
                 // Residual and Jacobian share the same operator tag, so we can assemble both in one pass.
                 current_residual_norm = assembleJacobianAndResidual(state);
                 ptc_gamma_applied = 0.0;
@@ -4749,8 +4757,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 // Newton convergence checks and line search evaluate the same residual used in the
                 // linear solve. (Some modules may also install vector contributions under jacobian_op
                 // as an optimization; those must not silently change the residual definition.)
-                current_residual_norm = assembleResidualOnly(state, /*phase=*/nullptr);
-                if (need_jacobian) {
+                current_residual_norm = assembleResidualOnly(
+                    state,
+                    residual_first_convergence_check
+                        ? "post_update_convergence_check"
+                        : nullptr);
+                if (need_jacobian && !residual_first_convergence_check) {
                     assembleJacobianOnly(state);
                     ptc_gamma_applied = 0.0;
                     jacobian_ready = true;
@@ -4870,7 +4882,10 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
 
         if (need_jacobian && !jacobian_ready) {
+            ntp0 = NTP();
             assembleJacobianOnly(state);
+            ntp_assembly += NTP() - ntp0;
+            ntp_assembly_count++;
             ptc_gamma_applied = 0.0;
             have_jacobian = true;
             last_jacobian_it = it;
