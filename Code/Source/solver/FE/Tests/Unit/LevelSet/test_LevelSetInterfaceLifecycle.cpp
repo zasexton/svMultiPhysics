@@ -2177,6 +2177,74 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAnd
     EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
 }
 
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipsoidApproximatesVolumeAndArea)
+{
+    constexpr int interface_marker = 93;
+    constexpr FE::Real axis_x = 0.65;
+    constexpr FE::Real axis_y = 0.4;
+    constexpr FE::Real axis_z = axis_y;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const auto mesh = std::make_shared<SingleHexMeshAccess>(FE::ElementType::Hex27);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleHexSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 27u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 27u; ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            (x[0] * x[0]) / (axis_x * axis_x) +
+            (x[1] * x[1]) / (axis_y * axis_y) +
+            (x[2] * x[2]) / (axis_z * axis_z) - FE::Real{1.0};
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = 5;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    const FE::Real eccentricity =
+        std::sqrt(FE::Real{1.0} - (axis_y * axis_y) / (axis_x * axis_x));
+    const FE::Real expected_volume =
+        FE::Real{4.0} * pi * axis_x * axis_y * axis_z / FE::Real{3.0};
+    const FE::Real expected_area =
+        FE::Real{2.0} * pi * axis_y * axis_y *
+        (FE::Real{1.0} +
+         axis_x * std::asin(eccentricity) / (axis_y * eccentricity));
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+    EXPECT_NE(result.diagnostic.find("SayeHyperrectangle"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("max_depth_reached="), std::string::npos);
+    EXPECT_GT(result.summary.active_fragment_count, 1u);
+    EXPECT_NEAR(result.summary.negative_volume_measure, expected_volume, 5.0e-2);
+    EXPECT_NEAR(result.summary.measure, expected_area, 2.0e-1);
+}
+
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleRulesAssembleFixedGeometryMeasures)
 {
     constexpr int interface_marker = 86;

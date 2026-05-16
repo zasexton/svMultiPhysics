@@ -393,7 +393,7 @@ order 2.
       p-refinement.
 - [x] 3D plane cut through a hex reproduces known volume and area.
 - [x] 3D sphere cut integrates volume and surface area to tolerance.
-- [ ] 3D ellipsoid cuts integrate volume and surface area to tolerance.
+- [x] 3D ellipsoid cuts integrate volume and surface area to tolerance.
 - [ ] Near-tangent tests produce either a valid high-order rule or an explicit
       fallback/failure diagnostic.
 
@@ -1122,7 +1122,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 - [x] Implement hex support.
 - [x] Add sphere volume and surface tests.
-- [ ] Add ellipsoid volume and surface tests.
+- [x] Add ellipsoid volume and surface tests.
 - [ ] Add curved physical geometry mapping tests.
 - [ ] Add MPI determinism tests.
 
