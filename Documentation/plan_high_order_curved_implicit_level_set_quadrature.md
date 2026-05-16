@@ -1287,7 +1287,12 @@ methods and volume correction remain separate numerical-method choices.
 
 ### Tests
 
-- [ ] Volume correction changes high-order cut-volume diagnostics before output.
+- [x] Volume correction changes high-order cut-volume diagnostics before output.
+      Covered by
+      `LevelSetVolume.VolumeCorrectionRefreshesHighOrderCutContextBeforeOutput`,
+      which builds stale and corrected HighOrderImplicit Saye contexts from a
+      Q2 level-set field and verifies the corrected context has a new revision
+      and changed high-order cut-volume diagnostic before output consumption.
 - [ ] Reinitialization does not move the zero contour beyond tolerance.
 - [ ] Long-run wet-volume drift reports physical high-order wet volume.
 - [ ] Conservative and nonconservative level-set runs are distinguishable in
