@@ -7,6 +7,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Interfaces/LevelSetInterfaceGeometryWriter.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
@@ -1295,6 +1296,16 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
     ASSERT_FALSE(interface_rules.empty());
     EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 2);
     EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 1);
+
+    const std::string vtp =
+        FE::interfaces::levelSetInterfaceGeometryVtpString(result.domain);
+    EXPECT_NE(vtp.find("<VTKFile type=\"PolyData\""), std::string::npos);
+    EXPECT_EQ(vtp.find("NumberOfLines=\"0\""), std::string::npos);
+    EXPECT_NE(vtp.find("Name=\"level_set_value\""), std::string::npos);
+    EXPECT_NE(vtp.find("Name=\"interface_normal\" NumberOfComponents=\"3\""),
+              std::string::npos);
+    EXPECT_NE(vtp.find("Name=\"negative_volume_fraction\""), std::string::npos);
+    EXPECT_NE(vtp.find("Name=\"interface_marker\""), std::string::npos);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleRulesAssembleFixedGeometryMeasures)

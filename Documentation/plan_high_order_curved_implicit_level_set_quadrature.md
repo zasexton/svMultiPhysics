@@ -829,7 +829,7 @@ linear-solver problems.
 
 - [ ] Output writes high-order `WetVolumeFraction`.
 - [ ] Debug output identifies fallback cells.
-- [ ] Curved-interface visualization contains nonzero surface data.
+- [x] Curved-interface visualization contains nonzero surface data.
 - [ ] Smoke parsing fails when high-order mode silently falls back too often.
 
 ### Literature Support
@@ -999,7 +999,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Add analytic area, length, and moment tests.
 - [x] Add fixed-geometry assembly tests.
 - [x] Add diagnostics tests.
-- [ ] Add output tests.
+- [x] Add output tests.
 - [ ] Document limitations and fallback behavior.
 
 ### Phase 2: Simplex And Mixed Mesh Support
