@@ -1310,6 +1310,43 @@ TEST(CutCellForms, HighOrderCutInterfaceManyPointRuleRemapsBasisEvaluation)
     }
 }
 
+TEST(CutCellForms, HighOrderCutInterfaceSurfaceTractionMatchesGeneratedRule)
+{
+    constexpr int marker = 86;
+    auto rule = makeManyPointReferenceTetraInterfaceRule(marker);
+    Real expected_traction = Real(0.0);
+    for (const auto& qp : rule.points) {
+        expected_traction += qp.weight * qp.normal[0];
+    }
+
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addInterfaceRule(std::move(rule));
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    svmp::FE::assembly::DenseVectorView rhs(dof_map.getNumDofs());
+    rhs.zero();
+
+    const auto v = TestFunction(space, "v");
+    const auto n = FormExpr::normal();
+    FormCompiler compiler;
+    FormKernel kernel(compiler.compileLinear((n.component(0) * v).dI(marker)));
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    const auto assembled = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        nullptr, &rhs, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+    ASSERT_EQ(assembled.interface_faces_assembled, svmp::FE::GlobalIndex{1});
+    Real assembled_traction = Real(0.0);
+    for (svmp::FE::GlobalIndex i = 0; i < dof_map.getNumDofs(); ++i) {
+        assembled_traction += rhs.getVectorEntry(i);
+    }
+    EXPECT_NEAR(assembled_traction, expected_traction, Real(1.0e-13));
+}
+
 TEST(CutCellForms, ZeroTangentProbeSupportsMixedCutVolumeBlocks)
 {
     requireLLVMJITOrSkip();
