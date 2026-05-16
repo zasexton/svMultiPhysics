@@ -601,6 +601,10 @@ TEST(CutCellForms, CutAdjacentFacetVocabularyReusesInteriorFaceOperators)
     EXPECT_EQ(cutAdjacentFacetJump(u).toString(), jump(u).toString());
     EXPECT_EQ(cutAdjacentFacetAverage(grad(u)).toString(), avg(grad(u)).toString());
     EXPECT_EQ(cutAdjacentFacetGradientJump(u).toString(), jump(grad(u)).toString());
+    EXPECT_EQ(cutAdjacentFacetHessianJump(u).toString(), jump(hessian(u)).toString());
+    const auto n_minus = FormExpr::normal().minus();
+    EXPECT_EQ(cutAdjacentFacetSecondNormalDerivativeJump(u).toString(),
+              inner(jump(hessian(u)), outer(n_minus, n_minus)).toString());
 
     const auto residual = cutAdjacentFacetIntegral(
         cutAdjacentFacetJump(u) * cutAdjacentFacetJump(v) +
@@ -618,6 +622,28 @@ TEST(CutCellForms, CutAdjacentFacetVocabularyReusesInteriorFaceOperators)
     EXPECT_THROW(
         (void)cutAdjacentFacetIntegral(cutAdjacentFacetJump(u), -1),
         std::invalid_argument);
+}
+
+TEST(CutCellForms, CutAdjacentSecondNormalDerivativeJumpRequiresHessians)
+{
+    constexpr int facet_set_marker = 38;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+
+    const auto bilinear = cutAdjacentFacetIntegral(
+        cutAdjacentFacetSecondNormalDerivativeJump(u) *
+            cutAdjacentFacetSecondNormalDerivativeJump(v),
+        facet_set_marker);
+
+    FormCompiler compiler;
+    const auto ir = compiler.compileBilinear(bilinear);
+    EXPECT_TRUE(ir.hasInteriorFaceTerms());
+    EXPECT_TRUE(svmp::FE::assembly::hasFlag(
+        ir.requiredData(), svmp::FE::assembly::RequiredData::BasisHessians));
+    ASSERT_EQ(ir.terms().size(), 1u);
+    EXPECT_EQ(ir.terms().front().domain, IntegralDomain::InteriorFace);
+    EXPECT_EQ(ir.terms().front().interface_marker, facet_set_marker);
 }
 
 TEST(CutCellForms, BuildsParameterBackedCutMetadataTerminals)

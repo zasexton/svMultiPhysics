@@ -782,6 +782,9 @@ unmarked far-field cells receive zero cut-adjacent stabilization contribution.
 Form-level cut-adjacent gradient-penalty tests verify the implemented trace
 height scaling: first-gradient velocity penalties scale with `h`, while the
 pressure-gradient path scales with `h^3`.
+The cut-cell form vocabulary now exposes second-normal-derivative jump helpers
+backed by the existing Hessian kernels, with compiler coverage proving P2
+cut-adjacent facet forms request basis Hessians.
 
 ### Design Checklist
 
@@ -799,7 +802,7 @@ pressure-gradient path scales with `h^3`.
 
 ### Implementation Checklist
 
-- [ ] Extend form vocabulary or kernels for higher normal-derivative jumps if not
+- [x] Extend form vocabulary or kernels for higher normal-derivative jumps if not
       already available.
 - [x] Include polynomial order in stabilization setup.
 - [x] Preserve active-side facet-set generation.

@@ -188,6 +188,18 @@ struct CutCellFormTerminals {
     return inner(cutAdjacentFacetGradientJump(expr), FormExpr::normal().minus());
 }
 
+[[nodiscard]] inline FormExpr cutAdjacentFacetHessianJump(const FormExpr& expr)
+{
+    return jump(expr.hessian());
+}
+
+[[nodiscard]] inline FormExpr cutAdjacentFacetSecondNormalDerivativeJump(
+    const FormExpr& expr)
+{
+    const auto n_minus = FormExpr::normal().minus();
+    return inner(cutAdjacentFacetHessianJump(expr), outer(n_minus, n_minus));
+}
+
 [[nodiscard]] FormExpr cutAdjacentFacetIntegral(const FormExpr& integrand) = delete;
 
 [[nodiscard]] inline FormExpr cutAdjacentFacetIntegral(
