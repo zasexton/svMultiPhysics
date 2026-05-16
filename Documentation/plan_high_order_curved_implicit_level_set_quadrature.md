@@ -1408,7 +1408,11 @@ linear-solver problems.
       These helpers are intentionally separate from routine solution VTK output
       so inspection can be enabled by tests, debug tools, or smoke scripts
       without changing production field output.
-- [ ] Warn when vertex-sign `ActiveFluid` and high-order wet fractions disagree.
+- [x] Warn when vertex-sign `ActiveFluid` and high-order wet fractions disagree.
+      VTK output compares nodal sign fractions in cut cells against generated
+      retained wet fractions and logs `ActiveFluid/WetVolumeFraction`
+      disagreements with request metadata, compared/disagreeing cut-cell
+      counts, threshold, maximum absolute difference, and the worst parent cell.
 
 ### Tests
 
