@@ -396,6 +396,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             env["SVMP_FE_JACOBIAN_CHECK_IT"] = str(args.jacobian_check_iteration)
         if args.jacobian_check_step is not None:
             env["SVMP_FE_JACOBIAN_CHECK_STEP"] = f"{args.jacobian_check_step:.16g}"
+        if args.jacobian_check_scheme:
+            env["SVMP_FE_JACOBIAN_CHECK_SCHEME"] = args.jacobian_check_scheme
         if args.jacobian_check_components:
             env["SVMP_FE_JACOBIAN_CHECK_COMPONENTS"] = args.jacobian_check_components
         if args.jacobian_check_component_sweeps:
@@ -2511,6 +2513,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
     for name in (
         "jacobian_check_iteration",
         "jacobian_check_step",
+        "jacobian_check_scheme",
         "jacobian_check_components",
         "jacobian_check_component_sweeps",
         "linear_solve_history_max_calls",
@@ -3377,6 +3380,11 @@ def main() -> int:
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--max-jacobian-component-block-relative-error", type=float)
+    parser.add_argument(
+        "--jacobian-check-scheme",
+        choices=("forward", "central"),
+        help="Finite-difference scheme used by the solver Jacobian diagnostic.",
+    )
     parser.add_argument("--disable-cut-stabilization", action="store_true")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--disable-velocity-extension", action="store_true")

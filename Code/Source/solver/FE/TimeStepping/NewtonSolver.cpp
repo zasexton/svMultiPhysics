@@ -872,6 +872,42 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
     return v;
 }
 
+enum class JacobianCheckDifferenceScheme {
+    Forward,
+    Central,
+};
+
+[[nodiscard]] JacobianCheckDifferenceScheme jacobianCheckDifferenceScheme() noexcept
+{
+    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_SCHEME");
+    if (env == nullptr) {
+        return JacobianCheckDifferenceScheme::Forward;
+    }
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) {
+                    return std::isspace(c) != 0 || c == '-' || c == '_';
+                }),
+                value.end());
+    if (value == "central" || value == "centered" || value == "symmetric") {
+        return JacobianCheckDifferenceScheme::Central;
+    }
+    return JacobianCheckDifferenceScheme::Forward;
+}
+
+[[nodiscard]] const char* jacobianCheckDifferenceSchemeName(
+    JacobianCheckDifferenceScheme scheme) noexcept
+{
+    switch (scheme) {
+    case JacobianCheckDifferenceScheme::Central:
+        return "central";
+    case JacobianCheckDifferenceScheme::Forward:
+        break;
+    }
+    return "forward";
+}
+
 [[nodiscard]] std::string lowerCopy(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -3745,6 +3781,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.u_backup = factory.createVector(n_dofs);
     workspace.residual_scratch = factory.createVector(n_dofs);
     workspace.residual_base = factory.createVector(n_dofs);
+    workspace.residual_minus = factory.createVector(n_dofs);
     workspace.ptc_mass_lumped.reset();
     workspace.dt_field_dofs.clear();
 
@@ -3754,6 +3791,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     FE_CHECK_NOT_NULL(workspace.u_backup.get(), "NewtonSolver workspace.u_backup");
     FE_CHECK_NOT_NULL(workspace.residual_scratch.get(), "NewtonSolver workspace.residual_scratch");
     FE_CHECK_NOT_NULL(workspace.residual_base.get(), "NewtonSolver workspace.residual_base");
+    FE_CHECK_NOT_NULL(workspace.residual_minus.get(), "NewtonSolver workspace.residual_minus");
 
     if (options_.pseudo_transient.enabled) {
         workspace.ptc_mass_lumped = factory.createVector(n_dofs);
@@ -3811,6 +3849,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto& u_backup = *workspace.u_backup;
     auto& residual_scratch = *workspace.residual_scratch;
     auto& residual_base = *workspace.residual_base;
+    auto& residual_minus = *workspace.residual_minus;
 
     NewtonReport report;
 
@@ -4902,6 +4941,9 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             const double u_norm = history.u().norm();
             const double u_rms = (n_dofs > 0) ? (u_norm / std::sqrt(static_cast<double>(n_dofs))) : u_norm;
             const double h = rel_step * (1.0 + u_rms);
+            const auto difference_scheme = jacobianCheckDifferenceScheme();
+            const char* difference_scheme_name =
+                jacobianCheckDifferenceSchemeName(difference_scheme);
 
             if (h > 0.0 && std::isfinite(h)) {
                 const auto& component_sweeps = jacobianCheckComponentSweepFilters();
@@ -5009,14 +5051,60 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 restoreDiagnosticState();
                 synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
 
-                const double r_base_norm = residualNormForConvergence(residual_base, u_backup);
-                const double r_used_norm = residualNormForConvergence(r, u_backup);
+                double fd_curvature_norm = 0.0;
+                if (difference_scheme == JacobianCheckDifferenceScheme::Central) {
+                    // Assemble r(u - h*v) into residual_minus. A centered
+                    // check cancels step-independent refresh jumps and gives a
+                    // more reliable smooth-tangent diagnostic.
+                    axpy(history.u(), static_cast<Real>(-h), du);
+                    syncCurrentState();
 
-                // residual_scratch <- (r(u+h*v) - r(u)) / h  (FD approximation of J*v).
-                axpy(residual_scratch, static_cast<Real>(-1.0), residual_base);
-                residual_scratch.scale(static_cast<Real>(1.0 / h));
+                    residual_minus.zero();
+                    {
+                        auto r_view = residual_minus.createAssemblyView();
+                        FE_CHECK_NOT_NULL(r_view.get(), "NewtonSolver: jacobian check residual minus view");
+
+                        transient.system().beginTimeStep(/*reset_auxiliary_state=*/false,
+                                                         /*invalidate_auxiliary_inputs=*/false);
+                        systems::AssemblyRequest req;
+                        req.op = options_.residual_op;
+                        req.want_vector = true;
+                        req.suppress_constraint_inhomogeneity = true;
+                        req.is_nonlinear_iteration = true;
+                        auto minus_state_holder = makeNewtonState(history, solve_time);
+                        synchronizeState(minus_state_holder.view,
+                                         StateSyncPoint::ResidualAssembly);
+                        const auto ar = transient.assemble(
+                            req, minus_state_holder.view, nullptr, r_view.get());
+                        FE_THROW_IF(!ar.success, FEException,
+                                    "NewtonSolver: Jacobian check minus residual assembly failed: " +
+                                        ar.error_message);
+                    }
+                    applyResidualFixups(residual_minus);
+                    restoreDiagnosticState();
+                    synchronizeState(state, StateSyncPoint::AcceptedNonlinearState);
+
+                    copyVector(u_backup, residual_minus);
+                    axpy(u_backup, static_cast<Real>(1.0), residual_scratch);
+                    axpy(u_backup, static_cast<Real>(-2.0), residual_base);
+                    zeroVectorEntries(constrained_dofs, u_backup);
+                    fd_curvature_norm = u_backup.norm();
+
+                    residual_scratch.scale(static_cast<Real>(1.0 / (2.0 * h)));
+                    axpy(residual_scratch,
+                         static_cast<Real>(-1.0 / (2.0 * h)),
+                         residual_minus);
+                } else {
+                    // residual_scratch <- (r(u+h*v) - r(u)) / h.
+                    axpy(residual_scratch, static_cast<Real>(-1.0), residual_base);
+                    residual_scratch.scale(static_cast<Real>(1.0 / h));
+                }
                 syncOwnedRowHaloIfNeeded(residual_scratch);
                 fd_component_norms = componentNormSnapshot(transient.system(), residual_scratch);
+                const double r_base_norm =
+                    residualNormForConvergence(residual_base, residual_minus);
+                const double r_used_norm =
+                    residualNormForConvergence(r, residual_minus);
 
                 // u_backup <- r_used - r_base (will overwrite u_backup).
                 copyVector(u_backup, r);
@@ -5090,6 +5178,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 	                    oss << "NewtonSolver: Jacobian check jacobian_op='" << options_.jacobian_op
 	                        << "' residual_op='" << options_.residual_op << "'"
 	                        << " diagnostic=jacobian_check"
+	                        << " fd_scheme=" << difference_scheme_name
 	                        << " component_filter='" << component_filter_label << "'"
 	                        << " sweep=" << sweep_index
 	                        << " it=" << it
@@ -5101,6 +5190,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                         << " ||J_matrix*v-FD||=" << matrix_err_norm
                         << " ||Jv-FD||=" << err_norm
                         << " ||Jv+FD||=" << sign_flip_err_norm
+                        << " ||FD_curvature||=" << fd_curvature_norm
                         << " rel=" << rel_err
                         << " ||r(residual_op)||=" << r_base_norm
                         << " ||r(used_op=" << residual_op_used << ")||=" << r_used_norm

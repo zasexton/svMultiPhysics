@@ -520,10 +520,15 @@ benchmark runs.
       cut-adjacent residual fix: the pressure-pressure block relative mismatch
       dropped from order one to about 4.7e-9, with object-cache misses and new
       generated kernel objects confirming the fixed generator path was used.
-- [ ] Investigate the remaining MMS fixed-geometry velocity-column mismatch,
-      led by `column=velocity,row=Pressure` at about 0.91 relative error, and
-      the resulting GMRES true-residual failure before returning to D18/D38
-      qualification.
+- [x] Investigate the remaining MMS fixed-geometry velocity-column mismatch:
+      central finite-difference checks show the forward velocity-column result
+      was dominated by a refresh jump, while no-cut and cut-stabilized
+      velocity/pressure component sweeps now agree with the assembled tangent
+      within about 2.6e-4 relative block error.
+- [ ] Investigate the cut-stabilized MMS GMRES true-residual failure now that
+      central residual/tangent diagnostics pass, including linear-operator
+      conditioning, preconditioner scaling, and support-constrained block
+      treatment before returning to D18/D38 qualification.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

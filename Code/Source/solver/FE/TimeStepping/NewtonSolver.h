@@ -124,13 +124,15 @@ struct NewtonWorkspace {
     std::unique_ptr<backends::GenericVector> u_backup{};
     std::unique_ptr<backends::GenericVector> residual_scratch{};
     std::unique_ptr<backends::GenericVector> residual_base{};
+    std::unique_ptr<backends::GenericVector> residual_minus{};
     std::unique_ptr<backends::GenericVector> ptc_mass_lumped{};
     std::vector<GlobalIndex> dt_field_dofs{};
 
     [[nodiscard]] bool isAllocated() const noexcept
     {
         return jacobian != nullptr && residual != nullptr && delta != nullptr &&
-               u_backup != nullptr && residual_scratch != nullptr && residual_base != nullptr;
+               u_backup != nullptr && residual_scratch != nullptr &&
+               residual_base != nullptr && residual_minus != nullptr;
     }
 };
 
