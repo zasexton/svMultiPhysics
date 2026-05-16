@@ -1218,13 +1218,35 @@ methods and volume correction remain separate numerical-method choices.
 
 ### Design Checklist
 
-- [ ] Define high-order-compatible wet-volume diagnostics.
-- [ ] Define whether volume correction targets reference or physical volume.
-      Recommended validation metric: physical wet volume.
-- [ ] Define whether reinitialization preserves high-order coefficients or
+- [x] Define high-order-compatible wet-volume diagnostics.
+      Wet-volume diagnostics are based on retained generated cut-volume rules,
+      not vertex masks. Each report carries reference wet volume, physical wet
+      volume mapped through the parent-cell geometry, rule counts, skipped
+      physical-measure counts, wet-volume frame, drift, and relative drift. A
+      physical frame is required for high-order validation; reference fallback is
+      diagnostic-only evidence that a physical measure path is missing.
+- [x] Define whether volume correction targets reference or physical volume.
+      Validation targets physical wet volume. The current global-shift
+      correction remains a scalar level-set coefficient shift and must be
+      compared against the high-order physical wet-volume diagnostic before it
+      is accepted for high-order runs.
+- [x] Define whether reinitialization preserves high-order coefficients or
       projects back to a lower order.
-- [ ] Define acceptable zero-contour displacement caused by maintenance.
-- [ ] Define conservation tolerances for validation cases.
+      The projection reinitialization path preserves the full coefficient vector
+      layout and updates only vertex coefficients in the first milestone; it
+      does not project the field to a lower-order space and does not claim a
+      curved high-order signed-distance reconstruction.
+- [x] Define acceptable zero-contour displacement caused by maintenance.
+      Validation runs must record `max_interface_displacement`,
+      `l2_interface_displacement`, and sample count. The default acceptance gate
+      is `max_interface_displacement <= max(signed_distance_tolerance,
+      0.05*h_min)` for the maintained band unless a case-specific analytic
+      tolerance is documented.
+- [x] Define conservation tolerances for validation cases.
+      Fixed-geometry validation should keep absolute physical wet-volume drift
+      below `max(1.0e-10, 1.0e-8*initial_physical_wet_volume)`. Transient smoke
+      runs keep the existing relative drift warning threshold as a diagnostic
+      screen and must record the threshold used.
 
 ### Implementation Checklist
 
