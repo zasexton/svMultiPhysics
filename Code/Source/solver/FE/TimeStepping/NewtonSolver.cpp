@@ -148,6 +148,48 @@ namespace {
     return max_it;
 }
 
+[[nodiscard]] bool linearSolveMemoryDiagnosticsEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS");
+        if (env == nullptr) {
+            return false;
+        }
+        while (*env == ' ' || *env == '\t' || *env == '\n' || *env == '\r') {
+            ++env;
+        }
+        return *env != '\0' && *env != '0';
+    }();
+    return enabled;
+}
+
+struct ProcessMemorySnapshot {
+    long vm_kb{-1};
+    long rss_kb{-1};
+};
+
+[[nodiscard]] ProcessMemorySnapshot readProcessMemorySnapshot()
+{
+    ProcessMemorySnapshot snapshot;
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        std::istringstream fields(line);
+        std::string key;
+        long value = -1;
+        std::string unit;
+        if (!(fields >> key >> value >> unit)) {
+            continue;
+        }
+        if (key == "VmSize:") {
+            snapshot.vm_kb = value;
+        } else if (key == "VmRSS:") {
+            snapshot.rss_kb = value;
+        }
+    }
+    return snapshot;
+}
+
 [[nodiscard]] std::optional<std::string> firstLinearVectorDumpPrefix()
 {
     static const std::optional<std::string> prefix = []() -> std::optional<std::string> {
@@ -5671,6 +5713,23 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: calling linear.solve()");
             }
+            auto log_linear_solve_memory = [&](const char* phase) {
+                if (!linearSolveMemoryDiagnosticsEnabled() || mpiRank() != 0) {
+                    return;
+                }
+                const auto memory = readProcessMemorySnapshot();
+                FE_LOG_INFO(
+                    std::string("[svMultiPhysics::FE] NewtonSolver diagnostic=process_memory")
+                    + " phase=" + phase
+                    + " nonlinear_iteration=" + std::to_string(it)
+                    + " ptc_retry=" + std::to_string(ptc_retries)
+                    + " linear_backend='" + std::string(backends::backendKindToString(linear.backendKind())) + "'"
+                    + " matrix_rows=" + std::to_string(J.numRows())
+                    + " matrix_cols=" + std::to_string(J.numCols())
+                    + " process_vm_kb=" + std::to_string(memory.vm_kb)
+                    + " process_rss_kb=" + std::to_string(memory.rss_kb));
+            };
+            log_linear_solve_memory("before_linear_solve");
             if (linearProbeDumpEnabled() && !linear_probe_dumped && it == 0 && ptc_retries == 0) {
                 linear_probe_dumped = true;
                 logVectorComponentNorms(transient.system(), *linear_rhs, "linear rhs");
@@ -5797,6 +5856,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             ntp0 = NTP();
             report.linear = linear.solve(J, du, *linear_rhs);
             ntp_linear += NTP() - ntp0;
+            log_linear_solve_memory("after_linear_solve");
             ntp_linear_iters_total += report.linear.iterations;
             std::optional<std::vector<Real>> first_linear_dense_rhs;
             std::optional<std::vector<Real>> first_linear_dense_du_raw;

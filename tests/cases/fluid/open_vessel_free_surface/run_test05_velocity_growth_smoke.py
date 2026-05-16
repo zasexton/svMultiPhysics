@@ -411,6 +411,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             env["SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT"] = str(
                 args.linear_solve_component_norms_max_newton_it
             )
+    if args.enable_linear_solve_memory_diagnostics:
+        env["SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS"] = "1"
     if args.enable_form_block_diagnostics:
         env["SVMP_FE_FORM_BLOCK_DIAGNOSTICS"] = "1"
     if args.enable_interior_face_timing:
@@ -1826,6 +1828,15 @@ def has_marked_interior_face_fallback_trace(diagnostics: dict[str, Any]) -> bool
     )
 
 
+def has_linear_solve_memory_diagnostics(diagnostics: dict[str, Any]) -> bool:
+    phases = {
+        record.get("phase")
+        for record in diagnostics.get("process_memory", [])
+        if record.get("phase") in {"before_linear_solve", "after_linear_solve"}
+    }
+    return {"before_linear_solve", "after_linear_solve"}.issubset(phases)
+
+
 def add_diagnostic_metrics(metrics: dict[str, Any],
                            diagnostics: dict[str, Any]) -> None:
     metrics["diagnostics"] = diagnostics
@@ -2428,6 +2439,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         )
         if not has_process_memory:
             errors.append("process memory diagnostics were not reported")
+    if (args.require_linear_solve_memory_diagnostics and
+            not has_linear_solve_memory_diagnostics(diagnostics)):
+        errors.append("linear-solve memory diagnostics were not reported")
     if args.require_interior_face_timing_diagnostics and not diagnostics.get("interior_face_timings"):
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
@@ -2757,6 +2771,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         )
         if not has_process_memory:
             errors.append("process memory diagnostics were not reported")
+    if (args.require_linear_solve_memory_diagnostics and
+            not has_linear_solve_memory_diagnostics(metrics["diagnostics"])):
+        errors.append("linear-solve memory diagnostics were not reported")
     if (args.require_interior_face_timing_diagnostics and
             not metrics["diagnostics"].get("interior_face_timings")):
         errors.append("interior-face timing diagnostics were not reported")
@@ -3132,6 +3149,8 @@ def main() -> int:
     parser.add_argument("--linear-solve-history-max-calls", type=int)
     parser.add_argument("--enable-linear-solve-component-norms", action="store_true")
     parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
+    parser.add_argument("--enable-linear-solve-memory-diagnostics", action="store_true")
+    parser.add_argument("--require-linear-solve-memory-diagnostics", action="store_true")
     parser.add_argument("--enable-form-block-diagnostics", action="store_true")
     parser.add_argument("--enable-interior-face-timing", action="store_true")
     parser.add_argument("--require-interior-face-timing-diagnostics", action="store_true")

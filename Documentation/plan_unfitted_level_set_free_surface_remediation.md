@@ -576,6 +576,10 @@ benchmark runs.
       memory still grows by about 508 MiB while kernel-cache size and
       object-cache counters plateau, so the next memory-lifecycle work should
       focus outside retained JIT object code.
+- [x] Add opt-in linear-solve process-memory diagnostics and record a five-step
+      D18 probe showing before/after GMRES solve resident memory is unchanged;
+      the remaining growth occurs before the solve call, across assembly and
+      accepted cut-context refresh boundaries.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
