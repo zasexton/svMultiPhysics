@@ -537,9 +537,13 @@ benchmark runs.
       preconditioner/scaling fix: the cut-stabilized probe has no zero rows,
       missing diagonals, or nonfinite entries, but diagonal preconditioning sees
       many zero scalar diagonal entries and row sums up to about 1.0e12.
-- [ ] Rerun a bounded no-output D18 GMRES probe with automatic FSILS
+- [x] Rerun a bounded no-output D18 GMRES probe with automatic FSILS
       row-column scaling before resuming any long benchmark run, and use the
       compact diagnostics to identify remaining resource or assembly bottlenecks.
+- [ ] Eliminate the first-solve unconstrained dry velocity rows exposed by the
+      D18 automatic row-column scaling probe: the first prepared matrix reports
+      1,788 zero velocity rows and zero Dirichlet DOFs, while later prepared
+      matrices have the active-side constraints loaded and no zero rows.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
