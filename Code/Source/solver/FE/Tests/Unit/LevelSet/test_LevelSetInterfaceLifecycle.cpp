@@ -762,6 +762,21 @@ TEST(LevelSetInterfaceLifecycle, BackendDiagnosticStatusNamesAreStable)
 
 TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
 {
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
     FE::interfaces::CutInterfaceDomainRequest request{};
     request.source = FE::interfaces::LevelSetInterfaceSource::fromEvaluator(
         "validation-level-set", 0, 1);
@@ -782,13 +797,20 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
     };
     input.level_set_values = {-0.25, 0.75, 0.75, 0.75};
 
+    level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+    backend_input.linearized_input = input;
+    backend_input.evaluator = &evaluator;
+    backend_input.isovalue = request.isovalue;
+    backend_input.reference_min = {{0.0, 0.0, 0.0}};
+    backend_input.reference_max = {{1.0, 1.0, 1.0}};
+
     const auto& backend =
         level_set::implicitCutQuadratureBackendDriver(
             level_set::ImplicitCutQuadratureBackend::LinearCorner);
-    const auto result = backend.cut(3, request, input);
+    const auto result = backend.cut(3, request, backend_input);
     const auto validation =
         level_set::validateImplicitCutQuadratureBackendCellResult(
-            request, input, result);
+            request, backend_input, result);
     EXPECT_TRUE(validation.ok) << validation.diagnostic;
     EXPECT_EQ(validation.status,
               level_set::ImplicitCutQuadratureDiagnosticStatus::Cut);
@@ -804,6 +826,21 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
 
 TEST(LevelSetInterfaceLifecycle, InvalidBackendOutputIsRejected)
 {
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
     FE::interfaces::CutInterfaceDomainRequest request{};
     request.source = FE::interfaces::LevelSetInterfaceSource::fromEvaluator(
         "validation-level-set", 0, 1);
@@ -813,6 +850,9 @@ TEST(LevelSetInterfaceLifecycle, InvalidBackendOutputIsRejected)
     FE::interfaces::LevelSetCellCutInput input{};
     input.parent_cell = 2;
     input.element_type = FE::ElementType::Tetra4;
+    level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+    backend_input.linearized_input = input;
+    backend_input.evaluator = &evaluator;
 
     level_set::ImplicitCutQuadratureBackendCellResult result{};
     result.cut.supported = true;
@@ -832,7 +872,7 @@ TEST(LevelSetInterfaceLifecycle, InvalidBackendOutputIsRejected)
 
     const auto validation =
         level_set::validateImplicitCutQuadratureBackendCellResult(
-            request, input, result);
+            request, backend_input, result);
     EXPECT_FALSE(validation.ok);
     EXPECT_NE(validation.diagnostic.find("invalid volume region"),
               std::string::npos);

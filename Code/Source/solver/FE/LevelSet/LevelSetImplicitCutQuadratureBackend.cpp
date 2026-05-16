@@ -104,7 +104,7 @@ public:
     [[nodiscard]] ImplicitCutQuadratureBackendCellResult cut(
         int mesh_dimension,
         const interfaces::CutInterfaceDomainRequest& request,
-        const interfaces::LevelSetCellCutInput& input) const override
+        const ImplicitCutQuadratureBackendCellInput& input) const override
     {
         ImplicitCutQuadratureBackendCellResult result{};
         result.achieved_interface_quadrature_order =
@@ -112,13 +112,14 @@ public:
         result.achieved_volume_quadrature_order =
             achievedVolumeQuadratureOrder(request);
 
-        if (!supports(mesh_dimension, input.element_type)) {
+        if (!supports(mesh_dimension, input.linearized_input.element_type)) {
             result.cut.supported = false;
             result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
             result.cut.diagnostic =
                 "LinearCorner implicit cut quadrature backend does not support "
                 "element type " +
-                std::to_string(static_cast<unsigned>(input.element_type)) +
+                std::to_string(static_cast<unsigned>(
+                    input.linearized_input.element_type)) +
                 " in mesh dimension " + std::to_string(mesh_dimension);
             result.diagnostic_status =
                 ImplicitCutQuadratureDiagnosticStatus::Unsupported;
@@ -127,10 +128,12 @@ public:
 
         if (mesh_dimension == 2) {
             result.cut =
-                interfaces::cutLinearLevelSetCell2D(request, input);
+                interfaces::cutLinearLevelSetCell2D(
+                    request, input.linearized_input);
         } else if (mesh_dimension == 3) {
             result.cut =
-                interfaces::cutLinearLevelSetCell3D(request, input);
+                interfaces::cutLinearLevelSetCell3D(
+                    request, input.linearized_input);
         }
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
@@ -243,9 +246,24 @@ const char* implicitCutQuadratureDiagnosticStatusName(
 ImplicitCutQuadratureBackendValidation
 validateImplicitCutQuadratureBackendCellResult(
     const interfaces::CutInterfaceDomainRequest& request,
-    const interfaces::LevelSetCellCutInput& input,
+    const ImplicitCutQuadratureBackendCellInput& input,
     const ImplicitCutQuadratureBackendCellResult& result)
 {
+    const auto& linearized_input = input.linearized_input;
+    if (input.evaluator == nullptr) {
+        return failedValidation(
+            ImplicitCutQuadratureDiagnosticStatus::Failed,
+            "implicit cut backend input is missing a level-set evaluator");
+    }
+    if (!finiteArray(input.reference_min) ||
+        !finiteArray(input.reference_max) ||
+        input.reference_min[0] > input.reference_max[0] ||
+        input.reference_min[1] > input.reference_max[1] ||
+        input.reference_min[2] > input.reference_max[2]) {
+        return failedValidation(
+            ImplicitCutQuadratureDiagnosticStatus::Failed,
+            "implicit cut backend input has invalid reference bounds");
+    }
     const auto status = result.diagnostic_status ==
                                 ImplicitCutQuadratureDiagnosticStatus::Failed
                             ? classifyCutStatus(result.cut, result.fallback_used)
@@ -264,7 +282,7 @@ validateImplicitCutQuadratureBackendCellResult(
     }
 
     for (const auto& fragment : result.cut.fragments) {
-        if (fragment.parent_cell != input.parent_cell) {
+        if (fragment.parent_cell != linearized_input.parent_cell) {
             return failedValidation(
                 ImplicitCutQuadratureDiagnosticStatus::Failed,
                 "implicit cut backend returned an interface fragment for the wrong parent cell");
@@ -299,7 +317,7 @@ validateImplicitCutQuadratureBackendCellResult(
     Real negative_measure = Real{0.0};
     Real positive_measure = Real{0.0};
     for (const auto& region : result.cut.volume_regions) {
-        if (region.parent_cell != input.parent_cell) {
+        if (region.parent_cell != linearized_input.parent_cell) {
             return failedValidation(
                 ImplicitCutQuadratureDiagnosticStatus::Failed,
                 "implicit cut backend returned a volume region for the wrong parent cell");

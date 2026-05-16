@@ -3,6 +3,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include <algorithm>
@@ -106,6 +107,38 @@ struct GeneratedInterfaceCellDiagnostics {
     return {{point[0], point[1], point[2]}};
 }
 
+[[nodiscard]] std::array<Real, 3> minReferenceCoordinate(
+    const std::vector<std::array<Real, 3>>& coordinates) noexcept
+{
+    std::array<Real, 3> out{{0.0, 0.0, 0.0}};
+    if (coordinates.empty()) {
+        return out;
+    }
+    out = coordinates.front();
+    for (const auto& point : coordinates) {
+        out[0] = std::min(out[0], point[0]);
+        out[1] = std::min(out[1], point[1]);
+        out[2] = std::min(out[2], point[2]);
+    }
+    return out;
+}
+
+[[nodiscard]] std::array<Real, 3> maxReferenceCoordinate(
+    const std::vector<std::array<Real, 3>>& coordinates) noexcept
+{
+    std::array<Real, 3> out{{1.0, 1.0, 1.0}};
+    if (coordinates.empty()) {
+        return out;
+    }
+    out = coordinates.front();
+    for (const auto& point : coordinates) {
+        out[0] = std::max(out[0], point[0]);
+        out[1] = std::max(out[1], point[1]);
+        out[2] = std::max(out[2], point[2]);
+    }
+    return out;
+}
+
 [[nodiscard]] FieldId resolveLevelSetField(
     const systems::FESystem& system,
     const LevelSetGeneratedInterfaceOptions& options)
@@ -171,6 +204,7 @@ struct GeneratedInterfaceCellDiagnostics {
     const assembly::IMeshAccess& mesh,
     const dofs::EntityDofMap& entity_map,
     const ImplicitCutQuadratureBackendDriver& backend,
+    const LevelSetCellEvaluator& evaluator,
     std::span<const Real> coefficients,
     GlobalIndex cell_id)
 {
@@ -203,10 +237,20 @@ struct GeneratedInterfaceCellDiagnostics {
         throw std::invalid_argument(
             "generated level-set interface requires a 2D or 3D mesh");
     }
-    auto backend_result = backend.cut(mesh.dimension(), domain.request(), input);
+    ImplicitCutQuadratureBackendCellInput backend_input{};
+    backend_input.linearized_input = input;
+    backend_input.evaluator = &evaluator;
+    backend_input.isovalue = domain.request().isovalue;
+    backend_input.reference_min =
+        minReferenceCoordinate(input.node_coordinates);
+    backend_input.reference_max =
+        maxReferenceCoordinate(input.node_coordinates);
+
+    auto backend_result =
+        backend.cut(mesh.dimension(), domain.request(), backend_input);
     const auto validation =
         validateImplicitCutQuadratureBackendCellResult(
-            domain.request(), input, backend_result);
+            domain.request(), backend_input, backend_result);
     if (!validation.ok) {
         throw std::invalid_argument(validation.diagnostic);
     }
@@ -350,6 +394,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
 
     interfaces::LevelSetInterfaceDomain domain(request);
     const auto coefficients = solution.subspan(offset, n_field_dofs);
+    const auto evaluator = makeLevelSetCellEvaluator(system, field, solution);
     std::size_t cell_count = 0u;
     std::size_t corner_linearized_cell_count = 0u;
     std::size_t max_cell_node_count = 0u;
@@ -362,7 +407,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     mesh.forEachCell([&](GlobalIndex cell_id) {
         const auto diagnostics =
             appendGeneratedInterfaceCell(
-                domain, mesh, *entity_map, backend, coefficients, cell_id);
+                domain, mesh, *entity_map, backend, evaluator, coefficients, cell_id);
         ++cell_count;
         if (diagnostics.node_count > diagnostics.corner_count) {
             ++corner_linearized_cell_count;

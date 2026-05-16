@@ -7,7 +7,10 @@
  */
 
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+
+#include <array>
 
 namespace svmp::FE::level_set {
 
@@ -38,6 +41,14 @@ struct ImplicitCutQuadratureBackendValidation {
     ImplicitCutQuadratureDiagnosticStatus status{
         ImplicitCutQuadratureDiagnosticStatus::Cut};
     std::string diagnostic{};
+};
+
+struct ImplicitCutQuadratureBackendCellInput {
+    interfaces::LevelSetCellCutInput linearized_input{};
+    const LevelSetCellEvaluator* evaluator{nullptr};
+    Real isovalue{0.0};
+    std::array<Real, 3> reference_min{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> reference_max{{1.0, 1.0, 1.0}};
 };
 
 struct ImplicitCutQuadratureBackendCapability {
@@ -80,7 +91,7 @@ public:
     [[nodiscard]] virtual ImplicitCutQuadratureBackendCellResult cut(
         int mesh_dimension,
         const interfaces::CutInterfaceDomainRequest& request,
-        const interfaces::LevelSetCellCutInput& input) const = 0;
+        const ImplicitCutQuadratureBackendCellInput& input) const = 0;
 };
 
 [[nodiscard]] const ImplicitCutQuadratureBackendDriver&
@@ -94,7 +105,7 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
 [[nodiscard]] ImplicitCutQuadratureBackendValidation
 validateImplicitCutQuadratureBackendCellResult(
     const interfaces::CutInterfaceDomainRequest& request,
-    const interfaces::LevelSetCellCutInput& input,
+    const ImplicitCutQuadratureBackendCellInput& input,
     const ImplicitCutQuadratureBackendCellResult& result);
 
 } // namespace svmp::FE::level_set

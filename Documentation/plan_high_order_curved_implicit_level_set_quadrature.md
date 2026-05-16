@@ -246,7 +246,7 @@ assembly and physics code backend-agnostic.
 ### Design Checklist
 
 - [x] Define an interface such as `ImplicitCutQuadratureBackend`.
-- [ ] Input:
+- [x] Input:
       - parent cell id,
       - element type,
       - mesh dimension,
