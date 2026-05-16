@@ -544,6 +544,30 @@ Moment fitting is not part of the first simplex fallback chain. It remains a
 future backend and must be selected explicitly once positive-weight and
 diagnostic contracts are available for simplex cells.
 
+### Edge and Corner Degeneracy Policy
+
+The initial simplex degeneracy policy inherits the existing linear simplex
+classifier at terminal subcell leaves:
+
+- `NoCut` means the sampled simplex is entirely on one side after tolerance
+  handling and contributes only a full-side volume rule.
+- `FullZeroCell` is degenerate and must not create an active interface rule
+  unless a future exact-zero policy is introduced.
+- `VertexTouch` and `EdgeTouch` record contact with simplex vertices or edges.
+  Positive-measure fragments may be retained and counted as degenerate
+  fragments; zero-measure contacts remain inactive.
+- `SmallFragment` and `NearlyTangent` are diagnostic states. They must not
+  silently create nonfinite points, negative weights, or untagged fallback
+  rules.
+- `keep_degenerate_fragments` controls whether degenerate interface fragments
+  survive for diagnostics. Volume rules remain governed by positive measure and
+  conservation checks.
+
+For the first simplex milestone, edge and corner contacts are not elevated to
+request-level fallbacks. A valid finite subcell rule may be used; otherwise the
+backend must fail validation with a cell-local diagnostic that includes the
+selected backend and parent cell.
+
 ### Design Checklist
 
 - [x] Decide first simplex milestone:
@@ -558,7 +582,7 @@ diagnostic contracts are available for simplex cells.
 - [x] Define simplex fallback hierarchy:
       high-order subcell -> linear subcell -> fail, or
       high-order implicit -> moment fit -> fail.
-- [ ] Define edge/corner degeneracy handling.
+- [x] Define edge/corner degeneracy handling.
 
 ### Implementation Checklist
 
