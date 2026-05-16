@@ -712,8 +712,11 @@ benchmark runs.
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Record the solver controls, nonlinear iterations, linear iterations,
       wet-volume history, and output diagnostics in a qualification log.
-- [ ] Keep D18/D38 qualification blocked until all high-priority checklist items
-      above are complete.
+- [x] Keep D18/D38 qualification blocked until all high-priority checklist
+      items above are complete; the remaining open items require full
+      D18/D38 comparison runs and qualification-log capture, so benchmark
+      qualification remains blocked until those short-run diagnostics are clean
+      and the full comparisons are explicitly resumed.
 
 ## 7. Literature Alignment Checks
 
