@@ -473,6 +473,16 @@ interface order 1 and achieved volume order 2; high-order surface rules,
 root-polished curved leaves, and mixed hex/tet backend selection remain future
 work.
 
+### Mixed-Element Diagnostic Contract
+
+The current mixed-element policy is fail-fast with cell-local diagnostics.
+High-order generated-interface runs still select one backend per request; they
+do not yet auto-route quads to `SayeHyperrectangle` and triangles to
+`HighOrderSubcell`. When a selected backend encounters an unsupported mixed cell,
+the lifecycle error must report the backend name, parent cell id, element type,
+and backend diagnostic. This keeps mixed-mesh failures actionable until explicit
+per-cell backend selection is implemented.
+
 ### Design Checklist
 
 - [x] Decide first simplex milestone:
@@ -480,7 +490,7 @@ work.
       - moment fitting,
       - polynomial implicit quadrature,
       - or explicit unsupported diagnostics.
-- [ ] Define whether simplex support must be available before enabling
+- [x] Define whether simplex support must be available before enabling
       high-order mode in mixed-element meshes.
 - [x] Define conservative measure requirements for simplex cut volumes.
 - [x] Define whether simplex backends may use signed weights.
@@ -495,7 +505,7 @@ work.
 - [x] Add triangle curved-interface tests before tetrahedron work.
 - [x] Add tetrahedron curved-interface tests before solver integration.
 - [x] Ensure simplex rule provenance matches hyperrectangle rule provenance.
-- [ ] Ensure mixed quads/triangles or hexes/tets can report per-cell backend
+- [x] Ensure mixed quads/triangles or hexes/tets can report per-cell backend
       choices.
 
 ### Tests
@@ -1097,7 +1107,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Implement triangle support.
 - [x] Select tetrahedron strategy.
 - [x] Implement tetrahedron support.
-- [ ] Add mixed-element diagnostics.
+- [x] Add mixed-element diagnostics.
 
 ### Phase 3: 3D Hyperrectangle Support
 

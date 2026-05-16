@@ -85,6 +85,41 @@ struct GeneratedInterfaceCellDiagnostics {
     }
 }
 
+[[nodiscard]] const char* elementTypeDiagnosticName(ElementType type) noexcept
+{
+    switch (type) {
+    case ElementType::Triangle3:
+        return "Triangle3";
+    case ElementType::Triangle6:
+        return "Triangle6";
+    case ElementType::Quad4:
+        return "Quad4";
+    case ElementType::Quad8:
+        return "Quad8";
+    case ElementType::Quad9:
+        return "Quad9";
+    case ElementType::Tetra4:
+        return "Tetra4";
+    case ElementType::Tetra10:
+        return "Tetra10";
+    default:
+        return "Unsupported";
+    }
+}
+
+[[nodiscard]] std::string backendCellDiagnostic(
+    const ImplicitCutQuadratureBackendDriver& backend,
+    GlobalIndex cell_id,
+    ElementType type,
+    const std::string& diagnostic)
+{
+    return "generated level-set interface backend failure"
+           "; backend=" + std::string(backend.name()) +
+           "; cell=" + std::to_string(cell_id) +
+           "; element_type=" + elementTypeDiagnosticName(type) +
+           "; diagnostic=" + diagnostic;
+}
+
 [[nodiscard]] Real coefficientAtVertex(const dofs::EntityDofMap& entity_map,
                                        GlobalIndex vertex,
                                        std::span<const Real> coefficients)
@@ -214,7 +249,11 @@ struct GeneratedInterfaceCellDiagnostics {
     const std::size_t count = cornerCount(type);
     if (count == 0u) {
         throw std::invalid_argument(
-            "generated level-set interface encountered an unsupported element type");
+            backendCellDiagnostic(
+                backend,
+                cell_id,
+                type,
+                "unsupported element type"));
     }
 
     std::vector<GlobalIndex> cell_nodes;
@@ -254,10 +293,14 @@ struct GeneratedInterfaceCellDiagnostics {
         validateImplicitCutQuadratureBackendCellResult(
             domain.request(), backend_input, backend_result);
     if (!validation.ok) {
-        throw std::invalid_argument(validation.diagnostic);
+        throw std::invalid_argument(
+            backendCellDiagnostic(
+                backend, cell_id, type, validation.diagnostic));
     }
     if (!backend_result.cut.supported) {
-        throw std::invalid_argument(backend_result.cut.diagnostic);
+        throw std::invalid_argument(
+            backendCellDiagnostic(
+                backend, cell_id, type, backend_result.cut.diagnostic));
     }
     for (auto& fragment : backend_result.cut.fragments) {
         domain.addFragment(std::move(fragment));

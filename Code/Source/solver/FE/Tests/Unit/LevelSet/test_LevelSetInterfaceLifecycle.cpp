@@ -442,6 +442,108 @@ private:
     }};
 };
 
+class MixedQuadTriangleMeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 2; }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override { return 7; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return 7; }
+    [[nodiscard]] std::uint64_t topologyRevision() const override { return 11; }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override { return 13; }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override { return 17; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex cell_id) const override
+    {
+        return cell_id == 0 ? FE::ElementType::Quad4 : FE::ElementType::Triangle3;
+    }
+
+    void getCellNodes(FE::GlobalIndex cell_id,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        if (cell_id == 0) {
+            nodes = {0, 1, 2, 3};
+        } else {
+            nodes = {4, 5, 6};
+        }
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex cell_id,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        std::vector<FE::GlobalIndex> nodes;
+        getCellNodes(cell_id, nodes);
+        coords.clear();
+        coords.reserve(nodes.size());
+        for (const auto node : nodes) {
+            coords.push_back(getNodeCoordinates(node));
+        }
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face_id*/,
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+    }
+
+    void forEachOwnedCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    std::array<std::array<FE::Real, 3>, 7> nodes_{{
+        {{-1.0, -1.0, 0.0}},
+        {{1.0, -1.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{-1.0, 1.0, 0.0}},
+        {{2.0, 0.0, 0.0}},
+        {{3.0, 0.0, 0.0}},
+        {{2.0, 1.0, 0.0}},
+    }};
+};
+
 [[nodiscard]] FE::systems::SetupInputs makeSingleTetraSetupInputs()
 {
     FE::dofs::MeshTopologyInfo topo;
@@ -496,6 +598,26 @@ private:
     topo.vertex_gids = {0, 1, 2};
     topo.cell_gids = {0};
     topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+[[nodiscard]] FE::systems::SetupInputs makeMixedQuadTriangleSetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 2;
+    topo.n_vertices = 7;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 4, 7};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4, 5, 6};
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5, 6};
+    topo.cell_gids = {0, 1};
+    topo.cell_owner_ranks = {0, 0};
 
     FE::systems::SetupInputs inputs;
     inputs.topology_override = std::move(topo);
@@ -961,6 +1083,71 @@ TEST(LevelSetInterfaceLifecycle, RejectsHighOrderImplicitModeOnUnsupportedTetra)
     } catch (const std::invalid_argument& ex) {
         const std::string message = ex.what();
         EXPECT_NE(message.find("quadrilateral"), std::string::npos);
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle, MixedElementUnsupportedBackendReportsCellAndElement)
+{
+    const auto mesh = std::make_shared<MixedQuadTriangleMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1,
+                          FE::ElementType::Quad4,
+                          /*order=*/1,
+                          /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeMixedQuadTriangleSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, x[0]);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions saye_options{};
+    saye_options.level_set_field_name = "phi";
+    saye_options.domain_id = "water-air";
+    saye_options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    saye_options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle saye_lifecycle;
+    try {
+        (void)saye_lifecycle.build(system, saye_options, solution);
+        FAIL() << "Expected Saye backend to reject the triangle cell";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("backend=SayeHyperrectangle"), std::string::npos);
+        EXPECT_NE(message.find("cell=1"), std::string::npos);
+        EXPECT_NE(message.find("element_type=Triangle3"), std::string::npos);
+        EXPECT_NE(message.find("quadrilateral"), std::string::npos);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions subcell_options{};
+    subcell_options.level_set_field_name = "phi";
+    subcell_options.domain_id = "water-air";
+    subcell_options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    subcell_options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle subcell_lifecycle;
+    try {
+        (void)subcell_lifecycle.build(system, subcell_options, solution);
+        FAIL() << "Expected subcell backend to reject the quadrilateral cell";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("backend=HighOrderSubcell"), std::string::npos);
+        EXPECT_NE(message.find("cell=0"), std::string::npos);
+        EXPECT_NE(message.find("element_type=Quad4"), std::string::npos);
+        EXPECT_NE(message.find("triangular"), std::string::npos);
     }
 }
 
