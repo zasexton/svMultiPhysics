@@ -628,7 +628,7 @@ benchmark runs.
       free for final VTK output.
 - [x] Complete a D18 run to the configured comparison time without nonlinear
       stalls.
-- [ ] Complete a D38 run to the configured comparison time without nonlinear
+- [x] Complete a D38 run to the configured comparison time without nonlinear
       stalls.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
