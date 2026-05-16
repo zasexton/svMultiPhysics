@@ -1149,7 +1149,7 @@ rank-local discovery order.
 - [ ] Add point-count summaries by volume/interface rules.
 - [ ] Keep transient basis evaluations out of process-wide caches unless keyed
       by stable persistent data.
-- [ ] Sort generated rules by parent cell, side, marker, and topology id.
+- [x] Sort generated rules by parent cell, side, marker, and topology id.
 - [ ] Aggregate MPI diagnostics globally.
 - [ ] Add cache hit/miss counters for high-order quadrature if caching is used.
 
@@ -1157,7 +1157,7 @@ rank-local discovery order.
 
 - [ ] Repeated identical state rebuilds do not grow memory unbounded.
 - [ ] MPI and serial runs produce matching global measure summaries.
-- [ ] Rule ordering is deterministic across runs.
+- [x] Rule ordering is deterministic across runs.
 - [x] High-order smoke run reports timing, memory, and cache diagnostics.
 
 ### Literature Support

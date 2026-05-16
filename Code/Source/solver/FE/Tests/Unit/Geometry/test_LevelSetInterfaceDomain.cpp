@@ -462,6 +462,85 @@ TEST(LevelSetInterfaceDomain, CutVolumeMetadataIsDeterministicForOwnedAndGhostRe
     }
 }
 
+TEST(LevelSetInterfaceDomain, InterfaceRulesUseDeterministicMetadataOrdering)
+{
+    const auto make_domain = [](bool reverse_order) {
+        CutInterfaceDomainRequest request;
+        request.source = LevelSetInterfaceSource::fromEvaluator("deterministic-interface-source",
+                                                                /*layout_revision=*/3,
+                                                                /*value_revision=*/19);
+        request.interface_marker = 86;
+
+        std::vector<CutInterfaceFragment> fragments;
+        auto make_fragment = [](MeshIndex parent_cell,
+                                LocalIndex local_fragment_index,
+                                Real x_coordinate) {
+            CutInterfaceFragment fragment;
+            fragment.parent_cell = parent_cell;
+            fragment.local_fragment_index = local_fragment_index;
+            fragment.measure = 1.0;
+            fragment.topology_id = "cell-" + std::to_string(parent_cell) +
+                                   "-fragment-" +
+                                   std::to_string(local_fragment_index);
+            fragment.quadrature_points = {
+                CutInterfaceQuadraturePoint{
+                    .point = {{x_coordinate, 0.25, 0.0}},
+                    .parent_coordinate = {{x_coordinate, 0.25, 0.0}},
+                    .normal = {{0.0, 1.0, 0.0}},
+                    .weight = 1.0}};
+            return fragment;
+        };
+        fragments.push_back(make_fragment(/*parent_cell=*/7,
+                                          /*local_fragment_index=*/0,
+                                          0.75));
+        fragments.push_back(make_fragment(/*parent_cell=*/4,
+                                          /*local_fragment_index=*/1,
+                                          0.5));
+        fragments.push_back(make_fragment(/*parent_cell=*/4,
+                                          /*local_fragment_index=*/0,
+                                          0.25));
+        if (reverse_order) {
+            std::reverse(fragments.begin(), fragments.end());
+        }
+
+        LevelSetInterfaceDomain domain(request);
+        for (auto& fragment : fragments) {
+            domain.addFragment(std::move(fragment));
+        }
+        return domain;
+    };
+
+    const auto forward_rules =
+        make_domain(/*reverse_order=*/false).interfaceQuadratureRules();
+    const auto reversed_rules =
+        make_domain(/*reverse_order=*/true).interfaceQuadratureRules();
+
+    ASSERT_EQ(forward_rules.size(), 3u);
+    ASSERT_EQ(reversed_rules.size(), forward_rules.size());
+    EXPECT_EQ(forward_rules[0].provenance.parent_entity, 4);
+    EXPECT_EQ(forward_rules[0].provenance.cut_topology_id,
+              "cell-4-fragment-0");
+    EXPECT_EQ(forward_rules[1].provenance.parent_entity, 4);
+    EXPECT_EQ(forward_rules[1].provenance.cut_topology_id,
+              "cell-4-fragment-1");
+    EXPECT_EQ(forward_rules[2].provenance.parent_entity, 7);
+    EXPECT_EQ(forward_rules[2].provenance.cut_topology_id,
+              "cell-7-fragment-0");
+
+    for (std::size_t i = 0; i < forward_rules.size(); ++i) {
+        EXPECT_EQ(reversed_rules[i].provenance.parent_entity,
+                  forward_rules[i].provenance.parent_entity);
+        EXPECT_EQ(reversed_rules[i].provenance.cut_topology_revision,
+                  forward_rules[i].provenance.cut_topology_revision);
+        EXPECT_EQ(reversed_rules[i].provenance.cut_topology_id,
+                  forward_rules[i].provenance.cut_topology_id);
+        ASSERT_EQ(reversed_rules[i].points.size(), forward_rules[i].points.size());
+        EXPECT_NEAR(reversed_rules[i].points.front().point[0],
+                    forward_rules[i].points.front().point[0],
+                    1.0e-14);
+    }
+}
+
 TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
 {
     CutInterfaceDomainRequest negative_request;

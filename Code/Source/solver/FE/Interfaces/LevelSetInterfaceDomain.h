@@ -521,6 +521,25 @@ struct CutInterfaceDomainSummary {
     return h;
 }
 
+[[nodiscard]] inline bool cutQuadratureRuleDeterministicLess(
+    const geometry::CutQuadratureRule& a,
+    const geometry::CutQuadratureRule& b) noexcept {
+    if (a.provenance.parent_entity != b.provenance.parent_entity) {
+        return a.provenance.parent_entity < b.provenance.parent_entity;
+    }
+    if (a.side != b.side) {
+        return a.side < b.side;
+    }
+    if (a.provenance.marker != b.provenance.marker) {
+        return a.provenance.marker < b.provenance.marker;
+    }
+    if (a.provenance.cut_topology_id != b.provenance.cut_topology_id) {
+        return a.provenance.cut_topology_id < b.provenance.cut_topology_id;
+    }
+    return a.provenance.cut_topology_revision <
+           b.provenance.cut_topology_revision;
+}
+
 class LevelSetInterfaceDomain {
 public:
     LevelSetInterfaceDomain() = default;
@@ -614,6 +633,7 @@ public:
                 rules.push_back(fragment.toCutQuadratureRule(request_));
             }
         }
+        std::sort(rules.begin(), rules.end(), cutQuadratureRuleDeterministicLess);
         return rules;
     }
 
@@ -625,22 +645,7 @@ public:
                 rules.push_back(region.toCutQuadratureRule(request_));
             }
         }
-        std::sort(rules.begin(),
-                  rules.end(),
-                  [](const geometry::CutQuadratureRule& a,
-                     const geometry::CutQuadratureRule& b) {
-                      if (a.provenance.parent_entity != b.provenance.parent_entity) {
-                          return a.provenance.parent_entity < b.provenance.parent_entity;
-                      }
-                      if (a.side != b.side) {
-                          return a.side < b.side;
-                      }
-                      if (a.provenance.marker != b.provenance.marker) {
-                          return a.provenance.marker < b.provenance.marker;
-                      }
-                      return a.provenance.cut_topology_revision <
-                             b.provenance.cut_topology_revision;
-                  });
+        std::sort(rules.begin(), rules.end(), cutQuadratureRuleDeterministicLess);
         return rules;
     }
 
