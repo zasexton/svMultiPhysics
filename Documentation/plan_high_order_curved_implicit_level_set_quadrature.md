@@ -756,6 +756,23 @@ use `ImplicitCutQuadratureDiagnosticStatus` names and backend diagnostic strings
 for logging/debug output, but they do not by themselves change sparsity unless
 they also change active rules, topology ids, or rule visibility.
 
+### Policy And Revision Key Contract
+
+The generated-interface `quadrature_policy_key` is the backend-policy component
+of the cut-context revision. It must include the geometry mode, backend family,
+fallback policy, requested generic/interface/volume quadrature orders, root and
+classification tolerances, maximum subdivision depth, degenerate-fragment policy,
+and corner-linearization policy. The application cut-context topology key then
+mixes that policy key with the active fragment and active volume-region topology,
+so changing a requested order or backend option invalidates cut-context users
+even when the zero-contour topology remains unchanged.
+
+This partition keeps source-value changes, mesh revisions, and active cut
+topology separate from backend policy changes while still making every generated
+rule self-describing through its provenance. Output-only diagnostic strings may
+change without forcing rebuilds unless the policy enum, achieved rule, or active
+topology also changes.
+
 ### Design Checklist
 
 - [x] Extend cut metadata with:
@@ -769,7 +786,7 @@ they also change active rules, topology ids, or rule visibility.
       - fallback policy and fallback reason,
       - backend status,
       - source value revision.
-- [ ] Include backend policy fields in the topology/revision key.
+- [x] Include backend policy fields in the topology/revision key.
 - [ ] Define which metadata affects operator sparsity, matrix-free data,
       preconditioner metadata, and output only.
 - [ ] Define deterministic metadata ordering for MPI.
@@ -787,7 +804,7 @@ they also change active rules, topology ids, or rule visibility.
 
 ### Tests
 
-- [ ] Changing requested quadrature order changes the cut-context revision.
+- [x] Changing requested quadrature order changes the cut-context revision.
 - [x] Changing backend tolerance changes the cut-context revision.
 - [ ] Changing a high-order level-set edge DOF changes the source revision and
       generated rules.

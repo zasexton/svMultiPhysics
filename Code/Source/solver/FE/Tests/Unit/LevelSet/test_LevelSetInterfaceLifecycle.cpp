@@ -1232,17 +1232,46 @@ TEST(LevelSetInterfaceLifecycle, QuadraturePolicyKeyChangesWithBackendOptions)
     base_options.interface_quadrature_order = 0;
     base_options.volume_quadrature_order = 1;
 
-    auto changed_options = base_options;
-    changed_options.implicit_cut_root_tolerance = 1.0e-8;
+    const auto build_policy_key =
+        [&](const level_set::LevelSetGeneratedInterfaceOptions& options)
+            -> std::uint64_t {
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        const auto result = lifecycle.build(system, options, solution);
+        EXPECT_TRUE(result.success) << result.diagnostic;
+        return result.domain.request().quadrature_policy_key;
+    };
 
-    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
-    const auto base = lifecycle.build(system, base_options, solution);
-    const auto changed = lifecycle.build(system, changed_options, solution);
+    const auto base_key = build_policy_key(base_options);
+    ASSERT_NE(base_key, 0u);
 
-    ASSERT_TRUE(base.success) << base.diagnostic;
-    ASSERT_TRUE(changed.success) << changed.diagnostic;
-    EXPECT_NE(base.domain.request().quadrature_policy_key,
-              changed.domain.request().quadrature_policy_key);
+    auto changed_tolerance = base_options;
+    changed_tolerance.implicit_cut_root_tolerance = 1.0e-8;
+    EXPECT_NE(base_key, build_policy_key(changed_tolerance));
+
+    auto changed_depth = base_options;
+    changed_depth.implicit_cut_max_subdivision_depth = 5;
+    EXPECT_NE(base_key, build_policy_key(changed_depth));
+
+    auto changed_fallback = base_options;
+    changed_fallback.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::LinearCorner;
+    EXPECT_NE(base_key, build_policy_key(changed_fallback));
+
+    auto changed_interface_order = base_options;
+    changed_interface_order.interface_quadrature_order = 1;
+    EXPECT_NE(base_key, build_policy_key(changed_interface_order));
+
+    auto changed_volume_order = base_options;
+    changed_volume_order.volume_quadrature_order = 2;
+    EXPECT_NE(base_key, build_policy_key(changed_volume_order));
+
+    auto changed_degenerate_policy = base_options;
+    changed_degenerate_policy.keep_degenerate_fragments = true;
+    EXPECT_NE(base_key, build_policy_key(changed_degenerate_policy));
+
+    auto changed_corner_policy = base_options;
+    changed_corner_policy.allow_corner_linearized_geometry = true;
+    EXPECT_NE(base_key, build_policy_key(changed_corner_policy));
 }
 
 TEST(LevelSetCellEvaluator, P1ReproducesCornerValuesAndReferenceGradient)
