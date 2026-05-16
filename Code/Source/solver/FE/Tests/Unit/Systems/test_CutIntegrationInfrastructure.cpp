@@ -2186,6 +2186,63 @@ TEST(CutIntegrationInfrastructure, GeneratedInterfaceRulesRejectStaleSourceRevis
     }, std::invalid_argument);
 }
 
+TEST(CutIntegrationInfrastructure, FullCellGeneratedRulesCarryDiagnosticMetadata)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/6,
+                                                        /*layout_revision=*/11,
+                                                        /*value_revision=*/23);
+    request.interface_marker = 62;
+    request.quadrature_policy_key = 41;
+    request.volume_quadrature_order = 2;
+    request.implicit_geometry_mode = "HighOrderImplicit";
+    request.implicit_quadrature_backend = "SayeHyperrectangle";
+    request.implicit_fallback_policy = "Fail";
+
+    LevelSetInterfaceDomain domain(request);
+    CutInterfaceVolumeRegion region;
+    region.parent_cell = 13;
+    region.local_region_index = 0;
+    region.side = CutIntegrationSide::Negative;
+    region.parent_measure = 1.0;
+    region.measure = 1.0;
+    region.volume_fraction = 1.0;
+    region.centroid = {{0.5, 0.5, 0.0}};
+    region.normal = {{1.0, 0.0, 0.0}};
+    region.topology_id = "full-cell-13-negative";
+    region.full_cell_equivalent = true;
+    domain.addVolumeRegion(std::move(region));
+
+    const auto domain_rules = domain.volumeQuadratureRules();
+    ASSERT_EQ(domain_rules.size(), 1u);
+    EXPECT_TRUE(domain_rules.front().full_cell_equivalent);
+    EXPECT_EQ(domain_rules.front().provenance.source_value_revision, 23u);
+    EXPECT_EQ(domain_rules.front().provenance.predicate_policy_key, 41u);
+    EXPECT_EQ(domain_rules.front().provenance.implicit_geometry_mode,
+              "HighOrderImplicit");
+    EXPECT_EQ(domain_rules.front().provenance.implicit_quadrature_backend,
+              "SayeHyperrectangle");
+    EXPECT_EQ(domain_rules.front().provenance.implicit_fallback_policy,
+              "Fail");
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    const auto rules = context.generatedVolumeRulesForMarkerAndSide(
+        62, CutIntegrationSide::Negative);
+    ASSERT_EQ(rules.size(), 1u);
+    ASSERT_NE(rules.front(), nullptr);
+    EXPECT_TRUE(rules.front()->full_cell_equivalent);
+    EXPECT_EQ(rules.front()->provenance.source_value_revision, 23u);
+
+    const auto metadata = context.generatedVolumeMetadataForMarkerAndSide(
+        62, CutIntegrationSide::Negative);
+    ASSERT_EQ(metadata.size(), 1u);
+    ASSERT_NE(metadata.front(), nullptr);
+    EXPECT_EQ(metadata.front()->source_value_revision, 23u);
+    EXPECT_EQ(metadata.front()->quadrature_policy_key, 41u);
+    EXPECT_EQ(metadata.front()->cut_topology_id, "full-cell-13-negative");
+}
+
 TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAndSide)
 {
     CutIntegrationContext context;
