@@ -423,6 +423,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
             )
     if args.enable_linear_solve_memory_diagnostics:
         env["SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS"] = "1"
+    if args.enable_fsils_matrix_diagnostics:
+        env["SVMP_FSILS_MATRIX_DIAGNOSTICS"] = "1"
     if args.enable_form_block_diagnostics:
         env["SVMP_FE_FORM_BLOCK_DIAGNOSTICS"] = "1"
     if args.enable_interior_face_timing:
@@ -1317,6 +1319,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "pressure_gauge_checks": [],
         "residual_block_norms": [],
         "fsils_true_residuals": [],
+        "fsils_prepared_matrices": [],
         "fsils_solve_summaries": [],
         "fsils_blockschur_retries": [],
         "vector_component_norms": [],
@@ -1407,6 +1410,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["newton_assemblies"].append(parse_key_values(line))
         elif "true residual diagnostics" in line:
             diagnostics["fsils_true_residuals"].append(parse_key_values(line))
+        elif "diagnostic=fsils_prepared_matrix" in line:
+            diagnostics["fsils_prepared_matrices"].append(parse_key_values(line))
         elif "diagnostic=fsils_solve_summary" in line:
             diagnostics["fsils_solve_summaries"].append(parse_key_values(line))
         elif "diagnostic=fsils_blockschur_true_residual_retry" in line:
@@ -2106,6 +2111,33 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["form_block_install_count"] = len(diagnostics["form_block_installs"])
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
+    if diagnostics.get("fsils_prepared_matrices"):
+        records = diagnostics["fsils_prepared_matrices"]
+        latest_matrix = records[-1]
+        metrics["latest_fsils_prepared_matrix"] = latest_matrix
+        metrics["diagnostic_fsils_prepared_matrix_count"] = len(records)
+        for source, target in (
+                ("zero_rows", "diagnostic_fsils_prepared_matrix_max_zero_rows"),
+                ("missing_diag", "diagnostic_fsils_prepared_matrix_max_missing_diag"),
+                ("zero_diag", "diagnostic_fsils_prepared_matrix_max_zero_diag"),
+                ("nonfinite_entries",
+                 "diagnostic_fsils_prepared_matrix_max_nonfinite_entries"),
+                ("max_row_sum_to_abs_diag",
+                 "diagnostic_fsils_prepared_matrix_max_row_sum_to_abs_diag")):
+            values = [
+                record.get(source)
+                for record in records
+                if isinstance(record.get(source), (int, float))
+            ]
+            if values:
+                metrics[target] = max(values)
+        values = [
+            record.get("min_abs_diag_to_row_sum")
+            for record in records
+            if isinstance(record.get("min_abs_diag_to_row_sum"), (int, float))
+        ]
+        if values:
+            metrics["diagnostic_fsils_prepared_matrix_min_abs_diag_to_row_sum"] = min(values)
     if diagnostics.get("eigen_factorization_diagnostics"):
         records = diagnostics["eigen_factorization_diagnostics"]
         latest_eigen = records[-1]
@@ -2492,6 +2524,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_newton_assembly_diagnostics",
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
+        "enable_fsils_matrix_diagnostics",
         "enable_form_block_diagnostics",
         "enable_interior_face_timing",
         "enable_cut_volume_timing",
@@ -2505,6 +2538,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_process_memory_diagnostics",
         "require_marked_interior_face_fallback_diagnostics",
         "require_jacobian_component_block_diagnostics",
+        "require_fsils_matrix_diagnostics",
         "require_assembly_topology_consistency",
         "allow_failure_diagnostics",
     ):
@@ -2522,6 +2556,10 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_diagnostic_extra_assembly_timings_per_step",
         "max_diagnostic_cut_context_rebuilds_per_step",
         "max_diagnostic_newton_matrix_assemblies_per_step",
+        "max_fsils_matrix_zero_rows",
+        "max_fsils_matrix_missing_diag",
+        "max_fsils_matrix_zero_diag",
+        "max_fsils_matrix_nonfinite_entries",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -2641,6 +2679,49 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if (args.require_linear_solve_memory_diagnostics and
             not has_linear_solve_memory_diagnostics(diagnostics)):
         errors.append("linear-solve memory diagnostics were not reported")
+    if (args.require_fsils_matrix_diagnostics and
+            not diagnostics.get("fsils_prepared_matrices")):
+        errors.append("FSILS prepared-matrix diagnostics were not reported")
+    if args.max_fsils_matrix_zero_rows is not None:
+        zero_rows = metrics.get("diagnostic_fsils_prepared_matrix_max_zero_rows")
+        if not isinstance(zero_rows, (int, float)):
+            errors.append("FSILS prepared-matrix zero-row diagnostics are unavailable")
+        elif zero_rows > args.max_fsils_matrix_zero_rows:
+            errors.append(
+                f"FSILS prepared-matrix zero rows {zero_rows} exceed "
+                f"{args.max_fsils_matrix_zero_rows}"
+            )
+    if args.max_fsils_matrix_missing_diag is not None:
+        missing_diag = metrics.get(
+            "diagnostic_fsils_prepared_matrix_max_missing_diag"
+        )
+        if not isinstance(missing_diag, (int, float)):
+            errors.append("FSILS prepared-matrix missing-diagonal diagnostics are unavailable")
+        elif missing_diag > args.max_fsils_matrix_missing_diag:
+            errors.append(
+                f"FSILS prepared-matrix missing diagonals {missing_diag} exceed "
+                f"{args.max_fsils_matrix_missing_diag}"
+            )
+    if args.max_fsils_matrix_zero_diag is not None:
+        zero_diag = metrics.get("diagnostic_fsils_prepared_matrix_max_zero_diag")
+        if not isinstance(zero_diag, (int, float)):
+            errors.append("FSILS prepared-matrix zero-diagonal diagnostics are unavailable")
+        elif zero_diag > args.max_fsils_matrix_zero_diag:
+            errors.append(
+                f"FSILS prepared-matrix zero diagonals {zero_diag} exceed "
+                f"{args.max_fsils_matrix_zero_diag}"
+            )
+    if args.max_fsils_matrix_nonfinite_entries is not None:
+        nonfinite = metrics.get(
+            "diagnostic_fsils_prepared_matrix_max_nonfinite_entries"
+        )
+        if not isinstance(nonfinite, (int, float)):
+            errors.append("FSILS prepared-matrix nonfinite-entry diagnostics are unavailable")
+        elif nonfinite > args.max_fsils_matrix_nonfinite_entries:
+            errors.append(
+                f"FSILS prepared-matrix nonfinite entries {nonfinite} exceed "
+                f"{args.max_fsils_matrix_nonfinite_entries}"
+            )
     if args.require_basis_cache_diagnostics:
         has_basis_cache = any(
             isinstance(record.get("basis_cache_entries"), (int, float))
@@ -2996,6 +3077,49 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_linear_solve_memory_diagnostics and
             not has_linear_solve_memory_diagnostics(metrics["diagnostics"])):
         errors.append("linear-solve memory diagnostics were not reported")
+    if (args.require_fsils_matrix_diagnostics and
+            not metrics["diagnostics"].get("fsils_prepared_matrices")):
+        errors.append("FSILS prepared-matrix diagnostics were not reported")
+    if args.max_fsils_matrix_zero_rows is not None:
+        zero_rows = metrics.get("diagnostic_fsils_prepared_matrix_max_zero_rows")
+        if not isinstance(zero_rows, (int, float)):
+            errors.append("FSILS prepared-matrix zero-row diagnostics are unavailable")
+        elif zero_rows > args.max_fsils_matrix_zero_rows:
+            errors.append(
+                f"FSILS prepared-matrix zero rows {zero_rows} exceed "
+                f"{args.max_fsils_matrix_zero_rows}"
+            )
+    if args.max_fsils_matrix_missing_diag is not None:
+        missing_diag = metrics.get(
+            "diagnostic_fsils_prepared_matrix_max_missing_diag"
+        )
+        if not isinstance(missing_diag, (int, float)):
+            errors.append("FSILS prepared-matrix missing-diagonal diagnostics are unavailable")
+        elif missing_diag > args.max_fsils_matrix_missing_diag:
+            errors.append(
+                f"FSILS prepared-matrix missing diagonals {missing_diag} exceed "
+                f"{args.max_fsils_matrix_missing_diag}"
+            )
+    if args.max_fsils_matrix_zero_diag is not None:
+        zero_diag = metrics.get("diagnostic_fsils_prepared_matrix_max_zero_diag")
+        if not isinstance(zero_diag, (int, float)):
+            errors.append("FSILS prepared-matrix zero-diagonal diagnostics are unavailable")
+        elif zero_diag > args.max_fsils_matrix_zero_diag:
+            errors.append(
+                f"FSILS prepared-matrix zero diagonals {zero_diag} exceed "
+                f"{args.max_fsils_matrix_zero_diag}"
+            )
+    if args.max_fsils_matrix_nonfinite_entries is not None:
+        nonfinite = metrics.get(
+            "diagnostic_fsils_prepared_matrix_max_nonfinite_entries"
+        )
+        if not isinstance(nonfinite, (int, float)):
+            errors.append("FSILS prepared-matrix nonfinite-entry diagnostics are unavailable")
+        elif nonfinite > args.max_fsils_matrix_nonfinite_entries:
+            errors.append(
+                f"FSILS prepared-matrix nonfinite entries {nonfinite} exceed "
+                f"{args.max_fsils_matrix_nonfinite_entries}"
+            )
     if args.require_basis_cache_diagnostics:
         has_basis_cache = any(
             isinstance(record.get("basis_cache_entries"), (int, float))
@@ -3411,6 +3535,12 @@ def main() -> int:
     parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
     parser.add_argument("--enable-linear-solve-memory-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-memory-diagnostics", action="store_true")
+    parser.add_argument("--enable-fsils-matrix-diagnostics", action="store_true")
+    parser.add_argument("--require-fsils-matrix-diagnostics", action="store_true")
+    parser.add_argument("--max-fsils-matrix-zero-rows", type=int)
+    parser.add_argument("--max-fsils-matrix-missing-diag", type=int)
+    parser.add_argument("--max-fsils-matrix-zero-diag", type=int)
+    parser.add_argument("--max-fsils-matrix-nonfinite-entries", type=int)
     parser.add_argument("--require-basis-cache-diagnostics", action="store_true")
     parser.add_argument("--max-diagnostic-process-basis-cache-entries", type=int)
     parser.add_argument("--enable-form-block-diagnostics", action="store_true")

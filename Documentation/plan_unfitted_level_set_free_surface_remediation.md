@@ -529,6 +529,14 @@ benchmark runs.
       central residual/tangent diagnostics pass, including linear-operator
       conditioning, preconditioner scaling, and support-constrained block
       treatment before returning to D18/D38 qualification.
+- [x] Add opt-in FSILS prepared-matrix diagnostics and smoke-script validation
+      for GMRES failure probes, reporting row, diagonal, nonfinite, block, and
+      constrained-DOF summaries before the backend preconditioner modifies the
+      matrix.
+- [ ] Use the prepared-matrix MMS evidence to choose the next GMRES
+      preconditioner/scaling fix: the cut-stabilized probe has no zero rows,
+      missing diagonals, or nonfinite entries, but diagonal preconditioning sees
+      many zero scalar diagonal entries and row sums up to about 1.0e12.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

@@ -899,6 +899,23 @@ namespace {
     return enabled;
 }
 
+[[nodiscard]] bool fsilsMatrixDiagnosticsEnabled() noexcept
+{
+    const char* env = std::getenv("SVMP_FSILS_MATRIX_DIAGNOSTICS");
+    if (env == nullptr) {
+        return false;
+    }
+    std::string value(env);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) {
+                    return std::isspace(c) != 0;
+                }),
+                value.end());
+    return !value.empty() && value != "0" && value != "false" &&
+           value != "off" && value != "no";
+}
+
 [[nodiscard]] bool reducedInternalizationTraceEnabled() noexcept
 {
     const char* env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
@@ -1521,6 +1538,365 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
             applySaddlePointEnforcement();
         }
         dumpPreparedMatrixRowIfRequested(blockschur_preparation ? "blockschur" : "original");
+    };
+
+    auto fsilsPreconditionerName = [](consts::PreconditionerType prec) {
+        const auto it = consts::preconditioner_type_to_name.find(prec);
+        if (it != consts::preconditioner_type_to_name.end()) {
+            return it->second;
+        }
+        return std::string("unknown");
+    };
+
+    auto finiteOrZero = [](double value) {
+        return std::isfinite(value) ? value : 0.0;
+    };
+
+    auto logPreparedMatrixDiagnostics = [&](std::string_view phase) {
+        if (!fsilsMatrixDiagnosticsEnabled()) {
+            return;
+        }
+
+        struct MatrixStats {
+            unsigned long long rows{0};
+            unsigned long long zero_rows{0};
+            unsigned long long missing_diag{0};
+            unsigned long long zero_diag{0};
+            unsigned long long nonfinite_entries{0};
+            unsigned long long nonfinite_rows{0};
+            double min_abs_diag{std::numeric_limits<double>::infinity()};
+            double max_abs_diag{0.0};
+            double min_row_abs_sum{std::numeric_limits<double>::infinity()};
+            double max_row_abs_sum{0.0};
+            double min_abs_diag_to_row_sum{std::numeric_limits<double>::infinity()};
+            double max_row_sum_to_abs_diag{0.0};
+        };
+
+        const int stat_count = dof + 1;
+        const int total_index = dof;
+        std::vector<MatrixStats> local_stats(static_cast<std::size_t>(stat_count));
+        std::vector<unsigned long long> local_dirichlet_dofs(
+            static_cast<std::size_t>(stat_count), 0);
+        std::vector<int> local_dirichlet_nodes;
+        local_dirichlet_nodes.reserve(dirichlet_dofs_.size());
+
+        for (const auto dof_idx : dirichlet_dofs_) {
+            GlobalIndex fsils_dof = dof_idx;
+            if (shared_layout->dof_permutation) {
+                const auto idx = static_cast<std::size_t>(dof_idx);
+                if (idx < shared_layout->dof_permutation->forward.size()) {
+                    fsils_dof = shared_layout->dof_permutation->forward[idx];
+                }
+            }
+            if (fsils_dof < 0) {
+                continue;
+            }
+            const int node = static_cast<int>(fsils_dof / dof);
+            const int comp = static_cast<int>(fsils_dof % dof);
+            if (comp < 0 || comp >= dof) {
+                continue;
+            }
+            const int old_local = shared_layout->globalNodeToOld(node);
+            if (old_local < 0 || old_local >= lhs.nNo) {
+                continue;
+            }
+            ++local_dirichlet_dofs[static_cast<std::size_t>(comp)];
+            ++local_dirichlet_dofs[static_cast<std::size_t>(total_index)];
+            local_dirichlet_nodes.push_back(old_local);
+        }
+        std::sort(local_dirichlet_nodes.begin(), local_dirichlet_nodes.end());
+        local_dirichlet_nodes.erase(
+            std::unique(local_dirichlet_nodes.begin(), local_dirichlet_nodes.end()),
+            local_dirichlet_nodes.end());
+
+        const double tiny = 1.0e-30;
+        auto update_stats = [&](int stat_index,
+                                double row_abs_sum,
+                                bool diag_present,
+                                double abs_diag,
+                                unsigned long long nonfinite_entries,
+                                bool row_nonfinite) {
+            auto& stats = local_stats[static_cast<std::size_t>(stat_index)];
+            ++stats.rows;
+            stats.nonfinite_entries += nonfinite_entries;
+            if (row_nonfinite) {
+                ++stats.nonfinite_rows;
+            }
+            if (row_abs_sum <= tiny) {
+                ++stats.zero_rows;
+            }
+            stats.min_row_abs_sum = std::min(stats.min_row_abs_sum, row_abs_sum);
+            stats.max_row_abs_sum = std::max(stats.max_row_abs_sum, row_abs_sum);
+            if (!diag_present) {
+                ++stats.missing_diag;
+                return;
+            }
+            if (abs_diag <= tiny) {
+                ++stats.zero_diag;
+            }
+            stats.min_abs_diag = std::min(stats.min_abs_diag, abs_diag);
+            stats.max_abs_diag = std::max(stats.max_abs_diag, abs_diag);
+            if (row_abs_sum > tiny) {
+                stats.min_abs_diag_to_row_sum =
+                    std::min(stats.min_abs_diag_to_row_sum, abs_diag / row_abs_sum);
+            }
+            if (abs_diag > tiny) {
+                stats.max_row_sum_to_abs_diag =
+                    std::max(stats.max_row_sum_to_abs_diag, row_abs_sum / abs_diag);
+            }
+        };
+
+        for (int row = 0; row < lhs.mynNo; ++row) {
+            const auto start = lhs.rowPtr(0, row);
+            const auto end = lhs.rowPtr(1, row);
+            for (int rc = 0; rc < dof; ++rc) {
+                bool diag_present = false;
+                double abs_diag = 0.0;
+                double row_abs_sum = 0.0;
+                bool row_nonfinite = false;
+                unsigned long long nonfinite_entries = 0;
+                if (start >= 0 && end >= start) {
+                    for (auto nz = start; nz <= end; ++nz) {
+                        const int col = lhs.colPtr(nz);
+                        for (int cc = 0; cc < dof; ++cc) {
+                            const double value =
+                                Val(rc * dof + cc, static_cast<int>(nz));
+                            if (!std::isfinite(value)) {
+                                ++nonfinite_entries;
+                                row_nonfinite = true;
+                                continue;
+                            }
+                            const double abs_value = std::abs(value);
+                            row_abs_sum += abs_value;
+                            if (col == row && cc == rc) {
+                                diag_present = true;
+                                abs_diag = abs_value;
+                            }
+                        }
+                    }
+                }
+                update_stats(rc,
+                             row_abs_sum,
+                             diag_present,
+                             abs_diag,
+                             nonfinite_entries,
+                             row_nonfinite);
+                update_stats(total_index,
+                             row_abs_sum,
+                             diag_present,
+                             abs_diag,
+                             nonfinite_entries,
+                             row_nonfinite);
+            }
+        }
+
+        auto reduceCounts = [&](auto member) {
+            std::vector<unsigned long long> local(static_cast<std::size_t>(stat_count), 0);
+            std::vector<unsigned long long> global(static_cast<std::size_t>(stat_count), 0);
+            for (int i = 0; i < stat_count; ++i) {
+                local[static_cast<std::size_t>(i)] =
+                    local_stats[static_cast<std::size_t>(i)].*member;
+            }
+            if (lhs.commu.nTasks > 1) {
+                fe_fsi_linear_solver::fsils_allreduce(
+                    local.data(), global.data(), stat_count, MPI_UNSIGNED_LONG_LONG,
+                    MPI_SUM, lhs.commu);
+            } else {
+                global = local;
+            }
+            return global;
+        };
+
+        auto reduceDoubles = [&](auto member, MPI_Op op) {
+            std::vector<double> local(static_cast<std::size_t>(stat_count), 0.0);
+            std::vector<double> global(static_cast<std::size_t>(stat_count), 0.0);
+            for (int i = 0; i < stat_count; ++i) {
+                local[static_cast<std::size_t>(i)] =
+                    local_stats[static_cast<std::size_t>(i)].*member;
+            }
+            if (lhs.commu.nTasks > 1) {
+                fe_fsi_linear_solver::fsils_allreduce(
+                    local.data(), global.data(), stat_count, MPI_DOUBLE, op, lhs.commu);
+            } else {
+                global = local;
+            }
+            return global;
+        };
+
+        std::vector<unsigned long long> global_dirichlet_dofs(
+            static_cast<std::size_t>(stat_count), 0);
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce(
+                local_dirichlet_dofs.data(),
+                global_dirichlet_dofs.data(),
+                stat_count,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_SUM,
+                lhs.commu);
+        } else {
+            global_dirichlet_dofs = local_dirichlet_dofs;
+        }
+        unsigned long long local_dirichlet_node_count =
+            static_cast<unsigned long long>(local_dirichlet_nodes.size());
+        unsigned long long global_dirichlet_node_count = 0;
+        if (lhs.commu.nTasks > 1) {
+            fe_fsi_linear_solver::fsils_allreduce(
+                &local_dirichlet_node_count,
+                &global_dirichlet_node_count,
+                1,
+                MPI_UNSIGNED_LONG_LONG,
+                MPI_SUM,
+                lhs.commu);
+        } else {
+            global_dirichlet_node_count = local_dirichlet_node_count;
+        }
+
+        const auto rows = reduceCounts(&MatrixStats::rows);
+        const auto zero_rows = reduceCounts(&MatrixStats::zero_rows);
+        const auto missing_diag = reduceCounts(&MatrixStats::missing_diag);
+        const auto zero_diag = reduceCounts(&MatrixStats::zero_diag);
+        const auto nonfinite_entries = reduceCounts(&MatrixStats::nonfinite_entries);
+        const auto nonfinite_rows = reduceCounts(&MatrixStats::nonfinite_rows);
+        const auto min_abs_diag = reduceDoubles(&MatrixStats::min_abs_diag, MPI_MIN);
+        const auto max_abs_diag = reduceDoubles(&MatrixStats::max_abs_diag, MPI_MAX);
+        const auto min_row_abs_sum = reduceDoubles(&MatrixStats::min_row_abs_sum, MPI_MIN);
+        const auto max_row_abs_sum = reduceDoubles(&MatrixStats::max_row_abs_sum, MPI_MAX);
+        const auto min_abs_diag_to_row_sum =
+            reduceDoubles(&MatrixStats::min_abs_diag_to_row_sum, MPI_MIN);
+        const auto max_row_sum_to_abs_diag =
+            reduceDoubles(&MatrixStats::max_row_sum_to_abs_diag, MPI_MAX);
+
+        if (lhs.commu.task != 0) {
+            return;
+        }
+
+        const auto fsils_prec = to_fsils_prec(options_);
+        std::ostringstream oss;
+        oss << "FsilsLinearSolver: prepared matrix diagnostics"
+            << " diagnostic=fsils_prepared_matrix"
+            << " phase='" << phase << "'"
+            << " method=" << solverMethodToString(options_.method)
+            << " preconditioner=" << preconditionerToString(options_.preconditioner)
+            << " fsils_preconditioner=" << fsilsPreconditionerName(fsils_prec)
+            << " fsils_use_rcs=" << (options_.fsils_use_rcs ? 1 : 0)
+            << " dof=" << dof
+            << " n_nodes=" << lhs.nNo
+            << " owned_nodes=" << lhs.mynNo
+            << " nnz=" << lhs.nnz
+            << " rows=" << rows[static_cast<std::size_t>(total_index)]
+            << " zero_rows=" << zero_rows[static_cast<std::size_t>(total_index)]
+            << " missing_diag=" << missing_diag[static_cast<std::size_t>(total_index)]
+            << " zero_diag=" << zero_diag[static_cast<std::size_t>(total_index)]
+            << " nonfinite_entries="
+            << nonfinite_entries[static_cast<std::size_t>(total_index)]
+            << " nonfinite_rows=" << nonfinite_rows[static_cast<std::size_t>(total_index)]
+            << " min_abs_diag="
+            << finiteOrZero(min_abs_diag[static_cast<std::size_t>(total_index)])
+            << " max_abs_diag="
+            << finiteOrZero(max_abs_diag[static_cast<std::size_t>(total_index)])
+            << " min_row_abs_sum="
+            << finiteOrZero(min_row_abs_sum[static_cast<std::size_t>(total_index)])
+            << " max_row_abs_sum="
+            << finiteOrZero(max_row_abs_sum[static_cast<std::size_t>(total_index)])
+            << " min_abs_diag_to_row_sum="
+            << finiteOrZero(min_abs_diag_to_row_sum[static_cast<std::size_t>(total_index)])
+            << " max_row_sum_to_abs_diag="
+            << finiteOrZero(max_row_sum_to_abs_diag[static_cast<std::size_t>(total_index)])
+            << " dirichlet_dofs="
+            << global_dirichlet_dofs[static_cast<std::size_t>(total_index)]
+            << " dirichlet_nodes=" << global_dirichlet_node_count;
+
+        for (int comp = 0; comp < dof; ++comp) {
+            const auto idx = static_cast<std::size_t>(comp);
+            oss << " component" << comp << "_rows=" << rows[idx]
+                << " component" << comp << "_zero_rows=" << zero_rows[idx]
+                << " component" << comp << "_missing_diag=" << missing_diag[idx]
+                << " component" << comp << "_zero_diag=" << zero_diag[idx]
+                << " component" << comp << "_nonfinite_entries=" << nonfinite_entries[idx]
+                << " component" << comp << "_min_abs_diag="
+                << finiteOrZero(min_abs_diag[idx])
+                << " component" << comp << "_max_abs_diag="
+                << finiteOrZero(max_abs_diag[idx])
+                << " component" << comp << "_min_row_abs_sum="
+                << finiteOrZero(min_row_abs_sum[idx])
+                << " component" << comp << "_max_row_abs_sum="
+                << finiteOrZero(max_row_abs_sum[idx])
+                << " component" << comp << "_min_abs_diag_to_row_sum="
+                << finiteOrZero(min_abs_diag_to_row_sum[idx])
+                << " component" << comp << "_max_row_sum_to_abs_diag="
+                << finiteOrZero(max_row_sum_to_abs_diag[idx])
+                << " component" << comp << "_dirichlet_dofs="
+                << global_dirichlet_dofs[idx];
+        }
+
+        if (options_.block_layout.has_value()) {
+            int block_index = 0;
+            for (const auto& block : options_.block_layout->blocks) {
+                const int start = block.start_component;
+                const int end = std::min(dof, start + block.n_components);
+                unsigned long long block_rows = 0;
+                unsigned long long block_zero_rows = 0;
+                unsigned long long block_missing_diag = 0;
+                unsigned long long block_zero_diag = 0;
+                unsigned long long block_nonfinite_entries = 0;
+                unsigned long long block_dirichlet_dofs = 0;
+                double block_min_abs_diag = std::numeric_limits<double>::infinity();
+                double block_max_abs_diag = 0.0;
+                double block_min_row_abs_sum = std::numeric_limits<double>::infinity();
+                double block_max_row_abs_sum = 0.0;
+                double block_min_abs_diag_to_row_sum = std::numeric_limits<double>::infinity();
+                double block_max_row_sum_to_abs_diag = 0.0;
+                for (int comp = start; comp < end; ++comp) {
+                    const auto idx = static_cast<std::size_t>(comp);
+                    block_rows += rows[idx];
+                    block_zero_rows += zero_rows[idx];
+                    block_missing_diag += missing_diag[idx];
+                    block_zero_diag += zero_diag[idx];
+                    block_nonfinite_entries += nonfinite_entries[idx];
+                    block_dirichlet_dofs += global_dirichlet_dofs[idx];
+                    block_min_abs_diag = std::min(block_min_abs_diag, min_abs_diag[idx]);
+                    block_max_abs_diag = std::max(block_max_abs_diag, max_abs_diag[idx]);
+                    block_min_row_abs_sum = std::min(block_min_row_abs_sum, min_row_abs_sum[idx]);
+                    block_max_row_abs_sum = std::max(block_max_row_abs_sum, max_row_abs_sum[idx]);
+                    block_min_abs_diag_to_row_sum =
+                        std::min(block_min_abs_diag_to_row_sum,
+                                 min_abs_diag_to_row_sum[idx]);
+                    block_max_row_sum_to_abs_diag =
+                        std::max(block_max_row_sum_to_abs_diag,
+                                 max_row_sum_to_abs_diag[idx]);
+                }
+                oss << " block" << block_index << "_name='" << block.name << "'"
+                    << " block" << block_index << "_role="
+                    << blockRoleToString(block.role)
+                    << " block" << block_index << "_start=" << start
+                    << " block" << block_index << "_components=" << block.n_components
+                    << " block" << block_index << "_rows=" << block_rows
+                    << " block" << block_index << "_zero_rows=" << block_zero_rows
+                    << " block" << block_index << "_missing_diag=" << block_missing_diag
+                    << " block" << block_index << "_zero_diag=" << block_zero_diag
+                    << " block" << block_index << "_nonfinite_entries="
+                    << block_nonfinite_entries
+                    << " block" << block_index << "_min_abs_diag="
+                    << finiteOrZero(block_min_abs_diag)
+                    << " block" << block_index << "_max_abs_diag="
+                    << finiteOrZero(block_max_abs_diag)
+                    << " block" << block_index << "_min_row_abs_sum="
+                    << finiteOrZero(block_min_row_abs_sum)
+                    << " block" << block_index << "_max_row_abs_sum="
+                    << finiteOrZero(block_max_row_abs_sum)
+                    << " block" << block_index << "_min_abs_diag_to_row_sum="
+                    << finiteOrZero(block_min_abs_diag_to_row_sum)
+                    << " block" << block_index << "_max_row_sum_to_abs_diag="
+                    << finiteOrZero(block_max_row_sum_to_abs_diag)
+                    << " block" << block_index << "_dirichlet_dofs="
+                    << block_dirichlet_dofs;
+                ++block_index;
+            }
+            oss << " block_count=" << block_index;
+        } else {
+            oss << " block_count=0";
+        }
+        FE_LOG_INFO(oss.str());
     };
 
     const bool pure_mpi_native_face_rank_one_case =
@@ -2878,6 +3254,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
 
     auto rebuildPreparedSystem = [&](bool blockschur_preparation) {
         restorePreparedMatrixValues(blockschur_preparation);
+        logPreparedMatrixDiagnostics(blockschur_preparation ? "blockschur" : "original");
         loadSolveBufferFromVector(*b, blockschur_preparation);
         solution_stage_scaling_undone = false;
         current_preparation_uses_blockschur = blockschur_preparation;
