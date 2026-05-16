@@ -945,6 +945,13 @@ JIT specialization key contract:
   contract boundary for rule-specific basis and quadrature tables, including
   high-order generated rules.
 
+Cut-adjacent facet-set locality audit:
+- Marked cut-adjacent interior-face assembly is driven by
+  `CutFacetSetHandle` membership, not by scanning every interior face near a
+  marker. Existing DG coverage requires a cut context, rejects missing facet-set
+  handles, and checks that a P2 high-order marked facet leaves the far-field
+  cell block exactly zero.
+
 ### Design Checklist
 
 - [x] Preserve the public form vocabulary:
@@ -966,7 +973,7 @@ JIT specialization key contract:
       evaluation caching.
 - [x] Ensure interface rules with many points are remapped correctly.
 - [x] Ensure JIT specialization keys include enough quadrature shape metadata.
-- [ ] Keep marked cut-adjacent interior-face assembly local to the generated
+- [x] Keep marked cut-adjacent interior-face assembly local to the generated
       facet set.
 
 ### Tests
