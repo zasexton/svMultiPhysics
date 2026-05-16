@@ -1014,19 +1014,43 @@ topological classification. A documented quasi-Newton contract is practical and
 testable, while full sensitivities need their own research-grade implementation
 plan.
 
+Tangent policy contract:
+- The initial high-order generated-interface policy is
+  `geometry_tangent_policy=RefreshedFrozenQuadrature`. Residual and Jacobian
+  assembly refresh the cut context from the current accepted or trial nonlinear
+  state, but the Jacobian treats generated quadrature points, weights, normals,
+  and active topology as fixed during that assembly.
+- The reserved future exact-sensitivity policy is
+  `geometry_tangent_policy=DifferentiatedQuadrature`. That policy requires
+  explicit derivatives for quadrature weights, point locations, normals,
+  measure factors, and topology-transition handling before it can be enabled.
+- Diagnostics distinguish fixed-geometry finite-difference checks, refreshed
+  geometry residual checks, and full geometry-perturbation checks. A
+  fixed-geometry check should pass to tangent tolerance; a refreshed-geometry
+  check may show the documented quasi-Newton mismatch; a full perturbation
+  check is expected to remain unsupported until `DifferentiatedQuadrature`.
+- Solver convergence under `RefreshedFrozenQuadrature` is quasi-Newton:
+  residuals must use current geometry, line-search trials must refresh trial
+  geometry, rejected trials must restore the accepted cut context, and quadratic
+  Newton convergence is not promised for residuals dominated by geometry
+  motion.
+- Runs with coupled level-set geometry and omitted exact geometry derivatives
+  must log the tangent policy and a warning-level diagnostic when high-order
+  generated interfaces participate in nonlinear assembly.
+
 ### Design Checklist
 
-- [ ] Name the initial policy, for example
+- [x] Name the initial policy, for example
       `geometry_tangent_policy=RefreshedFrozenQuadrature`.
-- [ ] Define a future policy name for exact sensitivities, for example
+- [x] Define a future policy name for exact sensitivities, for example
       `DifferentiatedQuadrature`.
-- [ ] Define finite-difference diagnostics that distinguish:
+- [x] Define finite-difference diagnostics that distinguish:
       - fixed-geometry residual/Jacobian checks,
       - refreshed-geometry residual checks,
       - full geometry-perturbation checks.
-- [ ] Define solver expectations for Newton convergence under the quasi-Newton
+- [x] Define solver expectations for Newton convergence under the quasi-Newton
       policy.
-- [ ] Define warning logs when coupled level-set geometry is active and exact
+- [x] Define warning logs when coupled level-set geometry is active and exact
       geometry derivatives are omitted.
 
 ### Implementation Checklist
