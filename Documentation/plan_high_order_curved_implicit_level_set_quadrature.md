@@ -918,6 +918,14 @@ Assembly integration contract:
   counts or grow `AssemblyContext` on demand before mapping basis values,
   geometry, normals, and solution fields.
 
+Reserve-size audit:
+- `AssemblyContext` has on-demand growth in geometry, basis, solution, and
+  frame-explicit setters, so fixed initial reserve sizes are no longer a
+  correctness dependency. Cut-volume and generated-interface assembly should
+  still reserve from the selected generated rule point counts before entering
+  cell loops to avoid hidden reallocations and to make high-order point-count
+  assumptions explicit.
+
 ### Design Checklist
 
 - [x] Preserve the public form vocabulary:
@@ -933,7 +941,7 @@ Assembly integration contract:
 
 ### Implementation Checklist
 
-- [ ] Review `AssemblyContext::reserve(...)` assumptions for max quadrature
+- [x] Review `AssemblyContext::reserve(...)` assumptions for max quadrature
       point counts.
 - [ ] Ensure cut-volume rules with many points do not disable needed basis
       evaluation caching.

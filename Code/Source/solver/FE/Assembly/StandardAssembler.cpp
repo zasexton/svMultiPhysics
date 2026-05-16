@@ -55,6 +55,7 @@
 #include <functional>
 #include <optional>
 #include <string_view>
+#include <vector>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -268,6 +269,59 @@ void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
     const Real measure_tol = std::numeric_limits<Real>::epsilon() * Real{128.0} * measure_scale;
     return std::abs(rule.volume_fraction - Real{1.0}) <= fraction_tol &&
            std::abs(rule.measure - rule.parent_measure) <= measure_tol;
+}
+
+[[nodiscard]] LocalIndex qpointReserveCountAtLeastOne(std::size_t count)
+{
+    count = std::max<std::size_t>(count, 1u);
+    const auto max_local_index =
+        static_cast<std::size_t>(std::numeric_limits<LocalIndex>::max());
+    FE_THROW_IF(count > max_local_index, FEException,
+                "generated cut quadrature rule exceeds AssemblyContext capacity");
+    return static_cast<LocalIndex>(count);
+}
+
+[[nodiscard]] LocalIndex selectedVolumeRuleReserveCount(
+    const std::vector<geometry::CutQuadratureRule>& rules,
+    const std::vector<std::size_t>& indexed_rule_indices,
+    int interface_marker,
+    geometry::CutIntegrationSide side)
+{
+    std::size_t max_qpts = 1u;
+    const auto include_rule = [&](const geometry::CutQuadratureRule& rule) {
+        if (rule.kind != geometry::CutQuadratureKind::Volume ||
+            rule.provenance.marker != interface_marker ||
+            rule.side != side) {
+            return;
+        }
+        max_qpts = std::max(max_qpts, rule.points.size());
+    };
+
+    if (!indexed_rule_indices.empty()) {
+        for (const auto rule_index : indexed_rule_indices) {
+            if (rule_index < rules.size()) {
+                include_rule(rules[rule_index]);
+            }
+        }
+    } else {
+        for (const auto& rule : rules) {
+            include_rule(rule);
+        }
+    }
+
+    return qpointReserveCountAtLeastOne(max_qpts);
+}
+
+[[nodiscard]] LocalIndex selectedInterfaceRuleReserveCount(
+    const std::vector<const geometry::CutQuadratureRule*>& selected_rules)
+{
+    std::size_t max_qpts = 1u;
+    for (const auto* rule : selected_rules) {
+        if (rule != nullptr && rule->kind == geometry::CutQuadratureKind::Interface) {
+            max_qpts = std::max(max_qpts, rule->points.size());
+        }
+    }
+    return qpointReserveCountAtLeastOne(max_qpts);
 }
 
 using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
@@ -6830,7 +6884,14 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
 
     const LocalIndex max_dofs =
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
-    context_.reserve(max_dofs, LocalIndex{1}, mesh.dimension());
+    const auto& rules = cut_context.volumeRules();
+    const auto indexed_rule_indices =
+        cut_context.generatedVolumeRuleIndicesForMarkerAndSide(interface_marker, side);
+    const bool use_indexed_rules = !indexed_rule_indices.empty();
+    context_.reserve(max_dofs,
+                     selectedVolumeRuleReserveCount(
+                         rules, indexed_rule_indices, interface_marker, side),
+                     mesh.dimension());
 
     const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -6854,11 +6915,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
 
     cut_setup_time = cut_now() - cut_start;
 
-    const auto& rules = cut_context.volumeRules();
     const auto& metadata = cut_context.metadata();
-    const auto indexed_rule_indices =
-        cut_context.generatedVolumeRuleIndicesForMarkerAndSide(interface_marker, side);
-    const bool use_indexed_rules = !indexed_rule_indices.empty();
     std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
@@ -7222,9 +7279,21 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
     }
     ensureCellConstrainedFlags(mesh);
 
+    std::vector<const geometry::CutQuadratureRule*> selected_rules;
+    if (interface_marker >= 0) {
+        selected_rules = cut_context.interfaceRulesForMarker(interface_marker);
+    } else {
+        const auto& rules = cut_context.interfaceRules();
+        selected_rules.reserve(rules.size());
+        for (const auto& rule : rules) {
+            selected_rules.push_back(&rule);
+        }
+    }
+
     context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
                               col_dof_map_->getMaxDofsPerCell()),
-                     /*max_qpts=*/27, mesh.dimension());
+                     selectedInterfaceRuleReserveCount(selected_rules),
+                     mesh.dimension());
 
     const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -7243,17 +7312,6 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                 owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
                 insert_vector_view = &*owned_row_vector;
             }
-        }
-    }
-
-    std::vector<const geometry::CutQuadratureRule*> selected_rules;
-    if (interface_marker >= 0) {
-        selected_rules = cut_context.interfaceRulesForMarker(interface_marker);
-    } else {
-        const auto& rules = cut_context.interfaceRules();
-        selected_rules.reserve(rules.size());
-        for (const auto& rule : rules) {
-            selected_rules.push_back(&rule);
         }
     }
 
