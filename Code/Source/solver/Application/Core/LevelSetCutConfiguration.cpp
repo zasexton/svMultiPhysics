@@ -376,5 +376,17 @@ activeCutVolumeRequests(const Parameters& params)
   return requests;
 }
 
+bool hasHighOrderGeneratedInterfaceGeometry(
+    const std::vector<ActiveCutVolumeRequest>& requests) noexcept
+{
+  using Mode = svmp::FE::level_set::GeneratedInterfaceGeometryMode;
+  return std::any_of(
+      requests.begin(),
+      requests.end(),
+      [](const ActiveCutVolumeRequest& request) {
+        return request.geometry_mode == Mode::HighOrderImplicit;
+      });
+}
+
 } // namespace core
 } // namespace application

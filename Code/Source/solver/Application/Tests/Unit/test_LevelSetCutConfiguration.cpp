@@ -99,6 +99,8 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
   EXPECT_EQ(request.implicit_cut_root_tolerance, 1.0e-10);
   EXPECT_EQ(request.implicit_cut_max_subdivision_depth, 16);
   EXPECT_FALSE(request.allow_corner_linearized_geometry);
+  EXPECT_FALSE(application::core::hasHighOrderGeneratedInterfaceGeometry(
+      requests));
 }
 
 TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
@@ -153,6 +155,8 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
   EXPECT_EQ(request.implicit_cut_max_subdivision_depth, 12);
   EXPECT_TRUE(request.allow_corner_linearized_geometry);
   EXPECT_EQ(request.active_side, application::core::LevelSetActiveSide::Positive);
+  EXPECT_TRUE(application::core::hasHighOrderGeneratedInterfaceGeometry(
+      requests));
 }
 
 TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)

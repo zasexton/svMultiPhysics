@@ -3436,14 +3436,17 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
+  const bool high_order_cut_geometry =
+      hasHighOrderGeneratedInterfaceGeometry(activeCutVolumeRequests(params));
   using TransientStateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   opts.newton.synchronize_state =
-      [&, cut_lifecycle, cut_topology_key](
+      [&, cut_lifecycle, cut_topology_key, high_order_cut_geometry](
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
         if (!opts.newton.use_line_search &&
-            point == TransientStateSyncPoint::AcceptedNonlinearState) {
+            point == TransientStateSyncPoint::AcceptedNonlinearState &&
+            !high_order_cut_geometry) {
           return;
         }
         const auto report = refreshActiveCutIntegrationContext(

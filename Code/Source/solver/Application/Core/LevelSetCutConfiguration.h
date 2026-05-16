@@ -53,5 +53,8 @@ parseGeometryTangentPolicy(const std::string& raw);
 [[nodiscard]] std::vector<ActiveCutVolumeRequest>
 activeCutVolumeRequests(const Parameters& params);
 
+[[nodiscard]] bool hasHighOrderGeneratedInterfaceGeometry(
+    const std::vector<ActiveCutVolumeRequest>& requests) noexcept;
+
 } // namespace core
 } // namespace application
