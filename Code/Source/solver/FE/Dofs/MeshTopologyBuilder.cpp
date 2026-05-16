@@ -78,6 +78,49 @@ bool operator<(const FaceRecord& lhs, const FaceRecord& rhs) {
     return lhs.verts < rhs.verts;
 }
 
+FaceRecord face_record_from_vertices(int dim,
+                                     const MeshIndex* verts,
+                                     std::size_t n,
+                                     MeshIndex id) {
+    if (verts == nullptr || n == 0u) {
+        throw FEException("buildCellToFacesRefOrder: empty face vertex record");
+    }
+
+    FaceRecord rec{};
+    rec.id = id;
+    if (dim <= 1) {
+        rec.n = 1u;
+        rec.verts[0] = verts[0];
+    } else if (dim == 2) {
+        if (n < 2u) {
+            throw FEException("buildCellToFacesRefOrder: unsupported face vertex count");
+        }
+        rec.n = 2u;
+        rec.verts[0] = verts[0];
+        rec.verts[1] = verts[n == 2u ? 1u : n - 1u];
+        if (rec.verts[0] > rec.verts[1]) {
+            std::swap(rec.verts[0], rec.verts[1]);
+        }
+    } else {
+        std::size_t n_corners = 0u;
+        if (n == 3u || n == 4u) {
+            n_corners = n;
+        } else if (n == 6u) {
+            n_corners = 3u;
+        } else if (n == 8u || n == 9u) {
+            n_corners = 4u;
+        } else {
+            throw FEException("buildCellToFacesRefOrder: unsupported face vertex count");
+        }
+        rec.n = static_cast<std::uint8_t>(n_corners);
+        for (std::size_t i = 0; i < n_corners; ++i) {
+            rec.verts[i] = verts[i];
+        }
+        std::sort(rec.verts.begin(), rec.verts.begin() + n_corners);
+    }
+    return rec;
+}
+
 std::span<const MeshIndex> cell_vertices_span(std::span<const MeshOffset> offsets,
                                               std::span<const MeshIndex> data,
                                               GlobalIndex cell_id) {
@@ -241,39 +284,11 @@ CellToEntityCSR buildCellToFacesRefOrder(
             throw FEException("buildCellToFacesRefOrder: invalid face2vertex offsets");
         }
         const std::size_t n = end - begin;
-        if (n < 1u || n > 4u) {
-            throw FEException("buildCellToFacesRefOrder: unsupported face vertex count");
-        }
-
-        FaceRecord rec{};
-        rec.n = static_cast<std::uint8_t>(n);
-        if (n == 1u) {
-            rec.verts[0] = face2vertex[begin + 0];
-            rec.verts[1] = MeshIndex{0};
-            rec.verts[2] = MeshIndex{0};
-            rec.verts[3] = MeshIndex{0};
-        } else if (n == 2u) {
-            rec.verts[0] = face2vertex[begin + 0];
-            rec.verts[1] = face2vertex[begin + 1];
-            if (rec.verts[0] > rec.verts[1]) {
-                std::swap(rec.verts[0], rec.verts[1]);
-            }
-            rec.verts[2] = MeshIndex{0};
-            rec.verts[3] = MeshIndex{0};
-        } else if (n == 3u) {
-            rec.verts[0] = face2vertex[begin + 0];
-            rec.verts[1] = face2vertex[begin + 1];
-            rec.verts[2] = face2vertex[begin + 2];
-            std::sort(rec.verts.begin(), rec.verts.begin() + 3);
-            rec.verts[3] = MeshIndex{0};
-        } else {
-            rec.verts[0] = face2vertex[begin + 0];
-            rec.verts[1] = face2vertex[begin + 1];
-            rec.verts[2] = face2vertex[begin + 2];
-            rec.verts[3] = face2vertex[begin + 3];
-            std::sort(rec.verts.begin(), rec.verts.begin() + 4);
-        }
-        rec.id = static_cast<MeshIndex>(f);
+        FaceRecord rec = face_record_from_vertices(
+            dim,
+            face2vertex.data() + begin,
+            n,
+            static_cast<MeshIndex>(f));
         faces.push_back(rec);
     }
 
@@ -315,22 +330,7 @@ CellToEntityCSR buildCellToFacesRefOrder(
                 }
                 key.verts[i] = cell_verts[lv];
             }
-            if (fn_size == 1u) {
-                key.verts[1] = MeshIndex{0};
-                key.verts[2] = MeshIndex{0};
-                key.verts[3] = MeshIndex{0};
-            } else if (fn_size == 2u) {
-                if (key.verts[0] > key.verts[1]) {
-                    std::swap(key.verts[0], key.verts[1]);
-                }
-                key.verts[2] = MeshIndex{0};
-                key.verts[3] = MeshIndex{0};
-            } else if (fn_size == 3u) {
-                std::sort(key.verts.begin(), key.verts.begin() + 3);
-                key.verts[3] = MeshIndex{0};
-            } else {
-                std::sort(key.verts.begin(), key.verts.begin() + 4);
-            }
+            key = face_record_from_vertices(dim, key.verts.data(), fn_size, MeshIndex{0});
 
             const MeshIndex fid = find_face(key);
             if (fid < 0) {

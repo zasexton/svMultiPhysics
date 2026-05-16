@@ -1070,6 +1070,8 @@ finite-difference component checks are valuable for isolating assembly defects.
       point coefficients.
 - [x] Refresh active level-set mesh point fields from high-order FE solution
       coefficients before cut-context rebuilds.
+- [x] Match high-order face connectivity through reference corners for
+      cell-to-face assembly ordering.
 - [x] Add smoke-script switches for high-order backend and fallback thresholds.
 - [ ] Add benchmark qualification logs that record backend diagnostics.
 
