@@ -2912,6 +2912,7 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
                                  args: argparse.Namespace) -> list[str]:
     errors = []
     diagnostics = metrics["diagnostics"]
+    errors.extend(time_loop_convergence_errors(metrics, args))
     gauge_required = metrics.get("case") in {"d18", "d38", "mini2d", "static2d"}
     pre_solution_timeout = timeout_before_solution_state(diagnostics)
     if not diagnostics.get("cut_context_rebuilds"):
@@ -3350,6 +3351,64 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
             metrics["wet_fraction_min"] = float(np.min(fractions))
             metrics["wet_fraction_max"] = float(np.max(fractions))
     metrics.update(pressure_gauge_metrics(output, benchmark))
+    metrics.update(mms_verification_metrics(case_name, case_dir, result))
+    return metrics
+
+
+def mms_verification_metrics(case_name: str,
+                             case_dir: Path,
+                             result: Path) -> dict[str, Any]:
+    if case_name != "mms2d":
+        return {}
+    verifier = case_dir / "verify_expected_results.py"
+    if not verifier.exists():
+        return {
+            "mms_verification_available": False,
+            "mms_verification_error": f"missing verifier {verifier}",
+        }
+    completed = subprocess.run(
+        [sys.executable, str(verifier), str(result)],
+        cwd=case_dir,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    metrics: dict[str, Any] = {
+        "mms_verification_available": True,
+        "mms_verification_returncode": completed.returncode,
+    }
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        metrics["mms_verification_passed"] = False
+        metrics["mms_verification_stdout_tail"] = "\n".join(
+            completed.stdout.splitlines()[-40:])
+        return metrics
+
+    metrics["mms_verification"] = payload
+    metrics["mms_verification_passed"] = (
+        completed.returncode == 0 and bool(payload.get("passed", False)))
+    failed_checks = payload.get("failed_checks", [])
+    if isinstance(failed_checks, list):
+        metrics["mms_verification_failed_checks"] = failed_checks
+    for key in (
+            "phi_rms_error",
+            "phi_max_abs_error",
+            "interface_shift_error",
+            "interface_l2_height_error",
+            "area_relative_error",
+            "centroid_y_error",
+            "velocity_relative_l2_error",
+            "pressure_relative_rms_error",
+            "pressure_relative_rms_error_after_constant_offset_removal",
+            "interface_pressure_max_abs",
+            "manufactured_residual_x_max",
+            "manufactured_residual_y_max",
+            "level_set_residual_max"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            metrics[f"mms_{key}"] = float(value)
     return metrics
 
 
@@ -3357,6 +3416,18 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors = []
     if metrics.get("output_metrics_skipped"):
         return evaluate_timeout_diagnostics(metrics, args)
+    errors.extend(time_loop_convergence_errors(metrics, args))
+    if args.require_mms_verification:
+        if not metrics.get("mms_verification_available"):
+            errors.append("MMS verification was not available")
+        elif not metrics.get("mms_verification_passed"):
+            failed_checks = metrics.get("mms_verification_failed_checks", [])
+            if isinstance(failed_checks, list) and failed_checks:
+                errors.append(
+                    "MMS verification failed check(s): " +
+                    ", ".join(str(item) for item in failed_checks))
+            else:
+                errors.append("MMS verification did not pass")
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     errors.extend(cut_context_policy_errors(metrics, args))
@@ -3559,6 +3630,34 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
                     f"WetVolumeFraction volume error {error:.6g} exceeds "
                     f"{args.max_wet_fraction_volume_error:.6g}"
                 )
+    return errors
+
+
+def time_loop_convergence_errors(metrics: dict[str, Any],
+                                 args: argparse.Namespace) -> list[str]:
+    if not args.require_time_loop_convergence:
+        return []
+    time_loop = metrics.get("time_loop")
+    if not isinstance(time_loop, dict):
+        diagnostics = metrics.get("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            time_loop = diagnostics.get("time_loop", {})
+    summary = time_loop.get("summary") if isinstance(time_loop, dict) else None
+    if not isinstance(summary, dict):
+        return ["time-loop convergence summary was not reported"]
+
+    errors = []
+    expected_steps = int(metrics.get("steps", 0) or 0)
+    accepted_steps = summary.get("accepted_steps")
+    if not isinstance(accepted_steps, int):
+        errors.append("accepted-step count was not reported")
+    elif expected_steps > 0 and accepted_steps < expected_steps:
+        errors.append(
+            f"accepted steps {accepted_steps} below requested steps {expected_steps}")
+    if summary.get("all_nonlinear_converged") is not True:
+        errors.append("not all nonlinear solves converged")
+    if summary.get("all_linear_converged") is not True:
+        errors.append("not all linear solves converged")
     return errors
 
 
@@ -3877,6 +3976,8 @@ def main() -> int:
     parser.add_argument("--expect-implicit-cut-quadrature-backend")
     parser.add_argument("--expect-implicit-cut-fallback-policy")
     parser.add_argument("--require-high-order-cut-context-diagnostics", action="store_true")
+    parser.add_argument("--require-mms-verification", action="store_true")
+    parser.add_argument("--require-time-loop-convergence", action="store_true")
     parser.add_argument("--min-diagnostic-blockschur-true-residual-retries", type=int)
     parser.add_argument("--require-newton-direction-check-diagnostics", action="store_true")
     parser.add_argument("--require-jacobian-check-diagnostics", action="store_true")

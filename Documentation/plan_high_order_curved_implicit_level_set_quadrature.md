@@ -1067,7 +1067,7 @@ Tangent policy contract:
 - [x] Refreshed-geometry finite-difference checks report the expected
       quasi-Newton mismatch rather than silently passing or failing unclearly.
 - [x] Line-search rejection restores accepted high-order cut context.
-- [ ] A moving curved-interface MMS case converges under documented tolerances.
+- [x] A moving curved-interface MMS case converges under documented tolerances.
 
 ### Literature Support
 
@@ -1432,9 +1432,11 @@ rule counts, quadrature point counts, and fragment counts), per-step assembly
 density through assembly timings per accepted step, and resource bounds through
 process RSS and basis-cache counters. The compact smoke ceiling is 4 assembly
 timing records per accepted step, 3 extra assembly timings beyond nonlinear
-iterations per accepted step, 4 cut-context rebuilds per accepted step,
+iterations per accepted step, 6 cut-context rebuilds per accepted step,
 300000 KB maximum RSS, 100000 KB RSS growth, 4 basis-cache entries, and 3
-basis-cache entries of growth.
+basis-cache entries of growth. The compact moving-interface convergence gate
+also requires every requested step to be accepted and every reported nonlinear
+and linear solve to converge.
 
 Cache and invalidation policy: generated high-order rules are owned by the cut
 context and are invalidated by the same geometry revision that invalidates
