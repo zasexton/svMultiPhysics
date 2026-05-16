@@ -1618,6 +1618,18 @@ void expect_equivalent_operator_evaluation(
     EXPECT_EQ(actual.interface_rule_count, expected.interface_rule_count);
     EXPECT_EQ(actual.volume_point_count, expected.volume_point_count);
     EXPECT_EQ(actual.interface_point_count, expected.interface_point_count);
+    EXPECT_EQ(actual.fixed_geometry_diagnostics.high_order_volume_rule_count,
+              expected.fixed_geometry_diagnostics.high_order_volume_rule_count);
+    EXPECT_EQ(actual.fixed_geometry_diagnostics.high_order_interface_rule_count,
+              expected.fixed_geometry_diagnostics.high_order_interface_rule_count);
+    EXPECT_EQ(actual.fixed_geometry_diagnostics.refreshed_frozen_quadrature_rule_count,
+              expected.fixed_geometry_diagnostics.refreshed_frozen_quadrature_rule_count);
+    EXPECT_EQ(actual.fixed_geometry_diagnostics.differentiated_quadrature_rule_count,
+              expected.fixed_geometry_diagnostics.differentiated_quadrature_rule_count);
+    EXPECT_EQ(actual.fixed_geometry_diagnostics.missing_tangent_policy_rule_count,
+              expected.fixed_geometry_diagnostics.missing_tangent_policy_rule_count);
+    EXPECT_EQ(actual.fixed_geometry_diagnostics.quadrature_policy_key_xor,
+              expected.fixed_geometry_diagnostics.quadrature_policy_key_xor);
     EXPECT_NEAR(actual.parent_measure, expected.parent_measure, tolerance);
     EXPECT_NEAR(actual.negative_volume_measure,
                 expected.negative_volume_measure,
@@ -2499,6 +2511,57 @@ TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesConstants
         EXPECT_NEAR(evaluation.interface_integral, 1.0, 1.0e-14);
         EXPECT_NEAR(evaluation.totalIntegral(), 2.0, 1.0e-14);
     }
+}
+
+TEST(CutIntegrationInfrastructure, FixedGeometryDiagnosticsCountHighOrderRules)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/5,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.interface_marker = 54;
+    request.quadrature_policy_key = 871;
+    request.implicit_geometry_mode = "HighOrderImplicit";
+    request.implicit_quadrature_backend = "SayeHyperrectangle";
+    request.geometry_tangent_policy = "RefreshedFrozenQuadrature";
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 8,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+
+    const auto evaluation = context.evaluateScalarCutOperator(
+        CutIntegrationAssemblyPath::Interpreter,
+        [](const CutScalarOperatorPoint&) { return Real{1.0}; },
+        [](const CutScalarOperatorPoint&) { return Real{1.0}; });
+
+    EXPECT_EQ(evaluation.volume_rule_count, 2u);
+    EXPECT_EQ(evaluation.interface_rule_count, 1u);
+    EXPECT_TRUE(evaluation.fixed_geometry_diagnostics.hasHighOrderRules());
+    EXPECT_EQ(evaluation.fixed_geometry_diagnostics.high_order_volume_rule_count,
+              2u);
+    EXPECT_EQ(evaluation.fixed_geometry_diagnostics.high_order_interface_rule_count,
+              1u);
+    EXPECT_EQ(
+        evaluation.fixed_geometry_diagnostics.refreshed_frozen_quadrature_rule_count,
+        3u);
+    EXPECT_EQ(
+        evaluation.fixed_geometry_diagnostics.differentiated_quadrature_rule_count,
+        0u);
+    EXPECT_EQ(
+        evaluation.fixed_geometry_diagnostics.missing_tangent_policy_rule_count,
+        0u);
+    EXPECT_EQ(evaluation.fixed_geometry_diagnostics.quadrature_policy_key_xor,
+              request.quadrature_policy_key);
 }
 
 TEST(CutIntegrationInfrastructure, GeneratedLevelSetInterfaceIntegratesLinearFieldsAcrossPaths)

@@ -1058,7 +1058,7 @@ Tangent policy contract:
 - [x] Add the tangent policy to options and diagnostics.
 - [x] Ensure existing Newton sync callbacks remain active for high-order mode.
 - [x] Ensure line-search trial refreshes use the same high-order backend.
-- [ ] Add fixed-geometry assembly diagnostics for high-order cut rules.
+- [x] Add fixed-geometry assembly diagnostics for high-order cut rules.
 - [ ] Add a future design stub for quadrature-weight and normal sensitivities.
 
 ### Tests

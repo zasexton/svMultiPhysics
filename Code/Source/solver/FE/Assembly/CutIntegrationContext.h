@@ -127,6 +127,20 @@ struct CutScalarOperatorPoint {
     geometry::CutGeometryFrame frame = geometry::CutGeometryFrame::Reference;
 };
 
+struct CutFixedGeometryAssemblyDiagnostics {
+    std::size_t high_order_volume_rule_count = 0;
+    std::size_t high_order_interface_rule_count = 0;
+    std::size_t refreshed_frozen_quadrature_rule_count = 0;
+    std::size_t differentiated_quadrature_rule_count = 0;
+    std::size_t missing_tangent_policy_rule_count = 0;
+    std::uint64_t quadrature_policy_key_xor = 0;
+
+    [[nodiscard]] bool hasHighOrderRules() const noexcept {
+        return high_order_volume_rule_count > 0u ||
+               high_order_interface_rule_count > 0u;
+    }
+};
+
 struct CutScalarOperatorEvaluation {
     CutIntegrationAssemblyPath path = CutIntegrationAssemblyPath::Standard;
     std::size_t volume_rule_count = 0;
@@ -140,6 +154,7 @@ struct CutScalarOperatorEvaluation {
     Real negative_volume_integral = 0.0;
     Real positive_volume_integral = 0.0;
     Real interface_integral = 0.0;
+    CutFixedGeometryAssemblyDiagnostics fixed_geometry_diagnostics{};
 
     [[nodiscard]] Real volumeIntegral() const noexcept {
         return negative_volume_integral + positive_volume_integral;
@@ -698,6 +713,30 @@ public:
         InterfaceIntegrand&& interface_integrand) const {
         CutScalarOperatorEvaluation evaluation;
         evaluation.path = path;
+        const auto record_fixed_geometry_diagnostic =
+            [](CutFixedGeometryAssemblyDiagnostics& diagnostic,
+               const geometry::CutQuadratureRule& rule,
+               bool interface_rule) {
+                if (rule.provenance.implicit_geometry_mode != "HighOrderImplicit") {
+                    return;
+                }
+                if (interface_rule) {
+                    ++diagnostic.high_order_interface_rule_count;
+                } else {
+                    ++diagnostic.high_order_volume_rule_count;
+                }
+                diagnostic.quadrature_policy_key_xor ^=
+                    rule.provenance.predicate_policy_key;
+                if (rule.provenance.geometry_tangent_policy ==
+                    "RefreshedFrozenQuadrature") {
+                    ++diagnostic.refreshed_frozen_quadrature_rule_count;
+                } else if (rule.provenance.geometry_tangent_policy ==
+                           "DifferentiatedQuadrature") {
+                    ++diagnostic.differentiated_quadrature_rule_count;
+                } else if (rule.provenance.geometry_tangent_policy.empty()) {
+                    ++diagnostic.missing_tangent_policy_rule_count;
+                }
+            };
 
         std::unordered_map<MeshIndex, Real> parent_measures;
         const bool has_explicit_bindings = !bindings_.empty();
@@ -709,6 +748,10 @@ public:
             }
 
             const auto& rule = volume_rules_[i];
+            record_fixed_geometry_diagnostic(
+                evaluation.fixed_geometry_diagnostics,
+                rule,
+                /*interface_rule=*/false);
             const CutCellAssemblyMetadata* metadata =
                 i < metadata_.size() ? &metadata_[i] : nullptr;
             const auto parent_entity =
@@ -760,6 +803,10 @@ public:
         }
 
         for (const auto& rule : interface_rules_) {
+            record_fixed_geometry_diagnostic(
+                evaluation.fixed_geometry_diagnostics,
+                rule,
+                /*interface_rule=*/true);
             ++evaluation.interface_rule_count;
             evaluation.interface_measure += rule.measure;
             for (const auto& qp : rule.points) {
