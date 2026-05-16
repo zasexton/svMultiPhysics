@@ -895,17 +895,40 @@ from Navier-Stokes free-surface semantics. The high-order project should improve
 the generated rules without requiring physics modules to know which cutter made
 them.
 
+Assembly integration contract:
+- Public form syntax remains unchanged. Physics modules continue to request
+  active-domain terms through `dCutVolume(marker, side)`, generated interface
+  terms through `dI(marker)`, and stabilization terms through
+  `cutAdjacentFacetIntegral(..., marker)`. Backend choice, requested order,
+  achieved order, fallback use, and sliver pruning stay in cut-rule provenance
+  and cut-context metadata.
+- Generated `dI(marker)` rules support fixed-geometry interface integration,
+  including mapped normals and physical measures. Material-state storage on
+  generated interfaces remains unsupported until a material-history key and
+  transfer policy are added for generated interface quadrature points.
+- Empty generated high-order rules are not valid assembly inputs. Pruned rules
+  may remain visible in diagnostics, but retained assembly rules must contain at
+  least one finite quadrature point with finite weights. Fallback rules enter
+  assembly only when their provenance records the fallback backend and policy.
+- Full-cell-equivalent rules are selected only from explicit cutter metadata,
+  not from a floating-point measure comparison in the assembler. This prevents
+  near-full curved cuts from silently bypassing generated high-order geometry.
+- High-order generated rules may exceed fixed historical reserve guesses such
+  as 27 points. Assembly code must either reserve from selected rule point
+  counts or grow `AssemblyContext` on demand before mapping basis values,
+  geometry, normals, and solution fields.
+
 ### Design Checklist
 
-- [ ] Preserve the public form vocabulary:
+- [x] Preserve the public form vocabulary:
       - `dCutVolume(marker, side)`,
       - `dI(marker)`,
       - `cutAdjacentFacetIntegral(..., marker)`.
-- [ ] Define any assembly limitations for high-order generated interfaces, such
+- [x] Define any assembly limitations for high-order generated interfaces, such
       as material state on generated `dI`.
-- [ ] Define behavior for empty high-order rules and fallback rules.
-- [ ] Define how full-cell-equivalent rules are selected for high-order fields.
-- [ ] Define whether high-order interface rules can exceed current context
+- [x] Define behavior for empty high-order rules and fallback rules.
+- [x] Define how full-cell-equivalent rules are selected for high-order fields.
+- [x] Define whether high-order interface rules can exceed current context
       reserve sizes.
 
 ### Implementation Checklist
@@ -937,6 +960,9 @@ them.
   over bulk domains and surfaces defined by level sets.
 - Saye 2015 supports generating surface and volume quadrature rules that can be
   consumed by embedded-boundary finite-element methods.
+- Fries et al. 2017 emphasize that high-order integration over implicitly
+  defined domains must preserve the FE weak-form interface while the quadrature
+  construction supplies method-specific points, weights, and diagnostics.
 
 ## 9. Nonlinear Coupling And Tangent Policy
 
