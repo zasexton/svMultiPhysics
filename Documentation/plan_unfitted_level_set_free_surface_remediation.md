@@ -540,10 +540,13 @@ benchmark runs.
 - [x] Rerun a bounded no-output D18 GMRES probe with automatic FSILS
       row-column scaling before resuming any long benchmark run, and use the
       compact diagnostics to identify remaining resource or assembly bottlenecks.
-- [ ] Eliminate the first-solve unconstrained dry velocity rows exposed by the
-      D18 automatic row-column scaling probe: the first prepared matrix reports
-      1,788 zero velocity rows and zero Dirichlet DOFs, while later prepared
-      matrices have the active-side constraints loaded and no zero rows.
+- [x] Eliminate the TimeLoop initialization-solve unconstrained dry velocity
+      rows exposed by the D18 automatic row-column scaling probe: the first
+      prepared matrix came from the `uDot`/`uDDot` initialization path before
+      backend Dirichlet rows were installed, so TimeLoop now forwards the
+      active Dirichlet DOFs to the linear solver before those initialization
+      solves. Verified with the `svmultiphysics` target build; another D18
+      probe was not started for this step.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

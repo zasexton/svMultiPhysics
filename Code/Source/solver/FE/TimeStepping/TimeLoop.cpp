@@ -45,6 +45,32 @@ void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& cons
     }
 }
 
+std::vector<GlobalIndex> collectDirichletDofs(const constraints::AffineConstraints& constraints)
+{
+    std::vector<GlobalIndex> dirichlet_dofs;
+    if (constraints.empty()) {
+        return dirichlet_dofs;
+    }
+
+    dirichlet_dofs.reserve(constraints.numConstraints());
+    constraints.forEach([&dirichlet_dofs](const constraints::AffineConstraints::ConstraintView& cv) {
+        if (cv.slave_dof >= 0 && cv.isDirichlet()) {
+            dirichlet_dofs.push_back(cv.slave_dof);
+        }
+    });
+    std::sort(dirichlet_dofs.begin(), dirichlet_dofs.end());
+    dirichlet_dofs.erase(std::unique(dirichlet_dofs.begin(), dirichlet_dofs.end()),
+                         dirichlet_dofs.end());
+    return dirichlet_dofs;
+}
+
+void setLinearDirichletDofs(backends::LinearSolver& linear,
+                            const constraints::AffineConstraints& constraints)
+{
+    const auto dirichlet_dofs = collectDirichletDofs(constraints);
+    linear.setDirichletDofs(dirichlet_dofs);
+}
+
 void copyVector(backends::GenericVector& dst, const backends::GenericVector& src)
 {
     auto d = dst.localSpan();
@@ -352,6 +378,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             updateGhostsAndDistributeHistory(constraints, history);
         }
     }
+    setLinearDirichletDofs(linear, transient.system().constraints());
 
     auto scratch_vec0 = factory.createVector(n_dofs);
     auto scratch_vec1 = factory.createVector(n_dofs);
@@ -472,6 +499,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             (void)transient_mass.assemble(req_mass, state_mass, mass_view.get(), nullptr);
 
             history.uDDot().zero();
+            setLinearDirichletDofs(linear, constraints);
             const auto solve_rep = linear.solve(mass, history.uDDot(), rhs);
             if (!solve_rep.converged) {
                 if (require_u_ddot) {
@@ -1764,6 +1792,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 const double stage_time = t + ga1_params->alpha_f * dt;
                                 sys.updateConstraints(stage_time, dt);
                                 sys.beginTimeStep();
+                                setLinearDirichletDofs(linear, constraints);
 
                                 systems::SystemStateView init_state{};
                                 init_state.time = stage_time;
