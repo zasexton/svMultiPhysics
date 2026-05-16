@@ -703,8 +703,10 @@ material state storage is keyed by generated interface quadrature shape.
 
 ### Tests
 
-- [ ] Affine parent cell: reference and physical measures agree by constant
+- [x] Affine parent cell: reference and physical measures agree by constant
       Jacobian scaling.
+      Covered by
+      `ActiveDomainOutput.CollectsPhysicalCutVolumeMeasureOnScaledQuad`.
 - [ ] Curved parent cell: physical measure differs from reference measure and is
       computed by mapped quadrature.
 - [ ] Normal orientation test for negative and positive active sides.
