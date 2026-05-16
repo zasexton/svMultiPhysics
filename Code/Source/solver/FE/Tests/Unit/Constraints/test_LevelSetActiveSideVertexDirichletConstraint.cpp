@@ -490,7 +490,9 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
             Real{0.0},
             Real{0.0}));
 
-    ASSERT_NO_THROW(system.setup());
+    systems::SetupOptions setup_options;
+    setup_options.sparsity_options.ensure_diagonal = false;
+    ASSERT_NO_THROW(system.setup(setup_options));
 
     const auto& pressure_dofs = system.fieldDofHandler(pressure);
     const auto offset = system.fieldDofOffset(pressure);
@@ -509,6 +511,12 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
         constrained_dry_pressure_dofs.push_back(global_dof);
     }
     ASSERT_FALSE(constrained_dry_pressure_dofs.empty());
+
+    const auto& pressure_pattern = system.sparsity("pressure");
+    for (const auto global_dof : constrained_dry_pressure_dofs) {
+        EXPECT_TRUE(pressure_pattern.hasDiagonal(global_dof))
+            << "missing constrained dry pressure diagonal for DOF " << global_dof;
+    }
 
     assembly::DenseMatrixView matrix(system.dofHandler().getNumDofs());
     matrix.zero();

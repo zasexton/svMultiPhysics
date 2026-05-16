@@ -1185,7 +1185,11 @@ instead of zero rows.
 - [x] Ensure high-order generated volume metadata marks active cells correctly.
 - [x] Rebuild constraints after every high-order cut-context refresh.
 - [x] Add diagnostics split by entity dimension.
-- [ ] Ensure constrained dry rows receive valid diagonals in all backends.
+- [x] Ensure constrained dry rows receive valid diagonals in all backends.
+      The constrained-row sparse-structure regression disables blanket
+      diagonal padding and still requires diagonal slots for dry high-order
+      pressure rows, so Eigen, FSILS, PETSc, and Trilinos receive a valid
+      insertion location before their matrix-specific `setDiagonal` path runs.
 
 ### Tests
 
