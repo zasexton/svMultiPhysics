@@ -1484,7 +1484,10 @@ prevents solver behavior from hiding geometry errors.
       A fixed-seed line-cut sweep samples multiple cut positions through the
       reference quad and checks exact analytic area, interface length, retained
       rule partitioning, and finite point/weight data.
-- [ ] Add failure-mode tests for near-tangent and tiny sliver cuts.
+- [x] Add failure-mode tests for near-tangent and tiny sliver cuts.
+      Near-tangent and degenerate interface cases assert explicit diagnostic
+      statuses, and backend capability tests assert tiny-sliver pruning policy
+      for the supported high-order backends.
 
 ### Tests
 
@@ -1493,7 +1496,9 @@ prevents solver behavior from hiding geometry errors.
 - [x] Interface length/area accuracy.
 - [x] Negative plus positive measures sum to parent measure.
 - [x] Rule weights and points are finite.
-- [ ] Achieved-order diagnostics match measured convergence.
+- [x] Achieved-order diagnostics match measured convergence.
+      h/p-refinement convergence checks assert both reduced analytic errors and
+      the backend-reported achieved interface and volume orders.
 
 ### Literature Support
 
