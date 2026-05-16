@@ -811,7 +811,7 @@ unmarked far-field cells receive zero cut-adjacent stabilization contribution.
 - [x] Far-field interior faces receive zero contribution.
 - [ ] Derivative-order terms scale correctly with `h`.
 - [x] Small-cut conditioning probes remain bounded under refinement.
-- [ ] Direct factorization diagnostics show no dry unsupported pressure rows.
+- [x] Direct factorization diagnostics show no dry unsupported pressure rows.
 
 ### Literature Support
 
@@ -836,7 +836,9 @@ Milestone status: active-side pressure support constraints now report support
 and constrained counts by vertex, edge, face, cell-interior, and unknown DOF
 entity. P2 quadrilateral pressure tests explicitly verify that an edge DOF on a
 retained wet cut cell remains unconstrained, while an edge DOF supported only by
-a pruned or inactive cell is constrained.
+a pruned or inactive cell is constrained. Direct assembled-matrix coverage now
+checks that constrained dry high-order pressure rows receive identity diagonals
+instead of zero rows.
 
 ### Design Checklist
 
@@ -862,7 +864,7 @@ a pruned or inactive cell is constrained.
 - [x] P2 pressure edge DOF on a wet cut cell remains unconstrained.
 - [x] P2 pressure edge DOF with no active cell support is constrained.
 - [x] Cell-interior pressure DOFs behave correctly in high-order cells.
-- [ ] No zero pressure rows remain in direct factorization diagnostics.
+- [x] No zero pressure rows remain in direct factorization diagnostics.
 
 ### Literature Support
 

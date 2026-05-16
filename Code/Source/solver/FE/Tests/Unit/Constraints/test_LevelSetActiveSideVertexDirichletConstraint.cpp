@@ -7,8 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/AssemblyKernel.h"
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "Assembly/CutIntegrationContext.h"
+#include "Assembly/GlobalSystemView.h"
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/CutQuadrature.h"
 #include "Mesh/Fields/MeshFields.h"
@@ -149,6 +151,22 @@ std::shared_ptr<Mesh> buildTwoQuadStripWithCutLeftCell()
         }
     }
     return inactive_edge_dofs;
+}
+
+void expectRowsAreIdentity(const assembly::DenseMatrixView& matrix,
+                           const std::vector<GlobalIndex>& rows)
+{
+    for (const auto row : rows) {
+        EXPECT_NEAR(matrix.getMatrixEntry(row, row), 1.0, 1.0e-12);
+        for (GlobalIndex column = 0; column < matrix.numCols(); ++column) {
+            if (column == row) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "row=" << row
+                                              << ", column=" << column);
+            EXPECT_NEAR(matrix.getMatrixEntry(row, column), 0.0, 1.0e-12);
+        }
+    }
 }
 
 } // namespace
@@ -444,6 +462,63 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_NE(log_output.find("active_support_edge_dofs=4"), std::string::npos);
     EXPECT_NE(log_output.find("inactive_edge_dofs=3"), std::string::npos);
     EXPECT_NE(log_output.find("inactive_cell_dofs=1"), std::string::npos);
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     ConstrainedHighOrderDryPressureRowsAssembleIdentityDiagonal)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/2);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addCellKernel(
+        "pressure",
+        pressure,
+        std::make_shared<assembly::MassKernel>(1.0));
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0}));
+
+    ASSERT_NO_THROW(system.setup());
+
+    const auto& pressure_dofs = system.fieldDofHandler(pressure);
+    const auto offset = system.fieldDofOffset(pressure);
+    const auto active_cell_dofs = pressure_dofs.getCellDofs(0);
+    const std::unordered_set<GlobalIndex> active_support(
+        active_cell_dofs.begin(), active_cell_dofs.end());
+
+    std::vector<GlobalIndex> constrained_dry_pressure_dofs;
+    for (GlobalIndex local_dof = 0; local_dof < pressure_dofs.getNumDofs();
+         ++local_dof) {
+        if (active_support.find(local_dof) != active_support.end()) {
+            continue;
+        }
+        const auto global_dof = offset + local_dof;
+        ASSERT_TRUE(system.constraints().isConstrained(global_dof));
+        constrained_dry_pressure_dofs.push_back(global_dof);
+    }
+    ASSERT_FALSE(constrained_dry_pressure_dofs.empty());
+
+    assembly::DenseMatrixView matrix(system.dofHandler().getNumDofs());
+    matrix.zero();
+    systems::SystemStateView state;
+    systems::AssemblyRequest request;
+    request.op = "pressure";
+    request.want_matrix = true;
+    ASSERT_NO_THROW((void)system.assemble(request, state, &matrix, nullptr));
+
+    expectRowsAreIdentity(matrix, constrained_dry_pressure_dofs);
 #endif
 }
 
