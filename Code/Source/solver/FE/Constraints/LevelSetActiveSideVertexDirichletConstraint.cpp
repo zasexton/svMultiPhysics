@@ -39,6 +39,14 @@ namespace {
     return side == LevelSetConstraintSide::Negative ? phi <= isovalue : phi >= isovalue;
 }
 
+[[nodiscard]] bool hasPositiveActiveSideMeasure(
+    Real phi,
+    Real isovalue,
+    LevelSetConstraintSide side) noexcept
+{
+    return side == LevelSetConstraintSide::Negative ? phi < isovalue : phi > isovalue;
+}
+
 [[nodiscard]] std::string formatRuns(const std::vector<GlobalIndex>& values,
                                      std::size_t max_runs = 8u)
 {
@@ -187,17 +195,85 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     const auto offset = system.fieldDofOffset(field_);
     const auto& owned = system.dofHandler().getPartition().locallyOwned();
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto& mesh = system.mesh()->local_mesh();
+    std::vector<unsigned char> has_active_support(
+        static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
+    std::size_t active_support_cells = 0u;
+    for (GlobalIndex cell = 0;
+         cell < static_cast<GlobalIndex>(mesh.n_cells());
+         ++cell) {
+        const auto [vertices, count] =
+            mesh.cell_vertices_span(static_cast<index_t>(cell));
+        if (vertices == nullptr || count == 0u) {
+            continue;
+        }
+
+        bool cell_has_active_measure = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto vertex = static_cast<GlobalIndex>(vertices[i]);
+            if (vertex < 0 ||
+                static_cast<std::size_t>(vertex) >= level_set.entity_count) {
+                std::ostringstream oss;
+                oss << "LevelSetActiveSideVertexDirichletConstraint: cell "
+                    << cell << " references vertex " << vertex
+                    << " outside level-set field '" << level_set_field_name_
+                    << "'";
+                throw std::runtime_error(oss.str());
+            }
+            const auto phi = level_set.values[
+                static_cast<std::size_t>(vertex) * level_set.components];
+            if (hasPositiveActiveSideMeasure(phi, isovalue_, active_side_)) {
+                cell_has_active_measure = true;
+                break;
+            }
+        }
+        if (!cell_has_active_measure) {
+            continue;
+        }
+
+        ++active_support_cells;
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto vertex = static_cast<GlobalIndex>(vertices[i]);
+            if (vertex >= 0 && vertex < n_vertices) {
+                has_active_support[static_cast<std::size_t>(vertex)] =
+                    static_cast<unsigned char>(1);
+            }
+        }
+    }
+#else
+    std::vector<unsigned char> has_active_support(
+        static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
+    std::size_t active_support_cells = 0u;
+#endif
+
     std::vector<GlobalIndex> inactive_vertices;
     inactive_vertices.reserve(static_cast<std::size_t>(n_vertices));
-    std::size_t active_vertices = 0u;
+    std::size_t active_sign_vertices = 0u;
+    std::size_t active_support_vertices = 0u;
+    std::size_t inactive_sign_vertices_with_support = 0u;
+    std::size_t active_sign_vertices_without_support = 0u;
     std::size_t constrained_dofs = 0u;
 
     for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto phi = level_set.values[
             static_cast<std::size_t>(vertex) * level_set.components];
-        if (isActive(phi, isovalue_, active_side_)) {
-            ++active_vertices;
+        const bool active_sign = isActive(phi, isovalue_, active_side_);
+        const bool active_support =
+            has_active_support[static_cast<std::size_t>(vertex)] !=
+            static_cast<unsigned char>(0);
+        if (active_sign) {
+            ++active_sign_vertices;
+        }
+        if (active_support) {
+            ++active_support_vertices;
+            if (!active_sign) {
+                ++inactive_sign_vertices_with_support;
+            }
             continue;
+        }
+        if (isActive(phi, isovalue_, active_side_)) {
+            ++active_sign_vertices_without_support;
         }
 
         inactive_vertices.push_back(vertex);
@@ -222,8 +298,13 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         << " level_set_field='" << level_set_field_name_ << "'"
         << " active_side=" << sideName(active_side_)
         << " isovalue=" << isovalue_
+        << " support_mode=cell_patch"
         << " total_vertices=" << n_vertices
-        << " active_vertices=" << active_vertices
+        << " active_sign_vertices=" << active_sign_vertices
+        << " active_support_cells=" << active_support_cells
+        << " active_support_vertices=" << active_support_vertices
+        << " active_sign_vertices_without_support=" << active_sign_vertices_without_support
+        << " inactive_sign_vertices_with_support=" << inactive_sign_vertices_with_support
         << " inactive_vertices=" << inactive_vertices.size()
         << " constrained_owned_dofs=" << constrained_dofs
         << " inactive_vertex_runs=" << formatRuns(inactive_vertices);
@@ -257,6 +338,7 @@ LevelSetActiveSideVertexDirichletConstraint::storageRequirements() const noexcep
     systems::SetupStorageRequirements req;
     req.entity_dof_map = true;
     req.vertex_topology = true;
+    req.cell_topology = true;
     return req;
 }
 

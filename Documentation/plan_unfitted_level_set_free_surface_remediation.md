@@ -559,6 +559,11 @@ benchmark runs.
 - [x] Add parseable process-memory diagnostics to cut-context rebuild and
       assemble-operator logs, and verify the D18 no-output smoke script can
       require and summarize resident-memory growth before another long run.
+- [x] Constrain inactive pressure vertex DOFs from active cell support rather
+      than vertex sign, and add regression coverage that dry-sign cut-cell
+      vertices remain unconstrained when their basis has wet support; record
+      mini direct-Eigen pressure-block diagnostics and a two-step
+      linear-sloshing verification.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

@@ -2248,6 +2248,11 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Constraints/test_ConstraintTools.cpp
         Tests/Unit/Constraints/test_main.cpp
     )
+    if(FE_WITH_MESH)
+        list(APPEND FE_CONSTRAINTS_TEST_SOURCES
+            Tests/Unit/Constraints/test_LevelSetActiveSideVertexDirichletConstraint.cpp
+        )
+    endif()
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Constraints/test_main.cpp)
         add_executable(test_fe_constraints ${FE_CONSTRAINTS_TEST_SOURCES})
         _svmp_fe_target_enable_warnings(test_fe_constraints)
