@@ -568,6 +568,10 @@ benchmark runs.
       the short run converged for 5 accepted steps with bounded cut-adjacent
       scales and no missing cut-context solution sources, but resident memory
       still grew by about 507 MiB, making memory lifecycle the next blocker.
+- [x] Add opt-in parseable JIT-cache diagnostics and smoke-script validation so
+      D18/D38 no-output probes can correlate process-memory growth with kernel
+      cache size, object-cache entries, disk hits, misses, stores, and
+      evictions.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

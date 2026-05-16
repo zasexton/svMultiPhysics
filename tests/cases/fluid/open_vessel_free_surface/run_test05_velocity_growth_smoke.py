@@ -419,6 +419,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
         env["SVMP_CUT_VOLUME_TIMING"] = "1"
     if args.enable_jit_specialization_trace:
         env["SVMP_JIT_TRACE_SPECIALIZATION"] = "1"
+    if args.enable_jit_cache_diagnostics:
+        env["SVMP_JIT_CACHE_DIAGNOSTICS"] = "1"
     return env
 
 
@@ -1318,6 +1320,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "form_mixed_plans": [],
         "linear_solve_histories": [],
         "jit_specialization_traces": [],
+        "jit_cache_diagnostics": [],
         "assembly_timings": [],
         "process_memory": [],
         "interior_face_timings": [],
@@ -1432,6 +1435,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             )
         elif "JIT specialization trace:" in line:
             diagnostics["jit_specialization_traces"].append(parse_jit_specialization_trace(line))
+        elif "diagnostic=jit_cache" in line:
+            diagnostics["jit_cache_diagnostics"].append(parse_key_values(line))
         elif "[INTERIOR_FACE_TIMING]" in line:
             diagnostics["interior_face_timings"].append(parse_interior_face_timing(line))
         elif "[CUT_VOLUME_TIMING]" in line:
@@ -2112,6 +2117,32 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         if vm_values:
             metrics["diagnostic_process_vm_kb"] = numeric_range(vm_values)
             metrics["diagnostic_process_max_vm_kb"] = max(vm_values)
+    if diagnostics.get("jit_cache_diagnostics"):
+        jit_records = diagnostics["jit_cache_diagnostics"]
+        metrics["latest_jit_cache_diagnostics"] = jit_records[-1]
+        for name in (
+            "kernel_cache_size",
+            "kernel_cache_hits",
+            "kernel_cache_misses",
+            "kernel_cache_symbol_hits",
+            "kernel_cache_stores",
+            "kernel_cache_evictions",
+            "object_cache_entries",
+            "object_cache_notify_compiled",
+            "object_cache_gets",
+            "object_cache_mem_hits",
+            "object_cache_disk_hits",
+            "object_cache_misses",
+            "object_cache_bytes_written",
+            "object_cache_bytes_read",
+        ):
+            values = [
+                float(record[name])
+                for record in jit_records
+                if isinstance(record.get(name), (int, float))
+            ]
+            if values:
+                metrics[f"diagnostic_jit_cache_max_{name}"] = max(values)
     if diagnostics.get("interior_face_timings"):
         timings = diagnostics["interior_face_timings"]
         metrics["latest_interior_face_timing"] = timings[-1]
@@ -2403,6 +2434,8 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.append("cut-volume timing diagnostics were not reported")
     if args.require_jit_specialization_trace_diagnostics and not diagnostics.get("jit_specialization_traces"):
         errors.append("JIT specialization trace diagnostics were not reported")
+    if args.require_jit_cache_diagnostics and not diagnostics.get("jit_cache_diagnostics"):
+        errors.append("JIT cache diagnostics were not reported")
     if (args.require_marked_interior_face_fallback_diagnostics and
             not has_marked_interior_face_fallback_trace(diagnostics)):
         errors.append("marked interior-face fallback diagnostics were not reported")
@@ -2733,6 +2766,9 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if (args.require_jit_specialization_trace_diagnostics and
             not metrics["diagnostics"].get("jit_specialization_traces")):
         errors.append("JIT specialization trace diagnostics were not reported")
+    if (args.require_jit_cache_diagnostics and
+            not metrics["diagnostics"].get("jit_cache_diagnostics")):
+        errors.append("JIT cache diagnostics were not reported")
     if (args.require_marked_interior_face_fallback_diagnostics and
             not has_marked_interior_face_fallback_trace(metrics["diagnostics"])):
         errors.append("marked interior-face fallback diagnostics were not reported")
@@ -3103,6 +3139,8 @@ def main() -> int:
     parser.add_argument("--require-cut-volume-timing-diagnostics", action="store_true")
     parser.add_argument("--enable-jit-specialization-trace", action="store_true")
     parser.add_argument("--require-jit-specialization-trace-diagnostics", action="store_true")
+    parser.add_argument("--enable-jit-cache-diagnostics", action="store_true")
+    parser.add_argument("--require-jit-cache-diagnostics", action="store_true")
     parser.add_argument("--require-process-memory-diagnostics", action="store_true")
     parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")

@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <list>
 #include <mutex>
 #include <optional>
@@ -172,6 +173,23 @@ inferFunctionalReferenceSpaceSignature(const FormExprNode& node,
         pos = end + 1;
     }
     return false;
+}
+
+[[nodiscard]] bool envFlagEnabled(const char* name) noexcept
+{
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+    while (*value == ' ' || *value == '\t' || *value == '\n' || *value == '\r') {
+        ++value;
+    }
+    return *value != '\0' && *value != '0';
+}
+
+[[nodiscard]] bool cacheDiagnosticsEnabled(const JITOptions& options) noexcept
+{
+    return options.cache_diagnostics || envFlagEnabled("SVMP_JIT_CACHE_DIAGNOSTICS");
 }
 
 [[nodiscard]] int preferredVectorWidthFromCpuFeatures(std::string_view cpu_features) noexcept
@@ -827,20 +845,30 @@ JITCompileResult JITCompiler::Impl::compileFormIR(const FormIR& ir,
         }
     }
 
-    if (options.cache_diagnostics) {
+    if (cacheDiagnosticsEnabled(options)) {
         std::ostringstream oss;
         const auto object_stats = engine ? engine->objectCacheStats() : JITObjectCacheStats{};
-        oss << "JIT cache: groups=" << plan.groups.size()
-            << ", hits=" << local_hits
-            << ", symbol_hits=" << local_symbol_hits
-            << ", misses=" << local_misses
-            << ", stores=" << local_stores
-            << ", evictions=" << local_evictions
-            << ", kernel_cache_size=" << kernel_cache.size()
-            << ", objcache_gets=" << object_stats.get_calls
-            << ", objcache_mem_hits=" << object_stats.mem_hits
-            << ", objcache_disk_hits=" << object_stats.disk_hits
-            << ", objcache_misses=" << object_stats.misses;
+        oss << "[svMultiPhysics::FE] JITCompiler diagnostic=jit_cache"
+            << " groups=" << plan.groups.size()
+            << " local_hits=" << local_hits
+            << " local_symbol_hits=" << local_symbol_hits
+            << " local_misses=" << local_misses
+            << " local_stores=" << local_stores
+            << " local_evictions=" << local_evictions
+            << " kernel_cache_size=" << kernel_cache.size()
+            << " kernel_cache_hits=" << kernel_cache_stats.hits
+            << " kernel_cache_misses=" << kernel_cache_stats.misses
+            << " kernel_cache_symbol_hits=" << kernel_cache_stats.engine_symbol_hits
+            << " kernel_cache_stores=" << kernel_cache_stats.stores
+            << " kernel_cache_evictions=" << kernel_cache_stats.evictions
+            << " object_cache_entries=" << object_stats.in_memory_entries
+            << " object_cache_notify_compiled=" << object_stats.notify_compiled
+            << " object_cache_gets=" << object_stats.get_calls
+            << " object_cache_mem_hits=" << object_stats.mem_hits
+            << " object_cache_disk_hits=" << object_stats.disk_hits
+            << " object_cache_misses=" << object_stats.misses
+            << " object_cache_bytes_written=" << object_stats.bytes_written
+            << " object_cache_bytes_read=" << object_stats.bytes_read;
         FE_LOG_INFO(oss.str());
     }
 
