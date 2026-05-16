@@ -1512,66 +1512,105 @@ TEST(LevelSetInterfaceLifecycle, RejectsHighOrderImplicitModeOnUnsupportedTetra)
 TEST(LevelSetInterfaceLifecycle, MixedElementUnsupportedBackendReportsCellAndElement)
 {
     const auto mesh = std::make_shared<MixedQuadTriangleMeshAccess>();
-    auto scalar_space =
-        FE::spaces::Space(FE::spaces::SpaceType::H1,
-                          FE::ElementType::Quad4,
-                          /*order=*/1,
-                          /*components=*/1);
+    FE::interfaces::CutInterfaceDomainRequest request{};
+    request.source = FE::interfaces::LevelSetInterfaceSource::fromField(
+        /*field_id=*/42,
+        /*layout_revision=*/1,
+        /*value_revision=*/2);
+    request.interface_marker = 901;
+    request.quadrature_order = 1;
+    request.interface_quadrature_order = 1;
+    request.volume_quadrature_order = 1;
+    request.implicit_geometry_mode = "LinearCorner";
+    request.implicit_quadrature_backend = "LinearCorner";
+    request.implicit_fallback_policy = "Fail";
 
-    FE::systems::FESystem system(mesh);
-    const auto phi = system.addField(FE::systems::FieldSpec{
-        .name = "phi",
-        .space = scalar_space,
-        .components = 1,
-    });
-    ASSERT_NO_THROW(system.setup({}, makeMixedQuadTriangleSetupInputs()));
+    FE::interfaces::LevelSetInterfaceDomain domain(request);
+    std::vector<std::array<FE::Real, 3>> quad_coordinates;
+    mesh->getCellCoordinates(/*cell_id=*/0, quad_coordinates);
+    FE::interfaces::appendLinearLevelSetCellCut2D(
+        domain,
+        FE::interfaces::LevelSetCellCutInput{
+            .parent_cell = 0,
+            .element_type = FE::ElementType::Quad4,
+            .node_coordinates = quad_coordinates,
+            .level_set_values = {-1.0, 1.0, 1.0, -1.0}});
 
-    std::vector<FE::Real> solution(
-        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
-    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
-        const auto x = mesh->getNodeCoordinates(vertex);
-        setFieldComponentValue(solution, system, phi, vertex, x[0]);
-    }
+    std::vector<std::array<FE::Real, 3>> triangle_coordinates;
+    mesh->getCellCoordinates(/*cell_id=*/1, triangle_coordinates);
+    FE::interfaces::appendLinearLevelSetCellCut2D(
+        domain,
+        FE::interfaces::LevelSetCellCutInput{
+            .parent_cell = 1,
+            .element_type = FE::ElementType::Triangle3,
+            .node_coordinates = triangle_coordinates,
+            .level_set_values = {-0.5, 0.5, -0.5}});
 
-    level_set::LevelSetGeneratedInterfaceOptions saye_options{};
-    saye_options.level_set_field_name = "phi";
-    saye_options.domain_id = "water-air";
-    saye_options.geometry_mode =
-        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
-    saye_options.implicit_cut_quadrature_backend =
-        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    const auto interface_rules =
+        domain.interfaceQuadratureRules();
+    ASSERT_EQ(interface_rules.size(), 2u);
+    EXPECT_EQ(interface_rules[0].provenance.parent_entity, 0);
+    EXPECT_EQ(interface_rules[1].provenance.parent_entity, 1);
+    EXPECT_EQ(interface_rules[0].provenance.implicit_quadrature_backend,
+              "LinearCorner");
+    EXPECT_EQ(interface_rules[1].provenance.implicit_quadrature_backend,
+              "LinearCorner");
 
-    level_set::LevelSetGeneratedInterfaceLifecycle saye_lifecycle;
-    try {
-        (void)saye_lifecycle.build(system, saye_options, solution);
-        FAIL() << "Expected Saye backend to reject the triangle cell";
-    } catch (const std::invalid_argument& ex) {
-        const std::string message = ex.what();
-        EXPECT_NE(message.find("backend=SayeHyperrectangle"), std::string::npos);
-        EXPECT_NE(message.find("cell=1"), std::string::npos);
-        EXPECT_NE(message.find("element_type=Triangle3"), std::string::npos);
-        EXPECT_NE(message.find("quadrilateral"), std::string::npos);
-    }
+    const auto volume_rules = domain.volumeQuadratureRules();
+    ASSERT_EQ(volume_rules.size(), 4u);
+    EXPECT_EQ(volume_rules[0].provenance.parent_entity, 0);
+    EXPECT_EQ(volume_rules[1].provenance.parent_entity, 0);
+    EXPECT_EQ(volume_rules[2].provenance.parent_entity, 1);
+    EXPECT_EQ(volume_rules[3].provenance.parent_entity, 1);
+    EXPECT_EQ(volume_rules[0].side, FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(volume_rules[1].side, FE::geometry::CutIntegrationSide::Positive);
+    EXPECT_EQ(volume_rules[2].side, FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(volume_rules[3].side, FE::geometry::CutIntegrationSide::Positive);
 
-    level_set::LevelSetGeneratedInterfaceOptions subcell_options{};
-    subcell_options.level_set_field_name = "phi";
-    subcell_options.domain_id = "water-air";
-    subcell_options.geometry_mode =
-        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
-    subcell_options.implicit_cut_quadrature_backend =
-        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+    level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+    backend_input.linearized_input.parent_cell = 1;
+    backend_input.linearized_input.element_type = FE::ElementType::Triangle3;
+    backend_input.linearized_input.node_coordinates = triangle_coordinates;
+    backend_input.linearized_input.level_set_values = {-0.5, 0.5, -0.5};
+    const auto& saye_backend =
+        level_set::implicitCutQuadratureBackendDriver(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+    const auto saye_result = saye_backend.cut(/*mesh_dimension=*/2,
+                                             request,
+                                             backend_input);
+    ASSERT_FALSE(saye_result.cut.supported);
+    const std::string saye_message =
+        level_set::levelSetImplicitCutBackendCellDiagnostic(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+            /*cell_id=*/1,
+            FE::ElementType::Triangle3,
+            saye_result.cut.diagnostic);
+    EXPECT_NE(saye_message.find("backend=SayeHyperrectangle"), std::string::npos);
+    EXPECT_NE(saye_message.find("cell=1"), std::string::npos);
+    EXPECT_NE(saye_message.find("element_type=Triangle3"), std::string::npos);
+    EXPECT_NE(saye_message.find("quadrilateral"), std::string::npos);
 
-    level_set::LevelSetGeneratedInterfaceLifecycle subcell_lifecycle;
-    try {
-        (void)subcell_lifecycle.build(system, subcell_options, solution);
-        FAIL() << "Expected subcell backend to reject the quadrilateral cell";
-    } catch (const std::invalid_argument& ex) {
-        const std::string message = ex.what();
-        EXPECT_NE(message.find("backend=HighOrderSubcell"), std::string::npos);
-        EXPECT_NE(message.find("cell=0"), std::string::npos);
-        EXPECT_NE(message.find("element_type=Quad4"), std::string::npos);
-        EXPECT_NE(message.find("triangular"), std::string::npos);
-    }
+    backend_input.linearized_input.parent_cell = 0;
+    backend_input.linearized_input.element_type = FE::ElementType::Quad4;
+    backend_input.linearized_input.node_coordinates = quad_coordinates;
+    backend_input.linearized_input.level_set_values = {-1.0, 1.0, 1.0, -1.0};
+    const auto& subcell_backend =
+        level_set::implicitCutQuadratureBackendDriver(
+            level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    const auto subcell_result = subcell_backend.cut(/*mesh_dimension=*/2,
+                                                   request,
+                                                   backend_input);
+    ASSERT_FALSE(subcell_result.cut.supported);
+    const std::string subcell_message =
+        level_set::levelSetImplicitCutBackendCellDiagnostic(
+            level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+            /*cell_id=*/0,
+            FE::ElementType::Quad4,
+            subcell_result.cut.diagnostic);
+    EXPECT_NE(subcell_message.find("backend=HighOrderSubcell"), std::string::npos);
+    EXPECT_NE(subcell_message.find("cell=0"), std::string::npos);
+    EXPECT_NE(subcell_message.find("element_type=Quad4"), std::string::npos);
+    EXPECT_NE(subcell_message.find("triangular"), std::string::npos);
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderImplicitDoesNotSilentlyUseLinearFallback)

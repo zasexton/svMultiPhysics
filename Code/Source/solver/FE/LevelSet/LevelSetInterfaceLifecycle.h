@@ -43,6 +43,12 @@ enum class ImplicitCutFallbackPolicy {
 [[nodiscard]] const char* implicitCutFallbackPolicyName(
     ImplicitCutFallbackPolicy policy) noexcept;
 
+[[nodiscard]] std::string levelSetImplicitCutBackendCellDiagnostic(
+    ImplicitCutQuadratureBackend backend,
+    GlobalIndex cell_id,
+    ElementType type,
+    const std::string& diagnostic);
+
 struct LevelSetGeneratedInterfaceOptions {
     std::string level_set_field_name{"level_set"};
     std::string domain_id{"free_surface"};

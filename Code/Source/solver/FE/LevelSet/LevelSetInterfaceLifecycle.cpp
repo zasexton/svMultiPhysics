@@ -123,11 +123,8 @@ struct GeneratedInterfaceCellDiagnostics {
     ElementType type,
     const std::string& diagnostic)
 {
-    return "generated level-set interface backend failure"
-           "; backend=" + std::string(backend.name()) +
-           "; cell=" + std::to_string(cell_id) +
-           "; element_type=" + elementTypeDiagnosticName(type) +
-           "; diagnostic=" + diagnostic;
+    return levelSetImplicitCutBackendCellDiagnostic(
+        backend.kind(), cell_id, type, diagnostic);
 }
 
 [[nodiscard]] Real coefficientAtVertex(const dofs::EntityDofMap& entity_map,
@@ -346,6 +343,20 @@ void LevelSetGeneratedInterfaceLifecycle::restoreValueRevision(
     std::uint64_t value_revision) noexcept
 {
     value_revision_ = value_revision;
+}
+
+std::string levelSetImplicitCutBackendCellDiagnostic(
+    ImplicitCutQuadratureBackend backend,
+    GlobalIndex cell_id,
+    ElementType type,
+    const std::string& diagnostic)
+{
+    return "generated level-set interface backend failure"
+           "; backend=" +
+           std::string(implicitCutQuadratureBackendDriver(backend).name()) +
+           "; cell=" + std::to_string(cell_id) +
+           "; element_type=" + elementTypeDiagnosticName(type) +
+           "; diagnostic=" + diagnostic;
 }
 
 LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
