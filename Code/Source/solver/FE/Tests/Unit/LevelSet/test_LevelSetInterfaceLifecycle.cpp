@@ -1204,6 +1204,46 @@ TEST(LevelSetCellEvaluator, P2RespondsToEdgeDofsAtInteriorNodes)
     EXPECT_NEAR(at_vertex.value, 0.0, 1.0e-12);
 }
 
+TEST(LevelSetCellEvaluator, P3RespondsToInteriorDofsWhereAvailable)
+{
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/3, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), 16u);
+
+    const auto offset = system.fieldDofOffset(phi);
+    constexpr std::size_t first_cell_interior_dof = 12u;
+    solution[static_cast<std::size_t>(
+        offset + cell_dofs[first_cell_interior_dof])] = 7.0;
+
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+    const auto at_interior = evaluator.evaluate(
+        0, {{FE::Real(-1.0) / FE::Real(3.0),
+             FE::Real(-1.0) / FE::Real(3.0),
+             0.0}});
+    EXPECT_EQ(at_interior.interpolation_order, 3);
+    EXPECT_EQ(at_interior.implicit_geometry_order, 3);
+    EXPECT_NEAR(at_interior.value, 7.0, 1.0e-12);
+
+    const auto at_corner = evaluator.evaluate(0, {{-1.0, -1.0, 0.0}});
+    EXPECT_NEAR(at_corner.value, 0.0, 1.0e-12);
+}
+
 TEST(LevelSetCellEvaluator, ReferenceGradientMatchesFiniteDifference)
 {
     const auto mesh = std::make_shared<SingleTetra10GeometryMeshAccess>();

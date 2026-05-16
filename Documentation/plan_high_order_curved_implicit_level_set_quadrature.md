@@ -216,7 +216,7 @@ algorithms need repeated pointwise evaluation of the implicit function.
 
 - [x] P1 evaluator reproduces current vertex-interpolated values at corners.
 - [x] P2 evaluator responds to edge DOFs in the cell interior.
-- [ ] P3 evaluator responds to interior DOFs where available.
+- [x] P3 evaluator responds to interior DOFs where available.
 - [x] Gradient checks against finite differences in reference coordinates.
 - [ ] MPI/ghost test proving deterministic values on shared cells.
 - [x] State-ordering test proving Newton trial states feed the evaluator, not
