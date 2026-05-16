@@ -1055,7 +1055,7 @@ Tangent policy contract:
 
 ### Implementation Checklist
 
-- [ ] Add the tangent policy to options and diagnostics.
+- [x] Add the tangent policy to options and diagnostics.
 - [ ] Ensure existing Newton sync callbacks remain active for high-order mode.
 - [ ] Ensure line-search trial refreshes use the same high-order backend.
 - [ ] Add fixed-geometry assembly diagnostics for high-order cut rules.

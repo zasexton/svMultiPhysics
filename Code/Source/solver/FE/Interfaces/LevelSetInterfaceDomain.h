@@ -145,6 +145,7 @@ struct CutInterfaceDomainRequest {
     std::string implicit_geometry_mode{};
     std::string implicit_quadrature_backend{};
     std::string implicit_fallback_policy{};
+    std::string geometry_tangent_policy{};
     Real implicit_cut_root_tolerance{1.0e-10};
     int implicit_cut_max_subdivision_depth{16};
     int achieved_interface_quadrature_order{-1};
@@ -359,6 +360,8 @@ struct CutInterfaceVolumeRegion {
             request.implicit_quadrature_backend;
         rule.provenance.implicit_fallback_policy =
             request.implicit_fallback_policy;
+        rule.provenance.geometry_tangent_policy =
+            request.geometry_tangent_policy;
         rule.provenance.requested_quadrature_order = volume_order;
         rule.provenance.achieved_quadrature_order = exact_order;
         rule.provenance_id = request.source.identifier();
@@ -457,6 +460,8 @@ struct CutInterfaceFragment {
             request.implicit_quadrature_backend;
         rule.provenance.implicit_fallback_policy =
             request.implicit_fallback_policy;
+        rule.provenance.geometry_tangent_policy =
+            request.geometry_tangent_policy;
         rule.provenance.requested_quadrature_order = requested_order;
         rule.provenance.achieved_quadrature_order = quadrature_order;
         rule.provenance_id = request.source.identifier();

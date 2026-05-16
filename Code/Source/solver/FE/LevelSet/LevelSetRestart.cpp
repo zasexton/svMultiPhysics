@@ -89,6 +89,8 @@ captureLevelSetGeneratedInterfaceRestartRecord(
         options.implicit_cut_quadrature_backend;
     record.implicit_cut_fallback_policy =
         options.implicit_cut_fallback_policy;
+    record.geometry_tangent_policy =
+        options.geometry_tangent_policy;
     record.implicit_cut_root_tolerance =
         options.implicit_cut_root_tolerance;
     record.implicit_cut_max_subdivision_depth =
@@ -124,6 +126,8 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
         record.implicit_cut_quadrature_backend;
     options.implicit_cut_fallback_policy =
         record.implicit_cut_fallback_policy;
+    options.geometry_tangent_policy =
+        record.geometry_tangent_policy;
     options.implicit_cut_root_tolerance =
         record.implicit_cut_root_tolerance;
     options.implicit_cut_max_subdivision_depth =
@@ -183,6 +187,11 @@ bool levelSetGeneratedInterfaceRestartRecordMatches(
         record.implicit_cut_quadrature_backend !=
             ImplicitCutQuadratureBackend::LinearCorner) {
         setDiagnostic(diagnostic, "generated-interface restart linear geometry backend is invalid");
+        return false;
+    }
+    if (record.geometry_tangent_policy ==
+        GeometryTangentPolicy::DifferentiatedQuadrature) {
+        setDiagnostic(diagnostic, "generated-interface restart geometry tangent policy is not implemented");
         return false;
     }
 

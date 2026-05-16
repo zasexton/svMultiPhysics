@@ -30,6 +30,8 @@ struct ActiveCutVolumeRequest {
       svmp::FE::level_set::ImplicitCutQuadratureBackend::LinearCorner};
   svmp::FE::level_set::ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
       svmp::FE::level_set::ImplicitCutFallbackPolicy::Fail};
+  svmp::FE::level_set::GeometryTangentPolicy geometry_tangent_policy{
+      svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature};
   double implicit_cut_root_tolerance{1.0e-10};
   int implicit_cut_max_subdivision_depth{16};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
@@ -44,6 +46,9 @@ parseImplicitCutQuadratureBackend(const std::string& raw);
 
 [[nodiscard]] svmp::FE::level_set::ImplicitCutFallbackPolicy
 parseImplicitCutFallbackPolicy(const std::string& raw);
+
+[[nodiscard]] svmp::FE::level_set::GeometryTangentPolicy
+parseGeometryTangentPolicy(const std::string& raw);
 
 [[nodiscard]] std::vector<ActiveCutVolumeRequest>
 activeCutVolumeRequests(const Parameters& params);

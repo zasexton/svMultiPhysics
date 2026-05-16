@@ -91,6 +91,8 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
             level_set::ImplicitCutQuadratureBackend::LinearCorner);
   EXPECT_EQ(request.implicit_cut_fallback_policy,
             level_set::ImplicitCutFallbackPolicy::Fail);
+  EXPECT_EQ(request.geometry_tangent_policy,
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
   EXPECT_FALSE(request.quadrature_order.has_value());
   EXPECT_FALSE(request.interface_quadrature_order.has_value());
   EXPECT_FALSE(request.volume_quadrature_order.has_value());
@@ -114,6 +116,7 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
       <Generated_interface_geometry>HighOrderImplicit</Generated_interface_geometry>
       <Implicit_cut_quadrature_backend>SayeHyperrectangle</Implicit_cut_quadrature_backend>
       <Implicit_cut_fallback_policy>LinearCorner</Implicit_cut_fallback_policy>
+      <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
       <Implicit_cut_root_tolerance>2.5e-11</Implicit_cut_root_tolerance>
       <Implicit_cut_max_subdivision_depth>12</Implicit_cut_max_subdivision_depth>
       <Generated_interface_quadrature_order>5</Generated_interface_quadrature_order>
@@ -138,6 +141,8 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
             level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
   EXPECT_EQ(request.implicit_cut_fallback_policy,
             level_set::ImplicitCutFallbackPolicy::LinearCorner);
+  EXPECT_EQ(request.geometry_tangent_policy,
+            level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
   ASSERT_TRUE(request.quadrature_order.has_value());
   ASSERT_TRUE(request.interface_quadrature_order.has_value());
   ASSERT_TRUE(request.volume_quadrature_order.has_value());
@@ -165,6 +170,7 @@ TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)
       <GeneratedInterfaceGeometryMode>curved implicit</GeneratedInterfaceGeometryMode>
       <GeneratedInterfaceQuadratureBackend>hyperrectangle</GeneratedInterfaceQuadratureBackend>
       <ImplicitCutQuadratureFallback>legacy</ImplicitCutQuadratureFallback>
+      <GeneratedInterfaceGeometryTangentPolicy>exact sensitivities</GeneratedInterfaceGeometryTangentPolicy>
       <ImplicitGeometryRootTolerance>3.0e-9</ImplicitGeometryRootTolerance>
       <ImplicitCutSubdivisionDepth>9</ImplicitCutSubdivisionDepth>
       <CutQuadratureOrder>7</CutQuadratureOrder>
@@ -191,6 +197,8 @@ TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)
             level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
   EXPECT_EQ(request.implicit_cut_fallback_policy,
             level_set::ImplicitCutFallbackPolicy::LinearCorner);
+  EXPECT_EQ(request.geometry_tangent_policy,
+            level_set::GeometryTangentPolicy::DifferentiatedQuadrature);
   ASSERT_TRUE(request.quadrature_order.has_value());
   ASSERT_TRUE(request.interface_quadrature_order.has_value());
   ASSERT_TRUE(request.volume_quadrature_order.has_value());
@@ -214,6 +222,26 @@ TEST(LevelSetCutConfiguration, RejectsUnknownImplicitCutBackend)
       <Active_domain>LevelSetNegative</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
       <Implicit_cut_quadrature_backend>unknown_backend</Implicit_cut_quadrature_backend>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
+               std::runtime_error);
+}
+
+TEST(LevelSetCutConfiguration, RejectsUnknownGeometryTangentPolicy)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Geometry_tangent_policy>unknown_policy</Geometry_tangent_policy>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>

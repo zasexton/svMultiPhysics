@@ -159,6 +159,30 @@ parseImplicitCutFallbackPolicy(const std::string& raw)
       raw + "'.");
 }
 
+svmp::FE::level_set::GeometryTangentPolicy
+parseGeometryTangentPolicy(const std::string& raw)
+{
+  const auto value = normalizedToken(raw);
+  using Policy = svmp::FE::level_set::GeometryTangentPolicy;
+  if (value == "refreshedfrozenquadrature" ||
+      value == "refreshedfrozen" ||
+      value == "frozenquadrature" ||
+      value == "quasinewton" ||
+      value == "quasinewtongeometry") {
+    return Policy::RefreshedFrozenQuadrature;
+  }
+  if (value == "differentiatedquadrature" ||
+      value == "differentiated" ||
+      value == "exactgeometrytangent" ||
+      value == "exactsensitivities" ||
+      value == "shapederivative") {
+    return Policy::DifferentiatedQuadrature;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Unknown geometry tangent policy '" +
+      raw + "'.");
+}
+
 std::vector<ActiveCutVolumeRequest>
 activeCutVolumeRequests(const Parameters& params)
 {
@@ -306,6 +330,18 @@ activeCutVolumeRequests(const Parameters& params)
                    "ImplicitCutQuadratureFallback"})) {
         request.implicit_cut_fallback_policy =
             parseImplicitCutFallbackPolicy(*fallback_policy);
+      }
+      if (const auto tangent_policy =
+              firstDefinedParameter(
+                  bc_params,
+                  {"Geometry_tangent_policy",
+                   "GeometryTangentPolicy",
+                   "Generated_interface_geometry_tangent_policy",
+                   "GeneratedInterfaceGeometryTangentPolicy",
+                   "Implicit_geometry_tangent_policy",
+                   "ImplicitGeometryTangentPolicy"})) {
+        request.geometry_tangent_policy =
+            parseGeometryTangentPolicy(*tangent_policy);
       }
       if (const auto root_tolerance =
               firstDefinedDoubleParameter(

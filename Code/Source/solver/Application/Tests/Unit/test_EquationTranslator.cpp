@@ -279,6 +279,7 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
     <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
     <Implicit_cut_quadrature_backend>LinearCorner</Implicit_cut_quadrature_backend>
     <Implicit_cut_fallback_policy>Fail</Implicit_cut_fallback_policy>
+    <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
     <Implicit_cut_root_tolerance>1.0e-10</Implicit_cut_root_tolerance>
     <Implicit_cut_max_subdivision_depth>16</Implicit_cut_max_subdivision_depth>
     <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
@@ -306,6 +307,8 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   EXPECT_EQ(bc.params.at("Generated_interface_geometry").value, "LinearCorner");
   EXPECT_EQ(bc.params.at("Implicit_cut_quadrature_backend").value, "LinearCorner");
   EXPECT_EQ(bc.params.at("Implicit_cut_fallback_policy").value, "Fail");
+  EXPECT_EQ(bc.params.at("Geometry_tangent_policy").value,
+            "RefreshedFrozenQuadrature");
   EXPECT_EQ(bc.params.at("Implicit_cut_root_tolerance").value, "1.0e-10");
   EXPECT_EQ(bc.params.at("Implicit_cut_max_subdivision_depth").value, "16");
   EXPECT_EQ(bc.params.at("Generated_interface_quadrature_order").value, "2");

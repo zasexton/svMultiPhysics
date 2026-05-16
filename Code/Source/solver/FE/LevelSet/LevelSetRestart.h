@@ -46,6 +46,8 @@ struct LevelSetGeneratedInterfaceRestartRecord {
         ImplicitCutQuadratureBackend::LinearCorner};
     ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
         ImplicitCutFallbackPolicy::Fail};
+    GeometryTangentPolicy geometry_tangent_policy{
+        GeometryTangentPolicy::RefreshedFrozenQuadrature};
     Real implicit_cut_root_tolerance{1.0e-10};
     int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};

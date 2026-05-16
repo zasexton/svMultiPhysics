@@ -209,6 +209,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
         level_set::ImplicitCutQuadratureBackend::LinearCorner;
     interface_options.implicit_cut_fallback_policy =
         level_set::ImplicitCutFallbackPolicy::LinearCorner;
+    interface_options.geometry_tangent_policy =
+        level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature;
     interface_options.implicit_cut_root_tolerance = 2.0e-10;
     interface_options.implicit_cut_max_subdivision_depth = 18;
 
@@ -231,6 +233,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
               level_set::ImplicitCutQuadratureBackend::LinearCorner);
     EXPECT_EQ(interface_record.implicit_cut_fallback_policy,
               level_set::ImplicitCutFallbackPolicy::LinearCorner);
+    EXPECT_EQ(interface_record.geometry_tangent_policy,
+              level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
     EXPECT_DOUBLE_EQ(interface_record.implicit_cut_root_tolerance, 2.0e-10);
     EXPECT_EQ(interface_record.implicit_cut_max_subdivision_depth, 18);
     EXPECT_EQ(interface_record.value_revision, built.value_revision);
@@ -251,6 +255,13 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
         system, mismatch, &diagnostic));
     EXPECT_NE(diagnostic.find("geometry revision"), std::string::npos);
 
+    auto unsupported_tangent = interface_record;
+    unsupported_tangent.geometry_tangent_policy =
+        level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+    EXPECT_FALSE(level_set::levelSetGeneratedInterfaceRestartRecordMatches(
+        system, unsupported_tangent, &diagnostic));
+    EXPECT_NE(diagnostic.find("tangent policy"), std::string::npos);
+
     const auto restored_options =
         level_set::optionsFromLevelSetGeneratedInterfaceRestartRecord(interface_record);
     EXPECT_EQ(restored_options.requested_interface_marker,
@@ -264,6 +275,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
               interface_options.implicit_cut_quadrature_backend);
     EXPECT_EQ(restored_options.implicit_cut_fallback_policy,
               interface_options.implicit_cut_fallback_policy);
+    EXPECT_EQ(restored_options.geometry_tangent_policy,
+              interface_options.geometry_tangent_policy);
     EXPECT_DOUBLE_EQ(restored_options.implicit_cut_root_tolerance,
                      interface_options.implicit_cut_root_tolerance);
     EXPECT_EQ(restored_options.implicit_cut_max_subdivision_depth,

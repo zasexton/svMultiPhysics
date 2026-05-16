@@ -158,6 +158,7 @@ TEST(LevelSetInterfaceGeometryWriter, DumpsSingleCellQuadratureDebugJson)
     request.implicit_geometry_mode = "high-order-level-set";
     request.implicit_quadrature_backend = "saye-hyperrectangle";
     request.implicit_fallback_policy = "linear-topology";
+    request.geometry_tangent_policy = "refreshed-frozen-quadrature";
     request.quadrature_policy_key = 77;
     request.interface_quadrature_order = 1;
     request.volume_quadrature_order = 1;
@@ -191,6 +192,8 @@ TEST(LevelSetInterfaceGeometryWriter, DumpsSingleCellQuadratureDebugJson)
     EXPECT_NE(json.find("\"implicit_quadrature_backend\": \"saye-hyperrectangle\""),
               std::string::npos);
     EXPECT_NE(json.find("\"implicit_fallback_policy\": \"linear-topology\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"geometry_tangent_policy\": \"refreshed-frozen-quadrature\""),
               std::string::npos);
     EXPECT_NE(json.find("\"interface_rules\": ["), std::string::npos);
     EXPECT_NE(json.find("\"volume_rules\": ["), std::string::npos);

@@ -34,6 +34,11 @@ enum class ImplicitCutFallbackPolicy {
     LinearCorner,
 };
 
+enum class GeometryTangentPolicy {
+    RefreshedFrozenQuadrature,
+    DifferentiatedQuadrature,
+};
+
 [[nodiscard]] const char* generatedInterfaceGeometryModeName(
     GeneratedInterfaceGeometryMode mode) noexcept;
 
@@ -42,6 +47,9 @@ enum class ImplicitCutFallbackPolicy {
 
 [[nodiscard]] const char* implicitCutFallbackPolicyName(
     ImplicitCutFallbackPolicy policy) noexcept;
+
+[[nodiscard]] const char* geometryTangentPolicyName(
+    GeometryTangentPolicy policy) noexcept;
 
 [[nodiscard]] std::string levelSetImplicitCutBackendCellDiagnostic(
     ImplicitCutQuadratureBackend backend,
@@ -74,6 +82,8 @@ struct LevelSetGeneratedInterfaceOptions {
     int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};
     bool allow_corner_linearized_geometry{false};
+    GeometryTangentPolicy geometry_tangent_policy{
+        GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
 
 struct LevelSetGeneratedInterfaceResult {
@@ -92,6 +102,8 @@ struct LevelSetGeneratedInterfaceResult {
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
     std::size_t implicit_cut_fallback_cell_count{0};
+    GeometryTangentPolicy geometry_tangent_policy{
+        GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
 
 class LevelSetGeneratedInterfaceLifecycle {

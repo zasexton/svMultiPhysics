@@ -71,6 +71,7 @@ struct CutQuadratureProvenance {
     std::string implicit_geometry_mode{};
     std::string implicit_quadrature_backend{};
     std::string implicit_fallback_policy{};
+    std::string geometry_tangent_policy{};
     int requested_quadrature_order{-1};
     int achieved_quadrature_order{-1};
 };

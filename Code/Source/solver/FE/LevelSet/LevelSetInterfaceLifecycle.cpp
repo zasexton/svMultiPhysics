@@ -56,6 +56,17 @@ const char* implicitCutFallbackPolicyName(
     return "Unknown";
 }
 
+const char* geometryTangentPolicyName(GeometryTangentPolicy policy) noexcept
+{
+    switch (policy) {
+    case GeometryTangentPolicy::RefreshedFrozenQuadrature:
+        return "RefreshedFrozenQuadrature";
+    case GeometryTangentPolicy::DifferentiatedQuadrature:
+        return "DifferentiatedQuadrature";
+    }
+    return "Unknown";
+}
+
 namespace {
 
 struct GeneratedInterfaceCellDiagnostics {
@@ -232,6 +243,7 @@ struct GeneratedInterfaceCellDiagnostics {
     mix(static_cast<std::uint64_t>(options.geometry_mode));
     mix(static_cast<std::uint64_t>(options.implicit_cut_quadrature_backend));
     mix(static_cast<std::uint64_t>(options.implicit_cut_fallback_policy));
+    mix(static_cast<std::uint64_t>(options.geometry_tangent_policy));
     mix(static_cast<std::uint64_t>(options.quadrature_order));
     mix(static_cast<std::uint64_t>(interface_quadrature_order));
     mix(static_cast<std::uint64_t>(volume_quadrature_order));
@@ -381,6 +393,11 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         throw std::invalid_argument(
             "generated level-set interface requires nonnegative implicit_cut_max_subdivision_depth");
     }
+    if (options.geometry_tangent_policy ==
+        GeometryTangentPolicy::DifferentiatedQuadrature) {
+        throw std::invalid_argument(
+            "generated level-set interface geometry_tangent_policy=DifferentiatedQuadrature is reserved until quadrature point, weight, normal, and topology sensitivities are implemented");
+    }
     if (options.geometry_mode == GeneratedInterfaceGeometryMode::LinearCorner &&
         options.implicit_cut_quadrature_backend !=
             ImplicitCutQuadratureBackend::LinearCorner) {
@@ -461,6 +478,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         backend.name();
     request.implicit_fallback_policy =
         implicitCutFallbackPolicyName(options.implicit_cut_fallback_policy);
+    request.geometry_tangent_policy =
+        geometryTangentPolicyName(options.geometry_tangent_policy);
     request.implicit_cut_root_tolerance =
         options.implicit_cut_root_tolerance;
     request.implicit_cut_max_subdivision_depth =
@@ -525,6 +544,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     result.max_corner_node_count = max_corner_node_count;
     result.implicit_cut_quadrature_backend =
         options.implicit_cut_quadrature_backend;
+    result.geometry_tangent_policy =
+        options.geometry_tangent_policy;
     result.achieved_interface_quadrature_order =
         achieved_interface_quadrature_order;
     result.achieved_volume_quadrature_order =

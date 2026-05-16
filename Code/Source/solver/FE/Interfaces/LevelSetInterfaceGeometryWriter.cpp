@@ -316,6 +316,9 @@ void writeQuadratureRuleJson(const geometry::CutQuadratureRule& rule,
     out << indent << "    \"implicit_fallback_policy\": ";
     writeJsonString(out, rule.provenance.implicit_fallback_policy);
     out << ",\n";
+    out << indent << "    \"geometry_tangent_policy\": ";
+    writeJsonString(out, rule.provenance.geometry_tangent_policy);
+    out << ",\n";
     out << indent << "    \"requested_quadrature_order\": "
         << rule.provenance.requested_quadrature_order << ",\n";
     out << indent << "    \"achieved_quadrature_order\": "
@@ -481,6 +484,9 @@ void writeLevelSetInterfaceQuadratureDebugJson(
     out << ",\n";
     out << "    \"implicit_fallback_policy\": ";
     writeJsonString(out, request.implicit_fallback_policy);
+    out << ",\n";
+    out << "    \"geometry_tangent_policy\": ";
+    writeJsonString(out, request.geometry_tangent_policy);
     out << ",\n";
     out << "    \"implicit_cut_root_tolerance\": "
         << request.implicit_cut_root_tolerance << ",\n";

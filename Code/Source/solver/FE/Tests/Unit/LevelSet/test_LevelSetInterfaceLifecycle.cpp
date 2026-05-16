@@ -1170,6 +1170,10 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(result.domain.request().implicit_geometry_mode, "LinearCorner");
     EXPECT_EQ(result.domain.request().implicit_quadrature_backend, "LinearCorner");
     EXPECT_EQ(result.domain.request().implicit_fallback_policy, "Fail");
+    EXPECT_EQ(result.domain.request().geometry_tangent_policy,
+              "RefreshedFrozenQuadrature");
+    EXPECT_EQ(result.geometry_tangent_policy,
+              level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
     EXPECT_EQ(result.domain.request().resolvedInterfaceQuadratureOrder(), 0);
     EXPECT_EQ(result.domain.request().resolvedVolumeQuadratureOrder(), 1);
     EXPECT_EQ(result.summary.interface_marker, interface_marker);
@@ -1188,6 +1192,8 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
               result.domain.request().quadrature_policy_key);
     EXPECT_EQ(interface_rules.front().provenance.implicit_quadrature_backend,
               "LinearCorner");
+    EXPECT_EQ(interface_rules.front().provenance.geometry_tangent_policy,
+              "RefreshedFrozenQuadrature");
     EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 0);
     EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 0);
     ASSERT_EQ(result.domain.volumeRegions().size(), 2u);
@@ -1199,6 +1205,8 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
               result.domain.request().quadrature_policy_key);
     EXPECT_EQ(volume_rules.front().provenance.implicit_geometry_mode,
               "LinearCorner");
+    EXPECT_EQ(volume_rules.front().provenance.geometry_tangent_policy,
+              "RefreshedFrozenQuadrature");
     EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 1);
     EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 1);
 }
@@ -1272,6 +1280,45 @@ TEST(LevelSetInterfaceLifecycle, QuadraturePolicyKeyChangesWithBackendOptions)
     auto changed_corner_policy = base_options;
     changed_corner_policy.allow_corner_linearized_geometry = true;
     EXPECT_NE(base_key, build_policy_key(changed_corner_policy));
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     RejectsDifferentiatedQuadratureTangentPolicyUntilSensitivitiesExist)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.geometry_tangent_policy =
+        level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    try {
+        (void)lifecycle.build(system, options, solution);
+        FAIL() << "Expected differentiated quadrature tangent policy rejection";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("DifferentiatedQuadrature"), std::string::npos);
+        EXPECT_NE(message.find("sensitivities"), std::string::npos);
+    }
 }
 
 TEST(LevelSetCellEvaluator, P1ReproducesCornerValuesAndReferenceGradient)
@@ -2063,6 +2110,8 @@ TEST(LevelSetInterfaceLifecycle, BackendMetadataReachesCutIntegrationContext)
               "LinearCorner");
     EXPECT_EQ(context.volumeRules().front().provenance.implicit_quadrature_backend,
               "LinearCorner");
+    EXPECT_EQ(context.volumeRules().front().provenance.geometry_tangent_policy,
+              "RefreshedFrozenQuadrature");
     EXPECT_EQ(context.volumeRules().front().provenance.predicate_policy_key,
               result.domain.request().quadrature_policy_key);
     ASSERT_FALSE(context.interfaceRules().empty());
@@ -2070,6 +2119,8 @@ TEST(LevelSetInterfaceLifecycle, BackendMetadataReachesCutIntegrationContext)
               interface_marker);
     EXPECT_EQ(context.interfaceRules().front().provenance.implicit_fallback_policy,
               "Fail");
+    EXPECT_EQ(context.interfaceRules().front().provenance.geometry_tangent_policy,
+              "RefreshedFrozenQuadrature");
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1LineMatchesLinearMeasures)

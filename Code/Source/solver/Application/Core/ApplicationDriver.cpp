@@ -2530,6 +2530,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     options.implicit_cut_quadrature_backend = request.implicit_cut_backend;
     options.implicit_cut_fallback_policy =
         request.implicit_cut_fallback_policy;
+    options.geometry_tangent_policy = request.geometry_tangent_policy;
     options.implicit_cut_root_tolerance =
         static_cast<svmp::FE::Real>(request.implicit_cut_root_tolerance);
     options.implicit_cut_max_subdivision_depth =
@@ -2743,6 +2744,14 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                   static_cast<double>(global_cut_adjacent_metadata))
             : svmp::FE::Real{0.0};
     const auto memory = readProcessMemorySnapshot();
+    const bool high_order_geometry =
+        options.geometry_mode ==
+        svmp::FE::level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    const bool refreshed_frozen_tangent =
+        options.geometry_tangent_policy ==
+        svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature;
+    const bool high_order_refreshed_frozen_tangent =
+        high_order_geometry && refreshed_frozen_tangent;
     application::core::oopCout()
         << "[svMultiPhysics::Application] Active-domain cut context"
         << " diagnostic=cut_context_rebuild"
@@ -2767,6 +2776,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " implicit_cut_fallback_policy="
         << svmp::FE::level_set::implicitCutFallbackPolicyName(
                options.implicit_cut_fallback_policy)
+        << " geometry_tangent_policy="
+        << svmp::FE::level_set::geometryTangentPolicyName(
+               options.geometry_tangent_policy)
+        << " geometry_tangent_warning="
+        << (high_order_refreshed_frozen_tangent
+                ? "quadrature_sensitivities_omitted"
+                : "none")
         << " implicit_cut_root_tolerance="
         << options.implicit_cut_root_tolerance
         << " implicit_cut_max_subdivision_depth="
