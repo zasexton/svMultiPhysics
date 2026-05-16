@@ -735,9 +735,30 @@ Rationale: high-order implicit quadrature introduces more state than the current
 linear cutter. Stale quadrature is a correctness bug, especially when cut
 topology changes during Newton or line-search trials.
 
+### Metadata Contract
+
+The generated-interface request is the run-level metadata carrier. It owns the
+geometry mode, backend name, fallback policy, requested interface and volume
+orders, root tolerance, maximum subdivision depth, mesh revisions, ownership
+revision, source layout revision, and source value revision.
+
+Each exported `CutQuadratureRule` must mirror enough request metadata in
+`CutQuadratureProvenance` to make a rule self-describing outside the domain:
+parent cell, marker, frame, topology id and revision, policy key, construction
+kind, implicit geometry mode, implicit backend name, fallback policy, requested
+order, and achieved order. The assembly-facing `CutCellAssemblyMetadata` mirrors
+the parent entity, side, active volume fraction, embedded normal, topology id,
+topology revision, quadrature policy key, and source value revision so stale
+generated rules can be rejected after a rebuild.
+
+Per-cell backend status and fallback reason are diagnostic metadata. They should
+use `ImplicitCutQuadratureDiagnosticStatus` names and backend diagnostic strings
+for logging/debug output, but they do not by themselves change sparsity unless
+they also change active rules, topology ids, or rule visibility.
+
 ### Design Checklist
 
-- [ ] Extend cut metadata with:
+- [x] Extend cut metadata with:
       - geometry mode,
       - backend name,
       - requested volume and interface orders,
