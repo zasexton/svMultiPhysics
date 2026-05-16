@@ -352,6 +352,26 @@ order 2.
   fragment counts so validation can identify cells that need the full algorithm.
 - Output policy: diagnostic VTP output is the leaf-segment visualization of the
   generated rule, not an exact curved-interface reconstruction.
+- Full Saye target order policy: when the root-polished Gaussian construction
+  replaces the current terminal linearized leaves, the base one-dimensional
+  Gaussian rule order is selected from the resolved volume or interface order
+  requested by the form. The minimum accepted request is the maximum of the
+  parent geometry order, level-set interpolation order, and form integrand
+  order; backend provenance records both the requested order and the lower
+  achieved order whenever the milestone implementation cannot meet it.
+- Root-polishing policy: use `implicit_cut_root_tolerance` as the absolute
+  signed-level-set residual tolerance in reference coordinates, pair it with a
+  relative coordinate tolerance of the same magnitude, and cap polishing at 50
+  iterations per root branch. Nonconvergence, nonfinite evaluations, ambiguous
+  multiple roots, near-tangent cuts with singular reference gradients, and
+  branches that leave the parent hyperrectangle are diagnostic failures unless
+  an explicit fallback policy is selected.
+- Adaptive failure policy: a cut cell may be accepted only when every generated
+  rule has finite points, finite weights, deterministic provenance, and a
+  nonnegative achieved-order diagnostic. Otherwise the backend records a
+  per-cell status (`Tangent`, `Degenerate`, `Fallback`, `Unsupported`, or
+  `Failed`) and either returns an explicit failure or a counted fallback,
+  depending on the configured policy.
 
 ### Design Checklist
 
@@ -359,10 +379,10 @@ order 2.
       the algorithm.
 - [x] Define how svMultiPhysics reference hexes map to the hyperrectangle used by
       the algorithm.
-- [ ] Decide Gaussian base order from requested FE/form order.
-- [ ] Define root-finding tolerance and maximum iterations.
+- [x] Decide Gaussian base order from requested FE/form order.
+- [x] Define root-finding tolerance and maximum iterations.
 - [x] Define recursive subdivision limits.
-- [ ] Define adaptive failure handling for multiple roots, near-tangent
+- [x] Define adaptive failure handling for multiple roots, near-tangent
       interfaces, and singular gradients.
 - [x] Define how to orient reference normals consistently with the existing
       negative/positive side convention.
