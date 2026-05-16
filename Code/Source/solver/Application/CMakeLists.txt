@@ -7,6 +7,7 @@ cmake_minimum_required(VERSION 3.12)
 add_library(svapplication STATIC
   Core/ActiveDomainOutput.cpp
   Core/ApplicationDriver.cpp
+  Core/LevelSetCutConfiguration.cpp
   Core/LevelSetMaintenanceHistory.cpp
   Core/MeshCollection.cpp
   Core/SimulationBuilder.cpp

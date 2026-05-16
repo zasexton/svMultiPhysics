@@ -150,10 +150,10 @@ is qualified.
 
 ### Tests
 
-- [ ] Parser test for every new option and synonym.
+- [x] Parser test for every new option and synonym.
 - [x] Input-validation test for unsupported cell/backend combinations.
-- [ ] Regression test proving the default remains `LinearCorner`.
-- [ ] Regression test proving a high-order request cannot silently use the
+- [x] Regression test proving the default remains `LinearCorner`.
+- [x] Regression test proving a high-order request cannot silently use the
       corner cutter unless the fallback policy explicitly permits it.
 
 ### Literature Support
@@ -976,7 +976,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Add high-order level-set evaluator.
 - [x] Move linear cutter behind the backend interface.
 - [x] Add metadata and diagnostics plumbing.
-- [ ] Keep production fixtures on the current linear path.
+- [x] Keep production fixtures on the current linear path.
 
 ### Phase 1: 2D Hyperrectangle Proof
 

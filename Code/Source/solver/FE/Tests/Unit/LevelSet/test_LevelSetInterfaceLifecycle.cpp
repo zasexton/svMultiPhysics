@@ -490,6 +490,31 @@ TEST(LevelSetInterfaceLifecycle, RejectsHighOrderImplicitModeUntilBackendExists)
     }
 }
 
+TEST(LevelSetInterfaceLifecycle, HighOrderImplicitDoesNotSilentlyUseLinearFallback)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::LinearCorner;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::LinearCorner;
+    options.allow_corner_linearized_geometry = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    try {
+        (void)lifecycle.build(system, options, std::span<const FE::Real>{});
+        FAIL() << "Expected high-order implicit geometry to reject linear fallback";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("high-order implicit"), std::string::npos);
+        EXPECT_NE(message.find("not implemented"), std::string::npos);
+    }
+}
+
 TEST(LevelSetInterfaceLifecycle, RejectsNonlinearBackendForLinearCornerMode)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
