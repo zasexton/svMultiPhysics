@@ -153,6 +153,15 @@ struct Rectangle2D {
     Real ymax{0.0};
 };
 
+struct SayeHyperrectangleDiagnostics {
+    int max_depth_reached{0};
+    int subdivision_count{0};
+    int full_negative_region_count{0};
+    int full_positive_region_count{0};
+    int linearized_leaf_count{0};
+    int interface_fragment_count{0};
+};
+
 [[nodiscard]] Real rectangleMeasure(const Rectangle2D& rect) noexcept
 {
     return std::max(Real{0.0}, rect.xmax - rect.xmin) *
@@ -228,8 +237,15 @@ void appendFullRectangleRegion(
     geometry::CutIntegrationSide side,
     Real parent_measure,
     Real min_signed_value,
-    Real max_signed_value)
+    Real max_signed_value,
+    SayeHyperrectangleDiagnostics& diagnostics)
 {
+    if (side == geometry::CutIntegrationSide::Negative) {
+        ++diagnostics.full_negative_region_count;
+    } else if (side == geometry::CutIntegrationSide::Positive) {
+        ++diagnostics.full_positive_region_count;
+    }
+
     const auto centroid = rectangleCentroid(rect);
     auto normal = interfaceNormalAt(input, centroid);
     if (side == geometry::CutIntegrationSide::Positive) {
@@ -266,8 +282,11 @@ void appendLinearizedRectangleCut(
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
     const Rectangle2D& rect,
-    Real parent_measure)
+    Real parent_measure,
+    SayeHyperrectangleDiagnostics& diagnostics)
 {
+    ++diagnostics.linearized_leaf_count;
+
     interfaces::LevelSetCellCutInput leaf;
     leaf.parent_cell = input.linearized_input.parent_cell;
     leaf.element_type = ElementType::Quad4;
@@ -286,6 +305,8 @@ void appendLinearizedRectangleCut(
     }
 
     auto leaf_cut = interfaces::cutLinearLevelSetCell2D(request, leaf);
+    diagnostics.interface_fragment_count +=
+        static_cast<int>(leaf_cut.fragments.size());
     for (auto& fragment : leaf_cut.fragments) {
         fragment.parent_cell = input.linearized_input.parent_cell;
         fragment.interface_marker = request.interface_marker;
@@ -311,8 +332,11 @@ void appendAdaptiveRectangleCut(
     const Rectangle2D& rect,
     Real parent_measure,
     int depth,
-    int max_depth)
+    int max_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
 {
+    diagnostics.max_depth_reached =
+        std::max(diagnostics.max_depth_reached, depth);
     const auto samples = rectangleSamplePoints(rect);
     bool has_negative = false;
     bool has_positive = false;
@@ -336,15 +360,18 @@ void appendAdaptiveRectangleCut(
                          : geometry::CutIntegrationSide::Positive,
             parent_measure,
             min_signed,
-            max_signed);
+            max_signed,
+            diagnostics);
         return;
     }
 
     if (depth >= max_depth) {
-        appendLinearizedRectangleCut(cut, request, input, rect, parent_measure);
+        appendLinearizedRectangleCut(
+            cut, request, input, rect, parent_measure, diagnostics);
         return;
     }
 
+    ++diagnostics.subdivision_count;
     const Real xm = Real{0.5} * (rect.xmin + rect.xmax);
     const Real ym = Real{0.5} * (rect.ymin + rect.ymax);
     const std::array<Rectangle2D, 4> children{{
@@ -355,8 +382,34 @@ void appendAdaptiveRectangleCut(
     }};
     for (const auto& child : children) {
         appendAdaptiveRectangleCut(
-            cut, request, input, child, parent_measure, depth + 1, max_depth);
+            cut,
+            request,
+            input,
+            child,
+            parent_measure,
+            depth + 1,
+            max_depth,
+            diagnostics);
     }
+}
+
+[[nodiscard]] std::string formatSayeHyperrectangleDiagnostics(
+    const SayeHyperrectangleDiagnostics& diagnostics,
+    int max_depth_limit)
+{
+    return "SayeHyperrectangle recursive 2D hyperrectangle quadrature"
+           "; max_depth_limit=" + std::to_string(max_depth_limit) +
+           "; max_depth_reached=" +
+           std::to_string(diagnostics.max_depth_reached) +
+           "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; linearized_leaves=" +
+           std::to_string(diagnostics.linearized_leaf_count) +
+           "; full_negative_regions=" +
+           std::to_string(diagnostics.full_negative_region_count) +
+           "; full_positive_regions=" +
+           std::to_string(diagnostics.full_positive_region_count) +
+           "; interface_fragments=" +
+           std::to_string(diagnostics.interface_fragment_count);
 }
 
 class SayeHyperrectangleImplicitCutBackend final
@@ -436,11 +489,19 @@ public:
         const Real parent_measure = rectangleMeasure(root);
         const int max_depth =
             std::max(0, std::min(request.implicit_cut_max_subdivision_depth, 8));
+        SayeHyperrectangleDiagnostics diagnostics;
         appendAdaptiveRectangleCut(
-            result.cut, request, input, root, parent_measure, 0, max_depth);
+            result.cut,
+            request,
+            input,
+            root,
+            parent_measure,
+            0,
+            max_depth,
+            diagnostics);
         result.cut.supported = true;
         result.cut.diagnostic =
-            "SayeHyperrectangle recursive 2D hyperrectangle quadrature";
+            formatSayeHyperrectangleDiagnostics(diagnostics, max_depth);
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
         return result;

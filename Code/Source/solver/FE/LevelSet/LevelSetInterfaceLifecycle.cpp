@@ -65,6 +65,7 @@ struct GeneratedInterfaceCellDiagnostics {
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
     bool fallback_used{false};
+    std::string backend_diagnostic{};
 };
 
 [[nodiscard]] std::size_t cornerCount(ElementType type)
@@ -275,7 +276,8 @@ struct GeneratedInterfaceCellDiagnostics {
             backend_result.achieved_interface_quadrature_order,
         .achieved_volume_quadrature_order =
             backend_result.achieved_volume_quadrature_order,
-        .fallback_used = backend_result.fallback_used};
+        .fallback_used = backend_result.fallback_used,
+        .backend_diagnostic = backend_result.cut.diagnostic};
 }
 
 } // namespace
@@ -413,6 +415,8 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     int achieved_volume_quadrature_order =
         backend.achievedVolumeQuadratureOrder(request);
     std::size_t implicit_cut_fallback_cell_count = 0u;
+    std::size_t backend_diagnostic_cell_count = 0u;
+    std::string first_backend_diagnostic;
     mesh.forEachCell([&](GlobalIndex cell_id) {
         const auto diagnostics =
             appendGeneratedInterfaceCell(
@@ -429,6 +433,12 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
                      diagnostics.achieved_volume_quadrature_order);
         if (diagnostics.fallback_used) {
             ++implicit_cut_fallback_cell_count;
+        }
+        if (!diagnostics.backend_diagnostic.empty()) {
+            ++backend_diagnostic_cell_count;
+            if (first_backend_diagnostic.empty()) {
+                first_backend_diagnostic = diagnostics.backend_diagnostic;
+            }
         }
         max_cell_node_count = std::max(max_cell_node_count, diagnostics.node_count);
         max_corner_node_count = std::max(max_corner_node_count, diagnostics.corner_count);
@@ -466,6 +476,13 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         result.summary.active_volume_region_count > 0u;
     if (!result.success) {
         result.diagnostic = "generated level-set interface has no active fragments or volume regions";
+    } else if (!first_backend_diagnostic.empty() &&
+               options.implicit_cut_quadrature_backend !=
+                   ImplicitCutQuadratureBackend::LinearCorner) {
+        result.diagnostic =
+            "generated level-set interface backend diagnostics: cells=" +
+            std::to_string(backend_diagnostic_cell_count) + "; first_cell=" +
+            first_backend_diagnostic;
     }
     return result;
 }

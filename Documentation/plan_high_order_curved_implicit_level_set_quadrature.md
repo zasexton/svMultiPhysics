@@ -342,6 +342,9 @@ quadrature as achieved order 1 and volume quadrature as achieved order 2.
 - [x] Implement 2D hyperrectangle volume and interface quadrature.
 - [x] Validate 2D on analytic curves before implementing 3D.
 - [ ] Implement 3D hyperrectangle volume and interface quadrature.
+- [x] Expose first-milestone per-cell diagnostics for recursion depth,
+      subdivision count, linearized leaves, full-region counts, and fragment
+      counts.
 - [ ] Expose detailed per-cell diagnostics for recursion depth, root-finder
       iterations, fallback usage, and achieved order.
 - [x] Preserve deterministic point ordering.
@@ -995,7 +998,8 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Implement initial Saye-style 2D quad backend.
 - [x] Add analytic area, length, and moment tests.
 - [x] Add fixed-geometry assembly tests.
-- [ ] Add diagnostics and output tests.
+- [x] Add diagnostics tests.
+- [ ] Add output tests.
 - [ ] Document limitations and fallback behavior.
 
 ### Phase 2: Simplex And Mixed Mesh Support
