@@ -1997,6 +1997,65 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2CircleSegmentApproximatesArea
     EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
 }
 
+TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleP2EdgeDofMovesCutVolume)
+{
+    constexpr int interface_marker = 188;
+    const auto mesh =
+        std::make_shared<SingleTriangleMeshAccess>(FE::ElementType::Triangle6);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTriangleSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 6u);
+    const auto offset = system.fieldDofOffset(phi);
+
+    const auto make_solution = [&](FE::Real edge_mid_value) {
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (std::size_t i = 0; i < 6u; ++i) {
+            const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+            solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+                x[0] - FE::Real{0.5};
+        }
+        solution[static_cast<std::size_t>(offset + cell_dofs[3])] = edge_mid_value;
+        return solution;
+    };
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+    options.implicit_cut_max_subdivision_depth = 5;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto linear_edge = lifecycle.build(system, options, make_solution(0.0));
+    const auto curved_edge = lifecycle.build(system, options, make_solution(-0.35));
+
+    ASSERT_TRUE(linear_edge.success) << linear_edge.diagnostic;
+    ASSERT_TRUE(curved_edge.success) << curved_edge.diagnostic;
+    EXPECT_EQ(linear_edge.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(curved_edge.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_GT(std::abs(curved_edge.summary.negative_volume_measure -
+                       linear_edge.summary.negative_volume_measure),
+              1.0e-3);
+}
+
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1PlaneMatchesLinearTetraMeasures)
 {
     constexpr int interface_marker = 89;
@@ -2121,6 +2180,64 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2SphereCapApproximatesVolumeAn
               "HighOrderSubcell");
     EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 2);
     EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
+}
+
+TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTetraP2EdgeDofMovesCutVolume)
+{
+    constexpr int interface_marker = 190;
+    const auto mesh = std::make_shared<SingleTetra10GeometryMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 10u);
+    const auto offset = system.fieldDofOffset(phi);
+
+    const auto make_solution = [&](FE::Real edge_mid_value) {
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (std::size_t i = 0; i < 10u; ++i) {
+            const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+            solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+                x[0] - FE::Real{0.5};
+        }
+        solution[static_cast<std::size_t>(offset + cell_dofs[4])] = edge_mid_value;
+        return solution;
+    };
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+    options.implicit_cut_max_subdivision_depth = 4;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto linear_edge = lifecycle.build(system, options, make_solution(0.0));
+    const auto curved_edge = lifecycle.build(system, options, make_solution(-0.35));
+
+    ASSERT_TRUE(linear_edge.success) << linear_edge.diagnostic;
+    ASSERT_TRUE(curved_edge.success) << curved_edge.diagnostic;
+    EXPECT_EQ(linear_edge.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(curved_edge.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_GT(std::abs(curved_edge.summary.negative_volume_measure -
+                       linear_edge.summary.negative_volume_measure),
+              1.0e-4);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLength)

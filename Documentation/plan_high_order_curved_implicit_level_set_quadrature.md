@@ -543,7 +543,7 @@ per-cell backend selection is implemented.
 
 - [x] Triangle circle-segment area tests.
 - [x] Tetra sphere-cap volume tests.
-- [ ] P2 level-set edge DOF changes the cut location in triangles and tets.
+- [x] P2 level-set edge DOF changes the cut location in triangles and tets.
 - [ ] Degenerate vertex/edge touch tests.
 - [ ] Mixed-element mesh test with deterministic rule ordering and diagnostics.
 
