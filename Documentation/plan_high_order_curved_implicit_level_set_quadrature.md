@@ -411,7 +411,7 @@ order 2.
       iterations, fallback usage, and achieved order.
 - [x] Preserve deterministic point ordering.
 - [x] Keep the backend independent from physics-specific free-surface concepts.
-- [ ] Add optional debug output that dumps one cell's implicit quadrature rule for
+- [x] Add optional debug output that dumps one cell's implicit quadrature rule for
       postmortem inspection.
 
 ### Tests

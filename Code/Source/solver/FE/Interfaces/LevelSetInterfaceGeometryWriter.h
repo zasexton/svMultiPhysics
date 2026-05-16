@@ -28,6 +28,15 @@ void writeLevelSetInterfaceGeometryVtp(const LevelSetInterfaceDomain& domain,
 [[nodiscard]] std::string levelSetInterfaceGeometryVtpString(
     const LevelSetInterfaceDomain& domain);
 
+void writeLevelSetInterfaceQuadratureDebugJson(
+    const LevelSetInterfaceDomain& domain,
+    MeshIndex parent_cell,
+    std::ostream& out);
+
+[[nodiscard]] std::string levelSetInterfaceQuadratureDebugJsonString(
+    const LevelSetInterfaceDomain& domain,
+    MeshIndex parent_cell);
+
 } // namespace interfaces
 } // namespace FE
 } // namespace svmp

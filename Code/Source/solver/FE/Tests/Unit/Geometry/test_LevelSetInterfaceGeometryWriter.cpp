@@ -151,3 +151,52 @@ TEST(LevelSetInterfaceGeometryWriter, WritesSphereCutDiagnosticOutput)
     EXPECT_NE(xml.find("NumberOfPolys=\"1\""), std::string::npos);
     EXPECT_TRUE(contains_common_diagnostic_arrays(xml));
 }
+
+TEST(LevelSetInterfaceGeometryWriter, DumpsSingleCellQuadratureDebugJson)
+{
+    auto request = writer_request();
+    request.implicit_geometry_mode = "high-order-level-set";
+    request.implicit_quadrature_backend = "saye-hyperrectangle";
+    request.implicit_fallback_policy = "linear-topology";
+    request.quadrature_policy_key = 77;
+    request.interface_quadrature_order = 1;
+    request.volume_quadrature_order = 1;
+
+    LevelSetInterfaceDomain domain(request);
+    const std::vector<std::array<Real, 3>> coordinates = {
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{0.0, 1.0, 0.0}}};
+
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 11,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = coordinates,
+                             .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 12,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = coordinates,
+                             .level_set_values = {-0.25, 0.75, 0.75, -0.25}});
+
+    const std::string json =
+        levelSetInterfaceQuadratureDebugJsonString(domain, /*parent_cell=*/11);
+
+    EXPECT_NE(json.find("\"parent_cell\": 11"), std::string::npos);
+    EXPECT_NE(json.find("\"implicit_geometry_mode\": \"high-order-level-set\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"implicit_quadrature_backend\": \"saye-hyperrectangle\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"implicit_fallback_policy\": \"linear-topology\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"interface_rules\": ["), std::string::npos);
+    EXPECT_NE(json.find("\"volume_rules\": ["), std::string::npos);
+    EXPECT_NE(json.find("\"quadrature_points\""), std::string::npos);
+    EXPECT_NE(json.find("\"parent_entity\": 11"), std::string::npos);
+    EXPECT_NE(json.find("\"side\": \"negative\""), std::string::npos);
+    EXPECT_NE(json.find("\"side\": \"positive\""), std::string::npos);
+    EXPECT_EQ(json.find("\"parent_entity\": 12"), std::string::npos);
+}
