@@ -525,7 +525,7 @@ benchmark runs.
       was dominated by a refresh jump, while no-cut and cut-stabilized
       velocity/pressure component sweeps now agree with the assembled tangent
       within about 2.6e-4 relative block error.
-- [ ] Investigate the cut-stabilized MMS GMRES true-residual failure now that
+- [x] Investigate the cut-stabilized MMS GMRES true-residual failure now that
       central residual/tangent diagnostics pass, including linear-operator
       conditioning, preconditioner scaling, and support-constrained block
       treatment before returning to D18/D38 qualification.
@@ -533,10 +533,13 @@ benchmark runs.
       for GMRES failure probes, reporting row, diagonal, nonfinite, block, and
       constrained-DOF summaries before the backend preconditioner modifies the
       matrix.
-- [ ] Use the prepared-matrix MMS evidence to choose the next GMRES
+- [x] Use the prepared-matrix MMS evidence to choose the next GMRES
       preconditioner/scaling fix: the cut-stabilized probe has no zero rows,
       missing diagonals, or nonfinite entries, but diagonal preconditioning sees
       many zero scalar diagonal entries and row sums up to about 1.0e12.
+- [ ] Rerun a bounded no-output D18 GMRES probe with automatic FSILS
+      row-column scaling before resuming any long benchmark run, and use the
+      compact diagnostics to identify remaining resource or assembly bottlenecks.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.

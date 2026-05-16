@@ -115,6 +115,36 @@ toFsilsBlockSchurPreconditioner(const std::string& value)
                            value + "'.");
 }
 
+bool hasUnfittedLevelSetFreeSurface(const EquationParameters& eq)
+{
+  if (!eq.type.defined() || lower_copy(eq.type.value()) != "fluid") {
+    return false;
+  }
+
+  auto implementation_matches = [](const BoundaryConditionParameters& bc,
+                                   const std::string& key) {
+    const auto it = bc.extra_string_params.find(key);
+    return it != bc.extra_string_params.end() &&
+           it->second.defined() &&
+           lower_copy(it->second.value()) == "unfittedlevelset";
+  };
+
+  for (const auto* bc : eq.boundary_conditions) {
+    if (bc == nullptr || !bc->type.defined()) {
+      continue;
+    }
+    if (lower_copy(bc->type.value()) != "free_surface") {
+      continue;
+    }
+    if (implementation_matches(*bc, "Implementation") ||
+        implementation_matches(*bc, "Free_surface_implementation") ||
+        implementation_matches(*bc, "FreeSurfaceImplementation")) {
+      return true;
+    }
+  }
+  return false;
+}
+
 svmp::FE::backends::FsilsBlockSchurMomentumApproximation
 toFsilsBlockSchurMomentumApproximation(const std::string& value)
 {
@@ -293,12 +323,25 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
 
   const bool is_oop_ustruct =
       eq->type.defined() && lower_copy(eq->type.value()) == "ustruct";
+  const bool is_fsils_gmres_family =
+      backend_kind == svmp::FE::backends::BackendKind::FSILS &&
+      (opts.method == svmp::FE::backends::SolverMethod::GMRES ||
+       opts.method == svmp::FE::backends::SolverMethod::PGMRES ||
+       opts.method == svmp::FE::backends::SolverMethod::FGMRES);
+  const bool has_diagonal_like_scaling =
+      opts.preconditioner == svmp::FE::backends::PreconditionerType::None ||
+      opts.preconditioner == svmp::FE::backends::PreconditionerType::Diagonal;
+  if (is_fsils_gmres_family &&
+      hasUnfittedLevelSetFreeSurface(*eq) &&
+      has_diagonal_like_scaling) {
+    opts.preconditioner = svmp::FE::backends::PreconditionerType::RowColumnScaling;
+    opts.fsils_use_rcs = true;
+  }
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
       is_oop_ustruct &&
       opts.method != svmp::FE::backends::SolverMethod::Direct &&
       opts.method != svmp::FE::backends::SolverMethod::BlockSchur &&
-      (opts.preconditioner == svmp::FE::backends::PreconditionerType::None ||
-       opts.preconditioner == svmp::FE::backends::PreconditionerType::Diagonal)) {
+      has_diagonal_like_scaling) {
     opts.preconditioner = svmp::FE::backends::PreconditionerType::RowColumnScaling;
     opts.fsils_use_rcs = true;
   }
