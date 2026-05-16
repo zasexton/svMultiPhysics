@@ -630,6 +630,16 @@ benchmark runs.
       stalls.
 - [x] Complete a D38 run to the configured comparison time without nonlinear
       stalls.
+- [x] Record the stopped D18 final-output GMRES attempt and short no-output
+      assembly-density probes: the run was still in the solve phase after about
+      42 minutes, the no-output configured-time evidence shows about 2.86
+      assembly timing records per accepted step and about 7.71 cut-context
+      rebuilds per accepted step, and a three-step line-search probe did not
+      reduce the number of expensive assembly traversals.
+- [x] Add smoke-script assembly-density metrics and threshold switches for
+      assembly timing records per accepted step, extra assembly timing records
+      beyond nonlinear iterations per accepted step, and cut-context rebuilds
+      per accepted step.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Compare D38 peak height, front position if applicable, pressure range,

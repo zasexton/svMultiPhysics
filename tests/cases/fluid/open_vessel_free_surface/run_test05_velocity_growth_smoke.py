@@ -1697,6 +1697,17 @@ def cut_context_solution_source_summary(diagnostics: dict[str, Any]) -> dict[str
     }
 
 
+def cut_context_rebuild_provenance_counts(diagnostics: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in diagnostics.get("cut_context_rebuilds", []):
+        if not isinstance(record, dict):
+            continue
+        provenance = record.get("provenance")
+        key = str(provenance) if provenance else "missing"
+        increment_count(counts, key)
+    return counts
+
+
 def cut_context_solution_source_errors(diagnostics: dict[str, Any]) -> list[str]:
     records = diagnostics.get("cut_context_rebuilds", [])
     if not records:
@@ -1750,6 +1761,34 @@ def cut_context_solution_source_errors(diagnostics: dict[str, Any]) -> list[str]
             "vector cut-context refreshes did not all use fe_vector "
             f"({examples})"
         )
+    return errors
+
+
+def assembly_efficiency_errors(metrics: dict[str, Any],
+                               args: argparse.Namespace) -> list[str]:
+    checks = (
+        ("max_diagnostic_assembly_timings_per_step",
+         "diagnostic_assembly_timings_per_accepted_step",
+         "assembly timing records per accepted step"),
+        ("max_diagnostic_extra_assembly_timings_per_step",
+         "diagnostic_extra_assembly_timings_per_accepted_step",
+         "extra assembly timing records per accepted step"),
+        ("max_diagnostic_cut_context_rebuilds_per_step",
+         "diagnostic_cut_context_rebuilds_per_accepted_step",
+         "cut-context rebuilds per accepted step"),
+    )
+    errors = []
+    for arg_name, metric_name, label in checks:
+        threshold = getattr(args, arg_name)
+        if threshold is None:
+            continue
+        value = metrics.get(metric_name)
+        if not isinstance(value, (int, float)):
+            errors.append(f"{label} diagnostic is unavailable")
+        elif float(value) > float(threshold):
+            errors.append(
+                f"{label} {float(value):.6g} exceeds {float(threshold):.6g}"
+            )
     return errors
 
 
@@ -1913,6 +1952,25 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
     solution_source_summary = cut_context_solution_source_summary(diagnostics)
     if solution_source_summary:
         metrics["diagnostic_cut_context_solution_sources"] = solution_source_summary
+    rebuild_provenance_counts = cut_context_rebuild_provenance_counts(diagnostics)
+    if rebuild_provenance_counts:
+        rebuild_count = sum(rebuild_provenance_counts.values())
+        metrics["diagnostic_cut_context_rebuild_count"] = rebuild_count
+        metrics["diagnostic_cut_context_rebuild_provenance_counts"] = (
+            top_counts(rebuild_provenance_counts)
+        )
+        nonlinear_refresh_count = sum(
+            count for provenance, count in rebuild_provenance_counts.items()
+            if provenance in STATE_SYNC_CUT_CONTEXT_PROVENANCES
+        )
+        vector_refresh_count = sum(
+            count for provenance, count in rebuild_provenance_counts.items()
+            if provenance in VECTOR_CUT_CONTEXT_PROVENANCES
+        )
+        metrics["diagnostic_cut_context_nonlinear_refresh_count"] = (
+            nonlinear_refresh_count
+        )
+        metrics["diagnostic_cut_context_vector_refresh_count"] = vector_refresh_count
     if diagnostics.get("fsils_true_residuals"):
         latest_true_residual = diagnostics["fsils_true_residuals"][-1]
         metrics["latest_fsils_true_residual"] = latest_true_residual
@@ -2123,6 +2181,7 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         )
     if diagnostics.get("assembly_timings"):
         timings = diagnostics["assembly_timings"]
+        metrics["diagnostic_assembly_timing_count"] = len(timings)
         metrics["latest_assembly_timing"] = timings[-1]
         for name in (
             "total",
@@ -2141,6 +2200,30 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             ]
             if values:
                 metrics[f"diagnostic_assembly_timing_max_{name}_seconds"] = max(values)
+    summary = diagnostics.get("time_loop", {}).get("summary", {})
+    if isinstance(summary, dict):
+        accepted_steps = summary.get("accepted_steps")
+        nonlinear_iterations = summary.get("nonlinear_iterations_total")
+        assembly_count = metrics.get("diagnostic_assembly_timing_count")
+        cut_rebuild_count = metrics.get("diagnostic_cut_context_rebuild_count")
+        if isinstance(accepted_steps, (int, float)) and accepted_steps > 0:
+            if isinstance(assembly_count, (int, float)):
+                metrics["diagnostic_assembly_timings_per_accepted_step"] = (
+                    float(assembly_count) / float(accepted_steps)
+                )
+            if isinstance(cut_rebuild_count, (int, float)):
+                metrics["diagnostic_cut_context_rebuilds_per_accepted_step"] = (
+                    float(cut_rebuild_count) / float(accepted_steps)
+                )
+            if (isinstance(assembly_count, (int, float)) and
+                    isinstance(nonlinear_iterations, (int, float))):
+                extra_assemblies = int(assembly_count) - int(nonlinear_iterations)
+                metrics["diagnostic_extra_assembly_timing_count_vs_nonlinear_iterations"] = (
+                    extra_assemblies
+                )
+                metrics["diagnostic_extra_assembly_timings_per_accepted_step"] = (
+                    float(extra_assemblies) / float(accepted_steps)
+                )
     process_memory_records = list(diagnostics.get("process_memory", []))
     if process_memory_records:
         metrics["latest_process_memory"] = process_memory_records[-1]
@@ -2370,6 +2453,9 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "jacobian_check_component_sweeps",
         "linear_solve_history_max_calls",
         "linear_solve_component_norms_max_newton_it",
+        "max_diagnostic_assembly_timings_per_step",
+        "max_diagnostic_extra_assembly_timings_per_step",
+        "max_diagnostic_cut_context_rebuilds_per_step",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -2472,6 +2558,7 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.extend(cut_context_solution_source_errors(diagnostics))
     if args.require_assembly_timing_diagnostics and not diagnostics.get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
+    errors.extend(assembly_efficiency_errors(metrics, args))
     if args.require_process_memory_diagnostics:
         has_process_memory = (
             diagnostics.get("process_memory") or
@@ -2822,6 +2909,7 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     if args.require_assembly_timing_diagnostics and not metrics["diagnostics"].get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
+    errors.extend(assembly_efficiency_errors(metrics, args))
     if args.require_process_memory_diagnostics:
         diagnostics = metrics["diagnostics"]
         has_process_memory = (
@@ -3204,6 +3292,9 @@ def main() -> int:
     parser.add_argument("--require-form-block-diagnostics", action="store_true")
     parser.add_argument("--require-cut-context-solution-source-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-timing-diagnostics", action="store_true")
+    parser.add_argument("--max-diagnostic-assembly-timings-per-step", type=float)
+    parser.add_argument("--max-diagnostic-extra-assembly-timings-per-step", type=float)
+    parser.add_argument("--max-diagnostic-cut-context-rebuilds-per-step", type=float)
     parser.add_argument("--max-newton-direction-relative-error", type=float)
     parser.add_argument("--max-jacobian-check-relative-error", type=float)
     parser.add_argument("--max-jacobian-component-block-relative-error", type=float)
