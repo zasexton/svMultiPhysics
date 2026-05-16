@@ -1126,7 +1126,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Add sphere volume and surface tests.
 - [x] Add ellipsoid volume and surface tests.
 - [x] Add curved physical geometry mapping tests.
-- [ ] Add MPI determinism tests.
+- [x] Add MPI determinism tests.
 
 ### Phase 4: Stabilization And Pressure Support
 
