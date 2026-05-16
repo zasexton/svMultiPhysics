@@ -966,6 +966,56 @@ FE::Real ellipsePerimeterReference(FE::Real semi_major, FE::Real semi_minor)
     return h * sum / 3.0;
 }
 
+level_set::LevelSetGeneratedInterfaceResult buildSingleQuadCircleCut(
+    FE::ElementType element_type,
+    int level_set_order,
+    int subdivision_depth,
+    int interface_order,
+    int volume_order,
+    int interface_marker)
+{
+    constexpr FE::Real radius = 0.5;
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(element_type);
+    auto scalar_space = FE::spaces::Space(FE::spaces::SpaceType::H1,
+                                          mesh,
+                                          level_set_order,
+                                          /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.setup({}, makeSingleQuadSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x[0] * x[0] + x[1] * x[1] - radius * radius;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = subdivision_depth;
+    options.interface_quadrature_order = interface_order;
+    options.volume_quadrature_order = volume_order;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    return lifecycle.build(system, options, solution);
+}
+
 class CutMeasureAssemblyKernel final : public FE::assembly::AssemblyKernel {
 public:
     [[nodiscard]] FE::assembly::RequiredData getRequiredData() const override
@@ -2498,6 +2548,76 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipseIntegratesAreaAndArc
     ASSERT_FALSE(volume_rules.empty());
     EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 2);
     EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleCircleErrorsDecreaseUnderHAndPRefinement)
+{
+    constexpr FE::Real radius = 0.5;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const FE::Real expected_area = pi * radius * radius;
+    const FE::Real expected_length = 2.0 * pi * radius;
+
+    const auto coarse_h = buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                                  /*level_set_order=*/2,
+                                                  /*subdivision_depth=*/3,
+                                                  /*interface_order=*/1,
+                                                  /*volume_order=*/2,
+                                                  /*interface_marker=*/1881);
+    const auto fine_h = buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                                /*level_set_order=*/2,
+                                                /*subdivision_depth=*/6,
+                                                /*interface_order=*/1,
+                                                /*volume_order=*/2,
+                                                /*interface_marker=*/1882);
+    ASSERT_TRUE(coarse_h.success) << coarse_h.diagnostic;
+    ASSERT_TRUE(fine_h.success) << fine_h.diagnostic;
+
+    const FE::Real coarse_h_area_error =
+        std::abs(coarse_h.summary.negative_volume_measure - expected_area);
+    const FE::Real fine_h_area_error =
+        std::abs(fine_h.summary.negative_volume_measure - expected_area);
+    const FE::Real coarse_h_length_error =
+        std::abs(coarse_h.summary.measure - expected_length);
+    const FE::Real fine_h_length_error =
+        std::abs(fine_h.summary.measure - expected_length);
+
+    EXPECT_LT(fine_h_area_error, coarse_h_area_error);
+    EXPECT_LT(fine_h_length_error, coarse_h_length_error);
+    EXPECT_EQ(fine_h.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(fine_h.achieved_volume_quadrature_order, 2);
+    EXPECT_GT(fine_h.summary.active_fragment_count,
+              coarse_h.summary.active_fragment_count);
+
+    const auto coarse_p = buildSingleQuadCircleCut(FE::ElementType::Quad4,
+                                                  /*level_set_order=*/1,
+                                                  /*subdivision_depth=*/6,
+                                                  /*interface_order=*/1,
+                                                  /*volume_order=*/1,
+                                                  /*interface_marker=*/1883);
+    const auto fine_p = buildSingleQuadCircleCut(FE::ElementType::Quad9,
+                                                /*level_set_order=*/2,
+                                                /*subdivision_depth=*/6,
+                                                /*interface_order=*/1,
+                                                /*volume_order=*/2,
+                                                /*interface_marker=*/1884);
+    ASSERT_TRUE(coarse_p.success) << coarse_p.diagnostic;
+    ASSERT_TRUE(fine_p.success) << fine_p.diagnostic;
+
+    const FE::Real coarse_p_area_error =
+        std::abs(coarse_p.summary.negative_volume_measure - expected_area);
+    const FE::Real fine_p_area_error =
+        std::abs(fine_p.summary.negative_volume_measure - expected_area);
+    const FE::Real coarse_p_length_error =
+        std::abs(coarse_p.summary.measure - expected_length);
+    const FE::Real fine_p_length_error =
+        std::abs(fine_p.summary.measure - expected_length);
+
+    EXPECT_LT(fine_p_area_error, 0.25 * coarse_p_area_error);
+    EXPECT_LT(fine_p_length_error, 0.25 * coarse_p_length_error);
+    EXPECT_EQ(coarse_p.summary.active_fragment_count, 0u);
+    EXPECT_GT(fine_p.summary.active_fragment_count, 0u);
+    EXPECT_EQ(fine_p.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(fine_p.achieved_volume_quadrature_order, 2);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAndArea)
