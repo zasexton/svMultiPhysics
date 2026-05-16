@@ -947,6 +947,25 @@ FE::Real expectedCurvedHexMidplaneArea()
     return area;
 }
 
+FE::Real ellipsePerimeterReference(FE::Real semi_major, FE::Real semi_minor)
+{
+    constexpr int intervals = 4096;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const FE::Real h = 2.0 * pi / static_cast<FE::Real>(intervals);
+    const auto density = [semi_major, semi_minor](FE::Real theta) {
+        const FE::Real s = std::sin(theta);
+        const FE::Real c = std::cos(theta);
+        return std::sqrt(semi_major * semi_major * s * s +
+                         semi_minor * semi_minor * c * c);
+    };
+
+    FE::Real sum = density(0.0) + density(2.0 * pi);
+    for (int i = 1; i < intervals; ++i) {
+        sum += (i % 2 == 0 ? 2.0 : 4.0) * density(h * static_cast<FE::Real>(i));
+    }
+    return h * sum / 3.0;
+}
+
 class CutMeasureAssemblyKernel final : public FE::assembly::AssemblyKernel {
 public:
     [[nodiscard]] FE::assembly::RequiredData getRequiredData() const override
@@ -2390,6 +2409,95 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
               std::string::npos);
     EXPECT_NE(vtp.find("Name=\"negative_volume_fraction\""), std::string::npos);
     EXPECT_NE(vtp.find("Name=\"interface_marker\""), std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipseIntegratesAreaAndArcLength)
+{
+    constexpr int interface_marker = 87;
+    constexpr FE::Real semi_major = 0.65;
+    constexpr FE::Real semi_minor = 0.35;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 9u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 9u; ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x[0] * x[0] / (semi_major * semi_major) +
+            x[1] * x[1] / (semi_minor * semi_minor) - 1.0;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = 7;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+    EXPECT_NE(result.diagnostic.find("SayeHyperrectangle"), std::string::npos);
+    EXPECT_GT(result.summary.active_fragment_count, 1u);
+
+    const FE::Real expected_area = pi * semi_major * semi_minor;
+    const FE::Real expected_length =
+        ellipsePerimeterReference(semi_major, semi_minor);
+    EXPECT_NEAR(result.summary.negative_volume_measure, expected_area, 2.0e-2);
+    EXPECT_NEAR(result.summary.positive_volume_measure,
+                4.0 - expected_area,
+                2.0e-2);
+    EXPECT_NEAR(result.summary.measure, expected_length, 8.0e-2);
+
+    const auto x2_moment = [](const std::array<FE::Real, 3>& x) {
+        return x[0] * x[0];
+    };
+    const auto y2_moment = [](const std::array<FE::Real, 3>& x) {
+        return x[1] * x[1];
+    };
+    EXPECT_NEAR(integrateVolumeMoment(result.domain,
+                                      FE::geometry::CutIntegrationSide::Negative,
+                                      x2_moment),
+                pi * semi_major * semi_major * semi_major * semi_minor / 4.0,
+                1.5e-2);
+    EXPECT_NEAR(integrateVolumeMoment(result.domain,
+                                      FE::geometry::CutIntegrationSide::Negative,
+                                      y2_moment),
+                pi * semi_major * semi_minor * semi_minor * semi_minor / 4.0,
+                1.5e-2);
+
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 1);
+    EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 1);
+
+    const auto volume_rules = result.domain.volumeQuadratureRules();
+    ASSERT_FALSE(volume_rules.empty());
+    EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAndArea)

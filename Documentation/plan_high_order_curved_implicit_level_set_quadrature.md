@@ -418,7 +418,7 @@ order 2.
 
 - [x] 2D line cut through a quad reproduces linear backend measures.
 - [x] Initial 2D circle cut checks area and arc length against analytic values.
-- [ ] 2D circle/ellipse cuts integrate area and arc length to requested order.
+- [x] 2D circle/ellipse cuts integrate area and arc length to requested order.
 - [ ] 2D curved interface tests demonstrate convergence under h-refinement and
       p-refinement.
 - [x] 3D plane cut through a hex reproduces known volume and area.
