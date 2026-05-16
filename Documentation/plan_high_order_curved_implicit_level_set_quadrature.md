@@ -464,6 +464,15 @@ linear leaf diagnostics and be counted in backend diagnostics. Mixed tetrahedron
 and hexahedron meshes should continue to fail unsupported high-order cells until
 per-cell backend selection and mixed-mesh diagnostics are implemented.
 
+Milestone status: the first 3D `HighOrderSubcell` tetrahedron backend is
+implemented for Tetra4 and Tetra10 cells. Tetra4 delegates through the existing
+linear tetrahedron cutter. Tetra10+ fields use deterministic recursive
+reference-tetrahedron midpoint refinement with positive-weight full-subcell
+rules and linear terminal cut leaves. The current backend reports achieved
+interface order 1 and achieved volume order 2; high-order surface rules,
+root-polished curved leaves, and mixed hex/tet backend selection remain future
+work.
+
 ### Design Checklist
 
 - [x] Decide first simplex milestone:
@@ -484,7 +493,7 @@ per-cell backend selection and mixed-mesh diagnostics are implemented.
 
 - [x] Add backend capability reporting by element type.
 - [x] Add triangle curved-interface tests before tetrahedron work.
-- [ ] Add tetrahedron curved-interface tests before solver integration.
+- [x] Add tetrahedron curved-interface tests before solver integration.
 - [x] Ensure simplex rule provenance matches hyperrectangle rule provenance.
 - [ ] Ensure mixed quads/triangles or hexes/tets can report per-cell backend
       choices.
@@ -492,7 +501,7 @@ per-cell backend selection and mixed-mesh diagnostics are implemented.
 ### Tests
 
 - [x] Triangle circle-segment area tests.
-- [ ] Tetra sphere-cap volume tests.
+- [x] Tetra sphere-cap volume tests.
 - [ ] P2 level-set edge DOF changes the cut location in triangles and tets.
 - [ ] Degenerate vertex/edge touch tests.
 - [ ] Mixed-element mesh test with deterministic rule ordering and diagnostics.
@@ -1087,7 +1096,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 - [x] Select triangle strategy.
 - [x] Implement triangle support.
 - [x] Select tetrahedron strategy.
-- [ ] Implement tetrahedron support.
+- [x] Implement tetrahedron support.
 - [ ] Add mixed-element diagnostics.
 
 ### Phase 3: 3D Hyperrectangle Support

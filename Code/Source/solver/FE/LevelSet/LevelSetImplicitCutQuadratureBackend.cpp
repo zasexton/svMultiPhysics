@@ -70,7 +70,7 @@ classifyCutStatus(const interfaces::LevelSetCellCutResult& cut,
     int mesh_dimension,
     ElementType element_type) noexcept;
 
-[[nodiscard]] bool supportsHighOrderSubcellTriangleMilestone(
+[[nodiscard]] bool supportsHighOrderSubcellMilestone(
     int mesh_dimension,
     ElementType element_type) noexcept;
 
@@ -163,6 +163,13 @@ struct Triangle2D {
     std::array<Real, 3> c{{0.0, 0.0, 0.0}};
 };
 
+struct Tetrahedron3D {
+    std::array<Real, 3> a{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> b{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> c{{0.0, 0.0, 0.0}};
+    std::array<Real, 3> d{{0.0, 0.0, 0.0}};
+};
+
 struct SayeHyperrectangleDiagnostics {
     int max_depth_reached{0};
     int subdivision_count{0};
@@ -187,6 +194,36 @@ struct SayeHyperrectangleDiagnostics {
     return Real{0.5} * std::abs(x0 * y1 - y0 * x1);
 }
 
+[[nodiscard]] std::array<Real, 3> subtract(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b) noexcept
+{
+    return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+}
+
+[[nodiscard]] std::array<Real, 3> cross(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b) noexcept
+{
+    return {{a[1] * b[2] - a[2] * b[1],
+             a[2] * b[0] - a[0] * b[2],
+             a[0] * b[1] - a[1] * b[0]}};
+}
+
+[[nodiscard]] Real dot(const std::array<Real, 3>& a,
+                       const std::array<Real, 3>& b) noexcept
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+[[nodiscard]] Real tetrahedronMeasure(const Tetrahedron3D& tet) noexcept
+{
+    return std::abs(dot(subtract(tet.b, tet.a),
+                        cross(subtract(tet.c, tet.a),
+                              subtract(tet.d, tet.a)))) /
+           Real{6.0};
+}
+
 [[nodiscard]] std::array<Real, 3> rectangleCentroid(
     const Rectangle2D& rect) noexcept
 {
@@ -201,6 +238,14 @@ struct SayeHyperrectangleDiagnostics {
     return {{(tri.a[0] + tri.b[0] + tri.c[0]) / Real{3.0},
              (tri.a[1] + tri.b[1] + tri.c[1]) / Real{3.0},
              (tri.a[2] + tri.b[2] + tri.c[2]) / Real{3.0}}};
+}
+
+[[nodiscard]] std::array<Real, 3> tetrahedronCentroid(
+    const Tetrahedron3D& tet) noexcept
+{
+    return {{(tet.a[0] + tet.b[0] + tet.c[0] + tet.d[0]) / Real{4.0},
+             (tet.a[1] + tet.b[1] + tet.c[1] + tet.d[1]) / Real{4.0},
+             (tet.a[2] + tet.b[2] + tet.c[2] + tet.d[2]) / Real{4.0}}};
 }
 
 [[nodiscard]] std::array<Real, 3> midpoint(
@@ -276,6 +321,38 @@ struct SayeHyperrectangleDiagnostics {
         midpoint(tri.b, tri.c),
         midpoint(tri.c, tri.a),
         triangleCentroid(tri),
+    };
+}
+
+[[nodiscard]] std::array<Real, 3> faceCentroid(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    const std::array<Real, 3>& c) noexcept
+{
+    return {{(a[0] + b[0] + c[0]) / Real{3.0},
+             (a[1] + b[1] + c[1]) / Real{3.0},
+             (a[2] + b[2] + c[2]) / Real{3.0}}};
+}
+
+[[nodiscard]] std::vector<std::array<Real, 3>> tetrahedronSamplePoints(
+    const Tetrahedron3D& tet)
+{
+    return {
+        tet.a,
+        tet.b,
+        tet.c,
+        tet.d,
+        midpoint(tet.a, tet.b),
+        midpoint(tet.a, tet.c),
+        midpoint(tet.a, tet.d),
+        midpoint(tet.b, tet.c),
+        midpoint(tet.b, tet.d),
+        midpoint(tet.c, tet.d),
+        faceCentroid(tet.a, tet.b, tet.c),
+        faceCentroid(tet.a, tet.b, tet.d),
+        faceCentroid(tet.a, tet.c, tet.d),
+        faceCentroid(tet.b, tet.c, tet.d),
+        tetrahedronCentroid(tet),
     };
 }
 
@@ -375,6 +452,54 @@ void appendFullTriangleRegion(
     }
 }
 
+void appendFullTetrahedronRegion(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    geometry::CutIntegrationSide side,
+    Real parent_measure,
+    Real min_signed_value,
+    Real max_signed_value,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    if (side == geometry::CutIntegrationSide::Negative) {
+        ++diagnostics.full_negative_region_count;
+    } else if (side == geometry::CutIntegrationSide::Positive) {
+        ++diagnostics.full_positive_region_count;
+    }
+
+    const auto centroid = tetrahedronCentroid(tet);
+    auto normal = interfaceNormalAt(input, centroid);
+    if (side == geometry::CutIntegrationSide::Positive) {
+        normal = {{-normal[0], -normal[1], -normal[2]}};
+    }
+
+    interfaces::CutInterfaceVolumeRegion region;
+    region.interface_marker = request.interface_marker;
+    region.parent_cell = input.linearized_input.parent_cell;
+    region.side = side;
+    region.centroid = centroid;
+    region.normal = normal;
+    region.parent_measure = parent_measure;
+    region.measure = tetrahedronMeasure(tet);
+    region.volume_fraction =
+        parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+    region.min_level_set_value = min_signed_value;
+    region.max_level_set_value = max_signed_value;
+    region.full_cell_equivalent = std::abs(region.measure - parent_measure) <=
+                                  std::max(request.tolerance,
+                                           request.tolerance * parent_measure);
+    if (region.measure > Real{0.0}) {
+        geometry::CutQuadraturePoint qp;
+        qp.point = region.centroid;
+        qp.normal = region.normal;
+        qp.weight = region.measure;
+        region.quadrature_points.push_back(qp);
+        cut.volume_regions.push_back(std::move(region));
+    }
+}
+
 void appendLinearizedRectangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -446,6 +571,50 @@ void appendLinearizedTriangleCut(
     }
 
     auto leaf_cut = interfaces::cutLinearLevelSetCell2D(request, leaf);
+    diagnostics.interface_fragment_count +=
+        static_cast<int>(leaf_cut.fragments.size());
+    for (auto& fragment : leaf_cut.fragments) {
+        fragment.parent_cell = input.linearized_input.parent_cell;
+        fragment.interface_marker = request.interface_marker;
+        cut.fragments.push_back(std::move(fragment));
+    }
+    for (auto& region : leaf_cut.volume_regions) {
+        region.parent_cell = input.linearized_input.parent_cell;
+        region.interface_marker = request.interface_marker;
+        region.parent_measure = parent_measure;
+        region.volume_fraction =
+            parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
+        cut.volume_regions.push_back(std::move(region));
+    }
+    if (leaf_cut.hasActiveFragments() &&
+        cut.degeneracy == interfaces::CutInterfaceDegeneracy::None) {
+        cut.degeneracy = leaf_cut.degeneracy;
+    }
+}
+
+void appendLinearizedTetrahedronCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    Real parent_measure,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    ++diagnostics.linearized_leaf_count;
+
+    interfaces::LevelSetCellCutInput leaf;
+    leaf.parent_cell = input.linearized_input.parent_cell;
+    leaf.element_type = ElementType::Tetra4;
+    leaf.node_coordinates = {tet.a, tet.b, tet.c, tet.d};
+    leaf.level_set_values.reserve(leaf.node_coordinates.size());
+    for (const auto& point : leaf.node_coordinates) {
+        leaf.level_set_values.push_back(
+            input.evaluator
+                ->evaluate(input.linearized_input.parent_cell, point)
+                .value);
+    }
+
+    auto leaf_cut = interfaces::cutLinearLevelSetCell3D(request, leaf);
     diagnostics.interface_fragment_count +=
         static_cast<int>(leaf_cut.fragments.size());
     for (auto& fragment : leaf_cut.fragments) {
@@ -604,6 +773,82 @@ void appendAdaptiveTriangleCut(
     }
 }
 
+void appendAdaptiveTetrahedronCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Tetrahedron3D& tet,
+    Real parent_measure,
+    int depth,
+    int max_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    diagnostics.max_depth_reached =
+        std::max(diagnostics.max_depth_reached, depth);
+    const auto samples = tetrahedronSamplePoints(tet);
+    bool has_negative = false;
+    bool has_positive = false;
+    Real min_signed = std::numeric_limits<Real>::infinity();
+    Real max_signed = -std::numeric_limits<Real>::infinity();
+    for (const auto& point : samples) {
+        const Real value = signedLevelSetValue(input, point);
+        min_signed = std::min(min_signed, value);
+        max_signed = std::max(max_signed, value);
+        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
+        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
+    }
+
+    if (!has_negative || !has_positive) {
+        appendFullTetrahedronRegion(
+            cut,
+            request,
+            input,
+            tet,
+            has_negative ? geometry::CutIntegrationSide::Negative
+                         : geometry::CutIntegrationSide::Positive,
+            parent_measure,
+            min_signed,
+            max_signed,
+            diagnostics);
+        return;
+    }
+
+    if (depth >= max_depth) {
+        appendLinearizedTetrahedronCut(
+            cut, request, input, tet, parent_measure, diagnostics);
+        return;
+    }
+
+    ++diagnostics.subdivision_count;
+    const auto ab = midpoint(tet.a, tet.b);
+    const auto ac = midpoint(tet.a, tet.c);
+    const auto ad = midpoint(tet.a, tet.d);
+    const auto bc = midpoint(tet.b, tet.c);
+    const auto bd = midpoint(tet.b, tet.d);
+    const auto cd = midpoint(tet.c, tet.d);
+    const std::array<Tetrahedron3D, 8> children{{
+        Tetrahedron3D{tet.a, ab, ac, ad},
+        Tetrahedron3D{ab, tet.b, bc, bd},
+        Tetrahedron3D{ac, bc, tet.c, cd},
+        Tetrahedron3D{ad, bd, cd, tet.d},
+        Tetrahedron3D{ab, ac, ad, cd},
+        Tetrahedron3D{ab, ac, bc, cd},
+        Tetrahedron3D{ab, ad, bd, cd},
+        Tetrahedron3D{ab, bc, bd, cd},
+    }};
+    for (const auto& child : children) {
+        appendAdaptiveTetrahedronCut(
+            cut,
+            request,
+            input,
+            child,
+            parent_measure,
+            depth + 1,
+            max_depth,
+            diagnostics);
+    }
+}
+
 [[nodiscard]] std::string formatSayeHyperrectangleDiagnostics(
     const SayeHyperrectangleDiagnostics& diagnostics,
     int max_depth_limit)
@@ -628,6 +873,25 @@ void appendAdaptiveTriangleCut(
     int max_depth_limit)
 {
     return "HighOrderSubcell recursive 2D triangle quadrature"
+           "; max_depth_limit=" + std::to_string(max_depth_limit) +
+           "; max_depth_reached=" +
+           std::to_string(diagnostics.max_depth_reached) +
+           "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; linearized_leaves=" +
+           std::to_string(diagnostics.linearized_leaf_count) +
+           "; full_negative_regions=" +
+           std::to_string(diagnostics.full_negative_region_count) +
+           "; full_positive_regions=" +
+           std::to_string(diagnostics.full_positive_region_count) +
+           "; interface_fragments=" +
+           std::to_string(diagnostics.interface_fragment_count);
+}
+
+[[nodiscard]] std::string formatHighOrderSubcellTetrahedronDiagnostics(
+    const SayeHyperrectangleDiagnostics& diagnostics,
+    int max_depth_limit)
+{
+    return "HighOrderSubcell recursive 3D tetrahedron quadrature"
            "; max_depth_limit=" + std::to_string(max_depth_limit) +
            "; max_depth_reached=" +
            std::to_string(diagnostics.max_depth_reached) +
@@ -752,7 +1016,7 @@ public:
     [[nodiscard]] bool supports(int mesh_dimension,
                                 ElementType element_type) const noexcept override
     {
-        return supportsHighOrderSubcellTriangleMilestone(mesh_dimension, element_type);
+        return supportsHighOrderSubcellMilestone(mesh_dimension, element_type);
     }
 
     [[nodiscard]] int achievedInterfaceQuadratureOrder(
@@ -783,7 +1047,7 @@ public:
             result.cut.supported = false;
             result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
             result.cut.diagnostic =
-                "HighOrderSubcell implicit cut quadrature backend supports only triangular cells in two dimensions";
+                "HighOrderSubcell implicit cut quadrature backend supports only triangular cells in two dimensions and tetrahedron cells in three dimensions";
             result.diagnostic_status =
                 ImplicitCutQuadratureDiagnosticStatus::Unsupported;
             return result;
@@ -799,43 +1063,68 @@ public:
         }
         if (input.evaluator->interpolationOrder(
                 input.linearized_input.parent_cell) <= 1) {
-            result.cut =
-                interfaces::cutLinearLevelSetCell2D(
-                    request, input.linearized_input);
+            if (mesh_dimension == 2) {
+                result.cut =
+                    interfaces::cutLinearLevelSetCell2D(
+                        request, input.linearized_input);
+            } else {
+                result.cut =
+                    interfaces::cutLinearLevelSetCell3D(
+                        request, input.linearized_input);
+            }
             result.diagnostic_status =
                 classifyCutStatus(result.cut, result.fallback_used);
             return result;
         }
-        if (input.linearized_input.node_coordinates.size() < 3u) {
+        const std::size_t required_node_count = mesh_dimension == 2 ? 3u : 4u;
+        if (input.linearized_input.node_coordinates.size() < required_node_count) {
             result.cut.supported = false;
             result.cut.degeneracy = interfaces::CutInterfaceDegeneracy::NoCut;
             result.cut.diagnostic =
-                "HighOrderSubcell implicit cut quadrature backend requires triangle corner coordinates";
+                "HighOrderSubcell implicit cut quadrature backend requires simplex corner coordinates";
             result.diagnostic_status =
                 ImplicitCutQuadratureDiagnosticStatus::Failed;
             return result;
         }
 
-        const Triangle2D root{
-            input.linearized_input.node_coordinates[0],
-            input.linearized_input.node_coordinates[1],
-            input.linearized_input.node_coordinates[2]};
-        const Real parent_measure = triangleMeasure(root);
         const int max_depth =
             std::max(0, std::min(request.implicit_cut_max_subdivision_depth, 8));
         SayeHyperrectangleDiagnostics diagnostics;
-        appendAdaptiveTriangleCut(
-            result.cut,
-            request,
-            input,
-            root,
-            parent_measure,
-            0,
-            max_depth,
-            diagnostics);
+        if (mesh_dimension == 2) {
+            const Triangle2D root{
+                input.linearized_input.node_coordinates[0],
+                input.linearized_input.node_coordinates[1],
+                input.linearized_input.node_coordinates[2]};
+            appendAdaptiveTriangleCut(
+                result.cut,
+                request,
+                input,
+                root,
+                triangleMeasure(root),
+                0,
+                max_depth,
+                diagnostics);
+            result.cut.diagnostic =
+                formatHighOrderSubcellDiagnostics(diagnostics, max_depth);
+        } else {
+            const Tetrahedron3D root{
+                input.linearized_input.node_coordinates[0],
+                input.linearized_input.node_coordinates[1],
+                input.linearized_input.node_coordinates[2],
+                input.linearized_input.node_coordinates[3]};
+            appendAdaptiveTetrahedronCut(
+                result.cut,
+                request,
+                input,
+                root,
+                tetrahedronMeasure(root),
+                0,
+                max_depth,
+                diagnostics);
+            result.cut.diagnostic =
+                formatHighOrderSubcellTetrahedronDiagnostics(diagnostics, max_depth);
+        }
         result.cut.supported = true;
-        result.cut.diagnostic =
-            formatHighOrderSubcellDiagnostics(diagnostics, max_depth);
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
         return result;
@@ -859,20 +1148,29 @@ public:
     }
 }
 
-[[nodiscard]] bool supportsHighOrderSubcellTriangleMilestone(
+[[nodiscard]] bool supportsHighOrderSubcellMilestone(
     int mesh_dimension,
     ElementType element_type) noexcept
 {
-    if (mesh_dimension != 2) {
-        return false;
+    if (mesh_dimension == 2) {
+        switch (element_type) {
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+            return true;
+        default:
+            return false;
+        }
     }
-    switch (element_type) {
-    case ElementType::Triangle3:
-    case ElementType::Triangle6:
-        return true;
-    default:
-        return false;
+    if (mesh_dimension == 3) {
+        switch (element_type) {
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return true;
+        default:
+            return false;
+        }
     }
+    return false;
 }
 
 } // namespace
@@ -933,7 +1231,7 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
     case ImplicitCutQuadratureBackend::HighOrderSubcell:
         capability.implemented = true;
         capability.supports_element_type =
-            supportsHighOrderSubcellTriangleMilestone(mesh_dimension, element_type);
+            supportsHighOrderSubcellMilestone(mesh_dimension, element_type);
         capability.supports_high_order_geometry = true;
         capability.maximum_reported_interface_order = 1;
         capability.maximum_reported_volume_order = 2;

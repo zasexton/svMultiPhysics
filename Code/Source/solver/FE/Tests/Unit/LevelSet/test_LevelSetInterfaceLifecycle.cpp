@@ -1090,6 +1090,20 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_EQ(subcell_tri.maximum_reported_volume_order, 2);
     EXPECT_TRUE(subcell_tri.requires_scalar_h1_c0_level_set);
 
+    const auto subcell_tet =
+        level_set::implicitCutQuadratureBackendCapability(
+            level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+            3,
+            FE::ElementType::Tetra10);
+    EXPECT_TRUE(subcell_tet.implemented);
+    EXPECT_TRUE(subcell_tet.supports_element_type);
+    EXPECT_TRUE(subcell_tet.supports_high_order_geometry);
+    EXPECT_EQ(subcell_tet.minimum_level_set_order, 1);
+    EXPECT_EQ(subcell_tet.validation_level_set_order, 3);
+    EXPECT_EQ(subcell_tet.maximum_reported_interface_order, 1);
+    EXPECT_EQ(subcell_tet.maximum_reported_volume_order, 2);
+    EXPECT_TRUE(subcell_tet.requires_scalar_h1_c0_level_set);
+
     const auto subcell_quad =
         level_set::implicitCutQuadratureBackendCapability(
             level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
@@ -1460,6 +1474,132 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2CircleSegmentApproximatesArea
     EXPECT_NEAR(result.summary.measure,
                 pi * radius / 2.0,
                 5.0e-2);
+
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_FALSE(interface_rules.empty());
+    EXPECT_EQ(interface_rules.front().provenance.implicit_quadrature_backend,
+              "HighOrderSubcell");
+    EXPECT_EQ(interface_rules.front().provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(interface_rules.front().provenance.achieved_quadrature_order, 1);
+
+    const auto volume_rules = result.domain.volumeQuadratureRules();
+    ASSERT_FALSE(volume_rules.empty());
+    EXPECT_EQ(volume_rules.front().provenance.implicit_quadrature_backend,
+              "HighOrderSubcell");
+    EXPECT_EQ(volume_rules.front().provenance.requested_quadrature_order, 2);
+    EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 2);
+}
+
+TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1PlaneMatchesLinearTetraMeasures)
+{
+    constexpr int interface_marker = 89;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, x[0] - FE::Real{0.5});
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+    EXPECT_EQ(result.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_NEAR(result.summary.negative_volume_measure,
+                7.0 / 48.0,
+                1.0e-12);
+    EXPECT_NEAR(result.summary.positive_volume_measure,
+                1.0 / 48.0,
+                1.0e-12);
+    EXPECT_NEAR(result.summary.measure, 0.125, 1.0e-12);
+}
+
+TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2SphereCapApproximatesVolumeAndArea)
+{
+    constexpr int interface_marker = 90;
+    constexpr FE::Real radius = 0.5;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const auto mesh = std::make_shared<SingleTetra10GeometryMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 10u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 10u; ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x[0] * x[0] + x[1] * x[1] + x[2] * x[2] - radius * radius;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+    options.implicit_cut_max_subdivision_depth = 5;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+    EXPECT_NE(result.diagnostic.find("HighOrderSubcell"), std::string::npos);
+    EXPECT_NE(result.diagnostic.find("linearized_leaves="), std::string::npos);
+    EXPECT_GT(result.summary.active_fragment_count, 1u);
+    EXPECT_NEAR(result.summary.negative_volume_measure,
+                pi * radius * radius * radius / 6.0,
+                1.5e-2);
+    EXPECT_NEAR(result.summary.positive_volume_measure,
+                1.0 / 6.0 - pi * radius * radius * radius / 6.0,
+                1.5e-2);
+    EXPECT_NEAR(result.summary.measure,
+                pi * radius * radius / 2.0,
+                8.0e-2);
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
