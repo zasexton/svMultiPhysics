@@ -682,6 +682,12 @@ void appendLinearizedTriangleCut(
         cut.degeneracy == interfaces::CutInterfaceDegeneracy::None) {
         cut.degeneracy = leaf_cut.degeneracy;
     }
+    if (!leaf_cut.hasActiveFragments() &&
+        cut.degeneracy == interfaces::CutInterfaceDegeneracy::None &&
+        leaf_cut.degeneracy != interfaces::CutInterfaceDegeneracy::None &&
+        leaf_cut.degeneracy != interfaces::CutInterfaceDegeneracy::NoCut) {
+        cut.degeneracy = leaf_cut.degeneracy;
+    }
 }
 
 void appendLinearizedTetrahedronCut(
@@ -724,6 +730,12 @@ void appendLinearizedTetrahedronCut(
     }
     if (leaf_cut.hasActiveFragments() &&
         cut.degeneracy == interfaces::CutInterfaceDegeneracy::None) {
+        cut.degeneracy = leaf_cut.degeneracy;
+    }
+    if (!leaf_cut.hasActiveFragments() &&
+        cut.degeneracy == interfaces::CutInterfaceDegeneracy::None &&
+        leaf_cut.degeneracy != interfaces::CutInterfaceDegeneracy::None &&
+        leaf_cut.degeneracy != interfaces::CutInterfaceDegeneracy::NoCut) {
         cut.degeneracy = leaf_cut.degeneracy;
     }
 }

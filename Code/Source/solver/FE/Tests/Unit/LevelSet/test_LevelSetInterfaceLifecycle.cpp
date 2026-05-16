@@ -1016,6 +1016,50 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadCircleCut(
     return lifecycle.build(system, options, solution);
 }
 
+level_set::LevelSetGeneratedInterfaceResult buildSingleTriangleHighOrderSubcellCut(
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& level_set_function,
+    int interface_marker)
+{
+    const auto mesh =
+        std::make_shared<SingleTriangleMeshAccess>(FE::ElementType::Triangle6);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.setup({}, makeSingleTriangleSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            level_set_function(x);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
+    options.implicit_cut_max_subdivision_depth = 3;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    return lifecycle.build(system, options, solution);
+}
+
 class CutMeasureAssemblyKernel final : public FE::assembly::AssemblyKernel {
 public:
     [[nodiscard]] FE::assembly::RequiredData getRequiredData() const override
@@ -2168,6 +2212,45 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleP2EdgeDofMovesCutVolume
     EXPECT_GT(std::abs(curved_edge.summary.negative_volume_measure -
                        linear_edge.summary.negative_volume_measure),
               1.0e-3);
+}
+
+TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate)
+{
+    const auto vertex_touch =
+        buildSingleTriangleHighOrderSubcellCut(
+            [](const std::array<FE::Real, 3>& x) {
+                return x[0] + x[1];
+            },
+            /*interface_marker=*/1891);
+    ASSERT_TRUE(vertex_touch.success) << vertex_touch.diagnostic;
+    EXPECT_EQ(vertex_touch.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(vertex_touch.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_EQ(vertex_touch.summary.active_fragment_count, 0u);
+    EXPECT_NEAR(vertex_touch.summary.negative_volume_measure, 0.0, 1.0e-12);
+    EXPECT_NEAR(vertex_touch.summary.positive_volume_measure, 0.5, 1.0e-12);
+    EXPECT_NE(vertex_touch.diagnostic.find("status=Degenerate"),
+              std::string::npos);
+    EXPECT_NE(vertex_touch.diagnostic.find("fallback_used=false"),
+              std::string::npos);
+
+    const auto edge_touch =
+        buildSingleTriangleHighOrderSubcellCut(
+            [](const std::array<FE::Real, 3>& x) {
+                return x[1];
+            },
+            /*interface_marker=*/1892);
+    ASSERT_TRUE(edge_touch.success) << edge_touch.diagnostic;
+    EXPECT_EQ(edge_touch.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(edge_touch.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_EQ(edge_touch.summary.active_fragment_count, 0u);
+    EXPECT_NEAR(edge_touch.summary.negative_volume_measure, 0.0, 1.0e-12);
+    EXPECT_NEAR(edge_touch.summary.positive_volume_measure, 0.5, 1.0e-12);
+    EXPECT_NE(edge_touch.diagnostic.find("status=Degenerate"),
+              std::string::npos);
+    EXPECT_NE(edge_touch.diagnostic.find("fallback_used=false"),
+              std::string::npos);
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1PlaneMatchesLinearTetraMeasures)

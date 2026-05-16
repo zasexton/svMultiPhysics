@@ -598,7 +598,7 @@ selected backend and parent cell.
 - [x] Triangle circle-segment area tests.
 - [x] Tetra sphere-cap volume tests.
 - [x] P2 level-set edge DOF changes the cut location in triangles and tets.
-- [ ] Degenerate vertex/edge touch tests.
+- [x] Degenerate vertex/edge touch tests.
 - [ ] Mixed-element mesh test with deterministic rule ordering and diagnostics.
 
 ### Literature Support
