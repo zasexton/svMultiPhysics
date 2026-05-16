@@ -1417,7 +1417,7 @@ linear-solver problems.
 ### Tests
 
 - [x] Output writes high-order `WetVolumeFraction`.
-- [ ] Debug output identifies fallback cells.
+- [x] Debug output identifies fallback cells.
 - [x] Curved-interface visualization contains nonzero surface data.
 - [x] Smoke parsing fails when high-order mode silently falls back too often.
 

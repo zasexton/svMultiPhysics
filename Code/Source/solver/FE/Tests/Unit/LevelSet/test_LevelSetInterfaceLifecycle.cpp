@@ -1916,6 +1916,22 @@ TEST(LevelSetInterfaceLifecycle, BackendDiagnosticStatusNamesAreStable)
         "Failed");
 }
 
+TEST(LevelSetInterfaceLifecycle, BackendDiagnosticIdentifiesFallbackCell)
+{
+    const std::string diagnostic =
+        level_set::levelSetImplicitCutBackendCellDiagnostic(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+            /*cell_id=*/42,
+            FE::ElementType::Quad9,
+            "fallback_used=true; status=Fallback; max_depth_reached=7");
+
+    EXPECT_NE(diagnostic.find("backend=SayeHyperrectangle"), std::string::npos);
+    EXPECT_NE(diagnostic.find("cell=42"), std::string::npos);
+    EXPECT_NE(diagnostic.find("element_type=Quad9"), std::string::npos);
+    EXPECT_NE(diagnostic.find("fallback_used=true"), std::string::npos);
+    EXPECT_NE(diagnostic.find("status=Fallback"), std::string::npos);
+}
+
 TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
