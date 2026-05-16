@@ -1746,6 +1746,8 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_EQ(saye_quad.maximum_reported_interface_order, 1);
     EXPECT_EQ(saye_quad.maximum_reported_volume_order, 2);
     EXPECT_TRUE(saye_quad.requires_scalar_h1_c0_level_set);
+    EXPECT_TRUE(saye_quad.prunes_tiny_slivers_in_context);
+    EXPECT_GT(saye_quad.tiny_sliver_volume_fraction, 0.0);
 
     const auto saye_tri =
         level_set::implicitCutQuadratureBackendCapability(
@@ -1767,6 +1769,8 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_EQ(subcell_tri.maximum_reported_interface_order, 1);
     EXPECT_EQ(subcell_tri.maximum_reported_volume_order, 2);
     EXPECT_TRUE(subcell_tri.requires_scalar_h1_c0_level_set);
+    EXPECT_TRUE(subcell_tri.prunes_tiny_slivers_in_context);
+    EXPECT_GT(subcell_tri.tiny_sliver_volume_fraction, 0.0);
 
     const auto subcell_tet =
         level_set::implicitCutQuadratureBackendCapability(
@@ -1781,6 +1785,8 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_EQ(subcell_tet.maximum_reported_interface_order, 1);
     EXPECT_EQ(subcell_tet.maximum_reported_volume_order, 2);
     EXPECT_TRUE(subcell_tet.requires_scalar_h1_c0_level_set);
+    EXPECT_TRUE(subcell_tet.prunes_tiny_slivers_in_context);
+    EXPECT_GT(subcell_tet.tiny_sliver_volume_fraction, 0.0);
 
     const auto subcell_quad =
         level_set::implicitCutQuadratureBackendCapability(
@@ -1799,6 +1805,8 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_TRUE(saye_hex.supports_high_order_geometry);
     EXPECT_EQ(saye_hex.maximum_reported_interface_order, 1);
     EXPECT_EQ(saye_hex.maximum_reported_volume_order, 2);
+    EXPECT_TRUE(saye_hex.prunes_tiny_slivers_in_context);
+    EXPECT_GT(saye_hex.tiny_sliver_volume_fraction, 0.0);
 }
 
 TEST(LevelSetInterfaceLifecycle, BackendDiagnosticStatusNamesAreStable)

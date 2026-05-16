@@ -816,6 +816,28 @@ and restart diffs remain meaningful. Existing deterministic ordering tests in
 `LevelSetInterfaceDomain` and the high-order MPI rule-hash test in
 `LevelSetInterfaceBuilderMPI` are the regression anchors for this contract.
 
+### Tiny-Sliver Pruning Contract
+
+High-order backends must not export tiny positive-measure slivers as active
+assembly rules merely because a recursive or subcell construction found a
+topological fragment. The backend capability advertises
+`prunes_tiny_slivers_in_context` and `tiny_sliver_volume_fraction`; the default
+policy is to treat slivers below that relative parent-volume threshold as
+conditioning diagnostics, not as active quadrature support. This keeps positive
+weights and local conditioning consistent with CutFEM practice for small-cut
+stabilization.
+
+Pruned slivers are excluded from assembly-facing active interface and volume
+rules. They may be retained only as inactive diagnostic metadata when
+`keep_degenerate_fragments` is enabled, and their diagnostic status should be
+`Tangent`, `Degenerate`, or `ExactNoCut` depending on the local classification.
+They are included in per-cell diagnostics, fallback counts, and visualization
+debug output, but not in active measures, sparsity decisions, local residuals,
+or matrix entries. If conservation requires retaining the tiny volume, it must
+be merged into the complementary active volume rule or handled by a documented
+conditioning/aggregation policy rather than emitted as a standalone unstable
+rule.
+
 ### Design Checklist
 
 - [x] Extend cut metadata with:
@@ -833,8 +855,8 @@ and restart diffs remain meaningful. Existing deterministic ordering tests in
 - [x] Define which metadata affects operator sparsity, matrix-free data,
       preconditioner metadata, and output only.
 - [x] Define deterministic metadata ordering for MPI.
-- [ ] Define pruning policy for high-order tiny slivers.
-- [ ] Define whether pruned high-order slivers are included in diagnostics but
+- [x] Define pruning policy for high-order tiny slivers.
+- [x] Define whether pruned high-order slivers are included in diagnostics but
       excluded from assembly.
 
 ### Implementation Checklist
