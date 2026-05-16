@@ -434,6 +434,9 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
         env["SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS"] = "1"
     if args.enable_fsils_matrix_diagnostics:
         env["SVMP_FSILS_MATRIX_DIAGNOSTICS"] = "1"
+    if (args.enable_timeloop_initialization_diagnostics or
+            args.require_timeloop_initialization_diagnostics):
+        env["SVMP_TIMELOOP_INITIALIZATION_DIAGNOSTICS"] = "1"
     if args.enable_form_block_diagnostics:
         env["SVMP_FE_FORM_BLOCK_DIAGNOSTICS"] = "1"
     if args.enable_interior_face_timing:
@@ -1331,6 +1334,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "fsils_prepared_matrices": [],
         "fsils_solve_summaries": [],
         "fsils_blockschur_retries": [],
+        "timeloop_initialization_solves": [],
         "vector_component_norms": [],
         "newton_assemblies": [],
         "newton_direction_checks": [],
@@ -1425,6 +1429,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["fsils_solve_summaries"].append(parse_key_values(line))
         elif "diagnostic=fsils_blockschur_true_residual_retry" in line:
             diagnostics["fsils_blockschur_retries"].append(parse_key_values(line))
+        elif "diagnostic=timeloop_initialization_linear_solve" in line:
+            diagnostics["timeloop_initialization_solves"].append(parse_key_values(line))
         elif "NewtonSolver: direction check" in line:
             diagnostics["newton_direction_checks"].append(parse_norm_key_values(line))
         elif "NewtonSolver: Jacobian check jacobian_op=" in line:
@@ -2120,6 +2126,21 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["form_block_install_count"] = len(diagnostics["form_block_installs"])
     if diagnostics.get("linear_solve_histories"):
         metrics["latest_linear_solve_history"] = diagnostics["linear_solve_histories"][-1]
+    if diagnostics.get("timeloop_initialization_solves"):
+        records = diagnostics["timeloop_initialization_solves"]
+        metrics["latest_timeloop_initialization_solve"] = records[-1]
+        metrics["diagnostic_timeloop_initialization_solve_count"] = len(records)
+        for source, target in (
+                ("dirichlet_dofs", "diagnostic_timeloop_initialization_max_dirichlet_dofs"),
+                ("constraints", "diagnostic_timeloop_initialization_max_constraints"),
+                ("rhs_norm", "diagnostic_timeloop_initialization_max_rhs_norm")):
+            values = [
+                record.get(source)
+                for record in records
+                if isinstance(record.get(source), (int, float))
+            ]
+            if values:
+                metrics[target] = max(values)
     if diagnostics.get("fsils_prepared_matrices"):
         records = diagnostics["fsils_prepared_matrices"]
         latest_matrix = records[-1]
@@ -2689,6 +2710,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if (args.require_linear_solve_memory_diagnostics and
             not has_linear_solve_memory_diagnostics(diagnostics)):
         errors.append("linear-solve memory diagnostics were not reported")
+    if (args.require_timeloop_initialization_diagnostics and
+            not diagnostics.get("timeloop_initialization_solves")):
+        errors.append("TimeLoop initialization linear-solve diagnostics were not reported")
     if (args.require_fsils_matrix_diagnostics and
             not diagnostics.get("fsils_prepared_matrices")):
         errors.append("FSILS prepared-matrix diagnostics were not reported")
@@ -3547,6 +3571,8 @@ def main() -> int:
     parser.add_argument("--linear-solve-component-norms-max-newton-it", type=int)
     parser.add_argument("--enable-linear-solve-memory-diagnostics", action="store_true")
     parser.add_argument("--require-linear-solve-memory-diagnostics", action="store_true")
+    parser.add_argument("--enable-timeloop-initialization-diagnostics", action="store_true")
+    parser.add_argument("--require-timeloop-initialization-diagnostics", action="store_true")
     parser.add_argument("--enable-fsils-matrix-diagnostics", action="store_true")
     parser.add_argument("--require-fsils-matrix-diagnostics", action="store_true")
     parser.add_argument("--max-fsils-matrix-zero-rows", type=int)

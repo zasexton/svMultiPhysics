@@ -17,11 +17,15 @@
 #include "TimeStepping/NewmarkBeta.h"
 #include "TimeStepping/TimeSteppingUtils.h"
 #include "TimeStepping/VSVO_BDF_Controller.h"
+#include "Core/Logger.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -64,11 +68,49 @@ std::vector<GlobalIndex> collectDirichletDofs(const constraints::AffineConstrain
     return dirichlet_dofs;
 }
 
-void setLinearDirichletDofs(backends::LinearSolver& linear,
-                            const constraints::AffineConstraints& constraints)
+std::size_t setLinearDirichletDofs(backends::LinearSolver& linear,
+                                   const constraints::AffineConstraints& constraints)
 {
     const auto dirichlet_dofs = collectDirichletDofs(constraints);
     linear.setDirichletDofs(dirichlet_dofs);
+    return dirichlet_dofs.size();
+}
+
+[[nodiscard]] bool initializationDiagnosticsEnabled() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_TIMELOOP_INITIALIZATION_DIAGNOSTICS");
+        if (env == nullptr || env[0] == '\0') {
+            return false;
+        }
+        const std::string value(env);
+        return !(value == "0" || value == "false" || value == "False" ||
+                 value == "off" || value == "OFF" || value == "no" ||
+                 value == "NO");
+    }();
+    return enabled;
+}
+
+void logInitializationSolveDiagnostics(const char* phase,
+                                       const constraints::AffineConstraints& constraints,
+                                       std::size_t dirichlet_dofs,
+                                       const backends::GenericMatrix& matrix,
+                                       const backends::GenericVector& rhs)
+{
+    if (!initializationDiagnosticsEnabled()) {
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << "TimeLoop: initialization linear solve diagnostics"
+        << " diagnostic=timeloop_initialization_linear_solve"
+        << " phase='" << phase << "'"
+        << " constraints=" << constraints.numConstraints()
+        << " dirichlet_dofs=" << dirichlet_dofs
+        << " matrix_rows=" << matrix.numRows()
+        << " matrix_cols=" << matrix.numCols()
+        << " rhs_norm=" << rhs.norm();
+    FE_LOG_INFO(oss.str());
 }
 
 void copyVector(backends::GenericVector& dst, const backends::GenericVector& src)
@@ -499,7 +541,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             (void)transient_mass.assemble(req_mass, state_mass, mass_view.get(), nullptr);
 
             history.uDDot().zero();
-            setLinearDirichletDofs(linear, constraints);
+            const auto init_dirichlet_dofs = setLinearDirichletDofs(linear, constraints);
+            logInitializationSolveDiagnostics("u_ddot", constraints, init_dirichlet_dofs, mass, rhs);
             const auto solve_rep = linear.solve(mass, history.uDDot(), rhs);
             if (!solve_rep.converged) {
                 if (require_u_ddot) {
@@ -1792,7 +1835,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 const double stage_time = t + ga1_params->alpha_f * dt;
                                 sys.updateConstraints(stage_time, dt);
                                 sys.beginTimeStep();
-                                setLinearDirichletDofs(linear, constraints);
+                                const auto init_dirichlet_dofs = setLinearDirichletDofs(linear, constraints);
 
                                 systems::SystemStateView init_state{};
                                 init_state.time = stage_time;
@@ -1900,6 +1943,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                                     backends::SolverReport rep{};
                                     try {
+                                        logInitializationSolveDiagnostics(
+                                            "u_dot", constraints, init_dirichlet_dofs, A, b);
                                         rep = linear.solve(A, history.uDot(), b);
                                     } catch (const std::exception&) {
                                         rep.converged = false;

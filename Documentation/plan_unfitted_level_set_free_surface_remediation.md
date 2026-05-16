@@ -547,6 +547,10 @@ benchmark runs.
       active Dirichlet DOFs to the linear solver before those initialization
       solves. Verified with the `svmultiphysics` target build; another D18
       probe was not started for this step.
+- [x] Add opt-in TimeLoop initialization-solve diagnostics and smoke-script
+      parsing so future short probes can require a compact record of the
+      initialization phase, constraint count, backend Dirichlet DOF count,
+      matrix dimensions, and RHS norm before the initialization solve starts.
 - [x] Add a smoke-script switch for D18/D38 solver-control probes that disables
       cut metadata stabilization scaling in the temporary case copy while
       preserving local cut-neighborhood stabilization.
