@@ -17,6 +17,32 @@
 
 namespace svmp::FE::level_set {
 
+enum class GeneratedInterfaceGeometryMode {
+    LinearCorner,
+    HighOrderImplicit,
+};
+
+enum class ImplicitCutQuadratureBackend {
+    LinearCorner,
+    SayeHyperrectangle,
+    HighOrderSubcell,
+    MomentFit,
+};
+
+enum class ImplicitCutFallbackPolicy {
+    Fail,
+    LinearCorner,
+};
+
+[[nodiscard]] const char* generatedInterfaceGeometryModeName(
+    GeneratedInterfaceGeometryMode mode) noexcept;
+
+[[nodiscard]] const char* implicitCutQuadratureBackendName(
+    ImplicitCutQuadratureBackend backend) noexcept;
+
+[[nodiscard]] const char* implicitCutFallbackPolicyName(
+    ImplicitCutFallbackPolicy policy) noexcept;
+
 struct LevelSetGeneratedInterfaceOptions {
     std::string level_set_field_name{"level_set"};
     std::string domain_id{"free_surface"};
@@ -32,6 +58,14 @@ struct LevelSetGeneratedInterfaceOptions {
         /*geometry_order=*/1,
         /*field_order=*/1,
         /*form_order=*/2)};
+    GeneratedInterfaceGeometryMode geometry_mode{
+        GeneratedInterfaceGeometryMode::LinearCorner};
+    ImplicitCutQuadratureBackend implicit_cut_quadrature_backend{
+        ImplicitCutQuadratureBackend::LinearCorner};
+    ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
+        ImplicitCutFallbackPolicy::Fail};
+    Real implicit_cut_root_tolerance{1.0e-10};
+    int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};
     bool allow_corner_linearized_geometry{false};
 };

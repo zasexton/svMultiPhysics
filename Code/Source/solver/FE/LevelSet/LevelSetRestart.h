@@ -40,6 +40,14 @@ struct LevelSetGeneratedInterfaceRestartRecord {
     int quadrature_order{1};
     int interface_quadrature_order{-1};
     int volume_quadrature_order{-1};
+    GeneratedInterfaceGeometryMode geometry_mode{
+        GeneratedInterfaceGeometryMode::LinearCorner};
+    ImplicitCutQuadratureBackend implicit_cut_quadrature_backend{
+        ImplicitCutQuadratureBackend::LinearCorner};
+    ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
+        ImplicitCutFallbackPolicy::Fail};
+    Real implicit_cut_root_tolerance{1.0e-10};
+    int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};
     std::uint64_t value_revision{0};
     std::uint64_t mesh_geometry_revision{0};

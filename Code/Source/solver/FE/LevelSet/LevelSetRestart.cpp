@@ -84,6 +84,15 @@ captureLevelSetGeneratedInterfaceRestartRecord(
     record.quadrature_order = options.quadrature_order;
     record.interface_quadrature_order = options.interface_quadrature_order;
     record.volume_quadrature_order = options.volume_quadrature_order;
+    record.geometry_mode = options.geometry_mode;
+    record.implicit_cut_quadrature_backend =
+        options.implicit_cut_quadrature_backend;
+    record.implicit_cut_fallback_policy =
+        options.implicit_cut_fallback_policy;
+    record.implicit_cut_root_tolerance =
+        options.implicit_cut_root_tolerance;
+    record.implicit_cut_max_subdivision_depth =
+        options.implicit_cut_max_subdivision_depth;
     record.keep_degenerate_fragments = options.keep_degenerate_fragments;
     record.value_revision = result.value_revision;
     record.mesh_geometry_revision = result.domain.request().mesh_geometry_revision;
@@ -110,6 +119,15 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
     options.quadrature_order = record.quadrature_order;
     options.interface_quadrature_order = record.interface_quadrature_order;
     options.volume_quadrature_order = record.volume_quadrature_order;
+    options.geometry_mode = record.geometry_mode;
+    options.implicit_cut_quadrature_backend =
+        record.implicit_cut_quadrature_backend;
+    options.implicit_cut_fallback_policy =
+        record.implicit_cut_fallback_policy;
+    options.implicit_cut_root_tolerance =
+        record.implicit_cut_root_tolerance;
+    options.implicit_cut_max_subdivision_depth =
+        record.implicit_cut_max_subdivision_depth;
     options.keep_degenerate_fragments = record.keep_degenerate_fragments;
     return options;
 }
@@ -151,6 +169,20 @@ bool levelSetGeneratedInterfaceRestartRecordMatches(
     }
     if (record.volume_quadrature_order < -1) {
         setDiagnostic(diagnostic, "generated-interface restart volume quadrature order is invalid");
+        return false;
+    }
+    if (!(record.implicit_cut_root_tolerance > 0.0)) {
+        setDiagnostic(diagnostic, "generated-interface restart implicit cut root tolerance is invalid");
+        return false;
+    }
+    if (record.implicit_cut_max_subdivision_depth < 0) {
+        setDiagnostic(diagnostic, "generated-interface restart implicit cut subdivision depth is invalid");
+        return false;
+    }
+    if (record.geometry_mode == GeneratedInterfaceGeometryMode::LinearCorner &&
+        record.implicit_cut_quadrature_backend !=
+            ImplicitCutQuadratureBackend::LinearCorner) {
+        setDiagnostic(diagnostic, "generated-interface restart linear geometry backend is invalid");
         return false;
     }
 

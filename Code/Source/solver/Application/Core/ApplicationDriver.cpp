@@ -341,6 +341,67 @@ std::optional<bool> first_defined_bool_parameter(
   return std::nullopt;
 }
 
+svmp::FE::level_set::GeneratedInterfaceGeometryMode
+parseGeneratedInterfaceGeometryMode(const std::string& raw)
+{
+  const auto value = normalized_token(raw);
+  using Mode = svmp::FE::level_set::GeneratedInterfaceGeometryMode;
+  if (value == "linearcorner" || value == "cornerlinear" ||
+      value == "linear" || value == "legacy") {
+    return Mode::LinearCorner;
+  }
+  if (value == "highorderimplicit" || value == "highorder" ||
+      value == "curvedimplicit" || value == "implicitcurved") {
+    return Mode::HighOrderImplicit;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Unknown generated interface geometry mode '" +
+      raw + "'.");
+}
+
+svmp::FE::level_set::ImplicitCutQuadratureBackend
+parseImplicitCutQuadratureBackend(const std::string& raw)
+{
+  const auto value = normalized_token(raw);
+  using Backend = svmp::FE::level_set::ImplicitCutQuadratureBackend;
+  if (value == "linearcorner" || value == "cornerlinear" ||
+      value == "linear" || value == "legacy") {
+    return Backend::LinearCorner;
+  }
+  if (value == "saye" || value == "sayehyperrectangle" ||
+      value == "hyperrectangle") {
+    return Backend::SayeHyperrectangle;
+  }
+  if (value == "highordersubcell" || value == "subcell" ||
+      value == "subtriangulation" || value == "subtetrahedra") {
+    return Backend::HighOrderSubcell;
+  }
+  if (value == "momentfit" || value == "momentfitting" ||
+      value == "momentfitted") {
+    return Backend::MomentFit;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Unknown implicit cut quadrature backend '" +
+      raw + "'.");
+}
+
+svmp::FE::level_set::ImplicitCutFallbackPolicy
+parseImplicitCutFallbackPolicy(const std::string& raw)
+{
+  const auto value = normalized_token(raw);
+  using Policy = svmp::FE::level_set::ImplicitCutFallbackPolicy;
+  if (value == "fail" || value == "none" || value == "error") {
+    return Policy::Fail;
+  }
+  if (value == "linearcorner" || value == "cornerlinear" ||
+      value == "linear" || value == "legacy") {
+    return Policy::LinearCorner;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Unknown implicit cut fallback policy '" +
+      raw + "'.");
+}
+
 svmp::FE::level_set::LevelSetReinitializationMethod
 parseLevelSetReinitializationMethod(const std::string& raw)
 {
@@ -413,6 +474,17 @@ struct ActiveCutVolumeRequest {
   std::string domain_id{"free_surface"};
   int requested_interface_marker{-1};
   double isovalue{0.0};
+  std::optional<int> quadrature_order{};
+  std::optional<int> interface_quadrature_order{};
+  std::optional<int> volume_quadrature_order{};
+  svmp::FE::level_set::GeneratedInterfaceGeometryMode geometry_mode{
+      svmp::FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner};
+  svmp::FE::level_set::ImplicitCutQuadratureBackend implicit_cut_backend{
+      svmp::FE::level_set::ImplicitCutQuadratureBackend::LinearCorner};
+  svmp::FE::level_set::ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
+      svmp::FE::level_set::ImplicitCutFallbackPolicy::Fail};
+  double implicit_cut_root_tolerance{1.0e-10};
+  int implicit_cut_max_subdivision_depth{16};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
   bool allow_corner_linearized_geometry{false};
 };
@@ -582,6 +654,89 @@ std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& pa
                                                         "Interface_isovalue",
                                                         "InterfaceIsovalue"})) {
         request.isovalue = *isovalue;
+      }
+      if (const auto quadrature_order =
+              first_defined_int_parameter(
+                  bc_params,
+                  {"Generated_interface_quadrature_order",
+                   "GeneratedInterfaceQuadratureOrder",
+                   "Cut_quadrature_order",
+                   "CutQuadratureOrder",
+                   "Level_set_cut_quadrature_order",
+                   "LevelSetCutQuadratureOrder"})) {
+        request.quadrature_order = *quadrature_order;
+      }
+      if (const auto interface_quadrature_order =
+              first_defined_int_parameter(
+                  bc_params,
+                  {"Interface_quadrature_order",
+                   "InterfaceQuadratureOrder",
+                   "Generated_interface_surface_quadrature_order",
+                   "GeneratedInterfaceSurfaceQuadratureOrder",
+                   "Cut_interface_quadrature_order",
+                   "CutInterfaceQuadratureOrder"})) {
+        request.interface_quadrature_order = *interface_quadrature_order;
+      }
+      if (const auto volume_quadrature_order =
+              first_defined_int_parameter(
+                  bc_params,
+                  {"Volume_quadrature_order",
+                   "VolumeQuadratureOrder",
+                   "Generated_cut_volume_quadrature_order",
+                   "GeneratedCutVolumeQuadratureOrder",
+                   "Cut_volume_quadrature_order",
+                   "CutVolumeQuadratureOrder"})) {
+        request.volume_quadrature_order = *volume_quadrature_order;
+      }
+      if (const auto geometry_mode =
+              first_defined_parameter(
+                  bc_params,
+                  {"Generated_interface_geometry",
+                   "GeneratedInterfaceGeometry",
+                   "Implicit_geometry_mode",
+                   "ImplicitGeometryMode",
+                   "Generated_interface_geometry_mode",
+                   "GeneratedInterfaceGeometryMode"})) {
+        request.geometry_mode =
+            parseGeneratedInterfaceGeometryMode(*geometry_mode);
+      }
+      if (const auto backend =
+              first_defined_parameter(
+                  bc_params,
+                  {"Implicit_cut_quadrature_backend",
+                   "ImplicitCutQuadratureBackend",
+                   "Generated_interface_quadrature_backend",
+                   "GeneratedInterfaceQuadratureBackend"})) {
+        request.implicit_cut_backend =
+            parseImplicitCutQuadratureBackend(*backend);
+      }
+      if (const auto fallback_policy =
+              first_defined_parameter(
+                  bc_params,
+                  {"Implicit_cut_fallback_policy",
+                   "ImplicitCutFallbackPolicy",
+                   "Implicit_cut_quadrature_fallback",
+                   "ImplicitCutQuadratureFallback"})) {
+        request.implicit_cut_fallback_policy =
+            parseImplicitCutFallbackPolicy(*fallback_policy);
+      }
+      if (const auto root_tolerance =
+              first_defined_double_parameter(
+                  bc_params,
+                  {"Implicit_cut_root_tolerance",
+                   "ImplicitCutRootTolerance",
+                   "Implicit_geometry_root_tolerance",
+                   "ImplicitGeometryRootTolerance"})) {
+        request.implicit_cut_root_tolerance = *root_tolerance;
+      }
+      if (const auto max_subdivision_depth =
+              first_defined_int_parameter(
+                  bc_params,
+                  {"Implicit_cut_max_subdivision_depth",
+                   "ImplicitCutMaxSubdivisionDepth",
+                   "Implicit_cut_subdivision_depth",
+                   "ImplicitCutSubdivisionDepth"})) {
+        request.implicit_cut_max_subdivision_depth = *max_subdivision_depth;
       }
       if (const auto allow_corner_linearized =
               first_defined_bool_parameter(
@@ -2510,6 +2665,23 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     options.domain_id = request.domain_id;
     options.requested_interface_marker = request.requested_interface_marker;
     options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+    if (request.quadrature_order.has_value()) {
+      options.quadrature_order = *request.quadrature_order;
+    }
+    if (request.interface_quadrature_order.has_value()) {
+      options.interface_quadrature_order = *request.interface_quadrature_order;
+    }
+    if (request.volume_quadrature_order.has_value()) {
+      options.volume_quadrature_order = *request.volume_quadrature_order;
+    }
+    options.geometry_mode = request.geometry_mode;
+    options.implicit_cut_quadrature_backend = request.implicit_cut_backend;
+    options.implicit_cut_fallback_policy =
+        request.implicit_cut_fallback_policy;
+    options.implicit_cut_root_tolerance =
+        static_cast<svmp::FE::Real>(request.implicit_cut_root_tolerance);
+    options.implicit_cut_max_subdivision_depth =
+        request.implicit_cut_max_subdivision_depth;
     options.allow_corner_linearized_geometry =
         request.allow_corner_linearized_geometry;
 
@@ -2722,6 +2894,24 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << "' domain_id='" << request.domain_id
         << "' active_side=" << activeSideName(request.active_side)
         << " interface_contract=one_sided_embedded"
+        << " generated_interface_geometry="
+        << svmp::FE::level_set::generatedInterfaceGeometryModeName(
+               options.geometry_mode)
+        << " implicit_cut_quadrature_backend="
+        << svmp::FE::level_set::implicitCutQuadratureBackendName(
+               options.implicit_cut_quadrature_backend)
+        << " implicit_cut_fallback_policy="
+        << svmp::FE::level_set::implicitCutFallbackPolicyName(
+               options.implicit_cut_fallback_policy)
+        << " implicit_cut_root_tolerance="
+        << options.implicit_cut_root_tolerance
+        << " implicit_cut_max_subdivision_depth="
+        << options.implicit_cut_max_subdivision_depth
+        << " quadrature_order=" << options.quadrature_order
+        << " interface_quadrature_order="
+        << options.interface_quadrature_order
+        << " volume_quadrature_order="
+        << options.volume_quadrature_order
         << " allow_corner_linearized_geometry="
         << (request.allow_corner_linearized_geometry ? "true" : "false")
         << " isovalue=" << request.isovalue

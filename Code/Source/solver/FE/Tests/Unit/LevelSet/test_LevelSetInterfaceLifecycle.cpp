@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -334,6 +335,48 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     const auto volume_rules = result.domain.volumeQuadratureRules();
     ASSERT_EQ(volume_rules.size(), 2u);
     EXPECT_EQ(volume_rules.front().exact_polynomial_order, 1);
+}
+
+TEST(LevelSetInterfaceLifecycle, RejectsHighOrderImplicitModeUntilBackendExists)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    try {
+        (void)lifecycle.build(system, options, std::span<const FE::Real>{});
+        FAIL() << "Expected high-order implicit generated interface mode to be rejected";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("not implemented"), std::string::npos);
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle, RejectsNonlinearBackendForLinearCornerMode)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::LinearCorner;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    try {
+        (void)lifecycle.build(system, options, std::span<const FE::Real>{});
+        FAIL() << "Expected nonlinear backend to be rejected for linear geometry";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("LinearCorner"), std::string::npos);
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, FullSideVolumeRegionSucceedsWithoutInterfaceFragment)

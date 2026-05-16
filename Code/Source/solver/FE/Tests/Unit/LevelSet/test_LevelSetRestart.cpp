@@ -203,6 +203,14 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     interface_options.quadrature_order = 1;
     interface_options.interface_quadrature_order = 0;
     interface_options.volume_quadrature_order = 1;
+    interface_options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::LinearCorner;
+    interface_options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::LinearCorner;
+    interface_options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::LinearCorner;
+    interface_options.implicit_cut_root_tolerance = 2.0e-10;
+    interface_options.implicit_cut_max_subdivision_depth = 18;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     const auto built = lifecycle.build(system, interface_options, solution);
@@ -217,6 +225,14 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     EXPECT_EQ(interface_record.interface_marker, built.interface_marker);
     EXPECT_EQ(interface_record.interface_quadrature_order, 0);
     EXPECT_EQ(interface_record.volume_quadrature_order, 1);
+    EXPECT_EQ(interface_record.geometry_mode,
+              level_set::GeneratedInterfaceGeometryMode::LinearCorner);
+    EXPECT_EQ(interface_record.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::LinearCorner);
+    EXPECT_EQ(interface_record.implicit_cut_fallback_policy,
+              level_set::ImplicitCutFallbackPolicy::LinearCorner);
+    EXPECT_DOUBLE_EQ(interface_record.implicit_cut_root_tolerance, 2.0e-10);
+    EXPECT_EQ(interface_record.implicit_cut_max_subdivision_depth, 18);
     EXPECT_EQ(interface_record.value_revision, built.value_revision);
     EXPECT_EQ(interface_record.mesh_geometry_revision, 7u);
     EXPECT_EQ(interface_record.mesh_topology_revision, 11u);
@@ -242,6 +258,16 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     EXPECT_EQ(restored_options.domain_id, interface_options.domain_id);
     EXPECT_EQ(restored_options.interface_quadrature_order, 0);
     EXPECT_EQ(restored_options.volume_quadrature_order, 1);
+    EXPECT_EQ(restored_options.geometry_mode,
+              interface_options.geometry_mode);
+    EXPECT_EQ(restored_options.implicit_cut_quadrature_backend,
+              interface_options.implicit_cut_quadrature_backend);
+    EXPECT_EQ(restored_options.implicit_cut_fallback_policy,
+              interface_options.implicit_cut_fallback_policy);
+    EXPECT_DOUBLE_EQ(restored_options.implicit_cut_root_tolerance,
+                     interface_options.implicit_cut_root_tolerance);
+    EXPECT_EQ(restored_options.implicit_cut_max_subdivision_depth,
+              interface_options.implicit_cut_max_subdivision_depth);
 
     level_set::LevelSetGeneratedInterfaceLifecycle restored_lifecycle;
     restored_lifecycle.restoreValueRevision(interface_record.value_revision);

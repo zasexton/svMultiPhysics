@@ -12,6 +12,47 @@
 #include <vector>
 
 namespace svmp::FE::level_set {
+
+const char* generatedInterfaceGeometryModeName(
+    GeneratedInterfaceGeometryMode mode) noexcept
+{
+    switch (mode) {
+    case GeneratedInterfaceGeometryMode::LinearCorner:
+        return "LinearCorner";
+    case GeneratedInterfaceGeometryMode::HighOrderImplicit:
+        return "HighOrderImplicit";
+    }
+    return "Unknown";
+}
+
+const char* implicitCutQuadratureBackendName(
+    ImplicitCutQuadratureBackend backend) noexcept
+{
+    switch (backend) {
+    case ImplicitCutQuadratureBackend::LinearCorner:
+        return "LinearCorner";
+    case ImplicitCutQuadratureBackend::SayeHyperrectangle:
+        return "SayeHyperrectangle";
+    case ImplicitCutQuadratureBackend::HighOrderSubcell:
+        return "HighOrderSubcell";
+    case ImplicitCutQuadratureBackend::MomentFit:
+        return "MomentFit";
+    }
+    return "Unknown";
+}
+
+const char* implicitCutFallbackPolicyName(
+    ImplicitCutFallbackPolicy policy) noexcept
+{
+    switch (policy) {
+    case ImplicitCutFallbackPolicy::Fail:
+        return "Fail";
+    case ImplicitCutFallbackPolicy::LinearCorner:
+        return "LinearCorner";
+    }
+    return "Unknown";
+}
+
 namespace {
 
 struct GeneratedInterfaceCellDiagnostics {
@@ -163,6 +204,25 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     }
     if (options.quadrature_order < 0) {
         throw std::invalid_argument("generated level-set interface requires nonnegative quadrature_order");
+    }
+    if (!(options.implicit_cut_root_tolerance > Real{0.0})) {
+        throw std::invalid_argument(
+            "generated level-set interface requires a positive implicit_cut_root_tolerance");
+    }
+    if (options.implicit_cut_max_subdivision_depth < 0) {
+        throw std::invalid_argument(
+            "generated level-set interface requires nonnegative implicit_cut_max_subdivision_depth");
+    }
+    if (options.geometry_mode == GeneratedInterfaceGeometryMode::LinearCorner &&
+        options.implicit_cut_quadrature_backend !=
+            ImplicitCutQuadratureBackend::LinearCorner) {
+        throw std::invalid_argument(
+            "generated level-set interface LinearCorner geometry requires the LinearCorner implicit cut quadrature backend");
+    }
+    if (options.geometry_mode == GeneratedInterfaceGeometryMode::HighOrderImplicit) {
+        throw std::invalid_argument(
+            "high-order implicit generated level-set interface geometry is not implemented yet; "
+            "use Generated_interface_geometry=LinearCorner until a high-order backend is available");
     }
     const int interface_quadrature_order =
         options.interface_quadrature_order >= 0 ? options.interface_quadrature_order

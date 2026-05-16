@@ -276,6 +276,14 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
     <Implementation>UnfittedLevelSet</Implementation>
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    <Generated_interface_geometry>LinearCorner</Generated_interface_geometry>
+    <Implicit_cut_quadrature_backend>LinearCorner</Implicit_cut_quadrature_backend>
+    <Implicit_cut_fallback_policy>Fail</Implicit_cut_fallback_policy>
+    <Implicit_cut_root_tolerance>1.0e-10</Implicit_cut_root_tolerance>
+    <Implicit_cut_max_subdivision_depth>16</Implicit_cut_max_subdivision_depth>
+    <Generated_interface_quadrature_order>2</Generated_interface_quadrature_order>
+    <Interface_quadrature_order>1</Interface_quadrature_order>
+    <Volume_quadrature_order>2</Volume_quadrature_order>
     <Active_domain>LevelSetNegative</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
     <Active_domain_smoothing_width>0.02</Active_domain_smoothing_width>
@@ -295,6 +303,14 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   EXPECT_EQ(bc.params.at("Implementation").value, "UnfittedLevelSet");
   EXPECT_EQ(bc.params.at("Level_set_field_name").value, "phi");
   EXPECT_EQ(bc.params.at("Generated_interface_domain_id").value, "water_air");
+  EXPECT_EQ(bc.params.at("Generated_interface_geometry").value, "LinearCorner");
+  EXPECT_EQ(bc.params.at("Implicit_cut_quadrature_backend").value, "LinearCorner");
+  EXPECT_EQ(bc.params.at("Implicit_cut_fallback_policy").value, "Fail");
+  EXPECT_EQ(bc.params.at("Implicit_cut_root_tolerance").value, "1.0e-10");
+  EXPECT_EQ(bc.params.at("Implicit_cut_max_subdivision_depth").value, "16");
+  EXPECT_EQ(bc.params.at("Generated_interface_quadrature_order").value, "2");
+  EXPECT_EQ(bc.params.at("Interface_quadrature_order").value, "1");
+  EXPECT_EQ(bc.params.at("Volume_quadrature_order").value, "2");
   EXPECT_EQ(bc.params.at("Active_domain").value, "LevelSetNegative");
   EXPECT_EQ(bc.params.at("Active_domain_method").value, "CutVolume");
   EXPECT_EQ(bc.params.at("Active_domain_smoothing_width").value, "0.02");
