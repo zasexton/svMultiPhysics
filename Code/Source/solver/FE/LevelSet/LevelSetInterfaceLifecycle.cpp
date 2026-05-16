@@ -61,6 +61,7 @@ namespace {
 struct GeneratedInterfaceCellDiagnostics {
     std::size_t node_count{0};
     std::size_t corner_count{0};
+    bool corner_linearized{false};
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
     bool fallback_used{false};
@@ -267,6 +268,9 @@ struct GeneratedInterfaceCellDiagnostics {
     return GeneratedInterfaceCellDiagnostics{
         .node_count = cell_nodes.size(),
         .corner_count = count,
+        .corner_linearized =
+            backend.kind() == ImplicitCutQuadratureBackend::LinearCorner &&
+            cell_nodes.size() > count,
         .achieved_interface_quadrature_order =
             backend_result.achieved_interface_quadrature_order,
         .achieved_volume_quadrature_order =
@@ -317,10 +321,11 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         throw std::invalid_argument(
             "generated level-set interface LinearCorner geometry requires the LinearCorner implicit cut quadrature backend");
     }
-    if (options.geometry_mode == GeneratedInterfaceGeometryMode::HighOrderImplicit) {
+    if (options.geometry_mode == GeneratedInterfaceGeometryMode::HighOrderImplicit &&
+        options.implicit_cut_quadrature_backend ==
+            ImplicitCutQuadratureBackend::LinearCorner) {
         throw std::invalid_argument(
-            "high-order implicit generated level-set interface geometry is not implemented yet; "
-            "use Generated_interface_geometry=LinearCorner until a high-order backend is available");
+            "high-order implicit generated level-set interface geometry requires a high-order implicit cut quadrature backend");
     }
     const auto& backend = implicitCutQuadratureBackendDriver(
         options.implicit_cut_quadrature_backend);
@@ -390,6 +395,10 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
         backend.name();
     request.implicit_fallback_policy =
         implicitCutFallbackPolicyName(options.implicit_cut_fallback_policy);
+    request.implicit_cut_root_tolerance =
+        options.implicit_cut_root_tolerance;
+    request.implicit_cut_max_subdivision_depth =
+        options.implicit_cut_max_subdivision_depth;
     request.keep_degenerate_fragments = options.keep_degenerate_fragments;
 
     interfaces::LevelSetInterfaceDomain domain(request);
@@ -409,7 +418,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
             appendGeneratedInterfaceCell(
                 domain, mesh, *entity_map, backend, evaluator, coefficients, cell_id);
         ++cell_count;
-        if (diagnostics.node_count > diagnostics.corner_count) {
+        if (diagnostics.corner_linearized) {
             ++corner_linearized_cell_count;
         }
         achieved_interface_quadrature_order =

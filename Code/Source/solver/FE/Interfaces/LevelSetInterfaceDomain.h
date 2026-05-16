@@ -145,6 +145,8 @@ struct CutInterfaceDomainRequest {
     std::string implicit_geometry_mode{};
     std::string implicit_quadrature_backend{};
     std::string implicit_fallback_policy{};
+    Real implicit_cut_root_tolerance{1.0e-10};
+    int implicit_cut_max_subdivision_depth{16};
     int achieved_interface_quadrature_order{-1};
     int achieved_volume_quadrature_order{-1};
     bool keep_degenerate_fragments{false};

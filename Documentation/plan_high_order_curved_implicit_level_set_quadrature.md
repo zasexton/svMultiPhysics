@@ -316,35 +316,36 @@ good match for quadrilateral and hexahedral reference cells.
 
 ### Design Checklist
 
-- [ ] Define how svMultiPhysics reference quads map to the hyperrectangle used by
+- [x] Define how svMultiPhysics reference quads map to the hyperrectangle used by
       the algorithm.
 - [ ] Define how svMultiPhysics reference hexes map to the hyperrectangle used by
       the algorithm.
 - [ ] Decide Gaussian base order from requested FE/form order.
 - [ ] Define root-finding tolerance and maximum iterations.
-- [ ] Define recursive subdivision limits.
+- [x] Define recursive subdivision limits.
 - [ ] Define adaptive failure handling for multiple roots, near-tangent
       interfaces, and singular gradients.
-- [ ] Define how to orient reference normals consistently with the existing
+- [x] Define how to orient reference normals consistently with the existing
       negative/positive side convention.
-- [ ] Define how to compute side measures and volume fractions from the produced
+- [x] Define how to compute side measures and volume fractions from the produced
       weights.
 
 ### Implementation Checklist
 
-- [ ] Implement 2D hyperrectangle volume and interface quadrature.
-- [ ] Validate 2D on analytic curves before implementing 3D.
+- [x] Implement 2D hyperrectangle volume and interface quadrature.
+- [x] Validate 2D on analytic curves before implementing 3D.
 - [ ] Implement 3D hyperrectangle volume and interface quadrature.
 - [ ] Expose detailed per-cell diagnostics for recursion depth, root-finder
       iterations, fallback usage, and achieved order.
-- [ ] Preserve deterministic point ordering.
-- [ ] Keep the backend independent from physics-specific free-surface concepts.
+- [x] Preserve deterministic point ordering.
+- [x] Keep the backend independent from physics-specific free-surface concepts.
 - [ ] Add optional debug output that dumps one cell's implicit quadrature rule for
       postmortem inspection.
 
 ### Tests
 
-- [ ] 2D line cut through a quad reproduces linear backend measures.
+- [x] 2D line cut through a quad reproduces linear backend measures.
+- [x] Initial 2D circle cut checks area and arc length against analytic values.
 - [ ] 2D circle/ellipse cuts integrate area and arc length to requested order.
 - [ ] 2D curved interface tests demonstrate convergence under h-refinement and
       p-refinement.
@@ -980,7 +981,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 
 ### Phase 1: 2D Hyperrectangle Proof
 
-- [ ] Implement Saye-style 2D quad backend.
+- [x] Implement initial Saye-style 2D quad backend.
 - [ ] Add analytic area, length, and moment tests.
 - [ ] Add fixed-geometry assembly tests.
 - [ ] Add diagnostics and output tests.
