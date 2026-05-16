@@ -28,6 +28,19 @@ namespace {
            std::isfinite(values[2]);
 }
 
+[[nodiscard]] Real norm3(const std::array<Real, 3>& values) noexcept
+{
+    return std::sqrt(values[0] * values[0] +
+                     values[1] * values[1] +
+                     values[2] * values[2]);
+}
+
+[[nodiscard]] Real dot3(const std::array<Real, 3>& a,
+                        const std::array<Real, 3>& b) noexcept
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
 [[nodiscard]] ImplicitCutQuadratureDiagnosticStatus
 classifyCutStatus(const interfaces::LevelSetCellCutResult& cut,
                   bool fallback_used) noexcept
@@ -1638,6 +1651,26 @@ validateImplicitCutQuadratureBackendCellResult(
                 return failedValidation(
                     ImplicitCutQuadratureDiagnosticStatus::Failed,
                     "implicit cut backend returned an invalid interface quadrature point");
+            }
+            const auto normal_norm = norm3(point.normal);
+            if (normal_norm <= Real{1.0e-30}) {
+                return failedValidation(
+                    ImplicitCutQuadratureDiagnosticStatus::Failed,
+                    "implicit cut backend returned a zero interface quadrature normal");
+            }
+            const auto evaluation =
+                input.evaluator->evaluate(fragment.parent_cell, point.point);
+            const auto gradient_norm = norm3(evaluation.reference_gradient);
+            if (finiteArray(evaluation.reference_gradient) &&
+                gradient_norm > Real{1.0e-30}) {
+                const Real alignment =
+                    dot3(point.normal, evaluation.reference_gradient) /
+                    (normal_norm * gradient_norm);
+                if (!std::isfinite(alignment) || alignment < Real{0.0}) {
+                    return failedValidation(
+                        ImplicitCutQuadratureDiagnosticStatus::Failed,
+                        "implicit cut backend returned an inconsistent interface quadrature normal");
+                }
             }
         }
     }

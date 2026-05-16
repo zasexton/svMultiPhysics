@@ -692,7 +692,7 @@ material state storage is keyed by generated interface quadrature shape.
 - [x] Audit `StandardAssembler::assembleCutVolumes(...)` and
       `assembleCutInterfaces(...)` assumptions for high-order rule point counts.
 - [x] Extend interface remapping tests to high-order and curved parent geometry.
-- [ ] Add optional backend-provided normal consistency checks.
+- [x] Add optional backend-provided normal consistency checks.
 - [ ] Keep physical wet-volume diagnostics based on mapped cut-volume rules.
 - [ ] Ensure high-order rules do not reuse stale linear full-cell-equivalent
       assumptions.

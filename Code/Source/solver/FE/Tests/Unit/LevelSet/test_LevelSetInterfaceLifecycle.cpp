@@ -1831,7 +1831,7 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendOutputPassesCommonValidation)
     request.volume_quadrature_order = 2;
 
     FE::interfaces::LevelSetCellCutInput input{};
-    input.parent_cell = 5;
+    input.parent_cell = 0;
     input.element_type = FE::ElementType::Tetra4;
     input.node_coordinates = {
         std::array<FE::Real, 3>{0.0, 0.0, 0.0},
@@ -1919,6 +1919,68 @@ TEST(LevelSetInterfaceLifecycle, InvalidBackendOutputIsRejected)
             request, backend_input, result);
     EXPECT_FALSE(validation.ok);
     EXPECT_NE(validation.diagnostic.find("invalid volume region"),
+              std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, BackendValidationRejectsInconsistentInterfaceNormals)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2]);
+    }
+    const auto evaluator =
+        level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+    FE::interfaces::CutInterfaceDomainRequest request{};
+    request.source = FE::interfaces::LevelSetInterfaceSource::fromEvaluator(
+        "validation-level-set", 0, 1);
+    request.interface_marker = 13;
+    request.tolerance = 1.0e-12;
+
+    FE::interfaces::LevelSetCellCutInput input{};
+    input.parent_cell = 0;
+    input.element_type = FE::ElementType::Tetra4;
+    level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+    backend_input.linearized_input = input;
+    backend_input.evaluator = &evaluator;
+
+    level_set::ImplicitCutQuadratureBackendCellResult result{};
+    result.cut.supported = true;
+    result.achieved_interface_quadrature_order = 1;
+    result.achieved_volume_quadrature_order = 1;
+    result.diagnostic_status =
+        level_set::ImplicitCutQuadratureDiagnosticStatus::Cut;
+
+    FE::interfaces::CutInterfaceFragment fragment{};
+    fragment.interface_marker = request.interface_marker;
+    fragment.parent_cell = input.parent_cell;
+    fragment.measure = 1.0;
+    fragment.quadrature_points.push_back(
+        FE::interfaces::CutInterfaceQuadraturePoint{
+            .point = {{0.25, 0.25, 0.25}},
+            .parent_coordinate = {{0.25, 0.25, 0.25}},
+            .normal = {{-1.0, -1.0, -1.0}},
+            .weight = 1.0});
+    result.cut.fragments.push_back(fragment);
+
+    const auto validation =
+        level_set::validateImplicitCutQuadratureBackendCellResult(
+            request, backend_input, result);
+    EXPECT_FALSE(validation.ok);
+    EXPECT_NE(validation.diagnostic.find("inconsistent interface quadrature normal"),
               std::string::npos);
 }
 
