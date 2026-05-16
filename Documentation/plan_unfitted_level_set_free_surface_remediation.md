@@ -572,6 +572,10 @@ benchmark runs.
       D18/D38 no-output probes can correlate process-memory growth with kernel
       cache size, object-cache entries, disk hits, misses, stores, and
       evictions.
+- [x] Record a five-step D18 JIT-cache/process-memory probe showing resident
+      memory still grows by about 508 MiB while kernel-cache size and
+      object-cache counters plateau, so the next memory-lifecycle work should
+      focus outside retained JIT object code.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained
