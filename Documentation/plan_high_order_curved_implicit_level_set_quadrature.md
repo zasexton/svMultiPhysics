@@ -1145,7 +1145,7 @@ rank-local discovery order.
 
 ### Implementation Checklist
 
-- [ ] Add backend timing counters.
+- [x] Add backend timing counters.
 - [x] Add point-count summaries by volume/interface rules.
 - [ ] Keep transient basis evaluations out of process-wide caches unless keyed
       by stable persistent data.

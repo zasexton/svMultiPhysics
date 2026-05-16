@@ -2537,7 +2537,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     options.allow_corner_linearized_geometry =
         request.allow_corner_linearized_geometry;
 
+    const auto backend_start = Clock::now();
     auto result = lifecycle.build(*sim.fe_system, options, fe_solution);
+    const auto backend_timing =
+        reduceOutputTiming(secondsSince(backend_start), comm);
     if (!result.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Generated active-domain interface '" +
@@ -2756,6 +2759,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " implicit_cut_quadrature_backend="
         << svmp::FE::level_set::implicitCutQuadratureBackendName(
                options.implicit_cut_quadrature_backend)
+        << " implicit_cut_backend_seconds=" << backend_timing.local
+        << " implicit_cut_backend_seconds_min=" << backend_timing.min
+        << " implicit_cut_backend_seconds_mean=" << backend_timing.mean
+        << " implicit_cut_backend_seconds_max=" << backend_timing.max
         << " implicit_cut_fallback_policy="
         << svmp::FE::level_set::implicitCutFallbackPolicyName(
                options.implicit_cut_fallback_policy)

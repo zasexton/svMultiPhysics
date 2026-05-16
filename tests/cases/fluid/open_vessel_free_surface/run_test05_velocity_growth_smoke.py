@@ -1978,6 +1978,8 @@ def cut_context_policy_errors(metrics: dict[str, Any],
             required = (
                 "generated_interface_geometry",
                 "implicit_cut_quadrature_backend",
+                "implicit_cut_backend_seconds",
+                "implicit_cut_backend_seconds_max",
                 "implicit_cut_fallback_policy",
                 "implicit_cut_fallback_cells",
                 "achieved_interface_quadrature_order",
