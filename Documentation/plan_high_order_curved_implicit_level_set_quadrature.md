@@ -1267,7 +1267,13 @@ methods and volume correction remain separate numerical-method choices.
       FE-ordered solution. A Q2 regression verifies that all high-order
       coefficients receive the accepted shift while unrelated fields remain
       unchanged.
-- [ ] Rebuild high-order cut context after maintenance and before output.
+- [x] Rebuild high-order cut context after maintenance and before output.
+      The transient accepted-step callback applies level-set maintenance,
+      refreshes the active cut integration context from the maintained accepted
+      state, logs wet-volume diagnostics from that refreshed context, and only
+      then writes VTK output. A high-order Saye regression verifies that a Q2
+      maintained field rebuilds a HighOrderImplicit cut context whose output
+      wet volume follows the corrected coefficients rather than a stale context.
 - [ ] Log maintenance-induced geometry changes.
 
 ### Tests

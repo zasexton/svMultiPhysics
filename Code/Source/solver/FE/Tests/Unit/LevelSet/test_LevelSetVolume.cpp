@@ -1,6 +1,7 @@
 #include "LevelSet/LevelSetVolume.h"
 
 #include "Assembly/Assembler.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
@@ -465,6 +466,9 @@ TEST(LevelSetVolume, VolumeCorrectionUpdatesOutputTimeActiveVolume)
         solution,
         corrected_solution);
     ASSERT_TRUE(correction.success) << correction.diagnostic;
+    EXPECT_NEAR(correction.corrected_negative_volume,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
 
     const auto output_time_volume = level_set::computeLevelSetCutCellVolume(
         fixture.system,
@@ -529,6 +533,88 @@ TEST(LevelSetVolume, VolumeCorrectionRefreshesCutContextBeforeOutput)
     EXPECT_NEAR(output_context.summary.negative_volume_measure,
                 correction_opts.target_negative_volume,
                 correction_opts.volume_tolerance);
+}
+
+TEST(LevelSetVolume, VolumeCorrectionRefreshesHighOrderCutContextBeforeOutput)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto scalar_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 9u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < 9u; ++i) {
+        const auto xi =
+            FE::basis::NodeOrdering::get_node_coords(FE::ElementType::Quad9, i);
+        const auto x = FE::Real{0.5} * (xi[0] + FE::Real{1.0});
+        const auto y = FE::Real{0.5} * (xi[1] + FE::Real{1.0});
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x + y - FE::Real{0.5};
+    }
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 32.0;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        system,
+        phi,
+        level_set::LevelSetVolumeOptions{},
+        correction_opts,
+        solution,
+        corrected_solution);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+
+    level_set::LevelSetGeneratedInterfaceOptions interface_opts{};
+    interface_opts.level_set_field_name = "phi";
+    interface_opts.domain_id = "high-order-output-fluid";
+    interface_opts.requested_interface_marker = 917;
+    interface_opts.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    interface_opts.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    interface_opts.implicit_cut_max_subdivision_depth = 5;
+    interface_opts.interface_quadrature_order = 1;
+    interface_opts.volume_quadrature_order = 2;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto stale_context =
+        lifecycle.build(system, interface_opts, solution);
+    const auto output_context =
+        lifecycle.build(system, interface_opts, corrected_solution);
+
+    ASSERT_TRUE(stale_context.success) << stale_context.diagnostic;
+    ASSERT_TRUE(output_context.success) << output_context.diagnostic;
+    EXPECT_EQ(output_context.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+    EXPECT_EQ(output_context.domain.request().implicit_geometry_mode,
+              "HighOrderImplicit");
+    EXPECT_EQ(output_context.domain.request().implicit_quadrature_backend,
+              "SayeHyperrectangle");
+    EXPECT_EQ(output_context.corner_linearized_cell_count, 0u);
+    EXPECT_NE(stale_context.value_revision, output_context.value_revision);
+    EXPECT_GT(std::abs(stale_context.summary.negative_volume_measure -
+                       output_context.summary.negative_volume_measure),
+              1.0e-8);
+#endif
 }
 
 TEST(LevelSetVolume, VolumeCorrectionSynchronizesHistoryAndCutContext)
