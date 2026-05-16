@@ -1518,16 +1518,26 @@ finite-difference component checks are valuable for isolating assembly defects.
 
 ### Design Checklist
 
-- [ ] Define fixed-geometry form tests for:
+- [x] Define fixed-geometry form tests for:
       - scalar mass,
       - pressure-divergence coupling,
       - viscous terms,
       - VMS terms,
       - cut-adjacent stabilization.
-- [ ] Define component-selectable finite-difference checks.
+      Fixed-geometry coverage is split across generated cut-volume mass and
+      moment tests, interface traction/integral tests, nonlinear cut-volume and
+      cut-interface tangent checks, zero-tangent mixed block coverage, and
+      high-order cut-adjacent DG stabilization checks.
+- [x] Define component-selectable finite-difference checks.
+      Component-selectable checks use the Newton Jacobian-check diagnostic
+      contract with explicit component filters, finite-difference scheme,
+      geometry refresh mode, and geometry tangent policy.
 - [x] Define moving-interface MMS cases for high-order geometry.
-- [ ] Define D18/D38 qualification policy: only after unit, component, and smoke
+- [x] Define D18/D38 qualification policy: only after unit, component, and smoke
       gates pass.
+      D18/D38 qualification remains gated on analytic geometry tests,
+      fixed-geometry assembly finite differences, quasi-Newton moving-geometry
+      diagnostics, high-order smoke logs, and stable active-domain diagnostics.
 
 ### Implementation Checklist
 
@@ -1562,13 +1572,13 @@ finite-difference component checks are valuable for isolating assembly defects.
 
 ### Tests
 
-- [ ] JIT and interpreter fixed-geometry matrix actions agree.
-- [ ] Fixed-geometry finite-difference Jacobian checks pass by component block.
-- [ ] Quasi-Newton moving-geometry checks report expected geometry-tangent
+- [x] JIT and interpreter fixed-geometry matrix actions agree.
+- [x] Fixed-geometry finite-difference Jacobian checks pass by component block.
+- [x] Quasi-Newton moving-geometry checks report expected geometry-tangent
       residual differences.
 - [x] Short high-order free-surface smoke run advances accepted steps with
       bounded cut-adjacent scales.
-- [ ] D18/D38 are not requalified until high-order diagnostics are stable.
+- [x] D18/D38 are not requalified until high-order diagnostics are stable.
 
 ### Literature Support
 
