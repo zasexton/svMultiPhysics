@@ -92,6 +92,65 @@ std::shared_ptr<Mesh> buildTwoQuadStripWithCutLeftCell()
     return system.fieldDofOffset(field) + dofs.front();
 }
 
+[[nodiscard]] GlobalIndex findEdge(const Mesh& mesh,
+                                   index_t first_vertex,
+                                   index_t second_vertex)
+{
+    const auto& base = mesh.local_mesh();
+    for (GlobalIndex edge = 0;
+         edge < static_cast<GlobalIndex>(base.n_edges());
+         ++edge) {
+        const auto vertices = base.edge_vertices(static_cast<index_t>(edge));
+        if ((vertices[0] == first_vertex && vertices[1] == second_vertex) ||
+            (vertices[0] == second_vertex && vertices[1] == first_vertex)) {
+            return edge;
+        }
+    }
+    return GlobalIndex{-1};
+}
+
+[[nodiscard]] GlobalIndex edgeDof(const systems::FESystem& system,
+                                  FieldId field,
+                                  GlobalIndex edge)
+{
+    const auto* entity = system.fieldDofHandler(field).getEntityDofMap();
+    EXPECT_NE(entity, nullptr);
+    if (entity == nullptr) {
+        return GlobalIndex{-1};
+    }
+    const auto dofs = entity->getEdgeDofs(edge);
+    EXPECT_EQ(dofs.size(), 1u);
+    if (dofs.size() != 1u) {
+        return GlobalIndex{-1};
+    }
+    return system.fieldDofOffset(field) + dofs.front();
+}
+
+[[nodiscard]] std::size_t expectInactiveEdgeDofsConstrained(
+    const systems::FESystem& system,
+    FieldId field,
+    const std::unordered_set<GlobalIndex>& active_support)
+{
+    const auto* entity = system.fieldDofHandler(field).getEntityDofMap();
+    EXPECT_NE(entity, nullptr);
+    if (entity == nullptr) {
+        return 0u;
+    }
+
+    std::size_t inactive_edge_dofs = 0u;
+    const auto offset = system.fieldDofOffset(field);
+    for (GlobalIndex edge = 0; edge < entity->numEdges(); ++edge) {
+        for (const auto local_dof : entity->getEdgeDofs(edge)) {
+            if (active_support.find(local_dof) != active_support.end()) {
+                continue;
+            }
+            ++inactive_edge_dofs;
+            EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
+        }
+    }
+    return inactive_edge_dofs;
+}
+
 } // namespace
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
@@ -261,7 +320,11 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
             Real{0.0},
             Real{0.0}));
 
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
     ASSERT_NO_THROW(system.setup());
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
 
     const auto& pressure_dofs = system.fieldDofHandler(pressure);
     const auto offset = system.fieldDofOffset(pressure);
@@ -285,6 +348,102 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
         EXPECT_TRUE(system.constraints().isConstrained(offset + local_dof));
     }
     EXPECT_GT(dry_only_dofs, 0u);
+
+    const auto shared_edge = findEdge(*mesh, 1, 4);
+    ASSERT_GE(shared_edge, 0);
+    EXPECT_FALSE(system.constraints().isConstrained(
+        edgeDof(system, pressure, shared_edge)));
+    EXPECT_EQ(expectInactiveEdgeDofsConstrained(system, pressure, active_support),
+              3u);
+
+    EXPECT_NE(log_output.find("active_support_edge_dofs=4"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_cell_dofs=1"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_edge_dofs=3"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_cell_dofs=1"), std::string::npos);
+    EXPECT_NE(log_output.find("constrained_owned_edge_dofs=3"), std::string::npos);
+    EXPECT_NE(log_output.find("constrained_owned_cell_dofs=1"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_face_dofs=0"), std::string::npos);
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     RetainedCutVolumeSupportKeepsSharedP2EdgeDofActive)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr int marker = 52;
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    const auto phi_handle =
+        MeshFields::get_field_handle(mesh->local_mesh(), EntityKind::Vertex, "phi");
+    auto* phi = MeshFields::field_data_as<real_t>(mesh->local_mesh(), phi_handle);
+    ASSERT_NE(phi, nullptr);
+    phi[2] = -1.0;
+    phi[5] = -1.0;
+
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/2);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0},
+            marker));
+
+    ASSERT_NO_THROW(system.setup());
+    const auto shared_edge = findEdge(*mesh, 1, 4);
+    ASSERT_GE(shared_edge, 0);
+    EXPECT_FALSE(system.constraints().isConstrained(
+        edgeDof(system, pressure, shared_edge)));
+
+    auto context = std::make_shared<assembly::CutIntegrationContext>();
+    assembly::CutCellAssemblyMetadata metadata{};
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.side = geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = Real{0.25};
+    geometry::CutQuadratureRule rule{};
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    rule.measure = Real{0.25};
+    rule.parent_measure = Real{1.0};
+    rule.volume_fraction = Real{0.25};
+    context->addGeneratedVolumeRule(marker, metadata, rule);
+    auto pruned_metadata = metadata;
+    pruned_metadata.cell = 1;
+    pruned_metadata.parent_entity = 1;
+    pruned_metadata.volume_fraction =
+        assembly::CutIntegrationContext::minGeneratedCutVolumeFraction() *
+        Real{0.5};
+    auto pruned_rule = rule;
+    pruned_rule.measure = pruned_metadata.volume_fraction;
+    pruned_rule.volume_fraction = pruned_metadata.volume_fraction;
+    context->addGeneratedVolumeRule(marker, pruned_metadata, pruned_rule);
+
+    system.setCutIntegrationContext(std::move(context));
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    EXPECT_FALSE(system.constraints().isConstrained(
+        edgeDof(system, pressure, shared_edge)));
+    const auto active_cell_dofs = system.fieldDofHandler(pressure).getCellDofs(0);
+    const std::unordered_set<GlobalIndex> active_support(
+        active_cell_dofs.begin(), active_cell_dofs.end());
+    EXPECT_EQ(expectInactiveEdgeDofsConstrained(system, pressure, active_support),
+              3u);
+    EXPECT_NE(log_output.find("support_mode=retained_cut_volume"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_edge_dofs=4"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_edge_dofs=3"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_cell_dofs=1"), std::string::npos);
 #endif
 }
 

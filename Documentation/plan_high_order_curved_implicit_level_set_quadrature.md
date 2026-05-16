@@ -827,30 +827,36 @@ Rationale: high-order pressure fields introduce edge, face, and cell-interior
 DOFs. Vertex-sign masking is not a valid support test for such DOFs. The current
 active-support direction is correct and should be preserved.
 
+Milestone status: active-side pressure support constraints now report support
+and constrained counts by vertex, edge, face, cell-interior, and unknown DOF
+entity. P2 quadrilateral pressure tests explicitly verify that an edge DOF on a
+retained wet cut cell remains unconstrained, while an edge DOF supported only by
+a pruned or inactive cell is constrained.
+
 ### Design Checklist
 
-- [ ] Define active pressure support from retained generated volume rules.
-- [ ] Define support tolerance for high-order small fractions.
-- [ ] Define behavior for pressure DOFs supported only by pruned slivers.
-- [ ] Define diagnostics for vertex, edge, face, and cell-interior pressure DOF
+- [x] Define active pressure support from retained generated volume rules.
+- [x] Define support tolerance for high-order small fractions.
+- [x] Define behavior for pressure DOFs supported only by pruned slivers.
+- [x] Define diagnostics for vertex, edge, face, and cell-interior pressure DOF
       support.
-- [ ] Define whether inactive support constraints depend on physical or
+- [x] Define whether inactive support constraints depend on physical or
       reference wet volume. Recommended: retained assembly support, with
       physical measure reported separately.
 
 ### Implementation Checklist
 
-- [ ] Audit pressure constraint code for all entity DOF types.
-- [ ] Ensure high-order generated volume metadata marks active cells correctly.
-- [ ] Rebuild constraints after every high-order cut-context refresh.
-- [ ] Add diagnostics split by entity dimension.
+- [x] Audit pressure constraint code for all entity DOF types.
+- [x] Ensure high-order generated volume metadata marks active cells correctly.
+- [x] Rebuild constraints after every high-order cut-context refresh.
+- [x] Add diagnostics split by entity dimension.
 - [ ] Ensure constrained dry rows receive valid diagonals in all backends.
 
 ### Tests
 
-- [ ] P2 pressure edge DOF on a wet cut cell remains unconstrained.
-- [ ] P2 pressure edge DOF with no active cell support is constrained.
-- [ ] Cell-interior pressure DOFs behave correctly in high-order cells.
+- [x] P2 pressure edge DOF on a wet cut cell remains unconstrained.
+- [x] P2 pressure edge DOF with no active cell support is constrained.
+- [x] Cell-interior pressure DOFs behave correctly in high-order cells.
 - [ ] No zero pressure rows remain in direct factorization diagnostics.
 
 ### Literature Support
@@ -1138,7 +1144,7 @@ behavior. High-order quadrature adds more points and more per-cell work.
 ### Phase 4: Stabilization And Pressure Support
 
 - [ ] Extend ghost penalties for higher-order spaces.
-- [ ] Validate pressure support constraints for high-order pressure DOFs.
+- [x] Validate pressure support constraints for high-order pressure DOFs.
 - [ ] Add small-cut conditioning tests.
 - [x] Add stabilization diagnostics.
 

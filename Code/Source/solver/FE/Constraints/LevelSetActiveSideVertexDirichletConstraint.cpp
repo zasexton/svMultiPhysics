@@ -89,6 +89,40 @@ namespace {
     return oss.str();
 }
 
+struct EntityDofSupportCounts {
+    std::size_t vertex{0u};
+    std::size_t edge{0u};
+    std::size_t face{0u};
+    std::size_t cell{0u};
+    std::size_t unknown{0u};
+};
+
+void incrementEntityDofCount(EntityDofSupportCounts& counts,
+                             const dofs::EntityDofMap& entity_map,
+                             GlobalIndex local_dof)
+{
+    const auto entity = entity_map.getDofEntity(local_dof);
+    if (!entity.has_value()) {
+        ++counts.unknown;
+        return;
+    }
+
+    switch (entity->kind) {
+    case dofs::EntityKind::Vertex:
+        ++counts.vertex;
+        break;
+    case dofs::EntityKind::Edge:
+        ++counts.edge;
+        break;
+    case dofs::EntityKind::Face:
+        ++counts.face;
+        break;
+    case dofs::EntityKind::Cell:
+        ++counts.cell;
+        break;
+    }
+}
+
 struct LevelSetVertexView {
     const Real* values{nullptr};
     std::size_t components{0};
@@ -330,6 +364,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::size_t inactive_sign_vertices_with_support = 0u;
     std::size_t active_sign_vertices_without_support = 0u;
     std::size_t constrained_dofs = 0u;
+    EntityDofSupportCounts active_support_by_entity;
+    EntityDofSupportCounts inactive_by_entity;
+    EntityDofSupportCounts constrained_owned_by_entity;
 
     for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto phi = level_set.values[
@@ -359,14 +396,19 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         if (has_active_dof_support[static_cast<std::size_t>(local_dof)] !=
             static_cast<unsigned char>(0)) {
             ++active_support_dofs;
+            incrementEntityDofCount(
+                active_support_by_entity, *entity_map, local_dof);
             continue;
         }
 
         inactive_dofs.push_back(local_dof);
+        incrementEntityDofCount(inactive_by_entity, *entity_map, local_dof);
         const GlobalIndex dof = offset + local_dof;
         if (owned.contains(dof)) {
             constraints.addDirichlet(dof, inactive_value_);
             ++constrained_dofs;
+            incrementEntityDofCount(
+                constrained_owned_by_entity, *entity_map, local_dof);
         }
     }
 
@@ -384,11 +426,26 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         << " active_support_vertices=" << active_support_vertices
         << " total_dofs=" << n_field_dofs
         << " active_support_dofs=" << active_support_dofs
+        << " active_support_vertex_dofs=" << active_support_by_entity.vertex
+        << " active_support_edge_dofs=" << active_support_by_entity.edge
+        << " active_support_face_dofs=" << active_support_by_entity.face
+        << " active_support_cell_dofs=" << active_support_by_entity.cell
+        << " active_support_unknown_dofs=" << active_support_by_entity.unknown
         << " active_sign_vertices_without_support=" << active_sign_vertices_without_support
         << " inactive_sign_vertices_with_support=" << inactive_sign_vertices_with_support
         << " inactive_vertices=" << inactive_vertices.size()
         << " inactive_dofs=" << inactive_dofs.size()
+        << " inactive_vertex_dofs=" << inactive_by_entity.vertex
+        << " inactive_edge_dofs=" << inactive_by_entity.edge
+        << " inactive_face_dofs=" << inactive_by_entity.face
+        << " inactive_cell_dofs=" << inactive_by_entity.cell
+        << " inactive_unknown_dofs=" << inactive_by_entity.unknown
         << " constrained_owned_dofs=" << constrained_dofs
+        << " constrained_owned_vertex_dofs=" << constrained_owned_by_entity.vertex
+        << " constrained_owned_edge_dofs=" << constrained_owned_by_entity.edge
+        << " constrained_owned_face_dofs=" << constrained_owned_by_entity.face
+        << " constrained_owned_cell_dofs=" << constrained_owned_by_entity.cell
+        << " constrained_owned_unknown_dofs=" << constrained_owned_by_entity.unknown
         << " inactive_vertex_runs=" << formatRuns(inactive_vertices)
         << " inactive_dof_runs=" << formatRuns(inactive_dofs);
     FE_LOG_INFO(oss.str());
