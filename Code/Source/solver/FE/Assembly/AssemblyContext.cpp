@@ -502,6 +502,18 @@ void AssemblyContext::configureFace(
     clearMovingDomainData();
 }
 
+void AssemblyContext::markEmbeddedBoundaryFace(GlobalIndex face_id,
+                                               LocalIndex local_face_id,
+                                               int boundary_marker) noexcept
+{
+    type_ = ContextType::BoundaryFace;
+    face_id_ = face_id;
+    local_face_id_ = local_face_id;
+    boundary_marker_ = boundary_marker;
+    interior_face_marker_ = -1;
+    clearCutVolumeDomain();
+}
+
 void AssemblyContext::clear()
 {
     cell_id_ = -1;

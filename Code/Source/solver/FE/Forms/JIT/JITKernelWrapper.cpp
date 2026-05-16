@@ -501,6 +501,10 @@ bool JITKernelWrapper::hasCell() const noexcept { return fallback_->hasCell(); }
 bool JITKernelWrapper::hasBoundaryFace() const noexcept { return fallback_->hasBoundaryFace(); }
 bool JITKernelWrapper::hasInteriorFace() const noexcept { return fallback_->hasInteriorFace(); }
 bool JITKernelWrapper::hasInterfaceFace() const noexcept { return fallback_->hasInterfaceFace(); }
+bool JITKernelWrapper::requiresTwoSidedInterfaceFace() const noexcept
+{
+    return fallback_->requiresTwoSidedInterfaceFace();
+}
 
 void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
                                    assembly::KernelOutput& output)

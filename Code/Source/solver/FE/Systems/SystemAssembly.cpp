@@ -1265,6 +1265,10 @@ assembly::AssemblyResult assembleOperator(
 #endif
     double ao_setup_end = AO_TP();
     double ao_cell_time = 0.0, ao_boundary_time = 0.0, ao_other_time = 0.0;
+    double ao_interior_time = 0.0;
+    double ao_interface_time = 0.0;
+    double ao_cut_volume_time = 0.0;
+    double ao_global_time = 0.0;
     double ao0;
 
     // Cell terms — fused multi-term assembly
@@ -1457,9 +1461,11 @@ assembly::AssemblyResult assembleOperator(
             }
         }
     }
+    ao_interior_time += AO_TP() - ao0;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     // Interface face terms (InterfaceMesh subset)
+    ao0 = AO_TP();
     if (request.assemble_interface_face_terms) {
         for (const auto& term : plan.interface_terms) {
             FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: interface-face term kernel");
@@ -1483,43 +1489,85 @@ assembly::AssemblyResult assembleOperator(
             assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset, row_scope);
             assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset, col_scope);
 
-            auto assemble_on_marker = [&](int marker) {
-                auto it = system.interface_meshes_.find(marker);
-                FE_THROW_IF(it == system.interface_meshes_.end() || !it->second, InvalidArgumentException,
-                            "assembleOperator: missing InterfaceMesh for interface marker " + std::to_string(marker));
-                const auto& iface_mesh = *it->second;
+            const auto* cut_context = system.cutIntegrationContext();
 
-                if (want_matrix) {
-                    auto r = assembler.assembleInterfaceFaces(
-                        mesh, iface_mesh, marker, *term.test_space, *term.trial_space, *term.kernel, *matrix_out,
-                        want_vector ? vector_out : nullptr);
-                    mergeAssemblyResult(total, r);
-                } else {
-                    assembly::DenseVectorView dummy_matrix(0);
-                    auto r = assembler.assembleInterfaceFaces(
-                        mesh, iface_mesh, marker, *term.test_space, *term.trial_space, *term.kernel, dummy_matrix,
-                        vector_out);
-                    mergeAssemblyResult(total, r);
+            std::unordered_set<int> generated_markers_assembled;
+            auto assemble_generated_on_marker = [&](int marker) -> bool {
+                if (cut_context == nullptr ||
+                    !cut_context->hasGeneratedInterfaceMarker(marker)) {
+                    return false;
                 }
+                if (!generated_markers_assembled.insert(marker).second) {
+                    return true;
+                }
+                auto r = assembler.assembleCutInterfaces(
+                    mesh,
+                    *cut_context,
+                    marker,
+                    *term.test_space,
+                    *term.trial_space,
+                    *term.kernel,
+                    want_matrix ? matrix_out : nullptr,
+                    want_vector ? vector_out : nullptr,
+                    want_matrix,
+                    want_vector);
+                mergeAssemblyResult(total, r);
+                return true;
+            };
+
+            auto assemble_on_marker = [&](int marker) {
+                bool assembled = false;
+                auto it = system.interface_meshes_.find(marker);
+                if (it != system.interface_meshes_.end() && it->second) {
+                    const auto& iface_mesh = *it->second;
+
+                    if (want_matrix) {
+                        auto r = assembler.assembleInterfaceFaces(
+                            mesh, iface_mesh, marker, *term.test_space, *term.trial_space, *term.kernel, *matrix_out,
+                            want_vector ? vector_out : nullptr);
+                        mergeAssemblyResult(total, r);
+                    } else {
+                        assembly::DenseVectorView dummy_matrix(0);
+                        auto r = assembler.assembleInterfaceFaces(
+                            mesh, iface_mesh, marker, *term.test_space, *term.trial_space, *term.kernel, dummy_matrix,
+                            vector_out);
+                        mergeAssemblyResult(total, r);
+                    }
+                    assembled = true;
+                }
+
+                assembled = assemble_generated_on_marker(marker) || assembled;
+                FE_THROW_IF(!assembled, InvalidArgumentException,
+                            "assembleOperator: missing InterfaceMesh or generated cut-interface rules for interface marker " +
+                                std::to_string(marker));
             };
 
             if (term.marker < 0) {
-                FE_THROW_IF(system.interface_meshes_.empty(), InvalidArgumentException,
-                            "assembleOperator: interface-face term requested for all interface markers, but no InterfaceMesh was registered");
+                bool assembled_any = false;
                 for (const auto& kv : system.interface_meshes_) {
                     if (!kv.second) {
                         continue;
                     }
                     assemble_on_marker(kv.first);
+                    assembled_any = true;
                 }
+                if (cut_context != nullptr) {
+                    for (const int marker : cut_context->generatedInterfaceMarkers()) {
+                        assembled_any = assemble_generated_on_marker(marker) || assembled_any;
+                    }
+                }
+                FE_THROW_IF(!assembled_any, InvalidArgumentException,
+                            "assembleOperator: interface-face term requested for all interface markers, but no InterfaceMesh or generated cut-interface rules were registered");
             } else {
                 assemble_on_marker(term.marker);
             }
         }
     }
+    ao_interface_time += AO_TP() - ao0;
 #endif
 
     // Cut-volume terms from generated level-set volume rules
+    ao0 = AO_TP();
     if (!plan.cut_volume_terms.empty()) {
         const auto* cut_context = system.cutIntegrationContext();
         FE_THROW_IF(cut_context == nullptr, InvalidArgumentException,
@@ -1572,8 +1620,10 @@ assembly::AssemblyResult assembleOperator(
             mergeAssemblyResult(total, r);
         }
     }
+    ao_cut_volume_time += AO_TP() - ao0;
 
     // Global (non-element-local) terms (e.g., contact)
+    ao0 = AO_TP();
     if (request.assemble_global_terms) {
         for (auto* kernel : plan.global_terms) {
             FE_CHECK_NOT_NULL(kernel, "assembleOperator: global term kernel");
@@ -1583,8 +1633,9 @@ assembly::AssemblyResult assembleOperator(
             mergeAssemblyResult(total, r);
         }
     }
+    ao_global_time += AO_TP() - ao0;
 
-    ao_other_time += AO_TP() - ao0;
+    ao_other_time = ao_interior_time + ao_interface_time + ao_cut_volume_time + ao_global_time;
 
     assembler.finalize(request.want_matrix ? matrix_out : nullptr,
                        request.want_vector ? vector_out : nullptr);
@@ -1594,15 +1645,19 @@ assembly::AssemblyResult assembleOperator(
         int rank = 0;
         int size = 1;
         const double ao_total = ao_cell_time + ao_boundary_time + ao_other_time;
-        std::array<double, 4> local_times{
+        std::array<double, 8> local_times{
             ao_total,
             ao_cell_time,
             ao_boundary_time,
-            ao_other_time
+            ao_other_time,
+            ao_interior_time,
+            ao_interface_time,
+            ao_cut_volume_time,
+            ao_global_time
         };
-        std::array<double, 4> min_times = local_times;
-        std::array<double, 4> max_times = local_times;
-        std::array<double, 4> sum_times = local_times;
+        std::array<double, 8> min_times = local_times;
+        std::array<double, 8> max_times = local_times;
+        std::array<double, 8> sum_times = local_times;
 #if FE_HAS_MPI
         int mpi_init = 0;
         MPI_Initialized(&mpi_init);
@@ -1625,27 +1680,37 @@ assembly::AssemblyResult assembleOperator(
             if (ao_total > 1e-7) {
                 std::fprintf(stderr,
                     "  === assembleOperator TIMING (rank 0, op='%s') ===\n"
-                    "    Total:              %9.6f s\n"
-                    "    Cell terms:         %9.6f s  (%5.1f%%)\n"
-                    "    Boundary terms:     %9.6f s  (%5.1f%%)\n"
-                    "    Other (DG+global):  %9.6f s  (%5.1f%%)\n",
+                        "    Total:              %9.6f s\n"
+                        "    Cell terms:         %9.6f s  (%5.1f%%)\n"
+                        "    Boundary terms:     %9.6f s  (%5.1f%%)\n"
+                        "    Other (DG+global):  %9.6f s  (%5.1f%%)\n"
+                        "      Interior faces:   %9.6f s  (%5.1f%%)\n"
+                        "      Interface faces:  %9.6f s  (%5.1f%%)\n"
+                        "      Cut volumes:      %9.6f s  (%5.1f%%)\n"
+                        "      Global terms:     %9.6f s  (%5.1f%%)\n",
                     request.op.c_str(),
                     ao_total,
                     ao_cell_time,     100.0 * ao_cell_time     / ao_total,
                     ao_boundary_time, 100.0 * ao_boundary_time / ao_total,
-                    ao_other_time,    100.0 * ao_other_time    / ao_total);
+                    ao_other_time,    100.0 * ao_other_time    / ao_total,
+                    ao_interior_time, 100.0 * ao_interior_time / ao_total,
+                    ao_interface_time,100.0 * ao_interface_time/ ao_total,
+                    ao_cut_volume_time,100.0 * ao_cut_volume_time/ ao_total,
+                    ao_global_time,   100.0 * ao_global_time   / ao_total);
                 if (size > 1) {
                     std::fprintf(stderr,
                         "    MPI ranks:          %d\n"
                         "    Rank min/mean/max total:    %9.6f / %9.6f / %9.6f s\n"
                         "    Rank min/mean/max cell:     %9.6f / %9.6f / %9.6f s\n"
                         "    Rank min/mean/max boundary: %9.6f / %9.6f / %9.6f s\n"
-                        "    Rank min/mean/max other:    %9.6f / %9.6f / %9.6f s\n",
+                        "    Rank min/mean/max other:    %9.6f / %9.6f / %9.6f s\n"
+                        "    Rank min/mean/max cut-vol:  %9.6f / %9.6f / %9.6f s\n",
                         size,
                         min_times[0], sum_times[0] / static_cast<double>(size), max_times[0],
                         min_times[1], sum_times[1] / static_cast<double>(size), max_times[1],
                         min_times[2], sum_times[2] / static_cast<double>(size), max_times[2],
-                        min_times[3], sum_times[3] / static_cast<double>(size), max_times[3]);
+                        min_times[3], sum_times[3] / static_cast<double>(size), max_times[3],
+                        min_times[6], sum_times[6] / static_cast<double>(size), max_times[6]);
                 }
                 std::fprintf(stderr,
                     "  ================================================\n");

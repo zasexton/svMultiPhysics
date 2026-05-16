@@ -685,6 +685,16 @@ public:
      */
     [[nodiscard]] virtual bool hasInterfaceFace() const noexcept { return false; }
 
+    /**
+     * @brief True when interface-face evaluation needs distinct minus/plus contexts.
+     *
+     * Generated level-set cut interfaces are one-sided embedded boundaries. They
+     * can evaluate unrestricted or minus-side `dI` terms on the parent cell, but
+     * cannot represent plus-side, jump, or average semantics without an explicit
+     * two-sided interface topology.
+     */
+    [[nodiscard]] virtual bool requiresTwoSidedInterfaceFace() const noexcept { return false; }
+
     // =========================================================================
     // Query
     // =========================================================================

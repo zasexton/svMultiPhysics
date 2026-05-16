@@ -44,10 +44,21 @@ level-set curvature helpers, and cut-cell metadata, then install
 Navier-Stokes-specific pressure-jump, surface-tension, kinematic, and
 stabilization terms on the resulting interface domain.
 
+Generated level-set cut rules are reference-frame FE data. Assemblers map the
+retained cut-volume and cut-interface quadrature through the parent-cell
+geometry before evaluating physical kernels. Application wet-volume diagnostics
+may additionally integrate those reference rules against the parent-cell
+Jacobian to report a physical wet measure, but that diagnostic mapping does not
+change the FE cut-rule contract.
+
 The application level-set equation translator is an input adapter. It preserves
 legacy XML names, builds FE options, and calls
 `FE::level_set::installLevelSetTransport()`. It must not contain reusable
 transport, volume, reinitialization, diagnostics, or restart algorithms.
+The application also owns the optional nearest-active-vertex velocity extension
+for prescribed-data level-set advection; reusable PDE-based velocity-extension
+algorithms should be added to `FE::level_set` before being exposed as general
+transport services.
 
 ## Compatibility
 

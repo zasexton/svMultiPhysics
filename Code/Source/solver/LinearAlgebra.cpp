@@ -33,18 +33,88 @@
 #include "FsilsLinearAlgebra.h"
 #include "TrilinosLinearAlgebra.h"
 
+#include <stdexcept>
+
+namespace {
+
+class EigenOopOnlyLinearAlgebra final : public LinearAlgebra {
+ public:
+  EigenOopOnlyLinearAlgebra()
+  {
+    interface_type = consts::LinearAlgebraType::eigen;
+    assembly_type = consts::LinearAlgebraType::none;
+    preconditioner_type = consts::PreconditionerType::PREC_NONE;
+  }
+
+  void alloc(ComMod&, eqType&) override { throwLegacyUse(); }
+
+  void assemble(ComMod&,
+                const int,
+                const Vector<int>&,
+                const Array3<double>&,
+                const Array<double>&) override
+  {
+    throwLegacyUse();
+  }
+
+  void check_options(const consts::PreconditionerType prec_cond_type,
+                     const consts::LinearAlgebraType assembly_type_in) override
+  {
+    if (prec_cond_type != consts::PreconditionerType::PREC_NONE ||
+        assembly_type_in != consts::LinearAlgebraType::none) {
+      throw std::runtime_error(
+          "[svMultiPhysics] Eigen linear algebra is available only for the new OOP solver "
+          "and requires <Preconditioner>none</Preconditioner> with no legacy assembly override.");
+    }
+  }
+
+  void initialize(ComMod&, eqType&) override { throwLegacyUse(); }
+
+  void set_assembly(consts::LinearAlgebraType assembly_type_in) override
+  {
+    if (assembly_type_in != consts::LinearAlgebraType::none) {
+      throw std::runtime_error(
+          "[svMultiPhysics] Eigen linear algebra cannot be used as a legacy assembly backend.");
+    }
+  }
+
+  void set_preconditioner(consts::PreconditionerType prec_type) override
+  {
+    if (prec_type != consts::PreconditionerType::PREC_NONE) {
+      throw std::runtime_error(
+          "[svMultiPhysics] Eigen linear algebra requires <Preconditioner>none</Preconditioner>.");
+    }
+  }
+
+  void solve(ComMod&, eqType&, const Vector<int>&, const Vector<double>&) override
+  {
+    throwLegacyUse();
+  }
+
+ private:
+  [[noreturn]] static void throwLegacyUse()
+  {
+    throw std::runtime_error(
+        "[svMultiPhysics] Linear_algebra type='eigen' is supported by the new OOP solver only.");
+  }
+};
+
+} // namespace
+
 const std::map<std::string, consts::LinearAlgebraType> LinearAlgebra::name_to_type = {
   {"none", consts::LinearAlgebraType::none},
   {"fsils", consts::LinearAlgebraType::fsils},
   {"petsc", consts::LinearAlgebraType::petsc},
-  {"trilinos", consts::LinearAlgebraType::trilinos}
+  {"trilinos", consts::LinearAlgebraType::trilinos},
+  {"eigen", consts::LinearAlgebraType::eigen}
 };
 
 const std::map<consts::LinearAlgebraType, std::string> LinearAlgebra::type_to_name = {
   {consts::LinearAlgebraType::none, "none"},
   {consts::LinearAlgebraType::fsils, "fsils"},
   {consts::LinearAlgebraType::petsc, "petsc"},
-  {consts::LinearAlgebraType::trilinos, "trilinos"}
+  {consts::LinearAlgebraType::trilinos, "trilinos"},
+  {consts::LinearAlgebraType::eigen, "eigen"}
 };
 
 /// @brief Check that equation physics is compatible with LinearAlgebra type.
@@ -85,8 +155,15 @@ LinearAlgebra* LinearAlgebraFactory::create_interface(consts::LinearAlgebraType 
     case consts::LinearAlgebraType::trilinos:
       interface = new TrilinosLinearAlgebra();
     break;
+
+    case consts::LinearAlgebraType::eigen:
+      interface = new EigenOopOnlyLinearAlgebra();
+    break;
+
+    case consts::LinearAlgebraType::none:
+      interface = nullptr;
+    break;
   }
 
   return interface;
 }
-

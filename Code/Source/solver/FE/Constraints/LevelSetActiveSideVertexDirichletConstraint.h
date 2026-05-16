@@ -33,7 +33,8 @@ public:
                                                 std::string level_set_field_name,
                                                 LevelSetConstraintSide active_side,
                                                 Real isovalue = Real{0.0},
-                                                Real inactive_value = Real{0.0});
+                                                Real inactive_value = Real{0.0},
+                                                int interface_marker = -1);
 
     void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
@@ -54,6 +55,7 @@ private:
     LevelSetConstraintSide active_side_{LevelSetConstraintSide::Negative};
     Real isovalue_{Real{0.0}};
     Real inactive_value_{Real{0.0}};
+    int interface_marker_{-1};
 };
 
 } // namespace constraints

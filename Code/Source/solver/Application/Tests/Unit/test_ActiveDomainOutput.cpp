@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Core/ActiveDomainOutput.h"
+#include "FE/Assembly/MeshAccess.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -39,6 +40,28 @@ std::shared_ptr<svmp::Mesh> makeTwoQuadCellMesh()
       cell2vertex_offsets,
       cell2vertex,
       {quad, quad});
+  base->finalize();
+  return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<svmp::Mesh> makeSingleQuadCellMesh(
+    const std::vector<svmp::real_t>& x_ref)
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+  const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+  svmp::CellShape quad{};
+  quad.family = svmp::CellFamily::Quad;
+  quad.num_corners = 4;
+  quad.order = 1;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {quad});
   base->finalize();
   return svmp::create_mesh(std::move(base));
 }
@@ -170,3 +193,88 @@ TEST(ActiveDomainOutput, TracksWetVolumeDriftAcrossAcceptedSteps)
   EXPECT_DOUBLE_EQ(zero_relative.wet_volume_drift, 0.25);
   EXPECT_DOUBLE_EQ(zero_relative.relative_wet_volume_drift, 0.0);
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+
+TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      2.0, 0.0,
+      2.0, 3.0,
+      0.0, 3.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule cut_rule;
+  cut_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  cut_rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  cut_rule.measure = 2.0;
+  cut_rule.parent_measure = 4.0;
+  cut_rule.volume_fraction = 0.5;
+  cut_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  cut_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  cut_rule.provenance.parent_entity = 0;
+  cut_rule.points.push_back(
+      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &cut_rule,
+  };
+  const auto summary =
+      application::core::collectCutVolumeMeasures(mesh_access, rules);
+
+  EXPECT_EQ(summary.rule_count, 1u);
+  EXPECT_EQ(summary.physical_rule_count, 1u);
+  EXPECT_EQ(summary.skipped_physical_rule_count, 0u);
+  EXPECT_NEAR(summary.reference_measure, 2.0, 1.0e-12);
+  EXPECT_NEAR(summary.physical_measure, 3.0, 1.0e-12);
+
+  const auto wet_fraction =
+      application::core::collectWetVolumeFractions(mesh->n_cells(), rules);
+  ASSERT_EQ(wet_fraction.size(), 1u);
+  EXPECT_DOUBLE_EQ(wet_fraction[0], 0.5);
+}
+
+TEST(ActiveDomainOutput, CollectsPhysicalFullCellMeasureOnDistortedQuad)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      2.0, 0.0,
+      2.5, 3.0,
+      0.0, 2.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule full_rule;
+  full_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  full_rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  full_rule.measure = 4.0;
+  full_rule.parent_measure = 4.0;
+  full_rule.volume_fraction = 1.0;
+  full_rule.full_cell_equivalent = true;
+  full_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  full_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  full_rule.provenance.parent_entity = 0;
+  full_rule.points.push_back(
+      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 4.0});
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
+      &full_rule,
+  };
+  const auto summary =
+      application::core::collectCutVolumeMeasures(mesh_access, rules);
+
+  EXPECT_EQ(summary.rule_count, 1u);
+  EXPECT_EQ(summary.physical_rule_count, 1u);
+  EXPECT_EQ(summary.skipped_physical_rule_count, 0u);
+  EXPECT_NEAR(summary.reference_measure, 4.0, 1.0e-12);
+  EXPECT_NEAR(summary.physical_measure, 5.5, 1.0e-12);
+
+  const auto wet_fraction =
+      application::core::collectWetVolumeFractions(mesh->n_cells(), rules);
+  ASSERT_EQ(wet_fraction.size(), 1u);
+  EXPECT_DOUBLE_EQ(wet_fraction[0], 1.0);
+}
+
+#endif

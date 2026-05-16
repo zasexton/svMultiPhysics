@@ -511,11 +511,11 @@ enum class LinearAlgebraType {
   none,
   fsils,
   petsc,
-  trilinos
+  trilinos,
+  eigen
 };
 
 
 };
 
 #endif
-

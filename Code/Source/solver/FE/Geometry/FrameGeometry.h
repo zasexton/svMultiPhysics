@@ -119,7 +119,9 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     LocalIndex local_face_id,
     ElementType face_type,
     const quadrature::QuadratureRule& quad_rule,
-    std::span<const LocalIndex> align_facet_to_reference = {});
+    std::span<const LocalIndex> align_facet_to_reference = {},
+    bool compute_surface_jacobians = true,
+    bool compute_mean_curvatures = true);
 
 [[nodiscard]] FaceGeometryData evaluateFaceFrame(
     ElementType cell_type,
@@ -127,7 +129,9 @@ toGeometryNodes(std::span<const Point3D> coordinates);
     ElementType face_type,
     const quadrature::QuadratureRule& quad_rule,
     std::span<const Point3D> coordinates,
-    std::span<const LocalIndex> align_facet_to_reference = {});
+    std::span<const LocalIndex> align_facet_to_reference = {},
+    bool compute_surface_jacobians = true,
+    bool compute_mean_curvatures = true);
 
 [[nodiscard]] Matrix3x3 configurationTransform(
     const Matrix3x3& current_jacobian,

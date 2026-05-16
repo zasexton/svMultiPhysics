@@ -7,6 +7,7 @@
 
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 
+#include "Assembly/CutIntegrationContext.h"
 #include "Dofs/EntityDofMap.h"
 #include "Core/Logger.h"
 #include "Spaces/FunctionSpace.h"
@@ -45,6 +46,14 @@ namespace {
     LevelSetConstraintSide side) noexcept
 {
     return side == LevelSetConstraintSide::Negative ? phi < isovalue : phi > isovalue;
+}
+
+[[nodiscard]] geometry::CutIntegrationSide toCutIntegrationSide(
+    LevelSetConstraintSide side) noexcept
+{
+    return side == LevelSetConstraintSide::Negative
+               ? geometry::CutIntegrationSide::Negative
+               : geometry::CutIntegrationSide::Positive;
 }
 
 [[nodiscard]] std::string formatRuns(const std::vector<GlobalIndex>& values,
@@ -149,12 +158,14 @@ LevelSetActiveSideVertexDirichletConstraint::
                                                 std::string level_set_field_name,
                                                 LevelSetConstraintSide active_side,
                                                 Real isovalue,
-                                                Real inactive_value)
+                                                Real inactive_value,
+                                                int interface_marker)
     : field_(field)
     , level_set_field_name_(std::move(level_set_field_name))
     , active_side_(active_side)
     , isovalue_(isovalue)
     , inactive_value_(inactive_value)
+    , interface_marker_(interface_marker)
 {
     if (field_ == INVALID_FIELD_ID) {
         throw std::invalid_argument(
@@ -203,39 +214,24 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::vector<unsigned char> has_active_dof_support(
         static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
     std::size_t active_support_cells = 0u;
-    for (GlobalIndex cell = 0;
-         cell < static_cast<GlobalIndex>(mesh.n_cells());
-         ++cell) {
-        const auto [vertices, count] =
-            mesh.cell_vertices_span(static_cast<index_t>(cell));
-        if (vertices == nullptr || count == 0u) {
-            continue;
+    const char* support_mode = "cell_patch";
+    std::vector<unsigned char> active_cell_seen(
+        mesh.n_cells(), static_cast<unsigned char>(0));
+    const auto mark_cell_active = [&](GlobalIndex cell) {
+        if (cell < 0 || static_cast<std::size_t>(cell) >= mesh.n_cells()) {
+            std::ostringstream oss;
+            oss << "LevelSetActiveSideVertexDirichletConstraint: active support references cell "
+                << cell << " outside the mesh";
+            throw std::runtime_error(oss.str());
         }
-
-        bool cell_has_active_measure = false;
-        for (std::size_t i = 0; i < count; ++i) {
-            const auto vertex = static_cast<GlobalIndex>(vertices[i]);
-            if (vertex < 0 ||
-                static_cast<std::size_t>(vertex) >= level_set.entity_count) {
-                std::ostringstream oss;
-                oss << "LevelSetActiveSideVertexDirichletConstraint: cell "
-                    << cell << " references vertex " << vertex
-                    << " outside level-set field '" << level_set_field_name_
-                    << "'";
-                throw std::runtime_error(oss.str());
-            }
-            const auto phi = level_set.values[
-                static_cast<std::size_t>(vertex) * level_set.components];
-            if (hasPositiveActiveSideMeasure(phi, isovalue_, active_side_)) {
-                cell_has_active_measure = true;
-                break;
-            }
+        if (active_cell_seen[static_cast<std::size_t>(cell)] !=
+            static_cast<unsigned char>(0)) {
+            return;
         }
-        if (!cell_has_active_measure) {
-            continue;
-        }
-
+        active_cell_seen[static_cast<std::size_t>(cell)] =
+            static_cast<unsigned char>(1);
         ++active_support_cells;
+
         for (const auto local_dof : dh.getCellDofs(cell)) {
             if (local_dof < 0 || local_dof >= n_field_dofs) {
                 std::ostringstream oss;
@@ -247,11 +243,71 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             has_active_dof_support[static_cast<std::size_t>(local_dof)] =
                 static_cast<unsigned char>(1);
         }
+
+        const auto [vertices, count] =
+            mesh.cell_vertices_span(static_cast<index_t>(cell));
+        if (vertices == nullptr || count == 0u) {
+            return;
+        }
         for (std::size_t i = 0; i < count; ++i) {
             const auto vertex = static_cast<GlobalIndex>(vertices[i]);
             if (vertex >= 0 && vertex < n_vertices) {
                 has_active_support[static_cast<std::size_t>(vertex)] =
                     static_cast<unsigned char>(1);
+            }
+        }
+    };
+
+    const auto* cut_context = system.cutIntegrationContext();
+    if (interface_marker_ >= 0 && cut_context != nullptr &&
+        cut_context->hasGeneratedVolumeMarker(interface_marker_)) {
+        support_mode = "retained_cut_volume";
+        const auto active_rule_indices =
+            cut_context->generatedVolumeRuleIndicesForMarkerAndSide(
+                interface_marker_,
+                toCutIntegrationSide(active_side_));
+        const auto& metadata = cut_context->metadata();
+        for (const auto index : active_rule_indices) {
+            if (index >= metadata.size()) {
+                continue;
+            }
+            const auto& rule_metadata = metadata[index];
+            const auto cell = rule_metadata.parent_entity >= 0
+                                  ? rule_metadata.parent_entity
+                                  : rule_metadata.cell;
+            mark_cell_active(static_cast<GlobalIndex>(cell));
+        }
+    } else {
+        for (GlobalIndex cell = 0;
+             cell < static_cast<GlobalIndex>(mesh.n_cells());
+             ++cell) {
+            const auto [vertices, count] =
+                mesh.cell_vertices_span(static_cast<index_t>(cell));
+            if (vertices == nullptr || count == 0u) {
+                continue;
+            }
+
+            bool cell_has_active_measure = false;
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto vertex = static_cast<GlobalIndex>(vertices[i]);
+                if (vertex < 0 ||
+                    static_cast<std::size_t>(vertex) >= level_set.entity_count) {
+                    std::ostringstream oss;
+                    oss << "LevelSetActiveSideVertexDirichletConstraint: cell "
+                        << cell << " references vertex " << vertex
+                        << " outside level-set field '" << level_set_field_name_
+                        << "'";
+                    throw std::runtime_error(oss.str());
+                }
+                const auto phi = level_set.values[
+                    static_cast<std::size_t>(vertex) * level_set.components];
+                if (hasPositiveActiveSideMeasure(phi, isovalue_, active_side_)) {
+                    cell_has_active_measure = true;
+                    break;
+                }
+            }
+            if (cell_has_active_measure) {
+                mark_cell_active(cell);
             }
         }
     }
@@ -261,6 +317,7 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::vector<unsigned char> has_active_dof_support(
         static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
     std::size_t active_support_cells = 0u;
+    const char* support_mode = "cell_patch";
 #endif
 
     std::vector<GlobalIndex> inactive_vertices;
@@ -319,7 +376,8 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         << " level_set_field='" << level_set_field_name_ << "'"
         << " active_side=" << sideName(active_side_)
         << " isovalue=" << isovalue_
-        << " support_mode=cell_patch"
+        << " support_mode=" << support_mode
+        << " interface_marker=" << interface_marker_
         << " total_vertices=" << n_vertices
         << " active_sign_vertices=" << active_sign_vertices
         << " active_support_cells=" << active_support_cells

@@ -1491,58 +1491,75 @@ std::size_t KernelIR::optimize()
         root = cse_remap[root];
     }
 
-    // Pass 3: Dead code elimination.
-    // Mark reachable ops from root, then compact.
+    // Pass 3: Dead code elimination plus post-order restoration.
+    //
+    // Earlier rewrites may append helper ops or CSE-remap a parent to an older
+    // equivalent subtree.  Codegen and hashing expect children to appear before
+    // parents, so compact reachable ops in DFS post-order rather than preserving
+    // the old index order.
     const std::size_t n = ops.size();
-    std::vector<bool> reachable(n, false);
-    {
-        // BFS/DFS from root
-        std::vector<std::uint32_t> stack;
-        stack.push_back(root);
-        while (!stack.empty()) {
-            const auto idx = stack.back();
-            stack.pop_back();
-            if (idx >= n || reachable[idx]) continue;
-            reachable[idx] = true;
-            const auto& op = ops[idx];
-            for (std::uint32_t c = 0; c < op.child_count; ++c) {
-                const auto child = children[static_cast<std::size_t>(op.first_child) + c];
-                if (!reachable[child]) {
-                    stack.push_back(child);
-                }
+    FE_THROW_IF(root >= n, InvalidArgumentException,
+                "KernelIR::optimize: root index out of range");
+
+    std::vector<std::uint32_t> order;
+    order.reserve(n);
+    std::vector<std::uint8_t> state(n, 0);
+
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> dfs_stack;
+    dfs_stack.push_back({root, 0});
+    state[root] = 1;
+    while (!dfs_stack.empty()) {
+        auto& [node, next_child] = dfs_stack.back();
+        const auto& node_op = ops[node];
+        if (next_child < node_op.child_count) {
+            const auto child =
+                children[static_cast<std::size_t>(node_op.first_child) + next_child];
+            ++next_child;
+            FE_THROW_IF(child >= n, InvalidArgumentException,
+                        "KernelIR::optimize: child index out of range");
+            FE_THROW_IF(state[child] == 1, InvalidArgumentException,
+                        "KernelIR::optimize: cyclic child reference");
+            if (state[child] == 0) {
+                state[child] = 1;
+                dfs_stack.push_back({child, 0});
             }
+        } else {
+            state[node] = 2;
+            order.push_back(node);
+            dfs_stack.pop_back();
         }
     }
 
-    // Count reachable ops
-    std::size_t live_count = 0;
-    for (std::size_t i = 0; i < n; ++i) {
-        if (reachable[i]) ++live_count;
+    bool already_post_order = order.size() == n;
+    if (already_post_order) {
+        for (std::size_t i = 0; i < order.size(); ++i) {
+            if (order[i] != i) {
+                already_post_order = false;
+                break;
+            }
+        }
+    }
+    if (already_post_order) {
+        return 0;
     }
 
-    if (live_count == n) {
-        return 0; // nothing eliminated
-    }
-
-    // Build remapping: old index → new index
     std::vector<std::uint32_t> remap(n, UINT32_MAX);
     std::vector<KernelIROp> new_ops;
-    new_ops.reserve(live_count);
+    new_ops.reserve(order.size());
     std::vector<std::uint32_t> new_children;
     new_children.reserve(children.size());
 
-    for (std::size_t i = 0; i < n; ++i) {
-        if (!reachable[i]) continue;
-        const auto& old_op = ops[i];
-        const auto new_idx = static_cast<std::uint32_t>(new_ops.size());
-        remap[i] = new_idx;
-
+    for (const auto old_idx : order) {
+        remap[old_idx] = static_cast<std::uint32_t>(new_ops.size());
+        const auto& old_op = ops[old_idx];
         KernelIROp new_op = old_op;
         new_op.first_child = static_cast<std::uint32_t>(new_children.size());
         for (std::uint32_t c = 0; c < old_op.child_count; ++c) {
             const auto old_child = children[static_cast<std::size_t>(old_op.first_child) + c];
-            const auto remapped = remap[old_child];
-            new_children.push_back(remapped);
+            const auto mapped_child = remap[old_child];
+            FE_THROW_IF(mapped_child == UINT32_MAX, InvalidArgumentException,
+                        "KernelIR::optimize: child was not emitted before parent");
+            new_children.push_back(mapped_child);
         }
         new_ops.push_back(new_op);
     }
@@ -1551,7 +1568,7 @@ std::size_t KernelIR::optimize()
     ops = std::move(new_ops);
     children = std::move(new_children);
 
-    return original_count - live_count;
+    return original_count - order.size();
 }
 
 std::vector<std::uint32_t> KernelIR::subtreeCosts() const

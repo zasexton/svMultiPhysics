@@ -59,6 +59,7 @@
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "FE/Assembly/MeshAccess.h"
+#  include "Mesh/Fields/MeshFields.h"
 #  include "Mesh/Mesh.h"
 #  include "Mesh/Topology/CellShape.h"
 #endif
@@ -97,6 +98,25 @@ bool containsExprType(const FormExpr& expr, FormExprType target)
     return expr.isValid() && containsExprType(expr.node(), target);
 }
 
+bool containsFieldExprType(const FormExprNode* node,
+                           FormExprType target,
+                           FE::FieldId field)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == target && node->fieldId().has_value() &&
+        *node->fieldId() == field) {
+        return true;
+    }
+    for (const auto* child : node->children()) {
+        if (containsFieldExprType(child, target, field)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool formulationRecordsContain(const FE::systems::FESystem& system, FormExprType target)
 {
     for (const auto& record : system.formulationRecords()) {
@@ -106,6 +126,24 @@ bool formulationRecordsContain(const FE::systems::FESystem& system, FormExprType
         for (const auto& [block, expr] : record.block_residual_exprs) {
             (void)block;
             if (containsExprType(expr.get(), target)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool formulationRecordsContainFieldExprType(const FE::systems::FESystem& system,
+                                            FormExprType target,
+                                            FE::FieldId field)
+{
+    for (const auto& record : system.formulationRecords()) {
+        if (containsFieldExprType(record.residual_expr.get(), target, field)) {
+            return true;
+        }
+        for (const auto& [block, expr] : record.block_residual_exprs) {
+            (void)block;
+            if (containsFieldExprType(expr.get(), target, field)) {
                 return true;
             }
         }
@@ -991,6 +1029,82 @@ TEST(MovingDomainPhysics, NavierStokesALEDisabledDoesNotConsumeMovingDomainTermi
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CurrentNormal));
 }
 
+TEST(MovingDomainPhysics, NavierStokesBodyForceFieldRegistersPrescribedSource)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.body_force_field_name = "ManufacturedSource";
+    opts.enable_vms = true;
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    const auto source = system.findFieldByName("ManufacturedSource");
+    ASSERT_NE(source, FE::INVALID_FIELD_ID);
+    EXPECT_EQ(system.fieldRecord(source).source_kind,
+              FE::systems::FieldSourceKind::PrescribedData);
+    EXPECT_TRUE(formulationRecordsContainFieldExprType(
+        system,
+        FormExprType::StateField,
+        source));
+}
+
+TEST(MovingDomainPhysics, PrescribedBodyForceFieldSyncsFromMeshPointData)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = makeRegistryQuadMesh();
+    const auto handle = MeshFields::attach_field(
+        mesh->local_mesh(),
+        EntityKind::Vertex,
+        "ManufacturedSource",
+        FieldScalarType::Float64,
+        2);
+    auto* values = MeshFields::field_data_as<real_t>(mesh->local_mesh(), handle);
+    ASSERT_NE(values, nullptr);
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        values[2u * vertex] = static_cast<real_t>(1.0 + vertex);
+        values[2u * vertex + 1u] = static_cast<real_t>(10.0 + vertex);
+    }
+
+    auto u_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space =
+        FE::spaces::SpaceFactory::create_h1(FE::ElementType::Quad4, /*order=*/1);
+    auto opts = baseNavierStokesOptions();
+    opts.body_force_field_name = "ManufacturedSource";
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    ASSERT_NO_THROW(system.setup());
+
+    const auto source = system.findFieldByName("ManufacturedSource");
+    ASSERT_NE(source, FE::INVALID_FIELD_ID);
+    EXPECT_GT(system.syncPrescribedVertexFieldsFromMeshFields(), 0u);
+
+    const auto coefficients = system.prescribedFieldCoefficients(source);
+    const auto* entity_map = system.fieldDofHandler(source).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    for (FE::GlobalIndex vertex = 0;
+         vertex < static_cast<FE::GlobalIndex>(mesh->n_vertices());
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_GE(dofs.size(), 2u);
+        EXPECT_DOUBLE_EQ(coefficients[static_cast<std::size_t>(dofs[0])],
+                         1.0 + static_cast<double>(vertex));
+        EXPECT_DOUBLE_EQ(coefficients[static_cast<std::size_t>(dofs[1])],
+                         10.0 + static_cast<double>(vertex));
+    }
+#endif
+}
+
 TEST(MovingDomainPhysics, MovingMeshTangentPathDefaultsToSymbolicRequired)
 {
     EXPECT_EQ(mm::HarmonicMeshMotionOptions{}.tangent_path,
@@ -1287,6 +1401,8 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
     constexpr FE::Real fitted_middle_y = -0.75;
     constexpr FE::Real external_pressure = 1.25;
     constexpr FE::Real expected_surface_length = 2.0;
+    constexpr FE::Real expected_reference_surface_length = 4.0;
+    constexpr FE::Real reference_to_physical_surface_scale = 0.5;
 
     auto scalar_space = std::make_shared<FE::spaces::H1Space>(
         FE::ElementType::Quad4,
@@ -1424,8 +1540,14 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
     ASSERT_TRUE(generated.success) << generated.diagnostic;
     EXPECT_EQ(generated.interface_marker, interface_marker);
     EXPECT_EQ(generated.summary.active_fragment_count, 2u);
-    EXPECT_NEAR(generated.summary.measure, expected_surface_length, 1.0e-12);
-    EXPECT_NEAR(external_pressure * generated.summary.measure,
+    EXPECT_NEAR(generated.summary.measure,
+                expected_reference_surface_length,
+                1.0e-12);
+    EXPECT_NEAR(reference_to_physical_surface_scale * generated.summary.measure,
+                expected_surface_length,
+                1.0e-12);
+    EXPECT_NEAR(external_pressure * reference_to_physical_surface_scale *
+                    generated.summary.measure,
                 external_pressure * expected_surface_length,
                 1.0e-12);
 
@@ -1433,7 +1555,10 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
         if (!fragment.active()) {
             continue;
         }
-        EXPECT_NEAR(fragment.measure, 1.0, 1.0e-12);
+        EXPECT_NEAR(fragment.measure, 2.0, 1.0e-12);
+        EXPECT_NEAR(reference_to_physical_surface_scale * fragment.measure,
+                    1.0,
+                    1.0e-12);
         EXPECT_NEAR(fragment.normal[0], 0.0, 1.0e-12);
         EXPECT_NEAR(fragment.normal[1], 1.0, 1.0e-12);
         EXPECT_NEAR(fragment.normal[2], 0.0, 1.0e-12);
@@ -1450,6 +1575,7 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
             .interface_marker = interface_marker,
             .level_set_field_name = "phi",
             .generated_interface_domain_id = "flat_static_surface",
+            .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
             .external_pressure = external_pressure,
         });
     ns::IncompressibleNavierStokesVMSModule unfitted_module(
@@ -1459,7 +1585,7 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
     unfitted_module.registerOn(unfitted_system);
     EXPECT_TRUE(formulationRecordsContain(unfitted_system,
                                           FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContain(unfitted_system, FormExprType::Gradient));
+    EXPECT_TRUE(formulationRecordsContain(unfitted_system, FormExprType::Normal));
     EXPECT_TRUE(formulationRecordsContainInterfaceMarker(unfitted_system,
                                                         interface_marker));
 #endif
@@ -2014,8 +2140,11 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesLevelSetInterfaceGe
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .interface_marker = interface_marker,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         .surface_tension = 0.25,
+        .curvature = 2.0,
+        .use_level_set_curvature = false,
     });
 
     FE::systems::FESystem system(mesh);
@@ -2027,10 +2156,72 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesLevelSetInterfaceGe
     });
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
     module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
 
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
-    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+    EXPECT_EQ(log_output.find("diagnostic=unfitted_level_set_raw_curvature"),
+              std::string::npos);
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsNitscheKinematics)
+{
+    constexpr int interface_marker = 42;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::Nitsche,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionRejectsRawLevelSetCurvature)
+{
+    constexpr int interface_marker = 43;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .surface_tension = 0.0728,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesGeneratedInterfaceMarker)
@@ -2044,6 +2235,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesGeneratedInterfaceM
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
     });
 
@@ -2167,6 +2359,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInter
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 0.0,
         .surface_tension = 0.0,
         .cut_cell_stabilization = {
@@ -2224,6 +2417,83 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainZeroTractionFreeSurfaceAvoidsI
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
 }
 
+TEST(MovingDomainPhysics, NavierStokesActiveDomainExternalPressureInstallsInterfaceTraction)
+{
+    constexpr int interface_marker = 48;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 12.0,
+        .surface_tension = 0.0,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, interface_marker));
+}
+
+TEST(MovingDomainPhysics, NavierStokesActiveDomainSurfaceTensionInstallsInterfaceTraction)
+{
+    constexpr int interface_marker = 49;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 0.0,
+        .surface_tension = 0.0728,
+        .curvature = 3.0,
+        .use_level_set_curvature = false,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Normal));
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, interface_marker));
+    EXPECT_EQ(log_output.find("diagnostic=unfitted_level_set_raw_curvature"),
+              std::string::npos);
+}
+
 TEST(MovingDomainPhysics, NavierStokesInactiveActiveDomainKeepsFullCellVolumeKernels)
 {
     constexpr int interface_marker = 47;
@@ -2237,6 +2507,7 @@ TEST(MovingDomainPhysics, NavierStokesInactiveActiveDomainKeepsFullCellVolumeKer
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .interface_marker = interface_marker,
         .level_set_field_name = "phi",
+        .allow_full_domain_unfitted_free_surface = true,
     });
 
     FE::systems::FESystem system(mesh);
@@ -2612,6 +2883,8 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .interface_marker = interface_marker,
         .level_set_field_name = "missing_phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 1.0,
     });
 
     FE::systems::FESystem system(mesh);
@@ -2632,6 +2905,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleAddsLevelSet
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .interface_marker = interface_marker,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .contact_lines = {
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
                 .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,
@@ -2670,6 +2944,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedPrescribedContactAngleRequiresLeve
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
         .interface_marker = interface_marker,
         .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .contact_lines = {
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceContactLine{
                 .model = ns::FreeSurfaceContactLineModel::PrescribedContactAngle,

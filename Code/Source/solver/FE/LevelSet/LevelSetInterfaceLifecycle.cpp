@@ -1,8 +1,10 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <stdexcept>
@@ -11,6 +13,11 @@
 
 namespace svmp::FE::level_set {
 namespace {
+
+struct GeneratedInterfaceCellDiagnostics {
+    std::size_t node_count{0};
+    std::size_t corner_count{0};
+};
 
 [[nodiscard]] std::size_t cornerCount(ElementType type)
 {
@@ -46,6 +53,13 @@ namespace {
     return coefficients[static_cast<std::size_t>(dof)];
 }
 
+[[nodiscard]] std::array<Real, 3> referenceCornerCoordinate(ElementType type,
+                                                           std::size_t local_node)
+{
+    const auto point = basis::NodeOrdering::get_node_coords(type, local_node);
+    return {{point[0], point[1], point[2]}};
+}
+
 [[nodiscard]] FieldId resolveLevelSetField(
     const systems::FESystem& system,
     const LevelSetGeneratedInterfaceOptions& options)
@@ -65,7 +79,7 @@ namespace {
     return field;
 }
 
-void appendGeneratedInterfaceCell(
+[[nodiscard]] GeneratedInterfaceCellDiagnostics appendGeneratedInterfaceCell(
     interfaces::LevelSetInterfaceDomain& domain,
     const assembly::IMeshAccess& mesh,
     const dofs::EntityDofMap& entity_map,
@@ -80,10 +94,8 @@ void appendGeneratedInterfaceCell(
     }
 
     std::vector<GlobalIndex> cell_nodes;
-    std::vector<std::array<Real, 3>> cell_coordinates;
     mesh.getCellNodes(cell_id, cell_nodes);
-    mesh.getCellCoordinates(cell_id, cell_coordinates);
-    if (cell_nodes.size() < count || cell_coordinates.size() < count) {
+    if (cell_nodes.size() < count) {
         throw std::invalid_argument(
             "generated level-set interface found incomplete cell geometry");
     }
@@ -91,11 +103,10 @@ void appendGeneratedInterfaceCell(
     interfaces::LevelSetCellCutInput input{};
     input.parent_cell = cell_id;
     input.element_type = type;
-    input.node_coordinates.assign(cell_coordinates.begin(),
-                                  cell_coordinates.begin() +
-                                      static_cast<std::ptrdiff_t>(count));
+    input.node_coordinates.reserve(count);
     input.level_set_values.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
+        input.node_coordinates.push_back(referenceCornerCoordinate(type, i));
         input.level_set_values.push_back(
             coefficientAtVertex(entity_map, cell_nodes[i], coefficients));
     }
@@ -118,6 +129,10 @@ void appendGeneratedInterfaceCell(
     for (auto& region : cut_result.volume_regions) {
         domain.addVolumeRegion(std::move(region));
     }
+
+    return GeneratedInterfaceCellDiagnostics{
+        .node_count = cell_nodes.size(),
+        .corner_count = count};
 }
 
 } // namespace
@@ -210,15 +225,36 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
 
     interfaces::LevelSetInterfaceDomain domain(request);
     const auto coefficients = solution.subspan(offset, n_field_dofs);
+    std::size_t cell_count = 0u;
+    std::size_t corner_linearized_cell_count = 0u;
+    std::size_t max_cell_node_count = 0u;
+    std::size_t max_corner_node_count = 0u;
     mesh.forEachCell([&](GlobalIndex cell_id) {
-        appendGeneratedInterfaceCell(domain, mesh, *entity_map, coefficients, cell_id);
+        const auto diagnostics =
+            appendGeneratedInterfaceCell(domain, mesh, *entity_map, coefficients, cell_id);
+        ++cell_count;
+        if (diagnostics.node_count > diagnostics.corner_count) {
+            ++corner_linearized_cell_count;
+        }
+        max_cell_node_count = std::max(max_cell_node_count, diagnostics.node_count);
+        max_corner_node_count = std::max(max_corner_node_count, diagnostics.corner_count);
     });
+    if (!options.allow_corner_linearized_geometry &&
+        corner_linearized_cell_count > 0u) {
+        throw std::invalid_argument(
+            "generated level-set interface would corner-linearize high-order cell geometry; "
+            "set allow_corner_linearized_geometry=true only for explicitly linearized test cases");
+    }
 
     LevelSetGeneratedInterfaceResult result;
     result.interface_marker = marker;
     result.value_revision = revision;
     result.domain = std::move(domain);
     result.summary = result.domain.summary();
+    result.cell_count = cell_count;
+    result.corner_linearized_cell_count = corner_linearized_cell_count;
+    result.max_cell_node_count = max_cell_node_count;
+    result.max_corner_node_count = max_corner_node_count;
     result.success =
         result.summary.active_fragment_count > 0u ||
         result.summary.active_volume_region_count > 0u;

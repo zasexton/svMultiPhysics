@@ -1218,6 +1218,27 @@ TEST(FsilsBackendStrategy, SingleReducedScalarCorrectionStillUsesLegacyScalarPat
     EXPECT_TRUE(selection.use_momentum_only_low_rank_legacy_scalar_schur);
 }
 
+TEST(FsilsBackendStrategy, ForceSchurGmresBypassesLegacyScalarPath)
+{
+    ScopedEnvVar force_gmres("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_GMRES", "1");
+    ScopedUnsetEnvVar force_bicgstab("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_BICGSTAB");
+    ScopedUnsetEnvVar disable_face_legacy("SVMP_FSILS_BLOCKSCHUR_DISABLE_FACE_ONLY_LEGACY");
+
+    fe_fsi_linear_solver::FSILS_lhsType lhs{};
+    fe_fsi_linear_solver::distributed_low_rank_correction::Profile profile{};
+    profile.distributed = true;
+    profile.active_face_corrections = 1;
+    profile.active_reduced_corrections = 0;
+    profile.has_grouped_bordered = false;
+    profile.native_face_duplicates_only = true;
+
+    const auto selection =
+        fe_fsi_linear_solver::BlockSchurStrategySelector::select(lhs, profile, /*con_ncomp=*/1);
+
+    EXPECT_FALSE(selection.use_legacy_scalar_schur());
+    EXPECT_TRUE(selection.prefer_schur_gmres);
+}
+
 } // namespace
 
 TEST(FsilsBackend, SerialMatrixUsesExplicitOwnedRowLayout)

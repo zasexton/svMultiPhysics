@@ -1,6 +1,7 @@
 #include "Application/Core/ApplicationDriver.h"
 
 #include "Application/Core/ActiveDomainOutput.h"
+#include "Application/Core/LevelSetMaintenanceHistory.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
 
@@ -253,6 +254,20 @@ bool parseBoolEnv(const char* name, bool default_value)
   return default_value;
 }
 
+double parseDoubleEnv(const char* name, double default_value)
+{
+  const char* env = std::getenv(name);
+  if (!env) {
+    return default_value;
+  }
+  char* end = nullptr;
+  const double value = std::strtod(env, &end);
+  if (end == env || !std::isfinite(value)) {
+    return default_value;
+  }
+  return value;
+}
+
 std::string lower_copy(std::string s)
 {
   std::transform(s.begin(), s.end(), s.begin(),
@@ -399,6 +414,7 @@ struct ActiveCutVolumeRequest {
   int requested_interface_marker{-1};
   double isovalue{0.0};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
+  bool allow_corner_linearized_geometry{false};
 };
 
 struct LevelSetMaintenanceRequest {
@@ -414,6 +430,7 @@ struct LevelSetAdvectionVelocityRequest {
   std::string level_set_field_name{"level_set"};
   std::string source_velocity_field_name{"Velocity"};
   std::string target_velocity_field_name{"LevelSetAdvectionVelocity"};
+  std::string extension_method{"nearest_active_vertex"};
   double isovalue{0.0};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
 };
@@ -422,11 +439,15 @@ struct ActiveCutContextRefreshReport {
   bool refreshed{false};
   std::uint64_t topology_key{0};
   std::uint64_t value_revision{0};
+  std::size_t cell_count{0};
+  std::size_t corner_linearized_cell_count{0};
   std::size_t interface_fragments{0};
   std::size_t active_volume_regions{0};
   std::size_t cut_adjacent_facets{0};
   svmp::FE::Real negative_volume{0.0};
   svmp::FE::Real positive_volume{0.0};
+  svmp::FE::Real negative_physical_volume{0.0};
+  svmp::FE::Real positive_physical_volume{0.0};
 };
 
 struct WetVolumeDiagnostic {
@@ -436,9 +457,21 @@ struct WetVolumeDiagnostic {
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
   double isovalue{0.0};
   svmp::FE::Real wet_volume{0.0};
+  svmp::FE::Real reference_wet_volume{0.0};
+  svmp::FE::Real physical_wet_volume{0.0};
+  std::string wet_volume_frame{"physical"};
+  std::size_t volume_rule_count{0};
+  std::size_t physical_volume_rule_count{0};
+  std::size_t skipped_physical_volume_rule_count{0};
   std::size_t cut_cell_count{0};
   std::size_t full_wet_cell_count{0};
   std::size_t full_dry_cell_count{0};
+};
+
+struct ActiveFluidReport {
+  std::size_t total_vertices{0};
+  std::size_t active_vertices{0};
+  std::size_t dry_vertices{0};
 };
 
 struct ActiveSideRegionSummary {
@@ -550,6 +583,15 @@ std::vector<ActiveCutVolumeRequest> activeCutVolumeRequests(const Parameters& pa
                                                         "InterfaceIsovalue"})) {
         request.isovalue = *isovalue;
       }
+      if (const auto allow_corner_linearized =
+              first_defined_bool_parameter(
+                  bc_params,
+                  {"Allow_corner_linearized_cut_geometry",
+                   "AllowCornerLinearizedCutGeometry",
+                   "Allow_corner_linearized_geometry",
+                   "AllowCornerLinearizedGeometry"})) {
+        request.allow_corner_linearized_geometry = *allow_corner_linearized;
+      }
       requests.push_back(std::move(request));
     }
   }
@@ -629,6 +671,23 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
           "[svMultiPhysics::Application] Wet-extension level-set advection requires "
           "<Velocity_source>prescribed_data</Velocity_source> so the transport equation uses "
           "the generated prescribed advection field.");
+    }
+
+    if (const auto extension_method =
+            first_defined_parameter(eq_params, {"Wet_extension_advection_velocity_method",
+                                               "WetExtensionAdvectionVelocityMethod",
+                                               "Advection_velocity_extension_method",
+                                               "AdvectionVelocityExtensionMethod"})) {
+      const auto token = normalized_token(*extension_method);
+      if (token != "nearestactivevertex" &&
+          token != "nearestactive" &&
+          token != "nearestvertex") {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Unsupported wet-extension level-set "
+            "advection velocity method '" + trim_copy(*extension_method) +
+            "'. The currently implemented method is nearest_active_vertex.");
+      }
+      request.extension_method = "nearest_active_vertex";
     }
 
     if (const auto isovalue =
@@ -1014,62 +1073,51 @@ void logCutTopologyChange(
         << " previous_topology_key=" << *previous_topology_key
         << " topology_key=" << report.topology_key
         << " cut_context_revision=" << report.value_revision
+        << " cell_count=" << report.cell_count
+        << " corner_linearized_cells=" << report.corner_linearized_cell_count
         << " interface_fragments=" << report.interface_fragments
         << " active_volume_regions=" << report.active_volume_regions
         << " cut_adjacent_facets=" << report.cut_adjacent_facets
         << " negative_volume=" << report.negative_volume
-        << " positive_volume=" << report.positive_volume << std::endl;
+        << " negative_reference_volume=" << report.negative_volume
+        << " negative_physical_volume=" << report.negative_physical_volume
+        << " positive_volume=" << report.positive_volume
+        << " positive_reference_volume=" << report.positive_volume
+        << " positive_physical_volume=" << report.positive_physical_volume
+        << std::endl;
   }
   previous_topology_key = report.topology_key;
 }
 
-bool copyVertexFloat64Field(
-    svmp::Mesh& mesh,
-    const std::string& source_name,
-    const std::string& target_name)
+void logCornerLinearizedCutWarningOnce(
+    const ActiveCutVolumeRequest& request,
+    const svmp::FE::level_set::LevelSetGeneratedInterfaceResult& result)
 {
-  if (!mesh.has_field(svmp::EntityKind::Vertex, source_name)) {
-    return false;
+  if (result.corner_linearized_cell_count == 0u) {
+    return;
   }
 
-  const auto source_handle =
-      mesh.field_handle(svmp::EntityKind::Vertex, source_name);
-  if (mesh.field_type(source_handle) != svmp::FieldScalarType::Float64) {
-    return false;
+  static std::set<std::string> warned_keys;
+  const std::string key = request.level_set_field_name + "|" +
+                          request.domain_id + "|" +
+                          std::to_string(result.interface_marker);
+  if (!warned_keys.insert(key).second) {
+    return;
   }
 
-  if (mesh.has_field(svmp::EntityKind::Vertex, target_name)) {
-    const auto existing =
-        mesh.field_handle(svmp::EntityKind::Vertex, target_name);
-    mesh.remove_field(existing);
-  }
-
-  const auto components = mesh.field_components(source_handle);
-  const auto target_handle =
-      mesh.attach_field(svmp::EntityKind::Vertex,
-                        target_name,
-                        svmp::FieldScalarType::Float64,
-                        components);
-  const auto* source =
-      static_cast<const double*>(mesh.field_data(source_handle));
-  auto* target = static_cast<double*>(mesh.field_data(target_handle));
-  if (source == nullptr || target == nullptr) {
-    return false;
-  }
-
-  std::copy(source,
-            source + mesh.n_vertices() * components,
-            target);
-  return true;
-}
-
-std::size_t copyRawFreeSurfaceDebugOutput(svmp::Mesh& mesh)
-{
-  std::size_t copied = 0u;
-  copied += copyVertexFloat64Field(mesh, "Velocity", "RawVelocity") ? 1u : 0u;
-  copied += copyVertexFloat64Field(mesh, "Pressure", "RawPressure") ? 1u : 0u;
-  copied += copyVertexFloat64Field(mesh, "Divergence", "RawDivergence") ? 1u : 0u;
-  return copied;
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] WARNING generated level-set interface "
+      << "uses corner-linearized cut geometry"
+      << " marker=" << result.interface_marker
+      << " field='" << request.level_set_field_name << "'"
+      << " domain_id='" << request.domain_id << "'"
+      << " corner_linearized_cells="
+      << result.corner_linearized_cell_count
+      << " cell_count=" << result.cell_count
+      << " max_cell_node_count=" << result.max_cell_node_count
+      << " max_corner_node_count=" << result.max_corner_node_count
+      << " diagnostic=high_order_level_set_cut_uses_corners"
+      << std::endl;
 }
 
 std::size_t writeWetVolumeFractionOutput(
@@ -1108,6 +1156,7 @@ std::size_t writeWetVolumeFractionOutput(
 std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    const svmp::FE::assembly::IMeshAccess& mesh,
     std::size_t n_cells)
 {
   std::vector<WetVolumeDiagnostic> diagnostics;
@@ -1138,9 +1187,24 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     diagnostic.marker = *marker;
     diagnostic.active_side = request.active_side;
     diagnostic.isovalue = request.isovalue;
+    const auto measure_summary =
+        application::core::collectCutVolumeMeasures(mesh, rules);
+    diagnostic.reference_wet_volume = measure_summary.reference_measure;
+    diagnostic.physical_wet_volume = measure_summary.physical_measure;
+    diagnostic.volume_rule_count = measure_summary.rule_count;
+    diagnostic.physical_volume_rule_count =
+        measure_summary.physical_rule_count;
+    diagnostic.skipped_physical_volume_rule_count =
+        measure_summary.skipped_physical_rule_count;
+    if (measure_summary.skipped_physical_rule_count == 0u) {
+      diagnostic.wet_volume = diagnostic.physical_wet_volume;
+      diagnostic.wet_volume_frame = "physical";
+    } else {
+      diagnostic.wet_volume = diagnostic.reference_wet_volume;
+      diagnostic.wet_volume_frame = "reference_fallback";
+    }
     for (const auto* rule : rules) {
       if (rule != nullptr) {
-        diagnostic.wet_volume += rule->measure;
         const auto cell = rule->provenance.parent_entity;
         if (cell >= 0 && static_cast<std::size_t>(cell) < wet_fraction.size()) {
           wet_fraction[static_cast<std::size_t>(cell)] = std::clamp(
@@ -1165,6 +1229,71 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
   }
 
   return diagnostics;
+}
+
+void logActiveCutVolumeAvailabilityWarnings(
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    int step,
+    double time)
+{
+  if (requests.empty()) {
+    return;
+  }
+  if (cut_context == nullptr) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING active-domain cut context "
+        << "is unavailable"
+        << " step=" << step
+        << " time=" << time
+        << " requests=" << requests.size()
+        << " diagnostic=missing_active_cut_context"
+        << std::endl;
+    return;
+  }
+
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& request = requests[i];
+    const auto marker = generatedVolumeMarkerForRequest(
+        *cut_context, request, i);
+    if (!marker.has_value()) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] WARNING active-domain cut context "
+          << "has no generated marker for request"
+          << " step=" << step
+          << " time=" << time
+          << " field='" << request.level_set_field_name << "'"
+          << " domain_id='" << request.domain_id << "'"
+          << " requested_marker=" << request.requested_interface_marker
+          << " generated_marker_count="
+          << cut_context->generatedVolumeMarkers().size()
+          << " diagnostic=missing_generated_cut_marker"
+          << std::endl;
+      continue;
+    }
+
+    const auto side = cutIntegrationSide(request.active_side);
+    const auto rules =
+        cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
+    if (rules.empty()) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] WARNING active-domain cut context "
+          << "has no retained volume rules"
+          << " step=" << step
+          << " time=" << time
+          << " marker=" << *marker
+          << " field='" << request.level_set_field_name << "'"
+          << " domain_id='" << request.domain_id << "'"
+          << " active_side=" << activeSideName(request.active_side)
+          << " isovalue=" << request.isovalue
+          << " pruned_volume_rules="
+          << cut_context->generatedPrunedVolumeRuleCount()
+          << " pruned_volume="
+          << cut_context->generatedPrunedVolumeMeasure()
+          << " diagnostic=empty_active_cut_volume_rules"
+          << std::endl;
+    }
+  }
 }
 
 void logActiveFluidWetFractionDisagreementWarnings(
@@ -1301,13 +1430,17 @@ void logActiveFluidWetFractionDisagreementWarnings(
 void logWetVolumeDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& requests,
     const svmp::FE::assembly::CutIntegrationContext* cut_context,
+    const svmp::FE::assembly::IMeshAccess& mesh,
     std::size_t n_cells,
     int step,
     double time,
     std::map<std::string, svmp::FE::Real>& initial_wet_volume_by_key)
 {
+  logActiveCutVolumeAvailabilityWarnings(requests, cut_context, step, time);
   const auto diagnostics =
-      collectWetVolumeDiagnostics(requests, cut_context, n_cells);
+      collectWetVolumeDiagnostics(requests, cut_context, mesh, n_cells);
+  const double drift_warning_threshold =
+      parseDoubleEnv("SVMP_WET_VOLUME_DRIFT_WARNING", 1.0e-3);
   for (const auto& diagnostic : diagnostics) {
     const std::string key = diagnostic.level_set_field_name + "|" +
                             diagnostic.domain_id + "|" +
@@ -1324,42 +1457,70 @@ void logWetVolumeDiagnostics(
         << " active_side=" << activeSideName(diagnostic.active_side)
         << " isovalue=" << diagnostic.isovalue
         << " wet_volume=" << diagnostic.wet_volume
+        << " wet_volume_frame=" << diagnostic.wet_volume_frame
+        << " reference_wet_volume=" << diagnostic.reference_wet_volume
+        << " physical_wet_volume=" << diagnostic.physical_wet_volume
         << " initial_wet_volume=" << drift.initial_wet_volume
         << " wet_volume_drift=" << drift.wet_volume_drift
         << " relative_wet_volume_drift=" << drift.relative_wet_volume_drift
+        << " volume_rule_count=" << diagnostic.volume_rule_count
+        << " physical_volume_rule_count="
+        << diagnostic.physical_volume_rule_count
+        << " skipped_physical_volume_rule_count="
+        << diagnostic.skipped_physical_volume_rule_count
         << " cut_cell_count=" << diagnostic.cut_cell_count
         << " full_wet_cell_count=" << diagnostic.full_wet_cell_count
         << " full_dry_cell_count=" << diagnostic.full_dry_cell_count
         << std::endl;
+    if (drift_warning_threshold > 0.0 &&
+        std::abs(static_cast<double>(drift.relative_wet_volume_drift)) >
+            drift_warning_threshold) {
+      application::core::oopCout()
+          << "[svMultiPhysics::Application] WARNING wet-volume drift exceeds "
+          << "diagnostic threshold"
+          << " step=" << step
+          << " time=" << time
+          << " field='" << diagnostic.level_set_field_name << "'"
+          << " domain_id='" << diagnostic.domain_id << "'"
+          << " marker=" << diagnostic.marker
+          << " active_side=" << activeSideName(diagnostic.active_side)
+          << " relative_wet_volume_drift="
+          << drift.relative_wet_volume_drift
+          << " threshold=" << drift_warning_threshold
+          << " diagnostic=nonconservative_level_set_volume_drift"
+          << std::endl;
+    }
   }
 }
 
-std::size_t maskInactiveFreeSurfaceOutput(
+ActiveFluidReport writeActiveFluidVisualizationOutput(
     svmp::Mesh& mesh,
-    const std::vector<ActiveCutVolumeRequest>& requests,
-    const std::vector<std::string>& field_names)
+    const std::vector<ActiveCutVolumeRequest>& requests)
 {
   constexpr const char* kActiveFluidVisualizationField = "ActiveFluid";
+  ActiveFluidReport report{};
+  report.total_vertices = mesh.n_vertices();
   if (requests.empty()) {
-    return 0u;
+    return report;
   }
 
   // The current OOP free-surface path supports one active-domain level set for
-  // the Navier-Stokes volume. If more are present, use the first one for output
-  // masking instead of inventing ambiguous multi-interface semantics here.
+  // the Navier-Stokes volume. If more are present, use the first one for the
+  // visualization indicator instead of inventing ambiguous multi-interface
+  // semantics here.
   const auto& request = requests.front();
   if (!mesh.has_field(svmp::EntityKind::Vertex, request.level_set_field_name)) {
-    return 0u;
+    return report;
   }
   const auto phi_handle =
       mesh.field_handle(svmp::EntityKind::Vertex, request.level_set_field_name);
   if (mesh.field_type(phi_handle) != svmp::FieldScalarType::Float64 ||
       mesh.field_components(phi_handle) != 1u) {
-    return 0u;
+    return report;
   }
   const auto* phi = static_cast<const double*>(mesh.field_data(phi_handle));
   if (phi == nullptr) {
-    return 0u;
+    return report;
   }
 
   svmp::FieldHandle active_handle;
@@ -1382,43 +1543,17 @@ std::size_t maskInactiveFreeSurfaceOutput(
   }
   auto* active = static_cast<double*>(mesh.field_data(active_handle));
   if (active == nullptr) {
-    return 0u;
+    return report;
   }
 
-  std::vector<std::uint8_t> dry(mesh.n_vertices(), 0u);
-  std::size_t dry_vertices = 0u;
   for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
     const bool is_active = activeSideContains(phi[v], request);
     active[v] = is_active ? 1.0 : 0.0;
-    dry[v] = is_active ? 0u : 1u;
-    dry_vertices += dry[v] ? 1u : 0u;
+    report.dry_vertices += is_active ? 0u : 1u;
+    report.active_vertices += is_active ? 1u : 0u;
   }
 
-  const double nan = std::numeric_limits<double>::quiet_NaN();
-  for (const auto& name : field_names) {
-    if (!mesh.has_field(svmp::EntityKind::Vertex, name)) {
-      continue;
-    }
-    const auto handle = mesh.field_handle(svmp::EntityKind::Vertex, name);
-    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64) {
-      continue;
-    }
-    auto* data = static_cast<double*>(mesh.field_data(handle));
-    if (data == nullptr) {
-      continue;
-    }
-    const auto components = mesh.field_components(handle);
-    for (std::size_t v = 0; v < mesh.n_vertices(); ++v) {
-      if (!dry[v]) {
-        continue;
-      }
-      for (std::size_t c = 0; c < components; ++c) {
-        data[v * components + c] = nan;
-      }
-    }
-  }
-
-  return dry_vertices;
+  return report;
 }
 
 std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parameters& params)
@@ -1548,6 +1683,51 @@ std::vector<LevelSetMaintenanceRequest> levelSetMaintenanceRequests(const Parame
     }
   }
   return requests;
+}
+
+void logLevelSetMaintenanceCoverageDiagnostics(
+    const std::vector<ActiveCutVolumeRequest>& active_requests,
+    const std::vector<LevelSetMaintenanceRequest>& maintenance_requests)
+{
+  if (active_requests.empty()) {
+    return;
+  }
+
+  std::set<std::string> maintained_fields;
+  for (const auto& request : maintenance_requests) {
+    maintained_fields.insert(request.level_set_field_name);
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] Level-set maintenance diagnostic"
+        << " field='" << request.level_set_field_name << "'"
+        << " reinitialization="
+        << (request.reinitialization.enabled ? "enabled" : "disabled")
+        << " volume_correction="
+        << (request.volume_correction.enabled ? "enabled" : "disabled")
+        << " reinitialization_cadence="
+        << request.reinitialization.cadence_steps
+        << " volume_correction_cadence="
+        << request.volume_correction.cadence_steps
+        << std::endl;
+  }
+
+  std::set<std::string> warned_fields;
+  for (const auto& request : active_requests) {
+    if (maintained_fields.find(request.level_set_field_name) !=
+        maintained_fields.end()) {
+      continue;
+    }
+    if (!warned_fields.insert(request.level_set_field_name).second) {
+      continue;
+    }
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING unfitted free-surface "
+        << "level-set has no enabled maintenance request"
+        << " field='" << request.level_set_field_name << "'"
+        << " domain_id='" << request.domain_id << "'"
+        << " active_side=" << activeSideName(request.active_side)
+        << " diagnostic=plain_level_set_advection_not_conservative"
+        << std::endl;
+  }
 }
 
 std::vector<svmp::FE::Real> gatherFeOrderedSolution(
@@ -1816,6 +1996,7 @@ bool applyLevelSetMaintenance(
 
   bool changed = false;
   auto fe_solution = gatherFeOrderedSolution(history.u());
+  std::set<svmp::FE::FieldId> modified_level_set_fields;
   for (auto& request : requests) {
     const int completed_step = history.stepIndex();
     const bool do_reinit =
@@ -1859,6 +2040,7 @@ bool applyLevelSetMaintenance(
       }
       fe_solution = std::move(repaired);
       changed = true;
+      modified_level_set_fields.insert(field);
       application::core::oopCout()
           << "[svMultiPhysics::Application] Level-set reinitialized field='"
           << request.level_set_field_name << "' step=" << completed_step
@@ -1905,6 +2087,7 @@ bool applyLevelSetMaintenance(
       }
       fe_solution = std::move(corrected);
       changed = true;
+      modified_level_set_fields.insert(field);
       application::core::oopCout()
           << "[svMultiPhysics::Application] Level-set volume corrected field='"
           << request.level_set_field_name << "' step=" << completed_step
@@ -1929,8 +2112,20 @@ bool applyLevelSetMaintenance(
       older_history_before.push_back(gatherFeOrderedSolution(history.uPrevK(k)));
     }
 
-    scatterFeOrderedSolution(history.u(), fe_solution);
-    scatterFeOrderedSolution(history.uPrev(), fe_solution);
+    std::size_t synchronized_dofs = 0u;
+    auto current_solution = gatherFeOrderedSolution(history.u());
+    for (const auto field : modified_level_set_fields) {
+      synchronized_dofs += application::core::copyFieldDofsIntoFeOrderedSolution(
+          *sim.fe_system, field, fe_solution, current_solution);
+    }
+    scatterFeOrderedSolution(history.u(), current_solution);
+
+    auto previous_solution = gatherFeOrderedSolution(history.uPrev());
+    for (const auto field : modified_level_set_fields) {
+      (void)application::core::copyFieldDofsIntoFeOrderedSolution(
+          *sim.fe_system, field, fe_solution, previous_solution);
+    }
+    scatterFeOrderedSolution(history.uPrev(), previous_solution);
     history.updateGhosts();
     const auto current_previous_delta = globalMaxAbsDifference(
         history.uSpan(), history.uPrevSpan(), svmp::MeshComm::world());
@@ -1946,7 +2141,10 @@ bool applyLevelSetMaintenance(
     application::core::oopCout()
         << "[svMultiPhysics::Application] Level-set maintenance synchronized"
         << " step=" << history.stepIndex()
-        << " accepted_solution=true previous_state=true"
+        << " accepted_solution=modified_level_set_fields"
+        << " previous_state=modified_level_set_fields"
+        << " synchronized_fields=" << modified_level_set_fields.size()
+        << " synchronized_dofs=" << synchronized_dofs
         << " current_previous_max_abs_delta=" << current_previous_delta
         << " older_history_max_abs_delta=" << older_history_delta
         << " history_depth=" << history.historyDepth() << std::endl;
@@ -2265,7 +2463,8 @@ bool updateLevelSetAdvectionVelocities(
       application::core::oopCout()
           << "[svMultiPhysics::Application] Updated level-set advection velocity field='"
           << request.target_velocity_field_name << "' from source='"
-          << request.source_velocity_field_name << "' active_vertices="
+          << request.source_velocity_field_name << "' extension_method="
+          << request.extension_method << " active_vertices="
           << active_vertices.size() << " dry_vertices="
           << (n_vertices - active_vertices.size())
           << " max_active_speed=" << max_active_speed
@@ -2297,25 +2496,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
 
   const auto synchronized_level_set_fields =
       syncActiveLevelSetVertexFieldsFromSolution(sim, requests, fe_solution);
-  if (synchronized_level_set_fields > 0u) {
-    sim.fe_system->rebuildConstraintState();
-    application::core::oopCout()
-        << "[svMultiPhysics::Application] Active pressure support constraint refresh"
-        << " diagnostic=active_pressure_constraint_refresh"
-        << " provenance=" << (provenance != nullptr ? provenance : "unknown")
-        << " solution_source="
-        << (solution_source != nullptr ? solution_source : "unknown")
-        << " synchronized_level_set_fields="
-        << synchronized_level_set_fields
-        << " constraints=" << sim.fe_system->constraints().numConstraints()
-        << std::endl;
-  }
 
   auto context =
       std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
   report.refreshed = true;
   report.topology_key = kCutContextHashOffset;
   const auto comm = svmp::MeshComm::world();
+  const auto& mesh_access = sim.fe_system->meshAccess();
 
   for (const auto& request : requests) {
     svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
@@ -2323,6 +2510,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     options.domain_id = request.domain_id;
     options.requested_interface_marker = request.requested_interface_marker;
     options.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+    options.allow_corner_linearized_geometry =
+        request.allow_corner_linearized_geometry;
 
     auto result = lifecycle.build(*sim.fe_system, options, fe_solution);
     if (!result.success) {
@@ -2333,11 +2522,12 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     }
 
     const auto summary = result.summary;
+    logCornerLinearizedCutWarningOnce(request, result);
     const auto active_summary = summarizeActiveSideRegions(
         result.domain,
         request.active_side,
         static_cast<std::size_t>(std::max<svmp::FE::GlobalIndex>(
-            0, sim.fe_system->meshAccess().numCells())));
+            0, mesh_access.numCells())));
     const auto raw_active_volume =
         request.active_side == LevelSetActiveSide::Negative
             ? summary.negative_volume_measure
@@ -2375,7 +2565,13 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         globalSumDouble(static_cast<double>(summary.negative_volume_measure), comm));
     const auto global_positive_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(summary.positive_volume_measure), comm));
+    const auto global_cell_count =
+        globalSumSize(result.cell_count, comm);
+    const auto global_corner_linearized_cells =
+        globalSumSize(result.corner_linearized_cell_count, comm);
     report.interface_fragments += global_interface_fragments;
+    report.cell_count += global_cell_count;
+    report.corner_linearized_cell_count += global_corner_linearized_cells;
     report.active_volume_regions += global_active_volume_regions;
     report.negative_volume += global_negative_volume;
     report.positive_volume += global_positive_volume;
@@ -2384,6 +2580,46 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto generated_pruned_volume_before =
         context->generatedPrunedVolumeMeasure();
     context->addGeneratedInterfaceDomain(result.domain);
+    const auto active_measure_summary =
+        application::core::collectCutVolumeMeasures(
+            mesh_access,
+            context->generatedVolumeRulesForMarkerAndSide(
+                result.interface_marker,
+                cutIntegrationSide(request.active_side)));
+    const auto negative_measure_summary =
+        application::core::collectCutVolumeMeasures(
+            mesh_access,
+            context->generatedVolumeRulesForMarkerAndSide(
+                result.interface_marker,
+                svmp::FE::geometry::CutIntegrationSide::Negative));
+    const auto positive_measure_summary =
+        application::core::collectCutVolumeMeasures(
+            mesh_access,
+            context->generatedVolumeRulesForMarkerAndSide(
+                result.interface_marker,
+                svmp::FE::geometry::CutIntegrationSide::Positive));
+    const auto global_active_physical_volume =
+        static_cast<svmp::FE::Real>(globalSumDouble(
+            static_cast<double>(active_measure_summary.physical_measure),
+            comm));
+    const auto global_active_physical_volume_rules =
+        globalSumSize(active_measure_summary.physical_rule_count, comm);
+    const auto global_active_skipped_physical_volume_rules =
+        globalSumSize(active_measure_summary.skipped_physical_rule_count, comm);
+    const auto global_negative_physical_volume =
+        static_cast<svmp::FE::Real>(globalSumDouble(
+            static_cast<double>(negative_measure_summary.physical_measure),
+            comm));
+    const auto global_positive_physical_volume =
+        static_cast<svmp::FE::Real>(globalSumDouble(
+            static_cast<double>(positive_measure_summary.physical_measure),
+            comm));
+    const auto global_negative_skipped_physical_volume_rules =
+        globalSumSize(negative_measure_summary.skipped_physical_rule_count, comm);
+    const auto global_positive_skipped_physical_volume_rules =
+        globalSumSize(positive_measure_summary.skipped_physical_rule_count, comm);
+    report.negative_physical_volume += global_negative_physical_volume;
+    report.positive_physical_volume += global_positive_physical_volume;
     const auto local_generated_pruned_volume_rules =
         context->generatedPrunedVolumeRuleCount() -
         generated_pruned_count_before;
@@ -2395,7 +2631,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto global_generated_pruned_volume = static_cast<svmp::FE::Real>(
         globalSumDouble(static_cast<double>(local_generated_pruned_volume), comm));
     const auto facet_set_handle = addGeneratedCutAdjacentFacetSet(
-        *context, result.domain, sim.fe_system->meshAccess(), request.active_side);
+        *context, result.domain, mesh_access, request.active_side);
     mixCutContextHash(report.topology_key, facet_set_handle.stable_id);
     const auto facet_scale_summary =
         summarizeCutAdjacentFacetScales(facet_set_handle);
@@ -2485,10 +2721,23 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << result.interface_marker << " field='" << request.level_set_field_name
         << "' domain_id='" << request.domain_id
         << "' active_side=" << activeSideName(request.active_side)
+        << " interface_contract=one_sided_embedded"
+        << " allow_corner_linearized_geometry="
+        << (request.allow_corner_linearized_geometry ? "true" : "false")
         << " isovalue=" << request.isovalue
         << " cut_context_revision=" << result.value_revision
+        << " cell_count=" << global_cell_count
+        << " corner_linearized_cells="
+        << global_corner_linearized_cells
         << " active_side_volume=" << global_active_volume
+        << " active_side_volume_frame=reference"
         << " active_side_volume_local=" << active_volume
+        << " active_side_physical_volume="
+        << global_active_physical_volume
+        << " active_side_physical_rule_count="
+        << global_active_physical_volume_rules
+        << " active_side_skipped_physical_rule_count="
+        << global_active_skipped_physical_volume_rules
         << " active_side_raw_volume=" << global_raw_active_volume
         << " active_side_raw_volume_local=" << raw_active_volume
         << " interface_fragments=" << global_interface_fragments
@@ -2539,12 +2788,32 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " basis_cache_entries="
         << svmp::FE::basis::BasisCache::instance().size()
         << " negative_volume=" << global_negative_volume
+        << " negative_reference_volume=" << global_negative_volume
+        << " negative_physical_volume=" << global_negative_physical_volume
+        << " negative_skipped_physical_rule_count="
+        << global_negative_skipped_physical_volume_rules
         << " negative_volume_local=" << summary.negative_volume_measure
         << " positive_volume=" << global_positive_volume
+        << " positive_reference_volume=" << global_positive_volume
+        << " positive_physical_volume=" << global_positive_physical_volume
+        << " positive_skipped_physical_rule_count="
+        << global_positive_skipped_physical_volume_rules
         << " positive_volume_local=" << summary.positive_volume_measure << std::endl;
   }
 
   sim.fe_system->setCutIntegrationContext(std::move(context));
+  sim.fe_system->rebuildConstraintState();
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] Active pressure support constraint refresh"
+      << " diagnostic=active_pressure_constraint_refresh"
+      << " provenance=" << (provenance != nullptr ? provenance : "unknown")
+      << " solution_source="
+      << (solution_source != nullptr ? solution_source : "unknown")
+      << " synchronized_level_set_fields="
+      << synchronized_level_set_fields
+      << " support_source=retained_cut_context"
+      << " constraints=" << sim.fe_system->constraints().numConstraints()
+      << std::endl;
   return report;
 }
 
@@ -3058,6 +3327,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const auto level_set_advection_velocity =
       levelSetAdvectionVelocityRequests(params);
   initializeLevelSetMaintenanceTargets(sim, level_set_maintenance);
+  logLevelSetMaintenanceCoverageDiagnostics(
+      activeCutVolumeRequests(params),
+      level_set_maintenance);
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
@@ -3116,14 +3388,24 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           << "[svMultiPhysics::Application] Level-set maintenance refreshed cut context"
           << " step=" << h.stepIndex()
           << " cut_context_revision=" << cut_report.value_revision
+          << " cell_count=" << cut_report.cell_count
+          << " corner_linearized_cells="
+          << cut_report.corner_linearized_cell_count
           << " negative_volume=" << cut_report.negative_volume
+          << " negative_reference_volume=" << cut_report.negative_volume
+          << " negative_physical_volume="
+          << cut_report.negative_physical_volume
           << " positive_volume=" << cut_report.positive_volume
+          << " positive_reference_volume=" << cut_report.positive_volume
+          << " positive_physical_volume="
+          << cut_report.positive_physical_volume
           << " cut_adjacent_facets=" << cut_report.cut_adjacent_facets
           << std::endl;
     }
     logWetVolumeDiagnostics(
         activeCutVolumeRequests(params),
         sim.fe_system->cutIntegrationContext(),
+        sim.fe_system->meshAccess(),
         sim.primary_mesh ? sim.primary_mesh->n_cells() : 0u,
         h.stepIndex(),
         h.time(),
@@ -3365,7 +3647,7 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   const auto active_output_requests = activeCutVolumeRequests(params);
   if (!active_output_requests.empty() && is_root) {
     oopCout()
-        << "[svMultiPhysics::Application] VTK output: ActiveFluid is a vertex-sign visualization mask; "
+        << "[svMultiPhysics::Application] VTK output: ActiveFluid is a vertex-sign visualization indicator; "
         << "WetVolumeFraction is the generated cut-volume active-domain diagnostic."
         << std::endl;
   }
@@ -3378,6 +3660,17 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
               << wet_fraction_fields
               << " wet volume fraction cell field(s) from generated cut metadata."
               << std::endl;
+  } else if (!active_output_requests.empty() && is_root) {
+    oopCout()
+        << "[svMultiPhysics::Application] WARNING VTK output did not write "
+        << "WetVolumeFraction from generated cut metadata"
+        << " step=" << step
+        << " time=" << time
+        << " requests=" << active_output_requests.size()
+        << " has_cut_context="
+        << (sim.fe_system->cutIntegrationContext() != nullptr ? "true" : "false")
+        << " diagnostic=missing_wet_volume_fraction_output"
+        << std::endl;
   }
   logActiveFluidWetFractionDisagreementWarnings(
       mesh,
@@ -3385,25 +3678,22 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
       sim.fe_system->cutIntegrationContext(),
       step,
       time);
-  if (!active_output_requests.empty() &&
-      parseBoolEnv("SVMP_DEBUG_RAW_ACTIVE_DOMAIN_OUTPUT", false)) {
-    const auto raw_fields_copied = copyRawFreeSurfaceDebugOutput(mesh);
-    if (raw_fields_copied > 0u && is_root) {
-      oopCout() << "[svMultiPhysics::Application] VTK output: wrote "
-                << raw_fields_copied
-                << " raw active-domain debug field(s) before inactive masking."
-                << std::endl;
-    }
-  }
-  const auto dry_vertices_masked = maskInactiveFreeSurfaceOutput(
+  const auto active_fluid_report = writeActiveFluidVisualizationOutput(
       mesh,
-      active_output_requests,
-      {"Velocity", "Pressure", "Divergence"});
-  if (dry_vertices_masked > 0u && is_root) {
-    oopCout() << "[svMultiPhysics::Application] VTK output: masked "
-              << dry_vertices_masked
-              << " inactive free-surface vertex value(s) in Velocity/Pressure outputs."
-              << std::endl;
+      active_output_requests);
+  if (!active_output_requests.empty() &&
+      active_fluid_report.total_vertices > 0u &&
+      active_fluid_report.active_vertices == 0u &&
+      is_root) {
+    oopCout()
+        << "[svMultiPhysics::Application] WARNING ActiveFluid output indicator has "
+        << "zero active vertices"
+        << " step=" << step
+        << " time=" << time
+        << " total_vertices=" << active_fluid_report.total_vertices
+        << " dry_vertices=" << active_fluid_report.dry_vertices
+        << " diagnostic=active_fluid_vertex_indicator_empty"
+        << std::endl;
   }
 
   svmp::MeshIOOptions io{};

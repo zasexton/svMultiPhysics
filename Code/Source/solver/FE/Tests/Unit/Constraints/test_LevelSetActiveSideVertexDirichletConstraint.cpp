@@ -8,7 +8,9 @@
 #include <gtest/gtest.h>
 
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Dofs/EntityDofMap.h"
+#include "Geometry/CutQuadrature.h"
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -164,6 +166,77 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
     EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     RebuildUsesRetainedCutVolumeSupportWhenContextIsAvailable)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    constexpr int marker = 51;
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    const auto phi_handle =
+        MeshFields::get_field_handle(mesh->local_mesh(), EntityKind::Vertex, "phi");
+    auto* phi = MeshFields::field_data_as<real_t>(mesh->local_mesh(), phi_handle);
+    ASSERT_NE(phi, nullptr);
+    phi[2] = -1.0;
+    phi[5] = -1.0;
+
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0},
+            marker));
+
+    ASSERT_NO_THROW(system.setup());
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+
+    auto context = std::make_shared<assembly::CutIntegrationContext>();
+    assembly::CutCellAssemblyMetadata metadata{};
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.side = geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = Real{0.25};
+    geometry::CutQuadratureRule rule{};
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    rule.measure = Real{0.25};
+    rule.parent_measure = Real{1.0};
+    rule.volume_fraction = Real{0.25};
+    context->addGeneratedVolumeRule(marker, metadata, rule);
+    auto pruned_metadata = metadata;
+    pruned_metadata.cell = 1;
+    pruned_metadata.parent_entity = 1;
+    pruned_metadata.volume_fraction =
+        assembly::CutIntegrationContext::minGeneratedCutVolumeFraction() *
+        Real{0.5};
+    auto pruned_rule = rule;
+    pruned_rule.measure = pruned_metadata.volume_fraction;
+    pruned_rule.volume_fraction = pruned_metadata.volume_fraction;
+    context->addGeneratedVolumeRule(marker, pruned_metadata, pruned_rule);
+    EXPECT_EQ(context->generatedPrunedVolumeRuleCount(), 1u);
+
+    system.setCutIntegrationContext(std::move(context));
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 0)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 1)));
+    EXPECT_TRUE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
+    EXPECT_TRUE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
 #endif
 }
 

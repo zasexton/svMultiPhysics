@@ -191,6 +191,40 @@ void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const>
     return ctx.cutVolumeSide() == expected_side;
 }
 
+[[nodiscard]] bool formExprRequiresTwoSidedInterfaceFace(const FormExprNode* node) noexcept
+{
+    if (node == nullptr) {
+        return false;
+    }
+    switch (node->type()) {
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+            return true;
+        default:
+            break;
+    }
+    for (const auto* child : node->children()) {
+        if (formExprRequiresTwoSidedInterfaceFace(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] bool formIRRequiresTwoSidedInterfaceFace(const FormIR& ir) noexcept
+{
+    for (const auto& term : ir.terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace) {
+            continue;
+        }
+        if (formExprRequiresTwoSidedInterfaceFace(term.integrand.node())) {
+            return true;
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] bool interiorFaceTermMatchesContext(
     const IntegralTerm& term,
     const assembly::AssemblyContext& ctx) noexcept
@@ -12911,6 +12945,10 @@ bool FormKernel::hasCell() const noexcept
 bool FormKernel::hasBoundaryFace() const noexcept { return ir_.hasBoundaryTerms(); }
 bool FormKernel::hasInteriorFace() const noexcept { return ir_.hasInteriorFaceTerms(); }
 bool FormKernel::hasInterfaceFace() const noexcept { return ir_.hasInterfaceFaceTerms(); }
+bool FormKernel::requiresTwoSidedInterfaceFace() const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFace(ir_);
+}
 
 void FormKernel::ensureInterpreterLoweredIndexedAccess()
 {
@@ -14106,6 +14144,12 @@ bool LinearFormKernel::hasInterfaceFace() const noexcept
     return bilinear_ir_.hasInterfaceFaceTerms() || (linear_ir_.has_value() && linear_ir_->hasInterfaceFaceTerms());
 }
 
+bool LinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFace(bilinear_ir_) ||
+           (linear_ir_.has_value() && formIRRequiresTwoSidedInterfaceFace(*linear_ir_));
+}
+
 void LinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
     if (!indexed_lowering_once_) {
@@ -14733,6 +14777,10 @@ bool NonlinearFormKernel::hasCell() const noexcept
 bool NonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
 bool NonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
 bool NonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
+bool NonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFace(residual_ir_);
+}
 
 void NonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
@@ -16011,6 +16059,11 @@ bool SymbolicNonlinearFormKernel::hasCell() const noexcept
 bool SymbolicNonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
 bool SymbolicNonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
 bool SymbolicNonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
+bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFace(residual_ir_) ||
+           formIRRequiresTwoSidedInterfaceFace(tangent_ir_);
+}
 
 void SymbolicNonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {

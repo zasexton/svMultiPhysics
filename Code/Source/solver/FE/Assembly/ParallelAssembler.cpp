@@ -1453,6 +1453,104 @@ AssemblyResult ParallelAssembler::assembleCutVolumes(
     });
 }
 
+AssemblyResult ParallelAssembler::assembleCutInterfaces(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view,
+    bool assemble_matrix,
+    bool assemble_vector)
+{
+    if (!initialized_) {
+        initialize();
+    }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleCutInterfaces(
+            owned_mesh,
+            cut_context,
+            interface_marker,
+            test_space,
+            trial_space,
+            kernel,
+            matrix_view,
+            vector_view,
+            assemble_matrix,
+            assemble_vector);
+    }
+
+    beginGhostAssemblyIfNeeded();
+
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+        if (assemble_matrix && matrix_view && assemble_vector && vector_view) {
+            if (matrix_view == vector_view) {
+                GhostRoutingView routed(*matrix_view, ghost_manager_, ghost_policy_);
+                return local_assembler_.assembleCutInterfaces(
+                    policy_mesh,
+                    cut_context,
+                    interface_marker,
+                    test_space,
+                    trial_space,
+                    kernel,
+                    &routed,
+                    &routed,
+                    assemble_matrix,
+                    assemble_vector);
+            }
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleCutInterfaces(
+                policy_mesh,
+                cut_context,
+                interface_marker,
+                test_space,
+                trial_space,
+                kernel,
+                &routed_matrix,
+                &routed_vector,
+                assemble_matrix,
+                assemble_vector);
+        }
+
+        if (assemble_matrix && matrix_view) {
+            GhostRoutingView routed_matrix(*matrix_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleCutInterfaces(
+                policy_mesh,
+                cut_context,
+                interface_marker,
+                test_space,
+                trial_space,
+                kernel,
+                &routed_matrix,
+                nullptr,
+                assemble_matrix,
+                assemble_vector);
+        }
+
+        if (assemble_vector && vector_view) {
+            GhostRoutingView routed_vector(*vector_view, ghost_manager_, ghost_policy_);
+            return local_assembler_.assembleCutInterfaces(
+                policy_mesh,
+                cut_context,
+                interface_marker,
+                test_space,
+                trial_space,
+                kernel,
+                nullptr,
+                &routed_vector,
+                assemble_matrix,
+                assemble_vector);
+        }
+
+        return {};
+    });
+}
+
 // ============================================================================
 // Internal Implementation
 // ============================================================================

@@ -639,12 +639,12 @@ def write_mini_solver_xml(case_dir: Path,
   <Output type="Volume_integral">
     <Volume>true</Volume>
   </Output>
-  <LS type="GMRES">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>50</Max_iterations>
-    <Krylov_space_dimension>50</Krylov_space_dimension>
+    <Max_iterations>1</Max_iterations>
+    <Krylov_space_dimension>1</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-4</Absolute_tolerance>
   </LS>
@@ -678,12 +678,12 @@ def write_mini_solver_xml(case_dir: Path,
   <Output type="Volume_integral">
     <Volume>true</Volume>
   </Output>
-  <LS type="GMRES">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>150</Max_iterations>
-    <Krylov_space_dimension>80</Krylov_space_dimension>
+    <Max_iterations>1</Max_iterations>
+    <Krylov_space_dimension>1</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-4</Absolute_tolerance>
   </LS>

@@ -311,6 +311,18 @@ public:
         bool assemble_matrix,
         bool assemble_vector) override;
 
+    [[nodiscard]] AssemblyResult assembleCutInterfaces(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view,
+        bool assemble_matrix,
+        bool assemble_vector) override;
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     [[nodiscard]] AssemblyResult assembleInterfaceFaces(
         const IMeshAccess& mesh,
@@ -633,7 +645,20 @@ private:
         ElementType face_type,
         const quadrature::QuadratureRule& quad_rule,
         std::span<const LocalIndex> align_facet_to_reference,
-        FaceFrameGeometryScratch& scratch);
+        FaceFrameGeometryScratch& scratch,
+        bool compute_surface_jacobians = true,
+        bool compute_mean_curvatures = true);
+
+    void computeFaceFrameGeometry(
+        const geometry::GeometryMapping& mapping,
+        ElementType cell_type,
+        LocalIndex local_face_id,
+        ElementType face_type,
+        const quadrature::QuadratureRule& quad_rule,
+        std::span<const LocalIndex> align_facet_to_reference,
+        FaceFrameGeometryScratch& scratch,
+        bool compute_surface_jacobians = true,
+        bool compute_mean_curvatures = true);
 
     [[nodiscard]] std::vector<FieldRequirement> effectiveFieldRequirements(
         RequiredData required_data,

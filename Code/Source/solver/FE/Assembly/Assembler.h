@@ -1133,6 +1133,27 @@ public:
         FE_THROW(FEException, "Assembler::assembleCutVolumes: not implemented");
     }
 
+    /**
+     * @brief Assemble one-sided embedded interface kernels on generated cut-interface rules.
+     *
+     * The rules are expected to live in the parent-cell reference frame and are
+     * mapped to physical surface measure by the concrete assembler.
+     */
+    [[nodiscard]] virtual AssemblyResult assembleCutInterfaces(
+        const IMeshAccess& /*mesh*/,
+        const CutIntegrationContext& /*cut_context*/,
+        int /*interface_marker*/,
+        const spaces::FunctionSpace& /*test_space*/,
+        const spaces::FunctionSpace& /*trial_space*/,
+        AssemblyKernel& /*kernel*/,
+        GlobalSystemView* /*matrix_view*/,
+        GlobalSystemView* /*vector_view*/,
+        bool /*assemble_matrix*/,
+        bool /*assemble_vector*/)
+    {
+        FE_THROW(FEException, "Assembler::assembleCutInterfaces: not implemented");
+    }
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     /**
      * @brief Assemble interface-face contributions (InterfaceMesh subset)

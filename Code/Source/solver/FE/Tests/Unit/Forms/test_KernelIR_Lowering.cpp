@@ -163,6 +163,49 @@ TEST(KernelIRHashing, StableHashHandlesEmptyAndRejectsMalformedIR)
     EXPECT_THROW((void)non_topological.stableHash64(), std::logic_error);
 }
 
+TEST(KernelIROptimize, RestoresPostOrderForForwardReferencedDAG)
+{
+    jit::KernelIR ir;
+    ir.ops.push_back(jit::KernelIROp{
+        .type = FormExprType::Add,
+        .first_child = 0u,
+        .child_count = 2u,
+    });
+    ir.ops.push_back(jit::KernelIROp{
+        .type = FormExprType::ParameterRef,
+        .imm0 = 0u,
+    });
+    ir.ops.push_back(jit::KernelIROp{
+        .type = FormExprType::ParameterRef,
+        .imm0 = 1u,
+    });
+    ir.children = {1u, 2u};
+    ir.root = 0u;
+
+    EXPECT_NO_THROW((void)ir.optimize());
+    EXPECT_NO_THROW((void)ir.stableHash64());
+    ASSERT_LT(ir.root, ir.ops.size());
+    for (std::size_t i = 0; i < ir.ops.size(); ++i) {
+        const auto& op = ir.ops[i];
+        for (std::uint32_t c = 0; c < op.child_count; ++c) {
+            const auto child = ir.children[static_cast<std::size_t>(op.first_child) + c];
+            EXPECT_LT(child, i);
+        }
+    }
+}
+
+TEST(KernelIROptimize, SmoothHeavisideExpressionKeepsHashablePostOrder)
+{
+    const auto phi = FormExpr::parameterRef(0);
+    const auto scale = FormExpr::parameterRef(1);
+    const auto eps = FormExpr::constant(Real{0.011});
+    const auto expr = smoothHeaviside(phi - FormExpr::constant(Real{0.018}), eps) * scale;
+
+    auto lowered = jit::lowerToKernelIR(expr);
+    EXPECT_NO_THROW((void)lowered.ir.optimize());
+    EXPECT_NO_THROW((void)lowered.ir.stableHash64());
+}
+
 TEST(KernelIRHashing, PerOpStructuralHashesMatchStableRootHash)
 {
     const auto a = FormExpr::parameterRef(0);

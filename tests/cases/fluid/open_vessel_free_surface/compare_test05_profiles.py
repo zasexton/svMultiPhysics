@@ -84,6 +84,42 @@ def _metrics(sim_y: np.ndarray, ref_y: np.ndarray) -> dict[str, float | int]:
     }
 
 
+def _elevated_front_metrics(
+    reference_x: np.ndarray,
+    simulated_y: np.ndarray,
+    reference_y: np.ndarray,
+    wet_bed_depth: float | None,
+    clearance: float,
+) -> dict[str, float | int | None]:
+    if wet_bed_depth is None:
+        return {}
+
+    threshold = wet_bed_depth + clearance
+
+    def front_x(y_values: np.ndarray) -> tuple[float | None, int]:
+        valid = np.isfinite(y_values) & (y_values > threshold)
+        if not np.any(valid):
+            return None, 0
+        return float(np.max(reference_x[valid])), int(np.count_nonzero(valid))
+
+    simulated_front, simulated_count = front_x(simulated_y)
+    reference_front, reference_count = front_x(reference_y)
+    error = None
+    if simulated_front is not None and reference_front is not None:
+        error = simulated_front - reference_front
+
+    return {
+        "wet_bed_depth_m": float(wet_bed_depth),
+        "elevated_front_clearance_m": float(clearance),
+        "elevated_front_threshold_y_m": float(threshold),
+        "simulated_elevated_front_x_m": simulated_front,
+        "reference_elevated_front_x_m": reference_front,
+        "elevated_front_error_m": error,
+        "simulated_elevated_samples": simulated_count,
+        "reference_elevated_samples": reference_count,
+    }
+
+
 def _load_benchmark(path: Path | None) -> dict[str, object]:
     if path is None:
         return {}
@@ -346,6 +382,29 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
         }
     )
     dimensions = benchmark.get("dimensions_m", {})
+    wet_bed_depth = None
+    if isinstance(dimensions, dict) and isinstance(dimensions.get("wet_bed_depth"), (int, float)):
+        wet_bed_depth = float(dimensions["wet_bed_depth"])
+    metric_values.update(
+        _elevated_front_metrics(
+            reference_x=reference_x,
+            simulated_y=sim_y,
+            reference_y=reference_y,
+            wet_bed_depth=wet_bed_depth,
+            clearance=args.elevated_front_clearance,
+        )
+    )
+    elevated_error = metric_values.get("elevated_front_error_m")
+    if (
+        args.max_elevated_front_lag is not None
+        and isinstance(elevated_error, (int, float))
+        and float(elevated_error) < -args.max_elevated_front_lag
+    ):
+        report["validation"]["passed"] = False
+        report["validation"]["failures"].append(
+            "elevated front lags reference by "
+            f"{abs(float(elevated_error)):.6g} m, exceeding {args.max_elevated_front_lag:.6g} m"
+        )
     front_position_role = (
         "diagnostic_only"
         if args.front_diagnostic_only or (
@@ -389,6 +448,8 @@ def main() -> None:
     parser.add_argument("--x-min", type=float)
     parser.add_argument("--x-max", type=float)
     parser.add_argument("--sample-radius", type=float)
+    parser.add_argument("--elevated-front-clearance", type=float, default=0.005)
+    parser.add_argument("--max-elevated-front-lag", type=float)
     parser.add_argument("--plot-output", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

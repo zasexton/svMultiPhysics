@@ -77,6 +77,7 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override;
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
     [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,

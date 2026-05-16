@@ -6895,6 +6895,87 @@ std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
     return values_written;
 }
 
+std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
+{
+    requireSetup();
+    const auto& mesh = singleMesh("FESystem::syncPrescribedVertexFieldsFromMeshFields");
+    const auto& local_mesh = mesh.local_mesh();
+    const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
+
+    std::size_t values_written = 0u;
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.source_kind != FieldSourceKind::PrescribedData) {
+            continue;
+        }
+
+        const auto mesh_field = svmp::MeshFields::get_field_handle(
+            local_mesh, svmp::EntityKind::Vertex, rec.name);
+        if (mesh_field.id == 0) {
+            continue;
+        }
+        FE_THROW_IF(svmp::MeshFields::field_type(local_mesh, mesh_field) !=
+                        svmp::FieldScalarType::Float64,
+                    InvalidArgumentException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh field '" +
+                        rec.name + "' must be Float64");
+
+        const auto* values =
+            svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, mesh_field);
+        FE_CHECK_NOT_NULL(values,
+                          "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh field data");
+
+        const auto field_idx = static_cast<std::size_t>(rec.id);
+        FE_THROW_IF(field_idx >= field_dof_handlers_.size(), InvalidStateException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: invalid field layout for '" +
+                        rec.name + "'");
+        const auto* entity_map = field_dof_handlers_[field_idx].getEntityDofMap();
+        FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
+                        rec.name + "' must have vertex DOFs to sync from mesh fields");
+
+        const auto components =
+            static_cast<std::size_t>(std::max(1, rec.components));
+        const auto mesh_components =
+            svmp::MeshFields::field_components(local_mesh, mesh_field);
+        FE_THROW_IF(mesh_components < components, InvalidArgumentException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh field '" +
+                        rec.name + "' has fewer components than FE field '" +
+                        rec.name + "'");
+        FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
+                        rec.name + "' does not cover every mesh vertex");
+
+        if (field_idx >= prescribed_field_buffers_.size()) {
+            prescribed_field_buffers_.resize(field_idx + 1u);
+        }
+        auto& buffer = prescribed_field_buffers_[field_idx];
+        buffer.coefficients.assign(
+            static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs()),
+            Real{0});
+
+        for (GlobalIndex v = 0; v < n_vertices; ++v) {
+            const auto vertex_dofs = entity_map->getVertexDofs(v);
+            FE_THROW_IF(vertex_dofs.size() < components, InvalidStateException,
+                        "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
+                            rec.name + "' vertex DOF component count mismatch");
+            const auto v_base = static_cast<std::size_t>(v) * mesh_components;
+            for (std::size_t c = 0; c < components; ++c) {
+                const auto dof = vertex_dofs[c];
+                FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >=
+                                         buffer.coefficients.size(),
+                            InvalidStateException,
+                            "FESystem::syncPrescribedVertexFieldsFromMeshFields: field DOF index out of range");
+                buffer.coefficients[static_cast<std::size_t>(dof)] =
+                    static_cast<Real>(values[v_base + c]);
+                ++values_written;
+            }
+        }
+        ++buffer.revision;
+    }
+
+    return values_written;
+}
+
 std::size_t FESystem::syncBoundMeshMotionFieldsToState(std::span<Real> state) const
 {
     requireSetup();
@@ -7965,18 +8046,34 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
     std::vector<Real> coeffs;
     coeffs.reserve(cell_dofs_local.size());
 
+    const bool use_prescribed =
+        rec.source_kind == FieldSourceKind::PrescribedData;
+    const auto prescribed_coefficients =
+        use_prescribed ? prescribedFieldCoefficients(field)
+                       : std::span<const Real>{};
+    FE_THROW_IF(use_prescribed && prescribed_coefficients.empty(),
+                InvalidStateException,
+                "FESystem::evaluateFieldAtPoint: prescribed field '" +
+                    rec.name + "' has no coefficients");
+
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
-    if (state.u_vector != nullptr) {
+    if (!use_prescribed && state.u_vector != nullptr) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
         solution_view = vec->createAssemblyView();
     }
 
     const GlobalIndex offset = field_dof_offsets_[field_idx];
     for (const auto d_local : cell_dofs_local) {
-        const GlobalIndex d = d_local + offset;
+        const GlobalIndex d = use_prescribed ? d_local : d_local + offset;
         FE_THROW_IF(d < 0, InvalidArgumentException,
                     "FESystem::evaluateFieldAtPoint: negative DOF index");
-        if (solution_view) {
+        if (use_prescribed) {
+            const auto idx = static_cast<std::size_t>(d);
+            FE_THROW_IF(idx >= prescribed_coefficients.size(),
+                        InvalidArgumentException,
+                        "FESystem::evaluateFieldAtPoint: prescribed field coefficients are smaller than required");
+            coeffs.push_back(prescribed_coefficients[idx]);
+        } else if (solution_view) {
             coeffs.push_back(solution_view->getVectorEntry(d));
         } else {
             const auto idx = static_cast<std::size_t>(d);
@@ -8031,11 +8128,21 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
         }
     }
 
+    const bool use_prescribed =
+        rec.source_kind == FieldSourceKind::PrescribedData;
+    const auto prescribed_coefficients =
+        use_prescribed ? prescribedFieldCoefficients(field)
+                       : std::span<const Real>{};
+    FE_THROW_IF(use_prescribed && prescribed_coefficients.empty(),
+                InvalidStateException,
+                "FESystem::evaluateFieldAtVertices: prescribed field '" +
+                    rec.name + "' has no coefficients");
+
     const GlobalIndex offset = field_dof_offsets_[field_idx];
 
     // Create assembly view if backend vector is provided (MPI case)
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
-    if (state.u_vector != nullptr) {
+    if (!use_prescribed && state.u_vector != nullptr) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
         solution_view = vec->createAssemblyView();
     }
@@ -8044,8 +8151,14 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
         const auto vdofs = entity_map->getVertexDofs(v);
         const auto out_base = static_cast<std::size_t>(v) * ncomp;
         for (std::size_t c = 0; c < ncomp; ++c) {
-            const GlobalIndex d = vdofs[c] + offset;
-            if (solution_view) {
+            const GlobalIndex d = use_prescribed ? vdofs[c] : vdofs[c] + offset;
+            if (use_prescribed) {
+                const auto idx = static_cast<std::size_t>(d);
+                FE_THROW_IF(idx >= prescribed_coefficients.size(),
+                            InvalidArgumentException,
+                            "FESystem::evaluateFieldAtVertices: prescribed field coefficients are smaller than required");
+                out[out_base + c] = prescribed_coefficients[idx];
+            } else if (solution_view) {
                 out[out_base + c] = solution_view->getVectorEntry(d);
             } else {
                 const auto idx = static_cast<std::size_t>(d);

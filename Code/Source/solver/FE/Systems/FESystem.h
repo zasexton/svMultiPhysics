@@ -1231,6 +1231,7 @@ public:
 	    std::size_t resetBoundMeshMotionField(MeshMotionFieldRole role, Real value = Real(0));
 
 	    std::size_t bindStandardMeshMotionFieldsByName();
+	    std::size_t syncPrescribedVertexFieldsFromMeshFields();
 	    std::size_t syncBoundMeshMotionFieldsToPrescribedBuffers();
 	    std::size_t syncBoundMeshMotionFieldsToState(std::span<Real> state) const;
 	    std::size_t syncBoundMeshMotionFieldsToState(assembly::GlobalSystemView& vector_view) const;

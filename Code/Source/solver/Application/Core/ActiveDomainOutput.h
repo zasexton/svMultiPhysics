@@ -8,11 +8,31 @@
 #include <string>
 #include <vector>
 
+namespace svmp {
+namespace FE {
+namespace assembly {
+class IMeshAccess;
+}
+}
+}
+
 namespace application {
 namespace core {
 
 std::vector<double> collectWetVolumeFractions(
     std::size_t n_cells,
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
+
+struct CutVolumeMeasureSummary {
+  svmp::FE::Real reference_measure{0.0};
+  svmp::FE::Real physical_measure{0.0};
+  std::size_t rule_count{0};
+  std::size_t physical_rule_count{0};
+  std::size_t skipped_physical_rule_count{0};
+};
+
+CutVolumeMeasureSummary collectCutVolumeMeasures(
+    const svmp::FE::assembly::IMeshAccess& mesh,
     const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
 
 std::size_t writeWetVolumeFractionField(

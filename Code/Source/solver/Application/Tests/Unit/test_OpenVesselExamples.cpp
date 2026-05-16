@@ -212,20 +212,14 @@ void expectGmresSolver(const tinyxml2::XMLElement& equation)
   EXPECT_FALSE(text(solver, "Tolerance").empty());
 }
 
-void expectBlockSchurSolver(const tinyxml2::XMLElement& equation)
+void expectEigenDirectSolver(const tinyxml2::XMLElement& equation)
 {
-  const auto& solver = childWithAttribute(equation, "LS", "type", "NS");
+  const auto& solver = childWithAttribute(equation, "LS", "type", "Direct");
+  const auto& linear_algebra =
+      childWithAttribute(solver, "Linear_algebra", "type", "eigen");
+  expectText(linear_algebra, "Preconditioner", "none");
   EXPECT_FALSE(text(solver, "Max_iterations").empty());
-  EXPECT_FALSE(text(solver, "Krylov_space_dimension").empty());
   EXPECT_FALSE(text(solver, "Tolerance").empty());
-  expectText(solver, "NS_GM_max_iterations", "1000");
-  expectText(solver, "NS_GM_tolerance", "1.0e-4");
-  expectText(solver, "NS_CG_max_iterations", "1000");
-  expectText(solver, "NS_CG_tolerance", "1.0e-4");
-  expectText(solver, "NS_min_outer_iterations", "1");
-  expectText(solver, "NS_Schur_preconditioner", "algebraic-shat");
-  expectText(solver, "NS_Momentum_approximation", "ilu-k");
-  expectText(solver, "NS_Use_coupled_outer_FGMRES", "true");
 }
 
 bool fileContains(const fs::path& path, std::string_view needle)
@@ -345,7 +339,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(level_set, "Enable_volume_correction", "true");
   expectText(level_set, "Volume_correction_use_initial_volume", "true");
   expectText(level_set, "Volume_correction_cadence_steps", "5");
-  expectGmresSolver(level_set);
+  expectEigenDirectSolver(level_set);
   expectOutputFields(level_set, "Spatial",
                      {"Level_set", "Generated_interface", "Surface_position"});
   expectOutputFields(level_set, "Volume_integral", {"Volume"});
@@ -358,7 +352,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(fluid, "Hydrostatic_pressure_reference_point", "0.0 0.5 0.0");
   expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
                              "Values_file_path");
-  expectGmresSolver(fluid);
+  expectEigenDirectSolver(fluid);
   expectOutputFields(fluid, "Spatial", {"Velocity", "Pressure"});
   expectOutputFields(fluid, "Volume_integral", {"Volume"});
 
@@ -470,6 +464,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     bool fitted;
     bool top_wall_bc;
     bool obstacle_bc;
+    bool pressure_constraints;
     std::vector<std::string> faces;
   };
 
@@ -479,6 +474,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        true,
        false,
        false,
+       true,
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "free_surface"}},
       {"unfitted_level_set",
@@ -486,11 +482,13 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        true,
        false,
+       true,
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d18",
        false,
+       true,
        false,
        false,
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
@@ -498,6 +496,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       {"unfitted_level_set",
        "spheric_test05_wet_bed_d38",
        false,
+       true,
        false,
        false,
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
@@ -506,6 +505,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        "spheric_test02_dambreak_obstacle",
        false,
        false,
+       true,
        true,
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top", "obstacle"}},
@@ -543,8 +543,12 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     }
 
     const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
-    expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
-                               "Values_file_path");
+    if (expected.pressure_constraints) {
+      expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
+                                 "Values_file_path");
+    } else {
+      EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
+    }
     for (const auto& face : expected.faces) {
       if (startsWith(face, "wall_") &&
           (expected.top_wall_bc || face != "wall_top")) {
@@ -563,17 +567,28 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     const bool is_test05 =
         startsWith(expected.case_name, "spheric_test05_wet_bed_");
     if (is_test05) {
+      const auto expected_jit_options =
+          std::string("jit=true; jit_specialization=true");
+      const auto& level_set =
+          childWithAttribute(*root, "Add_equation", "type", "level_set");
+      expectText(level_set, "Module_options", expected_jit_options);
+      expectText(level_set, "Enable_reinitialization", "false");
+      expectText(level_set, "Enable_volume_correction", "false");
+      expectText(fluid, "Module_options", expected_jit_options);
       expectText(free_surface, "Active_domain", "LevelSetNegative");
       expectText(free_surface, "Active_domain_method", "CutVolume");
-      expectBlockSchurSolver(fluid);
+      expectText(free_surface, "Enable_velocity_extension", "true");
+      expectText(free_surface, "Velocity_extension_diffusivity", "1.0");
+      expectEigenDirectSolver(fluid);
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
+      expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
       EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
-                               "256,643.659423052"));
+                               "node_id,pressure"));
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
-                               "\"node_id\": 256"));
+                               "\"pressure_gauge\""));
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",
-                               "\"initial_phi\": -0.0142363529744199"));
+                               "\"current_prescribed_pressure_matches_initial_hydrostatic\": true"));
     }
 
     if (expected.fitted) {

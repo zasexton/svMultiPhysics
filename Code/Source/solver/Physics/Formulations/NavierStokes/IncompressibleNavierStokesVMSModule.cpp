@@ -104,6 +104,43 @@ using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBou
     return existing;
 }
 
+[[nodiscard]] FE::FieldId ensureCompatiblePrescribedField(
+    FE::systems::FESystem& system,
+    FE::systems::FieldSpec spec,
+    bool auto_register,
+    const char* context)
+{
+    const auto existing = system.findFieldByName(spec.name);
+    if (existing == FE::INVALID_FIELD_ID) {
+        if (!auto_register) {
+            throw std::invalid_argument(
+                std::string(context) + ": prescribed field '" + spec.name +
+                "' was requested but is not registered");
+        }
+        return system.addField(std::move(spec));
+    }
+
+    const auto& rec = system.fieldRecord(existing);
+    if (rec.source_kind != FE::systems::FieldSourceKind::PrescribedData) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name +
+            "' must be a prescribed data field");
+    }
+    if (rec.components != spec.components) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name +
+            "' has component count " + std::to_string(rec.components) +
+            ", expected " + std::to_string(spec.components));
+    }
+    if (!rec.space || !spec.space || !spacesCompatible(*rec.space, *spec.space)) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name +
+            "' uses an incompatible function space");
+    }
+
+    return existing;
+}
+
 constexpr FE::Real kPressureGaugeLevelSetMargin = 1.0e-8;
 
 struct ActivePressureDomain {
@@ -819,6 +856,15 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             throw std::invalid_argument(
                 "IncompressibleNavierStokesVMSModule: UnfittedLevelSet free surfaces require Active_domain=LevelSetNegative or LevelSetPositive; set Allow_full_domain_unfitted_free_surface=true only for deliberate full-domain diagnostic runs");
         }
+        if (bc.kinematic_enforcement == FreeSurfaceKinematicEnforcement::Nitsche) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: unfitted level-set free surfaces are one-sided embedded boundaries; Nitsche free-surface kinematics require the fitted ALE path or a future two-sided CutFEM interface path");
+        }
+        if (!FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) &&
+            bc.use_level_set_curvature) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: unfitted level-set surface tension with raw level-set curvature is not validated; set Use_level_set_curvature=false and provide Curvature or a projected curvature field");
+        }
         const auto& cut = bc.cut_cell_stabilization;
         if (cut.enabled) {
             const auto* velocity_penalty =
@@ -917,6 +963,33 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
             }
         }
     }
+}
+
+void warnUnfittedRawCurvatureIfNeeded(const FreeSurfaceBoundary& bc)
+{
+    if (!isUnfittedLevelSet(bc) ||
+        FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension) ||
+        !bc.use_level_set_curvature) {
+        return;
+    }
+
+    FE_LOG_WARNING(
+        std::string("IncompressibleNavierStokesVMSModule: unfitted level-set surface tension is using raw level-set curvature") +
+        " marker=" + std::to_string(bc.interface_marker) +
+        " level_set_field='" + bc.level_set_field_name + "'" +
+        " generated_interface_domain_id='" + bc.generated_interface_domain_id + "'" +
+        " diagnostic=unfitted_level_set_raw_curvature"
+        " recommendation=use zero surface tension, prescribed curvature, or projected/smoothed curvature for verification cases");
+}
+
+[[nodiscard]] FE::forms::FormExpr unfittedInterfaceNormal(
+    const FreeSurfaceBoundary& bc)
+{
+    auto n = FE::forms::FormExpr::normal();
+    if (bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
+        return -n;
+    }
+    return n;
 }
 
 [[nodiscard]] const char* activeDomainName(FreeSurfaceActiveDomain domain) noexcept;
@@ -1064,6 +1137,20 @@ struct ActiveVolumeDomain {
     return "Unknown";
 }
 
+[[nodiscard]] const char* kinematicEnforcementName(
+    FreeSurfaceKinematicEnforcement enforcement) noexcept
+{
+    switch (enforcement) {
+    case FreeSurfaceKinematicEnforcement::None:
+        return "None";
+    case FreeSurfaceKinematicEnforcement::Penalty:
+        return "Penalty";
+    case FreeSurfaceKinematicEnforcement::Nitsche:
+        return "Nitsche";
+    }
+    return "Unknown";
+}
+
 [[nodiscard]] const char* cutVolumeSideName(FE::forms::CutVolumeSide side) noexcept
 {
     return side == FE::forms::CutVolumeSide::Negative ? "Negative" : "Positive";
@@ -1197,6 +1284,12 @@ void applyFreeSurfaceVelocityExtension(
     }
 
     namespace bc_forms = FE::forms::bc;
+    FE_LOG_INFO(
+        std::string("IncompressibleNavierStokesVMSModule: unfitted free-surface velocity extension marker=") +
+        std::to_string(bc.interface_marker) +
+        " level_set_field='" + bc.level_set_field_name + "'" +
+        " active_domain=" + activeDomainName(bc.active_domain) +
+        " active_domain_method=" + activeDomainMethodName(bc.active_domain_method));
     const auto diffusivity = bc_forms::toScalarExpr(
         bc.velocity_extension.diffusivity,
         freeSurfaceValueName("ns_free_surface_velocity_extension_diffusivity", bc));
@@ -1378,6 +1471,7 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     using namespace FE::forms;
 
     validateFreeSurfaceBoundary(bc, ale_enabled);
+    warnUnfittedRawCurvatureIfNeeded(bc);
 
     const bool has_dynamic_stress =
         !bc::isZeroConstantScalarValue(bc.external_pressure) ||
@@ -1385,13 +1479,35 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     const bool needs_surface_normal =
         has_dynamic_stress ||
         bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None;
+    if (isUnfittedLevelSet(bc)) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: unfitted free-surface boundary mode marker=") +
+            std::to_string(bc.interface_marker) +
+            " level_set_field='" + bc.level_set_field_name + "'" +
+            " generated_interface_domain_id='" + bc.generated_interface_domain_id + "'" +
+            " active_domain=" + activeDomainName(bc.active_domain) +
+            " active_domain_method=" + activeDomainMethodName(bc.active_domain_method) +
+            " dynamic_stress=" + (has_dynamic_stress ? "enabled" : "natural_zero") +
+            " kinematic_enforcement=" + kinematicEnforcementName(bc.kinematic_enforcement) +
+            " cut_cell_stabilization=" + (bc.cut_cell_stabilization.enabled ? "enabled" : "disabled") +
+            " velocity_extension=" + (bc.velocity_extension.enabled ? "enabled" : "disabled"));
+    }
     if (!needs_surface_normal) {
+        if (isUnfittedLevelSet(bc)) {
+            FE_LOG_WARNING(
+                std::string("IncompressibleNavierStokesVMSModule: unfitted free surface installs no explicit dI boundary residual marker=") +
+                std::to_string(bc.interface_marker) +
+                " level_set_field='" + bc.level_set_field_name + "'" +
+                " dynamic_stress=natural_zero"
+                " kinematic_enforcement=None"
+                " diagnostic=unfitted_free_surface_natural_mode");
+        }
         return;
     }
 
     const auto phi = freeSurfaceLevelSet(bc, system);
     const auto n = isUnfittedLevelSet(bc)
-                       ? unitNormalFromLevelSet(phi)
+                       ? unfittedInterfaceNormal(bc)
                        : (useFittedCurrentGeometry(bc, ale_enabled)
                               ? currentNormal()
                               : FormExpr::normal());
@@ -1615,6 +1731,20 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         std::move(p_spec),
         "IncompressibleNavierStokesVMSModule::registerOn pressure");
 
+    FE::FieldId body_force_field_id = FE::INVALID_FIELD_ID;
+    if (!options_.body_force_field_name.empty()) {
+        FE::systems::FieldSpec source_spec;
+        source_spec.name = options_.body_force_field_name;
+        source_spec.space = velocity_space_;
+        source_spec.components = dim;
+        source_spec.source_kind = FE::systems::FieldSourceKind::PrescribedData;
+        body_force_field_id = ensureCompatiblePrescribedField(
+            system,
+            std::move(source_spec),
+            options_.auto_register_body_force_field,
+            "IncompressibleNavierStokesVMSModule::registerOn momentum source");
+    }
+
     std::vector<FreeSurfaceBoundary> effective_free_surfaces;
     effective_free_surfaces.reserve(options_.free_surface.size());
     for (const auto& bc : options_.free_surface) {
@@ -1644,7 +1774,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                 active_pressure_domain->boundary->level_set_field_name,
                 side,
                 active_pressure_domain->boundary->level_set_isovalue,
-                FE::Real{0.0}));
+                FE::Real{0.0},
+                active_pressure_domain->boundary->interface_marker));
     }
 
     if (!options_.node_pressure_constraints.values.empty()) {
@@ -1704,13 +1835,21 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     const auto rho = FormExpr::constant(options_.density);
 
-    // Body force (constant vector).
+    // Body force/source acceleration. The optional field is evaluated as
+    // prescribed data, so it contributes to both Galerkin forcing and VMS
+    // strong residual without adding unknowns to the system.
     std::vector<FormExpr> f_comp;
     f_comp.reserve(static_cast<std::size_t>(dim));
     for (int d = 0; d < dim; ++d) {
         f_comp.push_back(FormExpr::constant(options_.body_force[static_cast<std::size_t>(d)]));
     }
-    const auto f = FormExpr::asVector(std::move(f_comp));
+    FormExpr f = FormExpr::asVector(std::move(f_comp));
+    if (body_force_field_id != FE::INVALID_FIELD_ID) {
+        f = f + StateField(
+                    body_force_field_id,
+                    *velocity_space_,
+                    options_.body_force_field_name);
+    }
 
     const auto eps_for_mu = sym(grad(u));
     const auto gamma_for_mu =

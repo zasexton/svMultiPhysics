@@ -24,8 +24,14 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/Assembler.h"
+#include "Assembly/CutIntegrationContext.h"
+#include "Core/FEException.h"
 #include "Dofs/DofMap.h"
+#include "Forms/FormCompiler.h"
+#include "Forms/FormKernels.h"
 #include "Forms/MonolithicCellKernel.h"
+#include "Forms/Vocabulary.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -1881,6 +1887,100 @@ public:
     }
 };
 
+class CutInterfaceDiagnosticsKernel : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::QuadraturePoints |
+               RequiredData::IntegrationWeights |
+               RequiredData::Normals;
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext& /*ctx_plus*/,
+                              int /*interface_marker*/,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        const auto n = ctx_minus.numTestDofs();
+        output_minus.reserve(n, ctx_minus.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/true);
+        output_plus.reserve(n, ctx_minus.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+        coupling_mp.reserve(n, ctx_minus.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+        coupling_pm.reserve(n, ctx_minus.numTrialDofs(), /*need_matrix=*/false, /*need_vector=*/false);
+
+        Real sum_w = 0.0;
+        Real max_plane_residual = 0.0;
+        std::array<Real, 3> avg_normal{{0.0, 0.0, 0.0}};
+        const auto n_qpts = ctx_minus.numQuadraturePoints();
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            sum_w += ctx_minus.integrationWeight(q);
+            const auto xi = ctx_minus.quadraturePoint(q);
+            max_plane_residual =
+                std::max(max_plane_residual, std::abs(xi[0] + xi[1] + xi[2] - Real{0.5}));
+            const auto normal = ctx_minus.normal(q);
+            avg_normal[0] += normal[0];
+            avg_normal[1] += normal[1];
+            avg_normal[2] += normal[2];
+        }
+        if (n_qpts > 0) {
+            avg_normal[0] /= static_cast<Real>(n_qpts);
+            avg_normal[1] /= static_cast<Real>(n_qpts);
+            avg_normal[2] /= static_cast<Real>(n_qpts);
+        }
+
+        output_minus.local_vector[0] = sum_w;
+        if (n > 1) output_minus.local_vector[1] = max_plane_residual;
+        if (n > 2) output_minus.local_vector[2] = avg_normal[0];
+        if (n > 3) output_minus.local_vector[3] = avg_normal[1];
+    }
+};
+
+class CutInterfaceBasisLoadKernel : public AssemblyKernel {
+public:
+    explicit CutInterfaceBasisLoadKernel(Real load) : load_(load) {}
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext& /*ctx_plus*/,
+                              int /*interface_marker*/,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        const auto n_test = ctx_minus.numTestDofs();
+        const auto n_trial = ctx_minus.numTrialDofs();
+        output_minus.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/true);
+        output_plus.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/false);
+        coupling_mp.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/false);
+        coupling_pm.reserve(n_test, n_trial, /*need_matrix=*/false, /*need_vector=*/false);
+
+        for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+            const Real w = ctx_minus.integrationWeight(q);
+            for (LocalIndex i = 0; i < n_test; ++i) {
+                output_minus.vectorEntry(i) += load_ * w * ctx_minus.basisValue(i, q);
+            }
+        }
+    }
+
+private:
+    Real load_{0.0};
+};
+
 /**
  * @brief Boundary face kernel that records only the physical face measure.
  *
@@ -2987,6 +3087,152 @@ private:
     std::uint64_t geometry_revision_{0};
     mutable std::size_t coordinate_query_count_{0};
 };
+
+interfaces::LevelSetInterfaceDomain makeReferencePlaneInterfaceDomain(int marker)
+{
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1}, 0u, 1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 0;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 0;
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+    interfaces::CutInterfaceFragment fragment;
+    fragment.interface_marker = marker;
+    fragment.parent_cell = 0;
+    fragment.local_fragment_index = 0;
+    fragment.stable_id = 1;
+    fragment.kind = interfaces::CutInterfaceFragmentKind::Polygon;
+    fragment.measure = std::sqrt(Real{3.0}) / Real{8.0};
+    fragment.normal = {{
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+    }};
+    interfaces::CutInterfaceQuadraturePoint qp;
+    qp.point = {{Real{1.0} / Real{6.0}, Real{1.0} / Real{6.0}, Real{1.0} / Real{6.0}}};
+    qp.parent_coordinate = qp.point;
+    qp.normal = fragment.normal;
+    qp.weight = fragment.measure;
+    fragment.quadrature_points.push_back(qp);
+    domain.addFragment(std::move(fragment));
+    return domain;
+}
+
+TEST(StandardAssemblerCutInterfaces, MapsReferenceInterfaceMeasureToPhysicalSurface) {
+    constexpr int marker = 314;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    DenseVectorView rhs(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    CutInterfaceDiagnosticsKernel kernel;
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        nullptr, &rhs, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    EXPECT_NEAR(rhs.getVectorEntry(0), std::sqrt(Real{61.0}) / Real{4.0}, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(2), Real{6.0} / std::sqrt(Real{61.0}), 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(3), Real{4.0} / std::sqrt(Real{61.0}), 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces, AssemblesOneSidedInterfaceLoadOnGeneratedSurface)
+{
+    constexpr int marker = 315;
+    constexpr Real load = 2.5;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    DenseVectorView rhs(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    CutInterfaceBasisLoadKernel kernel(load);
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        nullptr, &rhs, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    const Real physical_area = std::sqrt(Real{61.0}) / Real{4.0};
+    EXPECT_NEAR(rhs.getVectorEntry(0), load * physical_area * Real{0.5}, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(1), load * physical_area / Real{6.0}, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(2), load * physical_area / Real{6.0}, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(3), load * physical_area / Real{6.0}, 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces, RejectsTwoSidedGeneratedInterfaceForms)
+{
+    constexpr int marker = 316;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    DenseVectorView rhs(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    forms::FormCompiler compiler;
+    const auto u = forms::TrialFunction(space, "u");
+    const auto v = forms::TestFunction(space, "v");
+    auto ir = compiler.compileBilinear((forms::jump(u) * forms::jump(v)).dI(marker));
+    forms::FormKernel kernel(std::move(ir));
+    ASSERT_TRUE(kernel.requiresTwoSidedInterfaceFace());
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    try {
+        (void)assembler.assembleCutInterfaces(
+            mesh, cut_context, marker, space, space, kernel,
+            nullptr, &rhs, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+        FAIL() << "Expected generated level-set interface assembly to reject two-sided forms";
+    } catch (const FEException& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("one-sided embedded boundaries"), std::string::npos);
+    }
+}
 
 class SinglePointMeshAccess final : public IMeshAccess {
 public:

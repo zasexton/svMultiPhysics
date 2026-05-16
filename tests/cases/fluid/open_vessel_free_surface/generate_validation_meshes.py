@@ -16,11 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
-import meshio
 import numpy as np
 import pyvista as pv
-import tetgen
-from svv.utils.remeshing import mmg
 
 
 ROOT = Path(__file__).resolve().parent
@@ -40,6 +37,7 @@ TEST05_BLOCKSCHUR_LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-4"
 TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "9"
 TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS = "100"
 TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION = "80"
+TEST05_BLOCKSCHUR_INNER_MAX_ITERATIONS = "150"
 TEST05_BLOCKSCHUR_MIN_OUTER_ITERATIONS = "1"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
@@ -147,6 +145,109 @@ def tetra_grid(points: np.ndarray, elements: np.ndarray) -> pv.UnstructuredGrid:
     return pv.UnstructuredGrid(cells, cell_types, points)
 
 
+def orient_tets_positive(points: np.ndarray, elements: np.ndarray) -> np.ndarray:
+    oriented = elements.copy()
+    a = points[oriented[:, 0]]
+    b = points[oriented[:, 1]]
+    c = points[oriented[:, 2]]
+    d = points[oriented[:, 3]]
+    volumes = np.einsum("ij,ij->i", np.cross(b - a, c - a), d - a)
+    negative = volumes < 0.0
+    oriented[negative, 2], oriented[negative, 3] = (
+        oriented[negative, 3].copy(),
+        oriented[negative, 2].copy(),
+    )
+    return oriented
+
+
+def segmented_coordinates(values: Iterable[float], max_spacing: float) -> np.ndarray:
+    anchors = sorted({float(value) for value in values})
+    coords: list[float] = []
+    for start, stop in zip(anchors[:-1], anchors[1:]):
+        count = max(1, int(np.ceil((stop - start) / max_spacing)))
+        segment = np.linspace(start, stop, count + 1)
+        if coords:
+            segment = segment[1:]
+        coords.extend(float(value) for value in segment)
+    return np.array(coords, dtype=float)
+
+
+def centered_cut_segmented_coordinates(
+    start: float,
+    stop: float,
+    cut_values: Iterable[float],
+    *,
+    max_spacing: float,
+) -> np.ndarray:
+    anchors = [float(start), float(stop)]
+    half_width = 0.5 * max_spacing
+    for cut in cut_values:
+        cut = float(cut)
+        lower = max(float(start), cut - half_width)
+        upper = min(float(stop), cut + half_width)
+        if lower < cut < upper:
+            anchors.extend([lower, upper])
+    return segmented_coordinates(anchors, max_spacing)
+
+
+def structured_tet_grid(
+    x_coords: np.ndarray,
+    y_coords: np.ndarray,
+    z_coords: np.ndarray,
+    *,
+    mirror_z_midplane: bool = False,
+) -> pv.UnstructuredGrid:
+    nx = len(x_coords)
+    ny = len(y_coords)
+    nz = len(z_coords)
+    points = np.array(
+        [[x, y, z] for z in z_coords for y in y_coords for x in x_coords],
+        dtype=float,
+    )
+
+    def node(i: int, j: int, k: int) -> int:
+        return k * ny * nx + j * nx + i
+
+    elements: list[tuple[int, int, int, int]] = []
+    z_mid = 0.5 * (float(z_coords[0]) + float(z_coords[-1]))
+    for k in range(nz - 1):
+        for j in range(ny - 1):
+            for i in range(nx - 1):
+                n000 = node(i, j, k)
+                n100 = node(i + 1, j, k)
+                n010 = node(i, j + 1, k)
+                n110 = node(i + 1, j + 1, k)
+                n001 = node(i, j, k + 1)
+                n101 = node(i + 1, j, k + 1)
+                n011 = node(i, j + 1, k + 1)
+                n111 = node(i + 1, j + 1, k + 1)
+                if mirror_z_midplane and 0.5 * (z_coords[k] + z_coords[k + 1]) > z_mid:
+                    elements.extend(
+                        [
+                            (n001, n000, n010, n110),
+                            (n001, n010, n011, n110),
+                            (n001, n011, n111, n110),
+                            (n001, n111, n101, n110),
+                            (n001, n101, n100, n110),
+                            (n001, n100, n000, n110),
+                        ]
+                    )
+                else:
+                    elements.extend(
+                        [
+                            (n000, n001, n011, n111),
+                            (n000, n011, n010, n111),
+                            (n000, n010, n110, n111),
+                            (n000, n110, n100, n111),
+                            (n000, n100, n101, n111),
+                            (n000, n101, n001, n111),
+                        ]
+                    )
+
+    tets = orient_tets_positive(points, np.array(elements, dtype=np.int64))
+    return tetra_grid(points, tets)
+
+
 def grid_tets(grid: pv.UnstructuredGrid) -> np.ndarray:
     cells = grid.cells.reshape((-1, 5))
     return cells[:, 1:].astype(np.int64)
@@ -169,6 +270,8 @@ def build_tetgen_grid(
     max_volume: float,
     obstacles: list[Box] | None = None,
 ) -> pv.UnstructuredGrid:
+    import tetgen
+
     obstacles = obstacles or []
     surfaces = [box_surface(domain)]
     surfaces.extend(box_surface(obstacle, include_bottom=False) for obstacle in obstacles)
@@ -203,6 +306,9 @@ def build_tetgen_grid(
 
 
 def run_mmg(grid: pv.UnstructuredGrid, *, hmin: float, hmax: float, hausd: float) -> pv.UnstructuredGrid:
+    import meshio
+    from svv.utils.remeshing import mmg
+
     with tempfile.TemporaryDirectory(prefix="svmp-free-surface-mmg-") as temp_dir:
         temp = Path(temp_dir)
         in_path = temp / "input.mesh"
@@ -253,6 +359,7 @@ def add_solution_arrays(
     grid: pv.UnstructuredGrid,
     *,
     phi: Callable[[np.ndarray], np.ndarray] | None = None,
+    pressure: Callable[[np.ndarray], np.ndarray] | None = None,
     fitted: bool = False,
 ) -> None:
     clear_arrays(grid)
@@ -261,7 +368,9 @@ def add_solution_arrays(
     if phi is not None:
         grid.point_data["phi"] = phi(grid.points).astype(float)
     grid.point_data["Velocity"] = np.zeros((npoints, 3), dtype=float)
-    grid.point_data["Pressure"] = np.zeros(npoints, dtype=float)
+    grid.point_data["Pressure"] = (
+        pressure(grid.points).astype(float) if pressure is not None else np.zeros(npoints, dtype=float)
+    )
     if fitted:
         grid.point_data["mesh_displacement"] = np.zeros((npoints, 3), dtype=float)
         grid.point_data["mesh_velocity"] = np.zeros((npoints, 3), dtype=float)
@@ -368,6 +477,65 @@ def hydrostatic_pressure_at(point: np.ndarray, fill_height: float) -> float:
     return WATER_DENSITY * GRAVITY * (fill_height - float(point[1]))
 
 
+def dam_break_wet_bed_phi(
+    points: np.ndarray,
+    *,
+    gate_x: float,
+    dam_height: float,
+    wet_depth: float,
+) -> np.ndarray:
+    bed_phi = points[:, 1] - wet_depth
+    column_phi = np.maximum(points[:, 0] - gate_x, points[:, 1] - dam_height)
+    return np.minimum(bed_phi, column_phi)
+
+
+def dam_break_wet_bed_pressure(
+    points: np.ndarray,
+    *,
+    gate_x: float,
+    dam_height: float,
+    wet_depth: float,
+) -> np.ndarray:
+    surface_height = np.where(points[:, 0] <= gate_x, dam_height, wet_depth)
+    return WATER_DENSITY * GRAVITY * np.maximum(surface_height - points[:, 1], 0.0)
+
+
+def test05_vertical_coordinates(
+    domain: Box,
+    wet_depth: float,
+    dam_height: float,
+) -> np.ndarray:
+    fine_spacing = 0.006
+    coarse_spacing = 0.010
+    fine_top = min(domain.ymax, wet_depth + 0.5 * fine_spacing)
+    anchors = [domain.ymin, domain.ymax]
+    for cut, spacing in ((wet_depth, fine_spacing), (dam_height, coarse_spacing)):
+        half_width = 0.5 * spacing
+        lower = max(domain.ymin, cut - half_width)
+        upper = min(domain.ymax, cut + half_width)
+        if lower < cut < upper:
+            anchors.extend([lower, upper])
+    anchors.append(fine_top)
+    anchors = sorted({float(value) for value in anchors})
+
+    coords: list[float] = []
+    for start, stop in zip(anchors[:-1], anchors[1:]):
+        max_spacing = fine_spacing if stop <= fine_top else coarse_spacing
+        count = max(1, int(np.ceil((stop - start) / max_spacing)))
+        segment = np.linspace(start, stop, count + 1)
+        if coords:
+            segment = segment[1:]
+        coords.extend(float(value) for value in segment)
+    cut_values = (wet_depth, dam_height)
+    coords = [
+        value
+        for value in coords
+        if value in (domain.ymin, domain.ymax)
+        or not any(abs(value - cut) <= 1.0e-12 for cut in cut_values)
+    ]
+    return np.array(coords, dtype=float)
+
+
 def write_pressure_gauge(
     case_dir: Path,
     grid: pv.UnstructuredGrid,
@@ -413,6 +581,9 @@ def write_solver_xml(
     active_domain: str | None = None,
     use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
+    include_pressure_constraints: bool = True,
+    hydrostatic_pressure_field_name: str | None = None,
+    enable_level_set_maintenance: bool = True,
 ) -> None:
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
@@ -438,7 +609,9 @@ def write_solver_xml(
     if active_domain is not None:
         active_domain_block = f"""
     <Active_domain>{active_domain}</Active_domain>
-    <Active_domain_method>CutVolume</Active_domain_method>"""
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Enable_velocity_extension>true</Enable_velocity_extension>
+    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>"""
     cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
     unfitted_fluid_solver_type = "NS" if use_blockschur_solver else "GMRES"
     unfitted_level_set_nonlinear_tolerance = (
@@ -473,14 +646,32 @@ def write_solver_xml(
     unfitted_blockschur_controls = ""
     if use_blockschur_solver:
         unfitted_blockschur_controls = f"""
-    <NS_GM_max_iterations>1000</NS_GM_max_iterations>
+    <NS_GM_max_iterations>{TEST05_BLOCKSCHUR_INNER_MAX_ITERATIONS}</NS_GM_max_iterations>
     <NS_GM_tolerance>{unfitted_linear_tolerance}</NS_GM_tolerance>
-    <NS_CG_max_iterations>1000</NS_CG_max_iterations>
+    <NS_CG_max_iterations>{TEST05_BLOCKSCHUR_INNER_MAX_ITERATIONS}</NS_CG_max_iterations>
     <NS_CG_tolerance>{unfitted_linear_tolerance}</NS_CG_tolerance>
     <NS_min_outer_iterations>{TEST05_BLOCKSCHUR_MIN_OUTER_ITERATIONS}</NS_min_outer_iterations>
-    <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
+    <NS_Schur_preconditioner>blockdiag-l</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>"""
+    hydrostatic_pressure_field_block = (
+        f"\n  <Hydrostatic_pressure_field_name>{hydrostatic_pressure_field_name}</Hydrostatic_pressure_field_name>"
+        if hydrostatic_pressure_field_name
+        else ""
+    )
+    pressure_constraint_block = (
+        """
+  <Node_pressure_constraints>
+    <Id_type>Global_vertex_gid</Id_type>
+    <Values_file_path>pressure_gauge.csv</Values_file_path>
+  </Node_pressure_constraints>"""
+        if include_pressure_constraints
+        else ""
+    )
+    jit_module_options = "jit=true; jit_specialization=true"
+    enable_level_set_maintenance_text = (
+        "true" if enable_level_set_maintenance else "false"
+    )
 
     if fitted:
         equations = f"""
@@ -489,6 +680,7 @@ def write_solver_xml(
   <Min_iterations>1</Min_iterations>
   <Max_iterations>{unfitted_fluid_max_iterations}</Max_iterations>
   <Tolerance>{unfitted_fluid_nonlinear_tolerance}</Tolerance>
+  <Module_options>{jit_module_options}</Module_options>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Enable_ALE>true</Enable_ALE>
@@ -504,11 +696,7 @@ def write_solver_xml(
   <Force_z>0.0</Force_z>
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
-  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>
-  <Node_pressure_constraints>
-    <Id_type>Global_vertex_gid</Id_type>
-    <Values_file_path>pressure_gauge.csv</Values_file_path>
-  </Node_pressure_constraints>
+  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{hydrostatic_pressure_field_block}{pressure_constraint_block}
   <Viscosity model="Constant">
     <Value>{WATER_VISCOSITY}</Value>
   </Viscosity>
@@ -553,6 +741,7 @@ def write_solver_xml(
 
 <Add_equation type="mesh_motion">
   <Coupled>true</Coupled>
+  <Module_options>{jit_module_options}</Module_options>
   <Model>Harmonic</Model>
   <Field_name>mesh_displacement</Field_name>
   <Operator_tag>equations</Operator_tag>
@@ -568,6 +757,7 @@ def write_solver_xml(
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
   <Tolerance>{unfitted_level_set_nonlinear_tolerance}</Tolerance>
+  <Module_options>{jit_module_options}</Module_options>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
@@ -577,11 +767,11 @@ def write_solver_xml(
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>true</Enable_reinitialization>
+  <Enable_reinitialization>{enable_level_set_maintenance_text}</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
   <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
-  <Enable_volume_correction>true</Enable_volume_correction>
+  <Enable_volume_correction>{enable_level_set_maintenance_text}</Enable_volume_correction>
   <Volume_correction_use_initial_volume>true</Volume_correction_use_initial_volume>
   <Volume_correction_cadence_steps>5</Volume_correction_cadence_steps>
   <Volume_correction_tolerance>1.0e-5</Volume_correction_tolerance>
@@ -597,12 +787,12 @@ def write_solver_xml(
     <Volume>true</Volume>
   </Output>
 
-  <LS type="GMRES">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>50</Max_iterations>
-    <Krylov_space_dimension>50</Krylov_space_dimension>
+    <Max_iterations>1</Max_iterations>
+    <Krylov_space_dimension>1</Krylov_space_dimension>
     <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
@@ -611,8 +801,9 @@ def write_solver_xml(
 <Add_equation type="fluid">
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
-  <Max_iterations>8</Max_iterations>
-  <Tolerance>{FLUID_NONLINEAR_TOLERANCE}</Tolerance>
+  <Max_iterations>{unfitted_fluid_max_iterations}</Max_iterations>
+  <Tolerance>{unfitted_fluid_nonlinear_tolerance}</Tolerance>
+  <Module_options>{jit_module_options}</Module_options>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>{WATER_DENSITY}</Density>
@@ -621,11 +812,7 @@ def write_solver_xml(
   <Force_z>0.0</Force_z>
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
-  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>
-  <Node_pressure_constraints>
-    <Id_type>Global_vertex_gid</Id_type>
-    <Values_file_path>pressure_gauge.csv</Values_file_path>
-  </Node_pressure_constraints>
+  <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{hydrostatic_pressure_field_block}{pressure_constraint_block}
   <Viscosity model="Constant">
     <Value>{WATER_VISCOSITY}</Value>
   </Viscosity>
@@ -640,12 +827,12 @@ def write_solver_xml(
     <Volume>true</Volume>
   </Output>
 
-  <LS type="{unfitted_fluid_solver_type}">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>{unfitted_linear_max_iterations}</Max_iterations>
-    <Krylov_space_dimension>{unfitted_krylov_space_dimension}</Krylov_space_dimension>
+    <Max_iterations>1</Max_iterations>
+    <Krylov_space_dimension>1</Krylov_space_dimension>
     <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{unfitted_linear_absolute_tolerance}</Absolute_tolerance>{unfitted_blockschur_controls}
   </LS>
@@ -731,6 +918,8 @@ def write_case(
     mesh_subdir: str,
     domain: Box,
     phi: Callable[[np.ndarray], np.ndarray] | None,
+    pressure: Callable[[np.ndarray], np.ndarray] | None = None,
+    grid_factory: Callable[[], pv.UnstructuredGrid] | None = None,
     fill_height: float,
     gauge_point: tuple[float, float, float],
     metadata: dict,
@@ -743,6 +932,9 @@ def write_case(
     active_domain: str | None = None,
     use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
+    include_pressure_constraints: bool = True,
+    hydrostatic_pressure_field_name: str | None = None,
+    enable_level_set_maintenance: bool = True,
     gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
     record_gauge_metadata: bool = False,
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
@@ -753,11 +945,16 @@ def write_case(
     surface_dir = mesh_dir / "mesh-surfaces"
     mesh_dir.mkdir(parents=True, exist_ok=True)
 
-    max_volume = h**3 / 6.0
-    grid = build_tetgen_grid(domain, max_volume=max_volume, obstacles=obstacles)
-    grid = run_mmg(grid, hmin=0.35 * h, hmax=1.25 * h, hausd=0.15 * h)
-    grid = remove_cells_inside(grid, obstacles)
-    add_solution_arrays(grid, phi=phi, fitted=fitted)
+    if grid_factory is not None:
+        if obstacles:
+            raise ValueError("grid_factory cases do not support obstacles")
+        grid = grid_factory()
+    else:
+        max_volume = h**3 / 6.0
+        grid = build_tetgen_grid(domain, max_volume=max_volume, obstacles=obstacles)
+        grid = run_mmg(grid, hmin=0.35 * h, hmax=1.25 * h, hausd=0.15 * h)
+        grid = remove_cells_inside(grid, obstacles)
+    add_solution_arrays(grid, phi=phi, pressure=pressure, fitted=fitted)
 
     mesh_path = mesh_dir / "mesh-complete.mesh.vtu"
     grid.save(mesh_path, binary=False)
@@ -788,6 +985,9 @@ def write_case(
         active_domain=active_domain,
         use_cut_metadata_scale=use_cut_metadata_scale,
         use_blockschur_solver=use_blockschur_solver,
+        include_pressure_constraints=include_pressure_constraints,
+        hydrostatic_pressure_field_name=hydrostatic_pressure_field_name,
+        enable_level_set_maintenance=enable_level_set_maintenance,
     )
 
     print(
@@ -888,13 +1088,44 @@ def generate_spheric_test05() -> None:
     source_urls = ["https://www.spheric-sph.org/tests/test-05"]
 
     for wet_depth_mm, wet_depth in ((18, 0.018), (38, 0.038)):
-        wet_layer = Box(domain.xmin, domain.xmax, domain.ymin, wet_depth, domain.zmin, domain.zmax)
-        column = Box(domain.xmin, gate_x, domain.ymin, dam_height, domain.zmin, domain.zmax)
+        x_coords = centered_cut_segmented_coordinates(
+            domain.xmin,
+            domain.xmax,
+            (gate_x,),
+            max_spacing=0.0225,
+        )
+        y_coords = test05_vertical_coordinates(domain, wet_depth, dam_height)
+        z_coords = segmented_coordinates(
+            (domain.zmin, 0.5 * (domain.zmin + domain.zmax), domain.zmax),
+            max_spacing=0.015,
+        )
 
-        def phi(points: np.ndarray, wet_layer: Box = wet_layer, column: Box = column) -> np.ndarray:
-            return np.minimum(
-                signed_distance_to_box(points, wet_layer),
-                signed_distance_to_box(points, column),
+        def grid_factory(
+            x_coords: np.ndarray = x_coords,
+            y_coords: np.ndarray = y_coords,
+            z_coords: np.ndarray = z_coords,
+        ) -> pv.UnstructuredGrid:
+            return structured_tet_grid(
+                x_coords,
+                y_coords,
+                z_coords,
+                mirror_z_midplane=True,
+            )
+
+        def phi(points: np.ndarray, wet_depth: float = wet_depth) -> np.ndarray:
+            return dam_break_wet_bed_phi(
+                points,
+                gate_x=gate_x,
+                dam_height=dam_height,
+                wet_depth=wet_depth,
+            )
+
+        def pressure(points: np.ndarray, wet_depth: float = wet_depth) -> np.ndarray:
+            return dam_break_wet_bed_pressure(
+                points,
+                gate_x=gate_x,
+                dam_height=dam_height,
+                wet_depth=wet_depth,
             )
 
         write_case(
@@ -902,10 +1133,12 @@ def generate_spheric_test05() -> None:
             mesh_subdir="background",
             domain=domain,
             phi=phi,
+            pressure=pressure,
+            grid_factory=grid_factory,
             fill_height=dam_height,
             gauge_point=(0.10, 0.075, 0.015),
-            gauge_pressure=lambda point, dam_height=dam_height: hydrostatic_pressure_at(
-                point, dam_height
+            gauge_pressure=lambda point, wet_depth=wet_depth: float(
+                pressure(point.reshape(1, 3))[0]
             ),
             record_gauge_metadata=True,
             pressure_gauge_verification=test05_pressure_gauge_verification,
@@ -914,7 +1147,7 @@ def generate_spheric_test05() -> None:
                 "representation": "unfitted_level_set",
                 "source_urls": source_urls,
                 "reference_profiles": test05_reference_profiles(wet_depth_mm),
-                "mesh_tools": ["PyVista", "TetGen", "MMG"],
+                "mesh_tools": ["PyVista", "mirrored structured thin-extrusion tetrahedral grid"],
                 "dimensions_m": {
                     "initial_column_height": dam_height,
                     "wet_bed_depth": wet_depth,
@@ -926,17 +1159,22 @@ def generate_spheric_test05() -> None:
                 },
                 "notes": [
                     "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
+                    "The tetrahedral split is mirrored about the extrusion mid-plane to suppress transverse bias.",
                     "The initial level-set field is the union of the wet bed and the retained water column.",
                     "Negative level-set values denote the water side for active-domain assembly.",
                 ],
             },
-            h=0.035,
+            h=0.006,
             fitted=False,
             time_step=0.0005,
             time_steps=312,
+            include_top_wall_bc=True,
             active_domain="LevelSetNegative",
             use_cut_metadata_scale=True,
             use_blockschur_solver=True,
+            include_pressure_constraints=False,
+            hydrostatic_pressure_field_name="Pressure",
+            enable_level_set_maintenance=False,
         )
 
 

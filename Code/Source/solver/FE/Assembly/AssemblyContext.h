@@ -285,6 +285,16 @@ public:
         ContextType type);
 
     /**
+     * @brief Reclassify a prepared cell context as a one-sided embedded face
+     *
+     * Used by cut-interface assembly after arbitrary reference-frame interface
+     * quadrature has been mapped through the parent cell geometry.
+     */
+    void markEmbeddedBoundaryFace(GlobalIndex face_id,
+                                  LocalIndex local_face_id,
+                                  int boundary_marker) noexcept;
+
+    /**
      * @brief Clear the context for reuse
      */
     void clear();

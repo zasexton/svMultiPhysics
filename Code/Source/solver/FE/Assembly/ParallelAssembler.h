@@ -320,6 +320,18 @@ public:
         bool assemble_matrix,
         bool assemble_vector) override;
 
+    [[nodiscard]] AssemblyResult assembleCutInterfaces(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        AssemblyKernel& kernel,
+        GlobalSystemView* matrix_view,
+        GlobalSystemView* vector_view,
+        bool assemble_matrix,
+        bool assemble_vector) override;
+
     [[nodiscard]] AssemblyResult assembleCellsFused(
         const IMeshAccess& mesh,
         std::span<const FusedCellTerm> terms) override;

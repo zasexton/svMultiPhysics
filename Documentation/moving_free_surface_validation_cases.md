@@ -68,6 +68,21 @@ wet-volume post-processing. `ActiveFluid` is a vertex-sign visualization mask
 only; it helps inspect dry-vertex masking and must not be interpreted as the
 integration active domain.
 
+Wet-volume drift diagnostics report the physical wet measure used for
+validation drift. The generated cut-volume rules themselves remain in reference
+cell coordinates because FE assembly maps them through the parent-cell geometry
+at integration time. Log fields with `reference_*` names expose the retained
+reference cut measure for debugging quadrature generation; `physical_*` fields
+include the parent-cell Jacobian and are the values to compare against fitted
+ALE or literature volumes.
+
+Wet-extension level-set advection currently means nearest-active-vertex
+extension: dry vertices copy the prescribed source velocity from the closest
+vertex on the selected active side. This is a diagnostic and validation aid for
+`Velocity_source=prescribed_data` transport fields, not a PDE-based normal,
+harmonic, or fast-marching extension. Coupled-field level-set advection does
+not use this application-side copy unless the wet-extension option is enabled.
+
 ## Level-Set Maintenance Policy
 
 Reinitialization is a validation control, not a universal default. Cases that

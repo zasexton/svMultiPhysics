@@ -46,6 +46,7 @@ const std::map<std::string, consts::LinearAlgebraType> LinearAlgebra::name_to_ty
     {"fsils", consts::LinearAlgebraType::fsils},
     {"petsc", consts::LinearAlgebraType::petsc},
     {"trilinos", consts::LinearAlgebraType::trilinos},
+    {"eigen", consts::LinearAlgebraType::eigen},
 };
 
 const std::map<consts::LinearAlgebraType, std::string> LinearAlgebra::type_to_name = {
@@ -53,6 +54,7 @@ const std::map<consts::LinearAlgebraType, std::string> LinearAlgebra::type_to_na
     {consts::LinearAlgebraType::fsils, "fsils"},
     {consts::LinearAlgebraType::petsc, "petsc"},
     {consts::LinearAlgebraType::trilinos, "trilinos"},
+    {consts::LinearAlgebraType::eigen, "eigen"},
 };
 
 void LinearAlgebra::check_equation_compatibility(

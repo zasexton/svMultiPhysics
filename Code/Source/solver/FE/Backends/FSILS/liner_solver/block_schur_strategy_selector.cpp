@@ -28,8 +28,16 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
   BlockSchurStrategySelection selection;
   selection.native_face_duplicates_only = low_rank_profile.native_face_duplicates_only;
 
+  const bool force_schur_bicgstab =
+      env_enabled("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_BICGSTAB");
+  const bool force_schur_gmres =
+      env_enabled("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_GMRES") &&
+      !force_schur_bicgstab;
+  const bool force_exact_schur_path = force_schur_gmres;
+
   const bool disable_face_only_legacy =
-      env_enabled("SVMP_FSILS_BLOCKSCHUR_DISABLE_FACE_ONLY_LEGACY");
+      env_enabled("SVMP_FSILS_BLOCKSCHUR_DISABLE_FACE_ONLY_LEGACY") ||
+      force_exact_schur_path;
   selection.use_face_only_legacy_scalar_schur =
       (con_ncomp == 1) &&
       (low_rank_profile.active_face_corrections > 0) &&
@@ -49,7 +57,8 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
        low_rank_profile.has_grouped_bordered) &&
       !low_rank_profile.reduced_touches_constraint &&
       !low_rank_profile.grouped_touches_constraint &&
-      !selection.require_exact_momentum_low_rank_path;
+      !selection.require_exact_momentum_low_rank_path &&
+      !force_exact_schur_path;
 
   selection.prefer_schur_gmres =
       low_rank_profile.has_grouped_bordered ||
@@ -57,10 +66,10 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
        low_rank_profile.active_face_corrections > 0) ||
       low_rank_profile.active_nonduplicate_reduced_corrections > 1;
 
-  if (env_enabled("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_GMRES")) {
+  if (force_schur_gmres) {
     selection.prefer_schur_gmres = true;
   }
-  if (env_enabled("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_BICGSTAB")) {
+  if (force_schur_bicgstab) {
     selection.prefer_schur_gmres = false;
   }
 

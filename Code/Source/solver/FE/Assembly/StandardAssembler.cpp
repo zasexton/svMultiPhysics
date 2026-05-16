@@ -51,8 +51,10 @@
 #include <limits>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <optional>
+#include <string_view>
 
 #if FE_HAS_MPI
 #  include <mpi.h>
@@ -76,6 +78,43 @@ namespace {
         return env && std::string_view(env) != "0";
     }();
     return enabled;
+}
+
+[[nodiscard]] inline bool cutVolumeTimingEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* cut_env = std::getenv("SVMP_CUT_VOLUME_TIMING");
+        if (cut_env && std::string_view(cut_env) != "0") {
+            return true;
+        }
+        const char* assembly_env = std::getenv("SVMP_ASSEMBLY_TIMING");
+        return assembly_env && std::string_view(assembly_env) != "0";
+    }();
+    return enabled;
+}
+
+[[nodiscard]] inline bool interiorFaceTimingEnabled() noexcept {
+    static const bool enabled = [] {
+        const char* face_env = std::getenv("SVMP_INTERIOR_FACE_TIMING");
+        if (face_env && std::string_view(face_env) != "0") {
+            return true;
+        }
+        const char* assembly_env = std::getenv("SVMP_ASSEMBLY_TIMING");
+        return assembly_env && std::string_view(assembly_env) != "0";
+    }();
+    return enabled;
+}
+
+[[nodiscard]] const char* cutVolumeTimingSideName(geometry::CutIntegrationSide side) noexcept
+{
+    switch (side) {
+    case geometry::CutIntegrationSide::Negative:
+        return "Negative";
+    case geometry::CutIntegrationSide::Positive:
+        return "Positive";
+    case geometry::CutIntegrationSide::Interface:
+        return "Interface";
+    }
+    return "Unknown";
 }
 
 void prepareKernelOutputRequest(KernelOutput& output,
@@ -127,6 +166,90 @@ public:
     const quadrature::QuadratureRule& rule) noexcept
 {
     return dynamic_cast<const CutVolumeQuadratureRule*>(&rule) != nullptr;
+}
+
+[[nodiscard]] Real norm3(const AssemblyContext::Vector3D& v) noexcept
+{
+    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+[[nodiscard]] AssemblyContext::Vector3D normalizeOr(
+    const AssemblyContext::Vector3D& v,
+    const AssemblyContext::Vector3D& fallback) noexcept
+{
+    const Real n = norm3(v);
+    if (n <= Real{1.0e-30}) {
+        return fallback;
+    }
+    return {{v[0] / n, v[1] / n, v[2] / n}};
+}
+
+[[nodiscard]] AssemblyContext::Vector3D referenceToPhysicalVector(
+    const AssemblyContext::Matrix3x3& J,
+    const AssemblyContext::Vector3D& v) noexcept
+{
+    return {{
+        J[0][0] * v[0] + J[0][1] * v[1] + J[0][2] * v[2],
+        J[1][0] * v[0] + J[1][1] * v[1] + J[1][2] * v[2],
+        J[2][0] * v[0] + J[2][1] * v[1] + J[2][2] * v[2],
+    }};
+}
+
+[[nodiscard]] AssemblyContext::Vector3D inverseTransposeReferenceNormal(
+    const AssemblyContext::Matrix3x3& J_inv,
+    const AssemblyContext::Vector3D& n) noexcept
+{
+    return {{
+        J_inv[0][0] * n[0] + J_inv[1][0] * n[1] + J_inv[2][0] * n[2],
+        J_inv[0][1] * n[0] + J_inv[1][1] * n[1] + J_inv[2][1] * n[2],
+        J_inv[0][2] * n[0] + J_inv[1][2] * n[1] + J_inv[2][2] * n[2],
+    }};
+}
+
+void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
+                                      const geometry::CutQuadratureRule& rule,
+                                      int dimension,
+                                      const char* error_prefix)
+{
+    const auto n_qpts = context.numQuadraturePoints();
+    FE_THROW_IF(rule.points.size() != static_cast<std::size_t>(n_qpts), FEException,
+                std::string(error_prefix) + ": cut-interface rule/context quadrature mismatch");
+
+    auto integration_weights = context.integrationWeightsWritable();
+    const auto jacobians = context.jacobians();
+    const auto inverse_jacobians = context.inverseJacobians();
+    const auto jacobian_dets = context.jacobianDets();
+    std::vector<AssemblyContext::Vector3D> normals;
+    normals.reserve(rule.points.size());
+
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        const auto& qp = rule.points[static_cast<std::size_t>(q)];
+        AssemblyContext::Vector3D n_ref{{qp.normal[0], qp.normal[1], qp.normal[2]}};
+        n_ref = normalizeOr(n_ref, AssemblyContext::Vector3D{{Real{1.0}, Real{0.0}, Real{0.0}}});
+
+        const auto n_phys_raw = inverseTransposeReferenceNormal(inverse_jacobians[q], n_ref);
+        const auto n_phys = normalizeOr(n_phys_raw, n_ref);
+        normals.push_back(n_phys);
+
+        Real surface_scale = Real{1.0};
+        if (dimension == 3) {
+            surface_scale = std::abs(jacobian_dets[q]) * norm3(n_phys_raw);
+        } else if (dimension == 2) {
+            const AssemblyContext::Vector3D tangent_ref{{-n_ref[1], n_ref[0], Real{0.0}}};
+            const auto tangent_phys = referenceToPhysicalVector(jacobians[q], tangent_ref);
+            surface_scale = norm3(tangent_phys);
+        } else {
+            FE_THROW(FEException,
+                     std::string(error_prefix) + ": generated cut-interface assembly requires a 2D or 3D mesh");
+        }
+
+        FE_THROW_IF(!std::isfinite(surface_scale) || surface_scale <= Real{0.0}, FEException,
+                    std::string(error_prefix) + ": invalid cut-interface surface Jacobian");
+        integration_weights[q] = qp.weight * surface_scale;
+    }
+
+    context.setNormals(normals);
+    context.markGeometryDirty();
 }
 
 [[nodiscard]] bool isFullSideVolumeRule(const geometry::CutQuadratureRule& rule) noexcept
@@ -3161,6 +3284,32 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
+    const bool face_timing = interiorFaceTimingEnabled();
+    auto face_now = [&]() -> double {
+        if (!face_timing) {
+            return 0.0;
+        }
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const double face_start = face_now();
+    double face_setup_time = 0.0;
+    double face_filter_time = 0.0;
+    double face_dof_time = 0.0;
+    double face_local_index_time = 0.0;
+    double face_alignment_time = 0.0;
+    double face_prepare_minus_time = 0.0;
+    double face_prepare_plus_time = 0.0;
+    double face_context_setter_time = 0.0;
+    double face_cut_scale_time = 0.0;
+    double face_solution_time = 0.0;
+    double face_field_time = 0.0;
+    double face_material_time = 0.0;
+    double face_kernel_time = 0.0;
+    double face_orientation_time = 0.0;
+    double face_insert_time = 0.0;
+    std::size_t faces_considered = 0u;
+    std::size_t faces_assembled = 0u;
 
     if (!initialized_) {
         initialize();
@@ -3275,29 +3424,43 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
     std::vector<Real> cut_face_jit_constants;
     const auto cut_stabilization_cell_scales =
         buildCutStabilizationCellScales(cut_integration_context_);
+    face_setup_time = face_now() - face_start;
 
     withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
         mesh.forEachInteriorFace(
             [&](GlobalIndex face_id, GlobalIndex cell_minus, GlobalIndex cell_plus) {
+            double stage_start = face_now();
+            ++faces_considered;
             if (facet_set_handle != nullptr &&
                 !facet_set_handle->containsFacet(static_cast<MeshIndex>(face_id))) {
+                face_filter_time += face_now() - stage_start;
                 return;
             }
             if (!should_process(cell_minus, cell_plus)) {
+                face_filter_time += face_now() - stage_start;
                 return;
             }
+            face_filter_time += face_now() - stage_start;
             // Get DOFs for both cells (rows/cols may differ)
+            stage_start = face_now();
             minus_row_dofs = getCellDofsCached(mesh, cell_minus, row_dof_map_, row_dof_offset_);
             plus_row_dofs = getCellDofsCached(mesh, cell_plus, row_dof_map_, row_dof_offset_);
             minus_col_dofs = getCellDofsCached(mesh, cell_minus, col_dof_map_, col_dof_offset_);
             plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
+            face_dof_time += face_now() - stage_start;
 
             // Prepare contexts for both sides
+            stage_start = face_now();
             LocalIndex local_face_minus = mesh.getLocalFaceIndex(face_id, cell_minus);
             LocalIndex local_face_plus = mesh.getLocalFaceIndex(face_id, cell_plus);
+            face_local_index_time += face_now() - stage_start;
 
+            stage_start = face_now();
             prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
                                required_data, ContextType::InteriorFace);
+            face_prepare_minus_time += face_now() - stage_start;
+
+            stage_start = face_now();
             context_.setMaterialState(nullptr, nullptr, 0u, 0u);
             context_.setTimeIntegrationContext(time_integration_);
             context_.setTime(time_);
@@ -3311,7 +3474,9 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
             context_.setInteriorFaceMarker(interior_facet_marker);
             context_.clearAllPreviousSolutionData();
+            face_context_setter_time += face_now() - stage_start;
 
+            stage_start = face_now();
             std::array<LocalIndex, 4> align_plus_storage{};
             std::span<const LocalIndex> align_plus{};
             const ElementType cell_type_minus = mesh.getCellType(cell_minus);
@@ -3353,9 +3518,14 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                     }
                 }
             }
+            face_alignment_time += face_now() - stage_start;
 
+            stage_start = face_now();
             prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
                                required_data, ContextType::InteriorFace, align_plus);
+            face_prepare_plus_time += face_now() - stage_start;
+
+            stage_start = face_now();
             context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
             context_plus.setTimeIntegrationContext(time_integration_);
             context_plus.setTime(time_);
@@ -3369,8 +3539,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             context_plus.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
             context_plus.setInteriorFaceMarker(interior_facet_marker);
             context_plus.clearAllPreviousSolutionData();
+            face_context_setter_time += face_now() - stage_start;
 
             if (cut_integration_context_ != nullptr) {
+                stage_start = face_now();
                 const auto cut_scale = cutStabilizationScaleForInteriorFace(
                     cut_stabilization_cell_scales,
                     facet_set_handle,
@@ -3380,33 +3552,35 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 bindCutStabilizationScaleConstants(
                     context_, jit_constants_, cut_scale, cut_face_jit_constants);
                 context_plus.setJITConstants(cut_face_jit_constants);
+                face_cut_scale_time += face_now() - stage_start;
             }
 
-		            if (need_solution) {
-		                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
-		                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
-                        ResolvedVectorGatherCache minus_resolved_cache;
-                        ResolvedVectorGatherCache plus_resolved_cache;
-		
-		                local_solution_coeffs_.resize(minus_col_dofs.size());
-                        gatherVectorCoefficients(minus_col_dofs, current_solution_view_, current_solution_,
-                                                 local_solution_coeffs_, &minus_resolved_cache,
-                                                 "StandardAssembler::assembleInteriorFaces", true);
-		                if (context_.trialUsesVectorBasis()) {
-		                    applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-		                                                  std::span<Real>(local_solution_coeffs_));
-	                }
-	                context_.setSolutionCoefficients(local_solution_coeffs_);
-		
-		                plus_solution_coeffs.resize(plus_col_dofs.size());
-                        gatherVectorCoefficients(plus_col_dofs, current_solution_view_, current_solution_,
-                                                 plus_solution_coeffs, &plus_resolved_cache,
-                                                 "StandardAssembler::assembleInteriorFaces", true);
-		                if (context_plus.trialUsesVectorBasis()) {
-		                    applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-		                                                  std::span<Real>(plus_solution_coeffs));
-	                }
-	                context_plus.setSolutionCoefficients(plus_solution_coeffs);
+            if (need_solution) {
+                stage_start = face_now();
+                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                            "StandardAssembler::assembleInteriorFaces: kernel requires solution but no solution was set");
+                ResolvedVectorGatherCache minus_resolved_cache;
+                ResolvedVectorGatherCache plus_resolved_cache;
+
+                local_solution_coeffs_.resize(minus_col_dofs.size());
+                gatherVectorCoefficients(minus_col_dofs, current_solution_view_, current_solution_,
+                                         local_solution_coeffs_, &minus_resolved_cache,
+                                         "StandardAssembler::assembleInteriorFaces", true);
+                if (context_.trialUsesVectorBasis()) {
+                    applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+                                                  std::span<Real>(local_solution_coeffs_));
+                }
+                context_.setSolutionCoefficients(local_solution_coeffs_);
+
+                plus_solution_coeffs.resize(plus_col_dofs.size());
+                gatherVectorCoefficients(plus_col_dofs, current_solution_view_, current_solution_,
+                                         plus_solution_coeffs, &plus_resolved_cache,
+                                         "StandardAssembler::assembleInteriorFaces", true);
+                if (context_plus.trialUsesVectorBasis()) {
+                    applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+                                                  std::span<Real>(plus_solution_coeffs));
+                }
+                context_plus.setSolutionCoefficients(plus_solution_coeffs);
 
                 if (time_integration_ != nullptr) {
                     const int required = requiredHistoryStates(time_integration_);
@@ -3422,39 +3596,41 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                             plus_prev_solution_coeffs.resize(static_cast<std::size_t>(required));
                         }
 
-	                        for (int k = 1; k <= required; ++k) {
-	                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
-	                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
-	                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
-	                                                        : nullptr;
-	                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
-	                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
-	                                            std::to_string(k) + ") not set");
+                        for (int k = 1; k <= required; ++k) {
+                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                            const auto* prev_view = (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                                        ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                                        : nullptr;
+                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                        "StandardAssembler::assembleInteriorFaces: previous solution (k=" +
+                                            std::to_string(k) + ") not set");
 
-		                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
-                                    gatherVectorCoefficients(minus_col_dofs, prev_view, prev,
-                                                             local_prev_minus, &minus_resolved_cache,
-                                                             "StandardAssembler::assembleInteriorFaces", true);
-		                            if (context_.trialUsesVectorBasis()) {
-		                                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
-		                                                              std::span<Real>(local_prev_minus));
-	                            }
+                            auto& local_prev_minus = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            gatherVectorCoefficients(minus_col_dofs, prev_view, prev,
+                                                     local_prev_minus, &minus_resolved_cache,
+                                                     "StandardAssembler::assembleInteriorFaces", true);
+                            if (context_.trialUsesVectorBasis()) {
+                                applyVectorBasisGlobalToLocal(mesh, cell_minus, trial_space,
+                                                              std::span<Real>(local_prev_minus));
+                            }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev_minus);
 
-		                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
-                                    gatherVectorCoefficients(plus_col_dofs, prev_view, prev,
-                                                             local_prev_plus, &plus_resolved_cache,
-                                                             "StandardAssembler::assembleInteriorFaces", true);
-		                            if (context_plus.trialUsesVectorBasis()) {
-		                                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
-		                                                              std::span<Real>(local_prev_plus));
-	                            }
+                            auto& local_prev_plus = plus_prev_solution_coeffs[static_cast<std::size_t>(k - 1)];
+                            gatherVectorCoefficients(plus_col_dofs, prev_view, prev,
+                                                     local_prev_plus, &plus_resolved_cache,
+                                                     "StandardAssembler::assembleInteriorFaces", true);
+                            if (context_plus.trialUsesVectorBasis()) {
+                                applyVectorBasisGlobalToLocal(mesh, cell_plus, trial_space,
+                                                              std::span<Real>(local_prev_plus));
+                            }
                             context_plus.setPreviousSolutionCoefficientsK(k, local_prev_plus);
                         }
                     }
                 }
+                face_solution_time += face_now() - stage_start;
             }
 
+            stage_start = face_now();
             if (need_field_solutions) {
                 populateFieldSolutionData(context_, mesh, cell_minus, field_requirements);
                 populateFieldSolutionData(context_plus, mesh, cell_plus, field_requirements);
@@ -3463,8 +3639,10 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                                           "StandardAssembler::assembleInteriorFaces");
             populateMovingDomainFieldData(context_plus, required_data,
                                           "StandardAssembler::assembleInteriorFaces");
+            face_field_time += face_now() - stage_start;
 
             if (need_material_state) {
+                stage_start = face_now();
                 FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
                             "StandardAssembler::assembleInteriorFaces: mismatched quadrature point counts for interior face state binding");
 
@@ -3482,9 +3660,11 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 context_plus.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
                                               view.stride_bytes, view.alignment, view.variables,
                                               view.old_lifecycle, view.work_lifecycle);
+                face_material_time += face_now() - stage_start;
             }
 
             // Compute DG face contributions.
+            stage_start = face_now();
             prepareKernelOutputRequest(output_minus,
                                        context_.numTestDofs(),
                                        context_.numTrialDofs(),
@@ -3509,7 +3689,9 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             kernel_impl.computeInteriorFace(context_, context_plus,
                                             output_minus, output_plus,
                                             coupling_mp, coupling_pm);
+            face_kernel_time += face_now() - stage_start;
 
+            stage_start = face_now();
             if (output_minus.has_matrix || output_minus.has_vector) {
                 applyVectorBasisOutputOrientation(mesh, cell_minus, test_space, cell_minus, trial_space, output_minus);
             }
@@ -3522,9 +3704,11 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
             if (coupling_pm.has_matrix) {
                 applyVectorBasisOutputOrientation(mesh, cell_plus, test_space, cell_minus, trial_space, coupling_pm);
             }
+            face_orientation_time += face_now() - stage_start;
 
             // Insert contributions (4 blocks for DG)
             // Self-coupling: minus-minus
+            stage_start = face_now();
             if (output_minus.has_matrix || output_minus.has_vector) {
                 insertLocal(output_minus, minus_row_dofs, minus_col_dofs, insert_matrix_view, insert_vector_view);
             }
@@ -3545,13 +3729,51 @@ AssemblyResult StandardAssembler::assembleInteriorFaces(
                 insert_matrix_view->addMatrixEntries(plus_row_dofs, minus_col_dofs,
                                                      coupling_pm.local_matrix);
             }
+            face_insert_time += face_now() - stage_start;
 
             result.interior_faces_assembled++;
+            ++faces_assembled;
         });
     });
 
     auto end_time = std::chrono::steady_clock::now();
     result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    if (face_timing) {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        }
+#endif
+        std::fprintf(stderr,
+            "[INTERIOR_FACE_TIMING] rank=%d matrix=1 vector=%d faces_considered=%zu "
+            "faces_assembled=%zu total=%9.6f setup=%9.6f filter=%9.6f dofs=%9.6f "
+            "local_face=%9.6f align=%9.6f prepare_minus=%9.6f prepare_plus=%9.6f "
+            "ctx=%9.6f cut_scale=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
+            "kernel=%9.6f orient=%9.6f insert=%9.6f\n",
+            rank,
+            vector_view != nullptr ? 1 : 0,
+            faces_considered,
+            faces_assembled,
+            result.elapsed_time_seconds,
+            face_setup_time,
+            face_filter_time,
+            face_dof_time,
+            face_local_index_time,
+            face_alignment_time,
+            face_prepare_minus_time,
+            face_prepare_plus_time,
+            face_context_setter_time,
+            face_cut_scale_time,
+            face_solution_time,
+            face_field_time,
+            face_material_time,
+            face_kernel_time,
+            face_orientation_time,
+            face_insert_time);
+    }
 
     return result;
 }
@@ -4876,7 +5098,6 @@ void StandardAssembler::prepareGeometry(
         }
     }
     const auto n_nodes = cell_coords_.size();
-
     const bool transient_cut_quad_rule = isTransientCutVolumeQuadratureRule(quad_rule);
     const bool quadrature_rule_changed = cached_quad_rule_.get() != &quad_rule;
     if (quadrature_rule_changed || transient_cut_quad_rule) {
@@ -4884,6 +5105,7 @@ void StandardAssembler::prepareGeometry(
         cached_field_bcache_.clear();
         cached_field_recipes_valid_ = false;
     }
+
 #ifdef SVMP_FE_ASSEMBLY_TIMING
     g_pc_setup += PC_TP() - pc_t0;
 #endif
@@ -6369,14 +6591,51 @@ void StandardAssembler::computeFaceFrameGeometry(
     ElementType face_type,
     const quadrature::QuadratureRule& quad_rule,
     std::span<const LocalIndex> align_facet_to_reference,
-    FaceFrameGeometryScratch& scratch)
+    FaceFrameGeometryScratch& scratch,
+    bool compute_surface_jacobians,
+    bool compute_mean_curvatures)
 {
     const auto data = geometry::evaluateFaceFrame(cell_type,
                                                   local_face_id,
                                                   face_type,
                                                   quad_rule,
                                                   scratch.cell_coords,
-                                                  align_facet_to_reference);
+                                                  align_facet_to_reference,
+                                                  compute_surface_jacobians,
+                                                  compute_mean_curvatures);
+    scratch.cell.points = data.cell_geometry.points;
+    scratch.cell.jacobians = data.cell_geometry.jacobians;
+    scratch.cell.inverse_jacobians = data.cell_geometry.inverse_jacobians;
+    scratch.cell.jacobian_determinants = data.cell_geometry.jacobian_determinants;
+    scratch.cell.measures = data.cell_geometry.measures;
+    scratch.cell_reference_points = data.cell_reference_points;
+    scratch.face_reference_points = data.face_reference_points;
+    scratch.canonical_to_reference_measures = data.canonical_to_reference_measures;
+    scratch.normals = data.normals;
+    scratch.surface_measures = data.surface_measures;
+    scratch.surface_jacobians = data.surface_jacobians;
+    scratch.mean_curvatures = data.mean_curvatures;
+}
+
+void StandardAssembler::computeFaceFrameGeometry(
+    const geometry::GeometryMapping& mapping,
+    ElementType cell_type,
+    LocalIndex local_face_id,
+    ElementType face_type,
+    const quadrature::QuadratureRule& quad_rule,
+    std::span<const LocalIndex> align_facet_to_reference,
+    FaceFrameGeometryScratch& scratch,
+    bool compute_surface_jacobians,
+    bool compute_mean_curvatures)
+{
+    const auto data = geometry::evaluateFaceFrame(mapping,
+                                                  cell_type,
+                                                  local_face_id,
+                                                  face_type,
+                                                  quad_rule,
+                                                  align_facet_to_reference,
+                                                  compute_surface_jacobians,
+                                                  compute_mean_curvatures);
     scratch.cell.points = data.cell_geometry.points;
     scratch.cell.jacobians = data.cell_geometry.jacobians;
     scratch.cell.inverse_jacobians = data.cell_geometry.inverse_jacobians;
@@ -6475,6 +6734,35 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
 {
     AssemblyResult result;
     const auto start_time = std::chrono::steady_clock::now();
+    const bool cut_timing = cutVolumeTimingEnabled();
+    auto cut_now = [&]() -> double {
+        if (!cut_timing) {
+            return 0.0;
+        }
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const double cut_start = cut_now();
+    double cut_setup_time = 0.0;
+    double cut_filter_time = 0.0;
+    double cut_dof_time = 0.0;
+    double cut_rule_time = 0.0;
+    double cut_geometry_time = 0.0;
+    double cut_basis_time = 0.0;
+    double cut_frame_time = 0.0;
+    double cut_context_time = 0.0;
+    double cut_jit_time = 0.0;
+    double cut_solution_time = 0.0;
+    double cut_field_time = 0.0;
+    double cut_material_time = 0.0;
+    double cut_kernel_time = 0.0;
+    double cut_orientation_time = 0.0;
+    double cut_insert_time = 0.0;
+    std::size_t cut_rules_considered = 0u;
+    std::size_t cut_rules_assembled = 0u;
+    std::size_t cut_full_rules = 0u;
+    std::size_t cut_partial_rules = 0u;
+    std::size_t cut_quadrature_points = 0u;
 
     if (!initialized_) {
         initialize();
@@ -6563,19 +6851,44 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         }
     }
 
+    cut_setup_time = cut_now() - cut_start;
+
     const auto& rules = cut_context.volumeRules();
     const auto& metadata = cut_context.metadata();
+    const auto indexed_rule_indices =
+        cut_context.generatedVolumeRuleIndicesForMarkerAndSide(interface_marker, side);
+    const bool use_indexed_rules = !indexed_rule_indices.empty();
+    std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
     std::vector<Real> cut_jit_constants;
+    constexpr forms::CutCellParameterSlots cut_parameter_slots{};
+    const auto cut_parameter_count =
+        static_cast<std::size_t>(forms::cutCellParameterCount(cut_parameter_slots));
+    cut_jit_constants.assign(jit_constants_.begin(), jit_constants_.end());
+    if (cut_jit_constants.size() < cut_parameter_count) {
+        cut_jit_constants.resize(cut_parameter_count, Real{0.0});
+    }
 
-    for (std::size_t rule_index = 0u; rule_index < rules.size(); ++rule_index) {
-        const auto& rule = rules[rule_index];
-        if (rule.kind != geometry::CutQuadratureKind::Volume ||
-            rule.provenance.marker != interface_marker ||
-            rule.side != side) {
+    const auto iteration_count = use_indexed_rules ? indexed_rule_indices.size() : rules.size();
+    for (std::size_t ordinal = 0u; ordinal < iteration_count; ++ordinal) {
+        double stage_start = cut_now();
+        const auto rule_index = use_indexed_rules ? indexed_rule_indices[ordinal] : ordinal;
+        if (rule_index >= rules.size()) {
+            cut_filter_time += cut_now() - stage_start;
             continue;
         }
+        const auto& rule = rules[rule_index];
+        ++cut_rules_considered;
+        if (!use_indexed_rules &&
+            (rule.kind != geometry::CutQuadratureKind::Volume ||
+             rule.provenance.marker != interface_marker ||
+             rule.side != side)) {
+            cut_filter_time += cut_now() - stage_start;
+            continue;
+        }
+        cut_filter_time += cut_now() - stage_start;
+
         FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
                     "StandardAssembler::assembleCutVolumes: only reference-frame cut-volume rules are supported");
         FE_THROW_IF(rule.points.empty(), FEException,
@@ -6591,27 +6904,53 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             continue;
         }
 
+        stage_start = cut_now();
         row_dofs = getCellDofsCached(mesh, cell_id, row_dof_map_, row_dof_offset_);
         col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
+        cut_dof_time += cut_now() - stage_start;
 
+        stage_start = cut_now();
         const auto cell_type = mesh.getCellType(cell_id);
         std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
         std::optional<CutVolumeQuadratureRule> cut_rule;
         const quadrature::QuadratureRule* active_rule = nullptr;
         if (isFullSideVolumeRule(rule)) {
-            full_cell_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+            const auto type_key = static_cast<std::size_t>(cell_type);
+            if (type_key < full_cell_rule_cache.size()) {
+                auto& cached_rule = full_cell_rule_cache[type_key];
+                if (!cached_rule) {
+                    cached_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+                }
+                full_cell_rule = cached_rule;
+            } else {
+                full_cell_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+            }
             active_rule = full_cell_rule.get();
+            ++cut_full_rules;
         } else {
             cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
             active_rule = &*cut_rule;
             cached_quad_rule_ptr_ = nullptr;
             basis_scratch_valid_ = false;
+            ++cut_partial_rules;
         }
         FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumes: active quadrature rule");
-        prepareGeometry(context_, mesh, cell_id, *active_rule);
-        prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, *active_rule);
-        prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, *active_rule, required_data);
+        cut_quadrature_points += active_rule->num_points();
+        cut_rule_time += cut_now() - stage_start;
 
+        stage_start = cut_now();
+        prepareGeometry(context_, mesh, cell_id, *active_rule);
+        cut_geometry_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
+        prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, *active_rule);
+        cut_basis_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
+        prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, *active_rule, required_data);
+        cut_frame_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
         context_.setCutVolumeDomain(interface_marker, rule.side);
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_.setTimeIntegrationContext(time_integration_);
@@ -6624,16 +6963,19 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
         context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
         context_.clearAllPreviousSolutionData();
+        cut_context_time += cut_now() - stage_start;
 
-        auto cut_parameters = forms::cutCellParametersForRule(rule);
-        cut_jit_constants.assign(jit_constants_.begin(), jit_constants_.end());
-        if (cut_jit_constants.size() < cut_parameters.size()) {
-            cut_jit_constants.resize(cut_parameters.size(), Real{0.0});
-        }
-        for (std::size_t i = 0u; i < cut_parameters.size(); ++i) {
-            cut_jit_constants[i] = cut_parameters[i];
-        }
+        stage_start = cut_now();
+        cut_jit_constants[cut_parameter_slots.volume_fraction] = rule.volume_fraction;
+        cut_jit_constants[cut_parameter_slots.side_indicator] =
+            forms::cutSideIndicatorValue(rule.side);
+        cut_jit_constants[cut_parameter_slots.embedded_normal[0]] = rule.points.front().normal[0];
+        cut_jit_constants[cut_parameter_slots.embedded_normal[1]] = rule.points.front().normal[1];
+        cut_jit_constants[cut_parameter_slots.embedded_normal[2]] = rule.points.front().normal[2];
+        cut_jit_constants[cut_parameter_slots.stabilization_scale] = Real{0.0};
+        cut_jit_constants[cut_parameter_slots.quadrature_weight_sensitivity] = Real{0.0};
         context_.setJITConstants(cut_jit_constants);
+        cut_jit_time += cut_now() - stage_start;
 
         FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
                     "StandardAssembler::assembleCutVolumes: row DOF count does not match test space element DOFs");
@@ -6641,6 +6983,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
                     "StandardAssembler::assembleCutVolumes: column DOF count does not match trial space element DOFs");
 
         if (need_solution) {
+            stage_start = cut_now();
             FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
                         "StandardAssembler::assembleCutVolumes: kernel requires solution but no solution was set");
             local_solution_coeffs_.resize(col_dofs.size());
@@ -6684,15 +7027,21 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
                     }
                 }
             }
+            cut_solution_time += cut_now() - stage_start;
         }
 
         if (need_field_solutions) {
+            stage_start = cut_now();
             populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
+            cut_field_time += cut_now() - stage_start;
         }
+        stage_start = cut_now();
         populateMovingDomainFieldData(context_, required_data,
                                       "StandardAssembler::assembleCutVolumes");
+        cut_field_time += cut_now() - stage_start;
 
         if (need_material_state) {
+            stage_start = cut_now();
             auto view = material_state_provider_->getCellState(kernel, cell_id, context_.numQuadraturePoints());
             FE_THROW_IF(!view, FEException,
                         "StandardAssembler::assembleCutVolumes: material state provider returned null storage");
@@ -6703,26 +7052,34 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
                                       view.stride_bytes, view.alignment, view.variables,
                                       view.old_lifecycle, view.work_lifecycle);
+            cut_material_time += cut_now() - stage_start;
         }
 
+        stage_start = cut_now();
         prepareKernelOutputRequest(kernel_output_,
                                    context_.numTestDofs(),
                                    context_.numTrialDofs(),
                                    assemble_matrix,
                                    assemble_vector);
         kernel.computeCell(context_, kernel_output_);
+        cut_kernel_time += cut_now() - stage_start;
 
         if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+            stage_start = cut_now();
             applyVectorBasisOutputOrientation(mesh, cell_id, test_space, cell_id, trial_space, kernel_output_);
+            cut_orientation_time += cut_now() - stage_start;
         }
 
+        stage_start = cut_now();
         insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
                            col_dof_map_, col_dof_offset_,
                            kernel_output_, row_dofs, col_dofs,
                            assemble_matrix ? insert_matrix_view : nullptr,
                            assemble_vector ? insert_vector_view : nullptr);
+        cut_insert_time += cut_now() - stage_start;
 
         result.elements_assembled++;
+        ++cut_rules_assembled;
         if (kernel_output_.has_matrix) {
             result.matrix_entries_inserted +=
                 static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
@@ -6731,6 +7088,323 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
         }
     }
+
+    const auto end_time = std::chrono::steady_clock::now();
+    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    if (cut_timing) {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        }
+#endif
+        std::fprintf(stderr,
+            "[CUT_VOLUME_TIMING] rank=%d marker=%d side=%s matrix=%d vector=%d "
+            "indexed=%d rules_considered=%zu rules_assembled=%zu full_rules=%zu "
+            "partial_rules=%zu qpts=%zu total=%9.6f setup=%9.6f filter=%9.6f "
+            "dofs=%9.6f rule=%9.6f geometry=%9.6f basis=%9.6f frame=%9.6f "
+            "context=%9.6f jit=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
+            "kernel=%9.6f orient=%9.6f insert=%9.6f\n",
+            rank,
+            interface_marker,
+            cutVolumeTimingSideName(side),
+            assemble_matrix ? 1 : 0,
+            assemble_vector ? 1 : 0,
+            use_indexed_rules ? 1 : 0,
+            cut_rules_considered,
+            cut_rules_assembled,
+            cut_full_rules,
+            cut_partial_rules,
+            cut_quadrature_points,
+            result.elapsed_time_seconds,
+            cut_setup_time,
+            cut_filter_time,
+            cut_dof_time,
+            cut_rule_time,
+            cut_geometry_time,
+            cut_basis_time,
+            cut_frame_time,
+            cut_context_time,
+            cut_jit_time,
+            cut_solution_time,
+            cut_field_time,
+            cut_material_time,
+            cut_kernel_time,
+            cut_orientation_time,
+            cut_insert_time);
+    }
+    return result;
+}
+
+AssemblyResult StandardAssembler::assembleCutInterfaces(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view,
+    bool assemble_matrix,
+    bool assemble_vector)
+{
+    AssemblyResult result;
+    const auto start_time = std::chrono::steady_clock::now();
+
+    if (!initialized_) {
+        initialize();
+    }
+    ensureCellDofTables(mesh);
+
+    if (matrix_view && assemble_matrix && matrix_view->getPhase() == AssemblyPhase::NotStarted) {
+        matrix_view->beginAssemblyPhase();
+    }
+    if (vector_view && assemble_vector && vector_view != matrix_view &&
+        vector_view->getPhase() == AssemblyPhase::NotStarted) {
+        vector_view->beginAssemblyPhase();
+    }
+
+    const bool use_interface_kernel = kernel.hasInterfaceFace();
+    const bool use_single_sided_kernel = !use_interface_kernel && kernel.hasSingleSidedInterfaceFace();
+    if (!use_interface_kernel && !use_single_sided_kernel) {
+        result.elapsed_time_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+        return result;
+    }
+    FE_THROW_IF(use_interface_kernel && kernel.requiresTwoSidedInterfaceFace(), FEException,
+                "StandardAssembler::assembleCutInterfaces: generated level-set cut interfaces are one-sided embedded boundaries; "
+                "dI forms using plus-side, jump, or average semantics require an explicit two-sided InterfaceMesh/CutFEM path");
+
+    FE_THROW_IF(row_dof_scope_ == DofEntityScope::InterfaceFace ||
+                    col_dof_scope_ == DofEntityScope::InterfaceFace ||
+                    test_space.space_type() == spaces::SpaceType::Mortar ||
+                    trial_space.space_type() == spaces::SpaceType::Mortar,
+                FEException,
+                "StandardAssembler::assembleCutInterfaces: generated cut interfaces support parent-cell fields only");
+
+    const auto required_data = kernel.getRequiredData();
+    const auto kernel_field_requirements = kernel.fieldRequirements();
+    const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
+    const bool need_field_solutions = !field_requirements.empty();
+    const bool need_solution =
+        hasFlag(required_data, RequiredData::SolutionCoefficients) ||
+        hasFlag(required_data, RequiredData::SolutionValues) ||
+        hasFlag(required_data, RequiredData::SolutionGradients) ||
+        hasFlag(required_data, RequiredData::SolutionHessians) ||
+        hasFlag(required_data, RequiredData::SolutionLaplacians);
+    const bool need_material_state = hasFlag(required_data, RequiredData::MaterialState);
+    FE_THROW_IF(need_material_state, FEException,
+                "StandardAssembler::assembleCutInterfaces: material state on generated cut interfaces is not supported");
+
+    FE_CHECK_NOT_NULL(row_dof_map_, "StandardAssembler::assembleCutInterfaces: row_dof_map");
+    if (!col_dof_map_) {
+        col_dof_map_ = row_dof_map_;
+        col_dof_offset_ = row_dof_offset_;
+        col_dof_scope_ = row_dof_scope_;
+    }
+    (void)getCellDofTable(mesh, row_dof_map_, row_dof_offset_);
+    (void)getCellDofTable(mesh, col_dof_map_, col_dof_offset_);
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr &&
+            access.dof_map->getNumCells() == mesh.numCells()) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
+    if (assemble_matrix && matrix_view &&
+        matrix_view->insertionCapabilities().resolved_matrix_entries) {
+        ensureResolvedMatrixTable(mesh, row_dof_map_, row_dof_offset_,
+                                  col_dof_map_, col_dof_offset_, matrix_view);
+    }
+    ensureCellConstrainedFlags(mesh);
+
+    context_.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
+                              col_dof_map_->getMaxDofsPerCell()),
+                     /*max_qpts=*/27, mesh.dimension());
+
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
+    std::optional<OwnedRowOnlyView> owned_row_matrix;
+    std::optional<OwnedRowOnlyView> owned_row_vector;
+    GlobalSystemView* insert_matrix_view = matrix_view;
+    GlobalSystemView* insert_vector_view = vector_view;
+    if (owned_rows_only) {
+        if (matrix_view != nullptr) {
+            owned_row_matrix.emplace(*matrix_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
+            insert_matrix_view = &*owned_row_matrix;
+        }
+        if (vector_view != nullptr) {
+            if (vector_view == matrix_view && owned_row_matrix) {
+                insert_vector_view = insert_matrix_view;
+            } else {
+                owned_row_vector.emplace(*vector_view, *row_dof_map_, row_dof_offset_, options_.row_owner_rank);
+                insert_vector_view = &*owned_row_vector;
+            }
+        }
+    }
+
+    std::vector<const geometry::CutQuadratureRule*> selected_rules;
+    if (interface_marker >= 0) {
+        selected_rules = cut_context.interfaceRulesForMarker(interface_marker);
+    } else {
+        const auto& rules = cut_context.interfaceRules();
+        selected_rules.reserve(rules.size());
+        for (const auto& rule : rules) {
+            selected_rules.push_back(&rule);
+        }
+    }
+
+    std::span<const GlobalIndex> row_dofs;
+    std::span<const GlobalIndex> col_dofs;
+    KernelOutput output_plus;
+    KernelOutput coupling_mp;
+    KernelOutput coupling_pm;
+
+    withDevirtualizedKernel(kernel, [&](auto& kernel_impl) {
+        for (const auto* rule_ptr : selected_rules) {
+            FE_CHECK_NOT_NULL(rule_ptr, "StandardAssembler::assembleCutInterfaces: cut-interface rule");
+            const auto& rule = *rule_ptr;
+            if (rule.kind != geometry::CutQuadratureKind::Interface) {
+                continue;
+            }
+            const int active_marker = rule.provenance.marker >= 0 ? rule.provenance.marker : interface_marker;
+            if (interface_marker >= 0 && active_marker != interface_marker) {
+                continue;
+            }
+            FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
+                        "StandardAssembler::assembleCutInterfaces: only reference-frame cut-interface rules are supported");
+            FE_THROW_IF(rule.points.empty(), FEException,
+                        "StandardAssembler::assembleCutInterfaces: cut-interface rule has no quadrature points");
+
+            const auto cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
+            FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
+                        "StandardAssembler::assembleCutInterfaces: cut-interface parent cell is out of range");
+            if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
+                continue;
+            }
+
+            row_dofs = getCellDofsCached(mesh, cell_id, row_dof_map_, row_dof_offset_);
+            col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
+
+            const auto cell_type = mesh.getCellType(cell_id);
+            CutVolumeQuadratureRule cut_rule(rule, to_mesh_family(cell_type), mesh.dimension());
+            cached_quad_rule_ptr_ = nullptr;
+            basis_scratch_valid_ = false;
+
+            prepareGeometry(context_, mesh, cell_id, cut_rule);
+            prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
+            prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, cut_rule, required_data);
+            remapCutInterfaceSurfaceGeometry(
+                context_, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
+            context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
+            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+            context_.setTimeIntegrationContext(time_integration_);
+            context_.setTime(time_);
+            context_.setTimeStep(dt_);
+            context_.setRealParameterGetter(get_real_param_);
+            context_.setParameterGetter(get_param_);
+            context_.setUserData(user_data_);
+            context_.setJITConstants(jit_constants_);
+            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+            context_.clearAllPreviousSolutionData();
+
+            FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
+                        "StandardAssembler::assembleCutInterfaces: row DOF count does not match test space element DOFs");
+            FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
+                        "StandardAssembler::assembleCutInterfaces: column DOF count does not match trial space element DOFs");
+
+            if (need_solution) {
+                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                            "StandardAssembler::assembleCutInterfaces: kernel requires solution but no solution was set");
+                local_solution_coeffs_.resize(col_dofs.size());
+                gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
+                                             col_dofs, current_solution_view_,
+                                             current_solution_, local_solution_coeffs_,
+                                             "StandardAssembler::assembleCutInterfaces", true);
+                if (context_.trialUsesVectorBasis()) {
+                    applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+                                                  std::span<Real>(local_solution_coeffs_));
+                }
+                context_.setSolutionCoefficients(local_solution_coeffs_);
+
+                if (time_integration_ != nullptr) {
+                    const int required = requiredHistoryStates(time_integration_);
+                    if (required > 0) {
+                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                    "StandardAssembler::assembleCutInterfaces: time integration requires " +
+                                        std::to_string(required) + " history states, but only " +
+                                        std::to_string(previous_solutions_.size()) + " were provided");
+                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                        }
+                        for (int k = 1; k <= required; ++k) {
+                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                            const auto* prev_view =
+                                (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                    : nullptr;
+                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                        "StandardAssembler::assembleCutInterfaces: previous solution (k=" +
+                                            std::to_string(k) + ") not set");
+                            auto& local_prev =
+                                local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            gatherCellVectorCoefficients(cell_id, col_dof_map_, col_dof_offset_,
+                                                         col_dofs, prev_view, prev, local_prev,
+                                                         "StandardAssembler::assembleCutInterfaces", true);
+                            if (context_.trialUsesVectorBasis()) {
+                                applyVectorBasisGlobalToLocal(mesh, cell_id, trial_space,
+                                                              std::span<Real>(local_prev));
+                            }
+                            context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                        }
+                    }
+                }
+            }
+
+            if (need_field_solutions) {
+                populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
+            }
+            populateMovingDomainFieldData(context_, required_data,
+                                          "StandardAssembler::assembleCutInterfaces");
+
+            prepareKernelOutputRequest(kernel_output_,
+                                       context_.numTestDofs(),
+                                       context_.numTrialDofs(),
+                                       assemble_matrix && insert_matrix_view != nullptr,
+                                       assemble_vector && insert_vector_view != nullptr);
+            if (use_interface_kernel) {
+                kernel_impl.computeInterfaceFace(
+                    context_, context_, active_marker,
+                    kernel_output_, output_plus, coupling_mp, coupling_pm);
+            } else {
+                kernel_impl.computeBoundaryFace(context_, active_marker, kernel_output_);
+            }
+
+            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+                applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                                  cell_id, trial_space, kernel_output_);
+            }
+
+            insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
+                               col_dof_map_, col_dof_offset_,
+                               kernel_output_, row_dofs, col_dofs,
+                               assemble_matrix ? insert_matrix_view : nullptr,
+                               assemble_vector ? insert_vector_view : nullptr);
+
+            ++result.interface_faces_assembled;
+            if (kernel_output_.has_matrix) {
+                result.matrix_entries_inserted +=
+                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+            }
+            if (kernel_output_.has_vector) {
+                result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
+            }
+        }
+    });
 
     const auto end_time = std::chrono::steady_clock::now();
     result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
@@ -11502,9 +12176,9 @@ void StandardAssembler::prepareContextFace(
     const auto n_nodes = cell_coords_.size();
 
     // Convert to math::Vector format
-    std::vector<math::Vector<Real, 3>> node_coords(n_nodes);
+    scratch_node_coords_.resize(n_nodes);
     for (std::size_t i = 0; i < n_nodes; ++i) {
-        node_coords[i] = math::Vector<Real, 3>{
+        scratch_node_coords_[i] = math::Vector<Real, 3>{
             cell_coords_[i][0], cell_coords_[i][1], cell_coords_[i][2]};
     }
 
@@ -11514,7 +12188,7 @@ void StandardAssembler::prepareContextFace(
     map_request.geometry_order = mesh.getCellGeometryOrder(cell_id);
     map_request.use_affine = (map_request.geometry_order <= 1);
 
-    auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+    auto mapping = geometry::MappingFactory::create(map_request, scratch_node_coords_);
     const bool face_mapping_affine = mapping->isAffine();
 
     const bool need_reference_face =
@@ -11529,25 +12203,36 @@ void StandardAssembler::prepareContextFace(
         hasFlag(required_data, RequiredData::CurrentMeasures) ||
         hasFlag(required_data, RequiredData::CurrentNormals) ||
         hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    const bool need_surface_jacobians =
+        hasFlag(required_data, RequiredData::SurfaceJacobians);
 
     scratch_active_face_geometry_.cell_coords = cell_coords_;
-    computeFaceFrameGeometry(cell_type,
+    const bool active_surface_jacobians =
+        need_surface_jacobians && !need_current_face && !need_reference_face;
+    computeFaceFrameGeometry(*mapping,
+                             cell_type,
                              local_face_id,
                              face_type,
                              *quad_rule,
                              align_facet_to_reference,
-                             scratch_active_face_geometry_);
+                             scratch_active_face_geometry_,
+                             active_surface_jacobians,
+                             false);
 
     if (need_reference_face) {
         FE_THROW_IF(!mesh.supportsCoordinateFrame(CoordinateFrame::Reference), FEException,
                     "StandardAssembler::prepareContextFace: mesh adapter cannot provide reference coordinates");
         mesh.getCellCoordinates(cell_id, CoordinateFrame::Reference, scratch_reference_face_geometry_.cell_coords);
+        const bool reference_surface_jacobians =
+            need_surface_jacobians && !need_current_face;
         computeFaceFrameGeometry(cell_type,
                                  local_face_id,
                                  face_type,
                                  *quad_rule,
                                  align_facet_to_reference,
-                                 scratch_reference_face_geometry_);
+                                 scratch_reference_face_geometry_,
+                                 reference_surface_jacobians,
+                                 false);
     }
 
     if (need_current_face) {
@@ -11559,7 +12244,9 @@ void StandardAssembler::prepareContextFace(
                                  face_type,
                                  *quad_rule,
                                  align_facet_to_reference,
-                                 scratch_current_face_geometry_);
+                                 scratch_current_face_geometry_,
+                                 need_surface_jacobians,
+                                 hasFlag(required_data, RequiredData::CurrentNormals));
     }
 
     if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {
@@ -12219,9 +12906,9 @@ void StandardAssembler::prepareContextFace(
         Real h = 0.0;
         for (std::size_t a = 0; a < n_nodes; ++a) {
             for (std::size_t b = a + 1; b < n_nodes; ++b) {
-                const Real dx = node_coords[a][0] - node_coords[b][0];
-                const Real dy = node_coords[a][1] - node_coords[b][1];
-                const Real dz = node_coords[a][2] - node_coords[b][2];
+                const Real dx = scratch_node_coords_[a][0] - scratch_node_coords_[b][0];
+                const Real dy = scratch_node_coords_[a][1] - scratch_node_coords_[b][1];
+                const Real dz = scratch_node_coords_[a][2] - scratch_node_coords_[b][2];
                 const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
                 if (dist > h) h = dist;
             }

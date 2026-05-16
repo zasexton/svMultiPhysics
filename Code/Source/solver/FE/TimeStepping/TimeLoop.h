@@ -104,7 +104,7 @@ struct TimeLoopCallbacks {
      */
     std::function<bool(TimeHistory&, double solve_time, double dt)> on_before_physics_solve{};
     std::function<void(const TimeHistory&, const NewtonReport&)> on_nonlinear_done{};
-    std::function<void(const TimeHistory&)> on_step_accepted{};
+    std::function<void(TimeHistory&)> on_step_accepted{};
 
     std::function<void(const TimeHistory&, StepRejectReason, const NewtonReport&)> on_step_rejected{};
     std::function<void(double old_dt, double new_dt, int step_index, int attempt_index)> on_dt_updated{};

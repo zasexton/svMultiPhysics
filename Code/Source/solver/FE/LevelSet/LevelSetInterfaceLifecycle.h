@@ -10,6 +10,7 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Systems/FESystem.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -32,6 +33,7 @@ struct LevelSetGeneratedInterfaceOptions {
         /*field_order=*/1,
         /*form_order=*/2)};
     bool keep_degenerate_fragments{false};
+    bool allow_corner_linearized_geometry{false};
 };
 
 struct LevelSetGeneratedInterfaceResult {
@@ -41,6 +43,10 @@ struct LevelSetGeneratedInterfaceResult {
     interfaces::LevelSetInterfaceDomain domain{};
     interfaces::CutInterfaceDomainSummary summary{};
     std::string diagnostic{};
+    std::size_t cell_count{0};
+    std::size_t corner_linearized_cell_count{0};
+    std::size_t max_cell_node_count{0};
+    std::size_t max_corner_node_count{0};
 };
 
 class LevelSetGeneratedInterfaceLifecycle {

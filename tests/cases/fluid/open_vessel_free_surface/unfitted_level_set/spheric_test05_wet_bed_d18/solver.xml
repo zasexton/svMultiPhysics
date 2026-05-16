@@ -51,6 +51,7 @@
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
   <Tolerance>1.0e-4</Tolerance>
+  <Module_options>jit=true; jit_specialization=true</Module_options>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
@@ -60,11 +61,11 @@
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>true</Enable_reinitialization>
+  <Enable_reinitialization>false</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
   <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
-  <Enable_volume_correction>true</Enable_volume_correction>
+  <Enable_volume_correction>false</Enable_volume_correction>
   <Volume_correction_use_initial_volume>true</Volume_correction_use_initial_volume>
   <Volume_correction_cadence_steps>5</Volume_correction_cadence_steps>
   <Volume_correction_tolerance>1.0e-5</Volume_correction_tolerance>
@@ -96,6 +97,7 @@
   <Min_iterations>1</Min_iterations>
   <Max_iterations>9</Max_iterations>
   <Tolerance>6.0e-4</Tolerance>
+  <Module_options>jit=true; jit_specialization=true</Module_options>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>998.2</Density>
@@ -105,10 +107,7 @@
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 0.15 0.0</Hydrostatic_pressure_reference_point>
-  <Node_pressure_constraints>
-    <Id_type>Global_vertex_gid</Id_type>
-    <Values_file_path>pressure_gauge.csv</Values_file_path>
-  </Node_pressure_constraints>
+  <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
   <Viscosity model="Constant">
     <Value>0.001003</Value>
   </Viscosity>
@@ -131,12 +130,12 @@
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-4</Absolute_tolerance>
-    <NS_GM_max_iterations>1000</NS_GM_max_iterations>
+    <NS_GM_max_iterations>150</NS_GM_max_iterations>
     <NS_GM_tolerance>1.0e-4</NS_GM_tolerance>
-    <NS_CG_max_iterations>1000</NS_CG_max_iterations>
+    <NS_CG_max_iterations>150</NS_CG_max_iterations>
     <NS_CG_tolerance>1.0e-4</NS_CG_tolerance>
     <NS_min_outer_iterations>1</NS_min_outer_iterations>
-    <NS_Schur_preconditioner>algebraic-shat</NS_Schur_preconditioner>
+    <NS_Schur_preconditioner>blockdiag-l</NS_Schur_preconditioner>
     <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
     <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>
   </LS>
@@ -161,6 +160,10 @@
     <Type>Dir</Type>
     <Value>0.0</Value>
   </Add_BC>
+  <Add_BC name="wall_top">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+  </Add_BC>
 
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
@@ -170,6 +173,8 @@
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
+    <Enable_velocity_extension>true</Enable_velocity_extension>
+    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>

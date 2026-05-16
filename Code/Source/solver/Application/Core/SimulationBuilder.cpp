@@ -43,6 +43,9 @@ svmp::FE::backends::SolverMethod toSolverMethod(const std::string& legacy_type)
   if (v.empty()) {
     return SolverMethod::Direct;
   }
+  if (v == "direct" || v == "eigen" || v == "sparse-lu" || v == "sparselu") {
+    return SolverMethod::Direct;
+  }
   if (v == "cg" || v == "conjugate-gradient") {
     return SolverMethod::CG;
   }
@@ -189,6 +192,9 @@ svmp::FE::backends::BackendKind selectBackend(const Parameters& params)
   }
   if (type == "trilinos") {
     return BackendKind::Trilinos;
+  }
+  if (type == "eigen") {
+    return BackendKind::Eigen;
   }
 
   return BackendKind::FSILS;
@@ -768,6 +774,16 @@ void SimulationBuilder::setupSystem()
   }
 
   components_.fe_system->setup(setup_opts);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+  if (components_.fe_system->hasSingleNativeMesh()) {
+    const auto prescribed_values_from_mesh =
+        components_.fe_system->syncPrescribedVertexFieldsFromMeshFields();
+    if (prescribed_values_from_mesh > 0u) {
+      oopCout() << "[svMultiPhysics::Application] SimulationBuilder: prescribed vertex field values synchronized from mesh="
+                << prescribed_values_from_mesh << std::endl;
+    }
+  }
+#endif
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: FE storage plan "
             << components_.fe_system->setupStoragePlan().summary() << std::endl;
   if (components_.primary_mesh) {

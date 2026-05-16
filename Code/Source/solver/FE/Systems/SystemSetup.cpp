@@ -4655,6 +4655,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 if (!term.kernel) continue;
                 parameter_registry_.addAll(term.kernel->parameterSpecs(), term.kernel->name());
             }
+            for (const auto& term : def.cut_volumes) {
+                if (!term.kernel) continue;
+                parameter_registry_.addAll(term.kernel->parameterSpecs(), term.kernel->name());
+            }
             for (const auto& kernel : def.global) {
                 if (!kernel) continue;
                 parameter_registry_.addAll(kernel->parameterSpecs(), kernel->name());
@@ -4686,6 +4690,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 }
             }
             for (const auto& term : def.interface_faces) {
+                if (term.kernel) {
+                    term.kernel->resolveInlinableConstitutives();
+                }
+            }
+            for (const auto& term : def.cut_volumes) {
                 if (term.kernel) {
                     term.kernel->resolveInlinableConstitutives();
                 }

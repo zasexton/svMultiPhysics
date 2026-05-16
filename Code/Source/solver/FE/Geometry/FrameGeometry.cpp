@@ -679,7 +679,9 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     LocalIndex local_face_id,
     ElementType face_type,
     const quadrature::QuadratureRule& quad_rule,
-    std::span<const LocalIndex> align_facet_to_reference)
+    std::span<const LocalIndex> align_facet_to_reference,
+    bool compute_surface_jacobians,
+    bool compute_mean_curvatures)
 {
     FaceGeometryData data;
     const auto n_qpts = static_cast<LocalIndex>(quad_rule.num_points());
@@ -765,21 +767,25 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
 
         data.normals[qidx] = surface.normal;
         data.surface_measures[qidx] = surface.measure;
-        data.surface_jacobians[qidx] = analyticSurfaceJacobian(mapping,
-                                                               cell_type,
-                                                               local_face_id,
-                                                               face_type,
-                                                               canonical_point,
-                                                               surface.normal,
-                                                               align_facet_to_reference);
-        data.mean_curvatures[qidx] = meanCurvatureFromFaceGeometry(mapping,
+        if (compute_surface_jacobians || compute_mean_curvatures) {
+            data.surface_jacobians[qidx] = analyticSurfaceJacobian(mapping,
                                                                    cell_type,
                                                                    local_face_id,
                                                                    face_type,
                                                                    canonical_point,
                                                                    surface.normal,
-                                                                   data.surface_jacobians[qidx],
                                                                    align_facet_to_reference);
+        }
+        if (compute_mean_curvatures) {
+            data.mean_curvatures[qidx] = meanCurvatureFromFaceGeometry(mapping,
+                                                                       cell_type,
+                                                                       local_face_id,
+                                                                       face_type,
+                                                                       canonical_point,
+                                                                       surface.normal,
+                                                                       data.surface_jacobians[qidx],
+                                                                       align_facet_to_reference);
+        }
     }
 
     return data;
@@ -874,14 +880,18 @@ FaceGeometryData evaluateFaceFrame(const GeometryMapping& mapping,
                                    LocalIndex local_face_id,
                                    ElementType face_type,
                                    const quadrature::QuadratureRule& quad_rule,
-                                   std::span<const LocalIndex> align_facet_to_reference)
+                                   std::span<const LocalIndex> align_facet_to_reference,
+                                   bool compute_surface_jacobians,
+                                   bool compute_mean_curvatures)
 {
     return evaluateFaceFrameImpl(mapping,
                                  cell_type,
                                  local_face_id,
                                  face_type,
                                  quad_rule,
-                                 align_facet_to_reference);
+                                 align_facet_to_reference,
+                                 compute_surface_jacobians,
+                                 compute_mean_curvatures);
 }
 
 FaceGeometryData evaluateFaceFrame(ElementType cell_type,
@@ -889,7 +899,9 @@ FaceGeometryData evaluateFaceFrame(ElementType cell_type,
                                    ElementType face_type,
                                    const quadrature::QuadratureRule& quad_rule,
                                    std::span<const Point3D> coordinates,
-                                   std::span<const LocalIndex> align_facet_to_reference)
+                                   std::span<const LocalIndex> align_facet_to_reference,
+                                   bool compute_surface_jacobians,
+                                   bool compute_mean_curvatures)
 {
     const auto mapping = makeMapping(cell_type, coordinates);
     return evaluateFaceFrame(*mapping,
@@ -897,7 +909,9 @@ FaceGeometryData evaluateFaceFrame(ElementType cell_type,
                              local_face_id,
                              face_type,
                              quad_rule,
-                             align_facet_to_reference);
+                             align_facet_to_reference,
+                             compute_surface_jacobians,
+                             compute_mean_curvatures);
 }
 
 Matrix3x3 configurationTransform(const Matrix3x3& current_jacobian,
