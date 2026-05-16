@@ -773,6 +773,33 @@ rule self-describing through its provenance. Output-only diagnostic strings may
 change without forcing rebuilds unless the policy enum, achieved rule, or active
 topology also changes.
 
+### Metadata Consumer Matrix
+
+Operator sparsity depends on parent-cell and facet visibility, active side
+visibility, marker ids, cut-adjacent interior facets, conditioning aggregation
+patches, ownership/numbering revisions, FE space revisions, and active cut
+topology ids. It must not depend on diagnostic text, backend status strings, or
+achieved quadrature order when the active integration support and local DOF
+visibility are unchanged.
+
+Matrix-free data depends on every field that can change integration points,
+weights, normals, mapped geometry, local basis values, or stabilization hooks:
+source value revision, mesh geometry revision, cut topology revision,
+quadrature policy key, construction kind, frame, active side, and conditioning
+revision. A matrix-free operator may reuse sparsity-independent data only when
+these values match.
+
+Preconditioner metadata follows the assembled or matrix-free operator that it
+approximates. Changes to cut topology, quadrature policy, volume fractions,
+conditioning neighborhoods, FE block layout, or active constraints require a
+preconditioner refresh even if the algebraic sparsity pattern is unchanged.
+
+Output-only metadata includes backend diagnostic strings, per-cell fallback
+reasons, human-readable backend names, requested-versus-achieved order reports,
+debug counters, and visualization labels. These fields may be written to restart
+or diagnostic output, but by themselves they do not force a sparsity rebuild,
+matrix rebuild, matrix-free rebuild, or preconditioner refresh.
+
 ### Design Checklist
 
 - [x] Extend cut metadata with:
@@ -787,7 +814,7 @@ topology also changes.
       - backend status,
       - source value revision.
 - [x] Include backend policy fields in the topology/revision key.
-- [ ] Define which metadata affects operator sparsity, matrix-free data,
+- [x] Define which metadata affects operator sparsity, matrix-free data,
       preconditioner metadata, and output only.
 - [ ] Define deterministic metadata ordering for MPI.
 - [ ] Define pruning policy for high-order tiny slivers.
