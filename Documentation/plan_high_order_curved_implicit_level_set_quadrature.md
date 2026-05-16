@@ -1261,7 +1261,12 @@ methods and volume correction remain separate numerical-method choices.
       history deltas. A Q2 regression test verifies that the complete
       high-order field slice, not only vertex coefficients, is synchronized
       while unrelated fields are left unchanged.
-- [ ] Ensure volume correction updates the high-order field coefficients.
+- [x] Ensure volume correction updates the high-order field coefficients.
+      The global-shift correction operates on the complete level-set field slice
+      and the system overload copies the complete corrected slice back into the
+      FE-ordered solution. A Q2 regression verifies that all high-order
+      coefficients receive the accepted shift while unrelated fields remain
+      unchanged.
 - [ ] Rebuild high-order cut context after maintenance and before output.
 - [ ] Log maintenance-induced geometry changes.
 

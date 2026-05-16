@@ -4,6 +4,10 @@
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
+#include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"
@@ -25,6 +29,33 @@ namespace {
 
 namespace FE = svmp::FE;
 namespace level_set = svmp::FE::level_set;
+
+std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        {shape});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
 
 class SingleTetraMeshAccess final : public FE::assembly::IMeshAccess {
 public:
@@ -284,6 +315,96 @@ TEST(LevelSetVolume, GlobalShiftCorrectionMatchesTargetVolume)
     for (std::size_t i = 0; i < coefficients.size(); ++i) {
         EXPECT_NEAR(corrected[i], coefficients[i] + result.applied_shift, 1.0e-12);
     }
+}
+
+TEST(LevelSetVolume, GlobalShiftCorrectionShiftsCompleteHighOrderFieldSlice)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto pressure_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/1);
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto pressure = system.addField(FE::systems::FieldSpec{
+        .name = "pressure",
+        .space = pressure_space,
+        .components = 1,
+    });
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto n_total_dofs =
+        static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    const auto pressure_offset =
+        static_cast<std::size_t>(system.fieldDofOffset(pressure));
+    const auto pressure_count = static_cast<std::size_t>(
+        system.fieldDofHandler(pressure).getNumDofs());
+    const auto phi_offset =
+        static_cast<std::size_t>(system.fieldDofOffset(phi));
+    const auto& phi_dofs = system.fieldDofHandler(phi);
+    const auto phi_count = static_cast<std::size_t>(phi_dofs.getNumDofs());
+    const auto* entity_map = phi_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    ASSERT_GT(phi_count,
+              static_cast<std::size_t>(entity_map->numVertices()));
+
+    std::vector<FE::Real> field_coefficients(phi_count, FE::Real{0.0});
+    for (std::size_t i = 0; i < phi_count; ++i) {
+        field_coefficients[i] =
+            FE::Real{10.0} + static_cast<FE::Real>(i);
+    }
+    for (FE::GlobalIndex vertex = 0; vertex < entity_map->numVertices();
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = system.meshAccess().getNodeCoordinates(vertex);
+        field_coefficients[static_cast<std::size_t>(dofs.front())] =
+            x[0] + x[1] - FE::Real{0.5};
+    }
+
+    std::vector<FE::Real> solution(n_total_dofs, FE::Real{3.0});
+    std::copy(field_coefficients.begin(),
+              field_coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(phi_offset));
+    const auto original_solution = solution;
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 32.0;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        system,
+        phi,
+        level_set::LevelSetVolumeOptions{},
+        correction_opts,
+        solution,
+        corrected_solution);
+
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    EXPECT_NEAR(correction.applied_shift, 0.25, 1.0e-8);
+    ASSERT_EQ(corrected_solution.size(), solution.size());
+    for (std::size_t i = 0; i < pressure_count; ++i) {
+        EXPECT_DOUBLE_EQ(corrected_solution[pressure_offset + i],
+                         original_solution[pressure_offset + i]);
+    }
+    for (std::size_t i = 0; i < phi_count; ++i) {
+        EXPECT_NEAR(corrected_solution[phi_offset + i],
+                    field_coefficients[i] + correction.applied_shift,
+                    1.0e-12);
+    }
+#endif
 }
 
 TEST(LevelSetVolume, GlobalShiftCorrectionLeavesMatchedVolumeUnchanged)
