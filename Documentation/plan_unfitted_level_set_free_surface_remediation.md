@@ -556,6 +556,9 @@ benchmark runs.
       run advanced 53 accepted steps with bounded cut-adjacent scales and parsed
       nonlinear and linear convergence, but solver resident memory grew past
       4.6 GB before the run was stopped.
+- [x] Add parseable process-memory diagnostics to cut-context rebuild and
+      assemble-operator logs, and verify the D18 no-output smoke script can
+      require and summarize resident-memory growth before another long run.
 - [x] Run a short D18 probe and confirm pressure departs from the invalid
       full-volume hydrostatic state.
 - [x] Run a short D18 probe and confirm velocity grows in the released/retained

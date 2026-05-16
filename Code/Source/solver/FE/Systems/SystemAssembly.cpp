@@ -40,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <type_traits>
 #include <sstream>
@@ -58,6 +59,33 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+struct ProcessMemorySnapshot {
+    long vm_kb{-1};
+    long rss_kb{-1};
+};
+
+ProcessMemorySnapshot readProcessMemorySnapshot()
+{
+    ProcessMemorySnapshot snapshot;
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        std::istringstream fields(line);
+        std::string key;
+        long value = -1;
+        std::string unit;
+        if (!(fields >> key >> value >> unit)) {
+            continue;
+        }
+        if (key == "VmSize:") {
+            snapshot.vm_kb = value;
+        } else if (key == "VmRSS:") {
+            snapshot.rss_kb = value;
+        }
+    }
+    return snapshot;
+}
 
 class ParticipantFilteredMeshAccess final : public assembly::IMeshAccess {
 public:
@@ -1621,6 +1649,15 @@ assembly::AssemblyResult assembleOperator(
                 }
                 std::fprintf(stderr,
                     "  ================================================\n");
+                const auto memory = readProcessMemorySnapshot();
+                std::fprintf(stderr,
+                    "[svMultiPhysics::FE] assembleOperator diagnostic=process_memory"
+                    " phase=assemble_operator rank=%d op='%s'"
+                    " process_vm_kb=%ld process_rss_kb=%ld\n",
+                    rank,
+                    request.op.c_str(),
+                    memory.vm_kb,
+                    memory.rss_kb);
             }
         }
     }

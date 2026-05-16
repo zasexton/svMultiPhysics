@@ -72,6 +72,33 @@ struct OutputTimingStats {
   double max{0.0};
 };
 
+struct ProcessMemorySnapshot {
+  long vm_kb{-1};
+  long rss_kb{-1};
+};
+
+ProcessMemorySnapshot readProcessMemorySnapshot()
+{
+  ProcessMemorySnapshot snapshot;
+  std::ifstream status("/proc/self/status");
+  std::string line;
+  while (std::getline(status, line)) {
+    std::istringstream fields(line);
+    std::string key;
+    long value = -1;
+    std::string unit;
+    if (!(fields >> key >> value >> unit)) {
+      continue;
+    }
+    if (key == "VmSize:") {
+      snapshot.vm_kb = value;
+    } else if (key == "VmRSS:") {
+      snapshot.rss_kb = value;
+    }
+  }
+  return snapshot;
+}
+
 OutputTimingStats reduceOutputTiming(double local, const svmp::MeshComm& comm)
 {
   OutputTimingStats stats;
@@ -2335,6 +2362,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                   global_scale_sum /
                   static_cast<double>(global_cut_adjacent_metadata))
             : svmp::FE::Real{0.0};
+    const auto memory = readProcessMemorySnapshot();
     application::core::oopCout()
         << "[svMultiPhysics::Application] Active-domain cut context"
         << " diagnostic=cut_context_rebuild"
@@ -2394,6 +2422,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << global_max_scale
         << " cut_adjacent_mean_scale="
         << global_mean_scale
+        << " process_vm_kb=" << memory.vm_kb
+        << " process_rss_kb=" << memory.rss_kb
         << " negative_volume=" << global_negative_volume
         << " negative_volume_local=" << summary.negative_volume_measure
         << " positive_volume=" << global_positive_volume

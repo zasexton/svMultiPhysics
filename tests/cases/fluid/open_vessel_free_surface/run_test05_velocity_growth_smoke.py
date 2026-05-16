@@ -1319,6 +1319,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "linear_solve_histories": [],
         "jit_specialization_traces": [],
         "assembly_timings": [],
+        "process_memory": [],
         "interior_face_timings": [],
         "cut_volume_timings": [],
         "eigen_factorization_diagnostics": [],
@@ -1369,7 +1370,14 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         elif vtk_match is not None:
             diagnostics["time_loop"]["vtk_outputs"].append(vtk_match.group("path").strip())
         elif "Active-domain cut context" in line:
-            diagnostics["cut_context_rebuilds"].append(parse_key_values(line))
+            record = parse_key_values(line)
+            diagnostics["cut_context_rebuilds"].append(record)
+            if isinstance(record.get("process_rss_kb"), (int, float)):
+                memory_record = dict(record)
+                memory_record["phase"] = "cut_context_rebuild"
+                diagnostics["process_memory"].append(memory_record)
+        elif "diagnostic=process_memory" in line:
+            diagnostics["process_memory"].append(parse_key_values(line))
         elif "cut-volume active-domain diagnostics" in line:
             diagnostics["cut_volume_assemblies"].append(parse_key_values(line))
         elif "hydrostatic pressure initialization" in line:
@@ -2084,6 +2092,26 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             ]
             if values:
                 metrics[f"diagnostic_assembly_timing_max_{name}_seconds"] = max(values)
+    process_memory_records = list(diagnostics.get("process_memory", []))
+    if process_memory_records:
+        metrics["latest_process_memory"] = process_memory_records[-1]
+        rss_values = [
+            float(record["process_rss_kb"])
+            for record in process_memory_records
+            if isinstance(record.get("process_rss_kb"), (int, float))
+        ]
+        vm_values = [
+            float(record["process_vm_kb"])
+            for record in process_memory_records
+            if isinstance(record.get("process_vm_kb"), (int, float))
+        ]
+        if rss_values:
+            metrics["diagnostic_process_rss_kb"] = numeric_range(rss_values)
+            metrics["diagnostic_process_max_rss_kb"] = max(rss_values)
+            metrics["diagnostic_process_rss_growth_kb"] = rss_values[-1] - rss_values[0]
+        if vm_values:
+            metrics["diagnostic_process_vm_kb"] = numeric_range(vm_values)
+            metrics["diagnostic_process_max_vm_kb"] = max(vm_values)
     if diagnostics.get("interior_face_timings"):
         timings = diagnostics["interior_face_timings"]
         metrics["latest_interior_face_timing"] = timings[-1]
@@ -2242,6 +2270,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_interior_face_timing_diagnostics",
         "require_cut_volume_timing_diagnostics",
         "require_jit_specialization_trace_diagnostics",
+        "require_process_memory_diagnostics",
         "require_marked_interior_face_fallback_diagnostics",
         "require_jacobian_component_block_diagnostics",
         "require_assembly_topology_consistency",
@@ -2358,6 +2387,16 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.extend(cut_context_solution_source_errors(diagnostics))
     if args.require_assembly_timing_diagnostics and not diagnostics.get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
+    if args.require_process_memory_diagnostics:
+        has_process_memory = (
+            diagnostics.get("process_memory") or
+            any(
+                isinstance(record.get("process_rss_kb"), (int, float))
+                for record in diagnostics.get("cut_context_rebuilds", [])
+            )
+        )
+        if not has_process_memory:
+            errors.append("process memory diagnostics were not reported")
     if args.require_interior_face_timing_diagnostics and not diagnostics.get("interior_face_timings"):
         errors.append("interior-face timing diagnostics were not reported")
     if args.require_cut_volume_timing_diagnostics and not diagnostics.get("cut_volume_timings"):
@@ -2674,6 +2713,17 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     if args.require_assembly_timing_diagnostics and not metrics["diagnostics"].get("assembly_timings"):
         errors.append("assembly timing diagnostics were not reported")
+    if args.require_process_memory_diagnostics:
+        diagnostics = metrics["diagnostics"]
+        has_process_memory = (
+            diagnostics.get("process_memory") or
+            any(
+                isinstance(record.get("process_rss_kb"), (int, float))
+                for record in diagnostics.get("cut_context_rebuilds", [])
+            )
+        )
+        if not has_process_memory:
+            errors.append("process memory diagnostics were not reported")
     if (args.require_interior_face_timing_diagnostics and
             not metrics["diagnostics"].get("interior_face_timings")):
         errors.append("interior-face timing diagnostics were not reported")
@@ -3053,6 +3103,7 @@ def main() -> int:
     parser.add_argument("--require-cut-volume-timing-diagnostics", action="store_true")
     parser.add_argument("--enable-jit-specialization-trace", action="store_true")
     parser.add_argument("--require-jit-specialization-trace-diagnostics", action="store_true")
+    parser.add_argument("--require-process-memory-diagnostics", action="store_true")
     parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
     parser.add_argument("--require-eigen-factorization-diagnostics", action="store_true")
