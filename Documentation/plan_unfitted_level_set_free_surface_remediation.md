@@ -640,6 +640,11 @@ benchmark runs.
       assembly timing records per accepted step, extra assembly timing records
       beyond nonlinear iterations per accepted step, and cut-context rebuilds
       per accepted step.
+- [x] Skip redundant transient no-line-search accepted-state cut-context
+      refreshes while preserving assembly-time and accepted-step refreshes; the
+      three-step D18 no-output GMRES probe reduced cut-context rebuild density
+      from 6.0 to 4.0 per accepted step and passed a 4.1 rebuilds-per-step
+      smoke threshold.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Compare D38 peak height, front position if applicable, pressure range,

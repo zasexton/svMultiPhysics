@@ -3074,6 +3074,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       [&, cut_lifecycle, cut_topology_key](
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
+        if (!opts.newton.use_line_search &&
+            point == TransientStateSyncPoint::AcceptedNonlinearState) {
+          return;
+        }
         const auto report = refreshActiveCutIntegrationContext(
             sim, params, state, *cut_lifecycle, stateSyncPointName(point));
         logCutTopologyChange(report, point, *cut_topology_key, "transient");
