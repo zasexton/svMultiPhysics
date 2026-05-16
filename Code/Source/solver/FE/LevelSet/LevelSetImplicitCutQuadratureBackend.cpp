@@ -76,6 +76,23 @@ public:
     }
 };
 
+[[nodiscard]] bool supportsSayeHyperrectangleMilestone(
+    int mesh_dimension,
+    ElementType element_type) noexcept
+{
+    if (mesh_dimension != 2) {
+        return false;
+    }
+    switch (element_type) {
+    case ElementType::Quad4:
+    case ElementType::Quad8:
+    case ElementType::Quad9:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 const ImplicitCutQuadratureBackendDriver&
@@ -94,6 +111,49 @@ implicitCutQuadratureBackendDriver(ImplicitCutQuadratureBackend backend)
             " implicit cut quadrature backend is not implemented yet");
     }
     throw std::invalid_argument("unknown implicit cut quadrature backend");
+}
+
+ImplicitCutQuadratureBackendCapability
+implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
+                                       int mesh_dimension,
+                                       ElementType element_type) noexcept
+{
+    ImplicitCutQuadratureBackendCapability capability{};
+    capability.backend = backend;
+    capability.mesh_dimension = mesh_dimension;
+    capability.element_type = element_type;
+
+    switch (backend) {
+    case ImplicitCutQuadratureBackend::LinearCorner:
+        capability.implemented = true;
+        capability.supports_element_type =
+            (mesh_dimension == 2 &&
+             interfaces::supportsLinearLevelSetCellCut2D(element_type)) ||
+            (mesh_dimension == 3 &&
+             interfaces::supportsLinearLevelSetCellCut3D(element_type));
+        capability.supports_high_order_geometry = false;
+        capability.validation_level_set_order = 1;
+        capability.maximum_reported_interface_order = 1;
+        capability.maximum_reported_volume_order = 2;
+        return capability;
+    case ImplicitCutQuadratureBackend::SayeHyperrectangle:
+        capability.implemented = false;
+        capability.supports_element_type =
+            supportsSayeHyperrectangleMilestone(mesh_dimension, element_type);
+        capability.supports_high_order_geometry = true;
+        capability.maximum_reported_interface_order = -1;
+        capability.maximum_reported_volume_order = -1;
+        return capability;
+    case ImplicitCutQuadratureBackend::HighOrderSubcell:
+    case ImplicitCutQuadratureBackend::MomentFit:
+        capability.implemented = false;
+        capability.supports_element_type = false;
+        capability.supports_high_order_geometry = true;
+        capability.maximum_reported_interface_order = -1;
+        capability.maximum_reported_volume_order = -1;
+        return capability;
+    }
+    return capability;
 }
 
 } // namespace svmp::FE::level_set

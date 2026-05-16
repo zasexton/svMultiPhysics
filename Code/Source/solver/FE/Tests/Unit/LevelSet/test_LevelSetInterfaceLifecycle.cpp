@@ -560,12 +560,95 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendDriverReportsSupportAndOrders)
     EXPECT_EQ(backend.achievedVolumeQuadratureOrder(request), 2);
 }
 
+TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
+{
+    const auto linear_quad =
+        level_set::implicitCutQuadratureBackendCapability(
+            level_set::ImplicitCutQuadratureBackend::LinearCorner,
+            2,
+            FE::ElementType::Quad4);
+    EXPECT_TRUE(linear_quad.implemented);
+    EXPECT_TRUE(linear_quad.supports_element_type);
+    EXPECT_FALSE(linear_quad.supports_high_order_geometry);
+    EXPECT_TRUE(linear_quad.requires_scalar_h1_c0_level_set);
+    EXPECT_EQ(linear_quad.minimum_level_set_order, 1);
+    EXPECT_EQ(linear_quad.validation_level_set_order, 1);
+    EXPECT_EQ(linear_quad.maximum_reported_interface_order, 1);
+    EXPECT_EQ(linear_quad.maximum_reported_volume_order, 2);
+    EXPECT_TRUE(linear_quad.returns_reference_frame_rules);
+    EXPECT_TRUE(linear_quad.requires_positive_volume_weights);
+    EXPECT_TRUE(linear_quad.requires_deterministic_rule_order);
+    EXPECT_TRUE(linear_quad.prunes_tiny_slivers_in_context);
+    EXPECT_TRUE(linear_quad.near_tangent_requires_diagnostic);
+    EXPECT_GT(linear_quad.tiny_sliver_volume_fraction, 0.0);
+
+    const auto saye_quad =
+        level_set::implicitCutQuadratureBackendCapability(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+            2,
+            FE::ElementType::Quad9);
+    EXPECT_FALSE(saye_quad.implemented);
+    EXPECT_TRUE(saye_quad.supports_element_type);
+    EXPECT_TRUE(saye_quad.supports_high_order_geometry);
+    EXPECT_EQ(saye_quad.minimum_level_set_order, 1);
+    EXPECT_EQ(saye_quad.validation_level_set_order, 3);
+    EXPECT_EQ(saye_quad.maximum_reported_interface_order, -1);
+    EXPECT_EQ(saye_quad.maximum_reported_volume_order, -1);
+    EXPECT_TRUE(saye_quad.requires_scalar_h1_c0_level_set);
+
+    const auto saye_tri =
+        level_set::implicitCutQuadratureBackendCapability(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+            2,
+            FE::ElementType::Triangle6);
+    EXPECT_FALSE(saye_tri.supports_element_type);
+
+    const auto saye_hex =
+        level_set::implicitCutQuadratureBackendCapability(
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+            3,
+            FE::ElementType::Hex27);
+    EXPECT_FALSE(saye_hex.supports_element_type);
+}
+
 TEST(LevelSetInterfaceLifecycle, UnimplementedBackendFactoryThrows)
 {
     EXPECT_THROW(
         (void)level_set::implicitCutQuadratureBackendDriver(
             level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle),
         std::invalid_argument);
+}
+
+TEST(LevelSetInterfaceLifecycle, RejectsNonH1LevelSetField)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::L2, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NE(phi, FE::INVALID_FIELD_ID);
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.domain_id = "water-air";
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    try {
+        (void)lifecycle.build(system, options, solution);
+        FAIL() << "Expected non-H1 level-set field to be rejected";
+    } catch (const std::invalid_argument& ex) {
+        const std::string message = ex.what();
+        EXPECT_NE(message.find("H1/C0"), std::string::npos);
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, FullSideVolumeRegionSucceedsWithoutInterfaceFragment)

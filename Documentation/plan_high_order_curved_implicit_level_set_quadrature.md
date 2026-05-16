@@ -120,19 +120,19 @@ is qualified.
 - [x] Define a new quadrature backend option, for example
       `Implicit_cut_quadrature_backend=SayeHyperrectangle`,
       `HighOrderSubcell`, `MomentFit`, or `LinearFallback`.
-- [ ] Define supported cell families for the first milestone.
+- [x] Define supported cell families for the first milestone.
       Recommended first target:
       - quads in 2D with Saye-style hyperrectangle quadrature,
       - hexes in 3D only after the 2D path is validated,
       - triangles/tets through a separate simplex strategy.
-- [ ] Define accepted level-set spaces: scalar H1/C0 fields first.
-- [ ] Define minimum supported polynomial orders: P1 must reproduce existing
+- [x] Define accepted level-set spaces: scalar H1/C0 fields first.
+- [x] Define minimum supported polynomial orders: P1 must reproduce existing
       behavior; P2 and P3 must demonstrate curved-interface convergence.
 - [x] Define separate requested orders for volume and interface quadrature.
-- [ ] Define the achieved-order reporting contract for adaptive backends.
+- [x] Define the achieved-order reporting contract for adaptive backends.
 - [x] Define fallback behavior: hard fail, linear fallback, subcell fallback, or
       conservative constant-measure fallback.
-- [ ] Define acceptance policy for tiny slivers and near-tangent cuts.
+- [x] Define acceptance policy for tiny slivers and near-tangent cuts.
 - [x] Define whether high-order geometry is allowed in benchmark fixtures before
       validation is complete. Recommended answer: no.
 
@@ -391,7 +391,7 @@ robustness and implementation cost.
 
 ### Implementation Checklist
 
-- [ ] Add backend capability reporting by element type.
+- [x] Add backend capability reporting by element type.
 - [ ] Add triangle curved-interface tests before tetrahedron work.
 - [ ] Add tetrahedron curved-interface tests before solver integration.
 - [ ] Ensure simplex rule provenance matches hyperrectangle rule provenance.

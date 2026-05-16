@@ -122,6 +122,16 @@ struct GeneratedInterfaceCellDiagnostics {
             "generated level-set interface field '" +
             options.level_set_field_name + "' must be scalar");
     }
+    if (rec.space->space_type() != spaces::SpaceType::H1) {
+        throw std::invalid_argument(
+            "generated level-set interface field '" +
+            options.level_set_field_name + "' must use a scalar H1/C0 space");
+    }
+    if (rec.space->polynomial_order() < 1) {
+        throw std::invalid_argument(
+            "generated level-set interface field '" +
+            options.level_set_field_name + "' must have polynomial order at least one");
+    }
     return field;
 }
 
