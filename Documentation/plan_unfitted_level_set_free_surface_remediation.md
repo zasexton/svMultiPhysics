@@ -658,6 +658,10 @@ benchmark runs.
       before rebuilding the matrix; the three-step D18 no-output GMRES probe
       reduced Newton matrix assemblies from 2.0 to 1.0 per accepted step and
       eliminated post-update matrix assemblies on converged steps.
+- [x] Run the matching three-step D38 no-output GMRES residual-first probe and
+      verify the same Newton assembly pattern: one matrix assembly per accepted
+      step, post-update residual-only convergence checks, and no post-update
+      matrix assemblies on converged steps.
 - [ ] Compare D18 peak height, front position if applicable, pressure range,
       velocity range, and wet-volume drift against acceptance thresholds.
 - [ ] Compare D38 peak height, front position if applicable, pressure range,
