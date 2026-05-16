@@ -2340,33 +2340,52 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleP2EdgeDofMovesCutVolume
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     const auto linear_edge = lifecycle.build(system, options, make_solution(0.0));
     const auto curved_edge = lifecycle.build(system, options, make_solution(-0.35));
+    const auto restored_edge = lifecycle.build(system, options, make_solution(0.0));
 
     ASSERT_TRUE(linear_edge.success) << linear_edge.diagnostic;
     ASSERT_TRUE(curved_edge.success) << curved_edge.diagnostic;
+    ASSERT_TRUE(restored_edge.success) << restored_edge.diagnostic;
     EXPECT_EQ(linear_edge.implicit_cut_quadrature_backend,
               level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
     EXPECT_EQ(curved_edge.implicit_cut_quadrature_backend,
               level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(restored_edge.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
     EXPECT_EQ(linear_edge.value_revision, 1u);
     EXPECT_EQ(curved_edge.value_revision, linear_edge.value_revision + 1u);
+    EXPECT_EQ(restored_edge.value_revision, curved_edge.value_revision + 1u);
     EXPECT_EQ(linear_edge.domain.request().source.value_revision,
               linear_edge.value_revision);
     EXPECT_EQ(curved_edge.domain.request().source.value_revision,
               curved_edge.value_revision);
+    EXPECT_EQ(restored_edge.domain.request().source.value_revision,
+              restored_edge.value_revision);
     EXPECT_GT(std::abs(curved_edge.summary.negative_volume_measure -
                        linear_edge.summary.negative_volume_measure),
+              1.0e-3);
+    EXPECT_NEAR(restored_edge.summary.negative_volume_measure,
+                linear_edge.summary.negative_volume_measure,
+                1.0e-12);
+    EXPECT_GT(std::abs(curved_edge.summary.negative_volume_measure -
+                       restored_edge.summary.negative_volume_measure),
               1.0e-3);
 
     const auto linear_rules = linear_edge.domain.volumeQuadratureRules();
     const auto curved_rules = curved_edge.domain.volumeQuadratureRules();
+    const auto restored_rules = restored_edge.domain.volumeQuadratureRules();
     ASSERT_FALSE(linear_rules.empty());
     ASSERT_FALSE(curved_rules.empty());
+    ASSERT_FALSE(restored_rules.empty());
     EXPECT_EQ(linear_rules.front().provenance.source_value_revision,
               linear_edge.value_revision);
     EXPECT_EQ(curved_rules.front().provenance.source_value_revision,
               curved_edge.value_revision);
+    EXPECT_EQ(restored_rules.front().provenance.source_value_revision,
+              restored_edge.value_revision);
     EXPECT_NE(linear_rules.front().provenance.cut_topology_revision,
               curved_rules.front().provenance.cut_topology_revision);
+    EXPECT_NE(curved_rules.front().provenance.cut_topology_revision,
+              restored_rules.front().provenance.cut_topology_revision);
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleVertexAndEdgeTouchesAreDegenerate)

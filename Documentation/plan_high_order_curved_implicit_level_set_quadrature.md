@@ -874,7 +874,7 @@ rule.
 - [x] Changing backend tolerance changes the cut-context revision.
 - [x] Changing a high-order level-set edge DOF changes the source revision and
       generated rules.
-- [ ] Rejected line-search trial geometry is not left installed.
+- [x] Rejected line-search trial geometry is not left installed.
 - [ ] MPI ranks produce matching global cut-context summaries.
 
 ### Literature Support
