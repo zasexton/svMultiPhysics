@@ -241,6 +241,28 @@ TEST(EquationTranslatorDomainDefaults, BuildInputCopiesGravityForceComponents)
   EXPECT_TRUE(input.default_domain.params.at("Hydrostatic_pressure_reference_point").defined);
 }
 
+TEST(EquationTranslatorDomainDefaults, BuildInputKeepsMomentumSourceFieldOptions)
+{
+  auto mesh = buildTranslatorMesh();
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Density>998.2</Density>
+  <Momentum_source_field_name>ManufacturedSource</Momentum_source_field_name>
+  <Auto_register_momentum_source_field>false</Auto_register_momentum_source_field>
+  <Viscosity model="Constant">
+    <Value>1.003e-3</Value>
+  </Viscosity>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  ASSERT_TRUE(input.equation_params.at("Momentum_source_field_name").defined);
+  EXPECT_EQ(input.equation_params.at("Momentum_source_field_name").value, "ManufacturedSource");
+  ASSERT_TRUE(input.equation_params.at("Auto_register_momentum_source_field").defined);
+  EXPECT_EQ(input.equation_params.at("Auto_register_momentum_source_field").value, "false");
+}
+
 TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
 {
   auto mesh = buildTranslatorMesh();

@@ -863,6 +863,27 @@ void apply_node_pressure_constraints(
       read_node_pressure_constraints_csv(node_constraints.values_file_path);
 }
 
+void apply_fluid_momentum_source_params(
+    const svmp::Physics::ParameterMap& params,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  for (const auto key : {"Momentum_source_field_name", "MomentumSourceFieldName",
+                         "Body_force_field_name", "BodyForceFieldName",
+                         "Body_force_field", "BodyForceField"}) {
+    if (const auto field_name = get_defined_string(params, key)) {
+      options.body_force_field_name = *field_name;
+      break;
+    }
+  }
+  for (const auto key : {"Auto_register_momentum_source_field", "AutoRegisterMomentumSourceField",
+                         "Auto_register_body_force_field", "AutoRegisterBodyForceField"}) {
+    if (const auto auto_register = get_defined_bool(params, key)) {
+      options.auto_register_body_force_field = *auto_register;
+      break;
+    }
+  }
+}
+
 void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
                             svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
@@ -883,6 +904,7 @@ void apply_fluid_properties(const svmp::Physics::DomainInput& domain,
   if (const auto fz = get_defined_double(domain.params, "Force_z")) {
     options.body_force[2] = static_cast<svmp::FE::Real>(*fz);
   }
+  apply_fluid_momentum_source_params(domain.params, options);
 
   if (const auto enabled = get_defined_bool(domain.params, "Hydrostatic_pressure_initialization")) {
     options.hydrostatic_pressure_initialization.enabled = *enabled;
@@ -2941,6 +2963,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
 
   apply_fluid_moving_domain_options(input, domain, options);
+  apply_fluid_momentum_source_params(input.equation_params, options);
   apply_fluid_properties(domain, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, options);

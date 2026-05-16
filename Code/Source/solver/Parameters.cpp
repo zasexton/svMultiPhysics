@@ -234,6 +234,16 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Mu_mesh",
     "Mesh_mu",
     "Element_order",
+    "Momentum_source_field_name",
+    "MomentumSourceFieldName",
+    "Body_force_field_name",
+    "BodyForceFieldName",
+    "Body_force_field",
+    "BodyForceField",
+    "Auto_register_momentum_source_field",
+    "AutoRegisterMomentumSourceField",
+    "Auto_register_body_force_field",
+    "AutoRegisterBodyForceField",
   };
   return names.count(name) != 0;
 }
@@ -2123,9 +2133,11 @@ void DomainParameters::set_values(tinyxml2::XMLElement* domain_elem)
   
     } else if (item->GetText() != nullptr) {
       auto value = item->GetText();
-      try {
+      if (params_map.count(name) != 0) {
         set_parameter_value(name, value);
-      } catch (const std::bad_function_call& exception) {
+      } else if (is_oop_equation_extension_parameter(name)) {
+        set_extra_parameter_value(name, value);
+      } else {
         throw std::runtime_error(error_msg + name + "'.");
       }
 

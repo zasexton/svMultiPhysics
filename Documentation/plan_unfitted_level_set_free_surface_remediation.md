@@ -451,6 +451,8 @@ benchmark runs.
       require parseable finite-difference Jacobian checks, Newton direction
       checks, linear solve history, and component norms even when the solver
       exits before VTK output.
+- [x] Accept manufactured momentum-source field options in the OOP fluid input
+      path so the MMS traveling-interface fixture reaches assembly diagnostics.
 - [x] Add a component-selectable finite-difference Jacobian diagnostic so MMS
       probes can separate fixed-geometry velocity and pressure assembly checks
       from level-set geometry perturbations.
