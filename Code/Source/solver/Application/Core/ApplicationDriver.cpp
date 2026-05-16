@@ -948,6 +948,33 @@ const char* stateSyncPointName(
   return "unknown";
 }
 
+std::string highOrderGeometryTangentPolicySummary(
+    const std::vector<ActiveCutVolumeRequest>& requests)
+{
+  std::set<std::string> policies;
+  for (const auto& request : requests) {
+    if (request.geometry_mode !=
+        svmp::FE::level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit) {
+      continue;
+    }
+    policies.insert(svmp::FE::level_set::geometryTangentPolicyName(
+        request.geometry_tangent_policy));
+  }
+  if (policies.empty()) {
+    return {};
+  }
+  std::ostringstream oss;
+  bool first = true;
+  for (const auto& policy : policies) {
+    if (!first) {
+      oss << ",";
+    }
+    first = false;
+    oss << policy;
+  }
+  return oss.str();
+}
+
 void logCutTopologyChange(
     const ActiveCutContextRefreshReport& report,
     svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point,
@@ -3262,6 +3289,13 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   auto cut_lifecycle =
       std::make_shared<svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle>();
   auto cut_topology_key = std::make_shared<std::optional<std::uint64_t>>();
+  const auto steady_active_cut_requests = activeCutVolumeRequests(params);
+  if (hasHighOrderGeneratedInterfaceGeometry(steady_active_cut_requests)) {
+    newton_opts.jacobian_check_geometry_mode =
+        svmp::FE::timestepping::JacobianCheckGeometryMode::RefreshedGeometry;
+    newton_opts.jacobian_check_geometry_tangent_policy =
+        highOrderGeometryTangentPolicySummary(steady_active_cut_requests);
+  }
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   newton_opts.synchronize_state =
@@ -3443,6 +3477,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const auto transient_active_cut_requests = activeCutVolumeRequests(params);
   const bool high_order_cut_geometry =
       hasHighOrderGeneratedInterfaceGeometry(transient_active_cut_requests);
+  if (high_order_cut_geometry) {
+    opts.newton.jacobian_check_geometry_mode =
+        svmp::FE::timestepping::JacobianCheckGeometryMode::RefreshedGeometry;
+    opts.newton.jacobian_check_geometry_tangent_policy =
+        highOrderGeometryTangentPolicySummary(transient_active_cut_requests);
+  }
   const auto expected_cut_request_policy_key =
       activeCutVolumeRequestPolicyKey(transient_active_cut_requests);
   using TransientStateSyncPoint =

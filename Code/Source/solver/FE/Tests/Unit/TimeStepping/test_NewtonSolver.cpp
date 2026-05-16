@@ -218,6 +218,81 @@ private:
     svmp::FE::Real target_{0.0};
 };
 
+class RefreshedGeometryMeasureKernel final : public svmp::FE::assembly::AssemblyKernel {
+public:
+    RefreshedGeometryMeasureKernel(const double* measure, svmp::FE::Real target)
+        : measure_(measure)
+        , target_(target)
+    {
+        if (!measure_) {
+            throw std::runtime_error("RefreshedGeometryMeasureKernel: measure is null");
+        }
+    }
+
+    [[nodiscard]] svmp::FE::assembly::RequiredData getRequiredData() const override
+    {
+        using svmp::FE::assembly::RequiredData;
+        return RequiredData::IntegrationWeights |
+               RequiredData::BasisValues |
+               RequiredData::SolutionCoefficients;
+    }
+
+    [[nodiscard]] bool hasStateIndependentMatrix() const noexcept override { return false; }
+
+    void computeCell(const svmp::FE::assembly::AssemblyContext& ctx,
+                     svmp::FE::assembly::KernelOutput& output) override
+    {
+        const auto n_test = ctx.numTestDofs();
+        const auto n_trial = ctx.numTrialDofs();
+        bool want_matrix = output.has_matrix || !output.local_matrix.empty();
+        bool want_vector = output.has_vector || !output.local_vector.empty();
+        if (!want_matrix && !want_vector) {
+            want_matrix = true;
+            want_vector = true;
+        }
+        output.reserve(n_test, n_trial, want_matrix, want_vector);
+        output.clear();
+
+        const auto coeffs = ctx.solutionCoefficients();
+        if (want_vector && coeffs.size() < static_cast<std::size_t>(n_trial)) {
+            throw std::runtime_error("RefreshedGeometryMeasureKernel: missing solution coefficients");
+        }
+
+        const auto measure = static_cast<svmp::FE::Real>(*measure_);
+        for (svmp::FE::LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            const auto w = ctx.integrationWeight(q);
+            svmp::FE::Real uh = 0.0;
+            if (want_vector) {
+                for (svmp::FE::LocalIndex j = 0; j < n_trial; ++j) {
+                    uh += ctx.trialBasisValue(j, q) *
+                          coeffs[static_cast<std::size_t>(j)];
+                }
+            }
+            for (svmp::FE::LocalIndex i = 0; i < n_test; ++i) {
+                const auto vi = ctx.basisValue(i, q);
+                if (want_vector) {
+                    output.vectorEntry(i) += w * vi * measure * (uh - target_);
+                }
+                if (want_matrix) {
+                    for (svmp::FE::LocalIndex j = 0; j < n_trial; ++j) {
+                        output.matrixEntry(i, j) +=
+                            w * vi * measure * ctx.trialBasisValue(j, q);
+                    }
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "RefreshedGeometryMeasureKernel";
+    }
+
+private:
+    const double* measure_{nullptr};
+    svmp::FE::Real target_{0.0};
+};
+
 class ScalingLinearSolver final : public svmp::FE::backends::LinearSolver {
 public:
     ScalingLinearSolver(svmp::FE::backends::LinearSolver& inner, double scale)
@@ -730,6 +805,57 @@ template <typename BuildForm>
     return p;
 }
 
+[[nodiscard]] ScalarProblem makeRefreshedGeometryMeasureProblem(
+    double target,
+    double dt,
+    const std::vector<svmp::FE::Real>& u0,
+    const double* measure)
+{
+    ScalarProblem p;
+    p.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    p.space = std::make_shared<svmp::FE::spaces::L2Space>(
+        svmp::FE::ElementType::Tetra4, /*order=*/0);
+
+    p.sys = std::make_unique<svmp::FE::systems::FESystem>(p.mesh);
+    p.u_field = p.sys->addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = p.space, .components = 1});
+    p.sys->addOperator("op");
+
+    auto kernel = std::make_shared<RefreshedGeometryMeasureKernel>(
+        measure, static_cast<svmp::FE::Real>(target));
+    p.sys->addCellKernel("op", p.u_field, p.u_field, kernel);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    p.sys->setup({}, inputs);
+
+    p.integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    p.transient = std::make_unique<svmp::FE::systems::TransientSystem>(
+        *p.sys, p.integrator);
+
+    p.factory = ts_test::createTestFactory();
+    if (!p.factory) {
+        throw std::runtime_error(
+            "ScalarProblem requires the Eigen backend (enable FE_ENABLE_EIGEN)");
+    }
+    p.linear = p.factory->createLinearSolver(ts_test::directSolve());
+    if (!p.linear) {
+        throw std::runtime_error("ScalarProblem failed to create LinearSolver");
+    }
+
+    const auto n_dofs = p.sys->dofHandler().getNumDofs();
+    if (static_cast<std::size_t>(n_dofs) != u0.size()) {
+        throw std::runtime_error("ScalarProblem u0 size mismatch");
+    }
+    p.history = svmp::FE::timestepping::TimeHistory::allocate(*p.factory, n_dofs);
+    p.history.setDt(dt);
+    p.history.setPrevDt(dt);
+    ts_test::setVectorByDof(p.history.uPrev(), u0);
+    ts_test::setVectorByDof(p.history.uPrev2(), u0);
+    p.history.resetCurrentToPrevious();
+    return p;
+}
+
 [[nodiscard]] double scalarFromDofVector(svmp::FE::backends::GenericVector& vec)
 {
     const auto vals = ts_test::getVectorByDof(vec);
@@ -1095,6 +1221,83 @@ TEST(NewtonSolver, SynchronizesUpdatedCoupledGeometryBeforeResidualAssembly)
     EXPECT_TRUE(saw_initial_residual_state);
     EXPECT_TRUE(saw_updated_residual_state);
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 2.0, 1e-13);
+}
+
+TEST(NewtonSolver, RefreshedGeometryJacobianCheckReportsQuasiNewtonMismatch)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    double refreshed_measure = 1.0;
+    auto problem = makeRefreshedGeometryMeasureProblem(
+        /*target=*/0.0,
+        /*dt=*/0.1,
+        /*u0=*/{1.0},
+        &refreshed_measure);
+
+    using svmp::FE::timestepping::JacobianCheckGeometryMode;
+    using svmp::FE::timestepping::NewtonJacobianCheckDiagnostic;
+    using SyncPoint =
+        svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
+
+    std::vector<NewtonJacobianCheckDiagnostic> diagnostics;
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 0.0;
+    nopt.rel_tolerance = 0.0;
+    nopt.step_tolerance = 0.0;
+    nopt.use_line_search = false;
+    nopt.assemble_both_when_possible = true;
+    nopt.jacobian_check_geometry_mode =
+        JacobianCheckGeometryMode::RefreshedGeometry;
+    nopt.jacobian_check_geometry_tangent_policy =
+        "RefreshedFrozenQuadrature";
+    nopt.jacobian_check_relative_tolerance = 1e-8;
+    nopt.synchronize_state =
+        [&refreshed_measure](const svmp::FE::systems::SystemStateView& state,
+                             SyncPoint) {
+            if (!state.u.empty()) {
+                refreshed_measure =
+                    1.0 + 0.25 * static_cast<double>(state.u.front());
+            }
+        };
+    nopt.jacobian_check_diagnostic =
+        [&diagnostics](const NewtonJacobianCheckDiagnostic& diagnostic) {
+            diagnostics.push_back(diagnostic);
+        };
+
+    ScopedEnvVar jac_check("SVMP_FE_JACOBIAN_CHECK", "1");
+    ScopedEnvVar jac_it("SVMP_FE_JACOBIAN_CHECK_IT", "0");
+    ScopedEnvVar jac_step("SVMP_FE_JACOBIAN_CHECK_STEP", "1e-7");
+    ScopedEnvVar jac_scheme("SVMP_FE_JACOBIAN_CHECK_SCHEME", "forward");
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        ws);
+
+    EXPECT_TRUE(rep.linear.converged);
+    ASSERT_FALSE(diagnostics.empty());
+    const auto& diagnostic = diagnostics.front();
+    EXPECT_EQ(diagnostic.geometry_mode,
+              JacobianCheckGeometryMode::RefreshedGeometry);
+    EXPECT_EQ(diagnostic.geometry_tangent_policy,
+              "RefreshedFrozenQuadrature");
+    EXPECT_EQ(diagnostic.geometry_result,
+              "expected_quasi_newton_geometry_mismatch");
+    EXPECT_EQ(diagnostic.component_filter, "all");
+    EXPECT_EQ(diagnostic.finite_difference_scheme, "forward");
+    EXPECT_GT(diagnostic.relative_error,
+              nopt.jacobian_check_relative_tolerance);
 }
 
 TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)

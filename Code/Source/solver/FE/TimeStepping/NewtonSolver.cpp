@@ -908,6 +908,40 @@ enum class JacobianCheckDifferenceScheme {
     return "forward";
 }
 
+[[nodiscard]] const char* jacobianCheckGeometryModeName(
+    JacobianCheckGeometryMode mode) noexcept
+{
+    switch (mode) {
+    case JacobianCheckGeometryMode::FixedGeometry:
+        return "fixed_geometry";
+    case JacobianCheckGeometryMode::RefreshedGeometry:
+        return "refreshed_geometry";
+    case JacobianCheckGeometryMode::FullGeometryPerturbation:
+        return "full_geometry_perturbation";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] const char* jacobianCheckGeometryResult(
+    JacobianCheckGeometryMode mode,
+    double rel_error,
+    double tolerance) noexcept
+{
+    const bool mismatch =
+        std::isfinite(rel_error) && rel_error > std::max(tolerance, 0.0);
+    switch (mode) {
+    case JacobianCheckGeometryMode::FixedGeometry:
+        return mismatch ? "fixed_geometry_tangent_mismatch"
+                        : "fixed_geometry_tangent_match";
+    case JacobianCheckGeometryMode::RefreshedGeometry:
+        return mismatch ? "expected_quasi_newton_geometry_mismatch"
+                        : "refreshed_geometry_tangent_match";
+    case JacobianCheckGeometryMode::FullGeometryPerturbation:
+        return "full_geometry_perturbation_unsupported";
+    }
+    return "unknown";
+}
+
 [[nodiscard]] std::string lowerCopy(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -3695,6 +3729,10 @@ NewtonSolver::NewtonSolver(NewtonOptions options)
 
     FE_THROW_IF(options_.jacobian_rebuild_period <= 0, InvalidArgumentException,
                 "NewtonSolver: jacobian_rebuild_period must be >= 1");
+    FE_THROW_IF(options_.jacobian_check_relative_tolerance < 0.0 ||
+                    !std::isfinite(options_.jacobian_check_relative_tolerance),
+                InvalidArgumentException,
+                "NewtonSolver: jacobian_check_relative_tolerance must be finite and >= 0");
     if (options_.scale_dt_increments) {
         FE_THROW_IF(!std::isfinite(options_.dt_increment_scale), InvalidArgumentException,
                     "NewtonSolver: dt_increment_scale must be finite");
@@ -5165,6 +5203,28 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 err_component_norms = componentNormSnapshot(transient.system(), u_backup);
                 const double denom = std::max({jv_norm, fd_norm, 1e-14});
                 const double rel_err = err_norm / denom;
+                const char* geometry_result = jacobianCheckGeometryResult(
+                    options_.jacobian_check_geometry_mode,
+                    rel_err,
+                    options_.jacobian_check_relative_tolerance);
+                if (options_.jacobian_check_diagnostic) {
+                    NewtonJacobianCheckDiagnostic diag;
+                    diag.iteration = it;
+                    diag.sweep_index = sweep_index;
+                    diag.step_size = h;
+                    diag.matrix_action_norm = matrix_jv_norm;
+                    diag.full_action_norm = jv_norm;
+                    diag.finite_difference_norm = fd_norm;
+                    diag.error_norm = err_norm;
+                    diag.relative_error = rel_err;
+                    diag.geometry_mode = options_.jacobian_check_geometry_mode;
+                    diag.geometry_tangent_policy =
+                        options_.jacobian_check_geometry_tangent_policy;
+                    diag.geometry_result = geometry_result;
+                    diag.component_filter = component_filter_label;
+                    diag.finite_difference_scheme = difference_scheme_name;
+                    options_.jacobian_check_diagnostic(diag);
+                }
 
                 // Rebuild the matrix-only mismatch vector for the per-component
                 // diagnostic after using `residual_base` as a rank-one scratch.
@@ -5179,6 +5239,12 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 	                        << "' residual_op='" << options_.residual_op << "'"
 	                        << " diagnostic=jacobian_check"
 	                        << " fd_scheme=" << difference_scheme_name
+                            << " geometry_check_mode="
+                            << jacobianCheckGeometryModeName(
+                                   options_.jacobian_check_geometry_mode)
+                            << " geometry_tangent_policy='"
+                            << options_.jacobian_check_geometry_tangent_policy << "'"
+                            << " geometry_result=" << geometry_result
 	                        << " component_filter='" << component_filter_label << "'"
 	                        << " sweep=" << sweep_index
 	                        << " it=" << it

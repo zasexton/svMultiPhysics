@@ -16,6 +16,7 @@
 #include "Systems/TransientSystem.h"
 #include "TimeStepping/TimeHistory.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -24,6 +25,28 @@
 namespace svmp {
 namespace FE {
 namespace timestepping {
+
+enum class JacobianCheckGeometryMode : std::uint8_t {
+    FixedGeometry,
+    RefreshedGeometry,
+    FullGeometryPerturbation
+};
+
+struct NewtonJacobianCheckDiagnostic {
+    int iteration{0};
+    std::size_t sweep_index{0u};
+    double step_size{0.0};
+    double matrix_action_norm{0.0};
+    double full_action_norm{0.0};
+    double finite_difference_norm{0.0};
+    double error_norm{0.0};
+    double relative_error{0.0};
+    JacobianCheckGeometryMode geometry_mode{JacobianCheckGeometryMode::FixedGeometry};
+    std::string geometry_tangent_policy{};
+    std::string geometry_result{};
+    std::string component_filter{};
+    std::string finite_difference_scheme{};
+};
 
 struct NewtonOptions {
     enum class StateSynchronizationPoint : std::uint8_t {
@@ -99,6 +122,17 @@ struct NewtonOptions {
     double line_search_alpha_min{1e-6};
     double line_search_shrink{0.5};
     double line_search_c1{1e-4};
+
+    // Runtime Jacobian-check metadata. The check remains diagnostic-only, but
+    // this classifies whether residual finite differences are assembled on a
+    // fixed geometry, refreshed geometry, or a future full geometry perturbation
+    // path.
+    JacobianCheckGeometryMode jacobian_check_geometry_mode{
+        JacobianCheckGeometryMode::FixedGeometry};
+    std::string jacobian_check_geometry_tangent_policy{};
+    double jacobian_check_relative_tolerance{1e-6};
+    std::function<void(const NewtonJacobianCheckDiagnostic&)>
+        jacobian_check_diagnostic{};
 
     std::function<void(const systems::SystemStateView&, StateSynchronizationPoint)>
         synchronize_state{};
