@@ -191,8 +191,14 @@ algorithms need repeated pointwise evaluation of the implicit function.
       - optional `referenceHessian(xi)`,
       - polynomial/order metadata.
 - [x] Support scalar H1/C0 nodal fields first.
-- [ ] Avoid mesh vertex-field reads inside the high-order cutter.
-- [ ] Keep a separate synchronization path for visualization mesh fields.
+- [x] Avoid mesh vertex-field reads inside the high-order cutter.
+      High-order geometry evaluation is driven by the FE-ordered solution span
+      through `LevelSetCellEvaluator`; mesh vertex fields remain outside the
+      implicit cutter and are only synchronization/output mirrors.
+- [x] Keep a separate synchronization path for visualization mesh fields.
+      Application-level vertex mesh-field refreshes stay in
+      `syncActiveLevelSetVertexFieldsFromSolution(...)` before diagnostics and
+      output, separate from generated cut-rule construction.
 - [x] Ensure vector/state ordering is identical to the current cut-context
       refresh path used during Newton residual and Jacobian assembly.
 - [x] Define behavior for ghost cells and non-owned cells in MPI.
