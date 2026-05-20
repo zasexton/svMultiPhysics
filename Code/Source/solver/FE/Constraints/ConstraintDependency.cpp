@@ -14,7 +14,7 @@ namespace constraints {
 bool ConstraintDependencyMask::any() const noexcept
 {
     return geometry || reference_rebase || topology || ownership || numbering ||
-           mesh_field_layout || labels || active_configuration || fe_space ||
+           mesh_field_layout || mesh_field_values || labels || active_configuration || fe_space ||
            fe_dof_layout || fe_constraint_layout || fe_block_layout || time;
 }
 
@@ -53,6 +53,7 @@ void merge_into(ConstraintDependencyMask& dst, const ConstraintDependencyMask& s
     dst.ownership = dst.ownership || src.ownership;
     dst.numbering = dst.numbering || src.numbering;
     dst.mesh_field_layout = dst.mesh_field_layout || src.mesh_field_layout;
+    dst.mesh_field_values = dst.mesh_field_values || src.mesh_field_values;
     dst.labels = dst.labels || src.labels;
     dst.active_configuration = dst.active_configuration || src.active_configuration;
     dst.fe_space = dst.fe_space || src.fe_space;
@@ -90,6 +91,7 @@ bool dependency_changed(const ConstraintDependencyMask& mask,
            (mask.ownership && cached.ownership != current.ownership) ||
            (mask.numbering && cached.numbering != current.numbering) ||
            (mask.mesh_field_layout && cached.mesh_field_layout != current.mesh_field_layout) ||
+           (mask.mesh_field_values && cached.mesh_field_values != current.mesh_field_values) ||
            (mask.labels && cached.labels != current.labels) ||
            (mask.active_configuration && cached.active_configuration != current.active_configuration) ||
            (mask.fe_space && cached.fe_space != current.fe_space) ||

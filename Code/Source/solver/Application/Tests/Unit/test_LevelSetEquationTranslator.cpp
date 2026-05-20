@@ -129,6 +129,40 @@ std::shared_ptr<svmp::Mesh> makeRegistryQuadMesh()
 
   return svmp::create_mesh(std::move(base));
 }
+
+std::shared_ptr<svmp::Mesh> makeRegistryBiquadraticQuadMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  const std::vector<svmp::real_t> x_ref = {
+      0.0, 0.0,
+      1.0, 0.0,
+      1.0, 1.0,
+      0.0, 1.0,
+      0.5, 0.0,
+      1.0, 0.5,
+      0.5, 1.0,
+      0.0, 0.5,
+      0.5, 0.5,
+  };
+  const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9};
+  const std::vector<svmp::index_t> cell2vertex = {
+      0, 1, 2, 3, 4, 5, 6, 7, 8};
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Quad;
+  shape.num_corners = 4;
+  shape.order = 2;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape});
+  base->finalize();
+
+  return svmp::create_mesh(std::move(base));
+}
 #endif
 
 } // namespace
@@ -139,6 +173,37 @@ TEST(LevelSetEquationTranslator, RecognizesLegacyEquationTypes)
   EXPECT_TRUE(application::translators::level_set::isEquationType("levelSet"));
   EXPECT_TRUE(application::translators::level_set::isEquationType("level_set_transport"));
   EXPECT_FALSE(application::translators::level_set::isEquationType("fluid"));
+}
+
+TEST(LevelSetEquationTranslator, RejectsUnsupportedRuntimeReinitializationMethods)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  for (const std::string method : {"HamiltonJacobiPDE", "FastMarching"}) {
+    auto mesh = makeRegistryQuadMesh();
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "level_set";
+    input.mesh_name = "quad";
+    input.mesh = mesh->local_mesh_ptr();
+    input.equation_params["Level_set_field_name"] =
+        svmp::Physics::ParameterValue{true, "phi"};
+    input.equation_params["Velocity_field_name"] =
+        svmp::Physics::ParameterValue{true, "advecting_velocity"};
+    input.equation_params["Velocity_source"] =
+        svmp::Physics::ParameterValue{true, "prescribed_data"};
+    input.equation_params["Enable_reinitialization"] =
+        svmp::Physics::ParameterValue{true, "true"};
+    input.equation_params["Reinitialization_method"] =
+        svmp::Physics::ParameterValue{true, method};
+
+    svmp::FE::systems::FESystem system(mesh);
+    EXPECT_THROW(
+        (void)application::translators::level_set::createModule(input, system),
+        std::runtime_error)
+        << "method=" << method;
+  }
+#endif
 }
 
 TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
@@ -158,12 +223,18 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
       svmp::Physics::ParameterValue{true, "advecting_velocity"};
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Transport_form"] =
+      svmp::Physics::ParameterValue{true, "conservative_divergence"};
   input.equation_params["Operator_tag"] =
       svmp::Physics::ParameterValue{true, "transport"};
   input.equation_params["Enable_SUPG"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["SUPG_tau_scale"] =
       svmp::Physics::ParameterValue{true, "0.25"};
+  input.equation_params["Interface_kinematic_marker"] =
+      svmp::Physics::ParameterValue{true, "77"};
+  input.equation_params["Interface_kinematic_weight_scale"] =
+      svmp::Physics::ParameterValue{true, "1.5"};
   input.equation_params["Enable_reinitialization"] =
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["Reinitialization_method"] =
@@ -219,7 +290,9 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
             svmp::FE::systems::FieldSourceKind::PrescribedData);
   EXPECT_TRUE(system.hasOperator("transport"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+  EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+  EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
 #endif
 }
 
@@ -289,6 +362,92 @@ TEST(LevelSetEquationTranslator, InitializesPrescribedLevelSetFromMeshVertexFiel
 #endif
 }
 
+TEST(LevelSetEquationTranslator, InitializesPrescribedHighOrderLevelSetFromMeshPointField)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryBiquadraticQuadMesh();
+  auto& local_mesh = mesh->local_mesh();
+  const auto field = svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* phi_values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, field);
+  ASSERT_NE(phi_values, nullptr);
+  for (svmp::index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+    const auto x = local_mesh.get_vertex_coords(vertex);
+    phi_values[vertex] = 10.0 * x[0] + x[1] + 0.125 * static_cast<double>(vertex);
+  }
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad9";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Level_set_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+  ASSERT_TRUE(module);
+  ASSERT_NO_THROW(system.setup({}));
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  auto state = factory->createVector(system.dofHandler().getNumDofs());
+  state->zero();
+
+  module->applyInitialConditions(system, *state);
+  const auto values = state->localSpan();
+
+  const auto phi = system.findFieldByName("phi");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+  const auto* entity_map = system.fieldDofHandler(phi).getEntityDofMap();
+  ASSERT_NE(entity_map, nullptr);
+  for (svmp::FE::GlobalIndex vertex = 4; vertex < 9; ++vertex) {
+    EXPECT_TRUE(entity_map->getVertexDofs(vertex).empty());
+  }
+
+  auto [cell_vertices, n_cell_vertices] = local_mesh.cell_vertices_span(0);
+  ASSERT_NE(cell_vertices, nullptr);
+  ASSERT_EQ(n_cell_vertices, 9u);
+  const auto cell_dofs = system.fieldDofHandler(phi).getCellDofs(0);
+  ASSERT_EQ(cell_dofs.size(), n_cell_vertices);
+  const auto offset = system.fieldDofOffset(phi);
+
+  for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
+    const auto vertex = cell_vertices[local_node];
+    const auto dof = offset + cell_dofs[local_node];
+    ASSERT_GE(dof, 0);
+    ASSERT_LT(static_cast<std::size_t>(dof), values.size());
+    EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(dof)],
+                     phi_values[static_cast<std::size_t>(vertex)]);
+  }
+
+  svmp::FE::systems::SystemStateView state_view{};
+  state_view.u = values;
+  state_view.u_vector = state.get();
+  std::vector<double> sampled(local_mesh.n_vertices(), 0.0);
+  EXPECT_TRUE(system.evaluateFieldAtVertices(
+      phi,
+      state_view,
+      static_cast<svmp::FE::GlobalIndex>(local_mesh.n_vertices()),
+      sampled));
+  for (svmp::index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+    EXPECT_DOUBLE_EQ(sampled[static_cast<std::size_t>(vertex)],
+                     phi_values[static_cast<std::size_t>(vertex)]);
+  }
+#endif
+}
+
 TEST(LevelSetEquationTranslator, TranslatesConstantVelocity)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -350,6 +509,41 @@ TEST(LevelSetEquationTranslator, RoutesCoupledTransportToEquationsOperator)
   ASSERT_TRUE(module);
   EXPECT_TRUE(system.hasOperator("equations"));
   EXPECT_FALSE(system.hasOperator("level_set"));
+#endif
+}
+
+TEST(LevelSetEquationTranslator, AutoRegistersProjectedCurvatureField)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryQuadMesh();
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  input.equation_params["Projected_curvature_field"] =
+      svmp::Physics::ParameterValue{true, "kappa_projected"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+
+  ASSERT_TRUE(module);
+  const auto kappa = system.findFieldByName("kappa_projected");
+  ASSERT_NE(kappa, svmp::FE::INVALID_FIELD_ID);
+  const auto& rec = system.fieldRecord(kappa);
+  EXPECT_EQ(rec.components, 1);
+  ASSERT_TRUE(rec.space);
+  EXPECT_EQ(rec.space->value_dimension(), 1);
+  EXPECT_EQ(rec.source_kind,
+            svmp::FE::systems::FieldSourceKind::PrescribedData);
 #endif
 }
 

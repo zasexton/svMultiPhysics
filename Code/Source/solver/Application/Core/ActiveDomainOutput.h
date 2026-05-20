@@ -46,7 +46,8 @@ WetVolumeMeasureSelection selectWetVolumeForDrift(
 std::size_t writeWetVolumeFractionField(
     svmp::Mesh& mesh,
     const std::string& field_name,
-    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules);
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules,
+    const std::string& measure_field_name = std::string{});
 
 struct WetVolumeDriftDiagnostic {
   svmp::FE::Real initial_wet_volume{0.0};

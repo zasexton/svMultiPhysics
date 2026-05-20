@@ -87,6 +87,19 @@ FaceVertexKey make_face_vertex_key(const std::vector<svmp::index_t>& ids)
   return key;
 }
 
+std::vector<svmp::index_t> sorted_unique_copy(std::vector<svmp::index_t> ids)
+{
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  return ids;
+}
+
+bool sorted_subset_of(const std::vector<svmp::index_t>& subset,
+                      const std::vector<svmp::index_t>& superset)
+{
+  return std::includes(superset.begin(), superset.end(), subset.begin(), subset.end());
+}
+
 bool has_nonlocal_vertex_gids(const svmp::MeshBase& mesh)
 {
   const auto& gids = mesh.vertex_gids();
@@ -150,14 +163,7 @@ svmp::index_t match_face_vertex_to_volume(
     const auto i = static_cast<std::size_t>(face_vertex);
     if (face_vertex >= 0 && i < gids.size() && gids[i] != svmp::INVALID_GID) {
       const auto try_gid = [&](svmp::gid_t gid) -> svmp::index_t {
-        const auto local = volume_mesh.base().global_to_local_vertex(gid);
-        if (local == svmp::INVALID_INDEX) {
-          return svmp::INVALID_INDEX;
-        }
-        if (!vertex_coordinates_match(volume_mesh.base(), local, face_mesh, face_vertex)) {
-          return svmp::INVALID_INDEX;
-        }
-        return local;
+        return volume_mesh.base().global_to_local_vertex(gid);
       };
 
       const auto local = try_gid(gids[i]);
@@ -169,7 +175,8 @@ svmp::index_t match_face_vertex_to_volume(
       // volume mesh uses zero-based stable vertex ids after MPI partitioning.
       if (gids[i] > 0) {
         const auto zero_based_local = try_gid(gids[i] - 1);
-        if (zero_based_local != svmp::INVALID_INDEX) {
+        if (zero_based_local != svmp::INVALID_INDEX &&
+            vertex_coordinates_match(volume_mesh.base(), zero_based_local, face_mesh, face_vertex)) {
           return zero_based_local;
         }
       }
@@ -188,10 +195,20 @@ std::vector<svmp::index_t> cell_corner_vertices(const svmp::MeshBase& mesh, svmp
 std::vector<svmp::index_t> face_corner_vertices(const svmp::MeshBase& mesh, svmp::index_t f)
 {
   auto [ptr, count] = mesh.face_vertices_span(f);
+  if (ptr == nullptr || count == 0u) {
+    return {};
+  }
+
   std::size_t n_corners = count;
   const auto& shapes = mesh.face_shapes();
-  if (static_cast<std::size_t>(f) < shapes.size() && shapes[static_cast<std::size_t>(f)].num_corners > 0) {
-    n_corners = std::min(count, static_cast<std::size_t>(shapes[static_cast<std::size_t>(f)].num_corners));
+  if (static_cast<std::size_t>(f) < shapes.size()) {
+    const auto& shape = shapes[static_cast<std::size_t>(f)];
+    if (shape.family == svmp::CellFamily::Line && shape.num_corners == 2 && count >= 2u) {
+      return {ptr[0], ptr[count - 1u]};
+    }
+    if (shape.num_corners > 0) {
+      n_corners = std::min(count, static_cast<std::size_t>(shape.num_corners));
+    }
   }
   return std::vector<svmp::index_t>(ptr, ptr + n_corners);
 }
@@ -318,12 +335,12 @@ std::optional<MatchedBoundaryFace> match_owned_cell_boundary_face(
     for (int lf = 0; lf < face_view.face_count; ++lf) {
       const int begin = face_view.offsets[lf];
       const int end = face_view.offsets[lf + 1];
-      if (end < begin || static_cast<std::size_t>(end - begin) != sorted_face_vertices.size()) {
+      if (end < begin) {
         continue;
       }
 
       std::vector<svmp::index_t> candidate;
-      candidate.reserve(sorted_face_vertices.size());
+      candidate.reserve(static_cast<std::size_t>(end - begin));
       bool valid = true;
       for (int j = begin; j < end; ++j) {
         const auto local = face_view.indices[j];
@@ -337,28 +354,44 @@ std::optional<MatchedBoundaryFace> match_owned_cell_boundary_face(
         continue;
       }
 
-      auto sorted_candidate = candidate;
-      std::sort(sorted_candidate.begin(), sorted_candidate.end());
-      if (sorted_candidate != sorted_face_vertices) {
-        continue;
-      }
-
-      std::vector<svmp::index_t> oriented_face_vertices;
-      try {
-        oriented_face_vertices = mesh.base().cell_face_geometry_dofs(cell, lf);
-      } catch (const std::exception&) {
-        oriented_face_vertices.clear();
-      }
+      auto oriented_face_vertices = [&]() {
+        try {
+          return mesh.base().cell_face_geometry_dofs(cell, lf);
+        } catch (const std::exception&) {
+          return std::vector<svmp::index_t>{};
+        }
+      }();
       if (oriented_face_vertices.empty()) {
         oriented_face_vertices = candidate;
       }
 
+      auto sorted_candidate = sorted_unique_copy(candidate);
+      auto sorted_geometry_face = sorted_unique_copy(oriented_face_vertices);
+      const bool exact_corner_match =
+          sorted_candidate.size() == sorted_face_vertices.size() &&
+          sorted_candidate == sorted_face_vertices;
+      const bool high_order_subface_match =
+          !exact_corner_match &&
+          !sorted_geometry_face.empty() &&
+          sorted_subset_of(sorted_face_vertices, sorted_geometry_face);
+      if (!exact_corner_match && !high_order_subface_match) {
+        continue;
+      }
+
+      std::vector<svmp::index_t> boundary_vertices = candidate;
+      int boundary_order = 1;
+      if (!oriented_face_vertices.empty() &&
+          sorted_subset_of(sorted_candidate, sorted_geometry_face)) {
+        boundary_vertices = oriented_face_vertices;
+        boundary_order = std::max(1, mesh.base().geometry_order(cell));
+      }
+
       MatchedBoundaryFace match;
       match.cell = cell;
-      match.oriented_vertices = std::move(oriented_face_vertices);
+      match.oriented_vertices = std::move(boundary_vertices);
       match.shape = boundary_shape_for_corners(mesh.dim(),
-                                               sorted_face_vertices.size(),
-                                               mesh.base().geometry_order(cell));
+                                               sorted_candidate.size(),
+                                               boundary_order);
       return match;
     }
   }
@@ -540,19 +573,20 @@ void MeshTranslator::applyFaceLabels(svmp::Mesh& mesh,
           continue;
         }
 
-        const auto key = make_face_vertex_key(vol_vertex_ids);
+        auto match = match_owned_cell_boundary_face(mesh, vol_vertex_ids, vertex_cells);
+        if (!match.has_value()) {
+          ++local_skipped;
+          continue;
+        }
+
+        auto face_key_vertices = sorted_unique_copy(match->oriented_vertices);
+        const auto key = make_face_vertex_key(face_key_vertices);
         const auto existing = face_by_vertices.find(key);
         if (existing != face_by_vertices.end()) {
           const auto f = existing->second;
           boundary_labels[static_cast<std::size_t>(f)] = label;
           boundary_sets[static_cast<std::size_t>(f)].push_back(face_name);
           ++local_matched;
-          continue;
-        }
-
-        auto match = match_owned_cell_boundary_face(mesh, vol_vertex_ids, vertex_cells);
-        if (!match.has_value()) {
-          ++local_skipped;
           continue;
         }
 

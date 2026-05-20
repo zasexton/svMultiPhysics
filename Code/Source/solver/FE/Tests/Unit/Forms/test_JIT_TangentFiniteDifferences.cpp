@@ -52,6 +52,17 @@ namespace {
     return dof_map;
 }
 
+[[nodiscard]] dofs::DofMap createTwoTetraContinuousDofMap()
+{
+    dofs::DofMap dof_map(/*n_cells=*/2, /*n_dofs_total=*/5, /*dofs_per_cell=*/4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setCellDofs(1, std::vector<GlobalIndex>{1, 2, 3, 4});
+    dof_map.setNumDofs(5);
+    dof_map.setNumLocalDofs(5);
+    dof_map.finalize();
+    return dof_map;
+}
+
 void expectCellJitJacobianMatchesCentralFD(const assembly::IMeshAccess& mesh,
                                            const dofs::DofMap& dof_map,
                                            const spaces::FunctionSpace& space,
@@ -499,6 +510,46 @@ TEST(JITTangentFiniteDifferences, CutAdjacentGradientPenaltyTangentMatchesCentra
     expectInteriorFaceJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U,
                                                   /*eps=*/1e-6, /*tol=*/5e-7,
                                                   /*interior_facet_marker=*/12,
+                                                  &cut_context,
+                                                  /*disable_jit_cache=*/true);
+}
+
+TEST(JITTangentFiniteDifferences, CutAdjacentGradientPenaltyContinuousH1TangentMatchesCentralDifferences)
+{
+    requireLLVMJITOrSkip();
+
+    constexpr int marker = 12;
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraContinuousDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto h_face = avg(hNormal());
+    const auto h3 = h_face * h_face * h_face;
+    const auto residual = cutAdjacentFacetIntegral(
+        cutStabilizationScale() * h3 *
+            inner(cutAdjacentFacetGradientJump(u), cutAdjacentFacetGradientJump(v)),
+        marker);
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = "test-continuous-cut-adjacent-facets";
+    handle.facets = {0};
+    assembly::CutFacetSetFacetMetadata metadata;
+    metadata.facet = 0;
+    metadata.first_cell = 0;
+    metadata.second_cell = 1;
+    metadata.stabilization_scale = Real{1.75};
+    metadata.stable_id = 17;
+    handle.facet_metadata = {metadata};
+    cut_context.addFacetSetHandle(std::move(handle));
+
+    const std::vector<Real> U = {0.12, -0.05, 0.08, 0.02, -0.07};
+    expectInteriorFaceJitJacobianMatchesCentralFD(mesh, dof_map, space, residual, U,
+                                                  /*eps=*/1e-6, /*tol=*/5e-7,
+                                                  marker,
                                                   &cut_context,
                                                   /*disable_jit_cache=*/true);
 }

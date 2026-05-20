@@ -145,6 +145,42 @@ TEST(EigenBackend, VectorViewAndOps)
 #endif
 }
 
+TEST(EigenBackend, VectorValueRevisionTracksMutations)
+{
+#if !defined(FE_HAS_EIGEN)
+    GTEST_SKIP() << "FE_HAS_EIGEN not enabled";
+#else
+    EigenFactory factory;
+    auto v = factory.createVector(3);
+    ASSERT_TRUE(v);
+
+    const auto initial_revision = v->valueRevision();
+    {
+        const auto span = static_cast<const GenericVector&>(*v).localSpan();
+        EXPECT_EQ(span.size(), 3u);
+    }
+    EXPECT_EQ(v->valueRevision(), initial_revision);
+
+    v->set(2.0);
+    const auto set_revision = v->valueRevision();
+    EXPECT_GT(set_revision, initial_revision);
+
+    auto view = v->createAssemblyView();
+    ASSERT_TRUE(view);
+    const GlobalIndex dofs[2] = {0, 2};
+    const Real vals[2] = {4.0, 6.0};
+    view->beginAssemblyPhase();
+    view->setVectorEntries(dofs, vals);
+    view->finalizeAssembly();
+    const auto view_revision = v->valueRevision();
+    EXPECT_GT(view_revision, set_revision);
+
+    auto span = v->localSpan();
+    span[1] = 8.0;
+    EXPECT_GT(v->valueRevision(), view_revision);
+#endif
+}
+
 TEST(EigenBackend, MatrixMult2x2)
 {
 #if !defined(FE_HAS_EIGEN)

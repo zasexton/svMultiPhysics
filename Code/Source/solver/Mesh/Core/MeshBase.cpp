@@ -1372,6 +1372,50 @@ std::vector<index_t> MeshBase::cell_edge_geometry_dofs(index_t c, int edge_id) c
         return std::vector<index_t>(ptr, ptr + count);
     }
 
+    if (shape.family == CellFamily::Polygon) {
+        const int corner_count =
+            shape.num_corners > 0
+                ? std::min<int>(shape.num_corners, static_cast<int>(count))
+                : static_cast<int>(count);
+        if (corner_count < 2) {
+            return {};
+        }
+        const auto eview = CellTopology::get_polygon_edges_view(corner_count);
+        if (edge_id < 0 || edge_id >= eview.edge_count || !eview.pairs_flat) {
+            throw std::out_of_range("cell_edge_geometry_dofs: invalid polygon edge id");
+        }
+
+        int order = std::max(1, info.order);
+        if (count <= static_cast<size_t>(corner_count)) {
+            order = 1;
+        } else if (order <= 1) {
+            const size_t edge_node_count =
+                count - static_cast<size_t>(corner_count);
+            if (edge_node_count % static_cast<size_t>(corner_count) == 0u) {
+                order = static_cast<int>(
+                    edge_node_count / static_cast<size_t>(corner_count)) + 1;
+            }
+        }
+
+        std::vector<index_t> out;
+        out.reserve(static_cast<size_t>(order + 1));
+        out.push_back(ptr[static_cast<size_t>(eview.pairs_flat[2 * edge_id])]);
+        for (int k = 0; k < order - 1; ++k) {
+            const size_t local =
+                static_cast<size_t>(corner_count) +
+                static_cast<size_t>(edge_id) *
+                    static_cast<size_t>(std::max(0, order - 1)) +
+                static_cast<size_t>(k);
+            if (local >= count) {
+                throw std::runtime_error(
+                    "cell_edge_geometry_dofs: polygon high-order edge node index out of range");
+            }
+            out.push_back(ptr[local]);
+        }
+        out.push_back(ptr[static_cast<size_t>(eview.pairs_flat[2 * edge_id + 1])]);
+        return out;
+    }
+
     std::vector<index_t> local;
     try {
         local = CellTopology::high_order_edge_local_nodes(shape.family, info.order, edge_id, info.kind);

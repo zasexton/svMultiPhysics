@@ -129,6 +129,11 @@ struct LevelSetInterfaceSource {
     return requested_order > 2 ? 2 : (requested_order > 0 ? requested_order : 0);
 }
 
+[[nodiscard]] constexpr int implementedPlanarLevelSetCutVolumeExactOrder(
+    int requested_order) noexcept {
+    return requested_order > 5 ? 5 : (requested_order > 0 ? requested_order : 0);
+}
+
 struct CutInterfaceDomainRequest {
     LevelSetInterfaceSource source{};
     int interface_marker{-1};
@@ -145,8 +150,12 @@ struct CutInterfaceDomainRequest {
     std::string implicit_geometry_mode{};
     std::string implicit_quadrature_backend{};
     std::string implicit_fallback_policy{};
+    std::string implicit_fallback_status{};
+    std::string required_implicit_cut_backend_qualification{};
     std::string geometry_tangent_policy{};
     Real implicit_cut_root_tolerance{1.0e-10};
+    Real implicit_cut_root_coordinate_tolerance{1.0e-12};
+    int implicit_cut_root_max_iterations{48};
     int implicit_cut_max_subdivision_depth{16};
     int achieved_interface_quadrature_order{-1};
     int achieved_volume_quadrature_order{-1};
@@ -285,6 +294,9 @@ struct CutInterfaceQuadraturePoint {
     std::array<Real, 3> parent_coordinate{{0.0, 0.0, 0.0}};
     std::array<Real, 3> normal{{1.0, 0.0, 0.0}};
     Real weight{0.0};
+    Real reference_measure_factor{0.0};
+    Real level_set_residual{0.0};
+    Real gradient_norm{0.0};
 };
 
 struct CutInterfaceVolumeRegion {
@@ -301,7 +313,10 @@ struct CutInterfaceVolumeRegion {
     Real min_level_set_value{0.0};
     Real max_level_set_value{0.0};
     std::string topology_id{};
+    std::string implicit_quadrature_backend{};
+    std::string implicit_fallback_status{};
     bool full_cell_equivalent{false};
+    int achieved_quadrature_order{-1};
     std::vector<geometry::CutQuadraturePoint> quadrature_points{};
 
     [[nodiscard]] bool active() const noexcept {
@@ -309,6 +324,10 @@ struct CutInterfaceVolumeRegion {
                parent_cell >= static_cast<MeshIndex>(0) &&
                side != geometry::CutIntegrationSide::Interface &&
                measure > Real{0.0};
+    }
+
+    [[nodiscard]] std::size_t quadraturePointCount() const noexcept {
+        return quadrature_points.empty() ? 1u : quadrature_points.size();
     }
 
     [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRule(
@@ -320,7 +339,10 @@ struct CutInterfaceVolumeRegion {
         if (volume_order < 0) {
             throw std::invalid_argument("cut-volume quadrature order must be nonnegative");
         }
-        int exact_order = implementedLevelSetCutVolumeExactOrder(volume_order);
+        int exact_order =
+            achieved_quadrature_order >= 0
+                ? std::min(volume_order, achieved_quadrature_order)
+                : implementedLevelSetCutVolumeExactOrder(volume_order);
         if (quadrature_points.empty() && !full_cell_equivalent) {
             exact_order = std::min(exact_order, 1);
         }
@@ -342,8 +364,10 @@ struct CutInterfaceVolumeRegion {
             rule.policy.name = "conservative-level-set-volume";
         } else if (exact_order == 1) {
             rule.policy.name = "linear-moment-fitted-level-set-volume";
-        } else {
+        } else if (exact_order <= 2) {
             rule.policy.name = "quadratic-subcell-level-set-volume";
+        } else {
+            rule.policy.name = "high-order-subcell-level-set-volume";
         }
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
@@ -356,23 +380,47 @@ struct CutInterfaceVolumeRegion {
         rule.provenance.frame = request.frame;
         rule.provenance.implicit_geometry_mode =
             request.implicit_geometry_mode;
-        rule.provenance.implicit_quadrature_backend =
-            request.implicit_quadrature_backend;
+        const std::string selected_backend =
+            implicit_quadrature_backend.empty()
+                ? request.implicit_quadrature_backend
+                : implicit_quadrature_backend;
+        rule.provenance.implicit_quadrature_backend = selected_backend;
+        rule.provenance.selected_implicit_quadrature_backend =
+            selected_backend;
         rule.provenance.implicit_fallback_policy =
             request.implicit_fallback_policy;
+        rule.provenance.implicit_fallback_status =
+            implicit_fallback_status.empty()
+                ? request.implicit_fallback_status
+                : implicit_fallback_status;
         rule.provenance.geometry_tangent_policy =
             request.geometry_tangent_policy;
+        rule.provenance.implicit_cut_root_tolerance =
+            request.implicit_cut_root_tolerance;
+        rule.provenance.implicit_cut_root_coordinate_tolerance =
+            request.implicit_cut_root_coordinate_tolerance;
+        rule.provenance.implicit_cut_root_max_iterations =
+            request.implicit_cut_root_max_iterations;
         rule.provenance.requested_quadrature_order = volume_order;
         rule.provenance.achieved_quadrature_order = exact_order;
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
         rule.full_cell_equivalent = full_cell_equivalent;
         if (quadrature_points.empty()) {
-            rule.points.push_back(geometry::CutQuadraturePoint{centroid, normal, measure});
+            geometry::CutQuadraturePoint qp{centroid, normal, measure};
+            qp.parent_coordinate = centroid;
+            qp.reference_measure_factor = measure;
+            rule.points.push_back(qp);
         } else {
             rule.points.reserve(quadrature_points.size());
             for (auto point : quadrature_points) {
                 point.normal = normal;
+                if (request.frame == geometry::CutGeometryFrame::Reference) {
+                    point.parent_coordinate = point.point;
+                }
+                if (point.reference_measure_factor <= Real{0.0}) {
+                    point.reference_measure_factor = point.weight;
+                }
                 rule.points.push_back(point);
             }
         }
@@ -397,6 +445,14 @@ struct CutInterfaceFragment {
     Real min_level_set_value{0.0};
     Real max_level_set_value{0.0};
     std::string topology_id{};
+    std::string implicit_quadrature_backend{};
+    std::string implicit_fallback_status{};
+    std::string branch_id{};
+    std::string conditioning_diagnostic{};
+    int root_finder_iterations{0};
+    Real max_root_residual{0.0};
+    Real min_gradient_norm{0.0};
+    bool root_polished{false};
     std::vector<CutInterfaceVertex> vertices{};
     std::vector<CutInterfaceQuadraturePoint> quadrature_points{};
 
@@ -412,9 +468,38 @@ struct CutInterfaceFragment {
         return quadrature_points.size();
     }
 
+    [[nodiscard]] std::size_t quadraturePointCount(
+        const CutInterfaceDomainRequest& request) const noexcept {
+        if ((kind != CutInterfaceFragmentKind::Segment &&
+             kind != CutInterfaceFragmentKind::CurvedPatch) ||
+            measure <= Real{0.0}) {
+            return quadraturePointCount();
+        }
+        const int requested_order = request.resolvedInterfaceQuadratureOrder();
+        if (requested_order <= 1) {
+            return quadraturePointCount();
+        }
+        int quadrature_order = requested_order;
+        if (request.achieved_interface_quadrature_order >= 0) {
+            quadrature_order =
+                std::min(quadrature_order, request.achieved_interface_quadrature_order);
+        }
+        if (quadrature_order <= 1) {
+            return quadraturePointCount();
+        }
+        return quadrature_order <= 3 ? 2u : 3u;
+    }
+
     [[nodiscard]] geometry::CutQuadratureRule toCutQuadratureRule(
         const CutInterfaceDomainRequest& request) const {
-        const int supported_order = kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1;
+        const bool has_stored_curved_quadrature =
+            kind == CutInterfaceFragmentKind::CurvedPatch &&
+            !quadrature_points.empty();
+        const int supported_order =
+            (kind == CutInterfaceFragmentKind::Segment ||
+             has_stored_curved_quadrature)
+                ? 5
+                : (kind == CutInterfaceFragmentKind::CurvedPatch ? 0 : 1);
         const int requested_order = request.resolvedInterfaceQuadratureOrder();
         if (requested_order < 0) {
             throw std::invalid_argument("cut-interface quadrature order must be nonnegative");
@@ -424,7 +509,26 @@ struct CutInterfaceFragment {
             quadrature_order =
                 std::min(quadrature_order, request.achieved_interface_quadrature_order);
         }
-        if (quadrature_order > supported_order) {
+        const std::size_t requested_point_count =
+            quadraturePointCount(request);
+        const bool segment_high_order =
+            kind == CutInterfaceFragmentKind::Segment && quadrature_order > 1;
+        const bool curved_patch_high_order =
+            kind == CutInterfaceFragmentKind::CurvedPatch && quadrature_order > 1;
+        const bool can_generate_segment_quadrature =
+            segment_high_order && vertices.size() >= 2u && measure > Real{0.0};
+        const bool use_stored_segment_quadrature =
+            segment_high_order &&
+            quadrature_points.size() >= requested_point_count;
+        const bool use_stored_curved_quadrature =
+            curved_patch_high_order &&
+            quadrature_points.size() >= requested_point_count;
+        if (quadrature_order > supported_order ||
+            (segment_high_order &&
+             !use_stored_segment_quadrature &&
+             !can_generate_segment_quadrature) ||
+            (curved_patch_high_order &&
+             !use_stored_curved_quadrature)) {
             throw std::invalid_argument("cut-interface quadrature order is not supported for this fragment");
         }
 
@@ -436,15 +540,19 @@ struct CutInterfaceFragment {
         rule.volume_fraction = Real{0.0};
         rule.exact_for_constants = true;
         rule.exact_polynomial_order = quadrature_order;
-        rule.policy.kind = kind == CutInterfaceFragmentKind::CurvedPatch
+        rule.policy.kind = kind == CutInterfaceFragmentKind::CurvedPatch ||
+                                   use_stored_segment_quadrature
                                ? geometry::CutQuadratureConstructionKind::CurvedTopologySubdivision
                                : geometry::CutQuadratureConstructionKind::TopologySubdivision;
         rule.policy.polynomial_order = quadrature_order;
-        rule.policy.name = kind == CutInterfaceFragmentKind::CurvedPatch
-                               ? "curved-level-set-interface"
+        rule.policy.name = kind == CutInterfaceFragmentKind::CurvedPatch ||
+                                   use_stored_segment_quadrature
+                               ? "root-polished-level-set-interface"
                                : (quadrature_order == 0
                                       ? "constant-level-set-interface"
-                                      : "linear-level-set-interface");
+                                      : (quadrature_order == 1
+                                             ? "linear-level-set-interface"
+                                             : "gauss-segment-level-set-interface"));
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;
@@ -456,24 +564,85 @@ struct CutInterfaceFragment {
         rule.provenance.frame = request.frame;
         rule.provenance.implicit_geometry_mode =
             request.implicit_geometry_mode;
-        rule.provenance.implicit_quadrature_backend =
-            request.implicit_quadrature_backend;
+        const std::string selected_backend =
+            implicit_quadrature_backend.empty()
+                ? request.implicit_quadrature_backend
+                : implicit_quadrature_backend;
+        rule.provenance.implicit_quadrature_backend = selected_backend;
+        rule.provenance.selected_implicit_quadrature_backend =
+            selected_backend;
         rule.provenance.implicit_fallback_policy =
             request.implicit_fallback_policy;
+        rule.provenance.implicit_fallback_status =
+            implicit_fallback_status.empty()
+                ? request.implicit_fallback_status
+                : implicit_fallback_status;
         rule.provenance.geometry_tangent_policy =
             request.geometry_tangent_policy;
+        rule.provenance.implicit_cut_root_tolerance =
+            request.implicit_cut_root_tolerance;
+        rule.provenance.implicit_cut_root_coordinate_tolerance =
+            request.implicit_cut_root_coordinate_tolerance;
+        rule.provenance.implicit_cut_root_max_iterations =
+            request.implicit_cut_root_max_iterations;
         rule.provenance.requested_quadrature_order = requested_order;
         rule.provenance.achieved_quadrature_order = quadrature_order;
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;
-        rule.curved_geometry = kind == CutInterfaceFragmentKind::CurvedPatch;
-        rule.points.reserve(quadrature_points.size());
-        for (const auto& point : quadrature_points) {
-            geometry::CutQuadraturePoint qp;
-            qp.point = point.point;
-            qp.normal = point.normal;
-            qp.weight = point.weight;
-            rule.points.push_back(qp);
+        rule.curved_geometry =
+            kind == CutInterfaceFragmentKind::CurvedPatch ||
+            use_stored_segment_quadrature;
+        if (kind == CutInterfaceFragmentKind::Segment &&
+            vertices.size() >= 2u &&
+            quadrature_order > 1 &&
+            measure > Real{0.0} &&
+            !use_stored_segment_quadrature) {
+            const auto interpolate_point = [](const std::array<Real, 3>& a,
+                                              const std::array<Real, 3>& b,
+                                              Real t) {
+                return std::array<Real, 3>{{
+                    (Real{1.0} - t) * a[0] + t * b[0],
+                    (Real{1.0} - t) * a[1] + t * b[1],
+                    (Real{1.0} - t) * a[2] + t * b[2],
+                }};
+            };
+            const auto& a = vertices[0].point;
+            const auto& b = vertices[1].point;
+            const auto add_point = [&](Real t, Real weight_fraction) {
+                geometry::CutQuadraturePoint qp;
+                qp.point = interpolate_point(a, b, t);
+                qp.normal = normal;
+                qp.weight = measure * weight_fraction;
+                qp.parent_coordinate = qp.point;
+                qp.reference_measure_factor = measure;
+                rule.points.push_back(qp);
+            };
+            if (quadrature_order <= 3) {
+                constexpr Real offset = Real{0.28867513459481288225};
+                add_point(Real{0.5} - offset, Real{0.5});
+                add_point(Real{0.5} + offset, Real{0.5});
+            } else {
+                constexpr Real offset = Real{0.38729833462074168852};
+                add_point(Real{0.5} - offset, Real{5.0} / Real{18.0});
+                add_point(Real{0.5}, Real{4.0} / Real{9.0});
+                add_point(Real{0.5} + offset, Real{5.0} / Real{18.0});
+            }
+        } else {
+            rule.points.reserve(quadrature_points.size());
+            for (const auto& point : quadrature_points) {
+                geometry::CutQuadraturePoint qp;
+                qp.point = point.point;
+                qp.normal = point.normal;
+                qp.weight = point.weight;
+                qp.parent_coordinate = point.parent_coordinate;
+                qp.reference_measure_factor =
+                    point.reference_measure_factor > Real{0.0}
+                        ? point.reference_measure_factor
+                        : point.weight;
+                qp.level_set_residual = point.level_set_residual;
+                qp.gradient_norm = point.gradient_norm;
+                rule.points.push_back(qp);
+            }
         }
         return rule;
     }
@@ -485,7 +654,10 @@ struct CutInterfaceDomainSummary {
     std::size_t active_fragment_count{0};
     std::size_t volume_region_count{0};
     std::size_t active_volume_region_count{0};
+    // Existing interface-only count kept for API compatibility.
     std::size_t quadrature_point_count{0};
+    std::size_t volume_quadrature_point_count{0};
+    std::size_t total_quadrature_point_count{0};
     std::size_t degenerate_fragment_count{0};
     Real measure{0.0};
     Real negative_volume_measure{0.0};
@@ -669,7 +841,7 @@ public:
                 continue;
             }
             ++s.active_fragment_count;
-            s.quadrature_point_count += fragment.quadraturePointCount();
+            s.quadrature_point_count += fragment.quadraturePointCount(request_);
             s.measure += fragment.measure;
         }
         for (const auto& region : volume_regions_) {
@@ -677,12 +849,15 @@ public:
                 continue;
             }
             ++s.active_volume_region_count;
+            s.volume_quadrature_point_count += region.quadraturePointCount();
             if (region.side == geometry::CutIntegrationSide::Negative) {
                 s.negative_volume_measure += region.measure;
             } else if (region.side == geometry::CutIntegrationSide::Positive) {
                 s.positive_volume_measure += region.measure;
             }
         }
+        s.total_quadrature_point_count =
+            s.quadrature_point_count + s.volume_quadrature_point_count;
         return s;
     }
 

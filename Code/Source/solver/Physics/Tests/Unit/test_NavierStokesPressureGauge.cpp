@@ -389,7 +389,104 @@ TEST(NavierStokesInitialConditions, HydrostaticPressureInitializationFillsPressu
 #endif
 }
 
-TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesOnlyWetSide)
+TEST(NavierStokesInitialConditions, MeshVertexFieldsInitializeVelocityAndPressure)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN || !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Mesh-field initialization test requires Eigen and native mesh support.";
+#else
+    auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+    auto& local_mesh = mesh->local_mesh();
+
+    const auto velocity_handle = MeshFields::attach_field(
+        local_mesh,
+        EntityKind::Vertex,
+        "Velocity",
+        FieldScalarType::Float64,
+        3);
+    auto* velocity = MeshFields::field_data_as<real_t>(local_mesh, velocity_handle);
+    ASSERT_NE(velocity, nullptr);
+
+    const auto pressure_handle = MeshFields::attach_field(
+        local_mesh,
+        EntityKind::Vertex,
+        "Pressure",
+        FieldScalarType::Float64,
+        1);
+    auto* pressure = MeshFields::field_data_as<real_t>(local_mesh, pressure_handle);
+    ASSERT_NE(pressure, nullptr);
+
+    for (index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+        const auto x = local_mesh.get_vertex_coords(vertex);
+        const auto v_base = 3u * static_cast<std::size_t>(vertex);
+        velocity[v_base] = 2.0 + x[0];
+        velocity[v_base + 1u] = -3.0 + x[1];
+        velocity[v_base + 2u] = 99.0;
+        pressure[static_cast<std::size_t>(vertex)] = 100.0 + 10.0 * x[1];
+    }
+
+    auto u_space = FE::spaces::SpaceFactory::create_vector_h1(
+        FE::ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/2);
+    auto p_space = FE::spaces::SpaceFactory::create_h1(
+        FE::ElementType::Quad4,
+        /*order=*/1);
+
+    formulations::navier_stokes::IncompressibleNavierStokesVMSOptions opts;
+    opts.velocity_field_name = "Velocity";
+    opts.pressure_field_name = "Pressure";
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.0;
+    opts.viscosity = 0.001;
+    opts.hydrostatic_pressure_initialization.enabled = false;
+
+    FE::systems::FESystem system(mesh);
+    formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(
+        u_space,
+        p_space,
+        opts);
+    module.registerOn(system);
+    ASSERT_NO_THROW(system.setup({}));
+
+    auto factory = FE::backends::BackendFactory::create(FE::backends::BackendKind::Eigen);
+    auto state = factory->createVector(system.dofHandler().getNumDofs());
+    state->zero();
+
+    module.applyInitialConditions(system, *state);
+    const auto values = state->localSpan();
+
+    const auto u_id = system.findFieldByName("Velocity");
+    const auto p_id = system.findFieldByName("Pressure");
+    ASSERT_NE(u_id, FE::INVALID_FIELD_ID);
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    const auto* u_entity_map = system.fieldDofHandler(u_id).getEntityDofMap();
+    const auto* p_entity_map = system.fieldDofHandler(p_id).getEntityDofMap();
+    ASSERT_NE(u_entity_map, nullptr);
+    ASSERT_NE(p_entity_map, nullptr);
+    const auto u_offset = system.fieldDofOffset(u_id);
+    const auto p_offset = system.fieldDofOffset(p_id);
+
+    for (FE::GlobalIndex vertex = 0;
+         vertex < static_cast<FE::GlobalIndex>(local_mesh.n_vertices());
+         ++vertex) {
+        const auto u_dofs = u_entity_map->getVertexDofs(vertex);
+        const auto p_dofs = p_entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(u_dofs.size(), 2u);
+        ASSERT_EQ(p_dofs.size(), 1u);
+
+        const auto v_base = static_cast<std::size_t>(vertex) * 3u;
+        EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(u_offset + u_dofs[0])],
+                         velocity[v_base]);
+        EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(u_offset + u_dofs[1])],
+                         velocity[v_base + 1u]);
+        EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(p_offset + p_dofs[0])],
+                         pressure[static_cast<std::size_t>(vertex)]);
+    }
+#endif
+}
+
+TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesActiveSupport)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Active-domain hydrostatic initialization test requires native mesh support.";
@@ -461,8 +558,8 @@ TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesOn
         const auto vertex_dofs = entity_map->getVertexDofs(vertex);
         ASSERT_EQ(vertex_dofs.size(), 1u);
         const auto x = mesh_access.getNodeCoordinates(vertex);
-        const bool wet_side = vertex == 0 || vertex == 1;
-        const auto expected = wet_side
+        const bool active_pressure_support = vertex <= 3;
+        const auto expected = active_pressure_support
             ? 100.0 + 2.0 * (-9.81) * (x[1] - 1.0)
             : 100.0;
         const auto dof = pressure_offset + vertex_dofs.front();
@@ -474,7 +571,7 @@ TEST(NavierStokesInitialConditions, ActiveDomainHydrostaticPressureInitializesOn
 #endif
 }
 
-TEST(NavierStokesInitialConditions, SmoothedIndicatorHydrostaticPressureInitializesOnlyWetSide)
+TEST(NavierStokesInitialConditions, SmoothedIndicatorHydrostaticPressureInitializesActiveSupport)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Active-domain hydrostatic initialization test requires native mesh support.";
@@ -548,8 +645,8 @@ TEST(NavierStokesInitialConditions, SmoothedIndicatorHydrostaticPressureInitiali
         const auto vertex_dofs = entity_map->getVertexDofs(vertex);
         ASSERT_EQ(vertex_dofs.size(), 1u);
         const auto x = mesh_access.getNodeCoordinates(vertex);
-        const bool wet_side = vertex == 0 || vertex == 1;
-        const auto expected = wet_side
+        const bool active_pressure_support = vertex <= 3;
+        const auto expected = active_pressure_support
             ? 100.0 + 2.0 * (-9.81) * (x[1] - 1.0)
             : 100.0;
         const auto dof = pressure_offset + vertex_dofs.front();

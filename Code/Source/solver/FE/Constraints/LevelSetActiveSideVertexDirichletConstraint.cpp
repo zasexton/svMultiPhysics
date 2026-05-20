@@ -14,8 +14,10 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <array>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -123,6 +125,25 @@ void incrementEntityDofCount(EntityDofSupportCounts& counts,
     }
 }
 
+struct EdgeKey {
+    GlobalIndex a;
+    GlobalIndex b;
+
+    bool operator==(const EdgeKey& other) const noexcept
+    {
+        return a == other.a && b == other.b;
+    }
+};
+
+struct EdgeKeyHash {
+    std::size_t operator()(const EdgeKey& key) const noexcept
+    {
+        const std::size_t h1 = std::hash<GlobalIndex>{}(key.a);
+        const std::size_t h2 = std::hash<GlobalIndex>{}(key.b);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+    }
+};
+
 struct LevelSetVertexView {
     const Real* values{nullptr};
     std::size_t components{0};
@@ -220,12 +241,15 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         throw std::invalid_argument(
             "LevelSetActiveSideVertexDirichletConstraint: field has no function space");
     }
-    if (rec.space->space_type() != spaces::SpaceType::H1 ||
+    const bool scalar_or_product_h1 =
+        rec.space->space_type() == spaces::SpaceType::H1 ||
+        rec.space->space_type() == spaces::SpaceType::Product;
+    if (!scalar_or_product_h1 ||
         rec.space->continuity() != Continuity::C0 ||
-        rec.space->value_dimension() != 1 ||
-        rec.components != 1) {
+        rec.space->value_dimension() != rec.components ||
+        rec.space->element().basis().is_vector_valued()) {
         throw std::invalid_argument(
-            "LevelSetActiveSideVertexDirichletConstraint requires a scalar H1/C0 field");
+            "LevelSetActiveSideVertexDirichletConstraint requires an H1/C0 scalar field or Product H1 vector field");
     }
 
     const auto& dh = system.fieldDofHandler(field_);
@@ -243,15 +267,106 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     const auto& mesh = system.mesh()->local_mesh();
+    const bool has_subvertex_trace_dofs = n_field_dofs > n_vertices;
+    std::vector<std::array<index_t, 2>> derived_edge_vertices;
+    const auto* edge_vertices_by_id = &mesh.edge2vertex();
+    if (has_subvertex_trace_dofs && entity_map->numEdges() > 0 &&
+        edge_vertices_by_id->empty() &&
+        mesh.dim() == 2) {
+        const auto& face_offsets = mesh.face2vertex_offsets();
+        const auto& face_vertices = mesh.face2vertex();
+        derived_edge_vertices.resize(mesh.n_faces());
+        for (index_t face = 0; face < static_cast<index_t>(mesh.n_faces());
+             ++face) {
+            const auto begin =
+                static_cast<std::size_t>(face_offsets[static_cast<std::size_t>(face)]);
+            const auto end = static_cast<std::size_t>(
+                face_offsets[static_cast<std::size_t>(face) + 1u]);
+            if (end - begin != 2u) {
+                throw std::runtime_error(
+                    "LevelSetActiveSideVertexDirichletConstraint: expected two vertices per 2D facet");
+            }
+            derived_edge_vertices[static_cast<std::size_t>(face)] = {
+                face_vertices[begin], face_vertices[begin + 1u]};
+        }
+        edge_vertices_by_id = &derived_edge_vertices;
+    }
+
+    std::unordered_map<EdgeKey, GlobalIndex, EdgeKeyHash> edge_ids;
+    if (has_subvertex_trace_dofs && entity_map->numEdges() > 0) {
+        if (edge_vertices_by_id->size() <
+            static_cast<std::size_t>(entity_map->numEdges())) {
+            throw std::runtime_error(
+                "LevelSetActiveSideVertexDirichletConstraint: edge table is too small for the constrained field");
+        }
+        edge_ids.reserve(static_cast<std::size_t>(entity_map->numEdges()));
+        for (GlobalIndex edge = 0; edge < entity_map->numEdges(); ++edge) {
+            const auto& vertices =
+                (*edge_vertices_by_id)[static_cast<std::size_t>(edge)];
+            const auto v0 = static_cast<GlobalIndex>(vertices[0]);
+            const auto v1 = static_cast<GlobalIndex>(vertices[1]);
+            edge_ids.emplace(
+                EdgeKey{std::min(v0, v1), std::max(v0, v1)}, edge);
+        }
+    }
+
     std::vector<unsigned char> has_active_support(
         static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
     std::vector<unsigned char> has_active_dof_support(
         static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
     std::size_t active_support_cells = 0u;
-    const char* support_mode = "cell_patch";
+    std::size_t active_support_cells_from_volume_support = 0u;
+    std::size_t active_support_cells_from_cut_adjacent_facets = 0u;
+    std::string support_mode = "cell_patch";
     std::vector<unsigned char> active_cell_seen(
         mesh.n_cells(), static_cast<unsigned char>(0));
-    const auto mark_cell_active = [&](GlobalIndex cell) {
+    const auto mark_local_dof_active = [&](GlobalIndex local_dof,
+                                           const char* entity_name,
+                                           GlobalIndex entity_id) {
+        if (local_dof < 0 || local_dof >= n_field_dofs) {
+            std::ostringstream oss;
+            oss << "LevelSetActiveSideVertexDirichletConstraint: "
+                << entity_name << ' ' << entity_id
+                << " references field DOF " << local_dof
+                << " outside field '" << rec.name << "'";
+            throw std::runtime_error(oss.str());
+        }
+        has_active_dof_support[static_cast<std::size_t>(local_dof)] =
+            static_cast<unsigned char>(1);
+    };
+    const auto mark_vertex_support = [&](GlobalIndex vertex) {
+        if (vertex < 0 || vertex >= n_vertices) {
+            return;
+        }
+        has_active_support[static_cast<std::size_t>(vertex)] =
+            static_cast<unsigned char>(1);
+        for (const auto local_dof : entity_map->getVertexDofs(vertex)) {
+            mark_local_dof_active(local_dof, "vertex", vertex);
+        }
+    };
+    const auto mark_edge_support = [&](GlobalIndex edge) {
+        if (edge < 0 || edge >= entity_map->numEdges()) {
+            std::ostringstream oss;
+            oss << "LevelSetActiveSideVertexDirichletConstraint: active support references edge "
+                << edge << " outside the constrained field entity map";
+            throw std::runtime_error(oss.str());
+        }
+        for (const auto local_dof : entity_map->getEdgeDofs(edge)) {
+            mark_local_dof_active(local_dof, "edge", edge);
+        }
+    };
+    const auto mark_face_support = [&](GlobalIndex face) {
+        if (face < 0 || face >= entity_map->numFaces()) {
+            std::ostringstream oss;
+            oss << "LevelSetActiveSideVertexDirichletConstraint: active support references face "
+                << face << " outside the constrained field entity map";
+            throw std::runtime_error(oss.str());
+        }
+        for (const auto local_dof : entity_map->getFaceDofs(face)) {
+            mark_local_dof_active(local_dof, "face", face);
+        }
+    };
+    const auto mark_cell_active = [&](GlobalIndex cell) -> bool {
         if (cell < 0 || static_cast<std::size_t>(cell) >= mesh.n_cells()) {
             std::ostringstream oss;
             oss << "LevelSetActiveSideVertexDirichletConstraint: active support references cell "
@@ -260,36 +375,114 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         }
         if (active_cell_seen[static_cast<std::size_t>(cell)] !=
             static_cast<unsigned char>(0)) {
-            return;
+            return false;
         }
         active_cell_seen[static_cast<std::size_t>(cell)] =
             static_cast<unsigned char>(1);
         ++active_support_cells;
 
         for (const auto local_dof : dh.getCellDofs(cell)) {
-            if (local_dof < 0 || local_dof >= n_field_dofs) {
-                std::ostringstream oss;
-                oss << "LevelSetActiveSideVertexDirichletConstraint: cell "
-                    << cell << " references field DOF " << local_dof
-                    << " outside field '" << rec.name << "'";
-                throw std::runtime_error(oss.str());
-            }
-            has_active_dof_support[static_cast<std::size_t>(local_dof)] =
-                static_cast<unsigned char>(1);
+            mark_local_dof_active(local_dof, "cell", cell);
         }
 
         const auto [vertices, count] =
             mesh.cell_vertices_span(static_cast<index_t>(cell));
         if (vertices == nullptr || count == 0u) {
-            return;
+            return true;
         }
         for (std::size_t i = 0; i < count; ++i) {
-            const auto vertex = static_cast<GlobalIndex>(vertices[i]);
-            if (vertex >= 0 && vertex < n_vertices) {
-                has_active_support[static_cast<std::size_t>(vertex)] =
-                    static_cast<unsigned char>(1);
+            mark_vertex_support(static_cast<GlobalIndex>(vertices[i]));
+        }
+        return true;
+    };
+    const auto mark_cut_adjacent_facet_active =
+        [&](GlobalIndex cell, GlobalIndex facet) -> bool {
+        if (cell < 0 || static_cast<std::size_t>(cell) >= mesh.n_cells()) {
+            std::ostringstream oss;
+            oss << "LevelSetActiveSideVertexDirichletConstraint: active support references cell "
+                << cell << " outside the mesh";
+            throw std::runtime_error(oss.str());
+        }
+
+        bool first_cell_visit = false;
+        if (active_cell_seen[static_cast<std::size_t>(cell)] ==
+            static_cast<unsigned char>(0)) {
+            active_cell_seen[static_cast<std::size_t>(cell)] =
+                static_cast<unsigned char>(1);
+            ++active_support_cells;
+            first_cell_visit = true;
+        }
+
+        if (facet < 0 || static_cast<std::size_t>(facet) >= mesh.n_faces()) {
+            return first_cell_visit;
+        }
+        const auto [facet_vertices, facet_vertex_count] =
+            mesh.face_vertices_span(static_cast<index_t>(facet));
+        if (facet_vertices == nullptr || facet_vertex_count == 0u) {
+            return first_cell_visit;
+        }
+
+        std::vector<index_t> vertices(
+            facet_vertices, facet_vertices + facet_vertex_count);
+        std::sort(vertices.begin(), vertices.end());
+        vertices.erase(std::unique(vertices.begin(), vertices.end()),
+                       vertices.end());
+        for (const auto vertex : vertices) {
+            mark_vertex_support(static_cast<GlobalIndex>(vertex));
+        }
+
+        bool high_order_line_facet = false;
+        std::size_t n_corner_vertices = facet_vertex_count;
+        const auto& face_shapes = mesh.face_shapes();
+        if (static_cast<std::size_t>(facet) < face_shapes.size()) {
+            const auto& shape = face_shapes[static_cast<std::size_t>(facet)];
+            high_order_line_facet = shape.family == CellFamily::Line &&
+                                    shape.num_corners == 2 &&
+                                    facet_vertex_count >= 2u;
+            if (shape.num_corners > 0) {
+                n_corner_vertices = std::min(
+                    facet_vertex_count,
+                    static_cast<std::size_t>(shape.num_corners));
             }
         }
+
+        const auto mark_facet_edge = [&](GlobalIndex v0, GlobalIndex v1) {
+            if (edge_ids.empty()) {
+                return;
+            }
+            const auto key = EdgeKey{std::min(v0, v1), std::max(v0, v1)};
+            const auto it = edge_ids.find(key);
+            if (it == edge_ids.end()) {
+                std::ostringstream oss;
+                oss << "LevelSetActiveSideVertexDirichletConstraint: facet "
+                    << facet << " references edge (" << v0 << ',' << v1
+                    << ") missing from the constrained field entity map";
+                throw std::runtime_error(oss.str());
+            }
+            mark_edge_support(it->second);
+        };
+
+        if (high_order_line_facet) {
+            mark_facet_edge(
+                static_cast<GlobalIndex>(facet_vertices[0]),
+                static_cast<GlobalIndex>(
+                    facet_vertices[facet_vertex_count - 1u]));
+        } else if (n_corner_vertices == 2u) {
+            mark_facet_edge(
+                static_cast<GlobalIndex>(facet_vertices[0]),
+                static_cast<GlobalIndex>(facet_vertices[1]));
+        } else if (n_corner_vertices >= 3u) {
+            if (entity_map->numFaces() > 0) {
+                mark_face_support(facet);
+            }
+            for (std::size_t i = 0; i < n_corner_vertices; ++i) {
+                mark_facet_edge(
+                    static_cast<GlobalIndex>(facet_vertices[i]),
+                    static_cast<GlobalIndex>(
+                        facet_vertices[(i + 1u) % n_corner_vertices]));
+            }
+        }
+        return first_cell_visit;
     };
 
     const auto* cut_context = system.cutIntegrationContext();
@@ -297,7 +490,7 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         cut_context->hasGeneratedVolumeMarker(interface_marker_)) {
         support_mode = "retained_cut_volume";
         const auto active_rule_indices =
-            cut_context->generatedVolumeRuleIndicesForMarkerAndSide(
+            cut_context->generatedVolumeRuleIndexSpanForMarkerAndSide(
                 interface_marker_,
                 toCutIntegrationSide(active_side_));
         const auto& metadata = cut_context->metadata();
@@ -309,7 +502,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             const auto cell = rule_metadata.parent_entity >= 0
                                   ? rule_metadata.parent_entity
                                   : rule_metadata.cell;
-            mark_cell_active(static_cast<GlobalIndex>(cell));
+            if (mark_cell_active(static_cast<GlobalIndex>(cell))) {
+                ++active_support_cells_from_volume_support;
+            }
         }
     } else {
         for (GlobalIndex cell = 0;
@@ -341,7 +536,31 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
                 }
             }
             if (cell_has_active_measure) {
-                mark_cell_active(cell);
+                if (mark_cell_active(cell)) {
+                    ++active_support_cells_from_volume_support;
+                }
+            }
+        }
+    }
+
+    if (interface_marker_ >= 0 && cut_context != nullptr) {
+        const auto* facet_set =
+            cut_context->facetSetHandleForMarker(interface_marker_);
+        if (facet_set != nullptr && facet_set->hasFacetMetadata()) {
+            support_mode += "+cut_adjacent_facets";
+            for (const auto& facet : facet_set->facet_metadata) {
+                if (facet.first_cell >= static_cast<MeshIndex>(0) &&
+                    mark_cut_adjacent_facet_active(
+                        static_cast<GlobalIndex>(facet.first_cell),
+                        static_cast<GlobalIndex>(facet.facet))) {
+                    ++active_support_cells_from_cut_adjacent_facets;
+                }
+                if (facet.second_cell >= static_cast<MeshIndex>(0) &&
+                    mark_cut_adjacent_facet_active(
+                        static_cast<GlobalIndex>(facet.second_cell),
+                        static_cast<GlobalIndex>(facet.facet))) {
+                    ++active_support_cells_from_cut_adjacent_facets;
+                }
             }
         }
     }
@@ -351,7 +570,9 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     std::vector<unsigned char> has_active_dof_support(
         static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
     std::size_t active_support_cells = 0u;
-    const char* support_mode = "cell_patch";
+    std::size_t active_support_cells_from_volume_support = 0u;
+    std::size_t active_support_cells_from_cut_adjacent_facets = 0u;
+    std::string support_mode = "cell_patch";
 #endif
 
     std::vector<GlobalIndex> inactive_vertices;
@@ -423,6 +644,10 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         << " total_vertices=" << n_vertices
         << " active_sign_vertices=" << active_sign_vertices
         << " active_support_cells=" << active_support_cells
+        << " active_support_cells_from_volume_support="
+        << active_support_cells_from_volume_support
+        << " active_support_cells_from_cut_adjacent_facets="
+        << active_support_cells_from_cut_adjacent_facets
         << " active_support_vertices=" << active_support_vertices
         << " total_dofs=" << n_field_dofs
         << " active_support_dofs=" << active_support_dofs
@@ -468,7 +693,9 @@ ConstraintDependencyDeclaration
 LevelSetActiveSideVertexDirichletConstraint::dependencyDeclaration() const
 {
     ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
+    out.structural.fe_constraint_layout = true;
     out.structural.mesh_field_layout = true;
+    out.structural.mesh_field_values = true;
     return out;
 }
 

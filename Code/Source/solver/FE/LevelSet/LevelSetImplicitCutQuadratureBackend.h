@@ -11,6 +11,8 @@
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 
 #include <array>
+#include <cstddef>
+#include <string>
 
 namespace svmp::FE::level_set {
 
@@ -24,14 +26,45 @@ enum class ImplicitCutQuadratureDiagnosticStatus {
     Failed,
 };
 
+enum class ImplicitCutQuadratureBackendQualification {
+    Unavailable,
+    Experimental,
+    ProductionQualified,
+};
+
 [[nodiscard]] const char* implicitCutQuadratureDiagnosticStatusName(
     ImplicitCutQuadratureDiagnosticStatus status) noexcept;
 
+[[nodiscard]] const char* implicitCutQuadratureBackendQualificationName(
+    ImplicitCutQuadratureBackendQualification qualification) noexcept;
+
 struct ImplicitCutQuadratureBackendCellResult {
     interfaces::LevelSetCellCutResult cut{};
+    int requested_interface_quadrature_order{0};
+    int requested_volume_quadrature_order{0};
+    int possible_interface_quadrature_order{0};
+    int possible_volume_quadrature_order{0};
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
+    int verified_interface_quadrature_order{0};
+    int verified_volume_quadrature_order{0};
     bool fallback_used{false};
+    bool requested_high_order_downgrade{false};
+    int root_branch_count{0};
+    int root_finder_iteration_count{0};
+    int curved_fragment_count{0};
+    int linearized_leaf_count{0};
+    int subdivision_count{0};
+    int max_subdivision_depth_reached{0};
+    int full_negative_region_count{0};
+    int full_positive_region_count{0};
+    int interface_fragment_count{0};
+    std::size_t volume_quadrature_point_count{0};
+    std::size_t interface_quadrature_point_count{0};
+    double backend_elapsed_seconds{0.0};
+    std::string fallback_reason{};
+    ImplicitCutQuadratureBackend selected_backend{
+        ImplicitCutQuadratureBackend::LinearCorner};
     ImplicitCutQuadratureDiagnosticStatus diagnostic_status{
         ImplicitCutQuadratureDiagnosticStatus::Failed};
 };
@@ -58,6 +91,9 @@ struct ImplicitCutQuadratureBackendCapability {
     bool implemented{false};
     bool supports_element_type{false};
     bool supports_high_order_geometry{false};
+    ImplicitCutQuadratureBackendQualification qualification{
+        ImplicitCutQuadratureBackendQualification::Unavailable};
+    std::string qualification_diagnostic{};
     bool requires_scalar_h1_c0_level_set{true};
     int minimum_level_set_order{1};
     int validation_level_set_order{3};
@@ -66,7 +102,7 @@ struct ImplicitCutQuadratureBackendCapability {
     bool requires_deterministic_rule_order{true};
     bool prunes_tiny_slivers_in_context{true};
     bool near_tangent_requires_diagnostic{true};
-    Real tiny_sliver_volume_fraction{1.0e-10};
+    Real tiny_sliver_volume_fraction{1.0e-8};
     int maximum_reported_interface_order{-1};
     int maximum_reported_volume_order{-1};
 };
@@ -83,9 +119,13 @@ public:
                                         ElementType element_type) const noexcept = 0;
 
     [[nodiscard]] virtual int achievedInterfaceQuadratureOrder(
+        int mesh_dimension,
+        ElementType element_type,
         const interfaces::CutInterfaceDomainRequest& request) const noexcept = 0;
 
     [[nodiscard]] virtual int achievedVolumeQuadratureOrder(
+        int mesh_dimension,
+        ElementType element_type,
         const interfaces::CutInterfaceDomainRequest& request) const noexcept = 0;
 
     [[nodiscard]] virtual ImplicitCutQuadratureBackendCellResult cut(

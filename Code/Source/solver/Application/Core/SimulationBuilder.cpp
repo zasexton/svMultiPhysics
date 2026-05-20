@@ -1,11 +1,14 @@
 #include "Application/Core/SimulationBuilder.h"
 
+#include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Translators/EquationTranslator.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "Application/Translators/MeshTranslator.h"
 
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Backends/Interfaces/LinearSolver.h"
 #include "FE/Backends/Utils/BackendOptions.h"
 #include "FE/Assembly/CompositeMeshAccess.h"
@@ -19,10 +22,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -33,6 +38,59 @@ std::string lower_copy(std::string s)
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
+}
+
+bool oopStateTraceEnabled()
+{
+  const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+  if (env == nullptr) {
+    return false;
+  }
+  const auto v = lower_copy(env);
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+void traceStateVectorFields(const svmp::FE::systems::FESystem& system,
+                            svmp::FE::backends::GenericVector& vector,
+                            const char* label)
+{
+  if (!oopStateTraceEnabled()) {
+    return;
+  }
+  const auto view = vector.createAssemblyView();
+  if (!view) {
+    return;
+  }
+  const auto& fields = system.fieldMap();
+  std::ostringstream oss;
+  oss << "[svMultiPhysics::Application] state_vector diagnostic=state_vector_fields"
+      << " label='" << label << "'";
+  for (std::size_t field = 0; field < fields.numFields(); ++field) {
+    const auto& rec = fields.getField(field);
+    const auto range = fields.getFieldDofRange(field);
+    double sq_norm = 0.0;
+    double sum = 0.0;
+    double min_value = std::numeric_limits<double>::infinity();
+    double max_value = -std::numeric_limits<double>::infinity();
+    std::uint64_t count = 0;
+    for (svmp::FE::GlobalIndex dof = range.first; dof < range.second; ++dof) {
+      const double value = static_cast<double>(view->getVectorEntry(dof));
+      sq_norm += value * value;
+      sum += value;
+      min_value = std::min(min_value, value);
+      max_value = std::max(max_value, value);
+      ++count;
+    }
+    const double mean = count > 0 ? sum / static_cast<double>(count) : 0.0;
+    oss << " [" << rec.name
+        << " dofs=" << count
+        << " norm=" << std::sqrt(std::max(0.0, sq_norm))
+        << " mean=" << mean
+        << " min=" << (count > 0 ? min_value : 0.0)
+        << " max=" << (count > 0 ? max_value : 0.0)
+        << "]";
+  }
+  application::core::oopCout() << oss.str() << std::endl;
 }
 
 svmp::FE::backends::SolverMethod toSolverMethod(const std::string& legacy_type)
@@ -284,6 +342,67 @@ const EquationParameters* selectSolverEquation(const Parameters& params)
   return first;
 }
 
+svmp::FE::geometry::CutIntegrationSide toCutIntegrationSide(
+    application::core::LevelSetActiveSide side) noexcept
+{
+  return side == application::core::LevelSetActiveSide::Positive
+             ? svmp::FE::geometry::CutIntegrationSide::Positive
+             : svmp::FE::geometry::CutIntegrationSide::Negative;
+}
+
+std::vector<svmp::FE::systems::FESystem::FormCellDomainRestriction>
+equationCellDomainRestrictions(
+    const svmp::FE::systems::FESystem& system,
+    const EquationParameters& equation)
+{
+  std::vector<svmp::FE::systems::FESystem::FormCellDomainRestriction>
+      restrictions;
+  const auto requests = application::core::activeCutVolumeRequests(equation);
+  for (const auto& request : requests) {
+    if (request.origin != application::core::ActiveCutVolumeRequestOrigin::Equation) {
+      continue;
+    }
+
+    const auto field_id = system.findFieldByName(request.level_set_field_name);
+    int marker = request.requested_interface_marker;
+    if (marker < 0) {
+      if (field_id == svmp::FE::INVALID_FIELD_ID) {
+        const std::string equation_type =
+            equation.type.defined() ? equation.type.value() : std::string{"<unknown>"};
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Equation-level level-set cut domain for equation '" +
+            equation_type + "' references level-set field '" +
+            request.level_set_field_name +
+            "' before that field is registered. Declare the level_set equation before "
+            "the cut-domain consumer, or set Interface_marker explicitly.");
+      }
+
+      svmp::FE::interfaces::GeneratedInterfaceMarkerKey key{};
+      key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(field_id);
+      key.domain_id = request.domain_id;
+      key.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+      key.requested_marker = request.requested_interface_marker;
+      marker = svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
+    }
+
+    const std::string equation_type =
+        equation.type.defined() ? equation.type.value() : std::string{};
+    restrictions.push_back(
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = toCutIntegrationSide(request.active_side),
+            .level_set_field = field_id,
+            .isovalue = static_cast<svmp::FE::Real>(request.isovalue),
+            .enable_level_set_shape_tangent =
+                field_id != svmp::FE::INVALID_FIELD_ID,
+            .diagnostic =
+                "equation_level_level_set_cut_domain equation_type='" +
+                equation_type + "' domain_id='" + request.domain_id +
+                "' level_set_field='" + request.level_set_field_name + "'"});
+  }
+  return restrictions;
+}
+
 svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& params,
                                                          svmp::FE::backends::BackendKind backend_kind)
 {
@@ -342,6 +461,10 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
       has_diagonal_like_scaling) {
     opts.preconditioner = svmp::FE::backends::PreconditionerType::RowColumnScaling;
     opts.fsils_use_rcs = true;
+  }
+  if (is_fsils_gmres_family && hasUnfittedLevelSetFreeSurface(*eq)) {
+    opts.fsils_residual_check_policy =
+        svmp::FE::backends::FsilsResidualCheckPolicy::Always;
   }
   if (backend_kind == svmp::FE::backends::BackendKind::FSILS &&
       is_oop_ustruct &&
@@ -698,8 +821,24 @@ void SimulationBuilder::createPhysicsModules()
               << " domains=" << static_cast<int>(eq_params->domains.size())
               << " bcs=" << static_cast<int>(eq_params->boundary_conditions.size()) << std::endl;
 
-    auto module = application::translators::EquationTranslator::createModule(*eq_params, *components_.fe_system,
-                                                                             components_.meshes);
+    const auto previous_cell_restrictions =
+        components_.fe_system->formInstallCellDomainRestrictions();
+    const auto cell_restrictions =
+        equationCellDomainRestrictions(*components_.fe_system, *eq_params);
+    if (!cell_restrictions.empty()) {
+      oopCout() << "[svMultiPhysics::Application]   Applying equation-level cut-domain cell restriction count="
+                << static_cast<int>(cell_restrictions.size()) << std::endl;
+    }
+    components_.fe_system->setFormInstallCellDomainRestrictions(cell_restrictions);
+    std::unique_ptr<svmp::Physics::PhysicsModule> module;
+    try {
+      module = application::translators::EquationTranslator::createModule(*eq_params, *components_.fe_system,
+                                                                          components_.meshes);
+    } catch (...) {
+      components_.fe_system->setFormInstallCellDomainRestrictions(previous_cell_restrictions);
+      throw;
+    }
+    components_.fe_system->setFormInstallCellDomainRestrictions(previous_cell_restrictions);
     components_.physics_modules.push_back(std::move(module));
   }
 
@@ -1103,12 +1242,15 @@ void SimulationBuilder::allocateHistory()
   for (const auto& module : components_.physics_modules) {
     if (module) {
       module->applyInitialConditions(*components_.fe_system, history.u());
+      traceStateVectorFields(*components_.fe_system, history.u(), "after_module_initial_conditions");
     }
   }
   for (int k = 1; k <= history.historyDepth(); ++k) {
     history.uPrevK(k).copyFrom(history.u());
   }
+  traceStateVectorFields(*components_.fe_system, history.u(), "after_history_copy");
   history.updateGhosts();
+  traceStateVectorFields(*components_.fe_system, history.u(), "after_history_update_ghosts");
 
   components_.time_history = std::make_unique<svmp::FE::timestepping::TimeHistory>(std::move(history));
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: TimeHistory initialized time="

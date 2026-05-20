@@ -25,6 +25,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -141,6 +144,84 @@ struct CutFixedGeometryAssemblyDiagnostics {
     }
 };
 
+struct GeneratedVolumeRuleDiagnostics {
+    Real active_volume = 0.0;
+    Real cut_cell_active_volume = 0.0;
+    Real full_cell_active_volume = 0.0;
+    std::size_t rule_count = 0u;
+    std::size_t cut_cell_rules = 0u;
+    std::size_t full_cell_rules = 0u;
+    std::size_t quadrature_points = 0u;
+    std::size_t null_rules = 0u;
+    std::size_t zero_quadrature_rules = 0u;
+    std::size_t nonfinite_measure_rules = 0u;
+    std::size_t negative_measure_rules = 0u;
+    std::size_t nonfinite_volume_fraction_rules = 0u;
+    Real min_rule_measure = std::numeric_limits<Real>::infinity();
+    Real max_rule_measure = -std::numeric_limits<Real>::infinity();
+    Real min_volume_fraction = std::numeric_limits<Real>::infinity();
+    Real max_volume_fraction = -std::numeric_limits<Real>::infinity();
+    int min_exact_order = std::numeric_limits<int>::max();
+    int max_exact_order = std::numeric_limits<int>::min();
+
+    void recordRule(const geometry::CutQuadratureRule& rule) noexcept {
+        ++rule_count;
+        active_volume += rule.measure;
+        quadrature_points += rule.points.size();
+        if (rule.points.empty()) {
+            ++zero_quadrature_rules;
+        }
+        if (!std::isfinite(rule.measure)) {
+            ++nonfinite_measure_rules;
+        }
+        if (rule.measure < Real{0.0}) {
+            ++negative_measure_rules;
+        }
+        if (!std::isfinite(rule.volume_fraction)) {
+            ++nonfinite_volume_fraction_rules;
+        } else {
+            min_volume_fraction = std::min(min_volume_fraction,
+                                           rule.volume_fraction);
+            max_volume_fraction = std::max(max_volume_fraction,
+                                           rule.volume_fraction);
+        }
+        if (std::isfinite(rule.measure)) {
+            min_rule_measure = std::min(min_rule_measure, rule.measure);
+            max_rule_measure = std::max(max_rule_measure, rule.measure);
+        }
+        min_exact_order = std::min(min_exact_order, rule.exact_polynomial_order);
+        max_exact_order = std::max(max_exact_order, rule.exact_polynomial_order);
+        if (rule.full_cell_equivalent) {
+            full_cell_active_volume += rule.measure;
+            ++full_cell_rules;
+        } else {
+            cut_cell_active_volume += rule.measure;
+            ++cut_cell_rules;
+        }
+    }
+
+    void normalizeEmptyExtrema() noexcept {
+        if (!std::isfinite(min_rule_measure)) {
+            min_rule_measure = Real{0.0};
+        }
+        if (!std::isfinite(max_rule_measure)) {
+            max_rule_measure = Real{0.0};
+        }
+        if (!std::isfinite(min_volume_fraction)) {
+            min_volume_fraction = Real{0.0};
+        }
+        if (!std::isfinite(max_volume_fraction)) {
+            max_volume_fraction = Real{0.0};
+        }
+        if (min_exact_order == std::numeric_limits<int>::max()) {
+            min_exact_order = 0;
+        }
+        if (max_exact_order == std::numeric_limits<int>::min()) {
+            max_exact_order = 0;
+        }
+    }
+};
+
 struct CutScalarOperatorEvaluation {
     CutIntegrationAssemblyPath path = CutIntegrationAssemblyPath::Standard;
     std::size_t volume_rule_count = 0;
@@ -233,7 +314,7 @@ public:
     }
 
     [[nodiscard]] static constexpr Real minGeneratedCutVolumeFraction() noexcept {
-        return Real{1.0e-10};
+        return Real{1.0e-8};
     }
 
     [[nodiscard]] static bool shouldPruneGeneratedVolumeRule(
@@ -250,7 +331,6 @@ public:
         interface_rules_.clear();
         facet_set_rules_.clear();
         generated_volume_rule_indices_by_marker_.clear();
-        generated_volume_rule_indices_by_marker_and_side_.clear();
         generated_volume_markers_.clear();
         generated_interface_rule_indices_by_marker_.clear();
         generated_interface_markers_.clear();
@@ -259,6 +339,7 @@ public:
         facet_set_handles_.clear();
         facet_set_handle_indices_by_marker_.clear();
         expected_source_value_revision_by_marker_.clear();
+        generated_volume_rule_indices_by_marker_and_side_.clear();
         kinematic_data_.clear();
         stabilization_hooks_.clear();
         bindings_.clear();
@@ -347,10 +428,12 @@ public:
         }
 
         generated_volume_rule_indices_by_marker_[marker].push_back(index);
-        generated_volume_rule_indices_by_marker_and_side_[marker]
-            [volumeSideIndex(rule.side)].push_back(index);
+        auto& side_bucket = generated_volume_rule_indices_by_marker_and_side_[marker]
+            [volumeSideIndex(rule.side)];
+        side_bucket.indices.push_back(index);
         metadata_.push_back(std::move(metadata));
         volume_rules_.push_back(std::move(rule));
+        side_bucket.diagnostics.recordRule(volume_rules_.back());
 
         if (keep_binding_alignment) {
             const auto& stored_metadata = metadata_.back();
@@ -374,15 +457,26 @@ public:
         }
     }
 
-    void addGeneratedInterfaceDomain(const interfaces::LevelSetInterfaceDomain& domain) {
+    void addGeneratedInterfaceDomain(
+        const interfaces::LevelSetInterfaceDomain& domain,
+        std::optional<geometry::CutIntegrationSide> volume_side_filter = std::nullopt) {
         const int marker = domain.marker();
         if (marker < 0) {
             return;
+        }
+        if (volume_side_filter.has_value() &&
+            *volume_side_filter == geometry::CutIntegrationSide::Interface) {
+            throw std::invalid_argument(
+                "generated level-set volume side filter requires Negative or Positive side");
         }
         setExpectedGeneratedSourceValueRevision(marker,
                                                 domain.request().source.value_revision);
         auto volume_rules = domain.volumeQuadratureRules();
         for (auto& rule : volume_rules) {
+            if (volume_side_filter.has_value() &&
+                rule.side != *volume_side_filter) {
+                continue;
+            }
             CutCellAssemblyMetadata metadata;
             metadata.cell = rule.provenance.parent_entity;
             metadata.parent_entity = rule.provenance.parent_entity;
@@ -485,7 +579,7 @@ public:
         if (rule_it == generated_volume_rule_indices_by_marker_and_side_.end()) {
             return;
         }
-        const auto& indices = rule_it->second[volumeSideIndex(side)];
+        const auto& indices = rule_it->second[volumeSideIndex(side)].indices;
         for (const auto index : indices) {
             if (index >= metadata_.size()) {
                 throw std::invalid_argument(
@@ -593,17 +687,43 @@ public:
     [[nodiscard]] std::vector<std::size_t>
     generatedVolumeRuleIndicesForMarkerAndSide(int marker,
                                                geometry::CutIntegrationSide side) const {
-        std::vector<std::size_t> indices;
+        const auto span =
+            generatedVolumeRuleIndexSpanForMarkerAndSide(marker, side);
+        return std::vector<std::size_t>(span.begin(), span.end());
+    }
+
+    [[nodiscard]] std::span<const std::size_t>
+    generatedVolumeRuleIndexSpanForMarkerAndSide(
+        int marker,
+        geometry::CutIntegrationSide side) const {
         if (side == geometry::CutIntegrationSide::Interface) {
-            return indices;
+            return {};
         }
         assertGeneratedVolumeRulesCurrentForMarkerAndSide(marker, side);
         const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
         if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
-            return indices;
+            return {};
         }
-        indices = it->second[volumeSideIndex(side)];
-        return indices;
+        const auto& indices = it->second[volumeSideIndex(side)].indices;
+        return std::span<const std::size_t>(indices.data(), indices.size());
+    }
+
+    [[nodiscard]] GeneratedVolumeRuleDiagnostics
+    generatedVolumeDiagnosticsForMarkerAndSide(
+        int marker,
+        geometry::CutIntegrationSide side) const {
+        GeneratedVolumeRuleDiagnostics diagnostics;
+        if (side == geometry::CutIntegrationSide::Interface) {
+            diagnostics.normalizeEmptyExtrema();
+            return diagnostics;
+        }
+        assertGeneratedVolumeRulesCurrentForMarkerAndSide(marker, side);
+        const auto it = generated_volume_rule_indices_by_marker_and_side_.find(marker);
+        if (it != generated_volume_rule_indices_by_marker_and_side_.end()) {
+            diagnostics = it->second[volumeSideIndex(side)].diagnostics;
+        }
+        diagnostics.normalizeEmptyExtrema();
+        return diagnostics;
     }
 
     [[nodiscard]] std::vector<const geometry::CutQuadratureRule*>
@@ -634,7 +754,7 @@ public:
         if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
             return rules;
         }
-        const auto& indices = it->second[volumeSideIndex(side)];
+        const auto& indices = it->second[volumeSideIndex(side)].indices;
         rules.reserve(indices.size());
         for (const auto index : indices) {
             if (index < volume_rules_.size()) {
@@ -656,7 +776,7 @@ public:
         if (it == generated_volume_rule_indices_by_marker_and_side_.end()) {
             return metadata;
         }
-        const auto& indices = it->second[volumeSideIndex(side)];
+        const auto& indices = it->second[volumeSideIndex(side)].indices;
         metadata.reserve(indices.size());
         for (const auto index : indices) {
             if (index < metadata_.size()) {
@@ -784,7 +904,9 @@ public:
                     binding != nullptr ? binding->cut_topology_revision
                                        : rule.provenance.cut_topology_revision;
                 point.quadrature_policy_key =
-                    binding != nullptr ? binding->quadrature_policy_key : 0u;
+                    binding != nullptr
+                        ? binding->quadrature_policy_key
+                        : rule.provenance.predicate_policy_key;
                 point.construction = rule.policy.kind;
                 point.frame = rule.frame;
 
@@ -820,7 +942,8 @@ public:
                 point.weight = qp.weight;
                 point.volume_fraction = rule.volume_fraction;
                 point.cut_topology_revision = rule.provenance.cut_topology_revision;
-                point.quadrature_policy_key = 0u;
+                point.quadrature_policy_key =
+                    rule.provenance.predicate_policy_key;
                 point.construction = rule.policy.kind;
                 point.frame = rule.frame;
                 evaluation.interface_integral +=
@@ -1327,7 +1450,12 @@ private:
         throw std::invalid_argument("generated level-set volume side must be Negative or Positive");
     }
 
-    using VolumeRuleSideIndex = std::array<std::vector<std::size_t>, 2>;
+    struct VolumeRuleSideBucket {
+        std::vector<std::size_t> indices{};
+        GeneratedVolumeRuleDiagnostics diagnostics{};
+    };
+
+    using VolumeRuleSideIndex = std::array<VolumeRuleSideBucket, 2>;
 
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};

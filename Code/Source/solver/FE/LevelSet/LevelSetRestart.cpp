@@ -93,6 +93,10 @@ captureLevelSetGeneratedInterfaceRestartRecord(
         options.geometry_tangent_policy;
     record.implicit_cut_root_tolerance =
         options.implicit_cut_root_tolerance;
+    record.implicit_cut_root_coordinate_tolerance =
+        options.implicit_cut_root_coordinate_tolerance;
+    record.implicit_cut_root_max_iterations =
+        options.implicit_cut_root_max_iterations;
     record.implicit_cut_max_subdivision_depth =
         options.implicit_cut_max_subdivision_depth;
     record.keep_degenerate_fragments = options.keep_degenerate_fragments;
@@ -130,6 +134,10 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
         record.geometry_tangent_policy;
     options.implicit_cut_root_tolerance =
         record.implicit_cut_root_tolerance;
+    options.implicit_cut_root_coordinate_tolerance =
+        record.implicit_cut_root_coordinate_tolerance;
+    options.implicit_cut_root_max_iterations =
+        record.implicit_cut_root_max_iterations;
     options.implicit_cut_max_subdivision_depth =
         record.implicit_cut_max_subdivision_depth;
     options.keep_degenerate_fragments = record.keep_degenerate_fragments;
@@ -177,6 +185,14 @@ bool levelSetGeneratedInterfaceRestartRecordMatches(
     }
     if (!(record.implicit_cut_root_tolerance > 0.0)) {
         setDiagnostic(diagnostic, "generated-interface restart implicit cut root tolerance is invalid");
+        return false;
+    }
+    if (!(record.implicit_cut_root_coordinate_tolerance > 0.0)) {
+        setDiagnostic(diagnostic, "generated-interface restart implicit cut root coordinate tolerance is invalid");
+        return false;
+    }
+    if (record.implicit_cut_root_max_iterations <= 0) {
+        setDiagnostic(diagnostic, "generated-interface restart implicit cut root iteration limit is invalid");
         return false;
     }
     if (record.implicit_cut_max_subdivision_depth < 0) {

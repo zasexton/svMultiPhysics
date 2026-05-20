@@ -8,11 +8,13 @@ import io
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -26,15 +28,41 @@ CASE_ROOT = ROOT / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_se
 CASES = {
     "mini2d": None,
     "static2d": None,
+    "capillaryarc2d": None,
+    "curvedtet3d": None,
+    "open2d": CASE_ROOT,
     "d18": CASE_ROOT / "spheric_test05_wet_bed_d18",
     "d38": CASE_ROOT / "spheric_test05_wet_bed_d38",
     "mms2d": CASE_ROOT / "mms_traveling_interface_2d",
+    "sloshing2d": CASE_ROOT / "linear_sloshing_2d",
+    "tilt2d": CASE_ROOT / "square_tank_tilt_settling",
+}
+CASE_COPY_ENTRIES = {
+    CASE_ROOT: ("solver.xml", "pressure_gauge.csv", "mesh"),
 }
 CASE_GATE_X = {
+    "capillaryarc2d": 0.5,
     "mini2d": 0.4,
     "static2d": 0.5,
+    "open2d": 0.5,
     "mms2d": 0.5,
+    "sloshing2d": 0.5,
+    "tilt2d": 0.5,
+    "curvedtet3d": 0.5,
 }
+HIGH_ORDER_PRODUCTION_CASES = ("sloshing2d", "tilt2d")
+HIGH_ORDER_MPI_PRODUCTION_CASES = ("sloshing2d", "tilt2d")
+HIGH_ORDER_VISIBLE_MOTION_CASES = ("tilt2d",)
+HIGH_ORDER_3D_BENCHMARK_CASES = ("d18",)
+HIGH_ORDER_3D_BENCHMARK_QUALIFICATION_CASES = ("d18", "d38")
+HIGH_ORDER_3D_BENCHMARK_PROFILE_CASES = ("d18", "d38")
+HIGH_ORDER_CURVED_3D_SIMPLEX_CASES = ("curvedtet3d",)
+HIGH_ORDER_MPI_MOTION_CASES = ("sloshing2d",)
+HIGH_ORDER_CAPILLARY_PROJECTION_CASES = ("sloshing2d",)
+HIGH_ORDER_CAPILLARY_RESPONSE_CASES = ("capillaryarc2d",)
+HIGH_ORDER_CAPILLARY_BALANCE_CASES = ("capillaryarc2d",)
+HIGH_ORDER_VOLUME_CORRECTED_MOTION_CASES = ("sloshing2d",)
+HIGH_ORDER_SYNTHETIC_CASES = {"capillaryarc2d", "curvedtet3d"}
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
@@ -108,6 +136,23 @@ TIMELOOP_ACCEPTED_RE = re.compile(
     r" time=(?P<time>[-+0-9.eE]+)"
     r" dt=(?P<dt>[-+0-9.eE]+)"
 )
+TIMELOOP_REJECTED_RE = re.compile(
+    r"TimeLoop: step_rejected step=(?P<step>[0-9]+)"
+    r" time=(?P<time>[-+0-9.eE]+)"
+    r" dt=(?P<dt>[-+0-9.eE]+)"
+    r" reason=(?P<reason>\S+)"
+    r" \(newton: converged=(?P<converged>[01])"
+    r" iters=(?P<nonlinear_iterations>[0-9]+)"
+    r" \|\|r\|\|=(?P<residual>[-+0-9.eE]+)"
+    r" \|\|r_field\|\|=(?P<field_residual>[-+0-9.eE]+)"
+    r" \|\|r_aux\|\|=(?P<aux_residual>[-+0-9.eE]+)\)"
+)
+TIMELOOP_DT_UPDATED_RE = re.compile(
+    r"TimeLoop: dt_updated step=(?P<step>[0-9]+)"
+    r" attempt=(?P<attempt>[0-9]+)"
+    r" old_dt=(?P<old_dt>[-+0-9.eE]+)"
+    r" new_dt=(?P<new_dt>[-+0-9.eE]+)"
+)
 VTK_WRITE_RE = re.compile(r"Wrote VTK: (?P<path>.+)$")
 ASSEMBLY_TIMING_HEADER_RE = re.compile(
     r"assembleOperator TIMING \(rank (?P<rank>[0-9]+), op='(?P<op>[^']+)'\)"
@@ -120,6 +165,9 @@ INTERIOR_FACE_TIMING_VALUE_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_]*)=\s*([-+0-9.eE]+)"
 )
 STATIC_INTERFACE_HEIGHT = 0.53
+CAPILLARY_ARC_CENTER_X = 0.5
+CAPILLARY_ARC_CENTER_Y = -0.3
+CAPILLARY_ARC_RADIUS = 0.8
 STATE_SYNC_CUT_CONTEXT_PROVENANCES = {
     "accepted",
     "residual",
@@ -226,6 +274,13 @@ def free_surface_bc(root: ET.Element) -> ET.Element:
     raise ValueError("missing fluid free-surface boundary condition")
 
 
+def level_set_equation(root: ET.Element) -> ET.Element:
+    for equation in root.findall("Add_equation"):
+        if equation.attrib.get("type") == "level_set":
+            return equation
+    raise ValueError("missing level-set equation")
+
+
 def fluid_equation(root: ET.Element) -> ET.Element:
     for equation in root.findall("Add_equation"):
         if equation.attrib.get("type") == "fluid":
@@ -271,11 +326,25 @@ def configure_solver(solver_xml: Path,
                      generated_interface_geometry: str | None = None,
                      implicit_cut_quadrature_backend: str | None = None,
                      implicit_cut_fallback_policy: str | None = None,
+                     required_implicit_cut_backend_qualification: str | None = None,
                      implicit_cut_root_tolerance: float | None = None,
                      implicit_cut_max_subdivision_depth: int | None = None,
                      generated_interface_quadrature_order: int | None = None,
                      interface_quadrature_order: int | None = None,
-                     volume_quadrature_order: int | None = None) -> None:
+                     volume_quadrature_order: int | None = None,
+                     cut_cell_velocity_gradient_penalty: float | None = None,
+                     cut_cell_pressure_gradient_penalty: float | None = None,
+                     surface_tension: float | None = None,
+                     projected_curvature_field: str | None = None,
+                     curvature_projection_cadence_steps: int | None = None,
+                     curvature_projection_max_normalized_fit_residual: float | None = None,
+                     curvature_projection_smoothing_iterations: int | None = None,
+                     curvature_projection_smoothing_relaxation: float | None = None,
+                     enable_volume_correction: bool | None = None,
+                     volume_correction_cadence_steps: int | None = None,
+                     volume_correction_use_initial_volume: bool | None = None,
+                     volume_correction_tolerance: float | None = None,
+                     volume_correction_max_iterations: int | None = None) -> None:
     tree = ET.parse(solver_xml)
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
@@ -385,6 +454,12 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Implicit_cut_quadrature_backend", implicit_cut_quadrature_backend)
     if implicit_cut_fallback_policy is not None:
         set_text(free_surface, "Implicit_cut_fallback_policy", implicit_cut_fallback_policy)
+    if required_implicit_cut_backend_qualification is not None:
+        set_text(
+            free_surface,
+            "Required_implicit_cut_backend_qualification",
+            required_implicit_cut_backend_qualification,
+        )
     if implicit_cut_root_tolerance is not None:
         set_text(free_surface, "Implicit_cut_root_tolerance", f"{implicit_cut_root_tolerance:.16g}")
     if implicit_cut_max_subdivision_depth is not None:
@@ -395,6 +470,69 @@ def configure_solver(solver_xml: Path,
         set_text(free_surface, "Interface_quadrature_order", str(interface_quadrature_order))
     if volume_quadrature_order is not None:
         set_text(free_surface, "Volume_quadrature_order", str(volume_quadrature_order))
+    if cut_cell_velocity_gradient_penalty is not None:
+        set_text(
+            free_surface,
+            "Cut_cell_velocity_gradient_penalty",
+            f"{cut_cell_velocity_gradient_penalty:.16g}",
+        )
+    if cut_cell_pressure_gradient_penalty is not None:
+        set_text(
+            free_surface,
+            "Cut_cell_pressure_gradient_penalty",
+            f"{cut_cell_pressure_gradient_penalty:.16g}",
+        )
+    if surface_tension is not None:
+        set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
+    if projected_curvature_field:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Enable_curvature_projection", "true")
+        set_text(level_set, "Projected_curvature_field", projected_curvature_field)
+        set_text(free_surface, "Curvature_field", projected_curvature_field)
+        if curvature_projection_cadence_steps is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_cadence_steps",
+                str(curvature_projection_cadence_steps),
+            )
+        if curvature_projection_max_normalized_fit_residual is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_max_normalized_fit_residual",
+                f"{curvature_projection_max_normalized_fit_residual:.16g}",
+            )
+        if curvature_projection_smoothing_iterations is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_smoothing_iterations",
+                str(curvature_projection_smoothing_iterations),
+            )
+        if curvature_projection_smoothing_relaxation is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_smoothing_relaxation",
+                f"{curvature_projection_smoothing_relaxation:.16g}",
+            )
+    if enable_volume_correction is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Enable_volume_correction",
+                 "true" if enable_volume_correction else "false")
+    if volume_correction_cadence_steps is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Volume_correction_cadence_steps",
+                 str(volume_correction_cadence_steps))
+    if volume_correction_use_initial_volume is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Volume_correction_use_initial_volume",
+                 "true" if volume_correction_use_initial_volume else "false")
+    if volume_correction_tolerance is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Volume_correction_tolerance",
+                 f"{volume_correction_tolerance:.16g}")
+    if volume_correction_max_iterations is not None:
+        level_set = level_set_equation(root)
+        set_text(level_set, "Volume_correction_max_iterations",
+                 str(volume_correction_max_iterations))
 
     if disable_coupled_outer_fgmres:
         assert ns_solver is not None
@@ -497,6 +635,12 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
     if (args.enable_newton_assembly_diagnostics or
             args.require_newton_assembly_diagnostics):
         env["SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS"] = "1"
+    if args.newton_line_search_fail_on_no_reduction:
+        env["SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION"] = "1"
+    if args.newton_line_search_max_iterations is not None:
+        env["SVMP_NEWTON_LINE_SEARCH_MAX_ITERATIONS"] = str(
+            args.newton_line_search_max_iterations
+        )
     if args.enable_linear_solve_history:
         env["SVMP_DEBUG_LINEAR_SOLVE_HISTORY"] = "1"
         if args.linear_solve_history_max_calls is not None:
@@ -513,6 +657,16 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
         env["SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS"] = "1"
     if args.enable_fsils_matrix_diagnostics:
         env["SVMP_FSILS_MATRIX_DIAGNOSTICS"] = "1"
+        if args.fsils_matrix_diagnostics_every_n is not None:
+            env["SVMP_FSILS_MATRIX_DIAGNOSTICS_EVERY_N"] = str(
+                args.fsils_matrix_diagnostics_every_n
+            )
+        if args.fsils_matrix_diagnostics_max_records is not None:
+            env["SVMP_FSILS_MATRIX_DIAGNOSTICS_MAX_RECORDS"] = str(
+                args.fsils_matrix_diagnostics_max_records
+            )
+    if args.require_eigen_factorization_diagnostics:
+        env["SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS"] = "1"
     if (args.enable_timeloop_initialization_diagnostics or
             args.require_timeloop_initialization_diagnostics):
         env["SVMP_TIMELOOP_INITIALIZATION_DIAGNOSTICS"] = "1"
@@ -526,13 +680,62 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
         env["SVMP_JIT_TRACE_SPECIALIZATION"] = "1"
     if args.enable_jit_cache_diagnostics:
         env["SVMP_JIT_CACHE_DIAGNOSTICS"] = "1"
+    if args.enable_adaptive_time_loop:
+        env["SVMP_TIMELOOP_ADAPTIVE"] = "1"
+        env["SVMP_VTK_OUTPUT_FINAL_TIME"] = "1"
+        for arg_name, env_name in (
+            ("adaptive_time_loop_min_dt", "SVMP_TIMELOOP_MIN_DT"),
+            ("adaptive_time_loop_max_dt", "SVMP_TIMELOOP_MAX_DT"),
+            ("adaptive_time_loop_max_retries", "SVMP_TIMELOOP_MAX_RETRIES"),
+            ("adaptive_time_loop_decrease_factor", "SVMP_TIMELOOP_DECREASE_FACTOR"),
+            ("adaptive_time_loop_increase_factor", "SVMP_TIMELOOP_INCREASE_FACTOR"),
+            ("adaptive_time_loop_target_newton_iterations",
+             "SVMP_TIMELOOP_TARGET_NEWTON_ITERATIONS"),
+            ("adaptive_time_loop_max_steps_multiplier",
+             "SVMP_TIMELOOP_MAX_STEPS_MULTIPLIER"),
+        ):
+            value = getattr(args, arg_name)
+            if value is not None:
+                env[env_name] = f"{value:.16g}" if isinstance(value, float) else str(value)
     return env
 
 
-def copy_case_from_ref(case_dir: Path, destination: Path, source_ref: str) -> None:
+def case_artifact_ignore(_path: str, names: list[str]) -> set[str]:
+    ignored = set()
+    for name in names:
+        if re.match(r"result_.*\.p?vtu$", name):
+            ignored.add(name)
+        elif name in {"result.pvd", "1-procs", "2-procs", "3-procs", "4-procs"}:
+            ignored.add(name)
+        elif name.startswith("restart") or name.endswith(".log"):
+            ignored.add(name)
+    return ignored
+
+
+def copy_selected_entries(source_root: Path,
+                          destination: Path,
+                          entries: tuple[str, ...]) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in entries:
+        source = source_root / entry
+        target = destination / entry
+        if source.is_dir():
+            shutil.copytree(source, target, ignore=case_artifact_ignore)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
+def copy_case_from_ref(case_dir: Path,
+                       destination: Path,
+                       source_ref: str,
+                       entries: tuple[str, ...] | None = None) -> None:
     relative = case_dir.relative_to(ROOT)
+    archive_paths = [str(relative)]
+    if entries is not None:
+        archive_paths = [str(relative / entry) for entry in entries]
     completed = subprocess.run(
-        ["git", "archive", "--format=tar", source_ref, str(relative)],
+        ["git", "archive", "--format=tar", source_ref, *archive_paths],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -548,26 +751,22 @@ def copy_case_from_ref(case_dir: Path, destination: Path, source_ref: str) -> No
             archive.extractall(archive_root, filter="data")
         except TypeError:
             archive.extractall(archive_root)
-    shutil.move(str(archive_root / relative), destination)
+    if entries is None:
+        shutil.move(str(archive_root / relative), destination)
+    else:
+        copy_selected_entries(archive_root / relative, destination, entries)
 
 
 def copy_case(case_dir: Path, destination: Path, source_ref: str | None) -> None:
+    entries = CASE_COPY_ENTRIES.get(case_dir)
     if source_ref is not None:
-        copy_case_from_ref(case_dir, destination, source_ref)
+        copy_case_from_ref(case_dir, destination, source_ref, entries)
         return
 
-    def ignore(_path: str, names: list[str]) -> set[str]:
-        ignored = set()
-        for name in names:
-            if re.match(r"result_.*\.p?vtu$", name):
-                ignored.add(name)
-            elif name in {"result.pvd", "1-procs", "2-procs", "3-procs", "4-procs"}:
-                ignored.add(name)
-            elif name.startswith("restart") or name.endswith(".log"):
-                ignored.add(name)
-        return ignored
-
-    shutil.copytree(case_dir, destination, ignore=ignore)
+    if entries is not None:
+        copy_selected_entries(case_dir, destination, entries)
+    else:
+        shutil.copytree(case_dir, destination, ignore=case_artifact_ignore)
 
 
 def write_boundary(path: Path,
@@ -791,6 +990,7 @@ def write_mini_solver_xml(case_dir: Path,
     <Active_domain_method>CutVolume</Active_domain_method>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
+    <Enable_velocity_extension>true</Enable_velocity_extension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
     <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
     <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
@@ -808,6 +1008,402 @@ def write_mini_case(case_dir: Path, steps: int, static: bool = False) -> None:
     write_mini_solver_xml(case_dir, steps, gauge_node, gauge_pressure, static)
 
 
+def capillary_arc2d_phi(points: np.ndarray) -> np.ndarray:
+    return np.sqrt((points[:, 0] - CAPILLARY_ARC_CENTER_X) ** 2 +
+                   (points[:, 1] - CAPILLARY_ARC_CENTER_Y) ** 2) - (
+                       CAPILLARY_ARC_RADIUS)
+
+
+def write_capillary_arc2d_case(case_dir: Path,
+                               steps: int,
+                               pressure_jump: float = 0.0) -> None:
+    write_mini_case(case_dir, steps, static=True)
+
+    mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
+    grid = pv.read(mesh_path)
+    points = np.asarray(grid.points, dtype=float)
+    phi = capillary_arc2d_phi(points)
+    grid.point_data["phi"] = phi
+    grid.point_data["Pressure"] = np.where(phi < 0.0, pressure_jump, 0.0)
+    grid.point_data["Velocity"] = np.zeros((points.shape[0], 3), dtype=float)
+    grid.save(mesh_path)
+
+    gauge_point = np.array([0.5, 0.0, 0.0], dtype=float)
+    gauge_node = int(np.argmin(np.linalg.norm(points - gauge_point, axis=1)))
+    (case_dir / "pressure_gauge.csv").write_text(
+        f"node_id,pressure\n{gauge_node},{pressure_jump:.16g}\n",
+        encoding="utf-8")
+    benchmark = {
+        "benchmark": "synthetic zero-gravity capillary arc smoke",
+        "representation": "unfitted_level_set",
+        "capillary_arc_radius": CAPILLARY_ARC_RADIUS,
+        "initial_active_pressure": pressure_jump,
+        "dimensions_m": {
+            "tank_length": 1.0,
+            "tank_height": 1.0,
+            "profile_window_x_min": 0.5,
+        },
+        "pressure_gauge": {
+            "node_id": gauge_node,
+            "expected_initial_hydrostatic_pressure": pressure_jump,
+        },
+        "notes": [
+            "The wall-supported circular arc starts from zero velocity and zero gravity.",
+            "A zero active pressure preload exercises capillary response.",
+            "A negative gamma/R active pressure preload exercises a Laplace-style capillary balance.",
+        ],
+    }
+    (case_dir / "benchmark.json").write_text(
+        json.dumps(benchmark, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
+TETRA10_EDGE_PAIRS = (
+    (0, 1),
+    (1, 2),
+    (2, 0),
+    (0, 3),
+    (1, 3),
+    (2, 3),
+)
+TETRA10_FACE_CORNERS = (
+    (1, 2, 3),
+    (0, 3, 2),
+    (0, 1, 3),
+    (0, 2, 1),
+)
+
+
+def curved_tet3d_surface_height(points: np.ndarray) -> np.ndarray:
+    x = points[:, 0]
+    z = points[:, 2]
+    return 0.55 + 0.08 * np.sin(np.pi * x) * np.cos(2.0 * np.pi * z / 0.25)
+
+
+def curved_tet3d_phi(points: np.ndarray) -> np.ndarray:
+    return points[:, 1] - curved_tet3d_surface_height(points)
+
+
+def curved_tet3d_pressure(points: np.ndarray) -> np.ndarray:
+    rho = 998.2
+    gravity = 9.81
+    return rho * gravity * np.maximum(curved_tet3d_surface_height(points) - points[:, 1], 0.0)
+
+
+def curved_tet3d_midpoint(base_points: np.ndarray, a: int, b: int) -> np.ndarray:
+    point = 0.5 * (base_points[a] + base_points[b])
+    x, y, z = point
+    displacement = np.array([
+        0.0,
+        0.012 * np.sin(np.pi * x) * np.sin(np.pi * y) * np.sin(np.pi * z / 0.25),
+        0.006 * np.sin(np.pi * x) * np.sin(np.pi * y) * np.sin(2.0 * np.pi * z / 0.25),
+    ])
+    return point + displacement
+
+
+def orient_tetra_positive(points: np.ndarray, tet: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    a, b, c, d = tet
+    volume = float(np.dot(np.cross(points[b] - points[a], points[c] - points[a]),
+                          points[d] - points[a]))
+    if volume < 0.0:
+        return (a, b, d, c)
+    return tet
+
+
+def write_curved_tet3d_grid(case_dir: Path) -> tuple[int, float]:
+    nx, ny, nz = 2, 3, 2
+    length, height, width = 1.0, 1.0, 0.25
+    xs = np.linspace(0.0, length, nx + 1)
+    ys = np.linspace(0.0, height, ny + 1)
+    zs = np.linspace(0.0, width, nz + 1)
+    base_points = np.array([[x, y, z] for z in zs for y in ys for x in xs], dtype=float)
+
+    def node(i: int, j: int, k: int) -> int:
+        return k * (ny + 1) * (nx + 1) + j * (nx + 1) + i
+
+    linear_tets: list[tuple[int, int, int, int]] = []
+    for k in range(nz):
+        for j in range(ny):
+            for i in range(nx):
+                n000 = node(i, j, k)
+                n100 = node(i + 1, j, k)
+                n010 = node(i, j + 1, k)
+                n110 = node(i + 1, j + 1, k)
+                n001 = node(i, j, k + 1)
+                n101 = node(i + 1, j, k + 1)
+                n011 = node(i, j + 1, k + 1)
+                n111 = node(i + 1, j + 1, k + 1)
+                linear_tets.extend([
+                    (n000, n001, n011, n111),
+                    (n000, n011, n010, n111),
+                    (n000, n010, n110, n111),
+                    (n000, n110, n100, n111),
+                    (n000, n100, n101, n111),
+                    (n000, n101, n001, n111),
+                ])
+    linear_tets = [orient_tetra_positive(base_points, tet) for tet in linear_tets]
+
+    points = [point.copy() for point in base_points]
+    edge_midpoints: dict[tuple[int, int], int] = {}
+
+    def midpoint_id(a: int, b: int) -> int:
+        key = tuple(sorted((int(a), int(b))))
+        if key not in edge_midpoints:
+            edge_midpoints[key] = len(points)
+            points.append(curved_tet3d_midpoint(base_points, key[0], key[1]))
+        return edge_midpoints[key]
+
+    tet10_cells: list[list[int]] = []
+    for tet in linear_tets:
+        cell = list(tet)
+        cell.extend(midpoint_id(tet[a], tet[b]) for a, b in TETRA10_EDGE_PAIRS)
+        tet10_cells.append(cell)
+
+    point_array_values = np.asarray(points, dtype=float)
+    cells = np.asarray([[10, *cell] for cell in tet10_cells], dtype=np.int64).ravel()
+    cell_types = np.full(len(tet10_cells), int(pv.CellType.QUADRATIC_TETRA), dtype=np.uint8)
+    grid = pv.UnstructuredGrid(cells, cell_types, point_array_values)
+    grid.point_data["GlobalNodeID"] = np.arange(grid.n_points, dtype=np.int64)
+    grid.point_data["phi"] = curved_tet3d_phi(point_array_values)
+    grid.point_data["Pressure"] = curved_tet3d_pressure(point_array_values)
+    grid.point_data["Velocity"] = np.zeros((grid.n_points, 3), dtype=float)
+    grid.cell_data["GlobalElementID"] = np.arange(grid.n_cells, dtype=np.int64)
+
+    mesh_dir = case_dir / "mesh/background"
+    surface_dir = mesh_dir / "mesh-surfaces"
+    surface_dir.mkdir(parents=True)
+    grid.save(mesh_dir / "mesh-complete.mesh.vtu", binary=False)
+
+    face_counts: dict[tuple[int, int, int], tuple[int, list[int]]] = {}
+    for cell in tet10_cells:
+        corners = cell[:4]
+        for face in TETRA10_FACE_CORNERS:
+            face_corners = [corners[index] for index in face]
+            key = tuple(sorted(face_corners))
+            if key not in face_counts:
+                mids = [
+                    midpoint_id(face_corners[0], face_corners[1]),
+                    midpoint_id(face_corners[1], face_corners[2]),
+                    midpoint_id(face_corners[2], face_corners[0]),
+                ]
+                face_counts[key] = (0, [*face_corners, *mids])
+            count, stored = face_counts[key]
+            face_counts[key] = (count + 1, stored)
+
+    surfaces: dict[str, list[list[int]]] = {
+        "wall_left": [],
+        "wall_right": [],
+        "wall_bottom": [],
+        "wall_front": [],
+        "wall_back": [],
+        "wall_top": [],
+    }
+    tol = 1.0e-12
+    for key, (count, face_nodes) in face_counts.items():
+        if count != 1:
+            continue
+        center = np.mean(base_points[np.asarray(key, dtype=np.int64)], axis=0)
+        if abs(center[0]) <= tol:
+            surfaces["wall_left"].append(face_nodes)
+        elif abs(center[0] - length) <= tol:
+            surfaces["wall_right"].append(face_nodes)
+        elif abs(center[1]) <= tol:
+            surfaces["wall_bottom"].append(face_nodes)
+        elif abs(center[2]) <= tol:
+            surfaces["wall_front"].append(face_nodes)
+        elif abs(center[2] - width) <= tol:
+            surfaces["wall_back"].append(face_nodes)
+        elif abs(center[1] - height) <= tol:
+            surfaces["wall_top"].append(face_nodes)
+
+    for name, faces in surfaces.items():
+        if not faces:
+            raise RuntimeError(f"curvedtet3d surface {name!r} has no faces")
+        used = sorted({node_id for face in faces for node_id in face})
+        local = {node_id: index for index, node_id in enumerate(used)}
+        surface_cells = np.asarray(
+            [[6, *(local[node_id] for node_id in face)] for face in faces],
+            dtype=np.int64,
+        ).ravel()
+        surface_types = np.full(len(faces), int(pv.CellType.QUADRATIC_TRIANGLE), dtype=np.uint8)
+        surface = pv.UnstructuredGrid(surface_cells, surface_types, point_array_values[used])
+        surface.point_data["GlobalNodeID"] = np.asarray(used, dtype=np.int64)
+        surface.cell_data["GlobalElementID"] = np.arange(len(faces), dtype=np.int64)
+        surface.save(surface_dir / f"{name}.vtu", binary=False)
+
+    gauge_point = np.array([0.5, 0.0, 0.125], dtype=float)
+    gauge_node = int(np.argmin(np.linalg.norm(point_array_values - gauge_point, axis=1)))
+    gauge_pressure = float(curved_tet3d_pressure(point_array_values[[gauge_node]])[0])
+    return gauge_node, gauge_pressure
+
+
+def write_curved_tet3d_solver_xml(case_dir: Path,
+                                  steps: int,
+                                  gauge_node: int,
+                                  gauge_pressure: float) -> None:
+    (case_dir / "pressure_gauge.csv").write_text(
+        f"node_id,pressure\n{gauge_node},{gauge_pressure:.16g}\n", encoding="utf-8")
+    benchmark = {
+        "benchmark": "synthetic curved Tetra10 open-vessel free-surface smoke",
+        "representation": "unfitted_level_set",
+        "dimensions_m": {
+            "tank_length": 1.0,
+            "tank_height": 1.0,
+            "tank_width": 0.25,
+            "profile_window_x_min": 0.5,
+        },
+        "pressure_gauge": {
+            "node_id": gauge_node,
+            "expected_initial_hydrostatic_pressure": gauge_pressure,
+        },
+        "notes": [
+            "Generated at run time to exercise solver-level curved 3D Tetra10 geometry.",
+            "Quadratic tetrahedra use curved midside coordinates and quadratic triangle wall files.",
+        ],
+    }
+    (case_dir / "benchmark.json").write_text(
+        json.dumps(benchmark, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    face_blocks = "\n".join(
+        f"""  <Add_face name="{name}">
+    <Face_file_path>mesh/background/mesh-surfaces/{name}.vtu</Face_file_path>
+  </Add_face>"""
+        for name in ("wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back", "wall_top")
+    )
+    wall_bc_blocks = "\n".join(
+        f"""  <Add_BC name="{name}">
+    <Type>Dir</Type>
+    <Value>0.0</Value>
+  </Add_BC>"""
+        for name in ("wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back")
+    )
+    (case_dir / "solver.xml").write_text(f"""<?xml version="1.0" encoding="UTF-8" ?>
+<svMultiPhysicsFile version="0.1">
+
+<GeneralSimulationParameters>
+  <Use_new_OOP_solver>true</Use_new_OOP_solver>
+  <Continue_previous_simulation>false</Continue_previous_simulation>
+  <Number_of_spatial_dimensions>3</Number_of_spatial_dimensions>
+  <Number_of_time_steps>{steps}</Number_of_time_steps>
+  <Time_step_size>0.001</Time_step_size>
+  <Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>
+  <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>
+  <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+  <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
+  <Increment_in_saving_VTK_files>1</Increment_in_saving_VTK_files>
+  <Start_saving_after_time_step>1</Start_saving_after_time_step>
+  <Increment_in_saving_restart_files>{steps}</Increment_in_saving_restart_files>
+  <Convert_BIN_to_VTK_format>0</Convert_BIN_to_VTK_format>
+  <Verbose>1</Verbose>
+  <Warning>0</Warning>
+  <Debug>0</Debug>
+</GeneralSimulationParameters>
+
+<Add_mesh name="tank">
+  <Mesh_file_path>mesh/background/mesh-complete.mesh.vtu</Mesh_file_path>
+{face_blocks}
+</Add_mesh>
+
+<Add_equation type="level_set">
+  <Coupled>true</Coupled>
+  <Min_iterations>1</Min_iterations>
+  <Max_iterations>4</Max_iterations>
+  <Tolerance>1.0e-4</Tolerance>
+  <Level_set_field_name>phi</Level_set_field_name>
+  <Operator_tag>equations</Operator_tag>
+  <Level_set_source>prescribed_data</Level_set_source>
+  <Velocity_source>coupled_field</Velocity_source>
+  <Velocity_field_name>Velocity</Velocity_field_name>
+  <Auto_register_velocity_field>true</Auto_register_velocity_field>
+  <Enable_SUPG>true</Enable_SUPG>
+  <SUPG_tau_scale>0.5</SUPG_tau_scale>
+  <Enable_reinitialization>false</Enable_reinitialization>
+  <Enable_volume_correction>false</Enable_volume_correction>
+  <Output type="Spatial">
+    <Level_set>true</Level_set>
+    <Generated_interface>true</Generated_interface>
+    <Surface_position>true</Surface_position>
+  </Output>
+  <Output type="Volume_integral">
+    <Volume>true</Volume>
+  </Output>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
+    </Linear_algebra>
+    <Max_iterations>1</Max_iterations>
+    <Krylov_space_dimension>1</Krylov_space_dimension>
+    <Tolerance>1.0e-4</Tolerance>
+    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
+  </LS>
+</Add_equation>
+
+<Add_equation type="fluid">
+  <Coupled>true</Coupled>
+  <Min_iterations>1</Min_iterations>
+  <Max_iterations>8</Max_iterations>
+  <Tolerance>1.0e-4</Tolerance>
+  <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
+  <Density>998.2</Density>
+  <Force_x>0.0</Force_x>
+  <Force_y>-9.81</Force_y>
+  <Force_z>0.0</Force_z>
+  <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
+  <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
+  <Hydrostatic_pressure_reference_point>0.0 0.55 0.0</Hydrostatic_pressure_reference_point>
+  <Node_pressure_constraints>
+    <Id_type>Global_vertex_gid</Id_type>
+    <Values_file_path>pressure_gauge.csv</Values_file_path>
+  </Node_pressure_constraints>
+  <Viscosity model="Constant">
+    <Value>1.003e-3</Value>
+  </Viscosity>
+  <Output type="Spatial">
+    <Velocity>true</Velocity>
+    <Pressure>true</Pressure>
+    <Divergence>true</Divergence>
+  </Output>
+  <Output type="Volume_integral">
+    <Volume>true</Volume>
+  </Output>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
+    </Linear_algebra>
+    <Max_iterations>1</Max_iterations>
+    <Krylov_space_dimension>1</Krylov_space_dimension>
+    <Tolerance>1.0e-4</Tolerance>
+    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
+  </LS>
+{wall_bc_blocks}
+  <Add_BC name="free_surface">
+    <Type>Free_surface</Type>
+    <Implementation>UnfittedLevelSet</Implementation>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
+    <Level_set_isovalue>0.0</Level_set_isovalue>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Enable_velocity_extension>true</Enable_velocity_extension>
+    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
+    <External_pressure>0.0</External_pressure>
+    <Surface_tension>0.0</Surface_tension>
+    <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
+    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
+    <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
+    <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
+  </Add_BC>
+</Add_equation>
+
+</svMultiPhysicsFile>
+""", encoding="utf-8")
+
+
+def write_curved_tet3d_case(case_dir: Path, steps: int) -> None:
+    case_dir.mkdir(parents=True)
+    gauge_node, gauge_pressure = write_curved_tet3d_grid(case_dir)
+    write_curved_tet3d_solver_xml(case_dir, steps, gauge_node, gauge_pressure)
+
+
 def result_path(case_dir: Path, step: int) -> Path:
     names = [
         f"result_{step:03d}.vtu",
@@ -823,6 +1419,18 @@ def result_path(case_dir: Path, step: int) -> Path:
     if candidates:
         return candidates[-1]
     raise FileNotFoundError(f"no result file found under {case_dir}")
+
+
+def final_result_step(default_step: int,
+                      diagnostics: dict[str, Any]) -> int:
+    time_loop = diagnostics.get("time_loop", {})
+    if isinstance(time_loop, dict):
+        accepted_steps = time_loop.get("accepted_steps", [])
+        if accepted_steps:
+            final_step = accepted_steps[-1].get("step")
+            if isinstance(final_step, int) and final_step > 0:
+                return final_step
+    return default_step
 
 
 def value_span(values: list[float]) -> float:
@@ -926,6 +1534,24 @@ def top_counts(counts: dict[str, int], limit: int = 24) -> dict[str, int]:
 
 def increment_count(counts: dict[str, int], key: str) -> None:
     counts[key] = counts.get(key, 0) + 1
+
+
+def parse_count_summary(value: Any) -> dict[str, int]:
+    if not isinstance(value, str) or not value or value == "none":
+        return {}
+    counts: dict[str, int] = {}
+    for part in value.split(","):
+        if ":" not in part:
+            continue
+        name, raw_count = part.split(":", 1)
+        name = name.strip()
+        try:
+            count = int(raw_count.strip())
+        except ValueError:
+            continue
+        if name and count > 0:
+            counts[name] = counts.get(name, 0) + count
+    return counts
 
 
 def jit_shape_key(record: dict[str, Any]) -> str:
@@ -1148,15 +1774,50 @@ def active_cut_volume_records(diagnostics: dict[str, Any]) -> list[dict[str, Any
 def summarize_time_loop(time_loop: dict[str, Any]) -> dict[str, Any]:
     nonlinear_records = time_loop.get("nonlinear_records", [])
     accepted_steps = time_loop.get("accepted_steps", [])
+    rejected_steps = time_loop.get("rejected_steps", [])
+    dt_updates = time_loop.get("dt_updates", [])
     summary: dict[str, Any] = {
         "nonlinear_records": len(nonlinear_records),
         "accepted_steps": len(accepted_steps),
+        "rejected_steps": len(rejected_steps),
+        "dt_updates": len(dt_updates),
         "vtk_outputs": len(time_loop.get("vtk_outputs", [])),
     }
     if accepted_steps:
         final_step = accepted_steps[-1]
         summary["final_accepted_step"] = final_step.get("step")
         summary["final_accepted_time"] = final_step.get("time")
+        accepted_dt = [
+            float(record["dt"])
+            for record in accepted_steps
+            if isinstance(record.get("dt"), (int, float))
+        ]
+        accepted_dt_range = numeric_range(accepted_dt)
+        if accepted_dt_range is not None:
+            summary["accepted_dt"] = accepted_dt_range
+    if rejected_steps:
+        rejected_dt = [
+            float(record["dt"])
+            for record in rejected_steps
+            if isinstance(record.get("dt"), (int, float))
+        ]
+        rejected_dt_range = numeric_range(rejected_dt)
+        if rejected_dt_range is not None:
+            summary["rejected_dt"] = rejected_dt_range
+        reasons: dict[str, int] = {}
+        for record in rejected_steps:
+            reason = str(record.get("reason", "unknown"))
+            reasons[reason] = reasons.get(reason, 0) + 1
+        summary["rejection_reasons"] = reasons
+    if dt_updates:
+        next_dt = [
+            float(record["new_dt"])
+            for record in dt_updates
+            if isinstance(record.get("new_dt"), (int, float))
+        ]
+        next_dt_range = numeric_range(next_dt)
+        if next_dt_range is not None:
+            summary["updated_dt"] = next_dt_range
     if nonlinear_records:
         nonlinear_iterations = [
             int(record["nonlinear_iterations"])
@@ -1435,9 +2096,15 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "cut_volume_timings": [],
         "eigen_factorization_diagnostics": [],
         "active_pressure_support_constraints": [],
+        "curvature_projections": [],
+        "level_set_volume_corrections": [],
+        "level_set_maintenance": [],
+        "level_set_nonconservative_warnings": [],
         "time_loop": {
             "nonlinear_records": [],
             "accepted_steps": [],
+            "rejected_steps": [],
+            "dt_updates": [],
             "vtk_outputs": [],
         },
         "true_residual_failure_count": solver_output.count("true residual check failed"),
@@ -1468,6 +2135,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         transient_match = TRANSIENT_SOLVE_RE.search(line)
         nonlinear_match = TIMELOOP_NONLINEAR_RE.search(line)
         accepted_match = TIMELOOP_ACCEPTED_RE.search(line)
+        rejected_match = TIMELOOP_REJECTED_RE.search(line)
+        dt_updated_match = TIMELOOP_DT_UPDATED_RE.search(line)
         vtk_match = VTK_WRITE_RE.search(line)
         if linear_match is not None:
             diagnostics["solver_controls"]["linear_solver"] = convert_match(linear_match)
@@ -1479,6 +2148,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["time_loop"]["nonlinear_records"].append(convert_match(nonlinear_match))
         elif accepted_match is not None:
             diagnostics["time_loop"]["accepted_steps"].append(convert_match(accepted_match))
+        elif rejected_match is not None:
+            diagnostics["time_loop"]["rejected_steps"].append(convert_match(rejected_match))
+        elif dt_updated_match is not None:
+            diagnostics["time_loop"]["dt_updates"].append(convert_match(dt_updated_match))
         elif vtk_match is not None:
             diagnostics["time_loop"]["vtk_outputs"].append(vtk_match.group("path").strip())
         elif "Active-domain cut context" in line:
@@ -1550,6 +2223,17 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             )
         elif "diagnostic=level_set_active_side_vertex_constraint" in line:
             diagnostics["active_pressure_support_constraints"].append(
+                parse_key_values(line)
+            )
+        elif "Level-set curvature projected" in line:
+            diagnostics["curvature_projections"].append(parse_key_values(line))
+        elif "Level-set volume corrected" in line:
+            diagnostics["level_set_volume_corrections"].append(parse_key_values(line))
+        elif "Level-set maintenance diagnostic" in line:
+            diagnostics["level_set_maintenance"].append(parse_key_values(line))
+        elif ("WARNING unfitted free-surface level-set has no enabled "
+              "reinitialization or volume-correction request") in line:
+            diagnostics["level_set_nonconservative_warnings"].append(
                 parse_key_values(line)
             )
         elif "JIT specialization trace:" in line:
@@ -1648,11 +2332,10 @@ def diagnostic_solution_pressure_range(diagnostics: dict[str, Any]) -> float | N
 
 
 def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
-    context_volumes = [
-        float(record["active_side_volume"])
-        for record in diagnostics.get("cut_context_rebuilds", [])
-        if isinstance(record.get("active_side_volume"), (int, float))
-    ]
+    context_volumes = diagnostic_context_active_side_volumes(
+        diagnostics,
+        prefer_physical=False,
+    )
     assembly_volumes = [
         float(record["active_wet_volume"])
         for record in active_cut_volume_records(diagnostics)
@@ -1664,6 +2347,35 @@ def diagnostic_active_volume_error(diagnostics: dict[str, Any]) -> float | None:
         min(abs(assembly_volume - context_volume) for context_volume in context_volumes)
         for assembly_volume in assembly_volumes
     )
+
+
+def diagnostic_context_active_side_physical_volumes(
+        diagnostics: dict[str, Any]) -> list[float]:
+    return [
+        float(record["active_side_physical_volume"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("active_side_physical_volume"), (int, float))
+    ]
+
+
+def diagnostic_context_active_side_reference_volumes(
+        diagnostics: dict[str, Any]) -> list[float]:
+    return [
+        float(record["active_side_volume"])
+        for record in diagnostics.get("cut_context_rebuilds", [])
+        if isinstance(record.get("active_side_volume"), (int, float))
+    ]
+
+
+def diagnostic_context_active_side_volumes(
+        diagnostics: dict[str, Any],
+        *,
+        prefer_physical: bool = True) -> list[float]:
+    physical_volumes = diagnostic_context_active_side_physical_volumes(diagnostics)
+    reference_volumes = diagnostic_context_active_side_reference_volumes(diagnostics)
+    if prefer_physical and physical_volumes:
+        return physical_volumes
+    return reference_volumes
 
 
 def diagnostic_cut_volume_min_exact_order(diagnostics: dict[str, Any]) -> int | None:
@@ -1796,6 +2508,14 @@ def diagnostic_cut_context_value_counts(diagnostics: dict[str, Any], key: str) -
     return counts
 
 
+def diagnostic_cut_context_summary_counts(diagnostics: dict[str, Any], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in diagnostics.get("cut_context_rebuilds", []):
+        for name, count in parse_count_summary(record.get(key)).items():
+            counts[name] = counts.get(name, 0) + count
+    return counts
+
+
 def diagnostic_pressure_gauge_value(diagnostics: dict[str, Any]) -> float | None:
     for record in reversed(diagnostics.get("hydrostatic_initializations", [])):
         checked = record.get("checked_gauge_constraints")
@@ -1849,6 +2569,37 @@ def cut_context_rebuild_provenance_counts(diagnostics: dict[str, Any]) -> dict[s
         key = str(provenance) if provenance else "missing"
         increment_count(counts, key)
     return counts
+
+
+def generated_cell_cache_summary(diagnostics: dict[str, Any]) -> dict[str, int]:
+    records = diagnostics.get("cut_context_rebuilds", [])
+    if not isinstance(records, list):
+        return {}
+    summary = {
+        "rebuilds_with_cell_cache": 0,
+        "total_hits": 0,
+        "total_misses": 0,
+        "domain_hits": 0,
+        "full_miss_rebuilds": 0,
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        hits = record.get("generated_cell_cache_hits")
+        misses = record.get("generated_cell_cache_misses")
+        cell_count = record.get("cell_count")
+        if not isinstance(hits, int) or not isinstance(misses, int):
+            continue
+        summary["rebuilds_with_cell_cache"] += 1
+        summary["total_hits"] += hits
+        summary["total_misses"] += misses
+        domain_hits = record.get("generated_domain_cache_hits")
+        if isinstance(domain_hits, int):
+            summary["domain_hits"] += domain_hits
+        if (isinstance(cell_count, int) and cell_count > 0 and
+                hits == 0 and misses == cell_count):
+            summary["full_miss_rebuilds"] += 1
+    return summary
 
 
 def cut_context_solution_source_errors(diagnostics: dict[str, Any]) -> list[str]:
@@ -1922,6 +2673,9 @@ def assembly_efficiency_errors(metrics: dict[str, Any],
         ("max_diagnostic_newton_matrix_assemblies_per_step",
          "diagnostic_newton_matrix_assemblies_per_accepted_step",
          "Newton matrix assemblies per accepted step"),
+        ("max_diagnostic_generated_cell_cache_full_miss_rebuilds",
+         "diagnostic_generated_cell_cache_full_miss_rebuilds",
+         "generated-interface full cell-cache miss rebuilds"),
     )
     errors = []
     for arg_name, metric_name, label in checks:
@@ -1978,10 +2732,13 @@ def cut_context_policy_errors(metrics: dict[str, Any],
             required = (
                 "generated_interface_geometry",
                 "implicit_cut_quadrature_backend",
+                "selected_implicit_cut_quadrature_backend_counts",
                 "implicit_cut_backend_seconds",
                 "implicit_cut_backend_seconds_max",
                 "implicit_cut_fallback_policy",
                 "implicit_cut_fallback_cells",
+                "implicit_cut_backend_qualification_counts",
+                "required_implicit_cut_backend_qualification",
                 "achieved_interface_quadrature_order",
                 "achieved_volume_quadrature_order",
                 "interface_rule_count",
@@ -2005,6 +2762,12 @@ def cut_context_policy_errors(metrics: dict[str, Any],
             ("expect_implicit_cut_quadrature_backend",
              "diagnostic_implicit_cut_quadrature_backend_counts",
              "implicit cut quadrature backend"),
+            ("expect_selected_implicit_cut_quadrature_backend",
+             "diagnostic_selected_implicit_cut_quadrature_backend_counts",
+             "selected implicit cut quadrature backend"),
+            ("expect_implicit_cut_backend_qualification",
+             "diagnostic_implicit_cut_backend_qualification_counts",
+             "implicit cut backend qualification"),
             ("expect_implicit_cut_fallback_policy",
              "diagnostic_implicit_cut_fallback_policy_counts",
              "implicit cut fallback policy")):
@@ -2045,6 +2808,86 @@ def cut_context_policy_errors(metrics: dict[str, Any],
             errors.append(
                 f"diagnostic {label} {value} is below {minimum}"
             )
+    return errors
+
+
+def curvature_projection_errors(metrics: dict[str, Any],
+                                args: argparse.Namespace) -> list[str]:
+    errors = []
+    if args.require_curvature_projection_diagnostics and not metrics["diagnostics"].get(
+            "curvature_projections"):
+        errors.append("curvature projection diagnostics were not reported")
+    if args.min_diagnostic_curvature_projection_count is not None:
+        count = metrics.get("diagnostic_curvature_projection_count")
+        if not isinstance(count, int):
+            errors.append("curvature projection diagnostic count is unavailable")
+        elif count < args.min_diagnostic_curvature_projection_count:
+            errors.append(
+                f"curvature projection diagnostic count {count} is below "
+                f"{args.min_diagnostic_curvature_projection_count}"
+            )
+    if args.min_diagnostic_curvature_projection_max_abs_curvature is not None:
+        value = metrics.get("diagnostic_curvature_projection_max_abs_curvature")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection max-abs-curvature diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_max_abs_curvature:
+            errors.append(
+                f"curvature projection max abs curvature {value:.6g} is below "
+                f"{args.min_diagnostic_curvature_projection_max_abs_curvature:.6g}"
+            )
+    if args.max_diagnostic_curvature_projection_zero_fallback_vertices is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_max_zero_fallback_vertices")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection zero-fallback diagnostic is unavailable")
+        elif value > args.max_diagnostic_curvature_projection_zero_fallback_vertices:
+            errors.append(
+                f"curvature projection zero fallback vertices {value} exceed "
+                f"{args.max_diagnostic_curvature_projection_zero_fallback_vertices}"
+            )
+    if args.max_diagnostic_curvature_projection_normalized_fit_residual is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_max_normalized_fit_residual")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection normalized fit residual diagnostic is unavailable")
+        elif value > args.max_diagnostic_curvature_projection_normalized_fit_residual:
+            errors.append(
+                f"curvature projection normalized fit residual {value:.6g} exceeds "
+                f"{args.max_diagnostic_curvature_projection_normalized_fit_residual:.6g}"
+            )
+    if args.min_diagnostic_curvature_projection_smoothing_iterations is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_max_smoothing_iterations")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection smoothing diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_smoothing_iterations:
+            errors.append(
+                f"curvature projection smoothing iterations {value} are below "
+                f"{args.min_diagnostic_curvature_projection_smoothing_iterations}"
+            )
+    if args.require_curvature_projection_newton_freshness:
+        reason_counts = metrics.get("diagnostic_curvature_projection_reason_counts")
+        if not isinstance(reason_counts, dict):
+            errors.append("curvature projection reason-count diagnostics are unavailable")
+            return errors
+        summary = metrics.get("time_loop", {}).get("summary", {})
+        accepted_steps = summary.get("accepted_steps") if isinstance(summary, dict) else None
+        if not isinstance(accepted_steps, int) or accepted_steps <= 0:
+            errors.append("curvature projection freshness requires accepted-step count")
+            return errors
+        required_reasons = {
+            "initial": 1,
+            "before_physics_solve": accepted_steps,
+            "jacobian_and_residual": accepted_steps,
+            "line_search_trial": accepted_steps,
+            "accepted_step": accepted_steps,
+        }
+        for reason, minimum in required_reasons.items():
+            count = reason_counts.get(reason, 0)
+            if not isinstance(count, int) or count < minimum:
+                errors.append(
+                    f"curvature projection reason '{reason}' count {count} is below {minimum}"
+                )
     return errors
 
 
@@ -2201,6 +3044,18 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         counts = diagnostic_cut_context_value_counts(diagnostics, source)
         if counts:
             metrics[target] = top_counts(counts)
+    selected_backend_counts = diagnostic_cut_context_summary_counts(
+        diagnostics, "selected_implicit_cut_quadrature_backend_counts")
+    if selected_backend_counts:
+        metrics["diagnostic_selected_implicit_cut_quadrature_backend_counts"] = (
+            top_counts(selected_backend_counts)
+        )
+    backend_qualification_counts = diagnostic_cut_context_summary_counts(
+        diagnostics, "implicit_cut_backend_qualification_counts")
+    if backend_qualification_counts:
+        metrics["diagnostic_implicit_cut_backend_qualification_counts"] = (
+            top_counts(backend_qualification_counts)
+        )
     gauge_value = diagnostic_pressure_gauge_value(diagnostics)
     if gauge_value is not None:
         metrics["diagnostic_pressure_gauge_value"] = gauge_value
@@ -2248,6 +3103,29 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             nonlinear_refresh_count
         )
         metrics["diagnostic_cut_context_vector_refresh_count"] = vector_refresh_count
+    cell_cache_summary = generated_cell_cache_summary(diagnostics)
+    if cell_cache_summary:
+        metrics["diagnostic_generated_cell_cache_summary"] = cell_cache_summary
+        metrics["diagnostic_generated_cell_cache_total_hits"] = (
+            cell_cache_summary["total_hits"]
+        )
+        metrics["diagnostic_generated_cell_cache_total_misses"] = (
+            cell_cache_summary["total_misses"]
+        )
+        metrics["diagnostic_generated_domain_cache_hits"] = (
+            cell_cache_summary["domain_hits"]
+        )
+        metrics["diagnostic_generated_cell_cache_full_miss_rebuilds"] = (
+            cell_cache_summary["full_miss_rebuilds"]
+        )
+    if diagnostics.get("level_set_maintenance"):
+        maintenance = diagnostics["level_set_maintenance"]
+        metrics["diagnostic_level_set_maintenance_count"] = len(maintenance)
+        metrics["latest_level_set_maintenance"] = maintenance[-1]
+    if diagnostics.get("level_set_nonconservative_warnings"):
+        warnings = diagnostics["level_set_nonconservative_warnings"]
+        metrics["diagnostic_level_set_nonconservative_warning_count"] = len(warnings)
+        metrics["latest_level_set_nonconservative_warning"] = warnings[-1]
     if diagnostics.get("fsils_true_residuals"):
         latest_true_residual = diagnostics["fsils_true_residuals"][-1]
         metrics["latest_fsils_true_residual"] = latest_true_residual
@@ -2461,6 +3339,81 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         value = latest_support.get("inactive_vertex_runs")
         if isinstance(value, str):
             metrics["diagnostic_active_pressure_support_latest_inactive_vertex_runs"] = value
+    if diagnostics.get("curvature_projections"):
+        records = diagnostics["curvature_projections"]
+        metrics["latest_curvature_projection"] = records[-1]
+        metrics["diagnostic_curvature_projection_count"] = len(records)
+        field_counts: dict[str, int] = {}
+        for record in records:
+            increment_count(
+                field_counts,
+                str(record.get("curvature_field", "unknown")),
+            )
+        metrics["diagnostic_curvature_projection_field_counts"] = (
+            top_counts(field_counts)
+        )
+        reason_counts: dict[str, int] = {}
+        for record in records:
+            increment_count(
+                reason_counts,
+                str(record.get("reason", "unknown")),
+            )
+        metrics["diagnostic_curvature_projection_reason_counts"] = (
+            top_counts(reason_counts)
+        )
+        for source, target in (
+                ("fitted_vertices",
+                 "diagnostic_curvature_projection_max_fitted_vertices"),
+                ("fallback_vertices",
+                 "diagnostic_curvature_projection_max_fallback_vertices"),
+                ("zero_fallback_vertices",
+                 "diagnostic_curvature_projection_max_zero_fallback_vertices"),
+                ("insufficient_stencil_vertices",
+                 "diagnostic_curvature_projection_max_insufficient_stencil_vertices"),
+                ("singular_stencil_vertices",
+                 "diagnostic_curvature_projection_max_singular_stencil_vertices"),
+                ("small_gradient_vertices",
+                 "diagnostic_curvature_projection_max_small_gradient_vertices"),
+                ("fit_residual_failure_vertices",
+                 "diagnostic_curvature_projection_max_fit_residual_failure_vertices"),
+                ("smoothing_iterations",
+                 "diagnostic_curvature_projection_max_smoothing_iterations"),
+                ("smoothing_mean_abs_update",
+                 "diagnostic_curvature_projection_max_smoothing_mean_abs_update"),
+                ("smoothing_max_abs_update",
+                 "diagnostic_curvature_projection_max_smoothing_max_abs_update"),
+                ("mean_normalized_fit_residual",
+                 "diagnostic_curvature_projection_max_mean_normalized_fit_residual"),
+                ("max_normalized_fit_residual",
+                 "diagnostic_curvature_projection_max_normalized_fit_residual"),
+                ("max_abs_curvature",
+                 "diagnostic_curvature_projection_max_abs_curvature")):
+            values = [
+                record.get(source)
+                for record in records
+                if isinstance(record.get(source), (int, float))
+            ]
+            if values:
+                metrics[target] = max(values)
+    if diagnostics.get("level_set_volume_corrections"):
+        records = diagnostics["level_set_volume_corrections"]
+        metrics["latest_level_set_volume_correction"] = records[-1]
+        metrics["diagnostic_level_set_volume_correction_count"] = len(records)
+        for source, target in (
+                ("achieved_volume_error",
+                 "diagnostic_level_set_volume_correction_max_abs_achieved_error"),
+                ("applied_shift_magnitude",
+                 "diagnostic_level_set_volume_correction_max_shift_magnitude"),
+                ("iterations",
+                 "diagnostic_level_set_volume_correction_max_iterations")):
+            values = [
+                abs(record.get(source)) if source == "achieved_volume_error"
+                else record.get(source)
+                for record in records
+                if isinstance(record.get(source), (int, float))
+            ]
+            if values:
+                metrics[target] = max(values)
     if diagnostics.get("jit_specialization_traces"):
         traces = diagnostics["jit_specialization_traces"]
         metrics["latest_jit_specialization_trace"] = traces[-1]
@@ -2767,9 +3720,9 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["diagnostic_blockschur_true_residual_retries"] = max(retry_counts)
 
     wet_fraction_volume = metrics.get("wet_fraction_volume")
-    context_volumes = metrics.get("cut_context_active_side_volumes", [])
+    context_volumes = metrics.get("cut_context_active_side_physical_volumes", [])
     if isinstance(wet_fraction_volume, (int, float)) and context_volumes:
-        metrics["wet_fraction_volume_drift_vs_initial_cut_context"] = (
+        metrics["wet_fraction_volume_drift_vs_initial_physical_cut_context"] = (
             float(wet_fraction_volume) - float(context_volumes[0])
         )
 
@@ -2790,11 +3743,23 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "generated_interface_geometry",
         "implicit_cut_quadrature_backend",
         "implicit_cut_fallback_policy",
+        "required_implicit_cut_backend_qualification",
         "implicit_cut_root_tolerance",
         "implicit_cut_max_subdivision_depth",
         "generated_interface_quadrature_order",
         "interface_quadrature_order",
         "volume_quadrature_order",
+        "surface_tension",
+        "projected_curvature_field",
+        "curvature_projection_cadence_steps",
+        "curvature_projection_smoothing_iterations",
+        "curvature_projection_smoothing_relaxation",
+        "enable_level_set_volume_correction",
+        "volume_correction_cadence_steps",
+        "volume_correction_use_initial_volume",
+        "volume_correction_tolerance",
+        "volume_correction_max_iterations",
+        "mpi_ranks",
         "mms_nx",
         "mms_ny",
         "max_diagnostic_implicit_cut_fallback_cells",
@@ -2802,6 +3767,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "min_diagnostic_achieved_volume_quadrature_order",
         "expect_generated_interface_geometry",
         "expect_implicit_cut_quadrature_backend",
+        "expect_selected_implicit_cut_quadrature_backend",
+        "expect_implicit_cut_backend_qualification",
         "expect_implicit_cut_fallback_policy",
     ):
         value = getattr(args, name)
@@ -2811,6 +3778,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "enable_jacobian_check",
         "enable_newton_direction_check",
         "enable_newton_assembly_diagnostics",
+        "newton_line_search_fail_on_no_reduction",
         "disable_cut_stabilization",
         "enable_linear_solve_history",
         "enable_linear_solve_component_norms",
@@ -2829,10 +3797,24 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_basis_cache_diagnostics",
         "require_marked_interior_face_fallback_diagnostics",
         "require_jacobian_component_block_diagnostics",
+        "require_eigen_factorization_diagnostics",
+        "require_active_pressure_support_diagnostics",
+        "require_curvature_projection_diagnostics",
+        "require_curvature_projection_newton_freshness",
         "require_fsils_matrix_diagnostics",
         "require_assembly_topology_consistency",
         "require_high_order_cut_context_diagnostics",
+        "high_order_production_qualification",
+        "high_order_mpi_production_qualification",
+        "high_order_3d_benchmark_smoke",
+        "high_order_3d_benchmark_qualification",
+        "high_order_3d_benchmark_profile_qualification",
+        "high_order_curved_3d_simplex_smoke",
+        "high_order_mpi_motion_smoke",
         "use_high_order_implicit_cuts",
+        "require_reference_profile_comparison",
+        "enable_adaptive_time_loop",
+        "allow_experimental_profile_linear_solver",
         "allow_failure_diagnostics",
     ):
         if getattr(args, name):
@@ -2845,18 +3827,54 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "jacobian_check_component_sweeps",
         "linear_solve_history_max_calls",
         "linear_solve_component_norms_max_newton_it",
+        "newton_line_search_max_iterations",
         "max_diagnostic_assembly_timings_per_step",
         "max_diagnostic_extra_assembly_timings_per_step",
         "max_diagnostic_cut_context_rebuilds_per_step",
         "max_diagnostic_newton_matrix_assemblies_per_step",
+        "max_diagnostic_generated_cell_cache_full_miss_rebuilds",
         "max_diagnostic_process_rss_kb",
         "max_diagnostic_process_rss_growth_kb",
         "max_diagnostic_process_basis_cache_entries",
         "max_diagnostic_process_basis_cache_entry_growth",
+        "max_wet_fraction_volume_error",
+        "max_reference_profile_rmse",
+        "max_reference_profile_mae",
+        "max_reference_profile_max_abs_error",
+        "max_reference_profile_elevated_front_lag",
+        "max_solver_elapsed_wall_seconds",
+        "curvature_projection_smoothing_iterations",
+        "curvature_projection_smoothing_relaxation",
+        "min_diagnostic_curvature_projection_count",
+        "min_diagnostic_curvature_projection_max_abs_curvature",
+        "max_diagnostic_curvature_projection_zero_fallback_vertices",
+        "max_diagnostic_curvature_projection_normalized_fit_residual",
+        "min_diagnostic_curvature_projection_smoothing_iterations",
+        "max_solver_elapsed_seconds_per_accepted_step",
+        "min_reference_profile_coverage",
+        "min_reference_profile_direct_coverage",
         "max_fsils_matrix_zero_rows",
         "max_fsils_matrix_missing_diag",
         "max_fsils_matrix_zero_diag",
         "max_fsils_matrix_nonfinite_entries",
+        "max_eigen_factorization_pressure_zero_cols",
+        "max_time_loop_nonlinear_iterations_per_step",
+        "max_time_loop_linear_iterations_per_step",
+        "min_interface_height_change",
+        "min_interface_mean_abs_height_change",
+        "min_interface_slope_change",
+        "min_interface_final_height_span",
+        "cut_cell_velocity_gradient_penalty",
+        "cut_cell_pressure_gradient_penalty",
+        "reference_profile_sample_radius",
+        "reference_profile_elevated_front_clearance",
+        "adaptive_time_loop_min_dt",
+        "adaptive_time_loop_max_dt",
+        "adaptive_time_loop_max_retries",
+        "adaptive_time_loop_decrease_factor",
+        "adaptive_time_loop_increase_factor",
+        "adaptive_time_loop_target_newton_iterations",
+        "adaptive_time_loop_max_steps_multiplier",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -2864,17 +3882,23 @@ def add_solver_control_overrides(metrics: dict[str, Any],
 
 
 def parse_active_volume_history_from_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
-    keys = [
-        "cut_context_active_side_volumes",
-        "assembly_active_wet_volumes",
-        "cut_context_active_side_volume_change",
-        "assembly_active_wet_volume_change",
-    ]
-    return {
+    metrics = {
         key: diagnostics[key]
-        for key in keys
+        for key in (
+            "cut_context_active_side_volumes",
+            "assembly_active_wet_volumes",
+            "cut_context_active_side_volume_change",
+            "assembly_active_wet_volume_change",
+        )
         if key in diagnostics
     }
+    physical_volumes = diagnostic_context_active_side_physical_volumes(diagnostics)
+    if physical_volumes:
+        metrics["cut_context_active_side_physical_volumes"] = physical_volumes
+        metrics["cut_context_active_side_physical_volume_change"] = value_span(
+            physical_volumes
+        )
+    return metrics
 
 
 def previous_invalid_pressure(benchmark: dict[str, Any]) -> float | None:
@@ -2908,10 +3932,60 @@ def diagnostic_timeout_metrics(case_name: str,
     return metrics
 
 
+def accepted_step_count_for_elapsed_budget(metrics: dict[str, Any]) -> int | None:
+    time_loop = metrics.get("time_loop")
+    if not isinstance(time_loop, dict):
+        diagnostics = metrics.get("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            time_loop = diagnostics.get("time_loop", {})
+    summary = time_loop.get("summary") if isinstance(time_loop, dict) else None
+    if isinstance(summary, dict):
+        accepted_steps = summary.get("accepted_steps")
+        if isinstance(accepted_steps, int) and accepted_steps > 0:
+            return accepted_steps
+    result_step = metrics.get("result_step")
+    if isinstance(result_step, int) and result_step > 0:
+        return result_step
+    return None
+
+
+def solver_elapsed_time_errors(metrics: dict[str, Any],
+                               args: argparse.Namespace) -> list[str]:
+    errors = []
+    max_wall_seconds = getattr(args, "max_solver_elapsed_wall_seconds", None)
+    max_seconds_per_step = getattr(
+        args, "max_solver_elapsed_seconds_per_accepted_step", None)
+    if max_wall_seconds is None and max_seconds_per_step is None:
+        return errors
+    elapsed = metrics.get("solver_elapsed_wall_seconds")
+    if not isinstance(elapsed, (int, float)):
+        return ["solver elapsed wall time was not reported"]
+    if max_wall_seconds is not None and float(elapsed) > max_wall_seconds:
+        errors.append(
+            f"solver elapsed wall time {float(elapsed):.3f}s exceeds "
+            f"{max_wall_seconds:.3f}s"
+        )
+    if max_seconds_per_step is not None:
+        accepted_steps = accepted_step_count_for_elapsed_budget(metrics)
+        if accepted_steps is None:
+            errors.append("accepted-step count is unavailable for elapsed-time budget")
+        else:
+            seconds_per_step = float(elapsed) / float(accepted_steps)
+            metrics["solver_elapsed_seconds_per_accepted_step"] = seconds_per_step
+            if seconds_per_step > max_seconds_per_step:
+                errors.append(
+                    "solver elapsed time per accepted step "
+                    f"{seconds_per_step:.3f}s exceeds "
+                    f"{max_seconds_per_step:.3f}s"
+                )
+    return errors
+
+
 def evaluate_timeout_diagnostics(metrics: dict[str, Any],
                                  args: argparse.Namespace) -> list[str]:
     errors = []
     diagnostics = metrics["diagnostics"]
+    errors.extend(solver_elapsed_time_errors(metrics, args))
     errors.extend(time_loop_convergence_errors(metrics, args))
     gauge_required = metrics.get("case") in {"d18", "d38", "mini2d", "static2d"}
     pre_solution_timeout = timeout_before_solution_state(diagnostics)
@@ -2959,6 +4033,7 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(diagnostics))
     errors.extend(cut_context_policy_errors(metrics, args))
+    errors.extend(curvature_projection_errors(metrics, args))
     if (args.require_newton_assembly_diagnostics and
             not diagnostics.get("newton_assemblies")):
         errors.append("Newton assembly diagnostics were not reported")
@@ -3079,6 +4154,17 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
             errors.append(
                 f"Eigen factorization pressure zero rows {pressure_zero_rows} exceed "
                 f"{args.max_eigen_factorization_pressure_zero_rows}"
+            )
+    if args.max_eigen_factorization_pressure_zero_cols is not None:
+        pressure_zero_cols = metrics.get(
+            "diagnostic_eigen_factorization_max_pressure_zero_cols"
+        )
+        if not isinstance(pressure_zero_cols, (int, float)):
+            errors.append("Eigen factorization pressure zero-column diagnostics are unavailable")
+        elif pressure_zero_cols > args.max_eigen_factorization_pressure_zero_cols:
+            errors.append(
+                f"Eigen factorization pressure zero columns {pressure_zero_cols} exceed "
+                f"{args.max_eigen_factorization_pressure_zero_cols}"
             )
     if args.max_eigen_factorization_nonfinite_entries is not None:
         nonfinite = metrics.get(
@@ -3272,6 +4358,108 @@ def pressure_gauge_metrics(output: pv.DataSet, benchmark: dict[str, Any]) -> dic
     return metrics
 
 
+def interface_profile_xy(dataset: pv.DataSet) -> tuple[np.ndarray, np.ndarray] | None:
+    if "phi" not in dataset.point_data:
+        return None
+    try:
+        interface = dataset.contour(isosurfaces=[0.0], scalars="phi")
+    except Exception:
+        return None
+    points = np.asarray(interface.points, dtype=float)
+    if points.ndim != 2 or points.shape[0] == 0 or points.shape[1] < 2:
+        return None
+    x = points[:, 0]
+    y = points[:, 1]
+    finite = np.isfinite(x) & np.isfinite(y)
+    if np.count_nonzero(finite) < 2:
+        return None
+    x = x[finite]
+    y = y[finite]
+    order = np.argsort(x, kind="mergesort")
+    x = x[order]
+    y = y[order]
+
+    unique_x: list[float] = []
+    averaged_y: list[float] = []
+    start = 0
+    tolerance = 1.0e-12
+    while start < x.size:
+        end = start + 1
+        while end < x.size and abs(float(x[end] - x[start])) <= tolerance:
+            end += 1
+        unique_x.append(float(np.mean(x[start:end])))
+        averaged_y.append(float(np.mean(y[start:end])))
+        start = end
+    if len(unique_x) < 2:
+        return None
+    return np.asarray(unique_x, dtype=float), np.asarray(averaged_y, dtype=float)
+
+
+def add_interface_profile_summary(metrics: dict[str, Any],
+                                  prefix: str,
+                                  profile: tuple[np.ndarray, np.ndarray] | None) -> None:
+    if profile is None:
+        metrics[f"{prefix}_interface_available"] = False
+        return
+    x, y = profile
+    metrics[f"{prefix}_interface_available"] = True
+    metrics[f"{prefix}_interface_points"] = int(x.size)
+    metrics[f"{prefix}_interface_x_min"] = float(np.min(x))
+    metrics[f"{prefix}_interface_x_max"] = float(np.max(x))
+    metrics[f"{prefix}_interface_height_min"] = float(np.min(y))
+    metrics[f"{prefix}_interface_height_max"] = float(np.max(y))
+    metrics[f"{prefix}_interface_height_mean"] = float(np.mean(y))
+    metrics[f"{prefix}_interface_height_span"] = float(np.max(y) - np.min(y))
+    if np.max(x) > np.min(x):
+        slope, intercept = np.polyfit(x, y, 1)
+        metrics[f"{prefix}_interface_slope"] = float(slope)
+        metrics[f"{prefix}_interface_intercept"] = float(intercept)
+
+
+def add_interface_motion_metrics(metrics: dict[str, Any],
+                                 initial: pv.DataSet,
+                                 output: pv.DataSet) -> None:
+    initial_profile = interface_profile_xy(initial)
+    final_profile = interface_profile_xy(output)
+    add_interface_profile_summary(metrics, "initial", initial_profile)
+    add_interface_profile_summary(metrics, "final", final_profile)
+    if initial_profile is None or final_profile is None:
+        metrics["interface_motion_available"] = False
+        return
+
+    initial_x, initial_y = initial_profile
+    final_x, final_y = final_profile
+    x_min = max(float(np.min(initial_x)), float(np.min(final_x)))
+    x_max = min(float(np.max(initial_x)), float(np.max(final_x)))
+    if not np.isfinite(x_min) or not np.isfinite(x_max) or x_max <= x_min:
+        metrics["interface_motion_available"] = False
+        metrics["interface_motion_unavailable_reason"] = "profiles_do_not_overlap_in_x"
+        return
+
+    sample_count = min(201, max(25, int(min(initial_x.size, final_x.size) * 4)))
+    sample_x = np.linspace(x_min, x_max, sample_count)
+    initial_sample_y = np.interp(sample_x, initial_x, initial_y)
+    final_sample_y = np.interp(sample_x, final_x, final_y)
+    delta = final_sample_y - initial_sample_y
+
+    metrics["interface_motion_available"] = True
+    metrics["interface_motion_sample_count"] = int(sample_count)
+    metrics["interface_motion_x_min"] = float(x_min)
+    metrics["interface_motion_x_max"] = float(x_max)
+    metrics["interface_height_max_abs_change"] = float(np.max(np.abs(delta)))
+    metrics["interface_height_mean_abs_change"] = float(np.mean(np.abs(delta)))
+    metrics["interface_height_rms_change"] = float(np.sqrt(np.mean(delta * delta)))
+    metrics["interface_height_signed_mean_change"] = float(np.mean(delta))
+    metrics["interface_height_change_min"] = float(np.min(delta))
+    metrics["interface_height_change_max"] = float(np.max(delta))
+
+    initial_slope = metrics.get("initial_interface_slope")
+    final_slope = metrics.get("final_interface_slope")
+    if isinstance(initial_slope, (int, float)) and isinstance(final_slope, (int, float)):
+        metrics["interface_slope_change"] = float(final_slope) - float(initial_slope)
+        metrics["interface_slope_abs_change"] = abs(float(final_slope) - float(initial_slope))
+
+
 def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, Any]:
     benchmark = load_benchmark(case_dir)
     if benchmark:
@@ -3299,13 +4487,18 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
     wet_speed = speed[wet0]
     wet_velocity = velocity[wet0]
 
+    def mean_velocity(region: np.ndarray) -> list[float]:
+        if not np.any(region):
+            return [0.0 for _ in range(velocity.shape[1])]
+        return [float(value) for value in np.nanmean(velocity[region], axis=0)]
+
     metrics: dict[str, Any] = {
         "result": str(result),
         "max_speed": float(np.nanmax(wet_speed)),
         "wet_mean_speed": float(np.nanmean(wet_speed)),
         "wet_mean_velocity": [float(value) for value in np.nanmean(wet_velocity, axis=0)],
-        "gate_mean_velocity": [float(value) for value in np.mean(velocity[gate_region], axis=0)],
-        "front_mean_velocity": [float(value) for value in np.mean(velocity[front_region], axis=0)],
+        "gate_mean_velocity": mean_velocity(gate_region),
+        "front_mean_velocity": mean_velocity(front_region),
         "finite_velocity": bool(np.isfinite(wet_velocity).all()),
         "wet_nodes": int(np.count_nonzero(wet0)),
         "gate_nodes": int(np.count_nonzero(gate_region)),
@@ -3342,12 +4535,23 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
                 metrics["interface_front_x"] = float(np.nanmax(interface_points[:, 0]))
         except Exception as exc:
             metrics["interface_extraction_error"] = str(exc)
+    add_interface_motion_metrics(metrics, initial, output)
+    if "WetVolumeMeasure" in output.cell_data:
+        wet_measures = np.asarray(output.cell_data["WetVolumeMeasure"], dtype=float).reshape(-1)
+        if wet_measures.shape[0] == output.n_cells:
+            metrics["wet_fraction_volume"] = float(np.sum(wet_measures))
+            metrics["wet_fraction_volume_source"] = "WetVolumeMeasure"
+            metrics["wet_volume_measure_cell_count"] = int(wet_measures.shape[0])
+            metrics["wet_volume_measure_min"] = float(np.min(wet_measures))
+            metrics["wet_volume_measure_max"] = float(np.max(wet_measures))
     if "WetVolumeFraction" in output.cell_data:
         fractions = np.asarray(output.cell_data["WetVolumeFraction"], dtype=float).reshape(-1)
         measures = cell_measure(output)
         if fractions.shape[0] == measures.shape[0]:
             metrics["wet_fraction_cell_count"] = int(fractions.shape[0])
-            metrics["wet_fraction_volume"] = float(np.sum(fractions * measures))
+            if "wet_fraction_volume" not in metrics:
+                metrics["wet_fraction_volume"] = float(np.sum(fractions * measures))
+                metrics["wet_fraction_volume_source"] = "WetVolumeFraction"
             metrics["wet_fraction_min"] = float(np.min(fractions))
             metrics["wet_fraction_max"] = float(np.max(fractions))
     metrics.update(pressure_gauge_metrics(output, benchmark))
@@ -3412,10 +4616,126 @@ def mms_verification_metrics(case_name: str,
     return metrics
 
 
+def solver_time_step_size(case_dir: Path) -> float | None:
+    try:
+        root = ET.parse(case_dir / "solver.xml").getroot()
+    except Exception:
+        return None
+    raw = text(root, "./GeneralSimulationParameters/Time_step_size")
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def reference_profile_for_time(
+        benchmark: dict[str, Any],
+        final_time: float,
+        tolerance: float) -> dict[str, Any] | None:
+    profiles = benchmark.get("reference_profiles")
+    if not isinstance(profiles, list):
+        return None
+    candidates = [
+        profile for profile in profiles
+        if isinstance(profile, dict) and
+        isinstance(profile.get("time_s"), (int, float)) and
+        isinstance(profile.get("path"), str)
+    ]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda profile: abs(float(profile["time_s"]) - final_time))
+    if abs(float(best["time_s"]) - final_time) > tolerance:
+        return None
+    return best
+
+
+def add_reference_profile_metrics(metrics: dict[str, Any],
+                                  case_dir: Path,
+                                  result: Path,
+                                  args: argparse.Namespace) -> None:
+    if not args.require_reference_profile_comparison:
+        return
+    benchmark = load_benchmark(case_dir)
+    dt = args.time_step_size
+    if dt is None:
+        dt = solver_time_step_size(case_dir)
+    if dt is None:
+        metrics["reference_profile_error"] = "solver time step size is unavailable"
+        return
+
+    final_time = float(args.steps) * float(dt)
+    tolerance = (
+        args.reference_profile_time_tolerance
+        if args.reference_profile_time_tolerance is not None
+        else max(1.0e-12, 0.5 * float(dt))
+    )
+    profile = reference_profile_for_time(benchmark, final_time, tolerance)
+    if profile is None:
+        metrics["reference_profile_error"] = (
+            f"no reference profile within {tolerance:.6g}s of final time "
+            f"{final_time:.6g}s"
+        )
+        metrics["reference_profile_time_s"] = final_time
+        return
+
+    reference_path = ROOT / str(profile["path"])
+    metrics["reference_profile_time_s"] = final_time
+    metrics["reference_profile_target_time_s"] = float(profile["time_s"])
+    metrics["reference_profile_path"] = str(reference_path)
+    try:
+        import compare_test05_profiles as test05_profiles
+
+        report = test05_profiles.compare(argparse.Namespace(
+            result=result,
+            reference_profile=reference_path,
+            scalar="phi",
+            benchmark_json=case_dir / "benchmark.json",
+            density=1000.0,
+            initial_wet_volume=None,
+            initial_kinetic_energy=0.0,
+            front_diagnostic_only=False,
+            stale_pressure_gauge_tolerance=None,
+            min_velocity_max=None,
+            x_min=None,
+            x_max=None,
+            sample_radius=args.reference_profile_sample_radius,
+            elevated_front_clearance=(
+                args.reference_profile_elevated_front_clearance
+                if args.reference_profile_elevated_front_clearance is not None
+                else 0.005
+            ),
+            max_elevated_front_lag=args.max_reference_profile_elevated_front_lag,
+            plot_output=None,
+            output=None,
+        ))
+    except Exception as exc:
+        metrics["reference_profile_error"] = str(exc)
+        return
+
+    validation = report.get("validation", {})
+    if isinstance(validation, dict):
+        metrics["reference_profile_validation_passed"] = bool(
+            validation.get("passed", False))
+        failures = validation.get("failures", [])
+        if isinstance(failures, list):
+            metrics["reference_profile_validation_failures"] = failures
+
+    comparison = report.get("profile_comparison", {})
+    if not isinstance(comparison, dict):
+        return
+    profile_metrics = comparison.get("metrics", {})
+    if not isinstance(profile_metrics, dict):
+        return
+    for key, value in profile_metrics.items():
+        if isinstance(value, (int, float, str)) or value is None:
+            metrics[f"reference_profile_{key}"] = value
+
+
 def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     errors = []
     if metrics.get("output_metrics_skipped"):
         return evaluate_timeout_diagnostics(metrics, args)
+    errors.extend(solver_elapsed_time_errors(metrics, args))
     errors.extend(time_loop_convergence_errors(metrics, args))
     if args.require_mms_verification:
         if not metrics.get("mms_verification_available"):
@@ -3431,6 +4751,7 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if args.require_cut_context_solution_source_diagnostics:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     errors.extend(cut_context_policy_errors(metrics, args))
+    errors.extend(curvature_projection_errors(metrics, args))
     if (args.require_newton_assembly_diagnostics and
             not metrics["diagnostics"].get("newton_assemblies")):
         errors.append("Newton assembly diagnostics were not reported")
@@ -3554,6 +4875,17 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
                 f"Eigen factorization pressure zero rows {pressure_zero_rows} exceed "
                 f"{args.max_eigen_factorization_pressure_zero_rows}"
             )
+    if args.max_eigen_factorization_pressure_zero_cols is not None:
+        pressure_zero_cols = metrics.get(
+            "diagnostic_eigen_factorization_max_pressure_zero_cols"
+        )
+        if not isinstance(pressure_zero_cols, (int, float)):
+            errors.append("Eigen factorization pressure zero-column diagnostics are unavailable")
+        elif pressure_zero_cols > args.max_eigen_factorization_pressure_zero_cols:
+            errors.append(
+                f"Eigen factorization pressure zero columns {pressure_zero_cols} exceed "
+                f"{args.max_eigen_factorization_pressure_zero_cols}"
+            )
     if args.max_eigen_factorization_nonfinite_entries is not None:
         nonfinite = metrics.get(
             "diagnostic_eigen_factorization_max_nonfinite_entries"
@@ -3567,6 +4899,63 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
             )
     if not metrics["finite_velocity"]:
         errors.append("Velocity contains non-finite values")
+    if args.min_capillary_response_speed_per_surface_tension is not None:
+        surface_tension = metrics.get("surface_tension")
+        max_speed = metrics.get("max_speed")
+        if not isinstance(surface_tension, (int, float)):
+            errors.append("surface-tension control is unavailable")
+        elif abs(float(surface_tension)) <= 0.0:
+            errors.append("surface tension is zero; capillary response cannot be normalized")
+        elif not isinstance(max_speed, (int, float)):
+            errors.append("capillary response speed diagnostic is unavailable")
+        else:
+            normalized_speed = float(max_speed) / abs(float(surface_tension))
+            metrics["capillary_response_speed_per_surface_tension"] = normalized_speed
+            if normalized_speed < args.min_capillary_response_speed_per_surface_tension:
+                errors.append(
+                    "capillary response speed per surface tension "
+                    f"{normalized_speed:.6g} is below "
+                    f"{args.min_capillary_response_speed_per_surface_tension:.6g}"
+                )
+    if args.max_capillary_balance_speed_per_surface_tension is not None:
+        surface_tension = metrics.get("surface_tension")
+        max_speed = metrics.get("max_speed")
+        if not isinstance(surface_tension, (int, float)):
+            errors.append("surface-tension control is unavailable")
+        elif abs(float(surface_tension)) <= 0.0:
+            errors.append("surface tension is zero; capillary balance cannot be normalized")
+        elif not isinstance(max_speed, (int, float)):
+            errors.append("capillary balance speed diagnostic is unavailable")
+        else:
+            normalized_speed = float(max_speed) / abs(float(surface_tension))
+            metrics["capillary_balance_speed_per_surface_tension"] = normalized_speed
+            if normalized_speed > args.max_capillary_balance_speed_per_surface_tension:
+                errors.append(
+                    "capillary balance speed per surface tension "
+                    f"{normalized_speed:.6g} exceeds "
+                    f"{args.max_capillary_balance_speed_per_surface_tension:.6g}"
+                )
+    if args.min_diagnostic_level_set_volume_correction_count is not None:
+        count = metrics.get("diagnostic_level_set_volume_correction_count")
+        if not isinstance(count, int):
+            errors.append("level-set volume-correction diagnostics are unavailable")
+        elif count < args.min_diagnostic_level_set_volume_correction_count:
+            errors.append(
+                f"level-set volume-correction count {count} is below "
+                f"{args.min_diagnostic_level_set_volume_correction_count}"
+            )
+    if args.max_diagnostic_level_set_volume_correction_achieved_error is not None:
+        error = metrics.get(
+            "diagnostic_level_set_volume_correction_max_abs_achieved_error"
+        )
+        if not isinstance(error, (int, float)):
+            errors.append("level-set volume-correction achieved-error diagnostic is unavailable")
+        elif float(error) > args.max_diagnostic_level_set_volume_correction_achieved_error:
+            errors.append(
+                "level-set volume-correction achieved error "
+                f"{float(error):.6g} exceeds "
+                f"{args.max_diagnostic_level_set_volume_correction_achieved_error:.6g}"
+            )
     if metrics.get("case") == "static2d":
         if metrics["max_speed"] > args.max_static_speed:
             errors.append(
@@ -3583,12 +4972,18 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
             f"wet mean speed {metrics['wet_mean_speed']:.6g} is below "
             f"{args.min_wet_mean_speed:.6g}"
         )
-    if metrics["gate_mean_velocity"][0] < args.min_gate_mean_ux:
+    if metrics.get("gate_nodes", 0) <= 0:
+        if args.min_gate_mean_ux > -1.0:
+            errors.append("gate region contains no wet nodes")
+    elif metrics["gate_mean_velocity"][0] < args.min_gate_mean_ux:
         errors.append(
             f"gate mean ux {metrics['gate_mean_velocity'][0]:.6g} is below "
             f"{args.min_gate_mean_ux:.6g}"
         )
-    if metrics["front_mean_velocity"][0] < args.min_front_mean_ux:
+    if metrics.get("front_nodes", 0) <= 0:
+        if args.min_front_mean_ux > -1.0:
+            errors.append("front region contains no wet nodes")
+    elif metrics["front_mean_velocity"][0] < args.min_front_mean_ux:
         errors.append(
             f"front mean ux {metrics['front_mean_velocity'][0]:.6g} is below "
             f"{args.min_front_mean_ux:.6g}"
@@ -3602,6 +4997,33 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
             errors.append(
                 f"assembly active wet-volume change {volume_change:.6g} is below "
                 f"{args.min_active_volume_change:.6g}"
+            )
+    for arg_name, metric_name, label in (
+            ("min_interface_height_change",
+             "interface_height_max_abs_change",
+             "interface height max absolute change"),
+            ("min_interface_mean_abs_height_change",
+             "interface_height_mean_abs_change",
+             "interface height mean absolute change"),
+            ("min_interface_slope_change",
+             "interface_slope_abs_change",
+             "interface slope absolute change"),
+            ("min_interface_final_height_span",
+             "final_interface_height_span",
+             "final interface height span")):
+        minimum = getattr(args, arg_name)
+        if minimum is None:
+            continue
+        if not metrics.get("interface_motion_available", False):
+            reason = metrics.get("interface_motion_unavailable_reason", "unavailable")
+            errors.append(f"interface motion diagnostics are unavailable ({reason})")
+            continue
+        value = metrics.get(metric_name)
+        if not isinstance(value, (int, float)):
+            errors.append(f"{label} diagnostic is unavailable")
+        elif float(value) < float(minimum):
+            errors.append(
+                f"{label} {float(value):.6g} is below {float(minimum):.6g}"
             )
     if args.stale_pressure_gauge_tolerance is not None:
         if not metrics.get("pressure_gauge_found", False):
@@ -3617,18 +5039,69 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
                 )
     if args.max_wet_fraction_volume_error is not None:
         wet_fraction_volume = metrics.get("wet_fraction_volume")
-        context_volumes = metrics.get("cut_context_active_side_volumes", [])
+        context_volumes = metrics.get("cut_context_active_side_physical_volumes", [])
+        wet_volume_source = str(metrics.get("wet_fraction_volume_source", "WetVolumeFraction"))
         if not isinstance(wet_fraction_volume, (int, float)):
-            errors.append("WetVolumeFraction output volume is unavailable")
+            errors.append("WetVolumeFraction/WetVolumeMeasure output volume is unavailable")
         elif not context_volumes:
-            errors.append("cut-context active-side volume was not reported")
+            errors.append("physical cut-context active-side volume was not reported")
         else:
             error = abs(float(wet_fraction_volume) - float(context_volumes[-1]))
+            metrics["wet_fraction_volume_comparison_frame"] = "physical"
             metrics["wet_fraction_volume_error_vs_last_cut_context"] = error
             if error > args.max_wet_fraction_volume_error:
                 errors.append(
-                    f"WetVolumeFraction volume error {error:.6g} exceeds "
+                    f"{wet_volume_source} volume error {error:.6g} exceeds "
                     f"{args.max_wet_fraction_volume_error:.6g}"
+                )
+    if args.require_reference_profile_comparison:
+        if metrics.get("reference_profile_error"):
+            errors.append(
+                "reference profile comparison failed: "
+                f"{metrics['reference_profile_error']}"
+            )
+        if metrics.get("reference_profile_validation_passed") is False:
+            failures = metrics.get("reference_profile_validation_failures", [])
+            errors.append(
+                "reference profile validation failed"
+                + (f": {failures}" if failures else "")
+            )
+        for arg_name, metric_name, label in (
+                ("min_reference_profile_coverage",
+                 "reference_profile_coverage_fraction",
+                 "reference profile coverage"),
+                ("min_reference_profile_direct_coverage",
+                 "reference_profile_direct_coverage_fraction",
+                 "reference profile direct coverage")):
+            minimum = getattr(args, arg_name)
+            if minimum is None:
+                continue
+            value = metrics.get(metric_name)
+            if not isinstance(value, (int, float)):
+                errors.append(f"{label} diagnostic is unavailable")
+            elif float(value) < float(minimum):
+                errors.append(
+                    f"{label} {float(value):.6g} is below {float(minimum):.6g}"
+                )
+        for arg_name, metric_name, label in (
+                ("max_reference_profile_rmse",
+                 "reference_profile_rmse_m",
+                 "reference profile RMSE"),
+                ("max_reference_profile_mae",
+                 "reference_profile_mae_m",
+                 "reference profile MAE"),
+                ("max_reference_profile_max_abs_error",
+                 "reference_profile_max_abs_error_m",
+                 "reference profile max absolute error")):
+            maximum = getattr(args, arg_name)
+            if maximum is None:
+                continue
+            value = metrics.get(metric_name)
+            if not isinstance(value, (int, float)):
+                errors.append(f"{label} diagnostic is unavailable")
+            elif float(value) > float(maximum):
+                errors.append(
+                    f"{label} {float(value):.6g} exceeds {float(maximum):.6g}"
                 )
     return errors
 
@@ -3654,10 +5127,47 @@ def time_loop_convergence_errors(metrics: dict[str, Any],
     elif expected_steps > 0 and accepted_steps < expected_steps:
         errors.append(
             f"accepted steps {accepted_steps} below requested steps {expected_steps}")
-    if summary.get("all_nonlinear_converged") is not True:
+    if args.enable_adaptive_time_loop:
+        final_time = summary.get("final_accepted_time")
+        time_step = metrics.get("time_step_size")
+        if not isinstance(time_step, (int, float)):
+            controls = metrics.get("solver_controls", {})
+            if isinstance(controls, dict):
+                time_stepping = controls.get("time_stepping", {})
+                if isinstance(time_stepping, dict):
+                    time_step = time_stepping.get("time_step_size")
+        if expected_steps > 0 and isinstance(time_step, (int, float)):
+            expected_time = expected_steps * float(time_step)
+            tolerance = max(1.0e-12, 1.0e-9 * max(1.0, abs(expected_time)))
+            if not isinstance(final_time, (int, float)):
+                errors.append("final accepted time was not reported")
+            elif float(final_time) + tolerance < expected_time:
+                errors.append(
+                    f"final accepted time {float(final_time):.6g} below requested "
+                    f"time {expected_time:.6g}"
+                )
+    elif summary.get("all_nonlinear_converged") is not True:
         errors.append("not all nonlinear solves converged")
-    if summary.get("all_linear_converged") is not True:
+    if not args.enable_adaptive_time_loop and summary.get("all_linear_converged") is not True:
         errors.append("not all linear solves converged")
+    if args.max_time_loop_nonlinear_iterations_per_step is not None:
+        max_nonlinear = summary.get("nonlinear_iterations_max")
+        if not isinstance(max_nonlinear, int):
+            errors.append("maximum nonlinear iteration count was not reported")
+        elif max_nonlinear > args.max_time_loop_nonlinear_iterations_per_step:
+            errors.append(
+                f"maximum nonlinear iterations per step {max_nonlinear} exceed "
+                f"{args.max_time_loop_nonlinear_iterations_per_step}"
+            )
+    if args.max_time_loop_linear_iterations_per_step is not None:
+        max_linear = summary.get("linear_iterations_max")
+        if not isinstance(max_linear, int):
+            errors.append("maximum linear iteration count was not reported")
+        elif max_linear > args.max_time_loop_linear_iterations_per_step:
+            errors.append(
+                f"maximum linear iterations per step {max_linear} exceed "
+                f"{args.max_time_loop_linear_iterations_per_step}"
+            )
     return errors
 
 
@@ -3675,6 +5185,166 @@ def write_qualification_log(path: Path | None,
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
                     encoding="utf-8")
+
+
+def format_failure_exception(failure: dict[str, Any],
+                             qualification_log: Path | None) -> str:
+    summary_keys = [
+        "case",
+        "run_dir",
+        "result_path",
+        "returncode",
+        "timeout_seconds",
+        "solver_elapsed_wall_seconds",
+        "solver_elapsed_seconds_per_accepted_step",
+        "result_step",
+        "diagnostic_assembly_timing_count",
+        "diagnostic_assembly_timings_per_accepted_step",
+        "diagnostic_cut_context_rebuild_count",
+        "diagnostic_cut_context_rebuilds_per_accepted_step",
+        "diagnostic_assembly_timing_max_cut_volumes_seconds",
+        "reference_profile_time_s",
+        "reference_profile_validation_passed",
+        "passed",
+        "errors",
+        "diagnostic_errors",
+    ]
+    summary = {
+        key: failure[key]
+        for key in summary_keys
+        if key in failure
+    }
+    if qualification_log is not None:
+        summary["qualification_log"] = str(qualification_log)
+    return json.dumps(summary, indent=2, sort_keys=True)
+
+
+def case_args_for_run(case_name: str,
+                      args: argparse.Namespace) -> argparse.Namespace:
+    case_args = argparse.Namespace(**vars(args))
+    if (case_args.high_order_mpi_production_qualification and
+            case_name == "tilt2d"):
+        if not getattr(args, "_explicit_linear_solver_type", False):
+            case_args.linear_solver_type = "ns"
+        if not getattr(args, "_explicit_linear_max_iterations", False):
+            case_args.linear_max_iterations = 100
+    return case_args
+
+
+def read_solver_log(run_dir: Path) -> str:
+    log_path = run_dir / "solver_run.log"
+    if not log_path.exists():
+        return ""
+    return log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def terminate_solver_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=5.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def run_solver_command(command: list[str],
+                       run_dir: Path,
+                       args: argparse.Namespace
+                       ) -> tuple[subprocess.CompletedProcess[str], float]:
+    log_path = run_dir / "solver_run.log"
+    start = time.monotonic()
+    with log_path.open("w", encoding="utf-8", buffering=1) as log_file:
+        process = subprocess.Popen(
+            command,
+            cwd=run_dir,
+            env=solver_environment(args),
+            text=True,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            returncode = process.wait(timeout=args.timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            elapsed = time.monotonic() - start
+            terminate_solver_process(process)
+            exc.output = read_solver_log(run_dir)
+            exc.timeout = elapsed
+            setattr(exc, "configured_timeout_seconds", args.timeout_seconds)
+            raise
+    elapsed = time.monotonic() - start
+    output = read_solver_log(run_dir)
+    completed = subprocess.CompletedProcess(
+        args=command,
+        returncode=returncode,
+        stdout=output,
+        stderr=None,
+    )
+    return completed, elapsed
+
+
+def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
+    configure_solver(
+        run_dir / "solver.xml",
+        args.steps,
+        time_step_size=args.time_step_size,
+        disable_cut_stabilization=args.disable_cut_stabilization,
+        max_nonlinear_iterations=args.max_nonlinear_iterations,
+        linear_relative_tolerance=args.linear_relative_tolerance,
+        linear_absolute_tolerance=args.linear_absolute_tolerance,
+        linear_max_iterations=args.linear_max_iterations,
+        ns_gm_max_iterations=args.ns_gm_max_iterations,
+        ns_cg_max_iterations=args.ns_cg_max_iterations,
+        ns_gm_tolerance=args.ns_gm_tolerance,
+        ns_cg_tolerance=args.ns_cg_tolerance,
+        linear_solver_type=args.linear_solver_type,
+        linear_algebra_backend=args.linear_algebra_backend,
+        linear_preconditioner=args.linear_preconditioner,
+        disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
+        disable_cut_metadata_scale=args.disable_cut_metadata_scale,
+        disable_velocity_extension=args.disable_velocity_extension,
+        disable_vtk_output=args.disable_vtk_output,
+        final_output_only=args.final_output_only,
+        vtk_save_increment=args.vtk_save_increment,
+        start_saving_after_step=args.start_saving_after_step,
+        generated_interface_geometry=args.generated_interface_geometry,
+        implicit_cut_quadrature_backend=args.implicit_cut_quadrature_backend,
+        implicit_cut_fallback_policy=args.implicit_cut_fallback_policy,
+        required_implicit_cut_backend_qualification=(
+            args.required_implicit_cut_backend_qualification),
+        implicit_cut_root_tolerance=args.implicit_cut_root_tolerance,
+        implicit_cut_max_subdivision_depth=args.implicit_cut_max_subdivision_depth,
+        generated_interface_quadrature_order=args.generated_interface_quadrature_order,
+        interface_quadrature_order=args.interface_quadrature_order,
+        volume_quadrature_order=args.volume_quadrature_order,
+        cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
+        cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
+        surface_tension=args.surface_tension,
+        projected_curvature_field=args.projected_curvature_field,
+        curvature_projection_cadence_steps=args.curvature_projection_cadence_steps,
+        curvature_projection_max_normalized_fit_residual=(
+            args.curvature_projection_max_normalized_fit_residual),
+        curvature_projection_smoothing_iterations=(
+            args.curvature_projection_smoothing_iterations),
+        curvature_projection_smoothing_relaxation=(
+            args.curvature_projection_smoothing_relaxation),
+        enable_volume_correction=args.enable_level_set_volume_correction,
+        volume_correction_cadence_steps=args.volume_correction_cadence_steps,
+        volume_correction_use_initial_volume=(
+            args.volume_correction_use_initial_volume),
+        volume_correction_tolerance=args.volume_correction_tolerance,
+        volume_correction_max_iterations=args.volume_correction_max_iterations,
+    )
 
 
 def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str, Any]:
@@ -3699,65 +5369,38 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
     try:
         run_dir = Path(temp_name) / case_name
         if source is None:
-            write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
+            if case_name == "curvedtet3d":
+                write_curved_tet3d_case(run_dir, args.steps)
+            elif case_name == "capillaryarc2d":
+                pressure_jump = 0.0
+                if args.high_order_capillary_balance_smoke:
+                    pressure_jump = -float(args.surface_tension) / CAPILLARY_ARC_RADIUS
+                write_capillary_arc2d_case(run_dir, args.steps, pressure_jump)
+            else:
+                write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
+            if args.use_high_order_implicit_cuts:
+                configure_case_solver_xml(run_dir, args)
         else:
             run_dir = Path(temp_name) / source.name
             copy_case(source, run_dir, args.source_ref)
             regenerate_mms_case_if_requested(case_name, run_dir, args)
-            configure_solver(
-                run_dir / "solver.xml",
-                args.steps,
-                time_step_size=args.time_step_size,
-                disable_cut_stabilization=args.disable_cut_stabilization,
-                max_nonlinear_iterations=args.max_nonlinear_iterations,
-                linear_relative_tolerance=args.linear_relative_tolerance,
-                linear_absolute_tolerance=args.linear_absolute_tolerance,
-                linear_max_iterations=args.linear_max_iterations,
-                ns_gm_max_iterations=args.ns_gm_max_iterations,
-                ns_cg_max_iterations=args.ns_cg_max_iterations,
-                ns_gm_tolerance=args.ns_gm_tolerance,
-                ns_cg_tolerance=args.ns_cg_tolerance,
-                linear_solver_type=args.linear_solver_type,
-                linear_algebra_backend=args.linear_algebra_backend,
-                linear_preconditioner=args.linear_preconditioner,
-                disable_coupled_outer_fgmres=args.disable_coupled_outer_fgmres,
-                disable_cut_metadata_scale=args.disable_cut_metadata_scale,
-                disable_velocity_extension=args.disable_velocity_extension,
-                disable_vtk_output=args.disable_vtk_output,
-                final_output_only=args.final_output_only,
-                vtk_save_increment=args.vtk_save_increment,
-                start_saving_after_step=args.start_saving_after_step,
-                generated_interface_geometry=args.generated_interface_geometry,
-                implicit_cut_quadrature_backend=args.implicit_cut_quadrature_backend,
-                implicit_cut_fallback_policy=args.implicit_cut_fallback_policy,
-                implicit_cut_root_tolerance=args.implicit_cut_root_tolerance,
-                implicit_cut_max_subdivision_depth=args.implicit_cut_max_subdivision_depth,
-                generated_interface_quadrature_order=args.generated_interface_quadrature_order,
-                interface_quadrature_order=args.interface_quadrature_order,
-                volume_quadrature_order=args.volume_quadrature_order,
-            )
+            configure_case_solver_xml(run_dir, args)
 
         try:
             command = solver_command(solver, args)
-            completed = subprocess.run(
-                command,
-                cwd=run_dir,
-                env=solver_environment(args),
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
-                timeout=args.timeout_seconds,
-            )
+            completed, solver_elapsed_wall_seconds = run_solver_command(
+                command, run_dir, args)
         except subprocess.TimeoutExpired as exc:
-            output = exc.stdout or ""
+            output = exc.stdout or exc.output or ""
             if isinstance(output, bytes):
                 output = output.decode("utf-8", errors="replace")
             write_solver_log(run_dir, output)
             tail = "\n".join(output.splitlines()[-80:])
             diagnostics = parse_solver_diagnostics(output)
             failure = diagnostic_timeout_metrics(case_name, run_dir, diagnostics)
-            failure["timeout_seconds"] = args.timeout_seconds
+            failure["timeout_seconds"] = getattr(
+                exc, "configured_timeout_seconds", args.timeout_seconds)
+            failure["solver_elapsed_wall_seconds"] = exc.timeout
             failure["command"] = command
             failure["stdout_tail"] = tail
             diagnostic_errors = evaluate_timeout_diagnostics(failure, args)
@@ -3779,7 +5422,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 return failure
             failure["errors"] = diagnostic_errors or ["solver timed out"]
             write_failure(failure)
-            raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True)) from exc
+            raise RuntimeError(format_failure_exception(
+                failure, args.qualification_log)) from exc
         write_solver_log(run_dir, completed.stdout)
         if completed.returncode != 0:
             tail = "\n".join(completed.stdout.splitlines()[-80:])
@@ -3788,6 +5432,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "run_dir": str(run_dir),
                 "command": solver_command(solver, args),
                 "returncode": completed.returncode,
+                "solver_elapsed_wall_seconds": solver_elapsed_wall_seconds,
                 "diagnostics": parse_solver_diagnostics(completed.stdout),
                 "stdout_tail": tail,
             }
@@ -3822,7 +5467,8 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 failure["errors"] = []
                 return failure
             write_failure(failure)
-            raise RuntimeError(json.dumps(failure, indent=2, sort_keys=True))
+            raise RuntimeError(format_failure_exception(
+                failure, args.qualification_log))
 
         diagnostics = parse_solver_diagnostics(completed.stdout)
         if args.disable_vtk_output:
@@ -3831,11 +5477,18 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "output_metrics_skip_reason": "VTK output disabled",
             }
         else:
-            metrics = compute_metrics(case_name, run_dir, result_path(run_dir, args.steps))
+            result_step = final_result_step(args.steps, diagnostics)
+            result = result_path(run_dir, result_step)
+            metrics = compute_metrics(case_name, run_dir, result)
+            metrics["result_step"] = result_step
+            metrics["result_path"] = str(result)
         add_diagnostic_metrics(metrics, diagnostics)
+        if not args.disable_vtk_output:
+            add_reference_profile_metrics(metrics, run_dir, result, args)
         metrics["case"] = case_name
         metrics["command"] = solver_command(solver, args)
         metrics["run_dir"] = str(run_dir)
+        metrics["solver_elapsed_wall_seconds"] = solver_elapsed_wall_seconds
         metrics["steps"] = args.steps
         if args.time_step_size is not None:
             metrics["time_step_size"] = args.time_step_size
@@ -3857,11 +5510,1046 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
         metrics["errors"] = errors
         if errors:
             write_failure(metrics)
-            raise RuntimeError(json.dumps(metrics, indent=2, sort_keys=True))
+            raise RuntimeError(format_failure_exception(
+                metrics, args.qualification_log))
         return metrics
     finally:
         if temp_context is not None:
             temp_context.cleanup()
+
+
+def set_default(args: argparse.Namespace, name: str, value: Any) -> None:
+    if getattr(args, name) is None:
+        setattr(args, name, value)
+
+
+def remember_explicit_cli_overrides(args: argparse.Namespace) -> None:
+    for name in (
+        "linear_solver_type",
+        "linear_max_iterations",
+    ):
+        setattr(args, f"_explicit_{name}", getattr(args, name) is not None)
+
+
+def normalized_option(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def require_profile_production_linear_solver_policy(args: argparse.Namespace) -> None:
+    if (not args.high_order_3d_benchmark_profile_qualification or
+            args.allow_experimental_profile_linear_solver):
+        return
+
+    required = {
+        "linear_algebra_backend": "fsils",
+        "linear_preconditioner": "fsils",
+        "linear_solver_type": "ns",
+    }
+    actual = {
+        name: normalized_option(getattr(args, name))
+        for name in required
+    }
+    mismatches = [
+        f"{name}={actual[name] or '<unset>'} (required {expected})"
+        for name, expected in required.items()
+        if actual[name] != expected
+    ]
+    if mismatches:
+        raise ValueError(
+            "The D18/D38 high-order profile qualification is production-gated "
+            "on FSILS BlockSchur because the GMRES/RCS route is known to stall "
+            "on long profiles. Use --allow-experimental-profile-linear-solver "
+            "only for diagnostic probes. Mismatches: " + "; ".join(mismatches)
+        )
+
+
+def apply_high_order_production_qualification_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_production_qualification:
+        if (args.steps is None and
+                not args.high_order_mpi_production_qualification and
+                not args.high_order_visible_motion_demo and
+                not args.high_order_3d_benchmark_smoke and
+                not args.high_order_3d_benchmark_qualification and
+                not args.high_order_3d_benchmark_profile_qualification and
+                not args.high_order_curved_3d_simplex_smoke and
+                not args.high_order_mpi_motion_smoke and
+                not args.high_order_capillary_projection_smoke and
+                not args.high_order_capillary_response_smoke and
+                not args.high_order_capillary_balance_smoke and
+                not args.high_order_volume_corrected_motion_smoke):
+            args.steps = 1
+        return
+    if args.high_order_mpi_production_qualification:
+        raise ValueError(
+            "--high-order-production-qualification cannot be combined with "
+            "--high-order-mpi-production-qualification"
+        )
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-production-qualification cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-production-qualification cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-production-qualification cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-production-qualification cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_PRODUCTION_CASES)
+    if args.steps is None:
+        args.steps = 20
+    set_default(args, "timeout_seconds", 900.0)
+    args.use_high_order_implicit_cuts = True
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+
+    set_default(args, "linear_algebra_backend", "eigen")
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-3
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-4
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-3)
+    set_default(args, "min_diagnostic_pressure_range", 100.0)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_interface_height_change", 1.0e-4)
+    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
+    set_default(args, "min_interface_slope_change", 5.0e-5)
+    set_default(args, "min_interface_final_height_span", 1.0e-4)
+
+
+def apply_high_order_mpi_production_qualification_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_mpi_production_qualification:
+        return
+    if args.high_order_3d_benchmark_smoke:
+        raise ValueError(
+            "--high-order-mpi-production-qualification cannot be combined with "
+            "--high-order-3d-benchmark-smoke"
+        )
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-mpi-production-qualification cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-mpi-production-qualification cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-mpi-production-qualification cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-mpi-production-qualification cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_MPI_PRODUCTION_CASES)
+    if args.steps is None:
+        args.steps = 20
+    set_default(args, "timeout_seconds", 1200.0)
+    set_default(args, "mpi_ranks", 2)
+    args.use_high_order_implicit_cuts = True
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.enable_fsils_matrix_diagnostics = True
+    args.require_fsils_matrix_diagnostics = True
+
+    set_default(args, "linear_algebra_backend", "fsils")
+    set_default(args, "linear_preconditioner", "fsils")
+    set_default(args, "linear_solver_type", "gmres")
+    set_default(args, "linear_relative_tolerance", 1.0e-4)
+    set_default(args, "linear_absolute_tolerance", 1.0e-4)
+    # FSILS restarted GMRES interprets Max_iterations as restart cycles.
+    # With the production cases' Krylov dimension of 80, 7 cycles cap the
+    # reported total Krylov work at 567 iterations per nonlinear solve.
+    set_default(args, "linear_max_iterations", 7)
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-3
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-4
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-3)
+    set_default(args, "min_diagnostic_pressure_range", 100.0)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_fsils_matrix_missing_diag", 0)
+    set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_rss_kb", 350000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 175000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "SayeHyperrectangle")
+    set_default(args, "expect_implicit_cut_backend_qualification",
+                "ProductionQualified")
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 600)
+    set_default(args, "min_interface_height_change", 1.0e-4)
+    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
+    set_default(args, "min_interface_slope_change", 5.0e-5)
+    set_default(args, "min_interface_final_height_span", 1.0e-4)
+
+
+def apply_high_order_visible_motion_demo_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_visible_motion_demo:
+        return
+    if args.high_order_production_qualification:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-production-qualification"
+        )
+    if args.high_order_mpi_production_qualification:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-mpi-production-qualification"
+        )
+    if args.high_order_3d_benchmark_smoke:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-3d-benchmark-smoke"
+        )
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-visible-motion-demo cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_VISIBLE_MOTION_CASES)
+    if args.steps is None:
+        args.steps = 20
+    set_default(args, "timeout_seconds", 300.0)
+    set_default(args, "mpi_ranks", 2)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 1.0)
+    args.use_high_order_implicit_cuts = True
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.enable_fsils_matrix_diagnostics = True
+    args.require_fsils_matrix_diagnostics = True
+
+    set_default(args, "linear_algebra_backend", "fsils")
+    set_default(args, "linear_preconditioner", "fsils")
+    set_default(args, "linear_solver_type", "ns")
+    set_default(args, "linear_relative_tolerance", 1.0e-4)
+    set_default(args, "linear_absolute_tolerance", 1.0e-4)
+    set_default(args, "linear_max_iterations", 100)
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 0.05
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 0.01
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 0.02)
+    set_default(args, "min_diagnostic_pressure_range", 100.0)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_fsils_matrix_missing_diag", 0)
+    set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_rss_kb", 350000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 175000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "SayeHyperrectangle")
+    set_default(args, "expect_implicit_cut_backend_qualification",
+                "ProductionQualified")
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 100)
+    set_default(args, "min_interface_height_change", 0.02)
+    set_default(args, "min_interface_mean_abs_height_change", 0.005)
+    set_default(args, "min_interface_slope_change", 0.02)
+    set_default(args, "min_interface_final_height_span", 0.02)
+
+
+def apply_high_order_3d_benchmark_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_3d_benchmark_smoke:
+        return
+    if args.high_order_production_qualification:
+        raise ValueError(
+            "--high-order-3d-benchmark-smoke cannot be combined with "
+            "--high-order-production-qualification"
+        )
+    if args.high_order_mpi_production_qualification:
+        raise ValueError(
+            "--high-order-3d-benchmark-smoke cannot be combined with "
+            "--high-order-mpi-production-qualification"
+        )
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-3d-benchmark-smoke cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-3d-benchmark-smoke cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-3d-benchmark-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-3d-benchmark-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_3D_BENCHMARK_CASES)
+    if args.steps is None:
+        args.steps = 1
+    set_default(args, "timeout_seconds", 600.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_vtk_output = True
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.enable_fsils_matrix_diagnostics = True
+    args.require_fsils_matrix_diagnostics = True
+
+    set_default(args, "implicit_cut_quadrature_backend", "Auto")
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "HighOrderSubcell")
+    set_default(args, "linear_algebra_backend", "fsils")
+    set_default(args, "linear_preconditioner", "fsils")
+    set_default(args, "max_fsils_matrix_missing_diag", 0)
+    set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 1)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_process_rss_kb", 700000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 300000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 32)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 32)
+
+
+def apply_high_order_3d_benchmark_qualification_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_3d_benchmark_qualification:
+        return
+    if args.high_order_mpi_production_qualification:
+        raise ValueError(
+            "--high-order-3d-benchmark-qualification cannot be combined with "
+            "--high-order-mpi-production-qualification"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-3d-benchmark-qualification cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-3d-benchmark-qualification cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-3d-benchmark-qualification cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_3D_BENCHMARK_QUALIFICATION_CASES)
+    if args.steps is None:
+        args.steps = 3
+    set_default(args, "timeout_seconds", 1200.0)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 6.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_vtk_output = True
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.enable_fsils_matrix_diagnostics = True
+    args.require_fsils_matrix_diagnostics = True
+
+    set_default(args, "implicit_cut_quadrature_backend", "Auto")
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "HighOrderSubcell")
+    set_default(args, "linear_algebra_backend", "fsils")
+    set_default(args, "linear_preconditioner", "fsils")
+    set_default(args, "max_fsils_matrix_missing_diag", 0)
+    set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 1)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_process_rss_kb", 800000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 350000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 32)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 32)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 250)
+
+
+def apply_high_order_3d_benchmark_profile_qualification_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_3d_benchmark_profile_qualification:
+        return
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-3d-benchmark-profile-qualification cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-3d-benchmark-profile-qualification cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_3D_BENCHMARK_PROFILE_CASES)
+    if args.steps is None:
+        args.steps = 312
+    set_default(args, "timeout_seconds", 7200.0)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 6.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_vtk_output = False
+    args.final_output_only = True
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.enable_fsils_matrix_diagnostics = True
+    args.require_fsils_matrix_diagnostics = True
+    set_default(args, "fsils_matrix_diagnostics_every_n", 25)
+    set_default(args, "fsils_matrix_diagnostics_max_records", 64)
+    args.require_reference_profile_comparison = True
+    args.enable_adaptive_time_loop = True
+    args.newton_line_search_fail_on_no_reduction = True
+
+    set_default(args, "implicit_cut_quadrature_backend", "Auto")
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "HighOrderSubcell")
+    set_default(args, "linear_algebra_backend", "fsils")
+    set_default(args, "linear_preconditioner", "fsils")
+    set_default(args, "linear_solver_type", "ns")
+    set_default(args, "ns_gm_max_iterations", 200)
+    set_default(args, "ns_cg_max_iterations", 200)
+    set_default(args, "ns_gm_tolerance", 1.0e-4)
+    set_default(args, "ns_cg_tolerance", 1.0e-4)
+    set_default(args, "adaptive_time_loop_min_dt", 6.25e-5)
+    set_default(args, "adaptive_time_loop_max_dt", 5.0e-4)
+    set_default(args, "adaptive_time_loop_max_retries", 8)
+    set_default(args, "adaptive_time_loop_decrease_factor", 0.5)
+    set_default(args, "adaptive_time_loop_increase_factor", 1.5)
+    set_default(args, "adaptive_time_loop_target_newton_iterations", 6)
+    set_default(args, "adaptive_time_loop_max_steps_multiplier", 16)
+    set_default(args, "newton_line_search_max_iterations", 6)
+    set_default(args, "max_fsils_matrix_missing_diag", 0)
+    set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 1)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 6.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 6.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_process_rss_kb", 1000000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 650000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 32)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 32)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 9)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 250)
+    set_default(args, "min_reference_profile_coverage", 0.95)
+    set_default(args, "min_reference_profile_direct_coverage", 0.25)
+    set_default(args, "max_reference_profile_rmse", 0.12)
+    set_default(args, "max_reference_profile_mae", 0.10)
+    set_default(args, "max_reference_profile_max_abs_error", 0.18)
+    # D38 has a long shallow reference tail a few mm above the wet-bed depth;
+    # use a material-height front threshold that tracks the moving wave.
+    set_default(args, "reference_profile_elevated_front_clearance", 0.010)
+    set_default(args, "max_reference_profile_elevated_front_lag", 0.30)
+
+
+def apply_high_order_curved_3d_simplex_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_curved_3d_simplex_smoke:
+        return
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-curved-3d-simplex-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_CURVED_3D_SIMPLEX_CASES)
+    if args.steps is None:
+        args.steps = 1
+    set_default(args, "timeout_seconds", 600.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+
+    set_default(args, "implicit_cut_quadrature_backend", "Auto")
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "HighOrderSubcell")
+    # The current production contract for curved 3D simplex support is
+    # conservative positive-weight cut-volume quadrature with verified volume
+    # order 2 and interface order 1.  Do not request interface order 2 here
+    # until the Tetra10 path has root-polished curved leaf rules end-to-end.
+    set_default(args, "generated_interface_quadrature_order", 1)
+    set_default(args, "interface_quadrature_order", 1)
+    set_default(args, "volume_quadrature_order", 2)
+    set_default(args, "implicit_cut_max_subdivision_depth", 2)
+    set_default(args, "time_step_size", 2.0e-4)
+    set_default(args, "linear_algebra_backend", "eigen")
+    set_default(args, "linear_solver_type", "direct")
+    # The curved Tetra10 hydrostatic smoke keeps velocity cut stabilization and
+    # active pressure support enabled, but disables the pressure-gradient ghost
+    # penalty. That penalty is not pressure-gradient robust for this curved
+    # hydrostatic state and otherwise dominates the refreshed-quadrature Newton
+    # solve.
+    set_default(args, "cut_cell_pressure_gradient_penalty", 0.0)
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-4
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-6
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-4)
+    set_default(args, "min_diagnostic_pressure_range", 10.0)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 1)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 15.0)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 20.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 15.0)
+    set_default(args, "max_diagnostic_process_rss_kb", 350000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 150000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 24)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 24)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 6)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_interface_height_change", 1.0e-4)
+    set_default(args, "min_interface_mean_abs_height_change", 1.0e-5)
+    set_default(args, "min_interface_slope_change", 1.0e-4)
+    set_default(args, "min_interface_final_height_span", 1.0e-3)
+
+
+def apply_high_order_mpi_motion_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_mpi_motion_smoke:
+        return
+    if args.high_order_mpi_production_qualification:
+        raise ValueError(
+            "--high-order-mpi-motion-smoke cannot be combined with "
+            "--high-order-mpi-production-qualification"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-mpi-motion-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_MPI_MOTION_CASES)
+    if args.steps is None:
+        args.steps = 5
+    set_default(args, "timeout_seconds", 600.0)
+    set_default(args, "mpi_ranks", 2)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_cut_context_solution_source_diagnostics = True
+    args.enable_fsils_matrix_diagnostics = True
+    args.require_fsils_matrix_diagnostics = True
+
+    set_default(args, "linear_algebra_backend", "fsils")
+    set_default(args, "linear_preconditioner", "fsils")
+    set_default(args, "linear_solver_type", "gmres")
+    set_default(args, "linear_relative_tolerance", 1.0e-4)
+    set_default(args, "linear_absolute_tolerance", 1.0e-4)
+    set_default(args, "linear_max_iterations", 7)
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-3
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-4
+    set_default(args, "max_fsils_matrix_missing_diag", 0)
+    set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "expect_selected_implicit_cut_quadrature_backend",
+                "SayeHyperrectangle")
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "max_diagnostic_process_rss_kb", 300000.0)
+    set_default(args, "max_diagnostic_process_rss_growth_kb", 150000.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 500)
+    set_default(args, "min_interface_height_change", 1.0e-4)
+    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
+    set_default(args, "min_interface_slope_change", 5.0e-5)
+    set_default(args, "min_interface_final_height_span", 1.0e-4)
+
+
+def apply_high_order_capillary_projection_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_capillary_projection_smoke:
+        return
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-capillary-projection-smoke cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-capillary-projection-smoke cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-capillary-projection-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-capillary-projection-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_CAPILLARY_PROJECTION_CASES)
+    if args.steps is None:
+        args.steps = 10
+    set_default(args, "timeout_seconds", 600.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.require_curvature_projection_diagnostics = True
+    args.require_curvature_projection_newton_freshness = True
+
+    set_default(args, "surface_tension", 1.0e-3)
+    set_default(args, "projected_curvature_field", "kappa_projected")
+    set_default(args, "curvature_projection_cadence_steps", 1)
+    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_smoothing_iterations", 1)
+    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    set_default(args, "linear_algebra_backend", "eigen")
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-3
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-4
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-3)
+    set_default(args, "min_diagnostic_pressure_range", 100.0)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_interface_height_change", 1.0e-4)
+    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
+    set_default(args, "min_interface_slope_change", 5.0e-5)
+    set_default(args, "min_interface_final_height_span", 1.0e-4)
+    set_default(args, "min_diagnostic_curvature_projection_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0e-6)
+    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
+    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
+    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+
+
+def apply_high_order_capillary_response_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_capillary_response_smoke:
+        return
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-capillary-response-smoke cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-capillary-response-smoke cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-capillary-response-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-capillary-response-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_capillary_projection_smoke:
+        raise ValueError(
+            "--high-order-capillary-response-smoke cannot be combined with "
+            "--high-order-capillary-projection-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_CAPILLARY_RESPONSE_CASES)
+    if args.steps is None:
+        args.steps = 3
+    set_default(args, "timeout_seconds", 300.0)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 1.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.require_curvature_projection_diagnostics = True
+    args.require_curvature_projection_newton_freshness = True
+
+    set_default(args, "surface_tension", 0.5)
+    set_default(args, "projected_curvature_field", "kappa_projected")
+    set_default(args, "curvature_projection_cadence_steps", 1)
+    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_smoothing_iterations", 1)
+    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    set_default(args, "linear_algebra_backend", "eigen")
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-6
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-7
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-6)
+    set_default(args, "min_capillary_response_speed_per_surface_tension", 1.0e-6)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_diagnostic_curvature_projection_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0)
+    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
+    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
+    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+
+
+def apply_high_order_capillary_balance_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_capillary_balance_smoke:
+        return
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_capillary_projection_smoke:
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-capillary-projection-smoke"
+        )
+    if args.high_order_capillary_response_smoke:
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-capillary-response-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_CAPILLARY_BALANCE_CASES)
+    if args.steps is None:
+        args.steps = 3
+    set_default(args, "timeout_seconds", 300.0)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 1.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.require_curvature_projection_diagnostics = True
+    args.require_curvature_projection_newton_freshness = True
+
+    set_default(args, "surface_tension", 0.5)
+    set_default(args, "projected_curvature_field", "kappa_projected")
+    set_default(args, "curvature_projection_cadence_steps", 1)
+    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_smoothing_iterations", 1)
+    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    set_default(args, "linear_algebra_backend", "eigen")
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 0.0
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 0.0
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "max_capillary_balance_speed_per_surface_tension", 1.0e-6)
+    set_default(args, "min_diagnostic_pressure_range", 0.5)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_diagnostic_curvature_projection_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0)
+    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
+    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
+    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+
+
+def apply_high_order_volume_corrected_motion_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not args.high_order_volume_corrected_motion_smoke:
+        return
+    if args.high_order_3d_benchmark_qualification:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if args.high_order_3d_benchmark_profile_qualification:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if args.high_order_curved_3d_simplex_smoke:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if args.high_order_mpi_motion_smoke:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if args.high_order_capillary_projection_smoke:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-capillary-projection-smoke"
+        )
+    if args.high_order_capillary_response_smoke:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-capillary-response-smoke"
+        )
+    if args.high_order_capillary_balance_smoke:
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-capillary-balance-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_VOLUME_CORRECTED_MOTION_CASES)
+    if args.steps is None:
+        args.steps = 10
+    set_default(args, "timeout_seconds", 600.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+
+    set_default(args, "enable_level_set_volume_correction", True)
+    set_default(args, "volume_correction_use_initial_volume", True)
+    set_default(args, "volume_correction_cadence_steps", 1)
+    set_default(args, "volume_correction_tolerance", 1.0e-10)
+    set_default(args, "volume_correction_max_iterations", 50)
+    set_default(args, "linear_algebra_backend", "eigen")
+    if args.min_max_speed == 1.0e-2:
+        args.min_max_speed = 1.0e-3
+    if args.min_wet_mean_speed == 2.5e-4:
+        args.min_wet_mean_speed = 1.0e-4
+    if args.min_gate_mean_ux == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if args.min_front_mean_ux == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "min_diagnostic_solution_velocity_range", 1.0e-3)
+    set_default(args, "min_diagnostic_pressure_range", 100.0)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "min_diagnostic_level_set_volume_correction_count", 1)
+    set_default(args, "max_diagnostic_level_set_volume_correction_achieved_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_interface_height_change", 1.0e-4)
+    set_default(args, "min_interface_mean_abs_height_change", 2.0e-5)
+    set_default(args, "min_interface_slope_change", 5.0e-5)
+    set_default(args, "min_interface_final_height_span", 1.0e-4)
 
 
 def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
@@ -3911,6 +6599,11 @@ def apply_high_order_implicit_defaults(args: argparse.Namespace) -> None:
         args.expect_generated_interface_geometry = args.generated_interface_geometry
     if args.expect_implicit_cut_quadrature_backend is None:
         args.expect_implicit_cut_quadrature_backend = args.implicit_cut_quadrature_backend
+    if (args.expect_selected_implicit_cut_quadrature_backend is None and
+            args.implicit_cut_quadrature_backend != "Auto"):
+        args.expect_selected_implicit_cut_quadrature_backend = (
+            args.implicit_cut_quadrature_backend
+        )
     if args.expect_implicit_cut_fallback_policy is None:
         args.expect_implicit_cut_fallback_policy = args.implicit_cut_fallback_policy
     if args.max_diagnostic_implicit_cut_fallback_cells is None:
@@ -3924,7 +6617,10 @@ def validate_high_order_implicit_cases(cases: list[str],
                                        args: argparse.Namespace) -> None:
     if not args.use_high_order_implicit_cuts:
         return
-    synthetic = [name for name in cases if CASES[name] is None]
+    synthetic = [
+        name for name in cases
+        if CASES[name] is None and name not in HIGH_ORDER_SYNTHETIC_CASES
+    ]
     if synthetic:
         names = ", ".join(synthetic)
         raise ValueError(
@@ -3939,8 +6635,59 @@ def main() -> int:
     parser.add_argument("--mpiexec", type=Path, default=Path("mpiexec"))
     parser.add_argument("--mpi-ranks", type=int)
     parser.add_argument("--case", choices=sorted(CASES), action="append")
+    parser.add_argument("--high-order-production-qualification", action="store_true",
+                        help=("enable strict high-order implicit free-surface "
+                              "qualification defaults"))
+    parser.add_argument("--high-order-mpi-production-qualification",
+                        action="store_true",
+                        help=("enable strict MPI high-order implicit "
+                              "free-surface production qualification defaults"))
+    parser.add_argument("--high-order-visible-motion-demo",
+                        action="store_true",
+                        help=("enable a strict high-order implicit "
+                              "free-surface demonstration with visibly large "
+                              "interface motion"))
+    parser.add_argument("--high-order-3d-benchmark-smoke", action="store_true",
+                        help=("enable the high-order implicit 3D D18 benchmark "
+                              "diagnostics smoke defaults"))
+    parser.add_argument("--high-order-3d-benchmark-qualification",
+                        action="store_true",
+                        help=("enable multi-step high-order implicit D18/D38 "
+                              "benchmark qualification defaults"))
+    parser.add_argument("--high-order-3d-benchmark-profile-qualification",
+                        action="store_true",
+                        help=("enable full first-profile-time high-order "
+                              "implicit D18/D38 benchmark qualification "
+                              "defaults"))
+    parser.add_argument("--high-order-curved-3d-simplex-smoke",
+                        action="store_true",
+                        help=("enable the high-order implicit curved Tetra10 "
+                              "solver-level smoke defaults"))
+    parser.add_argument("--high-order-mpi-motion-smoke", action="store_true",
+                        help=("enable the high-order implicit MPI free-surface "
+                              "motion smoke defaults"))
+    parser.add_argument("--high-order-capillary-projection-smoke",
+                        action="store_true",
+                        help=("enable a high-order implicit free-surface smoke "
+                              "with nonzero surface tension and projected "
+                              "level-set curvature"))
+    parser.add_argument("--high-order-capillary-response-smoke",
+                        action="store_true",
+                        help=("enable a zero-gravity high-order implicit "
+                              "capillary response smoke with projected "
+                              "level-set curvature"))
+    parser.add_argument("--high-order-capillary-balance-smoke",
+                        action="store_true",
+                        help=("enable a zero-gravity high-order implicit "
+                              "Laplace-style capillary balance smoke with "
+                              "projected level-set curvature"))
+    parser.add_argument("--high-order-volume-corrected-motion-smoke",
+                        action="store_true",
+                        help=("enable a high-order implicit free-surface "
+                              "motion smoke with runtime global level-set "
+                              "volume correction"))
     parser.add_argument("--source-ref")
-    parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--steps", type=int)
     parser.add_argument("--time-step-size", type=float)
     parser.add_argument("--timeout-seconds", type=float)
     parser.add_argument("--preserve-run-dir", action="store_true")
@@ -3954,13 +6701,47 @@ def main() -> int:
     parser.add_argument("--min-gate-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-front-mean-ux", type=float, default=1.0e-4)
     parser.add_argument("--min-active-volume-change", type=float, default=0.0)
+    parser.add_argument("--min-interface-height-change", type=float)
+    parser.add_argument("--min-interface-mean-abs-height-change", type=float)
+    parser.add_argument("--min-interface-slope-change", type=float)
+    parser.add_argument("--min-interface-final-height-span", type=float)
     parser.add_argument("--max-static-speed", type=float, default=1.0e-9)
     parser.add_argument("--stale-pressure-gauge-tolerance", type=float)
     parser.add_argument("--max-wet-fraction-volume-error", type=float)
+    parser.add_argument("--require-reference-profile-comparison", action="store_true")
+    parser.add_argument("--reference-profile-time-tolerance", type=float)
+    parser.add_argument("--reference-profile-sample-radius", type=float)
+    parser.add_argument("--reference-profile-elevated-front-clearance",
+                        type=float)
+    parser.add_argument("--min-reference-profile-coverage", type=float)
+    parser.add_argument("--min-reference-profile-direct-coverage", type=float)
+    parser.add_argument("--max-reference-profile-rmse", type=float)
+    parser.add_argument("--max-reference-profile-mae", type=float)
+    parser.add_argument("--max-reference-profile-max-abs-error", type=float)
+    parser.add_argument("--max-reference-profile-elevated-front-lag", type=float)
+    parser.add_argument("--allow-experimental-profile-linear-solver",
+                        action="store_true",
+                        help=("permit non-BlockSchur linear-solver overrides "
+                              "for D18/D38 profile diagnostics"))
+    parser.add_argument("--max-solver-elapsed-wall-seconds", type=float,
+                        help=("fail a completed solver run whose measured wall "
+                              "time exceeds this budget"))
+    parser.add_argument("--max-solver-elapsed-seconds-per-accepted-step",
+                        type=float,
+                        help=("fail a completed solver run whose measured wall "
+                              "time per accepted time step exceeds this budget"))
     parser.add_argument("--allow-timeout-diagnostics", action="store_true")
     parser.add_argument("--allow-failure-diagnostics", action="store_true")
     parser.add_argument("--min-diagnostic-solution-velocity-range", type=float)
     parser.add_argument("--min-diagnostic-pressure-range", type=float)
+    parser.add_argument("--min-capillary-response-speed-per-surface-tension",
+                        type=float)
+    parser.add_argument("--max-capillary-balance-speed-per-surface-tension",
+                        type=float)
+    parser.add_argument("--min-diagnostic-level-set-volume-correction-count",
+                        type=int)
+    parser.add_argument("--max-diagnostic-level-set-volume-correction-achieved-error",
+                        type=float)
     parser.add_argument("--max-diagnostic-active-volume-error", type=float)
     parser.add_argument("--min-diagnostic-cut-volume-exact-order", type=int)
     parser.add_argument("--min-diagnostic-cut-volume-max-exact-order", type=int)
@@ -3974,6 +6755,9 @@ def main() -> int:
     parser.add_argument("--min-diagnostic-achieved-volume-quadrature-order", type=int)
     parser.add_argument("--expect-generated-interface-geometry")
     parser.add_argument("--expect-implicit-cut-quadrature-backend")
+    parser.add_argument("--required-implicit-cut-backend-qualification")
+    parser.add_argument("--expect-selected-implicit-cut-quadrature-backend")
+    parser.add_argument("--expect-implicit-cut-backend-qualification")
     parser.add_argument("--expect-implicit-cut-fallback-policy")
     parser.add_argument("--require-high-order-cut-context-diagnostics", action="store_true")
     parser.add_argument("--require-mms-verification", action="store_true")
@@ -4010,6 +6794,31 @@ def main() -> int:
                         action="store_false")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--disable-velocity-extension", action="store_true")
+    parser.add_argument("--cut-cell-velocity-gradient-penalty", type=float)
+    parser.add_argument("--cut-cell-pressure-gradient-penalty", type=float)
+    parser.add_argument("--surface-tension", type=float)
+    parser.add_argument("--projected-curvature-field")
+    parser.add_argument("--curvature-projection-cadence-steps", type=int)
+    parser.add_argument("--curvature-projection-max-normalized-fit-residual", type=float)
+    parser.add_argument("--curvature-projection-smoothing-iterations", type=int)
+    parser.add_argument("--curvature-projection-smoothing-relaxation", type=float)
+    parser.add_argument("--enable-level-set-volume-correction",
+                        dest="enable_level_set_volume_correction",
+                        action="store_true",
+                        default=None)
+    parser.add_argument("--disable-level-set-volume-correction",
+                        dest="enable_level_set_volume_correction",
+                        action="store_false")
+    parser.add_argument("--volume-correction-cadence-steps", type=int)
+    parser.add_argument("--volume-correction-use-initial-volume",
+                        dest="volume_correction_use_initial_volume",
+                        action="store_true",
+                        default=None)
+    parser.add_argument("--volume-correction-target-volume",
+                        dest="volume_correction_use_initial_volume",
+                        action="store_false")
+    parser.add_argument("--volume-correction-tolerance", type=float)
+    parser.add_argument("--volume-correction-max-iterations", type=int)
     parser.add_argument("--max-nonlinear-iterations", type=int)
     parser.add_argument("--linear-relative-tolerance", type=float)
     parser.add_argument("--linear-absolute-tolerance", type=float)
@@ -4040,6 +6849,9 @@ def main() -> int:
     parser.add_argument("--jacobian-check-components")
     parser.add_argument("--jacobian-check-component-sweeps")
     parser.add_argument("--enable-newton-direction-check", action="store_true")
+    parser.add_argument("--newton-line-search-fail-on-no-reduction",
+                        action="store_true")
+    parser.add_argument("--newton-line-search-max-iterations", type=int)
     parser.add_argument("--enable-linear-solve-history", action="store_true")
     parser.add_argument("--linear-solve-history-max-calls", type=int)
     parser.add_argument("--enable-linear-solve-component-norms", action="store_true")
@@ -4050,6 +6862,8 @@ def main() -> int:
     parser.add_argument("--require-timeloop-initialization-diagnostics", action="store_true")
     parser.add_argument("--enable-fsils-matrix-diagnostics", action="store_true")
     parser.add_argument("--require-fsils-matrix-diagnostics", action="store_true")
+    parser.add_argument("--fsils-matrix-diagnostics-every-n", type=int)
+    parser.add_argument("--fsils-matrix-diagnostics-max-records", type=int)
     parser.add_argument("--max-fsils-matrix-zero-rows", type=int)
     parser.add_argument("--max-fsils-matrix-missing-diag", type=int)
     parser.add_argument("--max-fsils-matrix-zero-diag", type=int)
@@ -4071,20 +6885,54 @@ def main() -> int:
     parser.add_argument("--require-process-memory-diagnostics", action="store_true")
     parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
+    parser.add_argument("--max-diagnostic-generated-cell-cache-full-miss-rebuilds", type=int)
     parser.add_argument("--require-eigen-factorization-diagnostics", action="store_true")
     parser.add_argument("--require-active-pressure-support-diagnostics", action="store_true")
+    parser.add_argument("--require-curvature-projection-diagnostics", action="store_true")
+    parser.add_argument("--require-curvature-projection-newton-freshness", action="store_true")
+    parser.add_argument("--min-diagnostic-curvature-projection-count", type=int)
+    parser.add_argument("--min-diagnostic-curvature-projection-max-abs-curvature", type=float)
+    parser.add_argument("--max-diagnostic-curvature-projection-zero-fallback-vertices", type=int)
+    parser.add_argument("--max-diagnostic-curvature-projection-normalized-fit-residual", type=float)
+    parser.add_argument("--min-diagnostic-curvature-projection-smoothing-iterations", type=int)
     parser.add_argument("--max-eigen-factorization-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-pressure-zero-rows", type=int)
+    parser.add_argument("--max-eigen-factorization-pressure-zero-cols", type=int)
     parser.add_argument("--max-eigen-factorization-nonfinite-entries", type=int)
+    parser.add_argument("--max-time-loop-nonlinear-iterations-per-step", type=int)
+    parser.add_argument("--max-time-loop-linear-iterations-per-step", type=int)
+    parser.add_argument("--enable-adaptive-time-loop", action="store_true")
+    parser.add_argument("--adaptive-time-loop-min-dt", type=float)
+    parser.add_argument("--adaptive-time-loop-max-dt", type=float)
+    parser.add_argument("--adaptive-time-loop-max-retries", type=int)
+    parser.add_argument("--adaptive-time-loop-decrease-factor", type=float)
+    parser.add_argument("--adaptive-time-loop-increase-factor", type=float)
+    parser.add_argument("--adaptive-time-loop-target-newton-iterations", type=int)
+    parser.add_argument("--adaptive-time-loop-max-steps-multiplier", type=int)
     args = parser.parse_args()
+    remember_explicit_cli_overrides(args)
+    apply_high_order_production_qualification_defaults(args)
+    apply_high_order_mpi_production_qualification_defaults(args)
+    apply_high_order_visible_motion_demo_defaults(args)
+    apply_high_order_3d_benchmark_smoke_defaults(args)
+    apply_high_order_3d_benchmark_qualification_defaults(args)
+    apply_high_order_3d_benchmark_profile_qualification_defaults(args)
+    apply_high_order_curved_3d_simplex_smoke_defaults(args)
+    apply_high_order_mpi_motion_smoke_defaults(args)
+    apply_high_order_capillary_projection_smoke_defaults(args)
+    apply_high_order_capillary_response_smoke_defaults(args)
+    apply_high_order_capillary_balance_smoke_defaults(args)
+    apply_high_order_volume_corrected_motion_smoke_defaults(args)
     apply_high_order_implicit_defaults(args)
+    require_profile_production_linear_solver_policy(args)
 
     solver = resolve_solver(args.solver)
     cases = args.case or ["mini2d"]
     validate_high_order_implicit_cases(cases, args)
     report = []
     for case_name in cases:
-        report.append(run_case(case_name, solver, args))
+        case_args = case_args_for_run(case_name, args)
+        report.append(run_case(case_name, solver, case_args))
         write_qualification_log(args.qualification_log, solver, report, complete=False)
     write_qualification_log(args.qualification_log, solver, report, complete=True)
     print(json.dumps({"solver": str(solver), "probes": report}, indent=2, sort_keys=True))

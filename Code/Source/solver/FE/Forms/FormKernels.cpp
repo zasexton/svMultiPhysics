@@ -13513,19 +13513,80 @@ void FormKernel::computeInterfaceFace(
 {
     ensureInterpreterLoweredIndexedAccess();
 
+    const auto n_test_minus = ctx_minus.numTestDofs();
+    const auto n_trial_minus = ctx_minus.numTrialDofs();
+    const auto n_test_plus = ctx_plus.numTestDofs();
+    const auto n_trial_plus = ctx_plus.numTrialDofs();
+
+    if (ir_.kind() == FormKind::Linear) {
+        output_minus.reserve(n_test_minus, n_trial_minus, false, true);
+        output_plus.reserve(n_test_plus, n_trial_plus, false, false);
+        coupling_mp.reserve(n_test_minus, n_trial_plus, false, false);
+        coupling_pm.reserve(n_test_plus, n_trial_minus, false, false);
+
+        output_minus.clear();
+        output_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+
+        const auto n_qpts = ctx_minus.numQuadraturePoints();
+        const auto* time_ctx = ctx_minus.timeIntegrationContext();
+
+        if (!inlined_state_updates_.interface_face.empty()) {
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Linear,
+                                                     constitutive_state_.get(),
+                                                     inlined_state_updates_.interface_face,
+                                                     Side::Minus, q);
+            }
+        }
+
+        ConstitutiveCallCacheReal constitutive_cache;
+        EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Linear, Side::Minus, Side::Minus,
+                        0, 0, constitutive_state_.get(), &constitutive_cache};
+
+        const auto& terms = ir_.terms();
+        for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+            const auto& term = terms[term_index];
+            if (term.domain != IntegralDomain::InterfaceFace) continue;
+            if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
+            if (term_weight == 0.0) continue;
+
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_minus.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test_minus; ++i) {
+                    env.i = i;
+                    const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                  term.integrand,
+                                                                  tensor_term_ir_,
+                                                                  tensor_term_fallback_,
+                                                                  env,
+                                                                  Side::Minus,
+                                                                  q);
+                    output_minus.vectorEntry(i) += (term_weight * w) * s;
+                }
+            }
+        }
+        output_minus.has_matrix = false;
+        output_minus.has_vector = true;
+        output_plus.has_matrix = false;
+        output_plus.has_vector = false;
+        coupling_mp.has_matrix = false;
+        coupling_mp.has_vector = false;
+        coupling_pm.has_matrix = false;
+        coupling_pm.has_vector = false;
+        return;
+    }
+
     if (ir_.kind() != FormKind::Bilinear) {
-        // Interface face assembly is currently defined only for bilinear forms in FormKernel.
+        // Interface face assembly is currently defined only for linear or bilinear forms in FormKernel.
         output_minus.clear();
         output_plus.clear();
         coupling_mp.clear();
         coupling_pm.clear();
         return;
     }
-
-    const auto n_test_minus = ctx_minus.numTestDofs();
-    const auto n_trial_minus = ctx_minus.numTrialDofs();
-    const auto n_test_plus = ctx_plus.numTestDofs();
-    const auto n_trial_plus = ctx_plus.numTrialDofs();
 
     output_minus.reserve(n_test_minus, n_trial_minus, true, false);
     output_plus.reserve(n_test_plus, n_trial_plus, true, false);
@@ -15262,6 +15323,7 @@ void NonlinearFormKernel::computeInterfaceFace(
     const auto n_trial_minus = ctx_minus.numTrialDofs();
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
+    const bool one_sided_embedded = &ctx_plus == &ctx_minus;
 
     const auto minus_requested = requestedKernelOutputs(
         output_minus,
@@ -15269,15 +15331,15 @@ void NonlinearFormKernel::computeInterfaceFace(
         output_ != NonlinearKernelOutput::MatrixOnly);
     const auto plus_requested = requestedKernelOutputs(
         output_plus,
-        output_ != NonlinearKernelOutput::VectorOnly,
-        output_ != NonlinearKernelOutput::MatrixOnly);
+        !one_sided_embedded && output_ != NonlinearKernelOutput::VectorOnly,
+        !one_sided_embedded && output_ != NonlinearKernelOutput::MatrixOnly);
     const auto mp_requested = requestedKernelOutputs(
         coupling_mp,
-        output_ != NonlinearKernelOutput::VectorOnly,
+        !one_sided_embedded && output_ != NonlinearKernelOutput::VectorOnly,
         /*can_vector=*/false);
     const auto pm_requested = requestedKernelOutputs(
         coupling_pm,
-        output_ != NonlinearKernelOutput::VectorOnly,
+        !one_sided_embedded && output_ != NonlinearKernelOutput::VectorOnly,
         /*can_vector=*/false);
 
     output_minus.reserve(n_test_minus, n_trial_minus, minus_requested.matrix, minus_requested.vector);
@@ -15634,6 +15696,12 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
     hashTag64(h, 0x46ULL);
     hashPod64(h, static_cast<std::uint8_t>(geom.mode));
     hashPod64(h, static_cast<std::uint16_t>(geom.mesh_motion_field));
+    hashPod64(h, static_cast<std::uint32_t>(geom.level_set_cut_domains.size()));
+    for (const auto& domain : geom.level_set_cut_domains) {
+        hashPod64(h, static_cast<std::uint16_t>(domain.level_set_field));
+        hashPod64(h, static_cast<std::int32_t>(domain.interface_marker));
+        hashPod64(h, static_cast<std::uint8_t>(domain.side));
+    }
     hashPod64(h, residual_ir.geometrySensitivityActive() ? std::uint8_t{1u} : std::uint8_t{0u});
 
     NodeHashMemo memo;
@@ -15868,9 +15936,51 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
     const bool geometry_sensitivity_active = residual_ir_.geometrySensitivityActive();
     const auto geometry_sensitivity = residual_ir_.geometrySensitivityOptions();
     const FieldId trial_state_field = CURRENT_SOLUTION_FIELD_ID;
+    const bool mesh_geometry_sensitivity =
+        geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns;
+    const bool level_set_cut_geometry_sensitivity =
+        geometry_sensitivity.mode ==
+            GeometrySensitivityMode::LevelSetCutDomainUnknowns &&
+        !geometry_sensitivity.level_set_cut_domains.empty();
+    const FieldId sensitivity_field =
+        level_set_cut_geometry_sensitivity
+            ? geometry_sensitivity.level_set_cut_domains.front().level_set_field
+            : geometry_sensitivity.mesh_motion_field;
+
+    const auto append_term = [](FormExpr& accumulator, const FormExpr& term) {
+        if (!term.isValid()) {
+            return;
+        }
+        accumulator = accumulator.isValid() ? accumulator + term : term;
+    };
+    const auto cut_domain_matches =
+        [](const LevelSetCutDomainSensitivity& domain,
+           int marker,
+           CutVolumeSide side) noexcept {
+            return domain.interface_marker == marker && domain.side == side;
+        };
+    const auto shape_tangent_integrand =
+        [&](const IntegralTerm& term,
+            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            if (!residual_ir_.trialSpace().has_value()) {
+                return FormExpr{};
+            }
+            const auto primal_integrand =
+                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            const auto phi = FormExpr::stateField(
+                domain.level_set_field, *residual_ir_.trialSpace(), "level_set");
+            const auto dphi =
+                FormExpr::trialFunction(*residual_ir_.trialSpace(), "dlevel_set");
+            const auto grad_phi = grad(phi);
+            const auto grad_norm =
+                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
+            const auto sign = domain.side == CutVolumeSide::Negative
+                                  ? Real{-1.0}
+                                  : Real{1.0};
+            return FormExpr::constant(sign) * primal_integrand * dphi / grad_norm;
+        };
 
     FormExpr tangent_form{};
-    bool first = true;
 
     for (const auto& term : residual_ir_.terms()) {
         if (!term.integrand.isValid()) {
@@ -15879,42 +15989,61 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
 
         FormExpr dI = geometry_sensitivity_active
             ? differentiateResidual(term.integrand,
-                                    geometry_sensitivity.mesh_motion_field,
+                                    sensitivity_field,
                                     trial_state_field,
                                     geometry_sensitivity)
             : differentiateResidual(term.integrand);
 
-        if (geometry_sensitivity_active) {
+        if (mesh_geometry_sensitivity) {
             const auto primal_integrand = rewriteTrialFunctionsToState(term.integrand, trial_state_field);
             dI = dI + primal_integrand *
                 (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
         }
 
-        FormExpr wrapped{};
         switch (term.domain) {
             case IntegralDomain::Cell:
-                wrapped = dI.dx();
+                if (level_set_cut_geometry_sensitivity) {
+                    for (const auto& domain :
+                         geometry_sensitivity.level_set_cut_domains) {
+                        append_term(tangent_form,
+                                    dI.dCutVolume(domain.interface_marker,
+                                                  domain.side));
+                        append_term(tangent_form,
+                                    shape_tangent_integrand(term, domain)
+                                        .dI(domain.interface_marker));
+                    }
+                } else {
+                    append_term(tangent_form, dI.dx());
+                }
                 break;
             case IntegralDomain::Boundary:
-                wrapped = dI.ds(term.boundary_marker);
+                append_term(tangent_form, dI.ds(term.boundary_marker));
                 break;
             case IntegralDomain::InteriorFace:
-                wrapped = dI.dS(term.interface_marker);
+                append_term(tangent_form, dI.dS(term.interface_marker));
                 break;
             case IntegralDomain::InterfaceFace:
-                wrapped = dI.dI(term.interface_marker);
+                append_term(tangent_form, dI.dI(term.interface_marker));
                 break;
             case IntegralDomain::CutVolume:
-                wrapped = dI.dCutVolume(term.interface_marker, term.cut_volume_side);
+                append_term(tangent_form,
+                            dI.dCutVolume(term.interface_marker,
+                                          term.cut_volume_side));
+                if (level_set_cut_geometry_sensitivity) {
+                    for (const auto& domain :
+                         geometry_sensitivity.level_set_cut_domains) {
+                        if (!cut_domain_matches(domain,
+                                                term.interface_marker,
+                                                term.cut_volume_side)) {
+                            continue;
+                        }
+                        append_term(tangent_form,
+                                    shape_tangent_integrand(term, domain)
+                                        .dI(domain.interface_marker));
+                    }
+                }
                 break;
         }
-
-        if (!wrapped.isValid()) {
-            continue;
-        }
-
-        tangent_form = first ? wrapped : (tangent_form + wrapped);
-        first = false;
     }
 
     if (!tangent_form.isValid()) {
@@ -16058,7 +16187,14 @@ bool SymbolicNonlinearFormKernel::hasCell() const noexcept
 }
 bool SymbolicNonlinearFormKernel::hasBoundaryFace() const noexcept { return residual_ir_.hasBoundaryTerms(); }
 bool SymbolicNonlinearFormKernel::hasInteriorFace() const noexcept { return residual_ir_.hasInteriorFaceTerms(); }
-bool SymbolicNonlinearFormKernel::hasInterfaceFace() const noexcept { return residual_ir_.hasInterfaceFaceTerms(); }
+bool SymbolicNonlinearFormKernel::hasInterfaceFace() const noexcept
+{
+    const auto geometry_sensitivity = residual_ir_.geometrySensitivityOptions();
+    return residual_ir_.hasInterfaceFaceTerms() ||
+           (geometry_sensitivity.mode ==
+                GeometrySensitivityMode::LevelSetCutDomainUnknowns &&
+            !geometry_sensitivity.level_set_cut_domains.empty());
+}
 bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 {
     return formIRRequiresTwoSidedInterfaceFace(residual_ir_) ||
@@ -16597,6 +16733,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
     const auto n_trial_minus = ctx_minus.numTrialDofs();
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
+    const bool one_sided_embedded = &ctx_plus == &ctx_minus;
 
     const auto minus_requested = requestedKernelOutputs(
         output_minus,
@@ -16604,15 +16741,15 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
         output_ != NonlinearKernelOutput::MatrixOnly);
     const auto plus_requested = requestedKernelOutputs(
         output_plus,
-        output_ != NonlinearKernelOutput::VectorOnly,
-        output_ != NonlinearKernelOutput::MatrixOnly);
+        !one_sided_embedded && output_ != NonlinearKernelOutput::VectorOnly,
+        !one_sided_embedded && output_ != NonlinearKernelOutput::MatrixOnly);
     const auto mp_requested = requestedKernelOutputs(
         coupling_mp,
-        output_ != NonlinearKernelOutput::VectorOnly,
+        !one_sided_embedded && output_ != NonlinearKernelOutput::VectorOnly,
         /*can_vector=*/false);
     const auto pm_requested = requestedKernelOutputs(
         coupling_pm,
-        output_ != NonlinearKernelOutput::VectorOnly,
+        !one_sided_embedded && output_ != NonlinearKernelOutput::VectorOnly,
         /*can_vector=*/false);
     const bool want_matrix =
         minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;
@@ -16683,7 +16820,9 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
         };
 
         assembleResidualVec(Side::Minus, Side::Minus, output_minus, n_test_minus);
-        assembleResidualVec(Side::Plus, Side::Plus, output_plus, n_test_plus);
+        if (!one_sided_embedded) {
+            assembleResidualVec(Side::Plus, Side::Plus, output_plus, n_test_plus);
+        }
     }
 
     if (want_matrix) {
@@ -16727,12 +16866,14 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
 
         // minus-minus (evaluate on minus side)
         assembleBlock(Side::Minus, Side::Minus, Side::Minus, output_minus, n_test_minus, n_trial_minus);
-        // plus-plus (evaluate on plus side)
-        assembleBlock(Side::Plus, Side::Plus, Side::Plus, output_plus, n_test_plus, n_trial_plus);
-        // minus-plus coupling (evaluate on minus side)
-        assembleBlock(Side::Minus, Side::Minus, Side::Plus, coupling_mp, n_test_minus, n_trial_plus);
-        // plus-minus coupling (evaluate on plus side)
-        assembleBlock(Side::Plus, Side::Plus, Side::Minus, coupling_pm, n_test_plus, n_trial_minus);
+        if (!one_sided_embedded) {
+            // plus-plus (evaluate on plus side)
+            assembleBlock(Side::Plus, Side::Plus, Side::Plus, output_plus, n_test_plus, n_trial_plus);
+            // minus-plus coupling (evaluate on minus side)
+            assembleBlock(Side::Minus, Side::Minus, Side::Plus, coupling_mp, n_test_minus, n_trial_plus);
+            // plus-minus coupling (evaluate on plus side)
+            assembleBlock(Side::Plus, Side::Plus, Side::Minus, coupling_pm, n_test_plus, n_trial_minus);
+        }
     }
 }
 

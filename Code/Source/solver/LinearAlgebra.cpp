@@ -37,6 +37,25 @@
 
 namespace {
 
+bool eigenOopSupportsPreconditioner(const consts::PreconditionerType prec_cond_type)
+{
+  switch (prec_cond_type) {
+    case consts::PreconditionerType::PREC_NONE:
+    case consts::PreconditionerType::PREC_FSILS:
+    case consts::PreconditionerType::PREC_RCS:
+    case consts::PreconditionerType::PREC_PETSC_JACOBI:
+    case consts::PreconditionerType::PREC_TRILINOS_DIAGONAL:
+    case consts::PreconditionerType::PREC_TRILINOS_BLOCK_JACOBI:
+    case consts::PreconditionerType::PREC_TRILINOS_ILU:
+    case consts::PreconditionerType::PREC_TRILINOS_ILUT:
+    case consts::PreconditionerType::PREC_TRILINOS_IC:
+    case consts::PreconditionerType::PREC_TRILINOS_ICT:
+      return true;
+    default:
+      return false;
+  }
+}
+
 class EigenOopOnlyLinearAlgebra final : public LinearAlgebra {
  public:
   EigenOopOnlyLinearAlgebra()
@@ -60,11 +79,12 @@ class EigenOopOnlyLinearAlgebra final : public LinearAlgebra {
   void check_options(const consts::PreconditionerType prec_cond_type,
                      const consts::LinearAlgebraType assembly_type_in) override
   {
-    if (prec_cond_type != consts::PreconditionerType::PREC_NONE ||
+    if (!eigenOopSupportsPreconditioner(prec_cond_type) ||
         assembly_type_in != consts::LinearAlgebraType::none) {
       throw std::runtime_error(
           "[svMultiPhysics] Eigen linear algebra is available only for the new OOP solver "
-          "and requires <Preconditioner>none</Preconditioner> with no legacy assembly override.");
+          "and supports none, diagonal, row-column-scaling, and ILU preconditioners with no "
+          "legacy assembly override.");
     }
   }
 
@@ -80,9 +100,10 @@ class EigenOopOnlyLinearAlgebra final : public LinearAlgebra {
 
   void set_preconditioner(consts::PreconditionerType prec_type) override
   {
-    if (prec_type != consts::PreconditionerType::PREC_NONE) {
+    if (!eigenOopSupportsPreconditioner(prec_type)) {
       throw std::runtime_error(
-          "[svMultiPhysics] Eigen linear algebra requires <Preconditioner>none</Preconditioner>.");
+          "[svMultiPhysics] Eigen linear algebra supports none, diagonal, row-column-scaling, "
+          "and ILU preconditioners.");
     }
   }
 

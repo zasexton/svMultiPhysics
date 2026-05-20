@@ -61,6 +61,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <array>
 #include <functional>
@@ -264,6 +265,15 @@ struct MeshParticipantInfo {
 
 class FESystem {
 public:
+    struct FormCellDomainRestriction {
+        InterfaceId interface_marker{-1};
+        geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
+        FieldId level_set_field{INVALID_FIELD_ID};
+        Real isovalue{0.0};
+        bool enable_level_set_shape_tangent{false};
+        std::string diagnostic{};
+    };
+
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
     FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access,
              std::vector<MeshParticipantInfo> participants);
@@ -323,6 +333,10 @@ public:
     void addSystemConstraint(std::unique_ptr<constraints::ISystemConstraint> c);
 
     void addOperator(OperatorTag name);
+    void setFormInstallCellDomainRestrictions(
+        std::vector<FormCellDomainRestriction> restrictions);
+    [[nodiscard]] const std::vector<FormCellDomainRestriction>&
+    formInstallCellDomainRestrictions() const noexcept;
 
     /// @name Kernel registration (internal — do not use in physics modules)
     ///
@@ -1380,12 +1394,24 @@ public:
         return operator_registry_.has(op);
     }
 
+    [[nodiscard]] std::size_t cutVolumeKernelCount(
+        int interface_marker,
+        geometry::CutIntegrationSide side) const;
+
     void setCutIntegrationContext(std::shared_ptr<const assembly::CutIntegrationContext> context) noexcept {
+        if (cut_integration_context_.get() != context.get()) {
+            bumpConstraintLayoutRevision();
+        }
         cut_integration_context_ = std::move(context);
+        invalidateAnalysisCache();
     }
 
     void clearCutIntegrationContext() noexcept {
+        if (cut_integration_context_) {
+            bumpConstraintLayoutRevision();
+        }
         cut_integration_context_.reset();
+        invalidateAnalysisCache();
     }
 
     [[nodiscard]] const assembly::CutIntegrationContext* cutIntegrationContext() const noexcept {
@@ -1550,7 +1576,8 @@ private:
     void bumpDofLayoutRevision() noexcept { ++fe_layout_revisions_.dof_layout; }
     void bumpConstraintLayoutRevision() noexcept { ++fe_layout_revisions_.constraint_layout; }
     void bumpBlockLayoutRevision() noexcept { ++fe_layout_revisions_.block_layout; }
-    [[nodiscard]] constraints::ConstraintRevisionSnapshot captureConstraintRevisionSnapshot() const noexcept;
+    [[nodiscard]] constraints::ConstraintRevisionSnapshot captureConstraintRevisionSnapshot(
+        bool include_mesh_field_values = false) const noexcept;
 
     [[nodiscard]] const FieldRecord& singleField() const;
 
@@ -1580,7 +1607,9 @@ private:
 
     FieldRegistry field_registry_;
     OperatorRegistry operator_registry_;
+    std::vector<FormCellDomainRestriction> form_install_cell_domain_restrictions_{};
     std::shared_ptr<const assembly::CutIntegrationContext> cut_integration_context_{};
+    std::set<InterfaceId> generated_embedded_interface_markers_{};
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
     std::vector<std::unique_ptr<constraints::ISystemConstraint>> system_constraint_defs_;
 
@@ -1602,6 +1631,9 @@ private:
     bool has_last_setup_{false};
     constraints::ConstraintRevisionSnapshot constraint_revision_snapshot_{};
     std::uint64_t constraint_time_epoch_{0};
+    bool has_last_constraint_update_time_{false};
+    double last_constraint_update_time_{0.0};
+    double last_constraint_update_dt_{0.0};
     assembly::MeshMotionFieldAccess mesh_motion_fields_{};
     GeometricNonlinearityPolicy geometric_nonlinearity_policy_{};
 

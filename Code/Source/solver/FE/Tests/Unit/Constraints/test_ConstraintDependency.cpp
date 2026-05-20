@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Constraints/ConstraintDependency.h"
+#include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "Constraints/MultiPointConstraint.h"
 #include "Constraints/PeriodicBC.h"
 #include "Constraints/TiedInterfaceConstraint.h"
@@ -76,6 +77,46 @@ TEST(ConstraintDependencyTest, MultiPointConstraintsCanDeclareMotionAndTangentHo
     EXPECT_TRUE(deps.structural.fe_dof_layout);
     EXPECT_EQ(deps.tangent_policy, ConstraintTangentPolicy::Analytic);
     EXPECT_EQ(deps.tangent_hook_name, "rigid-link-linearization");
+}
+
+TEST(ConstraintDependencyTest,
+     LevelSetActiveSideConstraintTracksFieldAndCutContextRevisions)
+{
+    LevelSetActiveSideVertexDirichletConstraint constraint(
+        /*field=*/0,
+        "phi",
+        LevelSetConstraintSide::Negative,
+        /*isovalue=*/0.0,
+        /*inactive_value=*/0.0,
+        /*interface_marker=*/7);
+
+    const auto deps = constraint.dependencyDeclaration();
+    EXPECT_TRUE(deps.structural.topology);
+    EXPECT_TRUE(deps.structural.ownership);
+    EXPECT_TRUE(deps.structural.numbering);
+    EXPECT_TRUE(deps.structural.labels);
+    EXPECT_TRUE(deps.structural.fe_dof_layout);
+    EXPECT_TRUE(deps.structural.fe_constraint_layout);
+    EXPECT_TRUE(deps.structural.mesh_field_layout);
+    EXPECT_TRUE(deps.structural.mesh_field_values);
+
+    ConstraintRevisionSnapshot cached;
+    cached.valid = true;
+    cached.mesh_field_layout = 3;
+    cached.mesh_field_values = 11;
+    cached.fe_constraint_layout = 5;
+
+    auto current = cached;
+    current.mesh_field_layout += 1;
+    EXPECT_TRUE(structural_dependency_changed(deps, cached, current));
+
+    current = cached;
+    current.mesh_field_values += 1;
+    EXPECT_TRUE(structural_dependency_changed(deps, cached, current));
+
+    current = cached;
+    current.fe_constraint_layout += 1;
+    EXPECT_TRUE(structural_dependency_changed(deps, cached, current));
 }
 
 TEST(ConstraintDependencyTest, TiedInterfaceConstraintTracksRelationMapRevisions)

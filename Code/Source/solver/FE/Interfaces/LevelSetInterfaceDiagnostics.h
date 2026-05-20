@@ -27,6 +27,8 @@ struct LevelSetInterfaceSummaryStatistics {
     std::size_t active_fragment_count{0};
     std::size_t degenerate_fragment_count{0};
     std::size_t quadrature_point_count{0};
+    std::size_t volume_quadrature_point_count{0};
+    std::size_t total_quadrature_point_count{0};
     std::size_t cut_cell_count{0};
     Real total_interface_measure{0.0};
     bool enclosed_measure_available{false};

@@ -26,6 +26,8 @@ public:
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::Eigen; }
     [[nodiscard]] GlobalIndex size() const noexcept override { return static_cast<GlobalIndex>(vec_.size()); }
+    [[nodiscard]] std::uint64_t valueRevision() const noexcept override { return value_revision_; }
+    void markModified() noexcept override { ++value_revision_; }
 
     void zero() override;
     void set(Real value) override;
@@ -44,11 +46,16 @@ public:
     [[nodiscard]] std::span<Real> localSpan() override;
     [[nodiscard]] std::span<const Real> localSpan() const override;
 
-    [[nodiscard]] Eigen::VectorXd& eigen() noexcept { return vec_; }
+    [[nodiscard]] Eigen::VectorXd& eigen() noexcept
+    {
+        markModified();
+        return vec_;
+    }
     [[nodiscard]] const Eigen::VectorXd& eigen() const noexcept { return vec_; }
 
 private:
     Eigen::VectorXd vec_;
+    std::uint64_t value_revision_{0};
 };
 
 #endif // FE_HAS_EIGEN
@@ -58,4 +65,3 @@ private:
 } // namespace svmp
 
 #endif // SVMP_FE_BACKENDS_EIGEN_VECTOR_H
-

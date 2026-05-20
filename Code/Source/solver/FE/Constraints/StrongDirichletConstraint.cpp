@@ -353,9 +353,11 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
 
     for (std::size_t i = 0; i < dofs_.size(); ++i) {
         const auto dof = dofs_[i];
-        if (owned.contains(dof)) {
-            ++owned_dofs;
+        const bool is_owned = owned.contains(dof);
+        if (!is_owned) {
+            continue;
         }
+        ++owned_dofs;
         pctx.x = coords_[i];
         const Real v = forms::evaluateScalarAt(value_, pctx);
         const bool constrained = constraints.isConstrained(dof);
@@ -371,7 +373,7 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                 sample << "; ";
             }
             sample << "{dof=" << dof
-                   << ",owned=" << (owned.contains(dof) ? 1 : 0)
+                   << ",owned=1"
                    << ",constrained=" << (constrained ? 1 : 0)
                    << ",x=(" << coords_[i][0] << "," << coords_[i][1] << "," << coords_[i][2] << ")"
                    << ",v=" << v << "}";
@@ -380,7 +382,7 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
         constraints.updateInhomogeneity(dof, v);
     }
 
-    if (dofs_.empty()) {
+    if (owned_dofs == 0) {
         min_value = 0.0;
         max_value = 0.0;
     }

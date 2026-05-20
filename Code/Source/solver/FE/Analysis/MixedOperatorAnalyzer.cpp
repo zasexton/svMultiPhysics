@@ -1443,7 +1443,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                         ns_claim.status = PropertyStatus::Likely;
                         ns_claim.confidence = metadata.present
                             ? metadata.confidence
-                            : AnalysisConfidence::Medium;
+                            : AnalysisConfidence::High;
                         ns_claim.certification_class =
                             CertificationClass::NotCertified;
                         ns_claim.evidence_level = metadata.present
@@ -1579,7 +1579,7 @@ void MixedOperatorAnalyzer::run(const ProblemAnalysisContext& context,
                     ns_claim.status = PropertyStatus::Likely;
                     ns_claim.confidence = metadata.present
                         ? metadata.confidence
-                        : AnalysisConfidence::Medium;
+                        : AnalysisConfidence::High;
                     ns_claim.certification_class =
                         CertificationClass::NotCertified;
                     ns_claim.evidence_level = metadata.present

@@ -73,6 +73,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -1057,6 +1058,66 @@ private:
     bool cached_qpt_major_same_space_{false};
     bool cached_qpt_major_has_hessians_{false};
 
+    struct CutVolumeBasisCacheKey {
+        std::size_t rule_index{0};
+        std::string test_basis_identity{};
+        std::string trial_basis_identity{};
+        bool has_trial{false};
+        bool with_hessians{false};
+
+        [[nodiscard]] bool operator==(const CutVolumeBasisCacheKey& other) const noexcept
+        {
+            return rule_index == other.rule_index &&
+                   test_basis_identity == other.test_basis_identity &&
+                   trial_basis_identity == other.trial_basis_identity &&
+                   has_trial == other.has_trial &&
+                   with_hessians == other.with_hessians;
+        }
+    };
+
+    struct CutVolumeBasisCacheKeyHash {
+        [[nodiscard]] std::size_t operator()(const CutVolumeBasisCacheKey& key) const noexcept
+        {
+            std::size_t h = std::hash<std::size_t>{}(key.rule_index);
+            const auto mix = [](std::size_t& seed, std::size_t value) {
+                seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U);
+            };
+            mix(h, std::hash<std::string>{}(key.test_basis_identity));
+            mix(h, std::hash<std::string>{}(key.trial_basis_identity));
+            mix(h, std::hash<bool>{}(key.has_trial));
+            mix(h, std::hash<bool>{}(key.with_hessians));
+            return h;
+        }
+    };
+
+    struct CutVolumeBasisCacheEntry {
+        basis::BasisCacheEntry test_basis{};
+        basis::BasisCacheEntry trial_basis{};
+        bool has_trial{false};
+    };
+
+    const CutVolumeBasisCacheEntry* active_cut_volume_basis_cache_entry_{nullptr};
+    const CutIntegrationContext* cut_volume_basis_cache_context_{nullptr};
+    std::uint64_t cut_volume_basis_cache_signature_{0};
+    std::uint64_t cut_volume_basis_cache_mesh_geometry_revision_{0};
+    std::uint64_t cut_volume_basis_cache_mesh_topology_revision_{0};
+    std::unordered_map<CutVolumeBasisCacheKey,
+                       CutVolumeBasisCacheEntry,
+                       CutVolumeBasisCacheKeyHash> cut_volume_basis_cache_{};
+
+    [[nodiscard]] const CutVolumeBasisCacheEntry*
+    getOrCreateCutVolumeBasisCacheEntry(
+        const CutIntegrationContext& cut_context,
+        std::uint64_t cut_context_signature,
+        std::size_t rule_index,
+        const quadrature::QuadratureRule& quad_rule,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        ElementType cell_type,
+        const spaces::FunctionSpace& test_space,
+        const spaces::FunctionSpace& trial_space,
+        RequiredData required_data);
+
     // Pre-computed coupled-block metadata to avoid virtual calls in fast path.
     // Populated once per block before the cell loop; indexed by block index.
     std::vector<AssemblyContext::CoupledBlockMetadata> cached_coupled_block_meta_;
@@ -1211,12 +1272,19 @@ private:
     // Per-slot scalar physical gradient/hessian cache.
     // Populated by block 0 of each cell in the coupled loop; reused by blocks 1-3.
     // Layout: [q * n_scalar + si]  (qpt-major, scalar-DOF minor)
-    static constexpr std::size_t kMaxScalarDofsPerSlot = 8;
-    static constexpr std::size_t kMaxQPtsPerSlot = 16;
-    static constexpr std::size_t kMaxScalarEntriesPerSlot = kMaxScalarDofsPerSlot * kMaxQPtsPerSlot;
     struct CoupledSlotPhysCache {
-        AssemblyContext::Vector3D phys_grads[kMaxScalarEntriesPerSlot];
-        AssemblyContext::Matrix3x3 phys_hess[kMaxScalarEntriesPerSlot];
+        std::vector<AssemblyContext::Vector3D> phys_grads;
+        std::vector<AssemblyContext::Matrix3x3> phys_hess;
+
+        void resize(std::size_t entries, bool need_hessians)
+        {
+            phys_grads.resize(entries);
+            if (need_hessians) {
+                phys_hess.resize(entries);
+            } else {
+                phys_hess.clear();
+            }
+        }
     };
     std::vector<CoupledSlotPhysCache> coupled_slot_phys_cache_;
 

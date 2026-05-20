@@ -307,6 +307,23 @@ void requireSupportedGeometrySensitivityMode(const FormExprNode& node,
         return;
     }
 
+    if (options.mode == GeometrySensitivityMode::LevelSetCutDomainUnknowns) {
+        if (options.level_set_cut_domains.empty()) {
+            throw std::invalid_argument(
+                "FormCompiler: level-set cut-domain geometry sensitivity requires at least one cut domain");
+        }
+        for (const auto& domain : options.level_set_cut_domains) {
+            if (domain.level_set_field == INVALID_FIELD_ID ||
+                domain.level_set_field == GEOMETRY_FIELD_ID ||
+                domain.level_set_field == CURRENT_SOLUTION_FIELD_ID ||
+                domain.interface_marker < 0) {
+                throw std::invalid_argument(
+                    "FormCompiler: level-set cut-domain geometry sensitivity requires explicit level-set FieldId and interface marker");
+            }
+        }
+        return;
+    }
+
     if (options.mesh_motion_field == INVALID_FIELD_ID ||
         options.mesh_motion_field == GEOMETRY_FIELD_ID ||
         options.mesh_motion_field == CURRENT_SOLUTION_FIELD_ID) {
@@ -1080,9 +1097,12 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     const bool form_has_geometry_sensitivity_terminals =
         detail::containsGeometrySensitivityTerminal(*form.node());
     const bool geometry_sensitivity_active =
-        impl_->options.geometry_sensitivity.mode ==
-            GeometrySensitivityMode::MeshMotionUnknowns &&
-        form_has_geometry_sensitivity_terminals;
+        (impl_->options.geometry_sensitivity.mode ==
+             GeometrySensitivityMode::MeshMotionUnknowns &&
+         form_has_geometry_sensitivity_terminals) ||
+        (impl_->options.geometry_sensitivity.mode ==
+             GeometrySensitivityMode::LevelSetCutDomainUnknowns &&
+         !impl_->options.geometry_sensitivity.level_set_cut_domains.empty());
 
     assembly::RequiredData required = assembly::RequiredData::None;
     std::unordered_map<FieldId, assembly::RequiredData> field_required{};

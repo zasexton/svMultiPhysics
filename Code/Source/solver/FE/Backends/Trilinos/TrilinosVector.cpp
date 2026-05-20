@@ -153,6 +153,7 @@ void TrilinosVector::zero()
     syncVectorFromCache();
     vec_->putScalar(0.0);
     invalidateLocalCache();
+    markModified();
 }
 
 void TrilinosVector::set(Real value)
@@ -160,6 +161,7 @@ void TrilinosVector::set(Real value)
     syncVectorFromCache();
     vec_->putScalar(static_cast<trilinos::Scalar>(value));
     invalidateLocalCache();
+    markModified();
 }
 
 void TrilinosVector::add(Real value)
@@ -170,6 +172,7 @@ void TrilinosVector::add(Real value)
         data[i] += static_cast<trilinos::Scalar>(value);
     }
     invalidateLocalCache();
+    markModified();
 }
 
 void TrilinosVector::scale(Real alpha)
@@ -177,6 +180,7 @@ void TrilinosVector::scale(Real alpha)
     syncVectorFromCache();
     vec_->scale(static_cast<trilinos::Scalar>(alpha));
     invalidateLocalCache();
+    markModified();
 }
 
 void TrilinosVector::copyFrom(const GenericVector& other)
@@ -188,6 +192,7 @@ void TrilinosVector::copyFrom(const GenericVector& other)
     syncVectorFromCache();
     Tpetra::deep_copy(*vec_->tpetra(), *o->vec_->tpetra());
     invalidateLocalCache();
+    markModified();
 }
 
 Real TrilinosVector::dot(const GenericVector& other) const
@@ -214,6 +219,7 @@ void TrilinosVector::updateGhosts()
     syncVectorFromCache();
     overlap_vec_->doImport(*vec_, *importer_, Tpetra::INSERT);
     invalidateLocalCache();
+    markModified();
 }
 
 namespace {
@@ -276,6 +282,7 @@ public:
         }
 
         vec_->invalidateLocalCache();
+        vec_->markModified();
     }
 
     void setVectorEntries(std::span<const GlobalIndex> dofs,
@@ -339,6 +346,7 @@ std::span<Real> TrilinosVector::localSpan()
 {
     syncCacheFromVector();
     local_cache_dirty_ = true;
+    markModified();
     return std::span<Real>(local_cache_.data(), local_cache_.size());
 }
 

@@ -56,6 +56,10 @@ struct CutQuadraturePoint {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
     std::array<Real, 3> normal{{0.0, 0.0, 0.0}};
     Real weight{0.0};
+    std::array<Real, 3> parent_coordinate{{0.0, 0.0, 0.0}};
+    Real reference_measure_factor{0.0};
+    Real level_set_residual{0.0};
+    Real gradient_norm{0.0};
 };
 
 struct CutQuadratureProvenance {
@@ -70,8 +74,13 @@ struct CutQuadratureProvenance {
     CutGeometryFrame frame{CutGeometryFrame::Reference};
     std::string implicit_geometry_mode{};
     std::string implicit_quadrature_backend{};
+    std::string selected_implicit_quadrature_backend{};
     std::string implicit_fallback_policy{};
+    std::string implicit_fallback_status{};
     std::string geometry_tangent_policy{};
+    Real implicit_cut_root_tolerance{0.0};
+    Real implicit_cut_root_coordinate_tolerance{0.0};
+    int implicit_cut_root_max_iterations{0};
     int requested_quadrature_order{-1};
     int achieved_quadrature_order{-1};
 };

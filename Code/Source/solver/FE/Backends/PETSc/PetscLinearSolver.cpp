@@ -320,6 +320,7 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
 
         FE_PETSC_CALL(KSPSolve(ksp_, b->petsc(), x->petsc()));
         x->invalidateLocalCache();
+        x->markModified();
 
         SolverReport rep;
         rep.initial_residual_norm = static_cast<Real>(r0);
@@ -489,8 +490,10 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
         for (std::size_t j = 0; j < x->numBlocks(); ++j) {
             if (auto* pv = dynamic_cast<PetscVector*>(&x->block(j))) {
                 pv->invalidateLocalCache();
+                pv->markModified();
             }
         }
+        x->markModified();
 
         SolverReport rep;
         rep.initial_residual_norm = static_cast<Real>(r0);

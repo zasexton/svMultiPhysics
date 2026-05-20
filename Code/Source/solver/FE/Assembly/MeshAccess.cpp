@@ -100,21 +100,56 @@ std::optional<LocalIndex> local_face_index_from_stored_face(const svmp::MeshBase
     const auto [cell_ptr, cell_count] =
         mesh.cell_vertices_span(static_cast<svmp::index_t>(cell_id));
     if (face_ptr == nullptr || cell_ptr == nullptr || face_count == 0u ||
-        face_count > 4u || cell_count == 0u) {
+        cell_count == 0u) {
+        return std::nullopt;
+    }
+
+    std::size_t face_corner_count = face_count;
+    bool high_order_line_face = false;
+    const auto& face_shapes = mesh.face_shapes();
+    if (static_cast<std::size_t>(face_id) < face_shapes.size()) {
+        const auto& shape = face_shapes[static_cast<std::size_t>(face_id)];
+        high_order_line_face =
+            shape.family == svmp::CellFamily::Line &&
+            shape.num_corners == 2 &&
+            face_count >= 2u;
+        if (shape.num_corners > 0) {
+            face_corner_count = std::min(
+                face_count,
+                static_cast<std::size_t>(shape.num_corners));
+        }
+    } else if (mesh.dim() == 2 && face_count > 2u) {
+        high_order_line_face = true;
+        face_corner_count = 2u;
+    } else if (mesh.dim() == 3) {
+        if (face_count == 6u) {
+            face_corner_count = 3u;
+        } else if (face_count == 8u || face_count == 9u) {
+            face_corner_count = 4u;
+        }
+    }
+
+    if (face_corner_count == 0u || face_corner_count > 4u) {
         return std::nullopt;
     }
 
     std::array<MeshIndex, 4> face_key{MeshIndex{0}, MeshIndex{0}, MeshIndex{0}, MeshIndex{0}};
-    for (std::size_t i = 0; i < face_count; ++i) {
-        face_key[i] = static_cast<MeshIndex>(face_ptr[i]);
+    if (high_order_line_face) {
+        face_key[0] = static_cast<MeshIndex>(face_ptr[0]);
+        face_key[1] = static_cast<MeshIndex>(face_ptr[face_count - 1u]);
+    } else {
+        for (std::size_t i = 0; i < face_corner_count; ++i) {
+            face_key[i] = static_cast<MeshIndex>(face_ptr[i]);
+        }
     }
-    std::sort(face_key.begin(), face_key.begin() + static_cast<std::ptrdiff_t>(face_count));
+    std::sort(face_key.begin(),
+              face_key.begin() + static_cast<std::ptrdiff_t>(face_corner_count));
 
     const ElementType cell_type = element_type_from_mesh_cell(mesh, cell_id);
     const auto ref = elements::ReferenceElement::create(cell_type);
     for (std::size_t lf = 0; lf < ref.num_faces(); ++lf) {
         const auto& ref_face = ref.face_nodes(lf);
-        if (ref_face.size() != face_count || ref_face.size() > 4u) {
+        if (ref_face.size() != face_corner_count || ref_face.size() > 4u) {
             continue;
         }
 
@@ -133,7 +168,9 @@ std::optional<LocalIndex> local_face_index_from_stored_face(const svmp::MeshBase
         }
         std::sort(cell_face_key.begin(),
                   cell_face_key.begin() + static_cast<std::ptrdiff_t>(ref_face.size()));
-        if (cell_face_key == face_key) {
+        if (std::equal(cell_face_key.begin(),
+                       cell_face_key.begin() + static_cast<std::ptrdiff_t>(ref_face.size()),
+                       face_key.begin())) {
             return static_cast<LocalIndex>(lf);
         }
     }

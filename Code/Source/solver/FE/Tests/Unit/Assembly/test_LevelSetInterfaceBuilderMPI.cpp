@@ -165,6 +165,15 @@ void mix_real_hash(std::uint64_t& hash, Real value) noexcept
     mix_hash(hash, bits);
 }
 
+void mix_string_hash(std::uint64_t& hash, const std::string& value) noexcept
+{
+    for (const char c : value) {
+        mix_hash(hash, static_cast<std::uint64_t>(
+                           static_cast<unsigned char>(c)));
+    }
+    mix_hash(hash, 0xffu);
+}
+
 [[nodiscard]] std::uint64_t domain_rule_hash(
     const LevelSetInterfaceDomain& domain) noexcept
 {
@@ -173,6 +182,11 @@ void mix_real_hash(std::uint64_t& hash, Real value) noexcept
         mix_hash(hash, static_cast<std::uint64_t>(rule.kind));
         mix_hash(hash, static_cast<std::uint64_t>(rule.side));
         mix_real_hash(hash, rule.measure);
+        mix_string_hash(hash, rule.provenance.cut_topology_id);
+        mix_string_hash(hash, rule.provenance.implicit_quadrature_backend);
+        mix_hash(hash,
+                 static_cast<std::uint64_t>(
+                     rule.provenance.achieved_quadrature_order));
         mix_hash(hash, static_cast<std::uint64_t>(rule.points.size()));
         for (const auto& point : rule.points) {
             for (const Real x : point.point) {

@@ -339,7 +339,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(level_set, "Enable_volume_correction", "true");
   expectText(level_set, "Volume_correction_use_initial_volume", "true");
   expectText(level_set, "Volume_correction_cadence_steps", "5");
-  expectEigenDirectSolver(level_set);
+  expectGmresSolver(level_set);
   expectOutputFields(level_set, "Spatial",
                      {"Level_set", "Generated_interface", "Surface_position"});
   expectOutputFields(level_set, "Volume_integral", {"Volume"});
@@ -349,10 +349,10 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectText(fluid, "Force_y", "-9.81");
   expectText(fluid, "Force_z", "0.0");
   expectText(fluid, "Hydrostatic_pressure_initialization", "true");
-  expectText(fluid, "Hydrostatic_pressure_reference_point", "0.0 0.5 0.0");
+  expectText(fluid, "Hydrostatic_pressure_reference_point", "0.0 0.45 0.0");
   expectReferencedFileExists(case_dir, child(fluid, "Node_pressure_constraints"),
                              "Values_file_path");
-  expectEigenDirectSolver(fluid);
+  expectGmresSolver(fluid);
   expectOutputFields(fluid, "Spatial", {"Velocity", "Pressure"});
   expectOutputFields(fluid, "Volume_integral", {"Volume"});
 
@@ -579,7 +579,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       expectText(free_surface, "Active_domain_method", "CutVolume");
       expectText(free_surface, "Enable_velocity_extension", "true");
       expectText(free_surface, "Velocity_extension_diffusivity", "1.0");
-      expectEigenDirectSolver(fluid);
+      expectGmresSolver(fluid);
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
       expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");

@@ -21,6 +21,7 @@
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 #include "Backends/FSILS/liner_solver/spar_mul.h"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <exception>
 #include <cstdlib>
@@ -916,6 +917,45 @@ namespace {
            value != "off" && value != "no";
 }
 
+[[nodiscard]] unsigned long long parseUnsignedEnv(const char* name,
+                                                  unsigned long long fallback) noexcept
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || *env == '\0') {
+        return fallback;
+    }
+    try {
+        std::size_t consumed = 0u;
+        const auto parsed = std::stoull(std::string(env), &consumed);
+        return consumed == 0u ? fallback : parsed;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+[[nodiscard]] bool fsilsMatrixDiagnosticsShouldEmit() noexcept
+{
+    if (!fsilsMatrixDiagnosticsEnabled()) {
+        return false;
+    }
+
+    static const unsigned long long every_n = std::max<unsigned long long>(
+        1ull,
+        parseUnsignedEnv("SVMP_FSILS_MATRIX_DIAGNOSTICS_EVERY_N", 1ull));
+    static const unsigned long long max_records = parseUnsignedEnv(
+        "SVMP_FSILS_MATRIX_DIAGNOSTICS_MAX_RECORDS",
+        std::numeric_limits<unsigned long long>::max());
+    static std::atomic<unsigned long long> attempts{0ull};
+    static std::atomic<unsigned long long> emitted{0ull};
+
+    const auto attempt = attempts.fetch_add(1ull, std::memory_order_relaxed);
+    if (attempt % every_n != 0ull) {
+        return false;
+    }
+    const auto emit_index = emitted.fetch_add(1ull, std::memory_order_relaxed);
+    return emit_index < max_records;
+}
+
 [[nodiscard]] bool reducedInternalizationTraceEnabled() noexcept
 {
     const char* env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
@@ -1575,7 +1615,7 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     auto logPreparedMatrixDiagnostics = [&](std::string_view phase) {
-        if (!fsilsMatrixDiagnosticsEnabled()) {
+        if (!fsilsMatrixDiagnosticsShouldEmit()) {
             return;
         }
 
@@ -2115,7 +2155,16 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     //  - Dirichlet constraints (legacy-equivalent FSILS preconditioner handling)
     //  - rank-1 updates (coupled BC Sherman-Morrison correction)
     const int original_nFaces = lhs.nFaces;
-    const int num_dirichlet_faces = (!dirichlet_dofs_.empty() ? 1 : 0);
+    const int local_has_dirichlet_face = !dirichlet_dofs_.empty() ? 1 : 0;
+    int dirichlet_face_rank_count = local_has_dirichlet_face;
+    if (lhs.commu.nTasks > 1) {
+        fe_fsi_linear_solver::fsils_allreduce_sum(&local_has_dirichlet_face,
+                                                  &dirichlet_face_rank_count,
+                                                  1,
+                                                  MPI_INT,
+                                                  lhs.commu);
+    }
+    const int num_dirichlet_faces = (dirichlet_face_rank_count > 0 ? 1 : 0);
     const int num_rank_one_faces = static_cast<int>(native_face_rank_one_indices.size());
     const int num_added_faces = num_dirichlet_faces + num_rank_one_faces;
 
@@ -2183,9 +2232,22 @@ SolverReport FsilsLinearSolver::solve(const GenericMatrix& A_in,
     };
 
     // Face setup: restore from cache (fast path) or build from scratch.
+    const bool local_faces_cache_valid =
+        num_added_faces > 0 && dof > 0 && !faces_dirty_ &&
+        cached_faces_.size() == static_cast<std::size_t>(num_added_faces);
+    bool use_cached_faces = local_faces_cache_valid;
+    if (num_added_faces > 0 && dof > 0 && lhs.commu.nTasks > 1) {
+        const int local_valid = local_faces_cache_valid ? 1 : 0;
+        int valid_rank_count = 0;
+        fe_fsi_linear_solver::fsils_allreduce_sum(&local_valid, &valid_rank_count, 1, MPI_INT, lhs.commu);
+        use_cached_faces = (valid_rank_count == lhs.commu.nTasks);
+        if (local_faces_cache_valid && !use_cached_faces && oopTraceEnabled()) {
+            traceLog("FsilsLinearSolver: native face cache disabled because at least one MPI rank must rebuild");
+        }
+    }
+
     bool faces_from_cache = false;
-    if (num_added_faces > 0 && dof > 0 && !faces_dirty_ &&
-        cached_faces_.size() == static_cast<std::size_t>(num_added_faces)) {
+    if (use_cached_faces) {
         // Fast path: restore pre-built face data from cache.
         const int new_nFaces = original_nFaces + num_added_faces;
         lhs.face.resize(static_cast<std::size_t>(new_nFaces));

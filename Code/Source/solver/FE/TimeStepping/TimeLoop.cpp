@@ -172,6 +172,42 @@ void copyVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVecto
     dst_view->finalizeAssembly();
 }
 
+std::vector<GlobalIndex> collectNonTimeDerivativeDofs(
+    const systems::FESystem& system,
+    const std::vector<FieldId>& dt_fields)
+{
+    std::vector<GlobalIndex> nondt_dofs;
+    if (dt_fields.empty()) {
+        return nondt_dofs;
+    }
+
+    const auto& fmap = system.fieldMap();
+    std::vector<unsigned char> is_dt_field(fmap.numFields(), 0u);
+    for (const auto fid : dt_fields) {
+        if (fid == INVALID_FIELD_ID) {
+            continue;
+        }
+        const auto& rec = system.fieldRecord(fid);
+        const auto field_index = fmap.getFieldIndex(rec.name);
+        if (field_index < 0) {
+            continue;
+        }
+        is_dt_field[static_cast<std::size_t>(field_index)] = 1u;
+    }
+
+    nondt_dofs.reserve(static_cast<std::size_t>(system.dofHandler().getNumDofs()));
+    for (std::size_t field_index = 0; field_index < fmap.numFields(); ++field_index) {
+        if (is_dt_field[field_index] != 0u) {
+            continue;
+        }
+        const auto range = fmap.getFieldDofRange(field_index);
+        for (GlobalIndex dof = range.first; dof < range.second; ++dof) {
+            nondt_dofs.push_back(dof);
+        }
+    }
+    return nondt_dofs;
+}
+
 class Dt1NoHistoryIntegrator final : public systems::TimeIntegrator {
 public:
     [[nodiscard]] std::string name() const override { return "Dt1NoHistory"; }
@@ -1804,23 +1840,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        auto& sys = transient.system();
 	                        const auto& constraints = sys.constraints();
                             const auto dt_fields = sys.timeDerivativeFields(options_.newton.jacobian_op);
-                            std::vector<GlobalIndex> nondt_dofs;
-                            if (!dt_fields.empty()) {
-                                const auto& fmap = sys.fieldMap();
-                                nondt_dofs.reserve(static_cast<std::size_t>(sys.dofHandler().getNumDofs()));
-                                for (std::size_t fi = 0; fi < fmap.numFields(); ++fi) {
-                                    const auto fid = static_cast<FieldId>(fi);
-                                    const bool is_dt_field =
-                                        std::find(dt_fields.begin(), dt_fields.end(), fid) != dt_fields.end();
-                                    if (is_dt_field) {
-                                        continue;
-                                    }
-                                    const auto range = fmap.getFieldDofRange(fi);
-                                    for (GlobalIndex d = range.first; d < range.second; ++d) {
-                                        nondt_dofs.push_back(d);
-                                    }
-                                }
-                            }
+                            const auto nondt_dofs = collectNonTimeDerivativeDofs(sys, dt_fields);
 
 	                        // Ensure uDot storage exists and is initialized before the stage solve.
 	                        const bool had_u_dot = history.hasUDotState();
@@ -1831,7 +1851,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             // initialization that can remove inertia from the first residual evaluation.
                             history.uDot().zero();
 
-                            if (!dt_fields.empty()) {
+                            if (!options_.initialize_first_order_rate_from_pde) {
+                                (void)utils::initializeSecondOrderStateFromDisplacementHistory(
+                                    history,
+                                    history.uDot().localSpan(),
+                                    history.uDDot().localSpan(),
+                                    /*overwrite_u_dot=*/true,
+                                    /*overwrite_u_ddot=*/false);
+                            } else if (!dt_fields.empty()) {
                                 const double stage_time = t + ga1_params->alpha_f * dt;
                                 sys.updateConstraints(stage_time, dt);
                                 sys.beginTimeStep();
@@ -2637,24 +2664,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                         const auto dt_fields =
                             transient.system().timeDerivativeFields(options_.newton.jacobian_op);
-                        std::vector<GlobalIndex> nondt_dofs;
-                        if (!dt_fields.empty()) {
-                            const auto& fmap = transient.system().fieldMap();
-                            nondt_dofs.reserve(
-                                static_cast<std::size_t>(transient.system().dofHandler().getNumDofs()));
-                            for (std::size_t fi = 0; fi < fmap.numFields(); ++fi) {
-                                const auto fid = static_cast<FieldId>(fi);
-                                const bool is_dt_field =
-                                    std::find(dt_fields.begin(), dt_fields.end(), fid) != dt_fields.end();
-                                if (is_dt_field) {
-                                    continue;
-                                }
-                                const auto range = fmap.getFieldDofRange(fi);
-                                for (GlobalIndex d = range.first; d < range.second; ++d) {
-                                    nondt_dofs.push_back(d);
-                                }
-                            }
-                        }
+                        const auto nondt_dofs =
+                            collectNonTimeDerivativeDofs(transient.system(), dt_fields);
 
                         const double inv_af = 1.0 / ga1_params->alpha_f;
                         const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
@@ -2930,6 +2941,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     }
 
                 }
+
+                    if (needs_final_state_commit) {
+                        transient.system().updateConstraints(t + dt, dt);
+                        updateGhostsAndDistributeHistory(
+                            transient.system().constraints(),
+                            history);
+                    }
 
                     if (monolithic_aux_stage_alpha_f.has_value()) {
                         const Real alpha_f = static_cast<Real>(*monolithic_aux_stage_alpha_f);

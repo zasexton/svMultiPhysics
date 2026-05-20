@@ -11,6 +11,7 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     const level_set::LevelSetTransportOptions options{};
 
     EXPECT_EQ(options.operator_tag, "level_set");
+    EXPECT_EQ(options.transport_form, level_set::LevelSetTransportForm::Advective);
     EXPECT_EQ(options.level_set.field_name, "level_set");
     EXPECT_EQ(options.level_set.source, level_set::LevelSetFieldSource::Unknown);
     EXPECT_TRUE(options.level_set.auto_register_field);
@@ -26,7 +27,7 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_DOUBLE_EQ(options.supg.velocity_epsilon, 1.0e-12);
     EXPECT_FALSE(options.reinitialization.enabled);
     EXPECT_EQ(options.reinitialization.method,
-              level_set::LevelSetReinitializationMethod::HamiltonJacobiPDE);
+              level_set::LevelSetReinitializationMethod::Projection);
     EXPECT_EQ(options.reinitialization.cadence_steps, 1);
     EXPECT_EQ(options.reinitialization.max_iterations, 10);
     EXPECT_DOUBLE_EQ(options.reinitialization.pseudo_time_step_scale, 0.3);
@@ -45,6 +46,7 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
 TEST(LevelSetOptions, ExplicitTransportOptions)
 {
     level_set::LevelSetTransportOptions options{};
+    options.transport_form = level_set::LevelSetTransportForm::ConservativeDivergence;
     options.level_set.field_name = "phi";
     options.level_set.source = level_set::LevelSetFieldSource::PrescribedData;
     options.level_set.auto_register_field = false;
@@ -77,6 +79,7 @@ TEST(LevelSetOptions, ExplicitTransportOptions)
         level_set::LevelSetOutflowBoundary{.boundary_marker = 12});
 
     EXPECT_EQ(options.level_set.field_name, "phi");
+    EXPECT_EQ(options.transport_form, level_set::LevelSetTransportForm::ConservativeDivergence);
     EXPECT_EQ(options.level_set.source, level_set::LevelSetFieldSource::PrescribedData);
     EXPECT_FALSE(options.level_set.auto_register_field);
     EXPECT_EQ(options.velocity.field_name, "advecting_velocity");
@@ -121,6 +124,17 @@ TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
             level_set::levelSetConservationDiagnostic(plain)),
         "plain_level_set_advection_not_conservative");
 
+    level_set::LevelSetTransportOptions conservative{};
+    conservative.transport_form = level_set::LevelSetTransportForm::ConservativeDivergence;
+    EXPECT_EQ(
+        level_set::levelSetConservationDiagnostic(conservative),
+        level_set::LevelSetConservationDiagnostic::
+            ConservativeDivergenceAdvectionNotLocallyConservative);
+    EXPECT_STREQ(
+        level_set::levelSetConservationDiagnosticName(
+            level_set::levelSetConservationDiagnostic(conservative)),
+        "conservative_divergence_level_set_advection_not_locally_conservative");
+
     level_set::LevelSetTransportOptions reinitialized{};
     reinitialized.reinitialization.enabled = true;
     EXPECT_EQ(
@@ -132,15 +146,16 @@ TEST(LevelSetOptions, ConservationDiagnosticsDistinguishRunModes)
         "reinitialized_level_set_advection_not_conservative");
 
     level_set::LevelSetTransportOptions corrected{};
+    corrected.transport_form = level_set::LevelSetTransportForm::ConservativeDivergence;
     corrected.reinitialization.enabled = true;
     corrected.volume_correction.enabled = true;
     EXPECT_EQ(
         level_set::levelSetConservationDiagnostic(corrected),
-        level_set::LevelSetConservationDiagnostic::VolumeCorrectedConservative);
+        level_set::LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative);
     EXPECT_STREQ(
         level_set::levelSetConservationDiagnosticName(
             level_set::levelSetConservationDiagnostic(corrected)),
-        "volume_corrected_level_set_conservative");
+        "volume_corrected_level_set_advection_not_locally_conservative");
 
     EXPECT_NE(
         level_set::levelSetConservationDiagnosticName(

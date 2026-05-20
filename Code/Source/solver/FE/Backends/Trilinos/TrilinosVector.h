@@ -33,6 +33,8 @@ public:
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::Trilinos; }
     [[nodiscard]] GlobalIndex size() const noexcept override;
+    [[nodiscard]] std::uint64_t valueRevision() const noexcept override { return value_revision_; }
+    void markModified() noexcept override { ++value_revision_; }
 
     void zero() override;
     void set(Real value) override;
@@ -73,6 +75,7 @@ private:
     mutable std::vector<Real> local_cache_{};
     mutable bool local_cache_valid_{false};
     mutable bool local_cache_dirty_{false};
+    std::uint64_t value_revision_{0};
 };
 
 } // namespace backends

@@ -30,6 +30,11 @@ enum class LevelSetVelocitySource {
     ConstantVector
 };
 
+enum class LevelSetTransportForm {
+    Advective,
+    ConservativeDivergence
+};
+
 struct LevelSetFieldOptions {
     std::string field_name{"level_set"};
     LevelSetFieldSource source{LevelSetFieldSource::Unknown};
@@ -50,6 +55,12 @@ struct LevelSetSUPGOptions {
     Real velocity_epsilon{1.0e-12};
 };
 
+struct LevelSetInterfaceKinematicOptions {
+    bool enabled{false};
+    int interface_marker{-1};
+    Real weight_scale{1.0};
+};
+
 enum class LevelSetReinitializationMethod {
     HamiltonJacobiPDE,
     FastMarching,
@@ -58,7 +69,7 @@ enum class LevelSetReinitializationMethod {
 
 struct LevelSetReinitializationOptions {
     bool enabled{false};
-    LevelSetReinitializationMethod method{LevelSetReinitializationMethod::HamiltonJacobiPDE};
+    LevelSetReinitializationMethod method{LevelSetReinitializationMethod::Projection};
     int cadence_steps{1};
     int max_iterations{10};
     Real pseudo_time_step_scale{0.3};
@@ -92,9 +103,11 @@ struct LevelSetBoundaryOptions {
 
 struct LevelSetTransportOptions {
     std::string operator_tag{"level_set"};
+    LevelSetTransportForm transport_form{LevelSetTransportForm::Advective};
     LevelSetFieldOptions level_set{};
     LevelSetVelocityOptions velocity{};
     LevelSetSUPGOptions supg{};
+    LevelSetInterfaceKinematicOptions interface_kinematic{};
     LevelSetReinitializationOptions reinitialization{};
     LevelSetVolumeCorrectionOptions volume_correction{};
     LevelSetBoundaryOptions boundaries{};
@@ -102,11 +115,13 @@ struct LevelSetTransportOptions {
 
 enum class LevelSetConservationDiagnostic {
     PlainAdvectionNotConservative,
+    ConservativeDivergenceAdvectionNotLocallyConservative,
     ReinitializedAdvectionNotConservative,
-    VolumeCorrectedConservative
+    VolumeCorrectedAdvectionNotLocallyConservative
 };
 
 [[nodiscard]] LevelSetConservationDiagnostic levelSetConservationDiagnostic(
+    LevelSetTransportForm transport_form,
     const LevelSetReinitializationOptions& reinitialization,
     const LevelSetVolumeCorrectionOptions& volume_correction) noexcept;
 

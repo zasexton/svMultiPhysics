@@ -349,6 +349,52 @@ def write_velocity_bc_files(args: argparse.Namespace, grid: pv.UnstructuredGrid,
                     output.write(f"{u:.18e} 0.000000000000000000e+00\n")
 
 
+def write_momentum_source_file(args: argparse.Namespace, grid: pv.UnstructuredGrid, *, k: float, period: float) -> None:
+    bc_dir = CASE_DIR / "bc"
+    bc_dir.mkdir(parents=True, exist_ok=True)
+    times = time_samples(period, args.time_step)
+    points = np.asarray(grid.points)
+    px = points[:, 0]
+    path = bc_dir / "momentum_source.dat"
+    with path.open("w") as output:
+        output.write(f"2 {len(times)} {points.shape[0]}\n")
+        for t in times:
+            output.write(f"{t:.12e}\n")
+        for gid in range(points.shape[0]):
+            output.write(f"{gid + 1}\n")
+            for t in times:
+                sx = source_x(
+                    px[gid:gid + 1],
+                    t,
+                    gravity=args.gravity,
+                    amplitude=args.amplitude,
+                    k=k,
+                    u0=args.u0,
+                    omega=args.omega,
+                )[0]
+                output.write(f"{sx:.18e} 0.000000000000000000e+00\n")
+
+
+def write_pressure_gauge_file(args: argparse.Namespace, *, k: float) -> None:
+    pressure = pressure_exact(
+        np.array([0.0]),
+        np.array([0.0]),
+        0.0,
+        density=args.density,
+        gravity=args.gravity,
+        depth=args.depth,
+        amplitude=args.amplitude,
+        k=k,
+        u0=args.u0,
+        omega=args.omega,
+    )[0]
+    path = CASE_DIR / "pressure_gauge.csv"
+    with path.open("w", newline="") as output:
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow(["node_id", "pressure"])
+        writer.writerow([0, f"{pressure:.18e}"])
+
+
 def write_source_samples(args: argparse.Namespace, grid: pv.UnstructuredGrid, *, k: float) -> None:
     path = CASE_DIR / "manufactured_source_samples.csv"
     sample_count = min(args.time_steps, 10)
@@ -449,10 +495,10 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     <Surface_position>true</Surface_position>
   </Output>
   <Output type="Volume_integral"><Volume>true</Volume></Output>
-  <LS type="Direct">
-    <Linear_algebra type="eigen"><Preconditioner>none</Preconditioner></Linear_algebra>
-    <Max_iterations>1</Max_iterations>
-    <Krylov_space_dimension>1</Krylov_space_dimension>
+  <LS type="GMRES">
+    <Linear_algebra type="eigen"><Preconditioner>trilinos-ilu</Preconditioner></Linear_algebra>
+    <Max_iterations>200</Max_iterations>
+    <Krylov_space_dimension>50</Krylov_space_dimension>
     <Tolerance>1.0e-6</Tolerance>
     <Absolute_tolerance>1.0e-10</Absolute_tolerance>
   </LS>
@@ -470,9 +516,13 @@ def write_solver_xml(args: argparse.Namespace) -> None:
   <Force_x>0.0</Force_x>
   <Force_y>{-args.gravity:.12g}</Force_y>
   <Force_z>0.0</Force_z>
-  <Momentum_source_field_name>ManufacturedSource</Momentum_source_field_name>
+  <Momentum_source_temporal_and_spatial_values_file_path>bc/momentum_source.dat</Momentum_source_temporal_and_spatial_values_file_path>
   <Hydrostatic_pressure_initialization>false</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
+  <Node_pressure_constraints>
+    <Id_type>Global_vertex_gid</Id_type>
+    <Values_file_path>pressure_gauge.csv</Values_file_path>
+  </Node_pressure_constraints>
   <Viscosity model="Constant"><Value>{args.viscosity:.12g}</Value></Viscosity>
   <Output type="Spatial">
     <Velocity>true</Velocity>
@@ -480,10 +530,10 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     <Divergence>true</Divergence>
   </Output>
   <Output type="Volume_integral"><Volume>true</Volume></Output>
-  <LS type="Direct">
-    <Linear_algebra type="eigen"><Preconditioner>none</Preconditioner></Linear_algebra>
-    <Max_iterations>1</Max_iterations>
-    <Krylov_space_dimension>1</Krylov_space_dimension>
+  <LS type="GMRES">
+    <Linear_algebra type="eigen"><Preconditioner>trilinos-ilu</Preconditioner></Linear_algebra>
+    <Max_iterations>1000</Max_iterations>
+    <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>1.0e-5</Tolerance>
     <Absolute_tolerance>1.0e-8</Absolute_tolerance>
     <NS_GM_max_iterations>150</NS_GM_max_iterations>
@@ -722,9 +772,10 @@ is the acceleration-like extra body term required to make the MMS exact.
 
 ## Solver Source Wiring
 
-The generated XML sets `Momentum_source_field_name=ManufacturedSource`, so the
-OOP Navier-Stokes residual consumes the spatially varying manufactured
-acceleration from mesh point data in addition to constant `Force_x/y/z`.
+The generated XML sets
+`Momentum_source_temporal_and_spatial_values_file_path=bc/momentum_source.dat`,
+so the OOP Navier-Stokes residual consumes the time- and spatially-varying
+manufactured acceleration in addition to constant `Force_x/y/z`.
 `manufactured_source_samples.csv` is still generated as an independent audit of
 the source values used by the verifier.
 
@@ -849,6 +900,8 @@ def main() -> None:
     grid.save(mesh_dir / "mesh-complete.mesh.vtu", binary=False)
     write_boundary_surfaces(grid, args.nx, args.ny, mesh_dir / "mesh-surfaces")
     write_velocity_bc_files(args, grid, period=period)
+    write_momentum_source_file(args, grid, k=k, period=period)
+    write_pressure_gauge_file(args, k=k)
     write_source_samples(args, grid, k=k)
     write_solver_xml(args)
     write_expected(args, k=k, period=period, final_time=final_time)

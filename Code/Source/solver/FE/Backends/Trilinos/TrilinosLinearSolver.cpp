@@ -251,6 +251,7 @@ SolverReport TrilinosLinearSolver::solve(const GenericMatrix& A_in,
     rep.converged = (ret == Belos::Converged);
     rep.iterations = static_cast<int>(solver->getNumIters());
     x->invalidateLocalCache();
+    x->markModified();
 
     // Final residual.
     {

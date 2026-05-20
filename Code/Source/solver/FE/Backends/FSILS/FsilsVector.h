@@ -27,6 +27,8 @@ public:
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::FSILS; }
     [[nodiscard]] GlobalIndex size() const noexcept override { return global_size_; }
+    [[nodiscard]] std::uint64_t valueRevision() const noexcept override { return value_revision_; }
+    void markModified() noexcept override { ++value_revision_; }
 
     void zero() override;
     void set(Real value) override;
@@ -59,7 +61,11 @@ public:
     [[nodiscard]] bool ownsFeDof(GlobalIndex fe_dof) const noexcept;
     [[nodiscard]] std::vector<GlobalIndex> ownedFeDofs() const;
 
-    [[nodiscard]] std::vector<Real>& data() noexcept { return data_; }
+    [[nodiscard]] std::vector<Real>& data() noexcept
+    {
+        markModified();
+        return data_;
+    }
     [[nodiscard]] const std::vector<Real>& data() const noexcept { return data_; }
 
     // Resolve FE DOFs into backend-local vector entries and reuse the mapping
@@ -80,6 +86,7 @@ private:
     std::vector<Real> data_;
     mutable std::vector<double> halo_internal_work_{};
     mutable std::unordered_map<std::size_t, std::vector<ResolutionCacheEntry>> resolution_cache_{};
+    std::uint64_t value_revision_{0};
 };
 
 } // namespace backends

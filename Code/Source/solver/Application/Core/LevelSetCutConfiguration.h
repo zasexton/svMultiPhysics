@@ -8,6 +8,7 @@
 #include <vector>
 
 class Parameters;
+class EquationParameters;
 
 namespace application {
 namespace core {
@@ -17,9 +18,16 @@ enum class LevelSetActiveSide {
   Positive,
 };
 
+enum class ActiveCutVolumeRequestOrigin {
+  Equation,
+  FreeSurfaceBoundary,
+};
+
 struct ActiveCutVolumeRequest {
   std::string level_set_field_name{"level_set"};
   std::string domain_id{"free_surface"};
+  std::string equation_type{};
+  ActiveCutVolumeRequestOrigin origin{ActiveCutVolumeRequestOrigin::Equation};
   int requested_interface_marker{-1};
   double isovalue{0.0};
   std::optional<int> quadrature_order{};
@@ -34,9 +42,12 @@ struct ActiveCutVolumeRequest {
   svmp::FE::level_set::GeometryTangentPolicy geometry_tangent_policy{
       svmp::FE::level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature};
   double implicit_cut_root_tolerance{1.0e-10};
+  double implicit_cut_root_coordinate_tolerance{1.0e-12};
+  int implicit_cut_root_max_iterations{48};
   int implicit_cut_max_subdivision_depth{16};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
   bool allow_corner_linearized_geometry{false};
+  bool require_production_qualified_implicit_cut_backend{false};
 };
 
 [[nodiscard]] svmp::FE::level_set::GeneratedInterfaceGeometryMode
@@ -53,6 +64,9 @@ parseGeometryTangentPolicy(const std::string& raw);
 
 [[nodiscard]] std::vector<ActiveCutVolumeRequest>
 activeCutVolumeRequests(const Parameters& params);
+
+[[nodiscard]] std::vector<ActiveCutVolumeRequest>
+activeCutVolumeRequests(const EquationParameters& equation);
 
 [[nodiscard]] bool hasHighOrderGeneratedInterfaceGeometry(
     const std::vector<ActiveCutVolumeRequest>& requests) noexcept;

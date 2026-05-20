@@ -1801,6 +1801,12 @@ FormExpr differentiateResidual(const FormExpr& residual_form,
         throw std::invalid_argument(
             "differentiateResidual: mesh-motion geometry sensitivity requires a valid mesh_motion_field");
     }
+    if (geometry_sensitivity.mode ==
+            GeometrySensitivityMode::LevelSetCutDomainUnknowns &&
+        geometry_sensitivity.level_set_cut_domains.empty()) {
+        throw std::invalid_argument(
+            "differentiateResidual: level-set cut-domain geometry sensitivity requires at least one cut domain");
+    }
 
     DiffTargetConfig cfg;
     cfg.kind = DiffWrtKind::FieldId;

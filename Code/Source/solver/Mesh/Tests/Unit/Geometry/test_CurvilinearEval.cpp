@@ -626,6 +626,30 @@ TEST(CurvilinearEvalTest, HighOrderGeometryDofDescriptorAndSubentityViews) {
   EXPECT_TRUE(linear_mesh.cell_interior_geometry_dofs(0).empty());
 }
 
+TEST(CurvilinearEvalTest, QuadraticPolygonEdgeGeometryDofsUseTopologyEdges) {
+  MeshBase mesh;
+  mesh.set_dimension(2);
+  for (int i = 0; i < 8; ++i) {
+    mesh.add_vertex(static_cast<double>(i), 0.0, 0.0);
+  }
+
+  CellShape shape;
+  shape.family = CellFamily::Polygon;
+  shape.order = 2;
+  shape.num_corners = 4;
+  mesh.add_cell(0, shape, {0, 1, 2, 3, 4, 5, 6, 7});
+
+  EXPECT_EQ(mesh.geometry_order(0), 2);
+  EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 0)),
+            (std::vector<index_t>{0, 4, 1}));
+  EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 1)),
+            (std::vector<index_t>{1, 5, 2}));
+  EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 2)),
+            (std::vector<index_t>{2, 6, 3}));
+  EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 3)),
+            (std::vector<index_t>{3, 7, 0}));
+}
+
 TEST(CurvilinearEvalTest, HighOrderCurrentReferenceDofMutationMovesCurvedGeometryAndBumpsRevisions) {
   const int p = 3;
   const CellShape shape = make_shape(CellFamily::Quad, p);

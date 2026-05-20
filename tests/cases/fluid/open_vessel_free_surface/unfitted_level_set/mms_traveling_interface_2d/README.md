@@ -34,9 +34,10 @@ is the acceleration-like extra body term required to make the MMS exact.
 
 ## Solver Source Wiring
 
-The generated XML sets `Momentum_source_field_name=ManufacturedSource`, so the
-OOP Navier-Stokes residual consumes the spatially varying manufactured
-acceleration from mesh point data in addition to constant `Force_x/y/z`.
+The generated XML sets
+`Momentum_source_temporal_and_spatial_values_file_path=bc/momentum_source.dat`,
+so the OOP Navier-Stokes residual consumes the time- and spatially-varying
+manufactured acceleration in addition to constant `Force_x/y/z`.
 `manufactured_source_samples.csv` is still generated as an independent audit of
 the source values used by the verifier.
 

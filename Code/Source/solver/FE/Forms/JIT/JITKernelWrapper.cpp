@@ -74,6 +74,15 @@ struct RequestedKernelOutputs {
     return enabled;
 }
 
+[[nodiscard]] bool disableMarkedInteriorFaceJIT() noexcept
+{
+    static const bool disabled = [] {
+        const char* value = std::getenv("SVMP_JIT_DISABLE_MARKED_INTERIOR_FACE");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return disabled;
+}
+
 [[nodiscard]] std::optional<bool> parseOptionalBoolEnv(const char* name) noexcept
 {
     const char* value = std::getenv(name);
@@ -1781,6 +1790,10 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
                                            output_minus, output_plus,
                                            coupling_minus_plus, coupling_plus_minus);
         };
+        if (disableMarkedInteriorFaceJIT() && ctx_minus.interiorFaceMarker() >= 0) {
+            fallback_marked_interior_face();
+            return;
+        }
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -1996,6 +2009,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
+        const bool one_sided_embedded = &ctx_plus == &ctx_minus;
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
@@ -2012,9 +2026,9 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
         const auto n_trial_plus = ctx_plus.numTrialDofs();
 
         output_minus.reserve(n_test_minus, n_trial_minus, true, false);
-        output_plus.reserve(n_test_plus, n_trial_plus, true, false);
-        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, true, false);
-        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, true, false);
+        output_plus.reserve(n_test_plus, n_trial_plus, !one_sided_embedded, false);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, !one_sided_embedded, false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, !one_sided_embedded, false);
 
         output_minus.clear();
         output_plus.clear();
@@ -2049,19 +2063,19 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 	            getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
 	        const auto& compiled = disp ? *disp : compiled_form_;
 
-	        callJIT(compiled.interface_all, &args);
-	        if (const auto it = compiled.interface_by_marker.find(interface_marker);
-	            it != compiled.interface_by_marker.end()) {
-	            callJIT(it->second, &args);
-	        }
+            callJIT(compiled.interface_all, &args);
+            if (const auto it = compiled.interface_by_marker.find(interface_marker);
+                it != compiled.interface_by_marker.end()) {
+                callJIT(it->second, &args);
+            }
 
         output_minus.has_matrix = true;
         output_minus.has_vector = false;
-        output_plus.has_matrix = true;
+        output_plus.has_matrix = !one_sided_embedded;
         output_plus.has_vector = false;
-        coupling_minus_plus.has_matrix = true;
+        coupling_minus_plus.has_matrix = !one_sided_embedded;
         coupling_minus_plus.has_vector = false;
-        coupling_plus_minus.has_matrix = true;
+        coupling_plus_minus.has_matrix = !one_sided_embedded;
         coupling_plus_minus.has_vector = false;
         return;
     }
@@ -2081,15 +2095,15 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
             !k->isMatrixOnly());
         const auto plus_requested = requestedKernelOutputs(
             output_plus,
-            !k->isVectorOnly(),
-            !k->isMatrixOnly());
+            !one_sided_embedded && !k->isVectorOnly(),
+            !one_sided_embedded && !k->isMatrixOnly());
         const auto mp_requested = requestedKernelOutputs(
             coupling_minus_plus,
-            !k->isVectorOnly(),
+            !one_sided_embedded && !k->isVectorOnly(),
             /*can_vector=*/false);
         const auto pm_requested = requestedKernelOutputs(
             coupling_plus_minus,
-            !k->isVectorOnly(),
+            !one_sided_embedded && !k->isVectorOnly(),
             /*can_vector=*/false);
         const bool want_matrix =
             minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;

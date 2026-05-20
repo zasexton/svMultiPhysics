@@ -417,8 +417,10 @@ def compute_metrics(result_path: Path, time: float, expected: dict) -> dict[str,
     p_interface = interpolate_crossing_values(pressure, crossings)
     p_interface_finite = p_interface[np.isfinite(p_interface)]
     p_interface_nonfinite_endpoint_count = nonfinite_crossing_endpoint_count(pressure, crossings)
-    if p_interface_finite.size == 0:
-        raise RuntimeError("no finite pressure samples available at interface crossings")
+    interface_pressure_rms = rms(p_interface_finite) if p_interface_finite.size else math.nan
+    interface_pressure_max_abs = (
+        float(np.max(np.abs(p_interface_finite))) if p_interface_finite.size else math.nan
+    )
 
     audits = residual_audits(points, time, expected)
     metrics: dict[str, object] = {
@@ -467,8 +469,8 @@ def compute_metrics(result_path: Path, time: float, expected: dict) -> dict[str,
         "interface_pressure_interpolation_count": int(p_interface.size),
         "interface_pressure_finite_count": int(p_interface_finite.size),
         "interface_pressure_nonfinite_endpoint_count": int(p_interface_nonfinite_endpoint_count),
-        "interface_pressure_rms": rms(p_interface_finite),
-        "interface_pressure_max_abs": float(np.max(np.abs(p_interface_finite))),
+        "interface_pressure_rms": interface_pressure_rms,
+        "interface_pressure_max_abs": interface_pressure_max_abs,
     }
     metrics.update(audits)
 
@@ -492,7 +494,8 @@ def compute_metrics(result_path: Path, time: float, expected: dict) -> dict[str,
         "interface_pressure_all_samples_finite": metrics["interface_pressure_finite_count"]
         == metrics["interface_pressure_interpolation_count"],
         "interface_pressure_all_endpoints_finite": metrics["interface_pressure_nonfinite_endpoint_count"] == 0,
-        "interface_pressure_abs": metrics["interface_pressure_max_abs"] <= tolerances["interface_pressure_abs"],
+        "interface_pressure_abs": math.isfinite(metrics["interface_pressure_max_abs"])
+        and metrics["interface_pressure_max_abs"] <= tolerances["interface_pressure_abs"],
         "manufactured_residual_x_abs": metrics["manufactured_residual_x_max"] <= tolerances["manufactured_residual_abs"],
         "manufactured_residual_y_abs": metrics["manufactured_residual_y_max"] <= tolerances["manufactured_residual_abs"],
         "level_set_residual_abs": metrics["level_set_residual_max"] <= tolerances["level_set_residual_abs"],

@@ -96,7 +96,7 @@ public:
         if (dof < 0 || dof >= vec_->size()) {
             return 0.0;
         }
-        return vec_->eigen()[static_cast<Eigen::Index>(dof)];
+        return static_cast<const EigenVector*>(vec_)->eigen()[static_cast<Eigen::Index>(dof)];
     }
 
     // Assembly lifecycle
@@ -137,21 +137,25 @@ EigenVector::EigenVector(GlobalIndex size)
 void EigenVector::zero()
 {
     vec_.setZero();
+    markModified();
 }
 
 void EigenVector::set(Real value)
 {
     vec_.setConstant(value);
+    markModified();
 }
 
 void EigenVector::add(Real value)
 {
     vec_.array() += value;
+    markModified();
 }
 
 void EigenVector::scale(Real alpha)
 {
     vec_ *= alpha;
+    markModified();
 }
 
 void EigenVector::copyFrom(const GenericVector& other)
@@ -160,6 +164,7 @@ void EigenVector::copyFrom(const GenericVector& other)
     FE_THROW_IF(!o, InvalidArgumentException, "EigenVector::copyFrom: backend mismatch");
     FE_THROW_IF(size() != o->size(), InvalidArgumentException, "EigenVector::copyFrom: size mismatch");
     vec_ = o->vec_;
+    markModified();
 }
 
 Real EigenVector::dot(const GenericVector& other) const
@@ -187,6 +192,7 @@ std::unique_ptr<assembly::GlobalSystemView> EigenVector::createAssemblyView()
 
 std::span<Real> EigenVector::localSpan()
 {
+    markModified();
     return std::span<Real>(vec_.data(), static_cast<std::size_t>(vec_.size()));
 }
 

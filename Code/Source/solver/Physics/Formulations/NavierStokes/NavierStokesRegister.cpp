@@ -10,6 +10,7 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Topology/CellTopology.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -28,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #if FE_HAS_MPI
@@ -255,6 +258,9 @@ struct TemporalSpatialValues {
   std::vector<svmp::FE::Real> d{};
 
   std::unordered_map<Key, std::size_t, KeyHash> node_index_by_key{};
+  bool has_x_only_interpolant{false};
+  std::vector<svmp::FE::Real> x_interpolation_coords{};
+  std::vector<std::size_t> x_interpolation_nodes{};
 
   [[nodiscard]] static Key quantize(const std::array<svmp::FE::Real, 3>& p, int dim_in) noexcept
   {
@@ -276,6 +282,72 @@ struct TemporalSpatialValues {
       throw std::runtime_error("[svMultiPhysics::Physics] Internal error: temporal/spatial BC index out of range.");
     }
     return d[idx];
+  }
+
+  [[nodiscard]] static bool closeValues(svmp::FE::Real a, svmp::FE::Real b) noexcept
+  {
+    const double da = static_cast<double>(a);
+    const double db = static_cast<double>(b);
+    const double scale = std::max({1.0, std::abs(da), std::abs(db)});
+    return std::abs(da - db) <= 1.0e-10 * scale;
+  }
+
+  void buildInterpolationMetadata()
+  {
+    has_x_only_interpolant = false;
+    x_interpolation_coords.clear();
+    x_interpolation_nodes.clear();
+    if (coords.size() < 2 || num_time_points <= 0 || dof <= 0) {
+      return;
+    }
+
+    std::vector<std::size_t> order(coords.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [this](std::size_t a, std::size_t b) {
+      return coords[a][0] < coords[b][0];
+    });
+
+    constexpr double coord_tol = 1.0e-12;
+    std::size_t group_begin = 0;
+    bool values_depend_only_on_x = true;
+    while (group_begin < order.size()) {
+      const auto representative = order[group_begin];
+      const double x0 = static_cast<double>(coords[representative][0]);
+      std::size_t group_end = group_begin + 1;
+      while (group_end < order.size() &&
+             std::abs(static_cast<double>(coords[order[group_end]][0]) - x0) <= coord_tol) {
+        ++group_end;
+      }
+
+      for (std::size_t j = group_begin + 1; j < group_end && values_depend_only_on_x; ++j) {
+        const auto node = order[j];
+        for (int it = 0; it < num_time_points && values_depend_only_on_x; ++it) {
+          for (int comp = 0; comp < dof; ++comp) {
+            if (!closeValues(sample(representative, it, comp), sample(node, it, comp))) {
+              values_depend_only_on_x = false;
+              break;
+            }
+          }
+        }
+      }
+      if (!values_depend_only_on_x) {
+        break;
+      }
+
+      x_interpolation_coords.push_back(coords[representative][0]);
+      x_interpolation_nodes.push_back(representative);
+      group_begin = group_end;
+    }
+
+    has_x_only_interpolant =
+        values_depend_only_on_x && x_interpolation_coords.size() >= 2 &&
+        std::abs(static_cast<double>(x_interpolation_coords.back() - x_interpolation_coords.front())) > 1.0e-14;
+    if (!has_x_only_interpolant) {
+      x_interpolation_coords.clear();
+      x_interpolation_nodes.clear();
+    }
   }
 
   [[nodiscard]] std::size_t findNodeIndex(const std::array<svmp::FE::Real, 3>& p) const
@@ -373,23 +445,154 @@ struct TemporalSpatialValues {
     const auto v1 = static_cast<double>(sample(node_idx, i0 + 1, comp));
     return static_cast<svmp::FE::Real>((1.0 - alpha) * v0 + alpha * v1);
   }
+
+  [[nodiscard]] svmp::FE::Real interpolateAlongX(svmp::FE::Real x, svmp::FE::Real time, int comp) const
+  {
+    if (!has_x_only_interpolant || x_interpolation_coords.empty()) {
+      throw std::runtime_error("[svMultiPhysics::Physics] Internal error: missing x-axis temporal/spatial interpolant.");
+    }
+
+    if (x <= x_interpolation_coords.front()) {
+      return interpolate(x_interpolation_nodes.front(), time, comp);
+    }
+    if (x >= x_interpolation_coords.back()) {
+      return interpolate(x_interpolation_nodes.back(), time, comp);
+    }
+
+    const auto upper = std::upper_bound(x_interpolation_coords.begin(), x_interpolation_coords.end(), x);
+    const auto hi = static_cast<std::size_t>(std::distance(x_interpolation_coords.begin(), upper));
+    const auto lo = hi - 1;
+    const double x0 = static_cast<double>(x_interpolation_coords[lo]);
+    const double x1 = static_cast<double>(x_interpolation_coords[hi]);
+    const double denom = x1 - x0;
+    const double alpha = (denom > 0.0) ? ((static_cast<double>(x) - x0) / denom) : 0.0;
+    const double v0 = static_cast<double>(interpolate(x_interpolation_nodes[lo], time, comp));
+    const double v1 = static_cast<double>(interpolate(x_interpolation_nodes[hi], time, comp));
+    return static_cast<svmp::FE::Real>((1.0 - alpha) * v0 + alpha * v1);
+  }
+
+  [[nodiscard]] svmp::FE::Real interpolateNearestSpatial(const std::array<svmp::FE::Real, 3>& p,
+                                                         svmp::FE::Real time,
+                                                         int comp) const
+  {
+    if (coords.empty()) {
+      return svmp::FE::Real{0.0};
+    }
+
+    std::vector<std::pair<double, std::size_t>> distances;
+    distances.reserve(coords.size());
+    for (std::size_t i = 0; i < coords.size(); ++i) {
+      const auto& c = coords[i];
+      const double dx = static_cast<double>(p[0] - c[0]);
+      const double dy = static_cast<double>(p[1] - c[1]);
+      const double dz = static_cast<double>(p[2] - c[2]);
+      distances.emplace_back(dx * dx + dy * dy + dz * dz, i);
+    }
+    const auto k = std::min<std::size_t>(8, distances.size());
+    std::partial_sort(distances.begin(), distances.begin() + static_cast<std::ptrdiff_t>(k), distances.end());
+
+    constexpr double exact_tol2 = 1.0e-16;
+    if (distances.front().first <= exact_tol2) {
+      return interpolate(distances.front().second, time, comp);
+    }
+
+    double weighted_sum = 0.0;
+    double weight_total = 0.0;
+    for (std::size_t i = 0; i < k; ++i) {
+      const double w = 1.0 / std::max(distances[i].first, 1.0e-24);
+      weighted_sum += w * static_cast<double>(interpolate(distances[i].second, time, comp));
+      weight_total += w;
+    }
+    return static_cast<svmp::FE::Real>(weight_total > 0.0 ? weighted_sum / weight_total : 0.0);
+  }
+
+  [[nodiscard]] svmp::FE::Real interpolateSpatial(const std::array<svmp::FE::Real, 3>& p,
+                                                  svmp::FE::Real time,
+                                                  int comp) const
+  {
+    const auto key = quantize(p, dim);
+    if (const auto it = node_index_by_key.find(key); it != node_index_by_key.end()) {
+      return interpolate(it->second, time, comp);
+    }
+    if (has_x_only_interpolant) {
+      return interpolateAlongX(p[0], time, comp);
+    }
+    return interpolateNearestSpatial(p, time, comp);
+  }
 };
 
 std::unordered_set<svmp::gid_t> collect_boundary_vertex_gids(const svmp::MeshBase& mesh, int boundary_marker)
 {
   std::unordered_set<svmp::gid_t> gids;
-  const auto faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
   const auto& vgids = mesh.vertex_gids();
+  const auto add_vertex = [&](svmp::index_t v) {
+    if (v < 0) {
+      return;
+    }
+    const auto idx = static_cast<std::size_t>(v);
+    if (idx >= vgids.size()) {
+      return;
+    }
+    gids.insert(vgids[idx]);
+  };
+  const auto sorted_unique = [](std::vector<svmp::index_t> values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+    return values;
+  };
+
+  const auto faces = mesh.faces_with_label(static_cast<svmp::label_t>(boundary_marker));
   for (const auto f : faces) {
-    for (const auto v : mesh.face_vertices(f)) {
-      if (v < 0) {
+    const auto stored_vertices = mesh.face_vertices(f);
+    for (const auto v : stored_vertices) {
+      add_vertex(v);
+    }
+
+    auto stored_key = sorted_unique(stored_vertices);
+    if (stored_key.empty() || static_cast<std::size_t>(f) >= mesh.face2cell().size()) {
+      continue;
+    }
+
+    const auto& adjacent = mesh.face2cell()[static_cast<std::size_t>(f)];
+    for (const auto cell : adjacent) {
+      if (cell == svmp::INVALID_INDEX || static_cast<std::size_t>(cell) >= mesh.n_cells()) {
         continue;
       }
-      const auto idx = static_cast<std::size_t>(v);
-      if (idx >= vgids.size()) {
+      const auto& shape = mesh.cell_shape(cell);
+      const auto face_view = svmp::CellTopology::get_oriented_boundary_faces_view(shape.family);
+      if (!face_view.indices || !face_view.offsets || face_view.face_count <= 0) {
         continue;
       }
-      gids.insert(vgids[idx]);
+
+      for (int lf = 0; lf < face_view.face_count; ++lf) {
+        std::vector<svmp::index_t> geometry_vertices;
+        try {
+          geometry_vertices = mesh.cell_face_geometry_dofs(cell, lf);
+        } catch (const std::exception&) {
+          geometry_vertices.clear();
+        }
+        if (geometry_vertices.empty()) {
+          const auto [cell_vertices, n_cell_vertices] = mesh.cell_vertices_span(cell);
+          const int begin = face_view.offsets[lf];
+          const int end = face_view.offsets[lf + 1];
+          for (int j = begin; j < end; ++j) {
+            const auto local = face_view.indices[j];
+            if (local >= 0 && static_cast<std::size_t>(local) < n_cell_vertices) {
+              geometry_vertices.push_back(cell_vertices[local]);
+            }
+          }
+        }
+
+        auto geometry_key = sorted_unique(geometry_vertices);
+        if (!std::includes(geometry_key.begin(), geometry_key.end(),
+                           stored_key.begin(), stored_key.end())) {
+          continue;
+        }
+        for (const auto v : geometry_vertices) {
+          add_vertex(v);
+        }
+        break;
+      }
     }
   }
   return gids;
@@ -603,6 +806,8 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
         << " identity_vertex_gids=" << (identity_vertex_gids ? 1 : 0);
     navierStokesTraceLog(oss.str());
   }
+
+  out->buildInterpolationMetadata();
 
   return out;
 }
@@ -2012,6 +2217,59 @@ std::optional<int> first_defined_int(const svmp::Physics::ParameterMap& params,
   return std::nullopt;
 }
 
+void apply_fluid_momentum_source_spacetime_file(
+    const svmp::Physics::EquationModuleInput& input,
+    const svmp::Physics::DomainInput& domain,
+    int dim,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  const auto path = first_defined_string(
+      input.equation_params,
+      {"Momentum_source_temporal_and_spatial_values_file_path",
+       "MomentumSourceTemporalAndSpatialValuesFilePath",
+       "Body_force_temporal_and_spatial_values_file_path",
+       "BodyForceTemporalAndSpatialValuesFilePath"});
+  const auto domain_path = first_defined_string(
+      domain.params,
+      {"Momentum_source_temporal_and_spatial_values_file_path",
+       "MomentumSourceTemporalAndSpatialValuesFilePath",
+       "Body_force_temporal_and_spatial_values_file_path",
+       "BodyForceTemporalAndSpatialValuesFilePath"});
+
+  const auto source_path = path ? path : domain_path;
+  if (!source_path || source_path->empty()) {
+    return;
+  }
+  if (!input.mesh) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Time/spatial Navier-Stokes momentum source requires a mesh.");
+  }
+
+  auto data = read_temporal_and_spatial_values_file(
+      *input.mesh,
+      /*boundary_marker=*/-1,
+      *source_path);
+  options.has_body_force_spacetime = true;
+  for (int d = 0; d < dim; ++d) {
+    if (d < data->dof) {
+      const int comp = d;
+      options.body_force_spacetime[static_cast<std::size_t>(d)] =
+          svmp::FE::forms::TimeScalarCoefficient(
+              [data, comp](svmp::FE::Real x,
+                           svmp::FE::Real y,
+                           svmp::FE::Real z,
+                           svmp::FE::Real t) -> svmp::FE::Real {
+                const std::array<svmp::FE::Real, 3> p{x, y, z};
+                return data->interpolateSpatial(p, t, comp);
+              });
+    } else {
+      options.body_force_spacetime[static_cast<std::size_t>(d)] =
+          svmp::Physics::formulations::navier_stokes::
+              IncompressibleNavierStokesVMSOptions::ScalarValue{0.0};
+    }
+  }
+}
+
 svmp::Physics::formulations::navier_stokes::FreeSurfaceImplementation
 free_surface_implementation_from_params(const svmp::Physics::ParameterMap& params)
 {
@@ -2216,6 +2474,13 @@ void append_free_surface_bc(
     fs.curvature = IncompressibleNavierStokesVMSOptions::ScalarValue{
         static_cast<svmp::FE::Real>(*curvature)};
   }
+  if (const auto curvature_field = first_defined_string(
+          bc.params,
+          {"Curvature_field", "CurvatureField",
+           "Projected_curvature_field", "ProjectedCurvatureField",
+           "Free_surface_curvature_field", "FreeSurfaceCurvatureField"})) {
+    fs.curvature_field_name = *curvature_field;
+  }
   if (const auto use_level_set_curvature = first_defined_bool(
           bc.params,
           {"Use_level_set_curvature", "UseLevelSetCurvature"})) {
@@ -2331,14 +2596,18 @@ void append_free_surface_bc(
     fs.cut_cell_stabilization.use_cut_metadata_scale = *use_cut_scale;
   }
 
-  if (const auto velocity_extension_enabled = first_defined_bool(
-          bc.params,
-          {"Enable_velocity_extension", "EnableVelocityExtension",
-           "Velocity_extension", "VelocityExtension",
-           "Extend_velocity_to_inactive_domain",
-           "ExtendVelocityToInactiveDomain"})) {
+  const auto velocity_extension_enabled = first_defined_bool(
+      bc.params,
+      {"Enable_velocity_extension", "EnableVelocityExtension",
+       "Velocity_extension", "VelocityExtension",
+       "Extend_velocity_to_inactive_domain",
+       "ExtendVelocityToInactiveDomain"});
+  if (velocity_extension_enabled.has_value()) {
     fs.velocity_extension.enabled = *velocity_extension_enabled;
   }
+  const bool velocity_extension_explicitly_disabled =
+      velocity_extension_enabled.has_value() &&
+      !*velocity_extension_enabled;
   if (const auto velocity_extension_diffusivity = first_defined_double(
           bc.params,
           {"Velocity_extension_diffusivity", "VelocityExtensionDiffusivity",
@@ -2347,7 +2616,9 @@ void append_free_surface_bc(
     fs.velocity_extension.diffusivity =
         IncompressibleNavierStokesVMSOptions::ScalarValue{
             static_cast<svmp::FE::Real>(*velocity_extension_diffusivity)};
-    fs.velocity_extension.enabled = true;
+    if (!velocity_extension_explicitly_disabled) {
+      fs.velocity_extension.enabled = true;
+    }
   }
 
   append_free_surface_contact_line(bc.params, fs);
@@ -2965,6 +3236,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   apply_fluid_moving_domain_options(input, domain, options);
   apply_fluid_momentum_source_params(input.equation_params, options);
   apply_fluid_properties(domain, options);
+  apply_fluid_momentum_source_spacetime_file(input, domain, dim, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, options);
 

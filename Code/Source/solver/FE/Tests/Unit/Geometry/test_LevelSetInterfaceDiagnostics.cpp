@@ -49,6 +49,11 @@ TEST(LevelSetInterfaceDiagnostics, SummarizesGeneratedInterfaceDomain)
     EXPECT_EQ(statistics.active_fragment_count, 2u);
     EXPECT_EQ(statistics.degenerate_fragment_count, 0u);
     EXPECT_EQ(statistics.quadrature_point_count, 2u);
+    EXPECT_EQ(statistics.volume_quadrature_point_count,
+              domain.summary().volume_quadrature_point_count);
+    EXPECT_EQ(statistics.total_quadrature_point_count,
+              statistics.quadrature_point_count +
+                  statistics.volume_quadrature_point_count);
     EXPECT_EQ(statistics.cut_cell_count, 2u);
     EXPECT_DOUBLE_EQ(statistics.total_interface_measure, 2.0);
     EXPECT_FALSE(statistics.enclosed_measure_available);

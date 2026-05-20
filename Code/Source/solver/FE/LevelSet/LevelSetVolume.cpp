@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -70,8 +71,52 @@ using interfaces::LevelSetInterfaceSource;
     case ElementType::Tetra4:
     case ElementType::Tetra10:
         return 4u;
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return 8u;
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+        return 6u;
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        return 5u;
     default:
         return 0u;
+    }
+}
+
+[[nodiscard]] std::vector<std::array<std::size_t, 4>>
+tetrahedralCornerDecomposition(ElementType type)
+{
+    switch (type) {
+    case ElementType::Tetra4:
+    case ElementType::Tetra10:
+        return {{{0u, 1u, 2u, 3u}}};
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+        return {{{0u, 1u, 2u, 6u}},
+                {{0u, 2u, 3u, 6u}},
+                {{0u, 3u, 7u, 6u}},
+                {{0u, 7u, 4u, 6u}},
+                {{0u, 4u, 5u, 6u}},
+                {{0u, 5u, 1u, 6u}}};
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+        return {{{0u, 1u, 2u, 5u}},
+                {{0u, 1u, 5u, 4u}},
+                {{0u, 4u, 5u, 3u}}};
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14:
+        return {{{0u, 1u, 2u, 4u}},
+                {{0u, 2u, 3u, 4u}}};
+    default:
+        return {};
     }
 }
 
@@ -89,6 +134,21 @@ using interfaces::LevelSetInterfaceSource;
     case ElementType::Tetra4:
     case ElementType::Tetra10:
         return tetraVolume(x[0], x[1], x[2], x[3]);
+    case ElementType::Hex8:
+    case ElementType::Hex20:
+    case ElementType::Hex27:
+    case ElementType::Wedge6:
+    case ElementType::Wedge15:
+    case ElementType::Wedge18:
+    case ElementType::Pyramid5:
+    case ElementType::Pyramid13:
+    case ElementType::Pyramid14: {
+        Real volume = Real{0.0};
+        for (const auto& tet : tetrahedralCornerDecomposition(type)) {
+            volume += tetraVolume(x[tet[0]], x[tet[1]], x[tet[2]], x[tet[3]]);
+        }
+        return volume;
+    }
     default:
         return Real{0.0};
     }
@@ -160,6 +220,42 @@ using interfaces::LevelSetInterfaceSource;
     return shifted;
 }
 
+[[nodiscard]] Real negativeVolumeForLinearTetra(
+    const CutInterfaceDomainRequest& request,
+    GlobalIndex parent_cell,
+    std::span<const std::array<Real, 3>, 4> coordinates,
+    std::span<const Real, 4> signed_values,
+    Real tolerance)
+{
+    const Real measure = tetraVolume(
+        coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+    const Real simple_fraction =
+        negativeFractionFromValues(signed_values, tolerance);
+    if (simple_fraction >= Real{0.0}) {
+        return simple_fraction * measure;
+    }
+
+    LevelSetCellCutInput input{};
+    input.parent_cell = parent_cell;
+    input.element_type = ElementType::Tetra4;
+    input.node_coordinates.assign(coordinates.begin(), coordinates.end());
+    input.level_set_values.reserve(signed_values.size());
+    for (const auto value : signed_values) {
+        input.level_set_values.push_back(value + request.isovalue);
+    }
+
+    auto cut_result = interfaces::cutLinearLevelSetCell3D(request, input);
+    auto active = std::find_if(
+        cut_result.fragments.begin(),
+        cut_result.fragments.end(),
+        [](const auto& fragment) { return fragment.active(); });
+    if (active == cut_result.fragments.end()) {
+        throw std::runtime_error(
+            "level-set volume calculation found a tetrahedral subcell without an active interface fragment");
+    }
+    return active->negative_volume_fraction * measure;
+}
+
 } // namespace
 
 LevelSetVolumeResult computeLevelSetCutCellVolume(
@@ -228,36 +324,65 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
             negativeFractionFromValues(signed_values, options.tolerance);
         Real negative_fraction = simple_fraction;
         if (simple_fraction < Real{0.0}) {
-            LevelSetCellCutInput input{};
-            input.parent_cell = cell_id;
-            input.element_type = type;
-            input.node_coordinates.assign(cell_coordinates.begin(),
-                                          cell_coordinates.begin() +
-                                              static_cast<std::ptrdiff_t>(count));
-            input.level_set_values.reserve(count);
-            for (const auto value : signed_values) {
-                input.level_set_values.push_back(value + options.isovalue);
-            }
-
-            interfaces::LevelSetCellCutResult cut_result;
             if (mesh.dimension() == 2) {
-                cut_result = interfaces::cutLinearLevelSetCell2D(request, input);
+                LevelSetCellCutInput input{};
+                input.parent_cell = cell_id;
+                input.element_type = type;
+                input.node_coordinates.assign(
+                    cell_coordinates.begin(),
+                    cell_coordinates.begin() + static_cast<std::ptrdiff_t>(count));
+                input.level_set_values.reserve(count);
+                for (const auto value : signed_values) {
+                    input.level_set_values.push_back(value + options.isovalue);
+                }
+                auto cut_result =
+                    interfaces::cutLinearLevelSetCell2D(request, input);
+                auto active = std::find_if(
+                    cut_result.fragments.begin(),
+                    cut_result.fragments.end(),
+                    [](const auto& fragment) { return fragment.active(); });
+                if (active == cut_result.fragments.end()) {
+                    throw std::runtime_error(
+                        "level-set volume calculation found a cut cell without an active interface fragment");
+                }
+                negative_fraction = active->negative_volume_fraction;
+                ++result.cut_cells;
             } else if (mesh.dimension() == 3) {
-                cut_result = interfaces::cutLinearLevelSetCell3D(request, input);
+                const auto tets = tetrahedralCornerDecomposition(type);
+                if (tets.empty()) {
+                    throw std::invalid_argument(
+                        "level-set volume calculation encountered an unsupported 3D element type");
+                }
+                Real negative_volume = Real{0.0};
+                for (const auto& tet : tets) {
+                    const std::array<std::array<Real, 3>, 4> tet_coordinates{{
+                        cell_coordinates[tet[0]],
+                        cell_coordinates[tet[1]],
+                        cell_coordinates[tet[2]],
+                        cell_coordinates[tet[3]],
+                    }};
+                    const std::array<Real, 4> tet_values{{
+                        signed_values[tet[0]],
+                        signed_values[tet[1]],
+                        signed_values[tet[2]],
+                        signed_values[tet[3]],
+                    }};
+                    negative_volume += negativeVolumeForLinearTetra(
+                        request,
+                        cell_id,
+                        std::span<const std::array<Real, 3>, 4>(
+                            tet_coordinates.data(), tet_coordinates.size()),
+                        std::span<const Real, 4>(
+                            tet_values.data(), tet_values.size()),
+                        options.tolerance);
+                }
+                negative_fraction =
+                    measure > Real{0.0} ? negative_volume / measure : Real{0.0};
+                ++result.cut_cells;
             } else {
                 throw std::invalid_argument(
                     "level-set volume calculation requires a 2D or 3D mesh");
             }
-            auto active = std::find_if(
-                cut_result.fragments.begin(),
-                cut_result.fragments.end(),
-                [](const auto& fragment) { return fragment.active(); });
-            if (active == cut_result.fragments.end()) {
-                throw std::runtime_error(
-                    "level-set volume calculation found a cut cell without an active interface fragment");
-            }
-            negative_fraction = active->negative_volume_fraction;
-            ++result.cut_cells;
         } else if (negative_fraction >= Real{1.0}) {
             ++result.full_negative_cells;
         } else {

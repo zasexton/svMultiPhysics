@@ -46,8 +46,14 @@ const GeometrySensitivityOptions& FormIR::geometrySensitivityOptions() const noe
 bool FormIR::hasGeometrySensitivityTerminals() const noexcept { return impl_->has_geometry_sensitivity_terminals; }
 bool FormIR::geometrySensitivityActive() const noexcept
 {
-    return impl_->has_geometry_sensitivity_terminals &&
-           impl_->geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns;
+    if (impl_->geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns) {
+        return impl_->has_geometry_sensitivity_terminals;
+    }
+    if (impl_->geometry_sensitivity.mode ==
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns) {
+        return !impl_->geometry_sensitivity.level_set_cut_domains.empty();
+    }
+    return false;
 }
 
 bool FormIR::hasCellTerms() const noexcept

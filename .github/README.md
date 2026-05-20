@@ -60,6 +60,20 @@ This directory contains GitHub Actions workflows that run various actions (tests
 - Uses `kt3k/license_checker` to verify copyright headers in `.h` and `.cpp` files
 - Fails the workflow if any files are missing proper copyright notices
 
+### 5. High-Order Free-Surface Qualification (`workflows/high_order_free_surface.yml`)
+
+**Purpose**: Runs the high-order implicit free-surface qualification gates for the OOP solver path. This workflow builds the solver and focused high-order unit tests, then runs `tools/run_high_order_free_surface_qualification.sh`.
+
+**Triggers**:
+- Manual dispatch
+- Nightly schedule
+
+**Key Features**:
+- Exercises the serial high-order free-surface production gate
+- Exercises the MPI2 free-surface motion and production gates
+- Exercises the compact D18/D38 3D high-order benchmark qualification gate
+- Uploads qualification JSON, stdout logs, and preserved run directories as artifacts
+
 ## Testing Actions
 
 ### 1. Test Ubuntu Action (`actions/test-ubuntu/action.yml`)

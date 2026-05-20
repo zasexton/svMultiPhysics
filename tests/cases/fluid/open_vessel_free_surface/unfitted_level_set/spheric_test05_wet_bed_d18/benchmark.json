@@ -11,29 +11,29 @@
   },
   "mesh_tools": [
     "PyVista",
-    "TetGen",
-    "MMG"
+    "mirrored structured thin-extrusion tetrahedral grid"
   ],
   "notes": [
     "The three-dimensional mesh is a thin extrusion of the published two-dimensional setup.",
+    "The tetrahedral split is mirrored about the extrusion mid-plane to suppress transverse bias.",
     "The initial level-set field is the union of the wet bed and the retained water column.",
     "Negative level-set values denote the water side for active-domain assembly."
   ],
   "pressure_gauge": {
     "coordinates": [
-      0.0922952151152521,
-      0.0842691030345939,
-      0.0142363529744199
+      0.1084558823529412,
+      0.07823076923076924,
+      0.015
     ],
-    "expected_initial_hydrostatic_pressure": 643.659423052,
-    "initial_phi": -0.0142363529744199,
-    "node_id": 256
+    "expected_initial_hydrostatic_pressure": 702.7888527692306,
+    "initial_phi": -0.07176923076923075,
+    "node_id": 1765
   },
   "pressure_gauge_verification": {
     "current_prescribed_pressure_matches_initial_hydrostatic": true,
     "current_pressure_matches_previous_invalid_error_range": false,
     "current_pressure_matches_previous_invalid_offset": false,
-    "current_pressure_minus_previous_invalid_pressure": 625.972523052,
+    "current_pressure_minus_previous_invalid_pressure": 685.1019527692306,
     "initial_pressure_error_after_constraint": 0.0,
     "previous_invalid_d18_full_volume_hydrostatic_pressure": 17.6869,
     "previous_invalid_d18_hydrostatic_error_range": [

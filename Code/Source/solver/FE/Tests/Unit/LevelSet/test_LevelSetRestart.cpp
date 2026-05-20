@@ -212,6 +212,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     interface_options.geometry_tangent_policy =
         level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature;
     interface_options.implicit_cut_root_tolerance = 2.0e-10;
+    interface_options.implicit_cut_root_coordinate_tolerance = 3.0e-12;
+    interface_options.implicit_cut_root_max_iterations = 52;
     interface_options.implicit_cut_max_subdivision_depth = 18;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
@@ -236,6 +238,9 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     EXPECT_EQ(interface_record.geometry_tangent_policy,
               level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
     EXPECT_DOUBLE_EQ(interface_record.implicit_cut_root_tolerance, 2.0e-10);
+    EXPECT_DOUBLE_EQ(interface_record.implicit_cut_root_coordinate_tolerance,
+                     3.0e-12);
+    EXPECT_EQ(interface_record.implicit_cut_root_max_iterations, 52);
     EXPECT_EQ(interface_record.implicit_cut_max_subdivision_depth, 18);
     EXPECT_EQ(interface_record.value_revision, built.value_revision);
     EXPECT_EQ(interface_record.mesh_geometry_revision, 7u);
@@ -279,6 +284,10 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
               interface_options.geometry_tangent_policy);
     EXPECT_DOUBLE_EQ(restored_options.implicit_cut_root_tolerance,
                      interface_options.implicit_cut_root_tolerance);
+    EXPECT_DOUBLE_EQ(restored_options.implicit_cut_root_coordinate_tolerance,
+                     interface_options.implicit_cut_root_coordinate_tolerance);
+    EXPECT_EQ(restored_options.implicit_cut_root_max_iterations,
+              interface_options.implicit_cut_root_max_iterations);
     EXPECT_EQ(restored_options.implicit_cut_max_subdivision_depth,
               interface_options.implicit_cut_max_subdivision_depth);
 

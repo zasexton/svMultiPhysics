@@ -42,6 +42,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <type_traits>
 #include <sstream>
 #include <string>
@@ -86,6 +87,174 @@ ProcessMemorySnapshot readProcessMemorySnapshot()
     }
     return snapshot;
 }
+
+class CompositeCutVolumeCellKernel final : public assembly::AssemblyKernel {
+public:
+    struct Term {
+        assembly::AssemblyKernel* kernel{nullptr};
+        bool want_matrix{false};
+        bool want_vector{false};
+    };
+
+    explicit CompositeCutVolumeCellKernel(std::vector<Term> terms)
+        : terms_(std::move(terms))
+    {
+        for (const auto& term : terms_) {
+            FE_CHECK_NOT_NULL(term.kernel, "CompositeCutVolumeCellKernel: kernel");
+            want_matrix_ = want_matrix_ || term.want_matrix;
+            want_vector_ = want_vector_ || term.want_vector;
+            required_data_ |= term.kernel->getRequiredData();
+            max_temporal_derivative_order_ =
+                std::max(max_temporal_derivative_order_,
+                         term.kernel->maxTemporalDerivativeOrder());
+            has_explicit_time_dependency_ =
+                has_explicit_time_dependency_ ||
+                term.kernel->hasExplicitTimeDependency();
+            mergeFieldRequirements(term.kernel->fieldRequirements());
+        }
+    }
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const override
+    {
+        return required_data_;
+    }
+
+    [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override
+    {
+        return field_requirements_;
+    }
+
+    [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override
+    {
+        return {};
+    }
+
+    [[nodiscard]] std::vector<params::Spec> parameterSpecs() const override
+    {
+        std::vector<params::Spec> specs;
+        for (const auto& term : terms_) {
+            auto term_specs = term.kernel->parameterSpecs();
+            specs.insert(specs.end(), term_specs.begin(), term_specs.end());
+        }
+        return specs;
+    }
+
+    void resolveParameterSlots(
+        const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param) override
+    {
+        for (auto& term : terms_) {
+            term.kernel->resolveParameterSlots(slot_of_real_param);
+        }
+    }
+
+    void resolveInlinableConstitutives() override
+    {
+        for (auto& term : terms_) {
+            term.kernel->resolveInlinableConstitutives();
+        }
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return true; }
+
+    void computeCell(const assembly::AssemblyContext& ctx,
+                     assembly::KernelOutput& output) override
+    {
+        output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                       want_matrix_, want_vector_);
+        output.clear();
+
+        for (const auto& term : terms_) {
+            scratch_.reserve(ctx.numTestDofs(), ctx.numTrialDofs(),
+                             term.want_matrix, term.want_vector);
+            scratch_.clear();
+            term.kernel->computeCell(ctx, scratch_);
+            accumulateOutput(ctx, output, term);
+        }
+    }
+
+    [[nodiscard]] std::string name() const override
+    {
+        return "CompositeCutVolumeCellKernel";
+    }
+
+    [[nodiscard]] int maxTemporalDerivativeOrder() const noexcept override
+    {
+        return max_temporal_derivative_order_;
+    }
+
+    [[nodiscard]] bool hasExplicitTimeDependency() const noexcept override
+    {
+        return has_explicit_time_dependency_;
+    }
+
+    [[nodiscard]] bool isMatrixOnly() const noexcept override
+    {
+        return want_matrix_ && !want_vector_;
+    }
+
+    [[nodiscard]] bool isVectorOnly() const noexcept override
+    {
+        return want_vector_ && !want_matrix_;
+    }
+
+private:
+    void mergeFieldRequirements(
+        const std::vector<assembly::FieldRequirement>& requirements)
+    {
+        for (const auto& req : requirements) {
+            auto it = std::find_if(
+                field_requirements_.begin(),
+                field_requirements_.end(),
+                [&](const auto& existing) {
+                    return existing.field == req.field;
+                });
+            if (it == field_requirements_.end()) {
+                field_requirements_.push_back(req);
+            } else {
+                it->required |= req.required;
+            }
+        }
+    }
+
+    void accumulateOutput(const assembly::AssemblyContext& ctx,
+                          assembly::KernelOutput& output,
+                          const Term& term)
+    {
+        if (term.want_matrix && scratch_.has_matrix) {
+            FE_THROW_IF(scratch_.local_matrix.size() != output_matrix_size(ctx),
+                        InvalidStateException,
+                        "CompositeCutVolumeCellKernel: matrix block size mismatch");
+            for (std::size_t i = 0; i < scratch_.local_matrix.size(); ++i) {
+                output.local_matrix[i] += scratch_.local_matrix[i];
+            }
+        }
+        if (term.want_vector && scratch_.has_vector) {
+            FE_THROW_IF(scratch_.local_vector.size() !=
+                            static_cast<std::size_t>(ctx.numTestDofs()),
+                        InvalidStateException,
+                        "CompositeCutVolumeCellKernel: vector block size mismatch");
+            for (std::size_t i = 0; i < scratch_.local_vector.size(); ++i) {
+                output.local_vector[i] += scratch_.local_vector[i];
+            }
+        }
+    }
+
+    [[nodiscard]] static std::size_t output_matrix_size(
+        const assembly::AssemblyContext& ctx) noexcept
+    {
+        return static_cast<std::size_t>(ctx.numTestDofs()) *
+               static_cast<std::size_t>(ctx.numTrialDofs());
+    }
+
+    std::vector<Term> terms_{};
+    assembly::RequiredData required_data_{assembly::RequiredData::None};
+    std::vector<assembly::FieldRequirement> field_requirements_{};
+    int max_temporal_derivative_order_{0};
+    bool has_explicit_time_dependency_{false};
+    bool want_matrix_{false};
+    bool want_vector_{false};
+    mutable assembly::KernelOutput scratch_{};
+};
 
 class ParticipantFilteredMeshAccess final : public assembly::IMeshAccess {
 public:
@@ -263,80 +432,8 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
                                      int marker,
                                      geometry::CutIntegrationSide side)
 {
-    const auto rules = cut_context.generatedVolumeRulesForMarkerAndSide(marker, side);
-    Real active_volume = 0.0;
-    Real cut_cell_active_volume = 0.0;
-    Real full_cell_active_volume = 0.0;
-    std::size_t cut_cell_rules = 0u;
-    std::size_t full_cell_rules = 0u;
-    std::size_t quadrature_points = 0u;
-    std::size_t null_rules = 0u;
-    std::size_t zero_quadrature_rules = 0u;
-    std::size_t nonfinite_measure_rules = 0u;
-    std::size_t negative_measure_rules = 0u;
-    std::size_t nonfinite_volume_fraction_rules = 0u;
-    Real min_rule_measure = std::numeric_limits<Real>::infinity();
-    Real max_rule_measure = -std::numeric_limits<Real>::infinity();
-    Real min_volume_fraction = std::numeric_limits<Real>::infinity();
-    Real max_volume_fraction = -std::numeric_limits<Real>::infinity();
-    int min_exact_order = std::numeric_limits<int>::max();
-    int max_exact_order = std::numeric_limits<int>::min();
-    for (const auto* rule : rules) {
-        if (rule == nullptr) {
-            ++null_rules;
-            continue;
-        }
-        active_volume += rule->measure;
-        quadrature_points += rule->points.size();
-        if (rule->points.empty()) {
-            ++zero_quadrature_rules;
-        }
-        if (!std::isfinite(rule->measure)) {
-            ++nonfinite_measure_rules;
-        }
-        if (rule->measure < Real{0.0}) {
-            ++negative_measure_rules;
-        }
-        if (!std::isfinite(rule->volume_fraction)) {
-            ++nonfinite_volume_fraction_rules;
-        } else {
-            min_volume_fraction =
-                std::min(min_volume_fraction, rule->volume_fraction);
-            max_volume_fraction =
-                std::max(max_volume_fraction, rule->volume_fraction);
-        }
-        if (std::isfinite(rule->measure)) {
-            min_rule_measure = std::min(min_rule_measure, rule->measure);
-            max_rule_measure = std::max(max_rule_measure, rule->measure);
-        }
-        min_exact_order = std::min(min_exact_order, rule->exact_polynomial_order);
-        max_exact_order = std::max(max_exact_order, rule->exact_polynomial_order);
-        if (rule->full_cell_equivalent) {
-            full_cell_active_volume += rule->measure;
-            ++full_cell_rules;
-        } else {
-            cut_cell_active_volume += rule->measure;
-            ++cut_cell_rules;
-        }
-    }
-    if (!std::isfinite(min_rule_measure)) {
-        min_rule_measure = Real{0.0};
-    }
-    if (!std::isfinite(max_rule_measure)) {
-        max_rule_measure = Real{0.0};
-    }
-    if (!std::isfinite(min_volume_fraction)) {
-        min_volume_fraction = Real{0.0};
-    }
-    if (!std::isfinite(max_volume_fraction)) {
-        max_volume_fraction = Real{0.0};
-    }
-    if (min_exact_order == std::numeric_limits<int>::max()) {
-        min_exact_order = 0;
-    }
-    if (max_exact_order == std::numeric_limits<int>::min()) {
-        max_exact_order = 0;
-    }
+    const auto diagnostics =
+        cut_context.generatedVolumeDiagnosticsForMarkerAndSide(marker, side);
 
     std::ostringstream oss;
     oss << "assembleOperator: cut-volume active-domain diagnostics"
@@ -344,25 +441,27 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
         << " marker="
         << marker
         << " side=" << cutIntegrationSideName(side)
-        << " active_wet_volume=" << active_volume
-        << " cut_cell_active_wet_volume=" << cut_cell_active_volume
-        << " full_cell_active_wet_volume=" << full_cell_active_volume
-        << " rules=" << rules.size()
-        << " cut_cell_rules=" << cut_cell_rules
-        << " full_cell_rules=" << full_cell_rules
-        << " quadrature_points=" << quadrature_points
-        << " null_rules=" << null_rules
-        << " zero_quadrature_rules=" << zero_quadrature_rules
-        << " nonfinite_measure_rules=" << nonfinite_measure_rules
-        << " negative_measure_rules=" << negative_measure_rules
+        << " active_wet_volume=" << diagnostics.active_volume
+        << " cut_cell_active_wet_volume="
+        << diagnostics.cut_cell_active_volume
+        << " full_cell_active_wet_volume="
+        << diagnostics.full_cell_active_volume
+        << " rules=" << diagnostics.rule_count
+        << " cut_cell_rules=" << diagnostics.cut_cell_rules
+        << " full_cell_rules=" << diagnostics.full_cell_rules
+        << " quadrature_points=" << diagnostics.quadrature_points
+        << " null_rules=" << diagnostics.null_rules
+        << " zero_quadrature_rules=" << diagnostics.zero_quadrature_rules
+        << " nonfinite_measure_rules=" << diagnostics.nonfinite_measure_rules
+        << " negative_measure_rules=" << diagnostics.negative_measure_rules
         << " nonfinite_volume_fraction_rules="
-        << nonfinite_volume_fraction_rules
-        << " min_rule_measure=" << min_rule_measure
-        << " max_rule_measure=" << max_rule_measure
-        << " min_volume_fraction=" << min_volume_fraction
-        << " max_volume_fraction=" << max_volume_fraction
-        << " min_exact_order=" << min_exact_order
-        << " max_exact_order=" << max_exact_order;
+        << diagnostics.nonfinite_volume_fraction_rules
+        << " min_rule_measure=" << diagnostics.min_rule_measure
+        << " max_rule_measure=" << diagnostics.max_rule_measure
+        << " min_volume_fraction=" << diagnostics.min_volume_fraction
+        << " max_volume_fraction=" << diagnostics.max_volume_fraction
+        << " min_exact_order=" << diagnostics.min_exact_order
+        << " max_exact_order=" << diagnostics.max_exact_order;
     FE_LOG_INFO(oss.str());
 }
 
@@ -1497,6 +1596,16 @@ assembly::AssemblyResult assembleOperator(
                 if (!generated_markers_assembled.insert(marker).second) {
                     return true;
                 }
+                const auto generated_t0 = AO_TP();
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "assembleOperator: op='" << request.op
+                        << "' generated-interface term marker=" << marker
+                        << " test='" << test_field.name << "' trial='" << trial_field.name
+                        << "' want_matrix=" << (want_matrix ? 1 : 0)
+                        << " want_vector=" << (want_vector ? 1 : 0);
+                    traceLog(oss.str());
+                }
                 auto r = assembler.assembleCutInterfaces(
                     mesh,
                     *cut_context,
@@ -1509,6 +1618,17 @@ assembly::AssemblyResult assembleOperator(
                     want_matrix,
                     want_vector);
                 mergeAssemblyResult(total, r);
+                if (oopTraceEnabled()) {
+                    std::ostringstream oss;
+                    oss << "assembleOperator: op='" << request.op
+                        << "' generated-interface term done marker=" << marker
+                        << " test='" << test_field.name << "' trial='" << trial_field.name
+                        << "' time="
+                        << std::chrono::duration<double>(AO_TP() - generated_t0).count()
+                        << " want_matrix=" << (want_matrix ? 1 : 0)
+                        << " want_vector=" << (want_vector ? 1 : 0);
+                    traceLog(oss.str());
+                }
                 return true;
             };
 
@@ -1570,7 +1690,14 @@ assembly::AssemblyResult assembleOperator(
         FE_THROW_IF(cut_context == nullptr, InvalidArgumentException,
                     "assembleOperator: cut-volume terms require a registered CutIntegrationContext");
 
-        std::unordered_set<std::string> logged_cut_volume_diagnostics;
+        struct CutVolumeAssemblyEntry {
+            const FESystem::PlannedCutVolumeTerm* term{nullptr};
+            bool want_matrix{false};
+            bool want_vector{false};
+        };
+
+        std::vector<CutVolumeAssemblyEntry> active_terms;
+        active_terms.reserve(plan.cut_volume_terms.size());
         for (const auto& term : plan.cut_volume_terms) {
             FE_CHECK_NOT_NULL(term.kernel, "assembleOperator: cut-volume term kernel");
             const bool want_matrix = request.want_matrix && term.matrix_capable;
@@ -1578,43 +1705,157 @@ assembly::AssemblyResult assembleOperator(
             if (!want_matrix && !want_vector) {
                 continue;
             }
+            active_terms.push_back(CutVolumeAssemblyEntry{&term, want_matrix, want_vector});
+        }
 
-            const auto diagnostics_key =
-                std::to_string(term.marker) + ":" +
-                std::to_string(static_cast<int>(term.side));
-            if (logged_cut_volume_diagnostics.insert(diagnostics_key).second) {
-                logCutVolumeAssemblyDiagnostics(*cut_context, term.marker, term.side);
+        auto can_compose_cut_volume_term = [](const CutVolumeAssemblyEntry& entry) {
+            const auto* term = entry.term;
+            FE_CHECK_NOT_NULL(term, "assembleOperator: cut-volume group term");
+            FE_CHECK_NOT_NULL(term->kernel, "assembleOperator: cut-volume group kernel");
+            const auto required_data = term->kernel->getRequiredData();
+            if (assembly::hasFlag(required_data, assembly::RequiredData::MaterialState)) {
+                return false;
+            }
+            const auto material_spec = term->kernel->materialStateSpec();
+            return material_spec.bytes_per_qpt == 0u;
+        };
+
+        auto same_cut_volume_group_key =
+            [](const CutVolumeAssemblyEntry& lhs,
+               const CutVolumeAssemblyEntry& rhs) {
+                const auto& a = *lhs.term;
+                const auto& b = *rhs.term;
+                return a.marker == b.marker &&
+                       a.side == b.side &&
+                       a.test_field == b.test_field &&
+                       a.trial_field == b.trial_field &&
+                       a.test_space == b.test_space &&
+                       a.trial_space == b.trial_space &&
+                       a.row_dof_map == b.row_dof_map &&
+                       a.col_dof_map == b.col_dof_map &&
+                       a.row_dof_offset == b.row_dof_offset &&
+                       a.col_dof_offset == b.col_dof_offset;
+            };
+
+        std::vector<std::vector<std::size_t>> cut_volume_groups;
+        std::vector<char> grouped(active_terms.size(), 0);
+        for (std::size_t i = 0; i < active_terms.size(); ++i) {
+            if (grouped[i]) {
+                continue;
+            }
+            grouped[i] = 1;
+            std::vector<std::size_t> group;
+            group.push_back(i);
+            if (can_compose_cut_volume_term(active_terms[i])) {
+                for (std::size_t j = i + 1u; j < active_terms.size(); ++j) {
+                    if (grouped[j]) {
+                        continue;
+                    }
+                    if (can_compose_cut_volume_term(active_terms[j]) &&
+                        same_cut_volume_group_key(active_terms[i], active_terms[j])) {
+                        grouped[j] = 1;
+                        group.push_back(j);
+                    }
+                }
+            }
+            cut_volume_groups.push_back(std::move(group));
+        }
+
+        std::unordered_set<std::string> logged_cut_volume_diagnostics;
+        for (const auto& group : cut_volume_groups) {
+            if (group.empty()) {
+                continue;
+            }
+            const auto& first_entry = active_terms[group.front()];
+            const auto& first = *first_entry.term;
+            bool want_matrix = false;
+            bool want_vector = false;
+            for (const auto idx : group) {
+                want_matrix = want_matrix || active_terms[idx].want_matrix;
+                want_vector = want_vector || active_terms[idx].want_vector;
             }
 
-            assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
-            assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+            const auto diagnostics_key =
+                std::to_string(first.marker) + ":" +
+                std::to_string(static_cast<int>(first.side));
+            if (logged_cut_volume_diagnostics.insert(diagnostics_key).second) {
+                logCutVolumeAssemblyDiagnostics(*cut_context, first.marker, first.side);
+            }
+
+            assembler.setRowDofMap(*first.row_dof_map, first.row_dof_offset);
+            assembler.setColDofMap(*first.col_dof_map, first.col_dof_offset);
 
             if (oopTraceEnabled()) {
-                const auto& test_field = system.field_registry_.get(term.test_field);
-                const auto& trial_field = system.field_registry_.get(term.trial_field);
+                const auto& test_field = system.field_registry_.get(first.test_field);
+                const auto& trial_field = system.field_registry_.get(first.trial_field);
                 std::ostringstream oss;
-                oss << "assembleOperator: op='" << request.op << "' cut-volume term marker="
-                    << term.marker << " side="
-                    << (term.side == geometry::CutIntegrationSide::Negative ? "negative" : "positive")
+                oss << "assembleOperator: op='" << request.op << "' cut-volume "
+                    << (group.size() > 1u ? "fused group" : "term")
+                    << " marker=" << first.marker
+                    << " side=" << cutIntegrationSideName(first.side)
                     << " test='" << test_field.name << "' trial='" << trial_field.name
+                    << "' terms=" << group.size()
                     << "' want_matrix=" << (want_matrix ? 1 : 0)
                     << " want_vector=" << (want_vector ? 1 : 0);
                 traceLog(oss.str());
             }
 
-            auto r = assembler.assembleCutVolumes(
-                mesh,
-                *cut_context,
-                term.marker,
-                term.side,
-                *term.test_space,
-                *term.trial_space,
-                *term.kernel,
-                want_matrix ? matrix_out : nullptr,
-                want_vector ? vector_out : nullptr,
-                want_matrix,
-                want_vector);
+            const auto cut_term_t0 = AO_TP();
+            assembly::AssemblyResult r;
+            if (group.size() == 1u) {
+                r = assembler.assembleCutVolumes(
+                    mesh,
+                    *cut_context,
+                    first.marker,
+                    first.side,
+                    *first.test_space,
+                    *first.trial_space,
+                    *first.kernel,
+                    first_entry.want_matrix ? matrix_out : nullptr,
+                    first_entry.want_vector ? vector_out : nullptr,
+                    first_entry.want_matrix,
+                    first_entry.want_vector);
+            } else {
+                std::vector<CompositeCutVolumeCellKernel::Term> terms;
+                terms.reserve(group.size());
+                for (const auto idx : group) {
+                    const auto& entry = active_terms[idx];
+                    terms.push_back(CompositeCutVolumeCellKernel::Term{
+                        entry.term->kernel,
+                        entry.want_matrix,
+                        entry.want_vector});
+                }
+                CompositeCutVolumeCellKernel composite(std::move(terms));
+                r = assembler.assembleCutVolumes(
+                    mesh,
+                    *cut_context,
+                    first.marker,
+                    first.side,
+                    *first.test_space,
+                    *first.trial_space,
+                    composite,
+                    want_matrix ? matrix_out : nullptr,
+                    want_vector ? vector_out : nullptr,
+                    want_matrix,
+                    want_vector);
+            }
             mergeAssemblyResult(total, r);
+            if (oopTraceEnabled()) {
+                const auto& test_field = system.field_registry_.get(first.test_field);
+                const auto& trial_field = system.field_registry_.get(first.trial_field);
+                std::ostringstream oss;
+                oss << "assembleOperator: op='" << request.op << "' cut-volume "
+                    << (group.size() > 1u ? "fused group" : "term")
+                    << " done marker=" << first.marker
+                    << " side=" << cutIntegrationSideName(first.side)
+                    << " test='" << test_field.name << "' trial='" << trial_field.name
+                    << "' terms=" << group.size()
+                    << "' time="
+                    << std::chrono::duration<double>(AO_TP() - cut_term_t0).count()
+                    << " want_matrix=" << (want_matrix ? 1 : 0)
+                    << " want_vector=" << (want_vector ? 1 : 0);
+                traceLog(oss.str());
+            }
         }
     }
     ao_cut_volume_time += AO_TP() - ao0;

@@ -10,8 +10,10 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Systems/FESystem.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 
@@ -27,6 +29,7 @@ enum class ImplicitCutQuadratureBackend {
     SayeHyperrectangle,
     HighOrderSubcell,
     MomentFit,
+    Auto,
 };
 
 enum class ImplicitCutFallbackPolicy {
@@ -102,9 +105,12 @@ struct LevelSetGeneratedInterfaceOptions {
     ImplicitCutFallbackPolicy implicit_cut_fallback_policy{
         ImplicitCutFallbackPolicy::Fail};
     Real implicit_cut_root_tolerance{1.0e-10};
+    Real implicit_cut_root_coordinate_tolerance{1.0e-12};
+    int implicit_cut_root_max_iterations{48};
     int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};
     bool allow_corner_linearized_geometry{false};
+    bool require_production_qualified_implicit_cut_backend{false};
     GeometryTangentPolicy geometry_tangent_policy{
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
@@ -125,14 +131,35 @@ struct LevelSetGeneratedInterfaceResult {
     int achieved_interface_quadrature_order{0};
     int achieved_volume_quadrature_order{0};
     std::size_t implicit_cut_fallback_cell_count{0};
+    std::array<std::size_t, 5> selected_implicit_cut_quadrature_backend_counts{};
+    std::size_t backend_volume_quadrature_point_count{0};
+    std::size_t backend_interface_quadrature_point_count{0};
+    double backend_elapsed_seconds{0.0};
+    std::size_t cell_cache_hits{0};
+    std::size_t cell_cache_misses{0};
+    std::size_t domain_cache_hits{0};
+    std::size_t linear_full_cell_fast_path_count{0};
     GeometryTangentPolicy geometry_tangent_policy{
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
 
 class LevelSetGeneratedInterfaceLifecycle {
 public:
+    struct Cache;
+
     explicit LevelSetGeneratedInterfaceLifecycle(int marker_base = 1000000,
                                                  int marker_range = 1000000);
+    ~LevelSetGeneratedInterfaceLifecycle();
+
+    LevelSetGeneratedInterfaceLifecycle(
+        LevelSetGeneratedInterfaceLifecycle&&) noexcept;
+    LevelSetGeneratedInterfaceLifecycle& operator=(
+        LevelSetGeneratedInterfaceLifecycle&&) noexcept;
+
+    LevelSetGeneratedInterfaceLifecycle(
+        const LevelSetGeneratedInterfaceLifecycle&) = delete;
+    LevelSetGeneratedInterfaceLifecycle& operator=(
+        const LevelSetGeneratedInterfaceLifecycle&) = delete;
 
     [[nodiscard]] LevelSetGeneratedInterfaceResult build(
         const systems::FESystem& system,
@@ -145,6 +172,7 @@ public:
 private:
     interfaces::GeneratedInterfaceMarkerRegistry marker_registry_;
     std::uint64_t value_revision_{0};
+    std::unique_ptr<Cache> cache_;
 };
 
 } // namespace svmp::FE::level_set

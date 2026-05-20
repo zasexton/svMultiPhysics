@@ -99,7 +99,9 @@ TEST(StokesCouplingJacobianTest, CouplingBlocksMatchCentralDifferencesAndHaveCor
 
     svmp::FE::systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
-    sys.setup({}, inputs);
+    svmp::FE::systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    sys.setup(setup_options, inputs);
 
     const auto n_dofs = sys.dofHandler().getNumDofs();
     ASSERT_EQ(n_dofs, 16);

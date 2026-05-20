@@ -45,6 +45,17 @@ Real integrateWeight(const CutQuadratureRule& rule)
     return value;
 }
 
+Real integrateMonomial2D(const CutQuadratureRule& rule, int px, int py)
+{
+    Real value = 0.0;
+    for (const auto& point : rule.points) {
+        value += point.weight *
+                 std::pow(point.point[0], static_cast<Real>(px)) *
+                 std::pow(point.point[1], static_cast<Real>(py));
+    }
+    return value;
+}
+
 Real integrateQuadraticCutVolumeOnUnitTriangle(int cells_per_axis)
 {
     CutInterfaceDomainRequest request;
@@ -158,6 +169,8 @@ TEST(LevelSetInterfaceDomain, AccumulatesFragmentsAndExportsCutQuadrature)
     EXPECT_EQ(summary.fragment_count, 1u);
     EXPECT_EQ(summary.active_fragment_count, 1u);
     EXPECT_EQ(summary.quadrature_point_count, 1u);
+    EXPECT_EQ(summary.volume_quadrature_point_count, 0u);
+    EXPECT_EQ(summary.total_quadrature_point_count, 1u);
     EXPECT_DOUBLE_EQ(summary.measure, 1.0);
 
     ASSERT_EQ(domain.fragments().size(), 1u);
@@ -257,6 +270,8 @@ TEST(LevelSetInterfaceDomain, SummaryCountsDegenerateInactiveFragments)
     EXPECT_EQ(summary.active_fragment_count, 1u);
     EXPECT_EQ(summary.degenerate_fragment_count, 2u);
     EXPECT_EQ(summary.quadrature_point_count, 1u);
+    EXPECT_EQ(summary.volume_quadrature_point_count, 0u);
+    EXPECT_EQ(summary.total_quadrature_point_count, 1u);
     EXPECT_DOUBLE_EQ(summary.measure, 1.0e-16);
 }
 
@@ -562,6 +577,9 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
     auto summary = negative_domain.summary();
     EXPECT_EQ(summary.active_fragment_count, 0u);
     EXPECT_EQ(summary.active_volume_region_count, 1u);
+    EXPECT_EQ(summary.quadrature_point_count, 0u);
+    EXPECT_EQ(summary.volume_quadrature_point_count, 6u);
+    EXPECT_EQ(summary.total_quadrature_point_count, 6u);
     EXPECT_NEAR(summary.negative_volume_measure, 1.0, 1.0e-14);
     EXPECT_NEAR(summary.positive_volume_measure, 0.0, 1.0e-14);
 
@@ -575,8 +593,8 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
     EXPECT_NEAR(rules.front().parent_measure, 1.0, 1.0e-14);
     EXPECT_NEAR(rules.front().measure, 1.0, 1.0e-14);
     EXPECT_TRUE(rules.front().full_cell_equivalent);
-    ASSERT_EQ(rules.front().points.size(), 1u);
-    EXPECT_NEAR(rules.front().points.front().weight, 1.0, 1.0e-14);
+    ASSERT_EQ(rules.front().points.size(), 6u);
+    EXPECT_NEAR(integrateWeight(rules.front()), 1.0, 1.0e-14);
 
     CutInterfaceDomainRequest positive_request;
     positive_request.source = LevelSetInterfaceSource::fromEvaluator("full-positive-source");
@@ -593,6 +611,9 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
     summary = positive_domain.summary();
     EXPECT_EQ(summary.active_fragment_count, 0u);
     EXPECT_EQ(summary.active_volume_region_count, 1u);
+    EXPECT_EQ(summary.quadrature_point_count, 0u);
+    EXPECT_EQ(summary.volume_quadrature_point_count, 6u);
+    EXPECT_EQ(summary.total_quadrature_point_count, 6u);
     EXPECT_NEAR(summary.negative_volume_measure, 0.0, 1.0e-14);
     EXPECT_NEAR(summary.positive_volume_measure, 1.0, 1.0e-14);
 
@@ -603,6 +624,7 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportFullSideVolumeRules)
     EXPECT_EQ(rules.front().provenance.marker, 84);
     EXPECT_NEAR(rules.front().measure, 1.0, 1.0e-14);
     EXPECT_TRUE(rules.front().full_cell_equivalent);
+    ASSERT_EQ(rules.front().points.size(), 6u);
 }
 
 TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
@@ -610,6 +632,7 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     CutInterfaceDomainRequest square_request;
     square_request.source = LevelSetInterfaceSource::fromEvaluator("cut-square-source");
     square_request.interface_marker = 85;
+    square_request.volume_quadrature_order = 2;
 
     LevelSetInterfaceDomain square_domain(square_request);
     const LevelSetCellCutInput square_input{
@@ -625,6 +648,9 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     auto summary = square_domain.summary();
     EXPECT_EQ(summary.active_fragment_count, 1u);
     EXPECT_EQ(summary.active_volume_region_count, 2u);
+    EXPECT_EQ(summary.volume_quadrature_point_count, 12u);
+    EXPECT_EQ(summary.total_quadrature_point_count,
+              summary.quadrature_point_count + 12u);
     EXPECT_NEAR(summary.negative_volume_measure, 0.5, 1.0e-14);
     EXPECT_NEAR(summary.positive_volume_measure, 0.5, 1.0e-14);
 
@@ -651,6 +677,7 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     CutInterfaceDomainRequest tetra_request;
     tetra_request.source = LevelSetInterfaceSource::fromEvaluator("cut-tetra-source");
     tetra_request.interface_marker = 86;
+    tetra_request.volume_quadrature_order = 2;
 
     LevelSetInterfaceDomain tetra_domain(tetra_request);
     const LevelSetCellCutInput tetra_input{
@@ -666,6 +693,9 @@ TEST(LevelSetInterfaceDomain, LinearCellCutsExportCutSideVolumeRules)
     summary = tetra_domain.summary();
     EXPECT_EQ(summary.active_fragment_count, 1u);
     EXPECT_EQ(summary.active_volume_region_count, 2u);
+    EXPECT_EQ(summary.total_quadrature_point_count,
+              summary.quadrature_point_count +
+                  summary.volume_quadrature_point_count);
 
     rules = tetra_domain.volumeQuadratureRules();
     ASSERT_EQ(rules.size(), 2u);
@@ -754,7 +784,8 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         Real weight_sum = 0.0;
         for (const auto& rule : rules) {
             EXPECT_TRUE(rule.exact_for_constants);
-            EXPECT_EQ(rule.exact_polynomial_order, 2);
+            EXPECT_EQ(rule.exact_polynomial_order,
+                      c.three_dimensional ? 2 : 3);
             EXPECT_NEAR(rule.parent_measure, c.parent_measure, 1.0e-14);
             measure_sum += rule.measure;
             for (const auto& point : rule.points) {
@@ -764,6 +795,37 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         EXPECT_NEAR(measure_sum, c.parent_measure, 1.0e-14);
         EXPECT_NEAR(weight_sum, c.parent_measure, 1.0e-14);
     }
+}
+
+TEST(LevelSetInterfaceDomain, PlanarCutVolumeSupportsPositiveOrderFiveRules)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("order-five-volume-source");
+    request.interface_marker = 188;
+    request.volume_quadrature_order = 5;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 22,
+        .element_type = ElementType::Triangle3,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-1.0, -1.0, -1.0}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    const auto rules = domain.volumeQuadratureRules();
+    ASSERT_EQ(rules.size(), 1u);
+    const auto& rule = rules.front();
+    EXPECT_EQ(rule.exact_polynomial_order, 5);
+    EXPECT_EQ(rule.provenance.achieved_quadrature_order, 5);
+    EXPECT_EQ(rule.policy.name, "high-order-subcell-level-set-volume");
+    ASSERT_EQ(rule.points.size(), 7u);
+    for (const auto& point : rule.points) {
+        EXPECT_GT(point.weight, 0.0);
+    }
+    EXPECT_NEAR(integrateWeight(rule), 0.5, 1.0e-14);
+    EXPECT_NEAR(integrateMonomial2D(rule, 3, 2), 1.0 / 420.0, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceDomain, CutVolumeQuadratureConvergesForQuadraticFields)
@@ -857,6 +919,11 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     region.topology_id = "cut-volume-region";
     domain.addVolumeRegion(region);
 
+    const auto mixed_summary = domain.summary();
+    EXPECT_EQ(mixed_summary.quadrature_point_count, 1u);
+    EXPECT_EQ(mixed_summary.volume_quadrature_point_count, 1u);
+    EXPECT_EQ(mixed_summary.total_quadrature_point_count, 2u);
+
     const auto volume_rule = domain.volumeRegions().front().toCutQuadratureRule(linear_request);
     EXPECT_EQ(volume_rule.exact_polynomial_order, 1);
     EXPECT_EQ(volume_rule.policy.polynomial_order, 1);
@@ -872,6 +939,56 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_NEAR(high_order_volume_rule.measure, 0.5, 1.0e-14);
     ASSERT_EQ(high_order_volume_rule.points.size(), 1u);
     EXPECT_NEAR(high_order_volume_rule.points.front().weight, 0.5, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceDomain, CurvedPatchUsesStoredHighOrderQuadratureMetadata)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromEvaluator("curved-patch-source");
+    request.interface_marker = 94;
+    request.interface_quadrature_order = 2;
+    request.implicit_geometry_mode = "HighOrderImplicit";
+    request.implicit_quadrature_backend = "SayeHyperrectangle";
+
+    CutInterfaceFragment patch;
+    patch.parent_cell = 12;
+    patch.kind = CutInterfaceFragmentKind::CurvedPatch;
+    patch.measure = 0.5;
+    patch.topology_id = "cell-12-root-polished-branch";
+    patch.branch_id = patch.topology_id;
+    patch.root_polished = true;
+    patch.root_finder_iterations = 7;
+    patch.max_root_residual = 1.0e-11;
+    patch.min_gradient_norm = 0.75;
+    patch.quadrature_points = {
+        CutInterfaceQuadraturePoint{
+            .point = {{0.25, 0.125, 0.0}},
+            .parent_coordinate = {{0.25, 0.125, 0.0}},
+            .normal = {{0.0, 1.0, 0.0}},
+            .weight = 0.25,
+            .reference_measure_factor = 0.5,
+            .level_set_residual = 1.0e-11,
+            .gradient_norm = 0.75},
+        CutInterfaceQuadraturePoint{
+            .point = {{0.75, 0.375, 0.0}},
+            .parent_coordinate = {{0.75, 0.375, 0.0}},
+            .normal = {{0.0, 1.0, 0.0}},
+            .weight = 0.25,
+            .reference_measure_factor = 0.5,
+            .level_set_residual = 2.0e-11,
+            .gradient_norm = 0.8}};
+
+    const auto rule = patch.toCutQuadratureRule(request);
+    EXPECT_TRUE(rule.curved_geometry);
+    EXPECT_EQ(rule.exact_polynomial_order, 2);
+    EXPECT_EQ(rule.policy.name, "root-polished-level-set-interface");
+    EXPECT_EQ(rule.policy.kind, CutQuadratureConstructionKind::CurvedTopologySubdivision);
+    EXPECT_EQ(rule.provenance.implicit_geometry_mode, "HighOrderImplicit");
+    EXPECT_EQ(rule.provenance.implicit_quadrature_backend, "SayeHyperrectangle");
+    ASSERT_EQ(rule.points.size(), 2u);
+    EXPECT_NEAR(rule.points.front().reference_measure_factor, 0.5, 1.0e-14);
+    EXPECT_NEAR(rule.points.front().level_set_residual, 1.0e-11, 1.0e-20);
+    EXPECT_NEAR(rule.points.back().gradient_norm, 0.8, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceDomain, DefinesCutVolumeQuadratureOrderPolicy)

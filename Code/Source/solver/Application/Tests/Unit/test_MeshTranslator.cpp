@@ -46,12 +46,12 @@ void ensure_mpi_initialized_for_mesh_translator()
 #endif
 }
 
-svmp::CellShape make_shape(svmp::CellFamily family, int corners)
+svmp::CellShape make_shape(svmp::CellFamily family, int corners, int order = 1)
 {
   svmp::CellShape shape{};
   shape.family = family;
   shape.num_corners = corners;
-  shape.order = 1;
+  shape.order = order;
   return shape;
 }
 
@@ -101,6 +101,111 @@ void write_face_mesh(const std::filesystem::path& path,
   face.build_from_arrays(3, std::move(coords), std::move(offsets), std::move(conn),
                          {make_shape(svmp::CellFamily::Triangle, 3)});
   face.set_vertex_gids(std::move(gids));
+
+  svmp::MeshIOOptions opts{};
+  opts.format = "vtp";
+  opts.path = path.string();
+  opts.kv["codim1_topology"] = "none";
+  opts.kv["edge_topology"] = "false";
+  svmp::VTKWriter::write(face, opts);
+}
+
+void write_quadratic_quad_volume_mesh(const std::filesystem::path& path)
+{
+  svmp::MeshBase volume;
+  volume.build_from_arrays(2,
+                           {
+                               0.0, 0.0,
+                               1.0, 0.0,
+                               1.0, 1.0,
+                               0.0, 1.0,
+                               0.5, 0.0,
+                               1.0, 0.5,
+                               0.5, 1.0,
+                               0.0, 0.5,
+                               0.5, 0.5,
+                           },
+                           {0, 9},
+                           {0, 1, 2, 3, 4, 5, 6, 7, 8},
+                           {make_shape(svmp::CellFamily::Quad, 4, 2)});
+  volume.set_vertex_gids({0, 1, 2, 3, 4, 5, 6, 7, 8});
+
+  svmp::MeshIOOptions opts{};
+  opts.format = "vtu";
+  opts.path = path.string();
+  opts.kv["codim1_topology"] = "none";
+  opts.kv["edge_topology"] = "false";
+  svmp::VTKWriter::write(volume, opts);
+}
+
+void write_subdivided_quadratic_edge_face_mesh(const std::filesystem::path& path)
+{
+  svmp::MeshBase face;
+  face.build_from_arrays(2,
+                         {
+                             0.0, 0.0,
+                             0.5, 0.0,
+                             1.0, 0.0,
+                         },
+                         {0, 2, 4},
+                         {0, 1, 1, 2},
+                         {make_shape(svmp::CellFamily::Line, 2),
+                          make_shape(svmp::CellFamily::Line, 2)});
+  face.set_vertex_gids({0, 4, 1});
+
+  svmp::MeshIOOptions opts{};
+  opts.format = "vtp";
+  opts.path = path.string();
+  opts.kv["codim1_topology"] = "none";
+  opts.kv["edge_topology"] = "false";
+  svmp::VTKWriter::write(face, opts);
+}
+
+void write_quadratic_tetra_volume_mesh(const std::filesystem::path& path)
+{
+  svmp::MeshBase volume;
+  volume.build_from_arrays(3,
+                           {
+                               0.0, 0.0, 0.0,
+                               1.0, 0.0, 0.0,
+                               0.0, 1.0, 0.0,
+                               0.0, 0.0, 1.0,
+                               0.5, 0.0, 0.0,
+                               0.5, 0.5, 0.0,
+                               0.0, 0.5, 0.0,
+                               0.0, 0.0, 0.5,
+                               0.5, 0.0, 0.5,
+                               0.0, 0.5, 0.5,
+                           },
+                           {0, 10},
+                           {0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+                           {make_shape(svmp::CellFamily::Tetra, 4, 2)});
+  volume.set_vertex_gids({0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+
+  svmp::MeshIOOptions opts{};
+  opts.format = "vtu";
+  opts.path = path.string();
+  opts.kv["codim1_topology"] = "none";
+  opts.kv["edge_topology"] = "false";
+  svmp::VTKWriter::write(volume, opts);
+}
+
+void write_quadratic_triangle_face_mesh(const std::filesystem::path& path)
+{
+  svmp::MeshBase face;
+  face.build_from_arrays(3,
+                         {
+                             0.0, 0.0, 0.0,
+                             1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.5, 0.0, 0.0,
+                             0.5, 0.5, 0.0,
+                             0.0, 0.5, 0.0,
+                         },
+                         {0, 6},
+                         {0, 1, 2, 3, 4, 5},
+                         {make_shape(svmp::CellFamily::Triangle, 3, 2)});
+  face.set_vertex_gids({0, 1, 2, 4, 5, 6});
 
   svmp::MeshIOOptions opts{};
   opts.format = "vtp";
@@ -246,5 +351,73 @@ TEST(MeshTranslatorFaceLabels, FallsBackToCoordinatesWhenOnlyFaceHasNonlocalGids
   const auto marked_faces = mesh->base().faces_with_label(label);
   ASSERT_EQ(marked_faces.size(), 1u);
   EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "coordinate_marked").size(), 1u);
+#endif
+}
+
+TEST(MeshTranslatorFaceLabels, LabelsParentHighOrderFaceFromSubdividedLineSurface)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  auto volume_path = unique_temp_path("svmp_meshtranslator_quad9_volume");
+  const auto face_path = unique_temp_path("svmp_meshtranslator_quad9_face");
+  volume_path.replace_extension(".vtu");
+  write_quadratic_quad_volume_mesh(volume_path);
+  write_subdivided_quadratic_edge_face_mesh(face_path);
+
+  auto mesh = load_volume_with_face(volume_path, "bottom", face_path);
+  std::filesystem::remove(volume_path);
+  std::filesystem::remove(face_path);
+
+  const auto label = mesh->base().label_from_name("bottom");
+  ASSERT_NE(label, svmp::INVALID_LABEL);
+  const auto marked_faces = mesh->base().faces_with_label(label);
+  ASSERT_EQ(marked_faces.size(), 1u);
+
+  const auto face_id = marked_faces.front();
+  auto [face_vertices, face_vertex_count] = mesh->base().face_vertices_span(face_id);
+  ASSERT_NE(face_vertices, nullptr);
+  EXPECT_EQ(face_vertex_count, 3u);
+  ASSERT_LT(static_cast<std::size_t>(face_id), mesh->base().face_shapes().size());
+  EXPECT_EQ(mesh->base().face_shapes()[static_cast<std::size_t>(face_id)].family,
+            svmp::CellFamily::Line);
+  EXPECT_EQ(mesh->base().face_shapes()[static_cast<std::size_t>(face_id)].order, 2);
+  EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "bottom").size(), 1u);
+#endif
+}
+
+TEST(MeshTranslatorFaceLabels, LabelsFullTetra10FaceFromQuadraticTriangleSurface)
+{
+#ifndef MESH_HAS_VTK
+  GTEST_SKIP() << "VTK support is required for face-file translator coverage.";
+#else
+  ensure_mpi_initialized_for_mesh_translator();
+  auto volume_path = unique_temp_path("svmp_meshtranslator_tet10_volume");
+  const auto face_path = unique_temp_path("svmp_meshtranslator_tet10_face");
+  volume_path.replace_extension(".vtu");
+  write_quadratic_tetra_volume_mesh(volume_path);
+  write_quadratic_triangle_face_mesh(face_path);
+
+  auto mesh = load_volume_with_face(volume_path, "bottom", face_path);
+  std::filesystem::remove(volume_path);
+  std::filesystem::remove(face_path);
+
+  const auto label = mesh->base().label_from_name("bottom");
+  ASSERT_NE(label, svmp::INVALID_LABEL);
+  const auto marked_faces = mesh->base().faces_with_label(label);
+  ASSERT_EQ(marked_faces.size(), 1u);
+
+  const auto face_id = marked_faces.front();
+  auto face_vertices = mesh->base().face_vertices(face_id);
+  ASSERT_EQ(face_vertices.size(), 6u);
+  std::sort(face_vertices.begin(), face_vertices.end());
+  const std::vector<svmp::index_t> expected = {0, 1, 2, 4, 5, 6};
+  EXPECT_EQ(face_vertices, expected);
+  ASSERT_LT(static_cast<std::size_t>(face_id), mesh->base().face_shapes().size());
+  EXPECT_EQ(mesh->base().face_shapes()[static_cast<std::size_t>(face_id)].family,
+            svmp::CellFamily::Triangle);
+  EXPECT_EQ(mesh->base().face_shapes()[static_cast<std::size_t>(face_id)].order, 2);
+  EXPECT_EQ(mesh->base().get_set(svmp::EntityKind::Face, "bottom").size(), 1u);
 #endif
 }

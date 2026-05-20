@@ -433,10 +433,11 @@ public:
         GlobalIndex resolved = INVALID_GLOBAL_INDEX;
         vec_->resolveEntriesCached(std::span<const GlobalIndex>(&dof, 1),
                                    std::span<GlobalIndex>(&resolved, 1));
-        if (resolved < 0 || static_cast<std::size_t>(resolved) >= vec_->data().size()) {
+        const auto& data = static_cast<const FsilsVector*>(vec_)->data();
+        if (resolved < 0 || static_cast<std::size_t>(resolved) >= data.size()) {
             return 0.0;
         }
-        return vec_->data()[static_cast<std::size_t>(resolved)];
+        return data[static_cast<std::size_t>(resolved)];
     }
 
     [[nodiscard]] const void* vectorLayoutHandle() const noexcept override
@@ -506,7 +507,7 @@ public:
                          static_cast<double>(vector_value_l1_),
                          static_cast<double>(std::sqrt(vector_value_l2_sq_)),
                          static_cast<double>(vector_max_abs_),
-                         vec_ ? vec_->data().size() : std::size_t(0));
+                         vec_ ? static_cast<const FsilsVector*>(vec_)->data().size() : std::size_t(0));
         }
     }
     [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return phase_; }
@@ -596,11 +597,13 @@ void FsilsVector::resolveEntriesCached(std::span<const GlobalIndex> dofs,
 void FsilsVector::zero()
 {
     std::fill(data_.begin(), data_.end(), 0.0);
+    markModified();
 }
 
 void FsilsVector::set(Real value)
 {
     std::fill(data_.begin(), data_.end(), value);
+    markModified();
 }
 
 void FsilsVector::add(Real value)
@@ -608,6 +611,7 @@ void FsilsVector::add(Real value)
     for (auto& v : data_) {
         v += value;
     }
+    markModified();
 }
 
 void FsilsVector::scale(Real alpha)
@@ -615,6 +619,7 @@ void FsilsVector::scale(Real alpha)
     for (auto& v : data_) {
         v *= alpha;
     }
+    markModified();
 }
 
 void FsilsVector::copyFrom(const GenericVector& other)
@@ -626,6 +631,7 @@ void FsilsVector::copyFrom(const GenericVector& other)
                 InvalidArgumentException,
                 "FsilsVector::copyFrom: local size mismatch");
     std::copy(o->data_.begin(), o->data_.end(), data_.begin());
+    markModified();
 }
 
 Real FsilsVector::dot(const GenericVector& other) const
@@ -683,11 +689,13 @@ void FsilsVector::exchangeOwnedHalo(bool owner_to_ghost_only)
 void FsilsVector::updateGhosts()
 {
     exchangeOwnedHalo(/*owner_to_ghost_only=*/true);
+    markModified();
 }
 
 void FsilsVector::accumulateRawContributionsAndUpdateGhosts()
 {
     exchangeOwnedHalo(/*owner_to_ghost_only=*/false);
+    markModified();
 }
 
 bool FsilsVector::usesOwnedRowLayout() const noexcept
@@ -789,6 +797,7 @@ std::unique_ptr<assembly::GlobalSystemView> FsilsVector::createAssemblyView()
 
 std::span<Real> FsilsVector::localSpan()
 {
+    markModified();
     return std::span<Real>(data_.data(), data_.size());
 }
 

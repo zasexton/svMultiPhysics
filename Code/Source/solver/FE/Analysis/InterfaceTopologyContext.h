@@ -12,10 +12,12 @@
  * @file InterfaceTopologyContext.h
  * @brief Explicit interface topology from InterfaceMesh registrations
  *
- * Built from FESystem::interfaceMesh(marker) for each registered InterfaceId.
- * Provides per-face minus/plus cell incidence, orientation, and bulk region
- * annotations. Separate from TopologyAnalysisContext which handles bulk
- * connected components.
+ * Built from FESystem::interfaceMesh(marker) for each registered InterfaceId
+ * and augmented with generated one-sided embedded interface markers from the
+ * level-set cut-integration context. Explicit InterfaceMesh records provide
+ * per-face minus/plus cell incidence, orientation, and bulk region annotations.
+ * Generated embedded markers certify that a marker is covered by cut-interface
+ * quadrature rather than by a two-sided InterfaceMesh.
  *
  * @see TopologyAnalysisContext for bulk region analysis
  */
@@ -60,6 +62,15 @@ public:
     /// Marker → indices into faces vector
     std::map<int, std::vector<std::size_t>> marker_to_faces;
 
+    /// Generated level-set interface markers backed by cut-interface rules.
+    std::set<int> generated_embedded_markers;
+
+    void addGeneratedEmbeddedMarker(int marker) {
+        if (marker >= 0) {
+            generated_embedded_markers.insert(marker);
+        }
+    }
+
     // ---- Queries ----
 
     [[nodiscard]] std::set<int> markers() const {
@@ -76,6 +87,15 @@ public:
 
     [[nodiscard]] bool markerExists(int marker) const {
         return hasMarker(marker);
+    }
+
+    [[nodiscard]] bool hasGeneratedEmbeddedMarker(int marker) const {
+        return generated_embedded_markers.count(marker) > 0;
+    }
+
+    [[nodiscard]] bool markerCoveredByRegisteredOrGeneratedInterface(
+        int marker) const {
+        return markerExists(marker) || hasGeneratedEmbeddedMarker(marker);
     }
 
     [[nodiscard]] std::vector<const InterfaceFaceRecord*>
@@ -187,7 +207,8 @@ public:
     interfaceCoverageForReferencedMarkers(const std::set<int>& referenced_markers) const {
         std::vector<int> uncovered;
         for (int marker : referenced_markers) {
-            if (!markerExists(marker) || numFacesForMarker(marker) == 0u) {
+            if (!markerCoveredByRegisteredOrGeneratedInterface(marker) ||
+                (markerExists(marker) && numFacesForMarker(marker) == 0u)) {
                 uncovered.push_back(marker);
             }
         }
@@ -195,7 +216,9 @@ public:
     }
 
     /// True if any interface is registered
-    [[nodiscard]] bool empty() const noexcept { return faces.empty(); }
+    [[nodiscard]] bool empty() const noexcept {
+        return faces.empty() && generated_embedded_markers.empty();
+    }
 };
 
 } // namespace analysis

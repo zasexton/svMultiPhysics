@@ -212,6 +212,7 @@ struct IncompressibleNavierStokesVMSOptions {
         // expression/value.  Unfitted level-set surface tension requires a
         // supplied curvature until projected/smoothed curvature is validated.
         ScalarValue curvature{0.0};
+        std::string curvature_field_name{};
         bool use_current_geometry_curvature{false};
         bool use_level_set_curvature{true};
 
@@ -307,6 +308,9 @@ struct IncompressibleNavierStokesVMSOptions {
 
     // Constant body force (length-3; only first dim components are used).
     std::array<FE::Real, 3> body_force{0.0, 0.0, 0.0};
+    std::array<ScalarValue, 3> body_force_spacetime{
+        ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+    bool has_body_force_spacetime{false};
     std::string body_force_field_name{};
     bool auto_register_body_force_field{true};
 

@@ -85,6 +85,9 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
   const auto& request = requests.front();
   EXPECT_EQ(request.level_set_field_name, "phi");
   EXPECT_EQ(request.domain_id, "water_air");
+  EXPECT_EQ(request.origin,
+            application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary);
+  EXPECT_EQ(request.equation_type, "fluid");
   EXPECT_EQ(request.geometry_mode,
             level_set::GeneratedInterfaceGeometryMode::LinearCorner);
   EXPECT_EQ(request.implicit_cut_backend,
@@ -97,10 +100,48 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
   EXPECT_FALSE(request.interface_quadrature_order.has_value());
   EXPECT_FALSE(request.volume_quadrature_order.has_value());
   EXPECT_EQ(request.implicit_cut_root_tolerance, 1.0e-10);
+  EXPECT_EQ(request.implicit_cut_root_coordinate_tolerance, 1.0e-12);
+  EXPECT_EQ(request.implicit_cut_root_max_iterations, 48);
   EXPECT_EQ(request.implicit_cut_max_subdivision_depth, 16);
   EXPECT_FALSE(request.allow_corner_linearized_geometry);
+  EXPECT_FALSE(request.require_production_qualified_implicit_cut_backend);
   EXPECT_FALSE(application::core::hasHighOrderGeneratedInterfaceGeometry(
       requests));
+}
+
+TEST(LevelSetCutConfiguration, ParsesEquationLevelNonFluidCutDomain)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="heatS">
+    <EnableLevelSetCutDomain>true</EnableLevelSetCutDomain>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>heated_region</Generated_interface_domain_id>
+    <Interface_marker>123</Interface_marker>
+    <Active_domain>LevelSetPositive</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Generated_interface_geometry>HighOrderImplicit</Generated_interface_geometry>
+    <Implicit_cut_quadrature_backend>SayeHyperrectangle</Implicit_cut_quadrature_backend>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  ASSERT_EQ(params->equation_parameters.size(), 1u);
+  ASSERT_NE(params->equation_parameters.front(), nullptr);
+  const auto requests =
+      application::core::activeCutVolumeRequests(*params->equation_parameters.front());
+  ASSERT_EQ(requests.size(), 1u);
+  const auto& request = requests.front();
+  EXPECT_EQ(request.origin, application::core::ActiveCutVolumeRequestOrigin::Equation);
+  EXPECT_EQ(request.equation_type, "heatS");
+  EXPECT_EQ(request.level_set_field_name, "phi");
+  EXPECT_EQ(request.domain_id, "heated_region");
+  EXPECT_EQ(request.requested_interface_marker, 123);
+  EXPECT_EQ(request.active_side, application::core::LevelSetActiveSide::Positive);
+  EXPECT_EQ(request.geometry_mode,
+            level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit);
+  EXPECT_EQ(request.implicit_cut_backend,
+            level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
 }
 
 TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
@@ -120,11 +161,14 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
       <Implicit_cut_fallback_policy>LinearCorner</Implicit_cut_fallback_policy>
       <Geometry_tangent_policy>RefreshedFrozenQuadrature</Geometry_tangent_policy>
       <Implicit_cut_root_tolerance>2.5e-11</Implicit_cut_root_tolerance>
+      <Implicit_cut_root_coordinate_tolerance>4.0e-12</Implicit_cut_root_coordinate_tolerance>
+      <Implicit_cut_root_max_iterations>31</Implicit_cut_root_max_iterations>
       <Implicit_cut_max_subdivision_depth>12</Implicit_cut_max_subdivision_depth>
       <Generated_interface_quadrature_order>5</Generated_interface_quadrature_order>
       <Interface_quadrature_order>4</Interface_quadrature_order>
       <Volume_quadrature_order>6</Volume_quadrature_order>
       <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Required_implicit_cut_backend_qualification>ProductionQualified</Required_implicit_cut_backend_qualification>
       <Active_domain>LevelSetPositive</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
     </Add_BC>
@@ -152,8 +196,11 @@ TEST(LevelSetCutConfiguration, ParsesCanonicalImplicitCutOptions)
   EXPECT_EQ(*request.interface_quadrature_order, 4);
   EXPECT_EQ(*request.volume_quadrature_order, 6);
   EXPECT_DOUBLE_EQ(request.implicit_cut_root_tolerance, 2.5e-11);
+  EXPECT_DOUBLE_EQ(request.implicit_cut_root_coordinate_tolerance, 4.0e-12);
+  EXPECT_EQ(request.implicit_cut_root_max_iterations, 31);
   EXPECT_EQ(request.implicit_cut_max_subdivision_depth, 12);
   EXPECT_TRUE(request.allow_corner_linearized_geometry);
+  EXPECT_TRUE(request.require_production_qualified_implicit_cut_backend);
   EXPECT_EQ(request.active_side, application::core::LevelSetActiveSide::Positive);
   EXPECT_TRUE(application::core::hasHighOrderGeneratedInterfaceGeometry(
       requests));
@@ -176,11 +223,14 @@ TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)
       <ImplicitCutQuadratureFallback>legacy</ImplicitCutQuadratureFallback>
       <GeneratedInterfaceGeometryTangentPolicy>exact sensitivities</GeneratedInterfaceGeometryTangentPolicy>
       <ImplicitGeometryRootTolerance>3.0e-9</ImplicitGeometryRootTolerance>
+      <ImplicitGeometryRootCoordinateTolerance>7.0e-10</ImplicitGeometryRootCoordinateTolerance>
+      <ImplicitGeometryRootMaxIterations>29</ImplicitGeometryRootMaxIterations>
       <ImplicitCutSubdivisionDepth>9</ImplicitCutSubdivisionDepth>
       <CutQuadratureOrder>7</CutQuadratureOrder>
       <CutInterfaceQuadratureOrder>3</CutInterfaceQuadratureOrder>
       <CutVolumeQuadratureOrder>8</CutVolumeQuadratureOrder>
       <AllowCornerLinearizedGeometry>yes</AllowCornerLinearizedGeometry>
+      <RequireProductionQualifiedImplicitCutBackend>yes</RequireProductionQualifiedImplicitCutBackend>
       <ActiveDomain>phiPositive</ActiveDomain>
       <ActiveDomainMethod>CutVolume</ActiveDomainMethod>
     </Add_BC>
@@ -210,9 +260,113 @@ TEST(LevelSetCutConfiguration, ParsesImplicitCutOptionSynonyms)
   EXPECT_EQ(*request.interface_quadrature_order, 3);
   EXPECT_EQ(*request.volume_quadrature_order, 8);
   EXPECT_DOUBLE_EQ(request.implicit_cut_root_tolerance, 3.0e-9);
+  EXPECT_DOUBLE_EQ(request.implicit_cut_root_coordinate_tolerance, 7.0e-10);
+  EXPECT_EQ(request.implicit_cut_root_max_iterations, 29);
   EXPECT_EQ(request.implicit_cut_max_subdivision_depth, 9);
   EXPECT_TRUE(request.allow_corner_linearized_geometry);
+  EXPECT_TRUE(request.require_production_qualified_implicit_cut_backend);
   EXPECT_EQ(request.active_side, application::core::LevelSetActiveSide::Positive);
+}
+
+TEST(LevelSetCutConfiguration, ParsesAutoImplicitCutBackend)
+{
+  EXPECT_EQ(application::core::parseImplicitCutQuadratureBackend("Auto"),
+            level_set::ImplicitCutQuadratureBackend::Auto);
+  EXPECT_EQ(application::core::parseImplicitCutQuadratureBackend("automatic"),
+            level_set::ImplicitCutQuadratureBackend::Auto);
+  EXPECT_EQ(application::core::parseImplicitCutQuadratureBackend("per cell"),
+            level_set::ImplicitCutQuadratureBackend::Auto);
+}
+
+TEST(LevelSetCutConfiguration, ParsesEquationLevelCutDomainForNonFluidEquation)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="darcy">
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
+    <Level_set_field_name>phi_heat</Level_set_field_name>
+    <Generated_interface_domain_id>heated_liquid</Generated_interface_domain_id>
+    <Interface_marker>123</Interface_marker>
+    <Level_set_isovalue>0.125</Level_set_isovalue>
+    <Generated_interface_geometry>HighOrderImplicit</Generated_interface_geometry>
+    <Implicit_cut_quadrature_backend>Auto</Implicit_cut_quadrature_backend>
+    <Implicit_cut_fallback_policy>Fail</Implicit_cut_fallback_policy>
+    <Generated_interface_quadrature_order>6</Generated_interface_quadrature_order>
+    <Interface_quadrature_order>5</Interface_quadrature_order>
+    <Volume_quadrature_order>7</Volume_quadrature_order>
+    <Active_domain>LevelSetPositive</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = application::core::activeCutVolumeRequests(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  const auto& request = requests.front();
+  EXPECT_EQ(request.level_set_field_name, "phi_heat");
+  EXPECT_EQ(request.domain_id, "heated_liquid");
+  EXPECT_EQ(request.origin,
+            application::core::ActiveCutVolumeRequestOrigin::Equation);
+  EXPECT_EQ(request.equation_type, "darcy");
+  EXPECT_EQ(request.requested_interface_marker, 123);
+  EXPECT_DOUBLE_EQ(request.isovalue, 0.125);
+  EXPECT_EQ(request.geometry_mode,
+            level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit);
+  EXPECT_EQ(request.implicit_cut_backend,
+            level_set::ImplicitCutQuadratureBackend::Auto);
+  EXPECT_EQ(request.implicit_cut_fallback_policy,
+            level_set::ImplicitCutFallbackPolicy::Fail);
+  ASSERT_TRUE(request.quadrature_order.has_value());
+  ASSERT_TRUE(request.interface_quadrature_order.has_value());
+  ASSERT_TRUE(request.volume_quadrature_order.has_value());
+  EXPECT_EQ(*request.quadrature_order, 6);
+  EXPECT_EQ(*request.interface_quadrature_order, 5);
+  EXPECT_EQ(*request.volume_quadrature_order, 7);
+  EXPECT_EQ(request.active_side, application::core::LevelSetActiveSide::Positive);
+}
+
+TEST(LevelSetCutConfiguration, EquationLevelCutDomainRequiresActiveDomain)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="darcy">
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
+    <Level_set_field_name>phi</Level_set_field_name>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
+               std::runtime_error);
+}
+
+TEST(LevelSetCutConfiguration, DeduplicatesEquationAndFreeSurfaceCutRequests)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Enable_level_set_cut_domain>true</Enable_level_set_cut_domain>
+    <Level_set_field_name>phi</Level_set_field_name>
+    <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+    <Active_domain>LevelSetNegative</Active_domain>
+    <Active_domain_method>CutVolume</Active_domain_method>
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>water_air</Generated_interface_domain_id>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  const auto requests = application::core::activeCutVolumeRequests(*params);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front().origin,
+            application::core::ActiveCutVolumeRequestOrigin::Equation);
+  EXPECT_EQ(requests.front().equation_type, "fluid");
 }
 
 TEST(LevelSetCutConfiguration, RejectsUnknownImplicitCutBackend)
@@ -246,6 +400,26 @@ TEST(LevelSetCutConfiguration, RejectsUnknownGeometryTangentPolicy)
       <Active_domain>LevelSetNegative</Active_domain>
       <Active_domain_method>CutVolume</Active_domain_method>
       <Geometry_tangent_policy>unknown_policy</Geometry_tangent_policy>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+
+  EXPECT_THROW((void)application::core::activeCutVolumeRequests(*params),
+               std::runtime_error);
+}
+
+TEST(LevelSetCutConfiguration, RejectsUnknownBackendQualificationRequirement)
+{
+  auto params = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Active_domain>LevelSetNegative</Active_domain>
+      <Active_domain_method>CutVolume</Active_domain_method>
+      <Required_implicit_cut_backend_qualification>ResearchOnly</Required_implicit_cut_backend_qualification>
     </Add_BC>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -290,6 +464,25 @@ TEST(LevelSetCutConfiguration, ActiveCutRequestPolicyKeyTracksBackendOptions)
   EXPECT_NE(base_key,
             application::core::activeCutVolumeRequestPolicyKey(
                 {changed_order}));
+
+  auto changed_root_coordinate = base;
+  changed_root_coordinate.implicit_cut_root_coordinate_tolerance = 5.0e-11;
+  EXPECT_NE(base_key,
+            application::core::activeCutVolumeRequestPolicyKey(
+                {changed_root_coordinate}));
+
+  auto changed_root_iterations = base;
+  changed_root_iterations.implicit_cut_root_max_iterations = 24;
+  EXPECT_NE(base_key,
+            application::core::activeCutVolumeRequestPolicyKey(
+                {changed_root_iterations}));
+
+  auto changed_required_qualification = base;
+  changed_required_qualification.require_production_qualified_implicit_cut_backend =
+      true;
+  EXPECT_NE(base_key,
+            application::core::activeCutVolumeRequestPolicyKey(
+                {changed_required_qualification}));
 }
 
 TEST(LevelSetCutConfiguration, IgnoresSmoothedIndicatorRequests)

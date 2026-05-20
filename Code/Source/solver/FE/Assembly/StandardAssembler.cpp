@@ -54,6 +54,7 @@
 #include <cstdlib>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -167,6 +168,81 @@ public:
     const quadrature::QuadratureRule& rule) noexcept
 {
     return dynamic_cast<const CutVolumeQuadratureRule*>(&rule) != nullptr;
+}
+
+void mixCutVolumeBasisCacheHash(std::uint64_t& h, std::uint64_t value) noexcept
+{
+    h ^= value + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
+}
+
+void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
+{
+    std::uint64_t bits = 0u;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(value));
+    mixCutVolumeBasisCacheHash(h, bits);
+}
+
+[[nodiscard]] std::uint64_t cutVolumeBasisContextSignature(
+    const CutIntegrationContext& cut_context)
+{
+    std::uint64_t h = 1469598103934665603ULL;
+    const auto& rules = cut_context.volumeRules();
+    const auto& metadata = cut_context.metadata();
+    mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rules.size()));
+    mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(metadata.size()));
+    mixCutVolumeBasisCacheHash(
+        h,
+        static_cast<std::uint64_t>(cut_context.generatedPrunedVolumeRuleCount()));
+    mixCutVolumeBasisCacheHash(h, cut_context.generatedPrunedVolumeMeasure());
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        const auto& rule = rules[i];
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(i));
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.kind));
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.side));
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.points.size()));
+        mixCutVolumeBasisCacheHash(h, rule.measure);
+        mixCutVolumeBasisCacheHash(h, rule.parent_measure);
+        mixCutVolumeBasisCacheHash(h, rule.volume_fraction);
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.exact_polynomial_order));
+        mixCutVolumeBasisCacheHash(
+            h,
+            static_cast<std::uint64_t>(rule.full_cell_equivalent ? 1u : 0u));
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.provenance.parent_entity));
+        mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(rule.provenance.marker));
+        mixCutVolumeBasisCacheHash(h, rule.provenance.cut_topology_revision);
+        mixCutVolumeBasisCacheHash(h, rule.provenance.predicate_policy_key);
+        mixCutVolumeBasisCacheHash(h, rule.provenance.source_value_revision);
+        mixCutVolumeBasisCacheHash(
+            h,
+            static_cast<std::uint64_t>(rule.provenance.construction));
+        if (i < metadata.size()) {
+            const auto& meta = metadata[i];
+            mixCutVolumeBasisCacheHash(h, static_cast<std::uint64_t>(meta.parent_entity));
+            mixCutVolumeBasisCacheHash(h, meta.revision_key);
+            mixCutVolumeBasisCacheHash(h, meta.cut_topology_revision);
+            mixCutVolumeBasisCacheHash(h, meta.quadrature_policy_key);
+            mixCutVolumeBasisCacheHash(h, meta.source_value_revision);
+        }
+    }
+    return h;
+}
+
+[[nodiscard]] std::size_t cutVolumeBasisCacheMaxEntries() noexcept
+{
+    static const std::size_t max_entries = [] {
+        const char* env = std::getenv("SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES");
+        if (env == nullptr) {
+            return std::size_t{0};
+        }
+        char* end = nullptr;
+        const auto value = std::strtoull(env, &end, 10);
+        if (end == env) {
+            return std::size_t{0};
+        }
+        return static_cast<std::size_t>(value);
+    }();
+    return max_entries;
 }
 
 [[nodiscard]] Real norm3(const AssemblyContext::Vector3D& v) noexcept
@@ -283,7 +359,7 @@ void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
 
 [[nodiscard]] LocalIndex selectedVolumeRuleReserveCount(
     const std::vector<geometry::CutQuadratureRule>& rules,
-    const std::vector<std::size_t>& indexed_rule_indices,
+    std::span<const std::size_t> indexed_rule_indices,
     int interface_marker,
     geometry::CutIntegrationSide side)
 {
@@ -1824,6 +1900,14 @@ void StandardAssembler::setJITConstants(std::span<const Real> constants) noexcep
 void StandardAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
 {
     cut_integration_context_ = context;
+    if (context != cut_volume_basis_cache_context_) {
+        cut_volume_basis_cache_.clear();
+        cut_volume_basis_cache_context_ = nullptr;
+        cut_volume_basis_cache_signature_ = 0;
+        cut_volume_basis_cache_mesh_geometry_revision_ = 0;
+        cut_volume_basis_cache_mesh_topology_revision_ = 0;
+        active_cut_volume_basis_cache_entry_ = nullptr;
+    }
 }
 
 void StandardAssembler::setCoupledValues(std::span<const Real> integrals,
@@ -1976,6 +2060,12 @@ void StandardAssembler::reset()
     coloring_ownership_revision_ = 0;
     coloring_numbering_revision_ = 0;
     coloring_dof_revisions_.clear();
+    cut_volume_basis_cache_.clear();
+    cut_volume_basis_cache_context_ = nullptr;
+    cut_volume_basis_cache_signature_ = 0;
+    cut_volume_basis_cache_mesh_geometry_revision_ = 0;
+    cut_volume_basis_cache_mesh_topology_revision_ = 0;
+    active_cut_volume_basis_cache_entry_ = nullptr;
     initialized_ = false;
 }
 
@@ -1988,6 +2078,12 @@ void StandardAssembler::invalidateGeometryCaches()
     cached_mapping_affine_ = false;
     cached_geom_h_ = 0.0;
     cached_geom_volume_ = 0.0;
+    cut_volume_basis_cache_.clear();
+    cut_volume_basis_cache_context_ = nullptr;
+    cut_volume_basis_cache_signature_ = 0;
+    cut_volume_basis_cache_mesh_geometry_revision_ = 0;
+    cut_volume_basis_cache_mesh_topology_revision_ = 0;
+    active_cut_volume_basis_cache_entry_ = nullptr;
 }
 
 void StandardAssembler::invalidateTopologyLayoutCaches()
@@ -6069,8 +6165,12 @@ void StandardAssembler::prepareBasis(
     std::optional<basis::BasisCacheEntry> local_trial_bcache;
     const basis::BasisCacheEntry* test_bcache = nullptr;
     const basis::BasisCacheEntry* trial_bcache = nullptr;
+    const auto* cut_volume_basis_cache =
+        transient_cut_quad_rule ? active_cut_volume_basis_cache_entry_ : nullptr;
     if (!test_is_vector_basis) {
-        if (transient_cut_quad_rule) {
+        if (cut_volume_basis_cache != nullptr) {
+            test_bcache = &cut_volume_basis_cache->test_basis;
+        } else if (transient_cut_quad_rule) {
             local_test_bcache.emplace(basis::BasisCache::instance().compute_uncached(
                 test_basis, quad_rule, true, need_basis_hessians));
             test_bcache = &*local_test_bcache;
@@ -6083,7 +6183,10 @@ void StandardAssembler::prepareBasis(
         }
     }
     if (&test_space != &trial_space && !trial_is_vector_basis) {
-        if (transient_cut_quad_rule) {
+        if (cut_volume_basis_cache != nullptr &&
+            cut_volume_basis_cache->has_trial) {
+            trial_bcache = &cut_volume_basis_cache->trial_basis;
+        } else if (transient_cut_quad_rule) {
             local_trial_bcache.emplace(basis::BasisCache::instance().compute_uncached(
                 trial_basis, quad_rule, true, need_basis_hessians));
             trial_bcache = &*local_trial_bcache;
@@ -6609,6 +6712,79 @@ void StandardAssembler::prepareBasis(
 #endif
 }
 
+const StandardAssembler::CutVolumeBasisCacheEntry*
+StandardAssembler::getOrCreateCutVolumeBasisCacheEntry(
+    const CutIntegrationContext& cut_context,
+    std::uint64_t cut_context_signature,
+    std::size_t rule_index,
+    const quadrature::QuadratureRule& quad_rule,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    ElementType cell_type,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    RequiredData required_data)
+{
+    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const auto& test_element = getElement(test_space, cell_id, cell_type);
+    const auto& trial_element = getElement(trial_space, cell_id, cell_type);
+    const auto& test_basis = test_element.basis();
+    const auto& trial_basis = trial_element.basis();
+    if (test_basis.is_vector_valued() ||
+        (&test_space != &trial_space && trial_basis.is_vector_valued())) {
+        return nullptr;
+    }
+
+    const auto mesh_geometry_revision = mesh.geometryRevision();
+    const auto mesh_topology_revision = mesh.topologyRevision();
+    if (cut_volume_basis_cache_context_ != &cut_context ||
+        cut_volume_basis_cache_signature_ != cut_context_signature ||
+        cut_volume_basis_cache_mesh_geometry_revision_ != mesh_geometry_revision ||
+        cut_volume_basis_cache_mesh_topology_revision_ != mesh_topology_revision) {
+        cut_volume_basis_cache_.clear();
+        cut_volume_basis_cache_context_ = &cut_context;
+        cut_volume_basis_cache_signature_ = cut_context_signature;
+        cut_volume_basis_cache_mesh_geometry_revision_ = mesh_geometry_revision;
+        cut_volume_basis_cache_mesh_topology_revision_ = mesh_topology_revision;
+    }
+
+    CutVolumeBasisCacheKey key;
+    key.rule_index = rule_index;
+    key.test_basis_identity = test_basis.cache_identity();
+    key.has_trial = (&test_space != &trial_space);
+    key.trial_basis_identity = key.has_trial ? trial_basis.cache_identity() : std::string{};
+    key.with_hessians = need_basis_hessians;
+
+    const auto found = cut_volume_basis_cache_.find(key);
+    if (found != cut_volume_basis_cache_.end()) {
+        return &found->second;
+    }
+    const auto max_entries = cutVolumeBasisCacheMaxEntries();
+    if (max_entries == 0u || cut_volume_basis_cache_.size() >= max_entries) {
+        return nullptr;
+    }
+
+    CutVolumeBasisCacheEntry entry;
+    entry.test_basis = basis::BasisCache::instance().compute_uncached(
+        test_basis,
+        quad_rule,
+        /*gradients=*/true,
+        need_basis_hessians);
+    entry.has_trial = key.has_trial;
+    if (entry.has_trial) {
+        entry.trial_basis = basis::BasisCache::instance().compute_uncached(
+            trial_basis,
+            quad_rule,
+            /*gradients=*/true,
+            need_basis_hessians);
+    }
+
+    const auto [it, inserted] =
+        cut_volume_basis_cache_.emplace(std::move(key), std::move(entry));
+    (void)inserted;
+    return &it->second;
+}
+
 void StandardAssembler::prepareContext(
     AssemblyContext& context,
     const IMeshAccess& mesh,
@@ -6818,6 +6994,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     std::size_t cut_full_rules = 0u;
     std::size_t cut_partial_rules = 0u;
     std::size_t cut_quadrature_points = 0u;
+    std::size_t cut_basis_cacheable_rules = 0u;
 
     if (!initialized_) {
         initialize();
@@ -6886,7 +7063,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
     const auto& rules = cut_context.volumeRules();
     const auto indexed_rule_indices =
-        cut_context.generatedVolumeRuleIndicesForMarkerAndSide(interface_marker, side);
+        cut_context.generatedVolumeRuleIndexSpanForMarkerAndSide(interface_marker, side);
     const bool use_indexed_rules = !indexed_rule_indices.empty();
     context_.reserve(max_dofs,
                      selectedVolumeRuleReserveCount(
@@ -6916,6 +7093,9 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     cut_setup_time = cut_now() - cut_start;
 
     const auto& metadata = cut_context.metadata();
+    const auto cut_basis_cache_max_entries = cutVolumeBasisCacheMaxEntries();
+    const std::uint64_t cut_context_basis_signature =
+        cut_basis_cache_max_entries > 0u ? cutVolumeBasisContextSignature(cut_context) : 0u;
     std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
@@ -6972,6 +7152,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
         std::optional<CutVolumeQuadratureRule> cut_rule;
         const quadrature::QuadratureRule* active_rule = nullptr;
+        const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
         if (isFullSideVolumeRule(rule)) {
             const auto type_key = static_cast<std::size_t>(cell_type);
             if (type_key < full_cell_rule_cache.size()) {
@@ -6990,6 +7171,22 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             active_rule = &*cut_rule;
             cached_quad_rule_ptr_ = nullptr;
             basis_scratch_valid_ = false;
+            if (cut_basis_cache_max_entries > 0u) {
+                cut_volume_basis_cache_entry = getOrCreateCutVolumeBasisCacheEntry(
+                    cut_context,
+                    cut_context_basis_signature,
+                    rule_index,
+                    *active_rule,
+                    mesh,
+                    cell_id,
+                    cell_type,
+                    test_space,
+                    trial_space,
+                    required_data);
+                if (cut_volume_basis_cache_entry != nullptr) {
+                    ++cut_basis_cacheable_rules;
+                }
+            }
             ++cut_partial_rules;
         }
         FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumes: active quadrature rule");
@@ -7001,7 +7198,18 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         cut_geometry_time += cut_now() - stage_start;
 
         stage_start = cut_now();
-        prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, *active_rule);
+        const auto* previous_cut_volume_basis_cache_entry =
+            active_cut_volume_basis_cache_entry_;
+        active_cut_volume_basis_cache_entry_ = cut_volume_basis_cache_entry;
+        try {
+            prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, *active_rule);
+        } catch (...) {
+            active_cut_volume_basis_cache_entry_ =
+                previous_cut_volume_basis_cache_entry;
+            throw;
+        }
+        active_cut_volume_basis_cache_entry_ =
+            previous_cut_volume_basis_cache_entry;
         cut_basis_time += cut_now() - stage_start;
 
         stage_start = cut_now();
@@ -7161,7 +7369,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         std::fprintf(stderr,
             "[CUT_VOLUME_TIMING] rank=%d marker=%d side=%s matrix=%d vector=%d "
             "indexed=%d rules_considered=%zu rules_assembled=%zu full_rules=%zu "
-            "partial_rules=%zu qpts=%zu total=%9.6f setup=%9.6f filter=%9.6f "
+            "partial_rules=%zu cacheable_basis_rules=%zu basis_cache_entries=%zu "
+            "qpts=%zu total=%9.6f setup=%9.6f filter=%9.6f "
             "dofs=%9.6f rule=%9.6f geometry=%9.6f basis=%9.6f frame=%9.6f "
             "context=%9.6f jit=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
             "kernel=%9.6f orient=%9.6f insert=%9.6f\n",
@@ -7175,6 +7384,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             cut_rules_assembled,
             cut_full_rules,
             cut_partial_rules,
+            cut_basis_cacheable_rules,
+            cut_volume_basis_cache_.size(),
             cut_quadrature_points,
             result.elapsed_time_seconds,
             cut_setup_time,
@@ -7282,6 +7493,17 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
     std::vector<const geometry::CutQuadratureRule*> selected_rules;
     if (interface_marker >= 0) {
         selected_rules = cut_context.interfaceRulesForMarker(interface_marker);
+        if (selected_rules.empty()) {
+            const auto& rules = cut_context.interfaceRules();
+            selected_rules.reserve(rules.size());
+            for (const auto& rule : rules) {
+                const int active_marker =
+                    rule.provenance.marker >= 0 ? rule.provenance.marker : interface_marker;
+                if (active_marker == interface_marker) {
+                    selected_rules.push_back(&rule);
+                }
+            }
+        }
     } else {
         const auto& rules = cut_context.interfaceRules();
         selected_rules.reserve(rules.size());
@@ -7848,7 +8070,6 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     [](const auto& m) {
                         return hasFlag(m.required_data, RequiredData::BasisHessians);
                     });
-
                 if (!coupled_scalar_ref_valid_ ||
                     coupled_scalar_n_dofs_ != coupled_n_scalar ||
                     coupled_scalar_n_qpts_ != n_qpts ||
@@ -8272,6 +8493,15 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             scratch_saved_node_coords_.resize(monolithic_batch_size);
             if (coupled_slot_phys_cache_.size() < monolithic_batch_size) {
                 coupled_slot_phys_cache_.resize(monolithic_batch_size);
+            }
+            if (use_coupled_scalar_cache) {
+                const auto scalar_entries =
+                    static_cast<std::size_t>(coupled_scalar_n_dofs_) *
+                    static_cast<std::size_t>(coupled_scalar_n_qpts_);
+                for (std::size_t slot = 0; slot < monolithic_batch_size; ++slot) {
+                    coupled_slot_phys_cache_[slot].resize(
+                        scalar_entries, coupled_scalar_has_hessians_);
+                }
             }
 
             auto& shared_contexts = scratch_batch_contexts_;
@@ -10507,6 +10737,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     [](const auto& m) {
                         return hasFlag(m.required_data, RequiredData::BasisHessians);
                     });
+                const auto scalar_entries = ns * nq;
+                for (std::size_t slot = 0; slot < B; ++slot) {
+                    coupled_slot_phys_cache_[slot].resize(scalar_entries, need_hess);
+                }
 
                 if (!coupled_scalar_ref_valid_ ||
                     coupled_scalar_n_dofs_ != coupled_n_scalar ||
@@ -10691,6 +10925,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 FieldSolutionWorkspace field_ws;
                 CoupledSlotPhysCache slot_phys;
                 KernelOutput thread_output;
+                slot_phys.resize(
+                    static_cast<std::size_t>(ns) * static_cast<std::size_t>(nq),
+                    need_hess);
 
                 // Per-trial-group solution cache for this thread
                 struct ThreadTrialCache {

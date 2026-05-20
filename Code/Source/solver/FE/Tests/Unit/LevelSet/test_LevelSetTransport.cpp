@@ -449,7 +449,32 @@ TEST(LevelSetTransport, InstallsResidualFormStructure)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::Divergence));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellDiameter));
+}
+
+TEST(LevelSetTransport, ConservativeDivergenceTransportUsesDivergenceResidual)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    addScalarAndVelocityFields(system, phi_space, velocity_space);
+
+    level_set::LevelSetTransportOptions options{};
+    options.transport_form = level_set::LevelSetTransportForm::ConservativeDivergence;
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+
+    EXPECT_TRUE(system.hasOperator("level_set"));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Divergence));
 }
 
 TEST(LevelSetTransport, SUPGAddsCellDiameterStabilization)
@@ -475,6 +500,32 @@ TEST(LevelSetTransport, SUPGAddsCellDiameterStabilization)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
 }
 
+TEST(LevelSetTransport, InterfaceKinematicAddsInterfaceResidual)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    FE::systems::FESystem system(mesh);
+    addScalarAndVelocityFields(system, phi_space, velocity_space);
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+    options.interface_kinematic.enabled = true;
+    options.interface_kinematic.interface_marker = 77;
+    options.interface_kinematic.weight_scale = 2.0;
+
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+}
+
 TEST(LevelSetTransport, ValidatesSUPGOptions)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
@@ -495,6 +546,41 @@ TEST(LevelSetTransport, ValidatesSUPGOptions)
     EXPECT_THROW(
         (void)level_set::installLevelSetTransport(epsilon_system, phi_space, options),
         std::invalid_argument);
+}
+
+TEST(LevelSetTransport, ValidatesInterfaceKinematicOptions)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto phi_space = scalarSpace(mesh);
+    auto velocity_space = vectorSpace(mesh);
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+    options.interface_kinematic.enabled = true;
+
+    FE::systems::FESystem marker_system(mesh);
+    addScalarAndVelocityFields(marker_system, phi_space, velocity_space);
+    options.interface_kinematic.interface_marker = -1;
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(marker_system, phi_space, options),
+        std::invalid_argument);
+
+    FE::systems::FESystem weight_system(mesh);
+    addScalarAndVelocityFields(weight_system, phi_space, velocity_space);
+    options.interface_kinematic.interface_marker = 77;
+    options.interface_kinematic.weight_scale = 0.0;
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(weight_system, phi_space, options),
+        std::invalid_argument);
+
+    FE::systems::FESystem valid_system(mesh);
+    addScalarAndVelocityFields(valid_system, phi_space, velocity_space);
+    options.interface_kinematic.weight_scale = 1.0;
+    EXPECT_NO_THROW(
+        (void)level_set::installLevelSetTransport(valid_system, phi_space, options));
 }
 
 TEST(LevelSetTransport, ValidatesReinitializationOptions)
@@ -541,6 +627,16 @@ TEST(LevelSetTransport, ValidatesReinitializationOptions)
         std::invalid_argument);
 
     options.reinitialization.signed_distance_tolerance = 1.0e-6;
+    options.reinitialization.method =
+        level_set::LevelSetReinitializationMethod::FastMarching;
+    FE::systems::FESystem unsupported_method_system(mesh);
+    EXPECT_THROW(
+        (void)level_set::installLevelSetTransport(
+            unsupported_method_system, phi_space, options),
+        std::invalid_argument);
+
+    options.reinitialization.method =
+        level_set::LevelSetReinitializationMethod::Projection;
     FE::systems::FESystem valid_system(mesh);
     valid_system.addField(FE::systems::FieldSpec{
         .name = "Velocity",

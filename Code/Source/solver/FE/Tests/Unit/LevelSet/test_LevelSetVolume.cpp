@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -50,6 +51,45 @@ std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
     shape.order = 1;
     base->build_from_arrays(
         /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        {shape});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<svmp::Mesh> buildSingleCellMesh(
+    int spatial_dim,
+    std::span<const std::array<FE::Real, 3>> coordinates,
+    svmp::CellFamily family)
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    std::vector<svmp::real_t> x_ref;
+    x_ref.reserve(coordinates.size() * static_cast<std::size_t>(spatial_dim));
+    for (const auto& x : coordinates) {
+        for (int d = 0; d < spatial_dim; ++d) {
+            x_ref.push_back(static_cast<svmp::real_t>(x[static_cast<std::size_t>(d)]));
+        }
+    }
+
+    std::vector<svmp::index_t> cell2vertex;
+    cell2vertex.reserve(coordinates.size());
+    for (std::size_t i = 0; i < coordinates.size(); ++i) {
+        cell2vertex.push_back(static_cast<svmp::index_t>(i));
+    }
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {
+        0,
+        static_cast<svmp::offset_t>(cell2vertex.size()),
+    };
+
+    svmp::CellShape shape{};
+    shape.family = family;
+    shape.num_corners = static_cast<int>(coordinates.size());
+    shape.order = 1;
+    base->build_from_arrays(
+        spatial_dim,
         x_ref,
         cell2vertex_offsets,
         cell2vertex,
@@ -234,6 +274,131 @@ TEST(LevelSetVolume, CutCellVolumeUsesGeneratedInterfaceFractions)
     EXPECT_NEAR(result.total_volume, 1.0 / 6.0, 1.0e-12);
     EXPECT_NEAR(result.negative_volume, 1.0 / 48.0, 1.0e-12);
     EXPECT_NEAR(result.positive_volume, 7.0 / 48.0, 1.0e-12);
+}
+
+TEST(LevelSetVolume, CutCellVolumeSupportsLinearHexWedgeAndPyramidCuts)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    struct Case {
+        const char* name;
+        FE::ElementType element_type;
+        svmp::CellFamily family;
+        std::vector<std::array<FE::Real, 3>> coordinates;
+        std::function<FE::Real(const std::array<FE::Real, 3>&)> level_set;
+        FE::Real total_volume;
+        FE::Real negative_volume;
+    };
+
+    const std::vector<Case> cases = {
+        Case{
+            .name = "hex",
+            .element_type = FE::ElementType::Hex8,
+            .family = svmp::CellFamily::Hex,
+            .coordinates = {
+                {{0.0, 0.0, 0.0}},
+                {{1.0, 0.0, 0.0}},
+                {{1.0, 1.0, 0.0}},
+                {{0.0, 1.0, 0.0}},
+                {{0.0, 0.0, 1.0}},
+                {{1.0, 0.0, 1.0}},
+                {{1.0, 1.0, 1.0}},
+                {{0.0, 1.0, 1.0}},
+            },
+            .level_set = [](const auto& x) { return x[0] - FE::Real{0.5}; },
+            .total_volume = FE::Real{1.0},
+            .negative_volume = FE::Real{0.5},
+        },
+        Case{
+            .name = "wedge",
+            .element_type = FE::ElementType::Wedge6,
+            .family = svmp::CellFamily::Wedge,
+            .coordinates = {
+                {{0.0, 0.0, -1.0}},
+                {{1.0, 0.0, -1.0}},
+                {{0.0, 1.0, -1.0}},
+                {{0.0, 0.0, 1.0}},
+                {{1.0, 0.0, 1.0}},
+                {{0.0, 1.0, 1.0}},
+            },
+            .level_set = [](const auto& x) { return x[0] - FE::Real{0.5}; },
+            .total_volume = FE::Real{1.0},
+            .negative_volume = FE::Real{0.75},
+        },
+        Case{
+            .name = "pyramid",
+            .element_type = FE::ElementType::Pyramid5,
+            .family = svmp::CellFamily::Pyramid,
+            .coordinates = {
+                {{-1.0, -1.0, 0.0}},
+                {{1.0, -1.0, 0.0}},
+                {{1.0, 1.0, 0.0}},
+                {{-1.0, 1.0, 0.0}},
+                {{0.0, 0.0, 1.0}},
+            },
+            .level_set = [](const auto& x) { return x[2] - FE::Real{0.5}; },
+            .total_volume = FE::Real{4.0} / FE::Real{3.0},
+            .negative_volume = FE::Real{7.0} / FE::Real{6.0},
+        },
+    };
+
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        auto mesh = buildSingleCellMesh(
+            /*spatial_dim=*/3,
+            std::span<const std::array<FE::Real, 3>>(
+                c.coordinates.data(), c.coordinates.size()),
+            c.family);
+        auto phi_space =
+            std::make_shared<FE::spaces::H1Space>(c.element_type, /*order=*/1);
+
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = phi_space,
+            .components = 1,
+        });
+        ASSERT_NO_THROW(system.setup());
+
+        const auto& field_dofs = system.fieldDofHandler(phi);
+        const auto* entity_map = field_dofs.getEntityDofMap();
+        ASSERT_NE(entity_map, nullptr);
+        ASSERT_EQ(static_cast<std::size_t>(entity_map->numVertices()),
+                  c.coordinates.size());
+
+        std::vector<FE::Real> coefficients(
+            static_cast<std::size_t>(field_dofs.getNumDofs()), FE::Real{0.0});
+        for (FE::GlobalIndex vertex = 0; vertex < entity_map->numVertices();
+             ++vertex) {
+            const auto dofs = entity_map->getVertexDofs(vertex);
+            ASSERT_EQ(dofs.size(), 1u);
+            ASSERT_GE(dofs.front(), 0);
+            ASSERT_LT(static_cast<std::size_t>(dofs.front()), coefficients.size());
+            coefficients[static_cast<std::size_t>(dofs.front())] =
+                c.level_set(c.coordinates[static_cast<std::size_t>(vertex)]);
+        }
+
+        level_set::LevelSetVolumeOptions volume_opts{};
+        volume_opts.tolerance = 1.0e-12;
+        const auto result = level_set::computeLevelSetCutCellVolume(
+            system.meshAccess(),
+            field_dofs,
+            volume_opts,
+            coefficients);
+
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.cells, 1u);
+        EXPECT_EQ(result.cut_cells, 1u);
+        EXPECT_EQ(result.full_negative_cells, 0u);
+        EXPECT_EQ(result.full_positive_cells, 0u);
+        EXPECT_NEAR(result.total_volume, c.total_volume, 1.0e-12);
+        EXPECT_NEAR(result.negative_volume, c.negative_volume, 1.0e-12);
+        EXPECT_NEAR(result.positive_volume,
+                    c.total_volume - c.negative_volume,
+                    1.0e-12);
+    }
+#endif
 }
 
 TEST(LevelSetVolume, FESystemOverloadUsesFieldSlice)

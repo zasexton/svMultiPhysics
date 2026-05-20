@@ -3501,6 +3501,53 @@ DofLayoutInfo DofLayoutInfo::DG(int order, int num_verts_per_cell, int num_compo
     return info;
 }
 
+DofLayoutInfo continuousScalarLayoutForSpace(const spaces::FunctionSpace& space,
+                                             int dim,
+                                             int n_verts,
+                                             LocalIndex total_dofs)
+{
+    const auto basis_type = space.element().basis().basis_type();
+    if (basis_type != BasisType::Serendipity) {
+        auto layout = DofLayoutInfo::Lagrange(space.polynomial_order(), dim, n_verts);
+        layout.total_dofs_per_element = total_dofs;
+        layout.num_components = space.value_dimension();
+        return layout;
+    }
+
+    DofLayoutInfo layout{};
+    layout.is_continuous = true;
+    layout.num_components = space.value_dimension();
+    layout.tensor_face_dof_layout = false;
+    layout.dofs_per_vertex = 1;
+    layout.total_dofs_per_element = total_dofs;
+
+    switch (space.element_type()) {
+    case ElementType::Quad8:
+        FE_THROW_IF(dim != 2 || n_verts != 4, FEException,
+                    "Serendipity Quad8 DOF layout requires quadrilateral corner topology");
+        layout.dofs_per_edge = 1;
+        break;
+    case ElementType::Hex20:
+        FE_THROW_IF(dim != 3 || n_verts != 8, FEException,
+                    "Serendipity Hex20 DOF layout requires hexahedral corner topology");
+        layout.dofs_per_edge = 1;
+        break;
+    case ElementType::Quad4:
+        FE_THROW_IF(dim != 2 || n_verts != 4, FEException,
+                    "Serendipity Quad4 DOF layout requires quadrilateral corner topology");
+        break;
+    case ElementType::Hex8:
+        FE_THROW_IF(dim != 3 || n_verts != 8, FEException,
+                    "Serendipity Hex8 DOF layout requires hexahedral corner topology");
+        break;
+    default:
+        FE_THROW(InvalidArgumentException,
+                 "Serendipity scalar DOF layout is only implemented for Quad4/Quad8 and Hex8/Hex20");
+    }
+
+    return layout;
+}
+
 enum class VariableLocalDofKind : std::uint8_t {
     Vertex,
     Edge,
@@ -4064,7 +4111,6 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
 
     const auto continuity = space.continuity();
     const int dim = topology.dim;
-    const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
 
     DofLayoutInfo layout{};
@@ -4076,9 +4122,7 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
     layout.tensor_face_dof_layout = false;
 
     if (continuity == Continuity::C0 || continuity == Continuity::C1) {
-        layout = DofLayoutInfo::Lagrange(order, dim, n_verts);
-        layout.total_dofs_per_element = total_dofs;
-        layout.num_components = space.value_dimension();
+        layout = continuousScalarLayoutForSpace(space, dim, n_verts, total_dofs);
         return distributeDofs(dof_topology, layout, options);
     }
 
@@ -8559,7 +8603,6 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
                                 ? 1
                                 : space.value_dimension();
 
-    const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
     const auto cell0 = mesh.cell_corner_vertices_span(0);
     const int n_verts = static_cast<int>(cell0.second);
@@ -8568,9 +8611,10 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
     }
 
     if (continuity == Continuity::C0 || continuity == Continuity::C1) {
-        layout = DofLayoutInfo::Lagrange(order, mesh.dim(), n_verts);
-        layout.total_dofs_per_element = total_dofs;
-        layout.num_components = space.value_dimension();
+        layout = continuousScalarLayoutForSpace(space,
+                                                mesh.dim(),
+                                                n_verts,
+                                                total_dofs);
     } else if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
         const auto& elem = space.element();
         const auto& b = elem.basis();
@@ -8882,7 +8926,6 @@ void DofHandler::distributeDofs(const Mesh& mesh,
                                 ? 1
                                 : space.value_dimension();
 
-    const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
     const auto cell0 = local_mesh.cell_corner_vertices_span(0);
     const int n_verts = static_cast<int>(cell0.second);
@@ -8891,9 +8934,10 @@ void DofHandler::distributeDofs(const Mesh& mesh,
     }
 
     if (continuity == Continuity::C0 || continuity == Continuity::C1) {
-        layout = DofLayoutInfo::Lagrange(order, local_mesh.dim(), n_verts);
-        layout.total_dofs_per_element = total_dofs;
-        layout.num_components = space.value_dimension();
+        layout = continuousScalarLayoutForSpace(space,
+                                                local_mesh.dim(),
+                                                n_verts,
+                                                total_dofs);
     } else if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
         const auto& elem = space.element();
         const auto& b = elem.basis();
@@ -9267,14 +9311,14 @@ void DofHandler::distributeDofs(const Mesh& mesh,
     layout.is_continuous = (continuity == Continuity::C0 || continuity == Continuity::C1);
     layout.num_components = space.value_dimension();
 
-    const int order = space.polynomial_order();
     const auto total_dofs = static_cast<LocalIndex>(space.dofs_per_element());
 
     if (layout.is_continuous) {
         const int n_verts = static_cast<int>(local_mesh.cell_vertices(0).size());
-        layout = DofLayoutInfo::Lagrange(order, topology.dim, n_verts);
-        layout.total_dofs_per_element = total_dofs;
-        layout.num_components = space.value_dimension();
+        layout = continuousScalarLayoutForSpace(space,
+                                                topology.dim,
+                                                n_verts,
+                                                total_dofs);
     } else {
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;

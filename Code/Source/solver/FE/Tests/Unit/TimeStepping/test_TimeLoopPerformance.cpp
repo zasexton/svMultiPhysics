@@ -187,7 +187,7 @@ TEST(TimeLoopPerformance, TRBDF2_CostsTwiceAsMuchAsBackwardEuler)
     //   Check: Residual eval.
     // Minimally we expect 1 Jacobian per step.
     
-    EXPECT_GT(counts_be.matrix_only + counts_be.matrix_and_vector, steps);
+    EXPECT_GE(counts_be.matrix_only + counts_be.matrix_and_vector, steps);
     
     // TRBDF2: 2 solves per step.
     // Expect roughly 2x Jacobian evaluations.

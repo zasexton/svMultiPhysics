@@ -114,29 +114,74 @@ public:
     }
 
     const auto phi_offset = system.fieldDofOffset(phi_id);
+    const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
     std::vector<svmp::FE::GlobalIndex> dofs;
     std::vector<svmp::FE::Real> values;
-    dofs.reserve(static_cast<std::size_t>(n_vertices));
-    values.reserve(static_cast<std::size_t>(n_vertices));
+    dofs.reserve(n_field_dofs);
+    values.reserve(n_field_dofs);
 
+    bool all_mesh_vertices_have_vertex_dofs = true;
     for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
-      const auto vertex_dofs = entity_map->getVertexDofs(vertex);
-      if (vertex_dofs.empty()) {
-        continue;
+      if (entity_map->getVertexDofs(vertex).size() != 1u) {
+        all_mesh_vertices_have_vertex_dofs = false;
+        break;
       }
-      if (vertex_dofs.size() != 1u) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Level-set initial condition expects one scalar vertex DOF.");
-      }
+    }
 
-      dofs.push_back(phi_offset + vertex_dofs.front());
-      values.push_back(static_cast<svmp::FE::Real>(
-          mesh_values[static_cast<std::size_t>(vertex) * mesh_components]));
+    if (all_mesh_vertices_have_vertex_dofs) {
+      for (svmp::FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        dofs.push_back(phi_offset + vertex_dofs.front());
+        values.push_back(static_cast<svmp::FE::Real>(
+            mesh_values[static_cast<std::size_t>(vertex) * mesh_components]));
+      }
+    } else {
+      std::vector<unsigned char> coefficient_written(n_field_dofs, 0u);
+      for (svmp::FE::GlobalIndex cell = 0;
+           cell < static_cast<svmp::FE::GlobalIndex>(local_mesh.n_cells());
+           ++cell) {
+        auto [cell_vertices, n_cell_vertices] =
+            local_mesh.cell_vertices_span(static_cast<svmp::index_t>(cell));
+        if (cell_vertices == nullptr || n_cell_vertices == 0u) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set initial condition cannot sync from empty cell connectivity.");
+        }
+
+        const auto cell_dofs = field_dofs.getCellDofs(cell);
+        if (cell_dofs.size() != n_cell_vertices) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Level-set initial condition cell DOF count does not match mesh point field connectivity.");
+        }
+
+        for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
+          const auto vertex = cell_vertices[local_node];
+          if (vertex < 0 || static_cast<std::size_t>(vertex) >=
+                                static_cast<std::size_t>(n_vertices)) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set initial condition mesh vertex index is out of range.");
+          }
+
+          const auto dof = cell_dofs[local_node];
+          if (dof < 0 || static_cast<std::size_t>(dof) >= n_field_dofs) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set initial condition field DOF index is out of range.");
+          }
+          const auto sdof = static_cast<std::size_t>(dof);
+          if (coefficient_written[sdof] != 0u) {
+            continue;
+          }
+
+          dofs.push_back(phi_offset + dof);
+          values.push_back(static_cast<svmp::FE::Real>(
+              mesh_values[static_cast<std::size_t>(vertex) * mesh_components]));
+          coefficient_written[sdof] = 1u;
+        }
+      }
     }
 
     if (dofs.empty()) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Level-set initial condition found no vertex DOFs.");
+          "[svMultiPhysics::Application] Level-set initial condition found no field DOFs.");
     }
 
     auto view = u0.createAssemblyView();
@@ -249,6 +294,22 @@ double parse_double(std::string_view raw, std::string_view context)
   }
 }
 
+int parse_int(std::string_view raw, std::string_view context)
+{
+  const auto s = trim_copy(std::string(raw));
+  try {
+    size_t pos = 0;
+    const int v = std::stoi(s, &pos);
+    if (pos != s.size()) {
+      throw std::runtime_error("");
+    }
+    return v;
+  } catch (...) {
+    throw std::runtime_error("[svMultiPhysics::Application] Failed to parse integer value '" + std::string(raw) +
+                             "' for " + std::string(context) + ".");
+  }
+}
+
 std::optional<svmp::FE::Real> get_defined_real(
     const svmp::Physics::ParameterMap& params,
     std::initializer_list<std::string_view> keys,
@@ -262,6 +323,24 @@ std::optional<svmp::FE::Real> get_defined_real(
     const auto value = trim_copy(p->value);
     if (!value.empty()) {
       return static_cast<svmp::FE::Real>(parse_double(value, context));
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<int> get_defined_int(
+    const svmp::Physics::ParameterMap& params,
+    std::initializer_list<std::string_view> keys,
+    std::string_view context)
+{
+  for (const auto key : keys) {
+    const auto* p = find_param(params, key);
+    if (!p || !p->defined) {
+      continue;
+    }
+    const auto value = trim_copy(p->value);
+    if (!value.empty()) {
+      return parse_int(value, context);
     }
   }
   return std::nullopt;
@@ -449,20 +528,42 @@ ls::LevelSetVelocitySource parse_velocity_source(std::string_view raw)
       "[svMultiPhysics::Application] Velocity_source must be one of 'coupled_field', 'prescribed_data', or 'constant'.");
 }
 
+ls::LevelSetTransportForm parse_transport_form(std::string_view raw)
+{
+  const auto value = normalized_token(std::string(raw));
+  if (value == "advective" || value == "classical" || value == "standard") {
+    return ls::LevelSetTransportForm::Advective;
+  }
+  if (value == "conservative" ||
+      value == "conservativedivergence" ||
+      value == "divergence" ||
+      value == "divergenceform") {
+    return ls::LevelSetTransportForm::ConservativeDivergence;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Level-set Transport_form must be one of 'advective' or 'conservative_divergence'.");
+}
+
 ls::LevelSetReinitializationMethod parse_reinitialization_method(std::string_view raw)
 {
   const auto value = normalized_token(std::string(raw));
   if (value == "hamiltonjacobi" || value == "hamiltonjacobipde" || value == "pde") {
-    return ls::LevelSetReinitializationMethod::HamiltonJacobiPDE;
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Reinitialization_method=HamiltonJacobiPDE "
+        "is reserved until runtime Hamilton-Jacobi reinitialization is implemented; "
+        "use 'Projection'.");
   }
   if (value == "fastmarching" || value == "fastmarchingmethod" || value == "fmm") {
-    return ls::LevelSetReinitializationMethod::FastMarching;
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Reinitialization_method=FastMarching "
+        "is reserved until runtime fast-marching reinitialization is implemented; "
+        "use 'Projection'.");
   }
   if (value == "projection" || value == "signeddistanceprojection" || value == "repairprojection") {
     return ls::LevelSetReinitializationMethod::Projection;
   }
   throw std::runtime_error(
-      "[svMultiPhysics::Application] Reinitialization_method must be one of 'HamiltonJacobiPDE', 'FastMarching', or 'Projection'.");
+      "[svMultiPhysics::Application] Reinitialization_method currently supports 'Projection' only.");
 }
 
 void apply_level_set_params(const svmp::Physics::ParameterMap& params,
@@ -475,6 +576,12 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
     if (*value && !get_defined_string(params, {"Operator_tag", "OperatorTag"})) {
       options.operator_tag = "equations";
     }
+  }
+  if (const auto value = get_defined_string(
+          params,
+          {"Transport_form", "TransportForm", "Advection_form", "AdvectionForm",
+           "Level_set_transport_form", "LevelSetTransportForm"})) {
+    options.transport_form = parse_transport_form(*value);
   }
 
   if (const auto value = get_defined_string(
@@ -529,6 +636,28 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
           {"SUPG_velocity_epsilon", "SUPGVelocityEpsilon"},
           "SUPG_velocity_epsilon")) {
     options.supg.velocity_epsilon = *value;
+  }
+
+  if (const auto value = get_defined_bool(
+          params,
+          {"Enable_interface_kinematic", "EnableInterfaceKinematic",
+           "Enable_free_surface_kinematic_interface", "EnableFreeSurfaceKinematicInterface"})) {
+    options.interface_kinematic.enabled = *value;
+  }
+  if (const auto value = get_defined_int(
+          params,
+          {"Interface_kinematic_marker", "InterfaceKinematicMarker",
+           "Level_set_interface_marker", "LevelSetInterfaceMarker"},
+          "Interface_kinematic_marker")) {
+    options.interface_kinematic.enabled = true;
+    options.interface_kinematic.interface_marker = *value;
+  }
+  if (const auto value = get_defined_real(
+          params,
+          {"Interface_kinematic_weight_scale", "InterfaceKinematicWeightScale",
+           "Free_surface_kinematic_weight_scale", "FreeSurfaceKinematicWeightScale"},
+          "Interface_kinematic_weight_scale")) {
+    options.interface_kinematic.weight_scale = *value;
   }
 
   if (const auto value = get_defined_bool(
@@ -618,6 +747,74 @@ void apply_level_set_params(const svmp::Physics::ParameterMap& params,
   }
 }
 
+std::optional<std::string> projected_curvature_field_name(
+    const svmp::Physics::ParameterMap& params)
+{
+  return get_defined_string(
+      params,
+      {"Curvature_field_name",
+       "CurvatureFieldName",
+       "Curvature_field",
+       "CurvatureField",
+       "Projected_curvature_field",
+       "ProjectedCurvatureField",
+       "Free_surface_curvature_field",
+       "FreeSurfaceCurvatureField"});
+}
+
+void ensure_projected_curvature_field(
+    svmp::FE::systems::FESystem& system,
+    const std::string& field_name,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space)
+{
+  if (field_name.empty()) {
+    return;
+  }
+  const auto existing = system.findFieldByName(field_name);
+  if (existing != svmp::FE::INVALID_FIELD_ID) {
+    const auto& rec = system.fieldRecord(existing);
+    if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Projected curvature field '" +
+          field_name + "' must be scalar.");
+    }
+    if (rec.source_kind != svmp::FE::systems::FieldSourceKind::PrescribedData) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Projected curvature field '" +
+          field_name + "' must be registered as PrescribedData.");
+    }
+    return;
+  }
+  if (!space) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Projected curvature field auto-registration requires a scalar function space.");
+  }
+  system.addField(svmp::FE::systems::FieldSpec{
+      .name = field_name,
+      .space = space,
+      .components = 1,
+      .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData,
+  });
+}
+
+void ensure_projected_curvature_fields_from_input(
+    svmp::FE::systems::FESystem& system,
+    const svmp::Physics::EquationModuleInput& input,
+    const std::shared_ptr<const svmp::FE::spaces::FunctionSpace>& space)
+{
+  if (const auto field = projected_curvature_field_name(input.equation_params)) {
+    ensure_projected_curvature_field(system, *field, space);
+  }
+  if (const auto field = projected_curvature_field_name(input.default_domain.params)) {
+    ensure_projected_curvature_field(system, *field, space);
+  }
+  for (const auto& domain : input.domains) {
+    if (const auto field = projected_curvature_field_name(domain.params)) {
+      ensure_projected_curvature_field(system, *field, space);
+    }
+  }
+}
+
 void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
                          ls::LevelSetTransportOptions& options)
 {
@@ -691,6 +888,8 @@ create_level_set_transport_from_input(const svmp::Physics::EquationModuleInput& 
     apply_level_set_params(input.domains.front().params, options);
   }
   apply_level_set_bcs(input, options);
+  ensure_projected_curvature_fields_from_input(
+      system, input, level_set_space);
 
   options.velocity.space = velocity_space;
 

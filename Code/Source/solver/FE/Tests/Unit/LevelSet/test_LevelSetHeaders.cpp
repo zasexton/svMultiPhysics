@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSet.h"
+#include "LevelSet/LevelSetCurvatureProjection.h"
 #include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetOptions.h"

@@ -1,6 +1,7 @@
 #include "Application/Core/ActiveDomainOutput.h"
 
 #include "FE/Assembly/Assembler.h"
+#include "FE/Assembly/MeshAccess.h"
 #include "FE/Geometry/MappingFactory.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 
@@ -124,6 +125,108 @@ makeCellMapping(
   return measure;
 }
 
+struct MappedWetVolumeCellData {
+  std::vector<double> fraction;
+  std::vector<double> physical_wet_measure;
+};
+
+svmp::FieldHandle prepareScalarVolumeField(
+    svmp::Mesh& mesh,
+    const std::string& field_name)
+{
+  svmp::FieldHandle handle;
+  if (mesh.has_field(svmp::EntityKind::Volume, field_name)) {
+    handle = mesh.field_handle(svmp::EntityKind::Volume, field_name);
+    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64 ||
+        mesh.field_components(handle) != 1u) {
+      mesh.remove_field(handle);
+      handle = mesh.attach_field(svmp::EntityKind::Volume,
+                                 field_name,
+                                 svmp::FieldScalarType::Float64,
+                                 1u);
+    }
+  } else {
+    handle = mesh.attach_field(svmp::EntityKind::Volume,
+                               field_name,
+                               svmp::FieldScalarType::Float64,
+                               1u);
+  }
+  return handle;
+}
+
+void writeScalarVolumeField(
+    svmp::Mesh& mesh,
+    const std::string& field_name,
+    const std::vector<double>& values)
+{
+  const auto handle = prepareScalarVolumeField(mesh, field_name);
+  auto* data = static_cast<double*>(mesh.field_data(handle));
+  if (data == nullptr) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Failed to allocate VTK cell field '" +
+        field_name + "'.");
+  }
+  std::copy(values.begin(), values.end(), data);
+}
+
+MappedWetVolumeCellData collectMappedWetVolumeCellData(
+    const svmp::FE::assembly::IMeshAccess& mesh,
+    std::size_t n_cells,
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules)
+{
+  auto reference_fraction =
+      application::core::collectWetVolumeFractions(n_cells, rules);
+  std::vector<svmp::FE::Real> wet_measure(n_cells, svmp::FE::Real{0.0});
+  std::vector<svmp::FE::Real> parent_measure(n_cells, svmp::FE::Real{0.0});
+  std::vector<bool> has_mapped_measure(n_cells, false);
+  std::vector<bool> failed_mapped_measure(n_cells, false);
+
+  for (const auto* rule : rules) {
+    if (rule == nullptr ||
+        rule->kind != svmp::FE::geometry::CutQuadratureKind::Volume) {
+      continue;
+    }
+    const auto cell = rule->provenance.parent_entity;
+    if (cell < 0 || static_cast<std::size_t>(cell) >= n_cells) {
+      continue;
+    }
+    const auto index = static_cast<std::size_t>(cell);
+    try {
+      if (parent_measure[index] <= svmp::FE::Real{0.0}) {
+        parent_measure[index] = physicalCellMeasure(mesh, cell);
+      }
+      wet_measure[index] += physicalCutVolumeRuleMeasure(mesh, *rule);
+      has_mapped_measure[index] = true;
+    } catch (...) {
+      failed_mapped_measure[index] = true;
+    }
+  }
+
+  for (std::size_t cell = 0; cell < n_cells; ++cell) {
+    if (!has_mapped_measure[cell] || failed_mapped_measure[cell] ||
+        parent_measure[cell] <= svmp::FE::Real{0.0} ||
+        !std::isfinite(parent_measure[cell])) {
+      if (parent_measure[cell] > svmp::FE::Real{0.0} &&
+          std::isfinite(parent_measure[cell])) {
+        wet_measure[cell] =
+            static_cast<svmp::FE::Real>(reference_fraction[cell]) *
+            parent_measure[cell];
+      }
+      continue;
+    }
+    reference_fraction[cell] = std::clamp(
+        static_cast<double>(wet_measure[cell] / parent_measure[cell]),
+        0.0,
+        1.0);
+  }
+
+  std::vector<double> physical_wet_measure(n_cells, 0.0);
+  for (std::size_t cell = 0; cell < n_cells; ++cell) {
+    physical_wet_measure[cell] = static_cast<double>(wet_measure[cell]);
+  }
+  return {std::move(reference_fraction), std::move(physical_wet_measure)};
+}
+
 } // namespace
 
 namespace application {
@@ -190,36 +293,25 @@ WetVolumeMeasureSelection selectWetVolumeForDrift(
 std::size_t writeWetVolumeFractionField(
     svmp::Mesh& mesh,
     const std::string& field_name,
-    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules)
+    const std::vector<const svmp::FE::geometry::CutQuadratureRule*>& rules,
+    const std::string& measure_field_name)
 {
-  svmp::FieldHandle handle;
-  if (mesh.has_field(svmp::EntityKind::Volume, field_name)) {
-    handle = mesh.field_handle(svmp::EntityKind::Volume, field_name);
-    if (mesh.field_type(handle) != svmp::FieldScalarType::Float64 ||
-        mesh.field_components(handle) != 1u) {
-      mesh.remove_field(handle);
-      handle = mesh.attach_field(svmp::EntityKind::Volume,
-                                 field_name,
-                                 svmp::FieldScalarType::Float64,
-                                 1u);
-    }
-  } else {
-    handle = mesh.attach_field(svmp::EntityKind::Volume,
-                               field_name,
-                               svmp::FieldScalarType::Float64,
-                               1u);
-  }
-
-  auto* data = static_cast<double*>(mesh.field_data(handle));
-  if (data == nullptr) {
+  if (!measure_field_name.empty() && measure_field_name == field_name) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Failed to allocate VTK cell field '" +
-        field_name + "'.");
+        "[svMultiPhysics::Application] Wet volume fraction and measure fields must have different names.");
   }
 
-  const auto wet_fraction = collectWetVolumeFractions(mesh.n_cells(), rules);
-  std::copy(wet_fraction.begin(), wet_fraction.end(), data);
-  return 1u;
+  svmp::FE::assembly::MeshAccess mesh_access(mesh);
+  const auto wet_volume =
+      collectMappedWetVolumeCellData(mesh_access, mesh.n_cells(), rules);
+  writeScalarVolumeField(mesh, field_name, wet_volume.fraction);
+  if (measure_field_name.empty()) {
+    return 1u;
+  }
+  writeScalarVolumeField(mesh,
+                         measure_field_name,
+                         wet_volume.physical_wet_measure);
+  return 2u;
 }
 
 WetVolumeDriftDiagnostic computeWetVolumeDrift(

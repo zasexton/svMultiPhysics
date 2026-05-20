@@ -803,6 +803,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetOptions.h
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetCellEvaluator.h
+    LevelSet/LevelSetCurvatureProjection.h
     LevelSet/LevelSetInterfaceLifecycle.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
@@ -814,6 +815,7 @@ set(FE_LEVELSET_HEADERS
 set(FE_LEVELSET_SOURCES
     LevelSet/LevelSetTransport.cpp
     LevelSet/LevelSetCellEvaluator.cpp
+    LevelSet/LevelSetCurvatureProjection.cpp
     LevelSet/LevelSetInterfaceLifecycle.cpp
     LevelSet/LevelSetImplicitCutQuadratureBackend.cpp
     LevelSet/LevelSetVolume.cpp
@@ -2133,6 +2135,7 @@ if(FE_BUILD_TESTS)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/LevelSet/test_main.cpp)
         set(FE_LEVELSET_TEST_SOURCES
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
+            Tests/Unit/LevelSet/test_LevelSetCurvatureProjection.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp
             Tests/Unit/LevelSet/test_LevelSetInterfaceLifecycle.cpp
             Tests/Unit/LevelSet/test_LevelSetOptions.cpp

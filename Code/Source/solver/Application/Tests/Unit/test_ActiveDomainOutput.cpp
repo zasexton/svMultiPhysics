@@ -322,6 +322,76 @@ TEST(ActiveDomainOutput, CollectsPhysicalMeasureForHighOrderCurvedCutRule)
   EXPECT_NEAR(summary.physical_measure, 3.0, 1.0e-12);
 }
 
+TEST(ActiveDomainOutput, WritesMappedWetVolumeFractionForCurvedRule)
+{
+  auto mesh = makeSingleQuadCellMesh({
+      0.0, 0.0,
+      2.0, 0.0,
+      2.5, 3.0,
+      0.0, 2.0,
+  });
+  svmp::FE::assembly::MeshAccess mesh_access(*mesh);
+
+  svmp::FE::geometry::CutQuadratureRule cut_rule;
+  cut_rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  cut_rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  cut_rule.measure = 2.0;
+  cut_rule.parent_measure = 4.0;
+  cut_rule.volume_fraction = 0.5;
+  cut_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  cut_rule.curved_geometry = true;
+  cut_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  cut_rule.provenance.parent_entity = 0;
+  cut_rule.provenance.implicit_geometry_mode = "HighOrderImplicit";
+  cut_rule.provenance.implicit_quadrature_backend = "SayeHyperrectangle";
+  cut_rule.points.push_back(
+      {{{0.0, 0.0, 0.0}}, {{0.0, 0.0, 1.0}}, 2.0});
+
+  svmp::FE::geometry::CutQuadratureRule full_rule = cut_rule;
+  full_rule.measure = 4.0;
+  full_rule.parent_measure = 4.0;
+  full_rule.volume_fraction = 1.0;
+  full_rule.full_cell_equivalent = true;
+  full_rule.points.front().weight = 4.0;
+
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> cut_rules = {
+      &cut_rule,
+  };
+  const std::vector<const svmp::FE::geometry::CutQuadratureRule*> full_rules = {
+      &full_rule,
+  };
+  const auto cut_summary =
+      application::core::collectCutVolumeMeasures(mesh_access, cut_rules);
+  const auto full_summary =
+      application::core::collectCutVolumeMeasures(mesh_access, full_rules);
+
+  ASSERT_EQ(cut_summary.physical_rule_count, 1u);
+  ASSERT_EQ(full_summary.physical_rule_count, 1u);
+  ASSERT_GT(full_summary.physical_measure, 0.0);
+  const auto expected_fraction =
+      cut_summary.physical_measure / full_summary.physical_measure;
+  ASSERT_NE(expected_fraction, cut_rule.volume_fraction);
+
+  const auto fields_written =
+      application::core::writeWetVolumeFractionField(
+          *mesh, "WetVolumeFraction", cut_rules, "WetVolumeMeasure");
+
+  EXPECT_EQ(fields_written, 2u);
+  const auto handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeFraction");
+  const auto* data = static_cast<const double*>(mesh->field_data(handle));
+  ASSERT_NE(data, nullptr);
+  EXPECT_NEAR(data[0], expected_fraction, 1.0e-12);
+
+  ASSERT_TRUE(mesh->has_field(svmp::EntityKind::Volume, "WetVolumeMeasure"));
+  const auto measure_handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeMeasure");
+  const auto* measure_data =
+      static_cast<const double*>(mesh->field_data(measure_handle));
+  ASSERT_NE(measure_data, nullptr);
+  EXPECT_NEAR(measure_data[0], cut_summary.physical_measure, 1.0e-12);
+}
+
 TEST(ActiveDomainOutput, HighOrderWetVolumeDriftUsesPhysicalMeasure)
 {
   auto mesh = makeSingleQuadCellMesh({

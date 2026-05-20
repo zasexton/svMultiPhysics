@@ -571,35 +571,62 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
 
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature2D(
     const std::vector<SignedPoint>& polygon,
-    Real tolerance)
+    Real tolerance,
+    int requested_order)
 {
     std::vector<geometry::CutQuadraturePoint> points;
     if (polygon.size() < 3u) {
         return points;
     }
 
+    const int achieved_order =
+        implementedPlanarLevelSetCutVolumeExactOrder(requested_order);
     const auto& origin = polygon.front().point;
-    points.reserve(polygon.size() - 2u);
+    const std::size_t points_per_triangle = achieved_order > 2 ? 7u : 3u;
+    points.reserve((polygon.size() - 2u) * points_per_triangle);
+    const Real minimum_area = std::max(Real{1.0e-30}, tolerance * tolerance);
     for (std::size_t i = 1u; i + 1u < polygon.size(); ++i) {
         const auto& b = polygon[i].point;
         const auto& c = polygon[i + 1u].point;
         const Real area =
             Real{0.5} * norm3(cross(sub(b, origin), sub(c, origin)));
-        if (area <= tolerance) {
+        if (area <= minimum_area) {
             continue;
         }
-        constexpr Real high = Real{2.0} / Real{3.0};
-        constexpr Real low = Real{1.0} / Real{6.0};
-        const Real weight = area / Real{3.0};
-        points.push_back(geometry::CutQuadraturePoint{
-            .point = barycentricPoint(origin, b, c, high, low, low),
-            .weight = weight});
-        points.push_back(geometry::CutQuadraturePoint{
-            .point = barycentricPoint(origin, b, c, low, high, low),
-            .weight = weight});
-        points.push_back(geometry::CutQuadraturePoint{
-            .point = barycentricPoint(origin, b, c, low, low, high),
-            .weight = weight});
+        const auto add_point = [&](Real l0, Real l1, Real l2, Real weight) {
+            points.push_back(geometry::CutQuadraturePoint{
+                .point = barycentricPoint(origin, b, c, l0, l1, l2),
+                .weight = area * weight,
+                .parent_coordinate =
+                    barycentricPoint(origin, b, c, l0, l1, l2),
+                .reference_measure_factor = area});
+        };
+        if (achieved_order <= 2) {
+            constexpr Real high = Real{2.0} / Real{3.0};
+            constexpr Real low = Real{1.0} / Real{6.0};
+            constexpr Real weight = Real{1.0} / Real{3.0};
+            add_point(high, low, low, weight);
+            add_point(low, high, low, weight);
+            add_point(low, low, high, weight);
+        } else {
+            constexpr Real center_weight = Real{0.225};
+            constexpr Real a1 = Real{0.0597158717897698};
+            constexpr Real b1 = Real{0.470142064105115};
+            constexpr Real w1 = Real{0.132394152788506};
+            constexpr Real a2 = Real{0.797426985353087};
+            constexpr Real b2 = Real{0.101286507323456};
+            constexpr Real w2 = Real{0.125939180544827};
+            add_point(Real{1.0} / Real{3.0},
+                      Real{1.0} / Real{3.0},
+                      Real{1.0} / Real{3.0},
+                      center_weight);
+            add_point(a1, b1, b1, w1);
+            add_point(b1, a1, b1, w1);
+            add_point(b1, b1, a1, w1);
+            add_point(a2, b2, b2, w2);
+            add_point(b2, a2, b2, w2);
+            add_point(b2, b2, a2, w2);
+        }
     }
     return points;
 }
@@ -609,11 +636,13 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
     const std::vector<Real>& signed_values,
     std::size_t count,
     geometry::CutIntegrationSide side,
-    Real tolerance)
+    Real tolerance,
+    int requested_order)
 {
     return polygonQuadrature2D(
         cutSidePolygon2D(points, signed_values, count, side, tolerance),
-        tolerance);
+        tolerance,
+        requested_order);
 }
 
 void addUniquePoint(std::vector<std::array<Real, 3>>& points,
@@ -760,7 +789,9 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
             const auto& c = face[i];
             const auto& d = face[i + 1u];
             const Real volume = tetraVolume(a, b, c, d);
-            if (volume <= tolerance) {
+            const Real minimum_volume =
+                std::max(Real{1.0e-30}, tolerance * tolerance * tolerance);
+            if (volume <= minimum_volume) {
                 continue;
             }
             const Real weight = volume / Real{4.0};
@@ -840,7 +871,8 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     LocalIndex local_region_index,
     const std::string& suffix,
     std::vector<geometry::CutQuadraturePoint> quadrature_points = {},
-    bool full_cell_equivalent = false)
+    bool full_cell_equivalent = false,
+    int achieved_quadrature_order = -1)
 {
     CutInterfaceVolumeRegion region;
     region.interface_marker = request.interface_marker;
@@ -858,6 +890,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     region.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     region.topology_id = "cell-" + std::to_string(input.parent_cell) + "-" + suffix;
     region.full_cell_equivalent = full_cell_equivalent;
+    region.achieved_quadrature_order = achieved_quadrature_order;
     for (auto& point : quadrature_points) {
         point.normal = region.normal;
     }
@@ -1020,6 +1053,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     const auto parent_centroid = parent_moments.centroid;
     const auto gradient_normal =
         estimateGradient2D(input.node_coordinates, signed_values, count);
+    const int planar_volume_order =
+        implementedPlanarLevelSetCutVolumeExactOrder(
+            request.resolvedVolumeQuadratureOrder());
 
     if (zero_count == count) {
         result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
@@ -1027,6 +1063,13 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         return result;
     }
     if (positive_count == 0u) {
+        const auto full_quadrature =
+            cutSideQuadrature2D(input.node_coordinates,
+                                signed_values,
+                                count,
+                                geometry::CutIntegrationSide::Negative,
+                                request.tolerance,
+                                planar_volume_order);
         appendSideVolumeRegion(
             result,
             makeVolumeRegion(request,
@@ -1039,14 +1082,22 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-negative-volume",
-                             {},
-                             true));
+                             full_quadrature,
+                             true,
+                             planar_volume_order));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
                                                   request.tolerance);
         return result;
     }
     if (negative_count == 0u) {
+        const auto full_quadrature =
+            cutSideQuadrature2D(input.node_coordinates,
+                                signed_values,
+                                count,
+                                geometry::CutIntegrationSide::Positive,
+                                request.tolerance,
+                                planar_volume_order);
         appendSideVolumeRegion(
             result,
             makeVolumeRegion(request,
@@ -1059,8 +1110,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-positive-volume",
-                             {},
-                             true));
+                             full_quadrature,
+                             true,
+                             planar_volume_order));
         result.degeneracy = classifyZeroContact2D(signed_values,
                                                   count,
                                                   request.tolerance);
@@ -1180,13 +1232,15 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                             signed_values,
                             count,
                             geometry::CutIntegrationSide::Negative,
-                            request.tolerance);
+                            request.tolerance,
+                            planar_volume_order);
     const auto positive_quadrature =
         cutSideQuadrature2D(input.node_coordinates,
                             signed_values,
                             count,
                             geometry::CutIntegrationSide::Positive,
-                            request.tolerance);
+                            request.tolerance,
+                            planar_volume_order);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)
@@ -1233,7 +1287,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          signed_values,
                          0u,
                          "cut-negative-volume",
-                         negative_quadrature));
+                         negative_quadrature,
+                         false,
+                         planar_volume_order));
     appendSideVolumeRegion(
         result,
         makeVolumeRegion(request,
@@ -1248,7 +1304,9 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          signed_values,
                          1u,
                          "cut-positive-volume",
-                         positive_quadrature));
+                         positive_quadrature,
+                         false,
+                         planar_volume_order));
     result.fragments.push_back(std::move(fragment));
     return result;
 }
@@ -1301,6 +1359,14 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
         return result;
     }
     if (positive_count == 0u) {
+        const auto full_faces =
+            tetrahedronSideFaces(input.node_coordinates,
+                                 signed_values,
+                                 {},
+                                 geometry::CutIntegrationSide::Negative,
+                                 request.tolerance);
+        const auto full_quadrature =
+            polyhedronQuadratureFromFaces(full_faces, request.tolerance);
         appendSideVolumeRegion(
             result,
             makeVolumeRegion(request,
@@ -1313,13 +1379,21 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-negative-volume",
-                             {},
+                             full_quadrature,
                              true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);
         return result;
     }
     if (negative_count == 0u) {
+        const auto full_faces =
+            tetrahedronSideFaces(input.node_coordinates,
+                                 signed_values,
+                                 {},
+                                 geometry::CutIntegrationSide::Positive,
+                                 request.tolerance);
+        const auto full_quadrature =
+            polyhedronQuadratureFromFaces(full_faces, request.tolerance);
         appendSideVolumeRegion(
             result,
             makeVolumeRegion(request,
@@ -1332,7 +1406,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              signed_values,
                              0u,
                              "full-positive-volume",
-                             {},
+                             full_quadrature,
                              true));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, request.tolerance);

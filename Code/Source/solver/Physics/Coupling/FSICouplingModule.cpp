@@ -287,10 +287,8 @@ void declarePartitionedFsiExchanges(
         .from(fields.solid_displacement)
         .to(fields.fluid_velocity)
         .transfer(options.solid_to_fluid_transfer)
-        .producerTemporal(
-            options.partitioned_temporal.solid_displacement_source)
-        .consumerTemporal(
-            options.partitioned_temporal.fluid_displacement_target);
+        .producerTemporal(options.partitioned_temporal.solid_displacement_source)
+        .consumerTemporal(options.partitioned_temporal.fluid_displacement_target);
 
     coupling.partitionedPayloadFromForm("fluid_load")
         .contribution(fsiContributionName(options, kFSITractionContribution))

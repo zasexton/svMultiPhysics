@@ -1073,6 +1073,7 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
         SyncPoint point;
         double u;
         std::uint64_t cut_topology_key;
+        std::uint64_t value_revision;
     };
     std::vector<SyncRecord> sync_records;
 
@@ -1094,8 +1095,11 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
             const auto u = static_cast<double>(state.u.front());
             const auto cut_topology_key =
                 u > 1.5 ? std::uint64_t{0x202u} : std::uint64_t{0x101u};
+            const auto value_revision =
+                state.u_vector != nullptr ? state.u_vector->valueRevision()
+                                          : std::uint64_t{0};
             sync_records.push_back(
-                SyncRecord{point, u, cut_topology_key});
+                SyncRecord{point, u, cut_topology_key, value_revision});
         };
 
     svmp::FE::timestepping::NewtonSolver newton(nopt);
@@ -1118,22 +1122,34 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
     auto saw_trial_cut_topology = false;
     auto saw_restored_cut_topology = false;
     auto saw_restored_state_cut_topology = false;
+    std::optional<std::uint64_t> accepted_revision;
+    std::optional<std::uint64_t> trial_revision;
+    std::optional<std::uint64_t> trial_restore_revision;
+    std::optional<std::uint64_t> restored_revision;
     for (const auto& rec : sync_records) {
+        if (rec.point == SyncPoint::AcceptedNonlinearState &&
+            std::abs(rec.u - 1.0) < 1e-13 &&
+            !accepted_revision.has_value()) {
+            accepted_revision = rec.value_revision;
+        }
         if (rec.point == SyncPoint::LineSearchTrialResidual &&
             std::abs(rec.u - 2.0) < 1e-13) {
             saw_trial_update = true;
             saw_trial_cut_topology = rec.cut_topology_key == std::uint64_t{0x202u};
+            trial_revision = rec.value_revision;
         }
         if (rec.point == SyncPoint::LineSearchTrialResidual &&
             std::abs(rec.u - 1.0) < 1e-13) {
             saw_trial_restore = true;
             saw_restored_cut_topology = rec.cut_topology_key == std::uint64_t{0x101u};
+            trial_restore_revision = rec.value_revision;
         }
         if (rec.point == SyncPoint::RestoredNonlinearState &&
             std::abs(rec.u - 1.0) < 1e-13) {
             saw_restored_state = true;
             saw_restored_state_cut_topology =
                 rec.cut_topology_key == std::uint64_t{0x101u};
+            restored_revision = rec.value_revision;
         }
     }
     EXPECT_TRUE(saw_trial_update);
@@ -1142,6 +1158,13 @@ TEST(NewtonSolverLineSearch, SynchronizesTrialAndRestoredStates)
     EXPECT_TRUE(saw_trial_cut_topology);
     EXPECT_TRUE(saw_restored_cut_topology);
     EXPECT_TRUE(saw_restored_state_cut_topology);
+    ASSERT_TRUE(accepted_revision.has_value());
+    ASSERT_TRUE(trial_revision.has_value());
+    ASSERT_TRUE(trial_restore_revision.has_value());
+    ASSERT_TRUE(restored_revision.has_value());
+    EXPECT_GT(*trial_revision, *accepted_revision);
+    EXPECT_GT(*trial_restore_revision, *trial_revision);
+    EXPECT_EQ(*restored_revision, *trial_restore_revision);
     EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 1.0, 1e-13);
 }
 

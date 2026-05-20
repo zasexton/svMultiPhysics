@@ -106,9 +106,23 @@ std::vector<GlobalIndex> extractBoundaryDofsFromFaces(
             continue;
         }
 
+        bool high_order_line_face = false;
+        std::size_t n_corner_vertices = n_verts;
+        const auto& face_shapes = base.face_shapes();
+        if (static_cast<std::size_t>(fid_local) < face_shapes.size()) {
+            const auto& shape = face_shapes[static_cast<std::size_t>(fid_local)];
+            high_order_line_face =
+                shape.family == svmp::CellFamily::Line && shape.num_corners == 2 && n_verts >= 2u;
+            if (shape.num_corners > 0) {
+                n_corner_vertices = std::min(
+                    n_verts,
+                    static_cast<std::size_t>(shape.num_corners));
+            }
+        }
+
         // Collect face-interior DOFs (P2+ elements).  P1 elements have
         // no face DOFs, so skip when numFaces() == 0.
-        if (n_verts >= 3u && entity_map.numFaces() > 0) {
+        if (!high_order_line_face && n_verts >= 3u && entity_map.numFaces() > 0) {
             FE_THROW_IF(fid >= entity_map.numFaces(), InvalidStateException,
                         "extractBoundaryDofsFromFaces: face ID exceeds EntityDofMap face count");
             push_span(entity_map.getFaceDofs(fid));
@@ -127,12 +141,15 @@ std::vector<GlobalIndex> extractBoundaryDofsFromFaces(
                 push_span(entity_map.getEdgeDofs(it->second));
             };
 
-            if (n_verts == 2u) {
+            if (high_order_line_face) {
+                add_edge(verts[0], verts[n_verts - 1u]);
+            } else if (n_corner_vertices == 2u) {
                 add_edge(verts[0], verts[1]);
             } else {
-                for (std::size_t i = 0; i < n_verts; ++i) {
+                for (std::size_t i = 0; i < n_corner_vertices; ++i) {
                     const auto v0 = static_cast<GlobalIndex>(verts[i]);
-                    const auto v1 = static_cast<GlobalIndex>(verts[(i + 1u) % n_verts]);
+                    const auto v1 = static_cast<GlobalIndex>(
+                        verts[(i + 1u) % n_corner_vertices]);
                     add_edge(v0, v1);
                 }
             }

@@ -13,6 +13,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 
+#include <cstdint>
 #include <memory>
 #include <span>
 
@@ -26,6 +27,8 @@ public:
 
     [[nodiscard]] virtual BackendKind backendKind() const noexcept = 0;
     [[nodiscard]] virtual GlobalIndex size() const noexcept = 0;
+    [[nodiscard]] virtual std::uint64_t valueRevision() const noexcept = 0;
+    virtual void markModified() noexcept = 0;
 
     virtual void zero() = 0;
     virtual void set(Real value) = 0;

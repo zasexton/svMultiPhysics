@@ -122,6 +122,7 @@ struct NewtonOptions {
     double line_search_alpha_min{1e-6};
     double line_search_shrink{0.5};
     double line_search_c1{1e-4};
+    bool line_search_fail_on_no_reduction{false};
 
     // Runtime Jacobian-check metadata. The check remains diagnostic-only, but
     // this classifies whether residual finite differences are assembled on a

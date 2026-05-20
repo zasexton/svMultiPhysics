@@ -49,6 +49,8 @@ struct LevelSetGeneratedInterfaceRestartRecord {
     GeometryTangentPolicy geometry_tangent_policy{
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
     Real implicit_cut_root_tolerance{1.0e-10};
+    Real implicit_cut_root_coordinate_tolerance{1.0e-12};
+    int implicit_cut_root_max_iterations{48};
     int implicit_cut_max_subdivision_depth{16};
     bool keep_degenerate_fragments{false};
     std::uint64_t value_revision{0};

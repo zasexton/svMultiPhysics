@@ -46,9 +46,10 @@ constexpr index_t TET_FACES_ORIENTED_IDX[] = {
 };
 constexpr int TET_FACES_ORIENTED_OFF[] = {0,3,6,9,12};
 
-// Tetrahedron edges (6)
+// Tetrahedron edges (6), ordered to match VTK_QUADRATIC_TETRA/Tetra10
+// node ordering after the four corners.
 constexpr index_t TET_EDGES_FLAT[] = {
-    0,1, 0,2, 0,3, 1,2, 1,3, 2,3
+    0,1, 1,2, 2,0, 0,3, 1,3, 2,3
 };
 
 // Hexahedron: oriented faces (outward, right-hand rule)

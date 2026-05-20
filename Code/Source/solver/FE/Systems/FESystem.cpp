@@ -31,6 +31,7 @@
  #include "Core/Logger.h"
 
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 
 #include "Backends/Interfaces/GenericVector.h"
@@ -94,6 +95,78 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+constexpr std::uint64_t kConstraintRevisionHashOffset = 1469598103934665603ull;
+constexpr std::uint64_t kConstraintRevisionHashPrime = 1099511628211ull;
+
+void mixConstraintRevisionHash(std::uint64_t& h, std::uint64_t value) noexcept
+{
+    h ^= value;
+    h *= kConstraintRevisionHashPrime;
+}
+
+void mixConstraintRevisionBytes(std::uint64_t& h,
+                                const void* data,
+                                std::size_t n_bytes) noexcept
+{
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < n_bytes; ++i) {
+        mixConstraintRevisionHash(h, static_cast<std::uint64_t>(bytes[i]));
+    }
+}
+
+void mixConstraintRevisionString(std::uint64_t& h,
+                                 const std::string& value) noexcept
+{
+    mixConstraintRevisionHash(h, static_cast<std::uint64_t>(value.size()));
+    mixConstraintRevisionBytes(h, value.data(), value.size());
+}
+
+[[nodiscard]] std::uint64_t meshFieldValueFingerprint(
+    const svmp::MeshBase& mesh) noexcept
+{
+    std::uint64_t h = kConstraintRevisionHashOffset;
+    const std::array<svmp::EntityKind, 4> kinds{{
+        svmp::EntityKind::Vertex,
+        svmp::EntityKind::Edge,
+        svmp::EntityKind::Face,
+        svmp::EntityKind::Volume,
+    }};
+    try {
+        for (const auto kind : kinds) {
+            mixConstraintRevisionHash(h, static_cast<std::uint64_t>(kind));
+            const auto names = svmp::MeshFields::list_fields(mesh, kind);
+            mixConstraintRevisionHash(h, static_cast<std::uint64_t>(names.size()));
+            for (const auto& name : names) {
+                mixConstraintRevisionString(h, name);
+                const auto handle =
+                    svmp::MeshFields::get_field_handle(mesh, kind, name);
+                mixConstraintRevisionHash(h, static_cast<std::uint64_t>(handle.id));
+                mixConstraintRevisionHash(h, static_cast<std::uint64_t>(
+                                                 svmp::MeshFields::field_type(mesh, handle)));
+                const auto components =
+                    svmp::MeshFields::field_components(mesh, handle);
+                const auto entities =
+                    svmp::MeshFields::field_entity_count(mesh, handle);
+                const auto bytes_per_entity =
+                    svmp::MeshFields::field_bytes_per_entity(mesh, handle);
+                mixConstraintRevisionHash(h, static_cast<std::uint64_t>(components));
+                mixConstraintRevisionHash(h, static_cast<std::uint64_t>(entities));
+                mixConstraintRevisionHash(h, static_cast<std::uint64_t>(bytes_per_entity));
+                const auto n_bytes = entities * bytes_per_entity;
+                const auto* data = svmp::MeshFields::field_data(mesh, handle);
+                if (data != nullptr && n_bytes > 0u) {
+                    mixConstraintRevisionBytes(h, data, n_bytes);
+                }
+            }
+        }
+    } catch (...) {
+        mixConstraintRevisionHash(h, std::numeric_limits<std::uint64_t>::max());
+    }
+    return h;
+}
+#endif
 
 [[nodiscard]] state::StateFrameTransformRequest makeStateFrameTransformRequest(
     state::StateFrameTransformEvent event,
@@ -4625,7 +4698,8 @@ std::uint64_t FESystem::systemLayoutRevision() const noexcept
 }
 
 constraints::ConstraintRevisionSnapshot
-FESystem::captureConstraintRevisionSnapshot() const noexcept
+FESystem::captureConstraintRevisionSnapshot(
+    bool include_mesh_field_values) const noexcept
 {
     constraints::ConstraintRevisionSnapshot snapshot;
     snapshot.valid = true;
@@ -4643,6 +4717,9 @@ FESystem::captureConstraintRevisionSnapshot() const noexcept
         snapshot.ownership = local_mesh.ownership_revision();
         snapshot.numbering = local_mesh.numbering_revision();
         snapshot.mesh_field_layout = local_mesh.field_layout_revision();
+        if (include_mesh_field_values) {
+            snapshot.mesh_field_values = meshFieldValueFingerprint(local_mesh);
+        }
         snapshot.labels = local_mesh.label_revision();
         snapshot.active_configuration = local_mesh.active_configuration_epoch();
     } else if (mesh_access_ && mesh_access_->revisionTrackingAvailable()) {
@@ -4652,6 +4729,9 @@ FESystem::captureConstraintRevisionSnapshot() const noexcept
         snapshot.ownership = mesh_access_->ownershipRevision();
         snapshot.numbering = mesh_access_->numberingRevision();
         snapshot.mesh_field_layout = mesh_access_->fieldLayoutRevision();
+        snapshot.mesh_field_values = include_mesh_field_values
+                                         ? snapshot.mesh_field_layout
+                                         : 0u;
         snapshot.labels = mesh_access_->labelRevision();
         snapshot.active_configuration = mesh_access_->activeConfigurationEpoch();
     }
@@ -4693,7 +4773,9 @@ bool FESystem::constraintStateStaleForCurrentRevisions() const
             constraints::merge_into(deps, c->dependencyDeclaration());
         }
     }
-    const auto current = captureConstraintRevisionSnapshot();
+    const bool include_mesh_field_values =
+        deps.structural.mesh_field_values || deps.value.mesh_field_values;
+    const auto current = captureConstraintRevisionSnapshot(include_mesh_field_values);
     return constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current) ||
            constraints::value_dependency_changed(deps, constraint_revision_snapshot_, current);
 }
@@ -4705,9 +4787,14 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
 {
     constraints::ConstraintRefreshResult result;
     requireSetup();
+    has_last_constraint_update_time_ = true;
+    last_constraint_update_time_ = time;
+    last_constraint_update_dt_ = dt;
 
     const auto deps = constraintDependencyDeclaration();
-    const auto current = captureConstraintRevisionSnapshot();
+    const bool include_mesh_field_values =
+        deps.structural.mesh_field_values || deps.value.mesh_field_values;
+    const auto current = captureConstraintRevisionSnapshot(include_mesh_field_values);
     const bool structural_changed =
         constraints::structural_dependency_changed(deps, constraint_revision_snapshot_, current);
     const bool value_changed =
@@ -4748,7 +4835,8 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     }
 
     ++constraint_time_epoch_;
-    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
+    constraint_revision_snapshot_ =
+        captureConstraintRevisionSnapshot(include_mesh_field_values);
     buildConstraintSummary();
     invalidateAnalysisCache();
     result.value_update = any_update;
@@ -5855,9 +5943,24 @@ analysis::ProblemAnalysisContext FESystem::buildProblemAnalysisContext() const {
         ctx.setTopologyContext(*topology_context_);
     }
 
-    // Populate interface topology if available.
-    if (interface_topology_context_) {
-        ctx.setInterfaceTopologyContext(*interface_topology_context_);
+    // Populate interface topology if available. Generated level-set interfaces
+    // are backed by cut-interface quadrature rather than InterfaceMesh faces, so
+    // expose their markers to analysis as covered embedded interfaces.
+    if (interface_topology_context_ || cut_integration_context_ ||
+        !generated_embedded_interface_markers_.empty()) {
+        analysis::InterfaceTopologyContext interface_ctx =
+            interface_topology_context_ ? *interface_topology_context_
+                                        : analysis::InterfaceTopologyContext{};
+        for (const int marker : generated_embedded_interface_markers_) {
+            interface_ctx.addGeneratedEmbeddedMarker(marker);
+        }
+        if (cut_integration_context_) {
+            for (const int marker :
+                 cut_integration_context_->generatedInterfaceMarkers()) {
+                interface_ctx.addGeneratedEmbeddedMarker(marker);
+            }
+        }
+        ctx.setInterfaceTopologyContext(std::move(interface_ctx));
     }
 
     // Populate constraint summary if available.
@@ -7609,6 +7712,18 @@ void FESystem::addOperator(OperatorTag name)
     operator_registry_.addOperator(std::move(name));
 }
 
+void FESystem::setFormInstallCellDomainRestrictions(
+    std::vector<FormCellDomainRestriction> restrictions)
+{
+    form_install_cell_domain_restrictions_ = std::move(restrictions);
+}
+
+const std::vector<FESystem::FormCellDomainRestriction>&
+FESystem::formInstallCellDomainRestrictions() const noexcept
+{
+    return form_install_cell_domain_restrictions_;
+}
+
 void FESystem::addCellKernel(OperatorTag op, FieldId field,
                              std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
@@ -7618,6 +7733,25 @@ void FESystem::addCellKernel(OperatorTag op, FieldId field,
 void FESystem::addCellKernel(OperatorTag op, FieldId test_field, FieldId trial_field,
                              std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
+    if (!form_install_cell_domain_restrictions_.empty()) {
+        for (const auto& restriction : form_install_cell_domain_restrictions_) {
+            addCutVolumeKernel(op,
+                               restriction.interface_marker,
+                               restriction.side,
+                               test_field,
+                               trial_field,
+                               kernel);
+            if (kernel && kernel->hasInterfaceFace()) {
+                addInterfaceFaceKernel(op,
+                                       restriction.interface_marker,
+                                       test_field,
+                                       trial_field,
+                                       kernel);
+            }
+        }
+        return;
+    }
+
     invalidateSetup();
     validateKernelFieldScopes(field_registry_, test_field, trial_field,
                               analysis::DomainKind::Cell,
@@ -7748,12 +7882,32 @@ void FESystem::addCutVolumeKernel(OperatorTag op,
     if (!operator_registry_.has(op)) {
         operator_registry_.addOperator(op);
     }
+    if (interface_marker >= 0) {
+        generated_embedded_interface_markers_.insert(interface_marker);
+    }
     auto& def = operator_registry_.get(op);
     if (kernel) {
         field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
     }
     def.cut_volumes.push_back(CutVolumeTerm{
         interface_marker, side, test_field, trial_field, std::move(kernel)});
+}
+
+std::size_t FESystem::cutVolumeKernelCount(
+    int interface_marker,
+    geometry::CutIntegrationSide side) const
+{
+    std::size_t count = 0u;
+    for (const auto& op : operator_registry_.list()) {
+        const auto& def = operator_registry_.get(op);
+        for (const auto& term : def.cut_volumes) {
+            if ((term.marker == interface_marker || term.marker < 0) &&
+                term.side == side) {
+                ++count;
+            }
+        }
+    }
+    return count;
 }
 
 void FESystem::addGlobalKernel(OperatorTag op, std::shared_ptr<GlobalKernel> kernel)
@@ -8174,17 +8328,6 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
     FE_THROW_IF(out.size() < static_cast<std::size_t>(n_vertices) * ncomp, InvalidArgumentException,
                 "FESystem::evaluateFieldAtVertices: output buffer too small");
 
-    // Check that vertex DOFs exist and have the expected component count
-    {
-        const auto test_dofs = entity_map->getVertexDofs(0);
-        if (test_dofs.empty()) {
-            return false; // No vertex DOFs (e.g. DG elements)
-        }
-        if (test_dofs.size() != ncomp) {
-            return false; // Component count mismatch
-        }
-    }
-
     const bool use_prescribed =
         rec.source_kind == FieldSourceKind::PrescribedData;
     const auto prescribed_coefficients =
@@ -8204,25 +8347,83 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
         solution_view = vec->createAssemblyView();
     }
 
+    auto read_coefficient = [&](GlobalIndex local_dof) -> double {
+        const GlobalIndex d = use_prescribed ? local_dof : local_dof + offset;
+        FE_THROW_IF(d < 0, InvalidArgumentException,
+                    "FESystem::evaluateFieldAtVertices: negative DOF index");
+        if (use_prescribed) {
+            const auto idx = static_cast<std::size_t>(d);
+            FE_THROW_IF(idx >= prescribed_coefficients.size(),
+                        InvalidArgumentException,
+                        "FESystem::evaluateFieldAtVertices: prescribed field coefficients are smaller than required");
+            return static_cast<double>(prescribed_coefficients[idx]);
+        }
+        if (solution_view) {
+            return static_cast<double>(solution_view->getVectorEntry(d));
+        }
+        const auto idx = static_cast<std::size_t>(d);
+        FE_THROW_IF(idx >= state.u.size(), InvalidArgumentException,
+                    "FESystem::evaluateFieldAtVertices: state.u too small");
+        return static_cast<double>(state.u[idx]);
+    };
+
+    bool all_mesh_vertices_have_vertex_dofs = true;
+    for (GlobalIndex v = 0; v < n_vertices; ++v) {
+        if (entity_map->getVertexDofs(v).size() != ncomp) {
+            all_mesh_vertices_have_vertex_dofs = false;
+            break;
+        }
+    }
+
+    if (!all_mesh_vertices_have_vertex_dofs) {
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        const auto& mesh = singleMesh("FESystem::evaluateFieldAtVertices");
+        if (mesh.n_vertices() < static_cast<std::size_t>(n_vertices)) {
+            return false;
+        }
+        const auto& local_mesh = mesh.local_mesh();
+        std::vector<std::uint8_t> vertex_written(
+            static_cast<std::size_t>(n_vertices), 0u);
+        for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
+            auto [cell_vertices, n_cell_vertices] = local_mesh.cell_vertices_span(cell);
+            if (cell_vertices == nullptr || n_cell_vertices == 0u) {
+                return false;
+            }
+            const auto cell_dofs =
+                field_dof_handlers_[field_idx].getCellDofs(static_cast<GlobalIndex>(cell));
+            if (cell_dofs.size() != n_cell_vertices * ncomp) {
+                return false;
+            }
+
+            for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
+                const auto vertex = cell_vertices[local_node];
+                if (vertex < 0 || vertex >= static_cast<svmp::index_t>(n_vertices)) {
+                    return false;
+                }
+                const auto vertex_index = static_cast<std::size_t>(vertex);
+                if (vertex_written[vertex_index] != 0u) {
+                    continue;
+                }
+                const auto out_base = vertex_index * ncomp;
+                for (std::size_t c = 0; c < ncomp; ++c) {
+                    const auto cell_dof_position = c * n_cell_vertices + local_node;
+                    out[out_base + c] = read_coefficient(cell_dofs[cell_dof_position]);
+                }
+                vertex_written[vertex_index] = 1u;
+            }
+        }
+        return std::find(vertex_written.begin(), vertex_written.end(), 0u) ==
+               vertex_written.end();
+#else
+        return false;
+#endif
+    }
+
     for (GlobalIndex v = 0; v < n_vertices; ++v) {
         const auto vdofs = entity_map->getVertexDofs(v);
         const auto out_base = static_cast<std::size_t>(v) * ncomp;
         for (std::size_t c = 0; c < ncomp; ++c) {
-            const GlobalIndex d = use_prescribed ? vdofs[c] : vdofs[c] + offset;
-            if (use_prescribed) {
-                const auto idx = static_cast<std::size_t>(d);
-                FE_THROW_IF(idx >= prescribed_coefficients.size(),
-                            InvalidArgumentException,
-                            "FESystem::evaluateFieldAtVertices: prescribed field coefficients are smaller than required");
-                out[out_base + c] = prescribed_coefficients[idx];
-            } else if (solution_view) {
-                out[out_base + c] = solution_view->getVectorEntry(d);
-            } else {
-                const auto idx = static_cast<std::size_t>(d);
-                FE_THROW_IF(idx >= state.u.size(), InvalidArgumentException,
-                            "FESystem::evaluateFieldAtVertices: state.u too small");
-                out[out_base + c] = state.u[idx];
-            }
+            out[out_base + c] = read_coefficient(vdofs[c]);
         }
     }
 
@@ -8456,6 +8657,9 @@ std::vector<FieldId> FESystem::timeDerivativeFields(const OperatorTag& op) const
     for (const auto& term : def.interface_faces) {
         gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
     }
+    for (const auto& term : def.cut_volumes) {
+        gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
+    }
 
     return sortedUnique(std::move(fields));
 }
@@ -8475,6 +8679,9 @@ std::vector<FieldId> FESystem::timeDerivativeFields() const
             gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
         }
         for (const auto& term : def.interface_faces) {
+            gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
+        }
+        for (const auto& term : def.cut_volumes) {
             gatherTimeDerivativeFieldsFromKernel(term.kernel.get(), term.trial_field, fields);
         }
     }
@@ -17886,6 +18093,9 @@ FESystem::AuxiliaryAnalysisSummary FESystem::auxiliaryAnalysisSummary() const
 void FESystem::updateConstraints(double time, double dt)
 {
     requireSetup();
+    has_last_constraint_update_time_ = true;
+    last_constraint_update_time_ = time;
+    last_constraint_update_dt_ = dt;
     bool any_updated = false;
 
     for (const auto& c : constraint_defs_) {
@@ -17904,7 +18114,9 @@ void FESystem::updateConstraints(double time, double dt)
 
     if (any_updated) {
         ++constraint_time_epoch_;
-        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
+        const auto deps = constraintDependencyDeclaration();
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
+            deps.structural.mesh_field_values || deps.value.mesh_field_values);
     }
 }
 

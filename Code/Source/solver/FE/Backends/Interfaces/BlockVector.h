@@ -36,6 +36,8 @@ public:
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return backend_kind_; }
     [[nodiscard]] GlobalIndex size() const noexcept override { return global_size_; }
+    [[nodiscard]] std::uint64_t valueRevision() const noexcept override;
+    void markModified() noexcept override;
 
     void zero() override;
     void set(Real value) override;
@@ -64,6 +66,7 @@ public:
     std::vector<std::unique_ptr<GenericVector>> blocks_{};
     std::vector<GlobalIndex> offsets_{}; // size numBlocks()+1
     GlobalIndex global_size_{0};
+    std::uint64_t value_revision_{0};
 };
 
 } // namespace backends

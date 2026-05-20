@@ -31,11 +31,34 @@ BlockVector::BlockVector(std::vector<std::unique_ptr<GenericVector>> blocks)
     global_size_ = offsets_.back();
 }
 
+std::uint64_t BlockVector::valueRevision() const noexcept
+{
+    std::uint64_t h = value_revision_;
+    for (const auto& block : blocks_) {
+        if (block) {
+            const auto v = block->valueRevision();
+            h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
+        }
+    }
+    return h;
+}
+
+void BlockVector::markModified() noexcept
+{
+    ++value_revision_;
+    for (auto& block : blocks_) {
+        if (block) {
+            block->markModified();
+        }
+    }
+}
+
 void BlockVector::zero()
 {
     for (auto& b : blocks_) {
         b->zero();
     }
+    ++value_revision_;
 }
 
 void BlockVector::set(Real value)
@@ -43,6 +66,7 @@ void BlockVector::set(Real value)
     for (auto& b : blocks_) {
         b->set(value);
     }
+    ++value_revision_;
 }
 
 void BlockVector::add(Real value)
@@ -50,6 +74,7 @@ void BlockVector::add(Real value)
     for (auto& b : blocks_) {
         b->add(value);
     }
+    ++value_revision_;
 }
 
 void BlockVector::scale(Real alpha)
@@ -57,6 +82,7 @@ void BlockVector::scale(Real alpha)
     for (auto& b : blocks_) {
         b->scale(alpha);
     }
+    ++value_revision_;
 }
 
 void BlockVector::copyFrom(const GenericVector& other)
@@ -69,6 +95,7 @@ void BlockVector::copyFrom(const GenericVector& other)
     for (std::size_t i = 0; i < blocks_.size(); ++i) {
         blocks_[i]->copyFrom(*o->blocks_[i]);
     }
+    ++value_revision_;
 }
 
 Real BlockVector::dot(const GenericVector& other) const
@@ -95,6 +122,7 @@ void BlockVector::updateGhosts()
     for (auto& b : blocks_) {
         b->updateGhosts();
     }
+    ++value_revision_;
 }
 
 GenericVector& BlockVector::block(std::size_t i)

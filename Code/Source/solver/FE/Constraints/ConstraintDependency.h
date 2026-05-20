@@ -22,6 +22,7 @@ struct ConstraintDependencyMask {
     bool ownership{false};
     bool numbering{false};
     bool mesh_field_layout{false};
+    bool mesh_field_values{false};
     bool labels{false};
     bool active_configuration{false};
     bool fe_space{false};
@@ -46,6 +47,7 @@ struct ConstraintRevisionSnapshot {
     std::uint64_t ownership{0};
     std::uint64_t numbering{0};
     std::uint64_t mesh_field_layout{0};
+    std::uint64_t mesh_field_values{0};
     std::uint64_t labels{0};
     std::uint64_t active_configuration{0};
     std::uint64_t fe_space{0};

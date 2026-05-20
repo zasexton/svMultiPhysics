@@ -87,7 +87,8 @@ enum class GeometryConfiguration : std::uint8_t {
  */
 enum class GeometrySensitivityMode : std::uint8_t {
     GeometryConstant,
-    MeshMotionUnknowns
+    MeshMotionUnknowns,
+    LevelSetCutDomainUnknowns
 };
 
 enum class GeometryTangentPath : std::uint8_t {
@@ -102,9 +103,16 @@ enum class CutVolumeSide : std::uint8_t {
     Positive
 };
 
+struct LevelSetCutDomainSensitivity {
+    FieldId level_set_field{INVALID_FIELD_ID};
+    int interface_marker{-1};
+    CutVolumeSide side{CutVolumeSide::Negative};
+};
+
 struct GeometrySensitivityOptions {
     GeometrySensitivityMode mode{GeometrySensitivityMode::GeometryConstant};
     FieldId mesh_motion_field{INVALID_FIELD_ID};
+    std::vector<LevelSetCutDomainSensitivity> level_set_cut_domains{};
 };
 
 struct TensorJITOptions {

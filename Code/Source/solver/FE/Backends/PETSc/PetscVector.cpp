@@ -119,6 +119,7 @@ PetscVector& PetscVector::operator=(PetscVector&& other) noexcept
     local_cache_ = std::move(other.local_cache_);
     local_cache_valid_ = other.local_cache_valid_;
     local_cache_dirty_ = other.local_cache_dirty_;
+    value_revision_ = other.value_revision_;
 
     other.local_owned_ = 0;
     other.ghost_count_ = 0;
@@ -126,6 +127,7 @@ PetscVector& PetscVector::operator=(PetscVector&& other) noexcept
     other.vec_ = nullptr;
     other.local_cache_valid_ = false;
     other.local_cache_dirty_ = false;
+    other.value_revision_ = 0;
     return *this;
 }
 
@@ -206,6 +208,7 @@ void PetscVector::zero()
     ensureVecUpToDate();
     FE_PETSC_CALL(VecSet(vec_, 0.0));
     invalidateLocalCache();
+    markModified();
 }
 
 void PetscVector::set(Real value)
@@ -213,6 +216,7 @@ void PetscVector::set(Real value)
     ensureVecUpToDate();
     FE_PETSC_CALL(VecSet(vec_, static_cast<PetscScalar>(value)));
     invalidateLocalCache();
+    markModified();
 }
 
 void PetscVector::add(Real value)
@@ -220,6 +224,7 @@ void PetscVector::add(Real value)
     ensureVecUpToDate();
     FE_PETSC_CALL(VecShift(vec_, static_cast<PetscScalar>(value)));
     invalidateLocalCache();
+    markModified();
 }
 
 void PetscVector::scale(Real alpha)
@@ -227,6 +232,7 @@ void PetscVector::scale(Real alpha)
     ensureVecUpToDate();
     FE_PETSC_CALL(VecScale(vec_, static_cast<PetscScalar>(alpha)));
     invalidateLocalCache();
+    markModified();
 }
 
 void PetscVector::copyFrom(const GenericVector& other)
@@ -238,6 +244,7 @@ void PetscVector::copyFrom(const GenericVector& other)
     ensureVecUpToDate();
     FE_PETSC_CALL(VecCopy(o->vec_, vec_));
     invalidateLocalCache();
+    markModified();
 }
 
 Real PetscVector::dot(const GenericVector& other) const
@@ -272,6 +279,7 @@ void PetscVector::updateGhosts()
     FE_PETSC_CALL(VecGhostUpdateBegin(vec_, INSERT_VALUES, SCATTER_FORWARD));
     FE_PETSC_CALL(VecGhostUpdateEnd(vec_, INSERT_VALUES, SCATTER_FORWARD));
     invalidateLocalCache();
+    markModified();
 }
 
 namespace {
@@ -322,6 +330,7 @@ public:
                                    vals.data(),
                                    toPetscInsertMode(mode)));
         vec_->invalidateLocalCache();
+        vec_->markModified();
     }
 
     void addVectorEntry(GlobalIndex dof, Real value, assembly::AddMode mode) override
@@ -332,6 +341,7 @@ public:
         const PetscScalar v = static_cast<PetscScalar>(value);
         FE_PETSC_CALL(VecSetValues(vec_->petsc(), 1, &idx, &v, toPetscInsertMode(mode)));
         vec_->invalidateLocalCache();
+        vec_->markModified();
     }
 
     void setVectorEntries(std::span<const GlobalIndex> dofs,
@@ -404,6 +414,7 @@ std::span<Real> PetscVector::localSpan()
 {
     ensureCacheUpToDate();
     local_cache_dirty_ = true;
+    markModified();
     return std::span<Real>(local_cache_.data(), local_cache_.size());
 }
 

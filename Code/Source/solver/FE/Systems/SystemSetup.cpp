@@ -15,6 +15,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/AssemblerSelection.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/MatrixFreeAssembler.h"
 
 #include "Basis/BasisCache.h"
@@ -145,7 +146,28 @@ struct FaceVertexKeyHash {
 
 [[nodiscard]] FaceVertexKey makeFaceVertexKey(const svmp::MeshBase& mesh, svmp::index_t face)
 {
-    auto key = mesh.face_vertices(face);
+    const auto [ptr, count] = mesh.face_vertices_span(face);
+    if (count == 0u || ptr == nullptr) {
+        return {};
+    }
+
+    std::size_t n_vertices = count;
+    const auto& shapes = mesh.face_shapes();
+    if (static_cast<std::size_t>(face) < shapes.size()) {
+        const auto& shape = shapes[static_cast<std::size_t>(face)];
+        if (shape.family == svmp::CellFamily::Line && shape.num_corners == 2 && count >= 2u) {
+            FaceVertexKey key{ptr[0], ptr[count - 1u]};
+            std::sort(key.begin(), key.end());
+            return key;
+        }
+
+        const auto n_corners = shape.num_corners;
+        if (n_corners > 0) {
+            n_vertices = std::min(n_vertices, static_cast<std::size_t>(n_corners));
+        }
+    }
+
+    FaceVertexKey key(ptr, ptr + n_vertices);
     std::sort(key.begin(), key.end());
     return key;
 }
@@ -2676,6 +2698,24 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: constraint");
         c->apply(affine_constraints_);
     }
+    if (has_last_constraint_update_time_) {
+        for (auto& c : system_constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: system constraint time update");
+            if (c->isTimeDependent()) {
+                (void)c->updateValues(*this,
+                                      affine_constraints_,
+                                      last_constraint_update_time_,
+                                      last_constraint_update_dt_);
+            }
+        }
+        for (const auto& c : constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::setup: constraint time update");
+            if (c->isTimeDependent()) {
+                (void)c->updateValues(affine_constraints_,
+                                      last_constraint_update_time_);
+            }
+        }
+    }
 
 #if FE_HAS_MPI
     {
@@ -3435,7 +3475,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
     affine_constraints_.close();
     bumpConstraintLayoutRevision();
-    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
+    {
+        const auto deps = constraintDependencyDeclaration();
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
+            deps.structural.mesh_field_values || deps.value.mesh_field_values);
+    }
 
     // ---------------------------------------------------------------------
     // Analysis subsystem: topology + constraint summary
@@ -3993,8 +4037,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     const bool trial_is_interface_field =
                         field_registry_.get(trial_field).scope == FieldScope::InterfaceFace;
 
-		            auto add_interface_mesh_couplings = [&](const svmp::InterfaceMesh& iface) {
-		                for (std::size_t lf = 0; lf < iface.n_faces(); ++lf) {
+			            auto add_interface_mesh_couplings = [&](const svmp::InterfaceMesh& iface) {
+			                for (std::size_t lf = 0; lf < iface.n_faces(); ++lf) {
 		                    const auto local_face = static_cast<svmp::index_t>(lf);
 		                    const GlobalIndex cell_minus = static_cast<GlobalIndex>(iface.volume_cell_minus(local_face));
 		                    const GlobalIndex cell_plus = static_cast<GlobalIndex>(iface.volume_cell_plus(local_face));
@@ -4075,23 +4119,104 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                 add_element_couplings(iface_row_dofs_minus, iface_col_dofs_plus);
                                 add_element_couplings(iface_row_dofs_plus, iface_col_dofs_minus);
                             }
-		                }
-		            };
+			                }
+			            };
 
-		            if (marker < 0) {
-		                FE_THROW_IF(interface_meshes_.empty(), InvalidStateException,
-		                            "FESystem::setup: interface-face kernels registered for all markers, but no InterfaceMesh was set");
-		                for (const auto& kv : interface_meshes_) {
-		                    if (!kv.second) continue;
-		                    add_interface_mesh_couplings(*kv.second);
-		                }
-		            } else {
-		                auto it = interface_meshes_.find(marker);
-		                FE_THROW_IF(it == interface_meshes_.end() || !it->second, InvalidStateException,
-		                            "FESystem::setup: missing InterfaceMesh for interface marker " + std::to_string(marker));
-		                add_interface_mesh_couplings(*it->second);
-		            }
-		        }
+                        auto add_generated_cut_interface_couplings =
+                            [&](int requested_marker) -> bool {
+                            const auto* cut_context = cutIntegrationContext();
+                            if (cut_context == nullptr) {
+                                return false;
+                            }
+
+                            auto add_for_marker = [&](int active_marker) -> bool {
+                                if (!cut_context->hasGeneratedInterfaceMarker(active_marker)) {
+                                    return false;
+                                }
+                                FE_THROW_IF(test_is_interface_field || trial_is_interface_field,
+                                            InvalidStateException,
+                                            "FESystem::setup: generated cut-interface sparsity supports parent-cell fields only");
+                                bool added = false;
+                                for (const auto* rule : cut_context->interfaceRulesForMarker(active_marker)) {
+                                    if (rule == nullptr ||
+                                        rule->kind != geometry::CutQuadratureKind::Interface) {
+                                        continue;
+                                    }
+                                    const auto cell_id =
+                                        static_cast<GlobalIndex>(rule->provenance.parent_entity);
+                                    FE_THROW_IF(cell_id < 0 || cell_id >= n_cells_sparsity,
+                                                InvalidStateException,
+                                                "FESystem::setup: generated cut-interface parent cell is out of range");
+                                    add_cell_couplings(cell_id,
+                                                       row_map,
+                                                       col_map,
+                                                       row_offset,
+                                                       col_offset);
+                                    added = true;
+                                }
+                                return added;
+                            };
+
+                            if (requested_marker >= 0) {
+                                return add_for_marker(requested_marker);
+                            }
+
+                            bool added_any = false;
+                            for (const int active_marker : cut_context->generatedInterfaceMarkers()) {
+                                added_any = add_for_marker(active_marker) || added_any;
+                            }
+                            return added_any;
+                        };
+
+                        auto add_conservative_parent_cell_interface_couplings = [&]() -> bool {
+                            if (test_is_interface_field || trial_is_interface_field) {
+                                return false;
+                            }
+                            auto add_sparse_cell = [&](GlobalIndex cell) {
+                                add_cell_couplings(cell,
+                                                   row_map,
+                                                   col_map,
+                                                   row_offset,
+                                                   col_offset);
+                            };
+                            if (dist_pattern) {
+                                meshAccess().forEachOwnedCell(add_sparse_cell);
+                            } else {
+                                for (GlobalIndex cell = 0; cell < n_cells_sparsity; ++cell) {
+                                    add_sparse_cell(cell);
+                                }
+                            }
+                            return true;
+                        };
+
+			            if (marker < 0) {
+                            bool added_any = false;
+			                for (const auto& kv : interface_meshes_) {
+			                    if (!kv.second) continue;
+			                    add_interface_mesh_couplings(*kv.second);
+                                added_any = true;
+			                }
+                            added_any = add_generated_cut_interface_couplings(marker) || added_any;
+                            if (!added_any) {
+                                added_any = add_conservative_parent_cell_interface_couplings();
+                            }
+			                FE_THROW_IF(!added_any, InvalidStateException,
+			                            "FESystem::setup: interface-face kernels registered for all markers, but no InterfaceMesh, generated cut-interface rules, or parent-cell fallback was available");
+			            } else {
+			                auto it = interface_meshes_.find(marker);
+                            bool added = false;
+                            if (it != interface_meshes_.end() && it->second) {
+			                    add_interface_mesh_couplings(*it->second);
+                                added = true;
+                            }
+                            added = add_generated_cut_interface_couplings(marker) || added;
+                            if (!added) {
+                                added = add_conservative_parent_cell_interface_couplings();
+                            }
+			                FE_THROW_IF(!added, InvalidStateException,
+			                            "FESystem::setup: missing InterfaceMesh, generated cut-interface rules, or parent-cell fallback for interface marker " + std::to_string(marker));
+			            }
+			        }
 #endif
 
 	        // Global terms: allow kernels to conservatively augment sparsity.
@@ -5397,6 +5522,24 @@ void FESystem::rebuildConstraintState()
         FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: constraint");
         c->apply(affine_constraints_);
     }
+    if (has_last_constraint_update_time_) {
+        for (auto& c : system_constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: system constraint time update");
+            if (c->isTimeDependent()) {
+                (void)c->updateValues(*this,
+                                      affine_constraints_,
+                                      last_constraint_update_time_,
+                                      last_constraint_update_dt_);
+            }
+        }
+        for (const auto& c : constraint_defs_) {
+            FE_CHECK_NOT_NULL(c.get(), "FESystem::rebuildConstraintState: constraint time update");
+            if (c->isTimeDependent()) {
+                (void)c->updateValues(affine_constraints_,
+                                      last_constraint_update_time_);
+            }
+        }
+    }
 
 #if FE_HAS_MPI
     int mpi_initialized_constraints = 0;
@@ -5422,7 +5565,11 @@ void FESystem::rebuildConstraintState()
 
     affine_constraints_.close();
     bumpConstraintLayoutRevision();
-    constraint_revision_snapshot_ = captureConstraintRevisionSnapshot();
+    {
+        const auto deps = constraintDependencyDeclaration();
+        constraint_revision_snapshot_ = captureConstraintRevisionSnapshot(
+            deps.structural.mesh_field_values || deps.value.mesh_field_values);
+    }
     buildConstraintSummary();
     invalidateAnalysisCache();
 }

@@ -13,9 +13,11 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/StandardAssembler.h"
 #include "Assembly/TimeIntegrationContext.h"
 #include "Forms/BoundaryConditions.h"
+#include "Forms/CutCellForms.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
@@ -88,6 +90,17 @@ struct CompareOptions {
     dof_map.setCellDofs(0, cell_dofs);
     dof_map.setNumDofs(static_cast<GlobalIndex>(n_dofs));
     dof_map.setNumLocalDofs(static_cast<GlobalIndex>(n_dofs));
+    dof_map.finalize();
+    return dof_map;
+}
+
+[[nodiscard]] dofs::DofMap createTwoTetraContinuousDofMap()
+{
+    dofs::DofMap dof_map(/*n_cells=*/2, /*n_dofs_total=*/5, /*dofs_per_cell=*/4);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dof_map.setCellDofs(1, std::vector<GlobalIndex>{1, 2, 3, 4});
+    dof_map.setNumDofs(5);
+    dof_map.setNumLocalDofs(5);
     dof_map.finalize();
     return dof_map;
 }
@@ -298,6 +311,53 @@ void expectJitMatchesInterpreterInteriorFacesBilinear(const assembly::IMeshAcces
     (void)assembler.assembleInteriorFaces(mesh, test_space, trial_space, jit_kernel, A_jit, nullptr);
 
     expectDenseNear(A_jit, A_interp, mat_tol);
+}
+
+void expectJitMatchesInterpreterInteriorFacesResidual(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofMap& dof_map,
+    const spaces::FunctionSpace& space,
+    const FormExpr& residual,
+    const std::vector<Real>& U,
+    int marker,
+    const assembly::CutIntegrationContext* cut_context,
+    Real vec_tol,
+    Real mat_tol)
+{
+    FormCompiler compiler;
+    auto ir_interp = compiler.compileResidual(residual);
+    auto ir_jit = compiler.compileResidual(residual);
+
+    auto interp_kernel =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_interp), NonlinearKernelOutput::Both);
+    interp_kernel->resolveInlinableConstitutives();
+
+    auto jit_fallback =
+        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_jit), NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, defaultJitOptions());
+    jit_kernel.resolveInlinableConstitutives();
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(cut_context);
+    assembler.setCurrentSolution(U);
+
+    const GlobalIndex n = dof_map.getNumDofs();
+
+    assembly::DenseMatrixView J_interp(n);
+    assembly::DenseVectorView R_interp(n);
+    J_interp.zero();
+    R_interp.zero();
+    (void)assembler.assembleInteriorFaces(mesh, space, space, *interp_kernel, J_interp, &R_interp, marker);
+
+    assembly::DenseMatrixView J_jit(n);
+    assembly::DenseVectorView R_jit(n);
+    J_jit.zero();
+    R_jit.zero();
+    (void)assembler.assembleInteriorFaces(mesh, space, space, jit_kernel, J_jit, &R_jit, marker);
+
+    expectDenseNear(R_jit, R_interp, vec_tol);
+    expectDenseNear(J_jit, J_interp, mat_tol);
 }
 
 FormExpr spd2x2FromGradU(const FormExpr& u)
@@ -646,6 +706,50 @@ TEST(JITExtendedParityTest, DGInteriorPenaltyMatchesInterpreter)
     const auto form = (eta * inner(jump(u), jump(v))).dS();
 
     expectJitMatchesInterpreterInteriorFacesBilinear(mesh, dof_map, space, space, form, /*mat_tol=*/1e-12);
+}
+
+TEST(JITExtendedParityTest, CutAdjacentGradientPenaltyContinuousH1MatchesInterpreter)
+{
+    constexpr int marker = 12;
+
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraContinuousDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto h_face = avg(hNormal());
+    const auto h3 = h_face * h_face * h_face;
+    const auto residual = cutAdjacentFacetIntegral(
+        cutStabilizationScale() * h3 *
+            inner(cutAdjacentFacetGradientJump(u),
+                  cutAdjacentFacetGradientJump(v)),
+        marker);
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.name = "continuous-h1-cut-adjacent-gradient-penalty";
+    handle.facets = {0};
+    handle.facet_metadata = {assembly::CutFacetSetFacetMetadata{
+        .facet = 0,
+        .first_cell = 0,
+        .second_cell = 1,
+        .stabilization_scale = Real{1.75},
+        .stable_id = 17}};
+    cut_context.addFacetSetHandle(std::move(handle));
+
+    const std::vector<Real> U = {0.12, -0.05, 0.08, 0.02, -0.07};
+    expectJitMatchesInterpreterInteriorFacesResidual(
+        mesh,
+        dof_map,
+        space,
+        residual,
+        U,
+        marker,
+        &cut_context,
+        /*vec_tol=*/1e-12,
+        /*mat_tol=*/1e-12);
 }
 
 TEST(JITExtendedParityTest, NitscheBoundaryMatchesInterpreter)

@@ -96,6 +96,83 @@ std::shared_ptr<Mesh> build_single_quad_mesh_with_left_edge_marker(int marker)
     return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<Mesh> build_single_quad9_mesh_with_boundary_only_left_edge_marker(int marker)
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+        0.5, 0.0,
+        1.0, 0.5,
+        0.5, 1.0,
+        0.0, 0.5,
+        0.5, 0.5
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+
+    CellShape face_shape{};
+    face_shape.family = CellFamily::Line;
+    face_shape.num_corners = 2;
+    face_shape.order = 1;
+    base->set_faces_from_arrays({face_shape},
+                                {0, 2},
+                                {3, 0},
+                                {std::array<svmp::index_t, 2>{0, svmp::INVALID_INDEX}},
+                                svmp::MeshCodim1StorageMode::BoundaryOnly);
+    base->set_boundary_label(0, marker);
+
+    return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<Mesh> build_single_tetra10_mesh_with_boundary_only_face_marker(int marker)
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+        0.5, 0.0, 0.0,
+        0.5, 0.5, 0.0,
+        0.0, 0.5, 0.0,
+        0.0, 0.0, 0.5,
+        0.5, 0.0, 0.5,
+        0.0, 0.5, 0.5,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 10};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+
+    CellShape shape{};
+    shape.family = CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 2;
+    base->build_from_arrays(/*spatial_dim=*/3, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+
+    CellShape face_shape{};
+    face_shape.family = CellFamily::Triangle;
+    face_shape.num_corners = 3;
+    face_shape.order = 2;
+    base->set_faces_from_arrays({face_shape},
+                                {0, 6},
+                                {0, 1, 2, 4, 5, 6},
+                                {std::array<svmp::index_t, 2>{0, svmp::INVALID_INDEX}},
+                                svmp::MeshCodim1StorageMode::BoundaryOnly);
+    base->set_boundary_label(0, marker);
+
+    return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<Mesh> build_single_quad_mesh_with_vertex_gids()
 {
     auto base = std::make_shared<MeshBase>();
@@ -201,6 +278,60 @@ TEST(StrongDirichletConstraint, InstalledBeforeSetupAffectsAssembly)
     }
 }
 
+TEST(StrongDirichletConstraint, BoundaryOnlyQuadraticLineLabelSurvivesFullTopologySetup)
+{
+    const int marker = 7;
+    auto mesh = build_single_quad9_mesh_with_boundary_only_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad9, /*order=*/2);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    const auto bc = strongDirichlet(u, marker, FormExpr::constant(0.0), "u");
+    svmp::FE::systems::installStrongDirichlet(
+        sys, std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
+
+    sys.setup();
+
+    EXPECT_EQ(mesh->base().codim1_storage_mode(), svmp::MeshCodim1StorageMode::Full);
+
+    std::size_t labelled_faces = 0;
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(mesh->n_faces()); ++f) {
+        if (static_cast<int>(mesh->base().boundary_label(f)) == marker) {
+            ++labelled_faces;
+        }
+    }
+    EXPECT_EQ(labelled_faces, 1u);
+    EXPECT_EQ(sys.constraints().numConstraints(), 3);
+
+    const auto boundary_dofs =
+        svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    EXPECT_EQ(boundary_dofs.size(), 3u);
+}
+
+TEST(StrongDirichletConstraint, BoundaryOnlyTetra10Triangle6LabelConstrainsCornerAndEdgeDofs)
+{
+    const int marker = 7;
+    auto mesh = build_single_tetra10_mesh_with_boundary_only_face_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Tetra10, /*order=*/2);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+
+    const auto bc = strongDirichlet(u, marker, FormExpr::constant(0.0), "u");
+    svmp::FE::systems::installStrongDirichlet(
+        sys, std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
+
+    sys.setup();
+
+    const auto boundary_dofs =
+        svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    EXPECT_EQ(boundary_dofs.size(), 6u);
+    EXPECT_EQ(sys.constraints().numConstraints(), 6);
+}
+
 TEST(StrongDirichletConstraint, UpdateConstraintsRefreshesTimeDependentValues)
 {
     const int marker = 7;
@@ -229,6 +360,38 @@ TEST(StrongDirichletConstraint, UpdateConstraintsRefreshesTimeDependentValues)
     }
 
     sys.updateConstraints(/*time=*/2.0, /*dt=*/0.5);
+    for (auto dof : constrained) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-15);
+    }
+}
+
+TEST(StrongDirichletConstraint, RebuildConstraintStatePreservesLastTimeDependentValues)
+{
+    const int marker = 7;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    const auto bc = strongDirichlet(u, marker, t() + deltat(), "u");
+    svmp::FE::systems::installStrongDirichlet(
+        sys,
+        std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
+
+    sys.setup();
+    sys.updateConstraints(/*time=*/2.0, /*dt=*/0.5);
+
+    const auto constrained =
+        svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    ASSERT_EQ(constrained.size(), 2u);
+    for (auto dof : constrained) {
+        ASSERT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-15);
+    }
+
+    sys.rebuildConstraintState();
     for (auto dof : constrained) {
         EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-15);
     }

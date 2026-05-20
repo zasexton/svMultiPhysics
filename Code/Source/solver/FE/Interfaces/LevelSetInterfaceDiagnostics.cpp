@@ -21,6 +21,10 @@ LevelSetInterfaceSummaryStatistics summarizeLevelSetInterface(
     statistics.active_fragment_count = domain_summary.active_fragment_count;
     statistics.degenerate_fragment_count = domain_summary.degenerate_fragment_count;
     statistics.quadrature_point_count = domain_summary.quadrature_point_count;
+    statistics.volume_quadrature_point_count =
+        domain_summary.volume_quadrature_point_count;
+    statistics.total_quadrature_point_count =
+        domain_summary.total_quadrature_point_count;
     statistics.cut_cell_count = domain.cutCells().size();
     statistics.total_interface_measure = domain_summary.measure;
     return statistics;

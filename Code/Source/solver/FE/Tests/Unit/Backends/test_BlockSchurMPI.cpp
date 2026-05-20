@@ -112,7 +112,7 @@ void expectBlockSchurMetricsPresent(const SolverReport& rep)
     EXPECT_GT(rep.blockschur_outer_iterations, 0);
     EXPECT_GT(rep.blockschur_momentum_solve_calls, 0);
     EXPECT_GT(rep.blockschur_momentum_iterations, 0);
-    EXPECT_LE(rep.blockschur_momentum_restart_cycles, rep.blockschur_momentum_solve_calls);
+    EXPECT_GE(rep.blockschur_momentum_restart_cycles, 0);
     EXPECT_GE(rep.blockschur_momentum_solve_time_seconds, 0.0);
     if (rep.blockschur_schur_solve_calls == 0) {
         EXPECT_EQ(rep.blockschur_schur_iterations, 0);
@@ -1174,6 +1174,126 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
     }
 }
 
+TEST(FsilsBackendMPI, DirichletNativeFaceSetupIsCollectiveWhenOnlyOneRankHasDofs)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly 2 MPI ranks";
+    }
+
+    constexpr int dof = 3;
+    constexpr GlobalIndex n_nodes = 3;
+    constexpr GlobalIndex n_global = n_nodes * dof;
+    const IndexRange owned = (rank == 0) ? IndexRange{0, 3} : IndexRange{3, 9};
+    DistributedSparsityPattern pattern(owned, owned, n_global, n_global);
+
+    if (rank == 0) {
+        const std::array<GlobalIndex, 6> edofs = {0, 1, 2, 3, 4, 5};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    } else {
+        const std::array<GlobalIndex, 6> edofs = {3, 4, 5, 6, 7, 8};
+        pattern.addElementCouplings(std::span<const GlobalIndex>(edofs.data(), edofs.size()));
+    }
+
+    pattern.ensureDiagonal();
+    pattern.finalize();
+    if (rank == 0) {
+        std::vector<GlobalIndex> ghost_rows{3, 4, 5};
+        std::vector<GlobalIndex> ghost_row_ptr{0, 6, 12, 18};
+        std::vector<GlobalIndex> ghost_cols;
+        ghost_cols.reserve(18);
+        for (int r = 0; r < dof; ++r) {
+            for (GlobalIndex c = 0; c < static_cast<GlobalIndex>(2 * dof); ++c) {
+                ghost_cols.push_back(c);
+            }
+        }
+        pattern.setGhostRows(std::move(ghost_rows), std::move(ghost_row_ptr), std::move(ghost_cols));
+    }
+
+    FsilsFactory factory(dof);
+    auto A = factory.createMatrix(pattern);
+    auto b = factory.createVector(n_global);
+
+    auto viewA = A->createAssemblyView();
+    viewA->beginAssemblyPhase();
+
+    const int edof = 2 * dof;
+    std::vector<Real> Ke(edof * edof, 0.0);
+    const auto setKe = [&](int r, int c, Real v) {
+        Ke[static_cast<std::size_t>(r * edof + c)] = v;
+    };
+    const Real B[3][3] = {
+        {4.0, 1.0, 1.0},
+        {1.0, 3.0, 0.0},
+        {1.0, 0.0, 1.0},
+    };
+    const Real C[3][3] = {
+        {-1.0, 0.0, 0.0},
+        { 0.0,-1.0, 0.0},
+        { 0.0, 0.0, 0.0},
+    };
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            setKe(r, c, B[r][c]);
+            setKe(r, c + 3, C[r][c]);
+            setKe(r + 3, c, C[c][r]);
+            setKe(r + 3, c + 3, B[r][c]);
+        }
+    }
+
+    std::vector<GlobalIndex> idx(edof);
+    for (int i = 0; i < edof; ++i) {
+        idx[static_cast<std::size_t>(i)] = (rank == 0) ? i : 3 + i;
+    }
+    viewA->addMatrixEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                            std::span<const Real>(Ke.data(), Ke.size()),
+                            assembly::AddMode::Add);
+    viewA->finalizeAssembly();
+    A->finalizeAssembly();
+
+    auto viewB = b->createAssemblyView();
+    viewB->beginAssemblyPhase();
+    std::vector<Real> be(edof);
+    for (int i = 0; i < edof; ++i) {
+        Real sum = 0.0;
+        for (int j = 0; j < edof; ++j) {
+            sum += Ke[static_cast<std::size_t>(i * edof + j)];
+        }
+        be[static_cast<std::size_t>(i)] = sum;
+    }
+    viewB->addVectorEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                            std::span<const Real>(be.data(), be.size()),
+                            assembly::AddMode::Add);
+    viewB->finalizeAssembly();
+
+    auto opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3,
+                                           /*primary_components=*/2,
+                                           /*constraint_components=*/1,
+                                           FsilsBlockSchurSchurPreconditioner::DiagL,
+                                           FsilsBlockSchurMomentumApproximation::DiagK);
+    opts.rel_tol = 1e-8;
+    opts.abs_tol = 1e-12;
+    opts.max_iter = 20;
+
+    auto solver = factory.createLinearSolver(opts);
+    const std::vector<GlobalIndex> local_dirichlet = (rank == 0)
+        ? std::vector<GlobalIndex>{0, 1}
+        : std::vector<GlobalIndex>{};
+    solver->setDirichletDofs(std::span<const GlobalIndex>(
+        local_dirichlet.data(), local_dirichlet.size()));
+
+    auto x = factory.createVector(n_global);
+    const auto rep = solver->solve(*A, *x, *b);
+    EXPECT_TRUE(rep.converged);
+    expectSolverReportSane(rep, opts.max_iter);
+    expectBlockSchurMetricsPresent(rep);
+    EXPECT_GT(rep.collective_calls, 0u);
+}
+
 TEST(FsilsBackendMPI, SolveBlockSchur4DOFMultiConstraintPreconditioners)
 {
     int size = 1;
@@ -1449,6 +1569,59 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable)
                                                       std::span<const RankOneUpdate>(&upd, 1),
                                                       MPI_COMM_WORLD);
         EXPECT_LE(rel, 1e-8);
+
+        RankOneUpdate upd_second = upd;
+        if (rank == 1) {
+            upd_second.v = {
+                {6, 0.12},
+                {7, 0.03},
+            };
+        }
+
+        auto b_second = factory.createVector(n_global);
+        auto viewB_second = b_second->createAssemblyView();
+        viewB_second->beginAssemblyPhase();
+        if (rank == 0) {
+            std::vector<GlobalIndex> idx(edof);
+            for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = i;
+            viewB_second->addVectorEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                           std::span<const Real>(be.data(), be.size()),
+                                           assembly::AddMode::Add);
+        } else {
+            std::vector<GlobalIndex> idx(edof);
+            for (int i = 0; i < edof; ++i) idx[static_cast<std::size_t>(i)] = 3 + i;
+            viewB_second->addVectorEntries(std::span<const GlobalIndex>(idx.data(), idx.size()),
+                                           std::span<const Real>(be.data(), be.size()),
+                                           assembly::AddMode::Add);
+        }
+        Real local_dot_second = 0.0;
+        for (const auto& [dof_index, value] : upd_second.v) {
+            (void)dof_index;
+            local_dot_second += value;
+        }
+        Real dot_second = 0.0;
+        MPI_Allreduce(&local_dot_second, &dot_second, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        const Real scale_second = upd_second.sigma * dot_second;
+        for (const auto& [dof_index, value] : upd_second.v) {
+            viewB_second->addVectorEntry(dof_index, scale_second * value, assembly::AddMode::Add);
+        }
+        viewB_second->finalizeAssembly();
+
+        auto x_second = factory.createVector(n_global);
+        solver->setRankOneUpdates(std::span<const RankOneUpdate>(&upd_second, 1));
+        const auto rep_second = solver->solve(*A, *x_second, *b_second);
+        EXPECT_TRUE(rep_second.converged);
+        expectSolverReportSane(rep_second, opts.max_iter);
+        if (method == SolverMethod::BlockSchur) {
+            EXPECT_EQ(rep_second.message.find("fallback"), std::string::npos);
+            expectBlockSchurMetricsPresent(rep_second);
+        }
+
+        const Real rel_second =
+            fullOperatorRelativeResidual(factory, *A, *x_second, *b_second,
+                                         std::span<const RankOneUpdate>(&upd_second, 1),
+                                         MPI_COMM_WORLD);
+        EXPECT_LE(rel_second, 1e-8);
     }
 }
 

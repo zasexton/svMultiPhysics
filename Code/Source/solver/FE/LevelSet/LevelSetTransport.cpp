@@ -159,6 +159,10 @@ void validateReinitializationOptions(const LevelSetReinitializationOptions& opti
         throw std::invalid_argument(
             "installLevelSetTransport: reinitialization cadence_steps must be positive");
     }
+    if (options.method != LevelSetReinitializationMethod::Projection) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: runtime reinitialization currently supports Projection only");
+    }
     if (options.max_iterations <= 0) {
         throw std::invalid_argument(
             "installLevelSetTransport: reinitialization max_iterations must be positive");
@@ -201,6 +205,21 @@ void validateVolumeCorrectionOptions(const LevelSetVolumeCorrectionOptions& opti
     }
 }
 
+void validateInterfaceKinematicOptions(const LevelSetInterfaceKinematicOptions& options)
+{
+    if (!options.enabled) {
+        return;
+    }
+    if (options.interface_marker < 0) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: interface kinematic marker must be nonnegative when enabled");
+    }
+    if (!(options.weight_scale > 0.0)) {
+        throw std::invalid_argument(
+            "installLevelSetTransport: interface kinematic weight_scale must be positive when enabled");
+    }
+}
+
 } // namespace
 
 bool shouldReinitializeLevelSet(
@@ -214,14 +233,18 @@ bool shouldReinitializeLevelSet(
 }
 
 LevelSetConservationDiagnostic levelSetConservationDiagnostic(
+    LevelSetTransportForm transport_form,
     const LevelSetReinitializationOptions& reinitialization,
     const LevelSetVolumeCorrectionOptions& volume_correction) noexcept
 {
     if (volume_correction.enabled) {
-        return LevelSetConservationDiagnostic::VolumeCorrectedConservative;
+        return LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative;
     }
     if (reinitialization.enabled) {
         return LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative;
+    }
+    if (transport_form == LevelSetTransportForm::ConservativeDivergence) {
+        return LevelSetConservationDiagnostic::ConservativeDivergenceAdvectionNotLocallyConservative;
     }
     return LevelSetConservationDiagnostic::PlainAdvectionNotConservative;
 }
@@ -230,6 +253,7 @@ LevelSetConservationDiagnostic levelSetConservationDiagnostic(
     const LevelSetTransportOptions& options) noexcept
 {
     return levelSetConservationDiagnostic(
+        options.transport_form,
         options.reinitialization,
         options.volume_correction);
 }
@@ -240,10 +264,12 @@ const char* levelSetConservationDiagnosticName(
     switch (diagnostic) {
     case LevelSetConservationDiagnostic::PlainAdvectionNotConservative:
         return "plain_level_set_advection_not_conservative";
+    case LevelSetConservationDiagnostic::ConservativeDivergenceAdvectionNotLocallyConservative:
+        return "conservative_divergence_level_set_advection_not_locally_conservative";
     case LevelSetConservationDiagnostic::ReinitializedAdvectionNotConservative:
         return "reinitialized_level_set_advection_not_conservative";
-    case LevelSetConservationDiagnostic::VolumeCorrectedConservative:
-        return "volume_corrected_level_set_conservative";
+    case LevelSetConservationDiagnostic::VolumeCorrectedAdvectionNotLocallyConservative:
+        return "volume_corrected_level_set_advection_not_locally_conservative";
     }
     return "unknown_level_set_conservation";
 }
@@ -287,6 +313,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     }
     validateReinitializationOptions(options.reinitialization);
     validateVolumeCorrectionOptions(options.volume_correction);
+    validateInterfaceKinematicOptions(options.interface_kinematic);
     validateBoundaryOptions(options.boundaries);
     if (options.operator_tag.empty()) {
         throw std::invalid_argument(
@@ -345,7 +372,12 @@ systems::CoupledResidualKernels installLevelSetTransport(
                              options.velocity.field_name);
     }
 
-    const auto strong_residual = dt(phi) + dot(velocity, grad(phi));
+    const auto advective_residual = dt(phi) + dot(velocity, grad(phi));
+    const auto conservative_residual = dt(phi) + div(phi * velocity);
+    const auto strong_residual =
+        options.transport_form == LevelSetTransportForm::ConservativeDivergence
+            ? conservative_residual
+            : advective_residual;
     auto residual = (strong_residual * eta).dx();
     if (options.supg.enabled) {
         const auto velocity_norm = sqrt(
@@ -355,6 +387,12 @@ systems::CoupledResidualKernels installLevelSetTransport(
             FormExpr::constant(options.supg.tau_scale) * h() / velocity_norm;
         residual = residual +
                    (tau * dot(velocity, grad(eta)) * strong_residual).dx();
+    }
+    if (options.interface_kinematic.enabled) {
+        residual = residual +
+                   (FormExpr::constant(options.interface_kinematic.weight_scale) *
+                    h() * strong_residual * eta)
+                       .dI(options.interface_kinematic.interface_marker);
     }
 
     for (const auto& bc : options.boundaries.inflow) {

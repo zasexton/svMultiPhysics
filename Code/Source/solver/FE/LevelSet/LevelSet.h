@@ -12,6 +12,7 @@
  */
 
 #include "LevelSet/LevelSetDiagnostics.h"
+#include "LevelSet/LevelSetCurvatureProjection.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "LevelSet/LevelSetReinitialization.h"

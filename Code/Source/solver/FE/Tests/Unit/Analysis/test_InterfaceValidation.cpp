@@ -107,6 +107,35 @@ TEST(InterfaceValidation, PostSetup_MissingMarker_Error) {
 }
 
 // ============================================================================
+// Post-setup: generated embedded marker covered by cut-interface rules → no error
+// ============================================================================
+
+TEST(InterfaceValidation, PostSetup_GeneratedEmbeddedMarker_NoInterfaceMeshRequired) {
+    InterfaceValidationAnalyzer pass;
+    ProblemAnalysisContext ctx;
+
+    InterfaceTopologyContext itopo;
+    itopo.addGeneratedEmbeddedMarker(1030234);
+    ctx.setInterfaceTopologyContext(std::move(itopo));
+
+    ContributionDescriptor cd;
+    cd.domain = DomainKind::InterfaceFace;
+    cd.interface_scope = InterfaceScope::SpecificMarker;
+    cd.interface_marker = 1030234;
+    cd.test_variables = {VariableKey::field(0)};
+    cd.trial_variables = {VariableKey::field(1)};
+    ctx.addContribution(std::move(cd));
+
+    ProblemAnalysisReport report;
+    pass.run(ctx, report);
+
+    for (const auto& issue : report.issues) {
+        EXPECT_NE(issue.severity, IssueSeverity::Error)
+            << "Unexpected error: " << issue.message;
+    }
+}
+
+// ============================================================================
 // Post-setup: AllRegisteredInterfaces with at least one mesh → OK
 // ============================================================================
 

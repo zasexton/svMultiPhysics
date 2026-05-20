@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -1216,8 +1217,14 @@ void axpy(backends::GenericVector& y, Real alpha, const backends::GenericVector&
     auto ys = y.localSpan();
     auto xs = x.localSpan();
     FE_CHECK_ARG(ys.size() == xs.size(), "NewtonSolver: axpy size mismatch");
+    bool changed = false;
     for (std::size_t i = 0; i < ys.size(); ++i) {
+        const auto old = ys[i];
         ys[i] += alpha * xs[i];
+        changed = changed || ys[i] != old;
+    }
+    if (changed) {
+        y.markModified();
     }
 }
 
@@ -1226,7 +1233,14 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
     auto d = dst.localSpan();
     auto s = src.localSpan();
     FE_CHECK_ARG(d.size() == s.size(), "NewtonSolver: copyVector size mismatch");
-    std::copy(s.begin(), s.end(), d.begin());
+    bool changed = false;
+    for (std::size_t i = 0; i < d.size(); ++i) {
+        changed = changed || d[i] != s[i];
+        d[i] = s[i];
+    }
+    if (changed) {
+        dst.markModified();
+    }
 }
 
 double residualNormForConvergence(const backends::GenericVector& r, backends::GenericVector& scratch)
@@ -1863,6 +1877,21 @@ void logVectorComponentNorms(const systems::FESystem& sys,
             << " max=" << max_value << "]";
     }
     FE_LOG_INFO(oss.str());
+}
+
+std::optional<std::size_t> fieldMapIndexForFieldId(const systems::FESystem& sys,
+                                                   FieldId fid)
+{
+    if (fid == INVALID_FIELD_ID) {
+        return std::nullopt;
+    }
+    const auto& fmap = sys.fieldMap();
+    const auto& rec = sys.fieldRecord(fid);
+    const auto field_index = fmap.getFieldIndex(rec.name);
+    if (field_index < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(field_index);
 }
 
 void logVectorTopEntries(const systems::FESystem& sys,
@@ -3841,14 +3870,11 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
         if (!dt_fields.empty()) {
             const auto& fmap = system.fieldMap();
             for (const auto fid : dt_fields) {
-                if (fid < 0) {
+                const auto idx = fieldMapIndexForFieldId(system, fid);
+                if (!idx || *idx >= fmap.numFields()) {
                     continue;
                 }
-                const auto idx = static_cast<std::size_t>(fid);
-                if (idx >= fmap.numFields()) {
-                    continue;
-                }
-                const auto range = fmap.getFieldDofRange(idx);
+                const auto range = fmap.getFieldDofRange(*idx);
                 for (GlobalIndex d = range.first; d < range.second; ++d) {
                     workspace.dt_field_dofs.push_back(d);
                 }
@@ -3943,7 +3969,13 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     FE_THROW_IF(!(history.dt() > 0.0), InvalidArgumentException, "NewtonSolver: dt must be > 0");
     FE_THROW_IF(!std::isfinite(solve_time), InvalidArgumentException, "NewtonSolver: solve_time must be finite");
     transient.system().updateConstraints(solve_time, history.dt());
+    if (oopTraceEnabled()) {
+        logVectorComponentNorms(transient.system(), history.u(), "before_newton_sync");
+    }
     syncHistoryState();
+    if (oopTraceEnabled()) {
+        logVectorComponentNorms(transient.system(), history.u(), "after_newton_sync");
+    }
 
     auto base_state_holder = makeNewtonState(history, solve_time);
     const auto& base_state = base_state_holder.view;
@@ -4128,14 +4160,11 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             dofs::IndexSet dt_dofs_all;
             const auto& fmap = sys.fieldMap();
             for (const auto fid : dt_fields) {
-                if (fid < 0) {
+                const auto idx = fieldMapIndexForFieldId(sys, fid);
+                if (!idx || *idx >= fmap.numFields()) {
                     continue;
                 }
-                const auto idx = static_cast<std::size_t>(fid);
-                if (idx >= fmap.numFields()) {
-                    continue;
-                }
-                const auto range = fmap.getFieldDofRange(idx);
+                const auto range = fmap.getFieldDofRange(*idx);
                 dt_dofs_all = dt_dofs_all.unionWith(dofs::IndexSet(range.first, range.second));
             }
 #if defined(FE_HAS_FSILS)
@@ -7065,10 +7094,20 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
             auto trial_state_holder = makeNewtonState(history, solve_time);
             transient.system().beginGeometricNonlinearityTrial(trial_state_holder.view);
-            return assembleResidualOnly(
-                trial_state_holder.view,
-                phase,
-                StateSyncPoint::LineSearchTrialResidual);
+            try {
+                return assembleResidualOnly(
+                    trial_state_holder.view,
+                    phase,
+                    StateSyncPoint::LineSearchTrialResidual);
+            } catch (const std::exception& ex) {
+                if (trial_alpha == 0.0) {
+                    throw;
+                }
+                transient.system().rollbackGeometricNonlinearityTrial();
+                FE_LOG_INFO(std::string("NewtonSolver: line search trial residual failed; treating trial as rejected. reason='") +
+                            ex.what() + "'");
+                return std::numeric_limits<double>::infinity();
+            }
         };
 
         double alpha = 1.0;
@@ -7078,6 +7117,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         double best_alpha = 0.0;
         double best_trial_norm = std::numeric_limits<double>::infinity();
         bool have_best_trial = false;
+        bool failed_to_reduce = false;
         const int line_search_iteration_budget =
             std::max(1, options_.line_search_max_iterations);
 
@@ -7168,6 +7208,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                 alpha = 0.0;
                 trial_norm = evaluateLineSearchTrial(alpha, /*phase=*/"line_search_reject");
                 reverted_to_original = true;
+                failed_to_reduce = true;
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
                     oss << "NewtonSolver: line search did not reduce residual; reverting to original iterate"
@@ -7196,6 +7237,19 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
         current_residual_norm = trial_norm;
         have_residual = std::isfinite(current_residual_norm);
+
+        if (failed_to_reduce && options_.line_search_fail_on_no_reduction) {
+            report.converged = false;
+            report.iterations = it + 1;
+            if (have_residual) {
+                updateResidualReport();
+            }
+            if (oopTraceEnabled()) {
+                traceLog("NewtonSolver: line search failed to reduce residual; returning nonlinear failure.");
+            }
+            printNewtonProfile(it + 1);
+            return report;
+        }
 
         if (options_.step_tolerance > 0.0) {
             const double step_norm = reverted_to_original ? du_norm : (alpha * du_norm);

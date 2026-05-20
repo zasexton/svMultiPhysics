@@ -2069,14 +2069,30 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_NEAR(negative_volume_rules.front()->measure, 0.5, 1.0e-14);
     EXPECT_NEAR(positive_volume_rules.front()->measure, 0.5, 1.0e-14);
 
+    std::vector<std::uint64_t> volume_policy_keys;
+    std::vector<std::uint64_t> interface_policy_keys;
     const auto evaluation = context.evaluateScalarCutOperator(
         CutIntegrationAssemblyPath::Standard,
-        [](const CutScalarOperatorPoint&) { return 0.0; },
-        [](const CutScalarOperatorPoint&) { return 2.0; });
+        [&](const CutScalarOperatorPoint& point) {
+            volume_policy_keys.push_back(point.quadrature_policy_key);
+            return 0.0;
+        },
+        [&](const CutScalarOperatorPoint& point) {
+            interface_policy_keys.push_back(point.quadrature_policy_key);
+            return 2.0;
+        });
     EXPECT_EQ(evaluation.interface_rule_count, 1u);
     EXPECT_EQ(evaluation.interface_point_count, 1u);
     EXPECT_DOUBLE_EQ(evaluation.interface_measure, 1.0);
     EXPECT_DOUBLE_EQ(evaluation.interface_integral, 2.0);
+    ASSERT_FALSE(volume_policy_keys.empty());
+    ASSERT_FALSE(interface_policy_keys.empty());
+    for (const auto key : volume_policy_keys) {
+        EXPECT_EQ(key, request.quadrature_policy_key);
+    }
+    for (const auto key : interface_policy_keys) {
+        EXPECT_EQ(key, request.quadrature_policy_key);
+    }
 
     context.clear();
     EXPECT_FALSE(context.hasGeneratedInterfaceMarker(51));
@@ -2085,6 +2101,46 @@ TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMark
     EXPECT_TRUE(context.generatedVolumeMarkers().empty());
     EXPECT_TRUE(context.interfaceRules().empty());
     EXPECT_TRUE(context.volumeRules().empty());
+}
+
+TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainForRequestedVolumeSide)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.interface_marker = 51;
+    request.quadrature_policy_key = 19;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 7,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain, CutIntegrationSide::Negative);
+
+    EXPECT_TRUE(context.hasGeneratedInterfaceMarker(51));
+    EXPECT_TRUE(context.hasGeneratedVolumeMarker(51));
+    ASSERT_EQ(context.interfaceRulesForMarker(51).size(), 1u);
+    ASSERT_EQ(context.volumeRules().size(), 1u);
+
+    const auto negative_volume_rules =
+        context.generatedVolumeRulesForMarkerAndSide(51, CutIntegrationSide::Negative);
+    const auto positive_volume_rules =
+        context.generatedVolumeRulesForMarkerAndSide(51, CutIntegrationSide::Positive);
+    ASSERT_EQ(negative_volume_rules.size(), 1u);
+    EXPECT_TRUE(positive_volume_rules.empty());
+    EXPECT_EQ(negative_volume_rules.front()->side, CutIntegrationSide::Negative);
+    EXPECT_NEAR(negative_volume_rules.front()->measure, 0.5, 1.0e-14);
+    EXPECT_THROW(context.addGeneratedInterfaceDomain(domain, CutIntegrationSide::Interface),
+                 std::invalid_argument);
 }
 
 TEST(CutIntegrationInfrastructure, GeneratedCutVolumesRejectStaleSourceRevision)
@@ -2354,6 +2410,33 @@ TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAn
     EXPECT_EQ(positive_rules.front()->side, CutIntegrationSide::Positive);
     EXPECT_NEAR(positive_rules.front()->measure, 0.75, 1.0e-14);
 
+    const auto negative_diagnostics =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(51, CutIntegrationSide::Negative);
+    EXPECT_EQ(negative_diagnostics.rule_count, negative_rules.size());
+    EXPECT_EQ(negative_diagnostics.cut_cell_rules, 1u);
+    EXPECT_EQ(negative_diagnostics.full_cell_rules, 0u);
+    EXPECT_EQ(negative_diagnostics.quadrature_points,
+              negative_rules.front()->points.size());
+    EXPECT_DOUBLE_EQ(negative_diagnostics.active_volume,
+                     negative_rules.front()->measure);
+    EXPECT_DOUBLE_EQ(negative_diagnostics.cut_cell_active_volume,
+                     negative_rules.front()->measure);
+    EXPECT_DOUBLE_EQ(negative_diagnostics.min_volume_fraction,
+                     negative_rules.front()->volume_fraction);
+    EXPECT_DOUBLE_EQ(negative_diagnostics.max_volume_fraction,
+                     negative_rules.front()->volume_fraction);
+    EXPECT_EQ(negative_diagnostics.min_exact_order,
+              negative_rules.front()->exact_polynomial_order);
+    EXPECT_EQ(negative_diagnostics.max_exact_order,
+              negative_rules.front()->exact_polynomial_order);
+
+    const auto missing_diagnostics =
+        context.generatedVolumeDiagnosticsForMarkerAndSide(53, CutIntegrationSide::Negative);
+    EXPECT_EQ(missing_diagnostics.rule_count, 0u);
+    EXPECT_DOUBLE_EQ(missing_diagnostics.active_volume, 0.0);
+    EXPECT_DOUBLE_EQ(missing_diagnostics.min_rule_measure, 0.0);
+    EXPECT_EQ(missing_diagnostics.min_exact_order, 0);
+
     EXPECT_TRUE(context.generatedVolumeRulesForMarkerAndSide(
                            51, CutIntegrationSide::Interface)
                     .empty());
@@ -2364,6 +2447,10 @@ TEST(CutIntegrationInfrastructure, IndexesGeneratedLevelSetVolumeRulesByMarkerAn
     const auto negative_indices =
         context.generatedVolumeRuleIndicesForMarkerAndSide(51, CutIntegrationSide::Negative);
     ASSERT_EQ(negative_indices.size(), 1u);
+    const auto negative_index_span =
+        context.generatedVolumeRuleIndexSpanForMarkerAndSide(51, CutIntegrationSide::Negative);
+    ASSERT_EQ(negative_index_span.size(), negative_indices.size());
+    EXPECT_EQ(negative_index_span.front(), negative_indices.front());
     EXPECT_EQ(context.metadata()[negative_indices.front()].parent_entity, 7);
     EXPECT_EQ(context.metadata()[negative_indices.front()].side, CutIntegrationSide::Negative);
 

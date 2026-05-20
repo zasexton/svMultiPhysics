@@ -10365,6 +10365,86 @@ SideClosedTopology build_side_closed_topology_for_cell(
   return topology;
 }
 
+void synchronize_side_region_measure_with_subcells(
+    CutSideRegion& region,
+    const SideMeasureEstimate& measure,
+    real_t tol) {
+  if (region.integration_subcells.empty()) {
+    return;
+  }
+
+  real_t subcell_measure = real_t{0.0};
+  std::array<real_t, 3> weighted_centroid{{0.0, 0.0, 0.0}};
+  for (const auto& subcell : region.integration_subcells) {
+    if (subcell.measure <= real_t{0.0}) {
+      continue;
+    }
+    subcell_measure += subcell.measure;
+    weighted_centroid = add(weighted_centroid, scale(subcell.centroid, subcell.measure));
+  }
+  if (subcell_measure <= real_t{0.0}) {
+    return;
+  }
+
+  region.centroid_estimate =
+      scale(weighted_centroid, real_t{1.0} / subcell_measure);
+  region.measure_estimate = subcell_measure;
+  if (measure.available &&
+      measure.measure > positive_tolerance(tol) &&
+      std::isfinite(measure.measure)) {
+    const real_t scale_factor = measure.measure / subcell_measure;
+    if (std::isfinite(scale_factor) && scale_factor > real_t{0.0}) {
+      for (auto& subcell : region.integration_subcells) {
+        subcell.measure *= scale_factor;
+      }
+      region.measure_estimate = measure.measure;
+    }
+  }
+
+  region.volume_fraction_estimate =
+      region.parent_measure > real_t{0.0}
+          ? std::max(real_t{0.0},
+                     std::min(real_t{1.0},
+                              region.measure_estimate / region.parent_measure))
+          : real_t{0.0};
+}
+
+void conserve_side_region_pair_against_parent(
+    std::vector<CutSideRegion>& regions,
+    real_t tol) {
+  if (regions.empty()) {
+    return;
+  }
+
+  real_t parent_measure = real_t{0.0};
+  real_t side_measure_sum = real_t{0.0};
+  for (const auto& region : regions) {
+    parent_measure = std::max(parent_measure, region.parent_measure);
+    side_measure_sum += region.measure_estimate;
+  }
+  if (parent_measure <= positive_tolerance(tol) ||
+      side_measure_sum <= positive_tolerance(tol)) {
+    return;
+  }
+
+  const real_t scale_factor = parent_measure / side_measure_sum;
+  if (!std::isfinite(scale_factor) || scale_factor <= real_t{0.0}) {
+    return;
+  }
+
+  for (auto& region : regions) {
+    region.parent_measure = parent_measure;
+    region.measure_estimate *= scale_factor;
+    region.volume_fraction_estimate =
+        std::max(real_t{0.0},
+                 std::min(real_t{1.0},
+                          region.measure_estimate / parent_measure));
+    for (auto& subcell : region.integration_subcells) {
+      subcell.measure *= scale_factor;
+    }
+  }
+}
+
 } // namespace
 
 std::uint64_t EmbeddedGeometryRevisionState::revision_key() const noexcept {
@@ -11573,6 +11653,12 @@ CutTopologyRecord reconstruct_cut_topology(
           mesh.geometry_dof_coords(dof, cfg)));
     }
 
+    const bool high_order_cell = cell_uses_high_order_geometry(mesh, cell.entity);
+    std::vector<CutSideRegion> pending_side_regions;
+    if (high_order_cell) {
+      pending_side_regions.reserve(2u);
+    }
+
     for (const auto side : {CutTopologySide::Negative, CutTopologySide::Positive}) {
       CutSideRegion region;
       region.side = side;
@@ -11621,6 +11707,9 @@ CutTopologyRecord reconstruct_cut_topology(
       region.integration_subcells = closed_topology.subcells;
       region.integration_region_vertices = closed_topology.vertex_ids;
       region.integration_region_faces = closed_topology.faces;
+      if (high_order_cell) {
+        synchronize_side_region_measure_with_subcells(region, measure, tol);
+      }
       region.closed_integration_topology =
           !region.integration_subcells.empty() &&
           std::all_of(region.integration_subcells.begin(),
@@ -11667,47 +11756,20 @@ CutTopologyRecord reconstruct_cut_topology(
         topology.diagnostics.push_back(
             "linear side-measure reconstruction is unavailable for a cut side region");
       }
-      topology.side_regions.push_back(std::move(region));
-      h = append_hash(h, topology.side_regions.back().stable_id);
-      h = append_hash_real(h, topology.side_regions.back().parent_measure);
-      h = append_hash_real(h, topology.side_regions.back().measure_estimate);
-      h = append_hash_real(h, topology.side_regions.back().volume_fraction_estimate);
-      for (const auto id : topology.side_regions.back().integration_region_vertices) {
-        h = append_hash(h, id);
+
+      if (high_order_cell) {
+        pending_side_regions.push_back(std::move(region));
+      } else {
+        topology.side_regions.push_back(std::move(region));
+        hash_side_region_record(h, topology.side_regions.back());
       }
-      for (const auto& face : topology.side_regions.back().integration_region_faces) {
-        h = append_hash(h, static_cast<std::uint64_t>(face.size()));
-        for (const auto id : face) {
-          h = append_hash(h, id);
-        }
-      }
-      for (const auto& vertex : topology.side_regions.back().integration_vertices) {
-        h = append_hash(h, vertex.stable_id);
-        h = append_hash_real(h, vertex.point[0]);
-        h = append_hash_real(h, vertex.point[1]);
-        h = append_hash_real(h, vertex.point[2]);
-      }
-      for (const auto& subcell : topology.side_regions.back().integration_subcells) {
-        h = append_hash(h, subcell.stable_id);
-        h = append_hash(h, static_cast<std::uint64_t>(subcell.family));
-        h = append_hash_real(h, subcell.measure);
-        h = append_hash_real(h, subcell.parent_parametric_measure);
-        h = append_hash(h, subcell.curved_isoparametric ? 1u : 0u);
-        h = append_hash(h, subcell.measure_from_isoparametric_quadrature ? 1u : 0u);
-        for (const auto id : subcell.vertices) {
-          h = append_hash(h, id);
-        }
-        for (const auto& xi : subcell.parent_parametric_vertices) {
-          h = append_hash_real(h, xi[0]);
-          h = append_hash_real(h, xi[1]);
-          h = append_hash_real(h, xi[2]);
-        }
-        for (const auto& face : subcell.faces) {
-          h = append_hash(h, static_cast<std::uint64_t>(face.size()));
-          for (const auto id : face) {
-            h = append_hash(h, id);
-          }
-        }
+    }
+
+    if (high_order_cell) {
+      conserve_side_region_pair_against_parent(pending_side_regions, tol);
+      for (auto& region : pending_side_regions) {
+        topology.side_regions.push_back(std::move(region));
+        hash_side_region_record(h, topology.side_regions.back());
       }
     }
   }
