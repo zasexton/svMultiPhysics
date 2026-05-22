@@ -14,6 +14,7 @@
 #include "all_fun.h"
 #include "bf.h"
 #include "contact.h"
+#include "Core/Exception.h"
 #include "distribute.h"
 #include "eq_assem.h"
 #include "fs.h"
@@ -613,6 +614,7 @@ int main(int argc, char *argv[])
   dmsg.banner();
   #endif
 
+  try {
   // Iterate for restarting a simulation after remeshing. 
   //
   while (true) {
@@ -687,4 +689,30 @@ int main(int argc, char *argv[])
     }
 
   MPI_Finalize();
+  return 0;
+
+  } catch (const svmp::ExceptionBase& exception) {
+    if (mpi_rank == 0) {
+      std::cerr << "[svMultiPhysics] ERROR: The svMultiPhysics program has failed due to unhandled exception." << std::endl;
+      std::cerr << exception.what() << std::endl;
+    }
+    svmp::ExceptionRuntime::abort_mpi_if_needed(EXIT_FAILURE);
+    svmp::ExceptionRuntime::finalize_mpi_if_needed();
+    return EXIT_FAILURE;
+  } catch (const std::exception& exception) {
+    if (mpi_rank == 0) {
+      std::cerr << "[svMultiPhysics] ERROR: The svMultiPhysics program has failed due to unhandled exception." << std::endl;
+      std::cerr << exception.what() << std::endl;
+    }
+    svmp::ExceptionRuntime::abort_mpi_if_needed(EXIT_FAILURE);
+    svmp::ExceptionRuntime::finalize_mpi_if_needed();
+    return EXIT_FAILURE;
+  } catch (...) {
+    if (mpi_rank == 0) {
+      std::cerr << "[svMultiPhysics] ERROR: The svMultiPhysics program has failed due to an unknown unhandled exception." << std::endl;
+    }
+    svmp::ExceptionRuntime::abort_mpi_if_needed(EXIT_FAILURE);
+    svmp::ExceptionRuntime::finalize_mpi_if_needed();
+    return EXIT_FAILURE;
+  }
 }
