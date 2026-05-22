@@ -128,19 +128,19 @@ private:
   void relax_aitken(int cp, int nsd, const Array<double>& disp_current);
 
   /// Compute global_nNo and local_offset for a distributed face
-  static void compute_face_global_info(const faceType& face, const cmType& cm,
+  static void compute_face_global_info(const faceType& face, cmType& cm,
                                        const CmMod& cm_mod,
                                        int& global_nNo, int& local_offset);
 
   /// All-gather local face data (nrows, local_nNo) to global (nrows, global_nNo)
   static Array<double> gather_face_data(const Array<double>& local_data,
                                         int global_nNo, int local_offset,
-                                        const cmType& cm, const CmMod& cm_mod);
+                                        cmType& cm, const CmMod& cm_mod);
 
   /// All-gather local (local_src → global_tgt) map to global (global_src → global_tgt) map
   static void gather_global_map(const std::vector<int>& local_map,
                                 int global_src_nNo,
-                                const cmType& cm, const CmMod& cm_mod,
+                                cmType& cm, const CmMod& cm_mod,
                                 std::vector<int>& global_map);
 
   /// Build local face_a → global face_b node map using pre-gathered global face_b coords

@@ -128,7 +128,7 @@ void PartitionedFSI::resolve_faces()
 // and this rank's offset within the global face node ordering.
 //----------------------------------------------------------------------
 void PartitionedFSI::compute_face_global_info(
-    const faceType& face, const cmType& cm, const CmMod& cm_mod,
+    const faceType& face, cmType& cm, const CmMod& cm_mod,
     int& global_nNo, int& local_offset)
 {
   int np = cm.np();
@@ -155,7 +155,7 @@ void PartitionedFSI::compute_face_global_info(
 Array<double> PartitionedFSI::gather_face_data(
     const Array<double>& local_data,
     int global_nNo, int /*local_offset*/,
-    const cmType& cm, const CmMod& cm_mod)
+    cmType& cm, const CmMod& cm_mod)
 {
   const int nrows = local_data.nrows();
   const int local_nNo = local_data.ncols();
@@ -198,7 +198,7 @@ Array<double> PartitionedFSI::gather_face_data(
 void PartitionedFSI::gather_global_map(
     const std::vector<int>& local_map,
     int global_src_nNo,
-    const cmType& cm, const CmMod& cm_mod,
+    cmType& cm, const CmMod& cm_mod,
     std::vector<int>& global_map)
 {
   int np = cm.np();
