@@ -183,7 +183,7 @@
   <Max_coupling_iterations> 50 </Max_coupling_iterations>
   <Coupling_tolerance> 1e-8 </Coupling_tolerance>
   <Initial_relaxation> 1.0 </Initial_relaxation>
-  <Use_Aitken> true </Use_Aitken>
+  <Coupling_method> aitken </Coupling_method>
   <Fluid_interface_face> lumen_wall </Fluid_interface_face>
   <Solid_interface_face> wall_inner </Solid_interface_face>
 </Partitioned_coupling>

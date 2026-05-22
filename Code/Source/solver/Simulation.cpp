@@ -120,38 +120,76 @@ PartitionedFSI* Simulation::get_partitioned_fsi()
   return partitioned_fsi_.get();
 }
 
-/// @brief Initialize partitioned FSI if configured in parameters
+/// @brief Initialize partitioned FSI if configured in parameters.
+///
+/// Parameters are only parsed on rank 0 (slaves skip read_files), so we
+/// broadcast the active flag and config to all ranks before branching.
 void Simulation::initialize_partitioned_fsi(const std::string& xml_file_path)
 {
-  if (!parameters.partitioned_coupling_parameters.defined()) {
-    return;
-  }
+  auto& cm = com_mod.cm;
+  auto& cm_mod_ref = cm_mod;
 
-  // Only create PartitionedFSI when fluid and solid XML paths are specified.
-  // This allows standalone testing with just Partitioned_coupling (which sets
-  // mvMsh) but without the full coupling machinery.
-  auto& pcp = parameters.partitioned_coupling_parameters;
-  if (!pcp.fluid_xml.defined() || pcp.fluid_xml.value().empty() ||
-      !pcp.solid_xml.defined() || pcp.solid_xml.value().empty()) {
-    return;
-  }
+  // Rank 0 determines whether partitioned FSI is active and builds the config.
+  // Broadcast the decision so all ranks take the same path.
+  int active = 0;
   PartitionedFSIConfig config;
-  config.max_coupling_iterations = pcp.max_coupling_iterations.value();
-  config.coupling_tolerance = pcp.coupling_tolerance.value();
-  config.initial_relaxation = pcp.initial_relaxation.value();
-  config.omega_max = pcp.omega_max.value();
 
-  // Parse coupling method: "constant" or "aitken" (default)
-  std::string method = pcp.coupling_method.value();
-  if (method == "constant")      config.coupling_method = CouplingMethod::constant;
-  else if (method == "aitken")   config.coupling_method = CouplingMethod::aitken;
-  else throw std::runtime_error("[PartitionedFSI] Unknown Coupling_method: " + method);
+  if (cm.mas(cm_mod_ref)) {
+    auto& pcp = parameters.partitioned_coupling_parameters;
+    if (pcp.defined() &&
+        pcp.fluid_xml.defined() && !pcp.fluid_xml.value().empty() &&
+        pcp.solid_xml.defined() && !pcp.solid_xml.value().empty()) {
+      active = 1;
+      config.max_coupling_iterations = pcp.max_coupling_iterations.value();
+      config.coupling_tolerance       = pcp.coupling_tolerance.value();
+      config.initial_relaxation       = pcp.initial_relaxation.value();
+      config.omega_max                = pcp.omega_max.value();
 
-  config.fluid_interface_face = pcp.fluid_interface_face.value();
-  config.solid_interface_face = pcp.solid_interface_face.value();
-  config.fluid_xml = pcp.fluid_xml.value();
-  config.solid_xml = pcp.solid_xml.value();
-  if (pcp.mesh_xml.defined()) config.mesh_xml = pcp.mesh_xml.value();
+      std::string method = pcp.coupling_method.value();
+      if (method == "constant")    config.coupling_method = CouplingMethod::constant;
+      else if (method == "aitken") config.coupling_method = CouplingMethod::aitken;
+      else throw std::runtime_error("[PartitionedFSI] Unknown Coupling_method: " + method);
+
+      config.fluid_interface_face = pcp.fluid_interface_face.value();
+      config.solid_interface_face = pcp.solid_interface_face.value();
+      config.fluid_xml            = pcp.fluid_xml.value();
+      config.solid_xml            = pcp.solid_xml.value();
+      if (pcp.mesh_xml.defined()) config.mesh_xml = pcp.mesh_xml.value();
+    }
+  }
+
+  // Broadcast the active flag and config fields to all ranks.
+  MPI_Bcast(&active, 1, MPI_INT, 0, cm.com());
+  if (!active) return;
+
+  int max_iter = config.max_coupling_iterations;
+  double tol   = config.coupling_tolerance;
+  double relax = config.initial_relaxation;
+  double omax  = config.omega_max;
+  int method_i = static_cast<int>(config.coupling_method);
+  MPI_Bcast(&max_iter, 1, MPI_INT,    0, cm.com());
+  MPI_Bcast(&tol,      1, MPI_DOUBLE, 0, cm.com());
+  MPI_Bcast(&relax,    1, MPI_DOUBLE, 0, cm.com());
+  MPI_Bcast(&omax,     1, MPI_DOUBLE, 0, cm.com());
+  MPI_Bcast(&method_i, 1, MPI_INT,    0, cm.com());
+
+  auto bcast_str = [&](std::string& s) {
+    int len = static_cast<int>(s.size());
+    MPI_Bcast(&len, 1, MPI_INT, 0, cm.com());
+    s.resize(len);
+    MPI_Bcast(s.data(), len, MPI_CHAR, 0, cm.com());
+  };
+  bcast_str(config.fluid_interface_face);
+  bcast_str(config.solid_interface_face);
+  bcast_str(config.fluid_xml);
+  bcast_str(config.solid_xml);
+  bcast_str(config.mesh_xml);
+
+  config.max_coupling_iterations = max_iter;
+  config.coupling_tolerance       = tol;
+  config.initial_relaxation       = relax;
+  config.omega_max                = omax;
+  config.coupling_method          = static_cast<CouplingMethod>(method_i);
 
   partitioned_fsi_ = std::make_unique<PartitionedFSI>(this, config, xml_file_path);
 }

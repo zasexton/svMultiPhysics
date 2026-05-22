@@ -127,45 +127,189 @@ void PartitionedFSI::resolve_faces()
 }
 
 //----------------------------------------------------------------------
-// build_face_node_map
+// compute_face_global_info — gather per-rank nNo to compute global nNo
+// and this rank's offset within the global face node ordering.
+//----------------------------------------------------------------------
+void PartitionedFSI::compute_face_global_info(
+    const faceType& face, const cmType& cm, const CmMod& cm_mod,
+    int& global_nNo, int& local_offset)
+{
+  int np = cm.np();
+  int my_rank = cm.id();
+  int local_nNo = face.nNo;
+
+  std::vector<int> all_nNo(np);
+  MPI_Allgather(&local_nNo, 1, MPI_INT,
+                all_nNo.data(), 1, MPI_INT, cm.com());
+
+  global_nNo = 0;
+  local_offset = 0;
+  for (int p = 0; p < np; p++) {
+    if (p < my_rank) local_offset += all_nNo[p];
+    global_nNo += all_nNo[p];
+  }
+}
+
+//----------------------------------------------------------------------
+// gather_face_data — MPI_Allgatherv local face data to all ranks.
+// local_data is (nrows, local_nNo); returns (nrows, global_nNo).
+// Rank ordering in global array matches the local_offset convention.
+//----------------------------------------------------------------------
+Array<double> PartitionedFSI::gather_face_data(
+    const Array<double>& local_data,
+    int global_nNo, int /*local_offset*/,
+    const cmType& cm, const CmMod& cm_mod)
+{
+  const int nrows = local_data.nrows();
+  const int local_nNo = local_data.ncols();
+  const int np = cm.np();
+
+  // Pack as flat row-major: [node0_row0, node0_row1, ..., node1_row0, ...]
+  std::vector<double> local_flat(nrows * local_nNo);
+  for (int a = 0; a < local_nNo; a++)
+    for (int i = 0; i < nrows; i++)
+      local_flat[a * nrows + i] = local_data(i, a);
+
+  int send_count = nrows * local_nNo;
+  std::vector<int> recv_counts(np), displs(np);
+  MPI_Allgather(&send_count, 1, MPI_INT,
+                recv_counts.data(), 1, MPI_INT, cm.com());
+  int total = 0;
+  for (int p = 0; p < np; p++) { displs[p] = total; total += recv_counts[p]; }
+
+  std::vector<double> global_flat(total);
+  MPI_Allgatherv(local_flat.data(), send_count, MPI_DOUBLE,
+                 global_flat.data(), recv_counts.data(), displs.data(),
+                 MPI_DOUBLE, cm.com());
+
+  Array<double> result(nrows, global_nNo);
+  int node_offset = 0;
+  for (int p = 0; p < np; p++) {
+    int p_nNo = recv_counts[p] / nrows;
+    for (int la = 0; la < p_nNo; la++)
+      for (int i = 0; i < nrows; i++)
+        result(i, node_offset + la) = global_flat[displs[p] + la * nrows + i];
+    node_offset += p_nNo;
+  }
+  return result;
+}
+
+//----------------------------------------------------------------------
+// gather_global_map — all-gather a local (local_src → global_tgt) map
+// into a global (global_src → global_tgt) map.
+//----------------------------------------------------------------------
+void PartitionedFSI::gather_global_map(
+    const std::vector<int>& local_map,
+    int global_src_nNo,
+    const cmType& cm, const CmMod& cm_mod,
+    std::vector<int>& global_map)
+{
+  int np = cm.np();
+  int send_count = static_cast<int>(local_map.size());
+
+  std::vector<int> recv_counts(np), displs(np);
+  MPI_Allgather(&send_count, 1, MPI_INT,
+                recv_counts.data(), 1, MPI_INT, cm.com());
+  int total = 0;
+  for (int p = 0; p < np; p++) { displs[p] = total; total += recv_counts[p]; }
+
+  std::vector<int> global_flat(total);
+  MPI_Allgatherv(local_map.data(), send_count, MPI_INT,
+                 global_flat.data(), recv_counts.data(), displs.data(),
+                 MPI_INT, cm.com());
+
+  global_map.assign(global_src_nNo, -1);
+  int offset = 0;
+  for (int p = 0; p < np; p++) {
+    for (int la = 0; la < recv_counts[p]; la++)
+      global_map[offset + la] = global_flat[displs[p] + la];
+    offset += recv_counts[p];
+  }
+}
+
+//----------------------------------------------------------------------
+// build_face_node_map — match each LOCAL face_a node to its nearest
+// node in the PRE-GATHERED global face_b coordinates.
+// Returns local_src_idx → global_tgt_idx map.
 //----------------------------------------------------------------------
 void PartitionedFSI::build_face_node_map(
     const faceType& face_a, const ComMod& com_a,
-    const faceType& face_b, const ComMod& com_b,
-    std::vector<int>& a_to_b)
+    int global_b_nNo, const Array<double>& global_b_coords,
+    std::vector<int>& a_to_global_b)
 {
   const int nsd = com_a.nsd;
   const double tol = 1e-8;
-  a_to_b.assign(face_a.nNo, -1);
+  a_to_global_b.assign(face_a.nNo, -1);
 
   for (int a = 0; a < face_a.nNo; a++) {
     int Ac = face_a.gN(a);
     double best = 1e30;
     int best_b = -1;
-    for (int b = 0; b < face_b.nNo; b++) {
-      int Bc = face_b.gN(b);
+    for (int bg = 0; bg < global_b_nNo; bg++) {
       double d2 = 0.0;
       for (int i = 0; i < nsd; i++) {
-        double d = com_a.x(i, Ac) - com_b.x(i, Bc);
+        double d = com_a.x(i, Ac) - global_b_coords(i, bg);
         d2 += d * d;
       }
-      if (d2 < best) { best = d2; best_b = b; }
+      if (d2 < best) { best = d2; best_b = bg; }
     }
-    if (best < tol * tol) a_to_b[a] = best_b;
+    if (best < tol * tol) a_to_global_b[a] = best_b;
   }
 }
 
 //----------------------------------------------------------------------
-// build_node_maps
+// build_node_maps — build global→global interface node maps.
+// Each sub-mesh is independently distributed, so we gather all face
+// coordinates from all ranks before performing the nearest-neighbor
+// search; then gather the local partial maps into global maps.
 //----------------------------------------------------------------------
 void PartitionedFSI::build_node_maps()
 {
+  auto& cm = main_sim_->com_mod.cm;
+  auto& cm_mod = main_sim_->cm_mod;
+  const int nsd = main_sim_->com_mod.nsd;
+
+  // Compute global nNo and per-rank offsets for each interface face
+  compute_face_global_info(*solid_face_, cm, cm_mod,
+                           solid_face_global_nNo_, solid_face_local_offset_);
+  compute_face_global_info(*fluid_face_, cm, cm_mod,
+                           fluid_face_global_nNo_, fluid_face_local_offset_);
+  compute_face_global_info(*mesh_face_,  cm, cm_mod,
+                           mesh_face_global_nNo_,  mesh_face_local_offset_);
+
+  // Gather face coordinates globally for each sub-mesh face
+  auto pack_coords = [&](const faceType& face, const ComMod& com) {
+    Array<double> local(nsd, face.nNo);
+    for (int a = 0; a < face.nNo; a++) {
+      int Ac = face.gN(a);
+      for (int i = 0; i < nsd; i++)
+        local(i, a) = com.x(i, Ac);
+    }
+    return local;
+  };
+
+  auto global_solid_coords = gather_face_data(
+      pack_coords(*solid_face_, solid_sim_->com_mod),
+      solid_face_global_nNo_, solid_face_local_offset_, cm, cm_mod);
+  auto global_fluid_coords = gather_face_data(
+      pack_coords(*fluid_face_, fluid_sim_->com_mod),
+      fluid_face_global_nNo_, fluid_face_local_offset_, cm, cm_mod);
+  auto global_mesh_coords  = gather_face_data(
+      pack_coords(*mesh_face_,  mesh_sim_->com_mod),
+      mesh_face_global_nNo_,  mesh_face_local_offset_,  cm, cm_mod);
+
+  // Build local (local_src → global_tgt) maps, then gather to global maps
+  std::vector<int> local_s2f, local_f2s, local_s2m;
   build_face_node_map(*solid_face_, solid_sim_->com_mod,
-                      *fluid_face_, fluid_sim_->com_mod, solid_to_fluid_map_);
+                      fluid_face_global_nNo_, global_fluid_coords, local_s2f);
   build_face_node_map(*fluid_face_, fluid_sim_->com_mod,
-                      *solid_face_, solid_sim_->com_mod, fluid_to_solid_map_);
+                      solid_face_global_nNo_, global_solid_coords, local_f2s);
   build_face_node_map(*solid_face_, solid_sim_->com_mod,
-                      *mesh_face_,  mesh_sim_->com_mod,  solid_to_mesh_map_);
+                      mesh_face_global_nNo_,  global_mesh_coords,  local_s2m);
+
+  gather_global_map(local_s2f, solid_face_global_nNo_, cm, cm_mod, solid_to_fluid_map_);
+  gather_global_map(local_f2s, fluid_face_global_nNo_, cm, cm_mod, fluid_to_solid_map_);
+  gather_global_map(local_s2m, solid_face_global_nNo_, cm, cm_mod, solid_to_mesh_map_);
 }
 
 //----------------------------------------------------------------------
@@ -203,28 +347,30 @@ void PartitionedFSI::relax_interface(int cp, int nsd,
 }
 
 //----------------------------------------------------------------------
-// relax_constant — fixed relaxation
+// relax_constant — fixed relaxation (operates on global face arrays)
 //----------------------------------------------------------------------
 void PartitionedFSI::relax_constant(int cp, int nsd,
                                      const Array<double>& disp_current)
 {
   omega_ = config_.initial_relaxation;
-  for (int a = 0; a < solid_face_->nNo; a++)
+  for (int a = 0; a < solid_face_global_nNo_; a++)
     for (int i = 0; i < nsd; i++)
       disp_prev_(i, a) += omega_ * (disp_current(i, a) - disp_prev_(i, a));
 }
 
 //----------------------------------------------------------------------
 // relax_aitken — Aitken Delta^2 (Küttler & Wall 2008, Eq. 44)
+// Operates on global face arrays; all ranks have identical data so no
+// MPI reduction is needed here.
 //----------------------------------------------------------------------
 void PartitionedFSI::relax_aitken(int cp, int nsd,
                                    const Array<double>& disp_current)
 {
-  const int u = nsd * solid_face_->nNo;
+  const int u = nsd * solid_face_global_nNo_;
 
   // Build residual r = x_tilde - x
   std::vector<double> r(u);
-  for (int a = 0; a < solid_face_->nNo; a++)
+  for (int a = 0; a < solid_face_global_nNo_; a++)
     for (int i = 0; i < nsd; i++)
       r[a * nsd + i] = disp_current(i, a) - disp_prev_(i, a);
 
@@ -246,7 +392,7 @@ void PartitionedFSI::relax_aitken(int cp, int nsd,
   r_prev_ = r;
 
   // Apply: x_{k+1} = x_k + omega * r
-  for (int a = 0; a < solid_face_->nNo; a++)
+  for (int a = 0; a < solid_face_global_nNo_; a++)
     for (int i = 0; i < nsd; i++)
       disp_prev_(i, a) += omega_ * (disp_current(i, a) - disp_prev_(i, a));
 }
@@ -336,7 +482,9 @@ void PartitionedFSI::run()
 }
 
 //----------------------------------------------------------------------
-// compute_interface_velocity — Newmark-consistent velocity from disp_prev_
+// compute_interface_velocity — Newmark-consistent velocity from disp_prev_.
+// Each rank computes its local solid face nodes, then all-gather to
+// produce the global vel_prev_ replicated on all ranks.
 //----------------------------------------------------------------------
 void PartitionedFSI::compute_interface_velocity()
 {
@@ -349,22 +497,31 @@ void PartitionedFSI::compute_interface_velocity()
   const auto& Do = solid_sol.old.get_displacement();
   const auto& Yo = solid_sol.old.get_velocity();
   const auto& Ao = solid_sol.old.get_acceleration();
+  auto& cm = main_sim_->com_mod.cm;
+  auto& cm_mod = main_sim_->cm_mod;
 
-  vel_prev_.resize(nsd, solid_face_->nNo);
+  // Compute velocity for this rank's local solid face nodes
+  Array<double> local_vel(nsd, solid_face_->nNo);
   for (int a = 0; a < solid_face_->nNo; a++) {
     int Ac = solid_face_->gN(a);
     for (int i = 0; i < nsd; i++) {
+      double disp_a = disp_prev_(i, solid_face_local_offset_ + a);
       double a_new, v_new;
       newmark::state_from_displacement(
-          disp_prev_(i, a), Do(i + s, Ac), Yo(i + s, Ac), Ao(i + s, Ac),
+          disp_a, Do(i + s, Ac), Yo(i + s, Ac), Ao(i + s, Ac),
           dt, eq.beta, eq.gam, a_new, v_new);
-      vel_prev_(i, a) = v_new;
+      local_vel(i, a) = v_new;
     }
   }
+
+  // All-gather to global
+  vel_prev_ = gather_face_data(local_vel, solid_face_global_nNo_,
+                               solid_face_local_offset_, cm, cm_mod);
 }
 
 //----------------------------------------------------------------------
-// solve_fluid — fluid equation with interface velocity and ALE
+// solve_fluid — fluid equation with interface velocity and ALE.
+// vel_prev_ is global; extract this rank's local fluid face portion.
 //----------------------------------------------------------------------
 bool PartitionedFSI::solve_fluid(
     const Array<double>& mesh_vel_Yo, const Array<double>& mesh_vel_Yn)
@@ -374,10 +531,17 @@ bool PartitionedFSI::solve_fluid(
   auto& fluid_sol = fluid_int.get_solutions();
   const int nsd = main_sim_->com_mod.nsd;
 
-  auto fluid_vel = transfer_data(solid_to_fluid_map_, vel_prev_, fluid_face_->nNo);
+  // Transfer global solid velocity → global fluid velocity, then extract local
+  auto global_fluid_vel = transfer_data(solid_to_fluid_map_, vel_prev_,
+                                        fluid_face_global_nNo_);
+  Array<double> local_fluid_vel(nsd, fluid_face_->nNo);
+  for (int a = 0; a < fluid_face_->nNo; a++)
+    for (int i = 0; i < nsd; i++)
+      local_fluid_vel(i, a) = global_fluid_vel(i, fluid_face_local_offset_ + a);
+
   set_bc::set_bc_dir(fluid_com, fluid_sol);
   fsi_coupling::apply_velocity_on_fluid(
-      fluid_com, fluid_com.eq[0], *fluid_face_, fluid_vel, fluid_sol);
+      fluid_com, fluid_com.eq[0], *fluid_face_, local_fluid_vel, fluid_sol);
 
   // ALE mesh velocity at generalized-alpha intermediate time
   double af = fluid_com.eq[0].af;
@@ -394,7 +558,9 @@ bool PartitionedFSI::solve_fluid(
 }
 
 //----------------------------------------------------------------------
-// solve_solid — extract traction from fluid, solve solid
+// solve_solid — extract traction from fluid, solve solid.
+// All-gathers local fluid traction to global, transfers to global solid,
+// then extracts this rank's local solid portion.
 //----------------------------------------------------------------------
 bool PartitionedFSI::solve_solid()
 {
@@ -403,24 +569,41 @@ bool PartitionedFSI::solve_solid()
   auto& fluid_int = fluid_sim_->get_integrator();
   auto& solid_int = solid_sim_->get_integrator();
   auto& solid_sol = solid_int.get_solutions();
+  auto& cm = main_sim_->com_mod.cm;
+  auto& cm_mod = main_sim_->cm_mod;
 
-  auto fluid_traction = post::compute_face_traction(
+  // Compute local fluid traction, all-gather to global fluid face
+  auto local_fluid_traction = post::compute_face_traction(
       fluid_com, fluid_sim_->cm_mod,
       *fluid_mesh_, *fluid_face_, fluid_com.eq[0],
       fluid_int.get_solutions());
-  auto solid_traction = transfer_data(fluid_to_solid_map_,
-                                      fluid_traction, solid_face_->nNo);
+  auto global_fluid_traction = gather_face_data(local_fluid_traction,
+                                                fluid_face_global_nNo_,
+                                                fluid_face_local_offset_,
+                                                cm, cm_mod);
+
+  // Transfer global fluid → global solid, then extract local solid portion
+  auto global_solid_traction = transfer_data(fluid_to_solid_map_,
+                                             global_fluid_traction,
+                                             solid_face_global_nNo_);
+  const int nrows = global_solid_traction.nrows();
+  Array<double> local_solid_traction(nrows, solid_face_->nNo);
+  for (int a = 0; a < solid_face_->nNo; a++)
+    for (int i = 0; i < nrows; i++)
+      local_solid_traction(i, a) =
+          global_solid_traction(i, solid_face_local_offset_ + a);
 
   set_bc::set_bc_dir(solid_com, solid_sol);
   solid_int.step_equation(0, [&]() {
     fsi_coupling::apply_traction_on_solid(
-        solid_com, solid_com.eq[0], *solid_face_, solid_traction);
+        solid_com, solid_com.eq[0], *solid_face_, local_solid_traction);
   });
   return !has_nan(solid_sol);
 }
 
 //----------------------------------------------------------------------
-// solve_mesh — mesh equation with relaxed displacement, deform fluid mesh
+// solve_mesh — mesh equation with relaxed displacement, deform fluid mesh.
+// disp_prev_ is global; extract this rank's local mesh face portion.
 //----------------------------------------------------------------------
 bool PartitionedFSI::solve_mesh(const Array<double>& x_ref, int mesh_s)
 {
@@ -430,10 +613,17 @@ bool PartitionedFSI::solve_mesh(const Array<double>& x_ref, int mesh_s)
   auto& mesh_sol  = mesh_int.get_solutions();
   const int nsd = main_sim_->com_mod.nsd;
 
-  auto mesh_disp = transfer_data(solid_to_mesh_map_, disp_prev_, mesh_face_->nNo);
+  // Transfer global solid displacement → global mesh, extract local portion
+  auto global_mesh_disp = transfer_data(solid_to_mesh_map_, disp_prev_,
+                                        mesh_face_global_nNo_);
+  Array<double> local_mesh_disp(nsd, mesh_face_->nNo);
+  for (int a = 0; a < mesh_face_->nNo; a++)
+    for (int i = 0; i < nsd; i++)
+      local_mesh_disp(i, a) = global_mesh_disp(i, mesh_face_local_offset_ + a);
+
   set_bc::set_bc_dir(mesh_com, mesh_sol);
   fsi_coupling::apply_displacement_on_mesh(
-      mesh_com, mesh_com.eq[0], *mesh_face_, mesh_disp, mesh_sol);
+      mesh_com, mesh_com.eq[0], *mesh_face_, local_mesh_disp, mesh_sol);
   mesh_int.step_equation(0, [&]() {
     set_bc::enforce_dirichlet_on_face(mesh_com, *mesh_face_, nsd);
   });
@@ -501,10 +691,14 @@ bool PartitionedFSI::step()
       }
   }
 
-  // Initial interface state from predictor
-  auto disp_current = fsi_coupling::extract_solid_displacement(
-      solid_com, solid_com.eq[0], *solid_face_, solid_sol);
-  disp_prev_ = disp_current;
+  // Initial interface state from predictor — extract local, all-gather to global
+  Array<double> disp_current;
+  {
+    auto local_disp = fsi_coupling::extract_solid_displacement(
+        solid_com, solid_com.eq[0], *solid_face_, solid_sol);
+    disp_prev_ = gather_face_data(local_disp, solid_face_global_nNo_,
+                                  solid_face_local_offset_, cm, cm_mod);
+  }
   compute_interface_velocity();
 
   bool converged = false;
@@ -544,12 +738,18 @@ bool PartitionedFSI::step()
       return false;
     }
 
-    // ---- 4. Extract displacement, check convergence ----
-    disp_current = fsi_coupling::extract_solid_displacement(
-        solid_com, solid_com.eq[0], *solid_face_, solid_sol);
+    // ---- 4. Extract displacement (global), check convergence ----
+    // Extract local solid displacement and all-gather to global so all ranks
+    // have identical arrays — no MPI reduction needed for norms.
+    {
+      auto local_disp = fsi_coupling::extract_solid_displacement(
+          solid_com, solid_com.eq[0], *solid_face_, solid_sol);
+      disp_current = gather_face_data(local_disp, solid_face_global_nNo_,
+                                      solid_face_local_offset_, cm, cm_mod);
+    }
 
     double res_norm = 0.0, disp_norm = 0.0;
-    for (int a = 0; a < solid_face_->nNo; a++)
+    for (int a = 0; a < solid_face_global_nNo_; a++)
       for (int i = 0; i < nsd; i++) {
         double res = disp_current(i, a) - disp_prev_(i, a);
         res_norm  += res * res;
@@ -563,11 +763,11 @@ bool PartitionedFSI::step()
     relax_interface(cp, nsd, disp_current);
     compute_interface_velocity();
 
-    // Check for NaN/divergence
+    // Check for NaN/divergence (global arrays — consistent on all ranks)
     {
       bool bad = false;
       double max_disp = 0;
-      for (int a = 0; a < solid_face_->nNo && !bad; a++)
+      for (int a = 0; a < solid_face_global_nNo_ && !bad; a++)
         for (int i = 0; i < nsd; i++) {
           if (std::isnan(disp_prev_(i, a)) || std::isinf(disp_prev_(i, a)))
             { bad = true; break; }
