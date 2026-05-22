@@ -13,6 +13,17 @@
 #include <iostream>
 #include <stdexcept>
 
+void add_eq_linear_algebra(ComMod& com_mod, eqType& lEq)
+{
+  lEq.linear_algebra = LinearAlgebraFactory::create_interface(lEq.linear_algebra_type);
+  lEq.linear_algebra->set_preconditioner(lEq.linear_algebra_preconditioner);
+  lEq.linear_algebra->initialize(com_mod, lEq);
+
+  if (lEq.linear_algebra_assembly_type != consts::LinearAlgebraType::none) {
+    lEq.linear_algebra->set_assembly(lEq.linear_algebra_assembly_type);
+  }
+}
+
 Simulation::Simulation() 
 {
   roInf = 0.2;

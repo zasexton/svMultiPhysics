@@ -16,9 +16,6 @@
 #include <iostream>
 #include <stdexcept>
 
-// Forward declaration of add_eq_linear_algebra (defined in main.cpp)
-void add_eq_linear_algebra(ComMod& com_mod, eqType& lEq);
-
 /// Check if any value in the solution arrays is NaN
 static bool has_nan(const SolutionStates& sol) {
   const Array<double>* arrays[] = {

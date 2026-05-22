@@ -17,6 +17,8 @@
 class Integrator;
 class PartitionedFSI;
 
+void add_eq_linear_algebra(ComMod& com_mod, eqType& lEq);
+
 class Simulation {
 
   public:
