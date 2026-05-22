@@ -61,16 +61,6 @@ static testing::Environment* const mpi_env =
 // ---------------------------------------------------------------------------
 // Helper: set up a full simulation from an XML file
 // ---------------------------------------------------------------------------
-static void add_eq_linear_algebra(ComMod& com_mod, eqType& lEq)
-{
-  lEq.linear_algebra = LinearAlgebraFactory::create_interface(lEq.linear_algebra_type);
-  lEq.linear_algebra->set_preconditioner(lEq.linear_algebra_preconditioner);
-  lEq.linear_algebra->initialize(com_mod, lEq);
-  if (lEq.linear_algebra_assembly_type != consts::LinearAlgebraType::none) {
-    lEq.linear_algebra->set_assembly(lEq.linear_algebra_assembly_type);
-  }
-}
-
 static Simulation* setup_simulation(const std::string& xml_path)
 {
   // The solver reads mesh files relative to the XML directory,
