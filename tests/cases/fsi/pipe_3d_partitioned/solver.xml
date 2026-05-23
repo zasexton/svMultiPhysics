@@ -185,8 +185,8 @@
 <!-- Partitioned coupling configuration -->
 <Partitioned_coupling>
   <Max_coupling_iterations> 50 </Max_coupling_iterations>
-  <Coupling_tolerance> 1e-8 </Coupling_tolerance>
-  <Initial_relaxation> 1.0 </Initial_relaxation>
+  <Coupling_tolerance> 1e-4 </Coupling_tolerance>
+  <Initial_relaxation> 0.5 </Initial_relaxation>
   <Coupling_method> aitken </Coupling_method>
   <Fluid_interface_face> lumen_wall </Fluid_interface_face>
   <Solid_interface_face> wall_inner </Solid_interface_face>

@@ -45,7 +45,7 @@ def n_proc(request):
     return request.param
 
 
-def run_by_name(folder, name, t_max, n_proc=1):
+def run_by_name(folder, name, t_max, n_proc=1, name_result=None):
     """
     Run a test case and return results
     Args:
@@ -53,6 +53,8 @@ def run_by_name(folder, name, t_max, n_proc=1):
         name: name of svMultiPhysics input file (.xml)
         t_max: time step to compare
         n_proc: number of processors
+        name_result: VTU filename to read from {n_proc}-procs/; defaults to
+                     result_{t_max:03d}.vtu
 
     Returns:
     Simulation results
@@ -105,9 +107,8 @@ def run_by_name(folder, name, t_max, n_proc=1):
     subprocess.call(cmd, cwd=folder, shell=True)
 
     # read results
-    fname = os.path.join(
-        folder, str(n_proc) + "-procs", "result_" + str(t_max).zfill(3) + ".vtu"
-    )
+    result_file = name_result if name_result else "result_" + str(t_max).zfill(3) + ".vtu"
+    fname = os.path.join(folder, str(n_proc) + "-procs", result_file)
     if not os.path.exists(fname):
         raise RuntimeError("No svMultiPhysics output: " + fname)
     return meshio.read(fname)
@@ -121,6 +122,7 @@ def run_with_reference(
     t_max=1,
     name_ref=None,
     name_inp="solver.xml",
+    name_result=None,
 ):
     """
     Run a test case and compare it to a stored reference solution
@@ -140,12 +142,12 @@ def run_with_reference(
     folder = os.path.join("cases", base_folder, test_folder)
     
     if is_not_Darwin:
-        res = run_by_name(folder, name_inp, t_max, n_proc)
+        res = run_by_name(folder, name_inp, t_max, n_proc, name_result)
     else:
-        if "petsc" in folder or "trilinos" in folder: 
+        if "petsc" in folder or "trilinos" in folder:
             return
         else:
-            res = run_by_name(folder, name_inp, t_max, n_proc)
+            res = run_by_name(folder, name_inp, t_max, n_proc, name_result)
 
     # read reference
     fname = os.path.join(folder, name_ref)

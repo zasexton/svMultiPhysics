@@ -107,9 +107,28 @@ std::string PartitionedFSI::build_sub_xml(const std::string& main_xml_path,
   sub_root->SetAttribute("version", "0.1");
   sub.InsertFirstChild(sub_root);
 
-  // Copy GeneralSimulationParameters verbatim.
+  // Copy GeneralSimulationParameters, overriding the VTK save prefix
+  // so each sub-sim writes to distinct files (result_fluid_*, result_solid_*, result_mesh_*).
   XMLElement* gen = root->FirstChildElement("GeneralSimulationParameters");
-  if (gen) sub_root->InsertEndChild(gen->DeepClone(&sub));
+  if (gen) {
+    XMLElement* gen_clone = gen->DeepClone(&sub)->ToElement();
+    // Map role → short suffix used in the prefix name
+    std::string suffix;
+    if      (role == "partitioned_fluid") suffix = "fluid";
+    else if (role == "partitioned_solid") suffix = "solid";
+    else if (role == "partitioned_mesh")  suffix = "mesh";
+    if (!suffix.empty()) {
+      XMLElement* name_elem = gen_clone->FirstChildElement("Name_prefix_of_saved_VTK_files");
+      if (name_elem) {
+        std::string base_prefix = name_elem->GetText() ? name_elem->GetText() : "result";
+        // trim whitespace
+        base_prefix.erase(0, base_prefix.find_first_not_of(" \t\n\r"));
+        base_prefix.erase(base_prefix.find_last_not_of(" \t\n\r") + 1);
+        name_elem->SetText((" " + base_prefix + "_" + suffix + " ").c_str());
+      }
+    }
+    sub_root->InsertEndChild(gen_clone);
+  }
 
   // Copy matching Add_mesh elements.
   for (XMLElement* mesh = root->FirstChildElement("Add_mesh"); mesh;
@@ -125,6 +144,19 @@ std::string PartitionedFSI::build_sub_xml(const std::string& main_xml_path,
   XMLElement* eq_clone = target_eq->DeepClone(&sub)->ToElement();
   eq_clone->DeleteAttribute("role");
   sub_root->InsertEndChild(eq_clone);
+
+  // The mesh sub-sim needs a minimal <Partitioned_coupling> block so that
+  // read_files sets mvMsh=true (required for the mesh equation to be valid).
+  if (role == "partitioned_mesh") {
+    XMLElement* pcp = sub.NewElement("Partitioned_coupling");
+    XMLElement* fface = sub.NewElement("Fluid_interface_face");
+    fface->SetText("dummy");
+    XMLElement* sface = sub.NewElement("Solid_interface_face");
+    sface->SetText("dummy");
+    pcp->InsertEndChild(fface);
+    pcp->InsertEndChild(sface);
+    sub_root->InsertEndChild(pcp);
+  }
 
   // Write to temp file alongside the main XML.
   std::string base = main_xml_path;
