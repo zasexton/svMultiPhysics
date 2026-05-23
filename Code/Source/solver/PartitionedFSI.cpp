@@ -40,6 +40,16 @@ static void init_sub_sim(Simulation* sim, const std::string& xml_path)
 {
   read_files_ns::read_files(sim, xml_path);
   sim->logger.set_cout_write(false);
+
+  // The mesh sub-sim includes a <Partitioned_coupling> stub so that read_files
+  // accepts the mesh equation, but this sim has only the mesh equation (tDof=3).
+  // baf_ini assumes FSI DOF layout (Do(i+nsd+1,Ac) reaches row 4) when mvMsh=true,
+  // which would go out-of-bounds for the standalone mesh sub-sim.
+  if (sim->com_mod.nEq == 1 &&
+      sim->com_mod.eq[0].phys == consts::EquationType::phys_mesh) {
+    sim->com_mod.mvMsh = false;
+  }
+
   distribute(sim);
   Vector<double> init_time(3);
   initialize(sim, init_time);
