@@ -147,10 +147,14 @@ void Simulation::initialize_partitioned_fsi(const std::string& xml_file_path)
 
   if (cm.mas(cm_mod_ref)) {
     auto& pcp = parameters.partitioned_coupling_parameters;
-    if (pcp.defined() &&
-        pcp.fluid_xml.defined() && !pcp.fluid_xml.value().empty() &&
-        pcp.solid_xml.defined() && !pcp.solid_xml.value().empty()) {
-      active = 1;
+    // Active when <Partitioned_coupling> is present and at least one equation
+    // carries a partitioned role attribute.
+    if (pcp.defined()) {
+      for (auto* ep : parameters.equation_parameters) {
+        if (ep->role.defined() && !ep->role.value().empty()) { active = 1; break; }
+      }
+    }
+    if (active) {
       config.max_coupling_iterations = pcp.max_coupling_iterations.value();
       config.coupling_tolerance       = pcp.coupling_tolerance.value();
       config.initial_relaxation       = pcp.initial_relaxation.value();
@@ -163,9 +167,6 @@ void Simulation::initialize_partitioned_fsi(const std::string& xml_file_path)
 
       config.fluid_interface_face = pcp.fluid_interface_face.value();
       config.solid_interface_face = pcp.solid_interface_face.value();
-      config.fluid_xml            = pcp.fluid_xml.value();
-      config.solid_xml            = pcp.solid_xml.value();
-      if (pcp.mesh_xml.defined()) config.mesh_xml = pcp.mesh_xml.value();
     }
   }
 
@@ -192,9 +193,6 @@ void Simulation::initialize_partitioned_fsi(const std::string& xml_file_path)
   };
   bcast_str(config.fluid_interface_face);
   bcast_str(config.solid_interface_face);
-  bcast_str(config.fluid_xml);
-  bcast_str(config.solid_xml);
-  bcast_str(config.mesh_xml);
 
   config.max_coupling_iterations = max_iter;
   config.coupling_tolerance       = tol;

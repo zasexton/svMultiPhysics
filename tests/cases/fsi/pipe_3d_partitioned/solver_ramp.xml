@@ -59,7 +59,7 @@
 </Add_projection>
 
 <!-- Fluid equation (linear solver from fluid/newtonian test) -->
-<Add_equation type="fluid" >
+<Add_equation type="fluid" role="partitioned_fluid" >
    <Coupled> false </Coupled>
    <Min_iterations> 1 </Min_iterations>
    <Max_iterations> 10 </Max_iterations>
@@ -99,7 +99,7 @@
 </Add_equation>
 
 <!-- Structure equation -->
-<Add_equation type="struct" >
+<Add_equation type="struct" role="partitioned_solid" >
    <Coupled> false </Coupled>
    <Min_iterations> 1 </Min_iterations>
    <Max_iterations> 30 </Max_iterations>
@@ -147,12 +147,19 @@
 </Add_equation>
 
 <!-- Mesh motion equation (ALE, same as monolithic mesh equation) -->
-<Add_equation type="mesh" >
+<Add_equation type="mesh" role="partitioned_mesh" >
    <Coupled> false </Coupled>
    <Min_iterations> 1 </Min_iterations>
    <Max_iterations> 10 </Max_iterations>
    <Tolerance> 1e-6 </Tolerance>
    <Poisson_ratio> 0.3 </Poisson_ratio>
+
+   <Domain id="0" >
+      <Equation> mesh </Equation>
+      <Density> 0.0 </Density>
+      <Elasticity_modulus> 1.0 </Elasticity_modulus>
+      <Poisson_ratio> 0.3 </Poisson_ratio>
+   </Domain>
 
    <LS type="CG" >
       <Linear_algebra type="fsils" >
@@ -186,9 +193,6 @@
   <Coupling_method> aitken </Coupling_method>
   <Fluid_interface_face> lumen_wall </Fluid_interface_face>
   <Solid_interface_face> wall_inner </Solid_interface_face>
-  <Fluid_xml> solver_fluid_ramp.xml </Fluid_xml>
-  <Solid_xml> solver_solid.xml </Solid_xml>
-  <Mesh_xml> solver_mesh.xml </Mesh_xml>
 </Partitioned_coupling>
 
 </svMultiPhysicsFile>

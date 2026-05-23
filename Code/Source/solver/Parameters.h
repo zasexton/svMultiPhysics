@@ -1508,6 +1508,7 @@ class EquationParameters : public ParameterLists
     Parameter<double> tolerance;
 
     Parameter<std::string> type;
+    Parameter<std::string> role;  // "partitioned_fluid", "partitioned_solid", or "partitioned_mesh"
     Parameter<bool> use_taylor_hood_type_basis;
 
     // Explicit geometric coupling for FSI simulations: the fluid-structure equations
@@ -1815,11 +1816,6 @@ class PartitionedCouplingParameters : public ParameterLists
     Parameter<std::string> coupling_method;  // "constant" or "aitken"
     Parameter<std::string> fluid_interface_face;
     Parameter<std::string> solid_interface_face;
-
-    // Paths to standalone XML input files for each sub-field
-    Parameter<std::string> fluid_xml;
-    Parameter<std::string> solid_xml;
-    Parameter<std::string> mesh_xml;
 
     bool value_set = false;
 };

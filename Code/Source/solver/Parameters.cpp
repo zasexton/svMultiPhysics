@@ -281,6 +281,8 @@ void Parameters::set_equation_values(tinyxml2::XMLElement* root_element)
 
     auto eq_params = new EquationParameters();
     eq_params->type.set(std::string(eq_type));
+    const char* eq_role = add_eq_item->Attribute("role");
+    if (eq_role) eq_params->role.set(std::string(eq_role));
     eq_params->set_values(add_eq_item);
     equation_parameters.push_back(eq_params);
 
@@ -2947,9 +2949,6 @@ PartitionedCouplingParameters::PartitionedCouplingParameters()
   set_parameter("Fluid_interface_face", "", required, fluid_interface_face);
   set_parameter("Solid_interface_face", "", required, solid_interface_face);
 
-  set_parameter("Fluid_xml", "", !required, fluid_xml);
-  set_parameter("Solid_xml", "", !required, solid_xml);
-  set_parameter("Mesh_xml", "", !required, mesh_xml);
 }
 
 void PartitionedCouplingParameters::set_values(tinyxml2::XMLElement* xml_elem)

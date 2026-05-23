@@ -3,7 +3,11 @@
 
 <!-- Partitioned FSI version of pipe_3d: separate fluid, struct, and mesh
      equations coupled via Dirichlet-Neumann iteration with Aitken relaxation.
-     Results should match the monolithic FSI pipe_3d test case. -->
+     Results should match the monolithic FSI pipe_3d test case.
+
+     Each equation carries a role="partitioned_*" attribute so that
+     PartitionedFSI can build the three sub-simulation XMLs automatically.
+     No separate solver_fluid/solid/mesh.xml files are needed. -->
 
 <GeneralSimulationParameters>
   <Continue_previous_simulation> 0 </Continue_previous_simulation>
@@ -54,12 +58,8 @@
   <Domain> 1 </Domain>
 </Add_mesh>
 
-<Add_projection name="wall_inner" >
-   <Project_from_face> lumen_wall </Project_from_face>
-</Add_projection>
-
-<!-- Fluid equation (linear solver from fluid/newtonian test) -->
-<Add_equation type="fluid" >
+<!-- Fluid equation -->
+<Add_equation type="fluid" role="partitioned_fluid" >
    <Coupled> false </Coupled>
    <Min_iterations> 1 </Min_iterations>
    <Max_iterations> 10 </Max_iterations>
@@ -93,13 +93,10 @@
       <Value> 5.0e4 </Value>
    </Add_BC>
 
-   <!-- No-slip BC at FSI interface is handled by the partitioned coupling:
-        solid velocity is transferred as Dirichlet BC on lumen_wall. -->
-
 </Add_equation>
 
 <!-- Structure equation -->
-<Add_equation type="struct" >
+<Add_equation type="struct" role="partitioned_solid" >
    <Coupled> false </Coupled>
    <Min_iterations> 1 </Min_iterations>
    <Max_iterations> 30 </Max_iterations>
@@ -146,13 +143,20 @@
 
 </Add_equation>
 
-<!-- Mesh motion equation (ALE, same as monolithic mesh equation) -->
-<Add_equation type="mesh" >
+<!-- Mesh motion equation (ALE) -->
+<Add_equation type="mesh" role="partitioned_mesh" >
    <Coupled> false </Coupled>
    <Min_iterations> 1 </Min_iterations>
    <Max_iterations> 10 </Max_iterations>
    <Tolerance> 1e-6 </Tolerance>
    <Poisson_ratio> 0.3 </Poisson_ratio>
+
+   <Domain id="0" >
+      <Equation> mesh </Equation>
+      <Density> 0.0 </Density>
+      <Elasticity_modulus> 1.0 </Elasticity_modulus>
+      <Poisson_ratio> 0.3 </Poisson_ratio>
+   </Domain>
 
    <LS type="CG" >
       <Linear_algebra type="fsils" >

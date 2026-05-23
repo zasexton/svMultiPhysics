@@ -13,7 +13,9 @@
 #include "read_files.h"
 
 #include <cmath>
+#include <cstdio>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 
 /// Check if any value in the solution arrays is NaN
@@ -47,6 +49,94 @@ static void init_sub_sim(Simulation* sim, const std::string& xml_path)
 }
 
 //----------------------------------------------------------------------
+// build_sub_xml — extract one role's equation + its meshes from the
+// main XML and write a minimal standalone sub-simulation XML to a
+// temp file.  Returns the temp file path.
+//
+// Mesh association: the meshes included in the sub-XML are those whose
+// <Domain> value matches any <Domain id="..."> child of the target
+// equation.  The partitioned_mesh role falls back to the fluid meshes
+// when the mesh equation carries no explicit domain block.
+//----------------------------------------------------------------------
+std::string PartitionedFSI::build_sub_xml(const std::string& main_xml_path,
+                                          const std::string& role)
+{
+  using namespace tinyxml2;
+
+  XMLDocument doc;
+  if (doc.LoadFile(main_xml_path.c_str()) != XML_SUCCESS)
+    throw std::runtime_error("[PartitionedFSI] Cannot parse main XML: " + main_xml_path);
+
+  XMLElement* root = doc.FirstChildElement("svMultiPhysicsFile");
+  if (!root)
+    throw std::runtime_error("[PartitionedFSI] Missing <svMultiPhysicsFile> root in " + main_xml_path);
+
+  // Find the equation element with the requested role attribute.
+  XMLElement* target_eq = nullptr;
+  for (XMLElement* eq = root->FirstChildElement("Add_equation"); eq;
+       eq = eq->NextSiblingElement("Add_equation")) {
+    const char* r = eq->Attribute("role");
+    if (r && std::string(r) == role) { target_eq = eq; break; }
+  }
+  if (!target_eq)
+    throw std::runtime_error("[PartitionedFSI] No <Add_equation role=\"" + role + "\"> found in " + main_xml_path);
+
+  // Collect domain IDs used by the target equation.
+  std::set<int> domain_ids;
+  for (XMLElement* d = target_eq->FirstChildElement("Domain"); d;
+       d = d->NextSiblingElement("Domain"))
+    domain_ids.insert(d->IntAttribute("id", -1));
+
+  // Mesh role with no domain block: use the same domains as the fluid equation.
+  if (domain_ids.empty() && role == "partitioned_mesh") {
+    for (XMLElement* eq = root->FirstChildElement("Add_equation"); eq;
+         eq = eq->NextSiblingElement("Add_equation")) {
+      const char* r = eq->Attribute("role");
+      if (r && std::string(r) == "partitioned_fluid") {
+        for (XMLElement* d = eq->FirstChildElement("Domain"); d;
+             d = d->NextSiblingElement("Domain"))
+          domain_ids.insert(d->IntAttribute("id", -1));
+        break;
+      }
+    }
+  }
+
+  // Build sub-document.
+  XMLDocument sub;
+  XMLElement* sub_root = sub.NewElement("svMultiPhysicsFile");
+  sub_root->SetAttribute("version", "0.1");
+  sub.InsertFirstChild(sub_root);
+
+  // Copy GeneralSimulationParameters verbatim.
+  XMLElement* gen = root->FirstChildElement("GeneralSimulationParameters");
+  if (gen) sub_root->InsertEndChild(gen->DeepClone(&sub));
+
+  // Copy matching Add_mesh elements.
+  for (XMLElement* mesh = root->FirstChildElement("Add_mesh"); mesh;
+       mesh = mesh->NextSiblingElement("Add_mesh")) {
+    XMLElement* dom_elem = mesh->FirstChildElement("Domain");
+    if (!dom_elem) continue;
+    int mesh_dom = dom_elem->IntText(-1);
+    if (domain_ids.empty() || domain_ids.count(mesh_dom))
+      sub_root->InsertEndChild(mesh->DeepClone(&sub));
+  }
+
+  // Clone the equation, stripping the role attribute.
+  XMLElement* eq_clone = target_eq->DeepClone(&sub)->ToElement();
+  eq_clone->DeleteAttribute("role");
+  sub_root->InsertEndChild(eq_clone);
+
+  // Write to temp file alongside the main XML.
+  std::string base = main_xml_path;
+  auto slash = base.find_last_of('/');
+  std::string dir = (slash != std::string::npos) ? base.substr(0, slash + 1) : "./";
+  std::string temp_path = dir + ".partfsi_" + role + "_tmp.xml";
+  if (sub.SaveFile(temp_path.c_str()) != XML_SUCCESS)
+    throw std::runtime_error("[PartitionedFSI] Cannot write temp sub-XML: " + temp_path);
+  return temp_path;
+}
+
+//----------------------------------------------------------------------
 // Constructor
 //----------------------------------------------------------------------
 PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
@@ -58,16 +148,11 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
   auto& cm = main_sim_->com_mod.cm;
   auto& cm_mod = main_sim_->cm_mod;
 
-  // Resolve XML paths relative to the main XML directory
-  std::string dir;
-  auto slash = xml_file_path_.find_last_of('/');
-  if (slash != std::string::npos) {
-    dir = xml_file_path_.substr(0, slash + 1);
-  }
-
-  std::string fluid_xml = dir + config_.fluid_xml;
-  std::string solid_xml = dir + config_.solid_xml;
-  std::string mesh_xml  = dir + config_.mesh_xml;
+  // Build per-role sub-XMLs from the main XML (all ranks write identical content).
+  std::string fluid_xml = build_sub_xml(xml_file_path_, "partitioned_fluid");
+  std::string solid_xml = build_sub_xml(xml_file_path_, "partitioned_solid");
+  std::string mesh_xml  = build_sub_xml(xml_file_path_, "partitioned_mesh");
+  temp_xml_paths_ = {fluid_xml, solid_xml, mesh_xml};
 
   // 3 separate sub-sims: fluid, solid, mesh
   fluid_sim_ = std::make_unique<Simulation>();
@@ -96,7 +181,10 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
   build_node_maps();
 }
 
-PartitionedFSI::~PartitionedFSI() {}
+PartitionedFSI::~PartitionedFSI()
+{
+  for (const auto& p : temp_xml_paths_) std::remove(p.c_str());
+}
 
 //----------------------------------------------------------------------
 // resolve_faces

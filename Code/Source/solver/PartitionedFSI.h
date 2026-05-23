@@ -28,11 +28,6 @@ struct PartitionedFSIConfig {
   // Face names for the FSI interface
   std::string fluid_interface_face;
   std::string solid_interface_face;
-
-  // Paths to standalone XML files for each sub-field
-  std::string fluid_xml;
-  std::string solid_xml;
-  std::string mesh_xml;
 };
 
 /// @brief Partitioned FSI coupling with 3 independent sub-Simulations.
@@ -147,6 +142,11 @@ private:
   static void build_face_node_map(const faceType& face_a, const ComMod& com_a,
                                   int global_b_nNo, const Array<double>& global_b_coords,
                                   std::vector<int>& a_to_global_b);
+
+  /// Build a minimal sub-simulation XML for the given role by extracting
+  /// the tagged equation and its meshes from the main XML. Returns temp file path.
+  static std::string build_sub_xml(const std::string& main_xml_path,
+                                   const std::string& role);
 
   /// Transfer data from global src face to global tgt face using global map
   static Array<double> transfer_data(const std::vector<int>& src_to_tgt_map,
