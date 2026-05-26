@@ -1130,6 +1130,13 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
             }
           break;
 
+          case OutputNameType::outGrp_ionicState:
+            for (int a = 0; a < msh.nNo; a++) {
+              int Ac = msh.gN(a);
+              d[iM].x(is, a) = cep_mod.Xion(eq.output[iOut].o, Ac);
+            }
+            break;
+
           case OutputNameType::outGrp_WSS:
           case OutputNameType::outGrp_trac:
             post::bpost(simulation, msh, tmpV, solutions, oGrp);
@@ -1286,13 +1293,33 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
           break;
 
           case OutputNameType::outGrp_divV:
-            tmpV.resize(l,msh.nNo); 
+            tmpV.resize(l,msh.nNo);
             post::div_post(simulation, msh, tmpV, solutions, iEq);
             for (int a = 0; a < msh.nNo; a++) {
               d[iM].x(is,a) = tmpV(0,a);
             }
             tmpV.resize(consts::maxNSD,msh.nNo);
           break;
+
+          case OutputNameType::outGrp_fibStretch: {
+            Vector<double> res(msh.nNo);
+            if (msh.nFn != 0) {
+              post::fib_stretch(simulation->com_mod, iEq, msh, solutions.current.get_displacement(), res);
+            }
+            for (int a = 0; a < msh.nNo; a++) {
+              d[iM].x(is,a) = res(a);
+            }
+          } break;
+
+          case OutputNameType::outGrp_fibStretchRate: {
+            Vector<double> res(msh.nNo);
+            if (msh.nFn != 0) {
+              post::fib_stretch_rate(simulation->com_mod, iEq, msh, solutions, res);
+            }
+            for (int a = 0; a < msh.nNo; a++) {
+              d[iM].x(is,a) = res(a);
+            }
+          } break;
 
           default:
             throw std::runtime_error("Undefined output");
@@ -1526,4 +1553,3 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
 }
 
 };
-
