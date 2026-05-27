@@ -33,8 +33,10 @@
 #include "Forms/Vocabulary.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
+#include "Systems/MaterialStateProvider.h"
 #include "Constraints/AffineConstraints.h"
 #include "Elements/LagrangeElement.h"
 #include "Geometry/MappingFactory.h"
@@ -160,6 +162,21 @@ private:
     std::vector<std::array<Real, 3>> nodes_;
     std::vector<std::vector<GlobalIndex>> cells_;
     std::vector<ElementType> cell_types_;
+};
+
+class CountingMockMeshAccess : public MockMeshAccess {
+public:
+    void getCellCoordinates(GlobalIndex cell_id,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        ++cell_coordinate_calls_;
+        MockMeshAccess::getCellCoordinates(cell_id, coords);
+    }
+
+    [[nodiscard]] int cellCoordinateCalls() const noexcept { return cell_coordinate_calls_; }
+
+private:
+    mutable int cell_coordinate_calls_{0};
 };
 
 /**
@@ -669,6 +686,21 @@ inline dofs::DofMap createSingleCellDofMap(GlobalIndex n_dofs)
     return dof_map;
 }
 
+inline dofs::DofMap createTwoCellDisjointDofMap(GlobalIndex dofs_per_cell)
+{
+    dofs::DofMap dof_map(2, 2 * dofs_per_cell, static_cast<LocalIndex>(dofs_per_cell));
+    std::vector<GlobalIndex> cell0(static_cast<std::size_t>(dofs_per_cell));
+    std::vector<GlobalIndex> cell1(static_cast<std::size_t>(dofs_per_cell));
+    std::iota(cell0.begin(), cell0.end(), GlobalIndex{0});
+    std::iota(cell1.begin(), cell1.end(), dofs_per_cell);
+    dof_map.setCellDofs(0, cell0);
+    dof_map.setCellDofs(1, cell1);
+    dof_map.setNumDofs(2 * dofs_per_cell);
+    dof_map.setNumLocalDofs(2 * dofs_per_cell);
+    dof_map.finalize();
+    return dof_map;
+}
+
 inline void expectDenseSystemNear(const TestDenseSystemView& actual,
                                   const TestDenseSystemView& expected,
                                   Real tol,
@@ -882,6 +914,57 @@ public:
 
     [[nodiscard]] RequiredData getRequiredData() const override {
         return RequiredData::PhysicalGradients | RequiredData::IntegrationWeights;
+    }
+};
+
+class HDivVectorBasisProbeKernel : public AssemblyKernel {
+public:
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        const auto n_dofs = ctx.numTestDofs();
+        const auto n_qpts = ctx.numQuadraturePoints();
+
+        output.local_matrix.assign(static_cast<std::size_t>(n_dofs * n_dofs), 0.0);
+        output.local_vector.assign(static_cast<std::size_t>(n_dofs), 0.0);
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const Real w = ctx.integrationWeight(q);
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
+                const auto vi = ctx.basisVectorValue(i, q);
+                const auto Ji = ctx.basisVectorJacobian(i, q);
+                const Real div_i = ctx.basisDivergence(i, q);
+                output.local_vector[static_cast<std::size_t>(i)] +=
+                    w * (vi[0] + Real{0.5} * vi[1] + Real{0.25} * vi[2] + div_i + Ji[0][0]);
+
+                for (LocalIndex j = 0; j < n_dofs; ++j) {
+                    const auto vj = ctx.basisVectorValue(j, q);
+                    const auto Jj = ctx.basisVectorJacobian(j, q);
+                    const Real div_j = ctx.basisDivergence(j, q);
+                    Real dot_v = 0.0;
+                    Real dot_J = 0.0;
+                    for (int r = 0; r < 3; ++r) {
+                        dot_v += vi[static_cast<std::size_t>(r)] * vj[static_cast<std::size_t>(r)];
+                        for (int c = 0; c < 3; ++c) {
+                            dot_J += Ji[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                                     Jj[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+                        }
+                    }
+                    output.local_matrix[static_cast<std::size_t>(i * n_dofs + j)] +=
+                        w * (dot_v + div_i * div_j + Real{0.1} * dot_J);
+                }
+            }
+        }
+
+        output.has_matrix = true;
+        output.has_vector = true;
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::BasisValues |
+               RequiredData::PhysicalGradients |
+               RequiredData::BasisDivergences |
+               RequiredData::IntegrationWeights;
     }
 };
 
@@ -1979,6 +2062,224 @@ public:
 
 private:
     Real load_{0.0};
+};
+
+class CutInterfaceMaterialStateCounterKernel : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::MaterialState;
+    }
+
+    [[nodiscard]] MaterialStateSpec materialStateSpec() const noexcept override
+    {
+        return MaterialStateSpec{sizeof(int), alignof(int)};
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext& /*ctx_plus*/,
+                              int /*interface_marker*/,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        output_minus.reserve(ctx_minus.numTestDofs(),
+                             ctx_minus.numTrialDofs(),
+                             /*need_matrix=*/false,
+                             /*need_vector=*/false);
+        output_plus.reserve(ctx_minus.numTestDofs(),
+                            ctx_minus.numTrialDofs(),
+                            /*need_matrix=*/false,
+                            /*need_vector=*/false);
+        coupling_mp.reserve(ctx_minus.numTestDofs(),
+                            ctx_minus.numTrialDofs(),
+                            /*need_matrix=*/false,
+                            /*need_vector=*/false);
+        coupling_pm.reserve(ctx_minus.numTestDofs(),
+                            ctx_minus.numTrialDofs(),
+                            /*need_matrix=*/false,
+                            /*need_vector=*/false);
+
+        last_values.clear();
+        last_values.reserve(static_cast<std::size_t>(ctx_minus.numQuadraturePoints()));
+        for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+            auto state = ctx_minus.materialStateWork(q);
+            auto* counter = reinterpret_cast<int*>(state.data());
+            *counter += 1;
+            last_values.push_back(*counter);
+        }
+    }
+
+    mutable std::vector<int> last_values{};
+};
+
+class TwoSidedGeneratedInterfaceDispatchKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::IntegrationWeights;
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        ++calls;
+        observed_marker = interface_marker;
+        minus_cell = ctx_minus.cellId();
+        plus_cell = ctx_plus.cellId();
+        minus_qpts = ctx_minus.numQuadraturePoints();
+        plus_qpts = ctx_plus.numQuadraturePoints();
+        minus_measure = Real{0.0};
+        plus_measure = Real{0.0};
+        for (LocalIndex q = 0; q < minus_qpts; ++q) {
+            minus_measure += ctx_minus.integrationWeight(q);
+        }
+        for (LocalIndex q = 0; q < plus_qpts; ++q) {
+            plus_measure += ctx_plus.integrationWeight(q);
+        }
+
+        const auto n_test_minus = ctx_minus.numTestDofs();
+        const auto n_trial_minus = ctx_minus.numTrialDofs();
+        const auto n_test_plus = ctx_plus.numTestDofs();
+        const auto n_trial_plus = ctx_plus.numTrialDofs();
+        output_minus.reserve(n_test_minus, n_trial_minus, /*need_matrix=*/true, /*need_vector=*/true);
+        output_plus.reserve(n_test_plus, n_trial_plus, /*need_matrix=*/true, /*need_vector=*/true);
+        coupling_mp.reserve(n_test_minus, n_trial_plus, /*need_matrix=*/true, /*need_vector=*/false);
+        coupling_pm.reserve(n_test_plus, n_trial_minus, /*need_matrix=*/true, /*need_vector=*/false);
+        output_minus.clear();
+        output_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+
+        output_minus.vectorEntry(0) += Real{1.0};
+        output_plus.vectorEntry(1) += Real{2.0};
+        output_minus.matrixEntry(0, 0) += Real{10.0};
+        output_plus.matrixEntry(1, 1) += Real{20.0};
+        coupling_mp.matrixEntry(2, 3) += Real{30.0};
+        coupling_pm.matrixEntry(3, 2) += Real{40.0};
+    }
+
+    int calls{0};
+    int observed_marker{-1};
+    GlobalIndex minus_cell{-1};
+    GlobalIndex plus_cell{-1};
+    LocalIndex minus_qpts{0};
+    LocalIndex plus_qpts{0};
+    Real minus_measure{0.0};
+    Real plus_measure{0.0};
+};
+
+class SideSpecificGeneratedInterfaceFieldKernel final : public AssemblyKernel {
+public:
+    SideSpecificGeneratedInterfaceFieldKernel(FieldId minus_field, FieldId plus_field)
+        : minus_field_(minus_field), plus_field_(plus_field)
+    {
+    }
+
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::IntegrationWeights;
+    }
+
+    [[nodiscard]] std::vector<FieldRequirement> fieldRequirements() const override
+    {
+        return {
+            FieldRequirement{
+                minus_field_,
+                RequiredData::SolutionValues,
+                FieldEvaluationSide::Minus},
+            FieldRequirement{
+                plus_field_,
+                RequiredData::SolutionValues,
+                FieldEvaluationSide::Plus},
+        };
+    }
+
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override { return true; }
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override { return true; }
+
+    void computeInterfaceFace(const AssemblyContext& ctx_minus,
+                              const AssemblyContext& ctx_plus,
+                              int interface_marker,
+                              KernelOutput& output_minus,
+                              KernelOutput& output_plus,
+                              KernelOutput& coupling_mp,
+                              KernelOutput& coupling_pm) override
+    {
+        ++calls;
+        observed_marker = interface_marker;
+        minus_has_minus = ctx_minus.hasFieldSolutionData(minus_field_);
+        minus_has_plus = ctx_minus.hasFieldSolutionData(plus_field_);
+        plus_has_minus = ctx_plus.hasFieldSolutionData(minus_field_);
+        plus_has_plus = ctx_plus.hasFieldSolutionData(plus_field_);
+        minus_value_sum = Real{0.0};
+        plus_value_sum = Real{0.0};
+        minus_measure = Real{0.0};
+        plus_measure = Real{0.0};
+        for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
+            const auto w = ctx_minus.integrationWeight(q);
+            minus_measure += w;
+            minus_value_sum += w * ctx_minus.fieldValue(minus_field_, q);
+        }
+        for (LocalIndex q = 0; q < ctx_plus.numQuadraturePoints(); ++q) {
+            const auto w = ctx_plus.integrationWeight(q);
+            plus_measure += w;
+            plus_value_sum += w * ctx_plus.fieldValue(plus_field_, q);
+        }
+
+        output_minus.reserve(ctx_minus.numTestDofs(),
+                             ctx_minus.numTrialDofs(),
+                             /*need_matrix=*/false,
+                             /*need_vector=*/true);
+        output_plus.reserve(ctx_plus.numTestDofs(),
+                            ctx_plus.numTrialDofs(),
+                            /*need_matrix=*/false,
+                            /*need_vector=*/true);
+        coupling_mp.reserve(ctx_minus.numTestDofs(),
+                            ctx_plus.numTrialDofs(),
+                            /*need_matrix=*/false,
+                            /*need_vector=*/false);
+        coupling_pm.reserve(ctx_plus.numTestDofs(),
+                            ctx_minus.numTrialDofs(),
+                            /*need_matrix=*/false,
+                            /*need_vector=*/false);
+        output_minus.clear();
+        output_plus.clear();
+        coupling_mp.clear();
+        coupling_pm.clear();
+        output_minus.vectorEntry(0) += minus_value_sum;
+        output_plus.vectorEntry(1) += plus_value_sum;
+    }
+
+    FieldId minus_field_{INVALID_FIELD_ID};
+    FieldId plus_field_{INVALID_FIELD_ID};
+    int calls{0};
+    int observed_marker{-1};
+    bool minus_has_minus{false};
+    bool minus_has_plus{false};
+    bool plus_has_minus{false};
+    bool plus_has_plus{false};
+    Real minus_measure{0.0};
+    Real plus_measure{0.0};
+    Real minus_value_sum{0.0};
+    Real plus_value_sum{0.0};
 };
 
 /**
@@ -3116,8 +3417,368 @@ interfaces::LevelSetInterfaceDomain makeReferencePlaneInterfaceDomain(int marker
     qp.normal = fragment.normal;
     qp.weight = fragment.measure;
     fragment.quadrature_points.push_back(qp);
+    const auto interface_normal = fragment.normal;
     domain.addFragment(std::move(fragment));
+
+    interfaces::CutInterfaceVolumeRegion negative_region;
+    negative_region.interface_marker = marker;
+    negative_region.parent_cell = 0;
+    negative_region.local_region_index = 0;
+    negative_region.stable_id = 2;
+    negative_region.side = geometry::CutIntegrationSide::Negative;
+    negative_region.measure = Real{0.05};
+    negative_region.parent_measure = Real{1.0} / Real{6.0};
+    negative_region.volume_fraction =
+        negative_region.measure / negative_region.parent_measure;
+    negative_region.centroid = {{Real{0.1}, Real{0.1}, Real{0.1}}};
+    negative_region.normal = interface_normal;
+    domain.addVolumeRegion(std::move(negative_region));
+
+    interfaces::CutInterfaceVolumeRegion positive_region;
+    positive_region.interface_marker = marker;
+    positive_region.parent_cell = 0;
+    positive_region.local_region_index = 1;
+    positive_region.stable_id = 3;
+    positive_region.side = geometry::CutIntegrationSide::Positive;
+    positive_region.measure = Real{0.10};
+    positive_region.parent_measure = Real{1.0} / Real{6.0};
+    positive_region.volume_fraction =
+        positive_region.measure / positive_region.parent_measure;
+    positive_region.centroid = {{Real{0.3}, Real{0.1}, Real{0.1}}};
+    positive_region.normal = interface_normal;
+    domain.addVolumeRegion(std::move(positive_region));
+
     return domain;
+}
+
+CutIntegrationContext makeTwoCellReferenceCutVolumeContext(int marker)
+{
+    CutIntegrationContext context;
+    for (GlobalIndex cell = 0; cell < 2; ++cell) {
+        geometry::CutQuadraturePoint qp;
+        qp.point = {{Real{0.10} + Real{0.05} * static_cast<Real>(cell),
+                     Real{0.10},
+                     Real{0.10}}};
+        qp.parent_coordinate = qp.point;
+        qp.normal = {{Real{1.0}, Real{0.0}, Real{0.0}}};
+        qp.weight = Real{0.02} + Real{0.01} * static_cast<Real>(cell);
+
+        geometry::CutQuadratureRule rule;
+        rule.kind = geometry::CutQuadratureKind::Volume;
+        rule.side = geometry::CutIntegrationSide::Negative;
+        rule.points.push_back(qp);
+        rule.measure = qp.weight;
+        rule.parent_measure = Real{1.0} / Real{6.0};
+        rule.volume_fraction = rule.measure / rule.parent_measure;
+        rule.exact_polynomial_order = 1;
+        rule.provenance.parent_entity = cell;
+        rule.provenance.marker = marker;
+        rule.provenance.cut_topology_revision = 11u + static_cast<std::uint64_t>(cell);
+        rule.provenance.predicate_policy_key = 19u;
+        rule.provenance.source_value_revision = 23u;
+
+        CutCellAssemblyMetadata metadata;
+        metadata.cell = cell;
+        metadata.parent_entity = cell;
+        metadata.volume_fraction = rule.volume_fraction;
+        metadata.side = rule.side;
+        metadata.provenance_id = "unit-cut-volume-cache";
+        metadata.cut_topology_id = "unit-cut-volume-cache-" + std::to_string(cell);
+        metadata.revision_key = rule.provenance.cut_topology_revision;
+        metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+        metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
+        metadata.source_value_revision = rule.provenance.source_value_revision;
+
+        context.addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+    }
+    return context;
+}
+
+CutIntegrationContext makeSingleCellReferenceCutVolumeContext(int marker)
+{
+    CutIntegrationContext context;
+    geometry::CutQuadraturePoint qp;
+    qp.point = {{Real{0.10}, Real{0.10}, Real{0.10}}};
+    qp.parent_coordinate = qp.point;
+    qp.normal = {{Real{1.0}, Real{0.0}, Real{0.0}}};
+    qp.weight = Real{0.02};
+
+    geometry::CutQuadratureRule rule;
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    rule.points.push_back(qp);
+    rule.measure = qp.weight;
+    rule.parent_measure = Real{1.0} / Real{6.0};
+    rule.volume_fraction = rule.measure / rule.parent_measure;
+    rule.exact_polynomial_order = 1;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.cut_topology_revision = 31u;
+    rule.provenance.predicate_policy_key = 37u;
+    rule.provenance.source_value_revision = 41u;
+
+    CutCellAssemblyMetadata metadata;
+    metadata.cell = 0;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.side = rule.side;
+    metadata.provenance_id = "unit-single-cut-volume-cache";
+    metadata.cut_topology_id = "unit-single-cut-volume-cache";
+    metadata.revision_key = rule.provenance.cut_topology_revision;
+    metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
+    metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
+    metadata.source_value_revision = rule.provenance.source_value_revision;
+
+    context.addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+    return context;
+}
+
+TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheWithinEntryCap)
+{
+    constexpr int marker = 411;
+    MockMeshAccess mesh;
+    auto dof_map = createTestDofMap();
+    MockFunctionSpace space;
+    auto cut_context = makeTwoCellReferenceCutVolumeContext(marker);
+
+    AssemblyOptions options;
+    options.cut_volume_basis_cache_max_entries = 2u;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView system(5);
+    MassKernel kernel;
+
+    auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space, kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+
+    auto diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.max_entries, 2u);
+    EXPECT_EQ(diagnostics.entries, 2u);
+    EXPECT_EQ(diagnostics.high_watermark, 2u);
+    EXPECT_EQ(diagnostics.hits, 0u);
+    EXPECT_EQ(diagnostics.misses, 2u);
+    EXPECT_EQ(diagnostics.insertions, 2u);
+    EXPECT_EQ(diagnostics.evictions, 0u);
+
+    assembler.resetCutVolumeBasisCacheDiagnostics();
+    system.zero();
+    result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space, kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+
+    diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 2u);
+    EXPECT_EQ(diagnostics.high_watermark, 2u);
+    EXPECT_EQ(diagnostics.hits, 2u);
+    EXPECT_EQ(diagnostics.misses, 0u);
+    EXPECT_EQ(diagnostics.insertions, 0u);
+    EXPECT_EQ(diagnostics.evictions, 0u);
+}
+
+TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheAcrossCompatibleKernels)
+{
+    constexpr int marker = 413;
+    MockMeshAccess mesh;
+    auto dof_map = createTestDofMap();
+    MockFunctionSpace space;
+    auto cut_context = makeTwoCellReferenceCutVolumeContext(marker);
+
+    AssemblyOptions options;
+    options.cut_volume_basis_cache_max_entries = 2u;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView system(5);
+    MassKernel mass_kernel;
+    StiffnessKernel stiffness_kernel;
+
+    auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        space, space, mass_kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    auto diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.misses, 2u);
+    EXPECT_EQ(diagnostics.insertions, 2u);
+    EXPECT_EQ(diagnostics.hits, 0u);
+
+    assembler.resetCutVolumeBasisCacheDiagnostics();
+    system.zero();
+    result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        space, space, stiffness_kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+
+    diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 2u);
+    EXPECT_EQ(diagnostics.hits, 2u);
+    EXPECT_EQ(diagnostics.misses, 0u);
+    EXPECT_EQ(diagnostics.insertions, 0u);
+    EXPECT_EQ(diagnostics.evictions, 0u);
+}
+
+TEST(StandardAssemblerCutVolumes, ReusesCutVolumeGeometryAcrossCompatibleKernels)
+{
+    constexpr int marker = 416;
+    CountingMockMeshAccess mesh;
+    auto dof_map = createTestDofMap();
+    MockFunctionSpace space;
+    auto cut_context = makeTwoCellReferenceCutVolumeContext(marker);
+
+    AssemblyOptions options;
+    options.cut_volume_basis_cache_max_entries = 2u;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView system(5);
+    MassKernel mass_kernel;
+    StiffnessKernel stiffness_kernel;
+
+    auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        space, space, mass_kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+    const int first_coordinate_calls = mesh.cellCoordinateCalls();
+    EXPECT_EQ(first_coordinate_calls, 2);
+
+    system.zero();
+    result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        space, space, stiffness_kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+    EXPECT_EQ(mesh.cellCoordinateCalls(), first_coordinate_calls);
+}
+
+TEST(StandardAssemblerCutVolumes, EvictsLeastRecentCutVolumeBasisCacheEntryAtCap)
+{
+    constexpr int marker = 412;
+    MockMeshAccess mesh;
+    auto dof_map = createTestDofMap();
+    MockFunctionSpace space;
+    auto cut_context = makeTwoCellReferenceCutVolumeContext(marker);
+
+    AssemblyOptions options;
+    options.cut_volume_basis_cache_max_entries = 1u;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView system(5);
+    MassKernel kernel;
+
+    const auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative, space, space, kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+
+    const auto diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.max_entries, 1u);
+    EXPECT_EQ(diagnostics.entries, 1u);
+    EXPECT_EQ(diagnostics.high_watermark, 1u);
+    EXPECT_EQ(diagnostics.hits, 0u);
+    EXPECT_EQ(diagnostics.misses, 2u);
+    EXPECT_EQ(diagnostics.insertions, 2u);
+    EXPECT_EQ(diagnostics.evictions, 1u);
+}
+
+TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheForProductSpace)
+{
+    constexpr int marker = 414;
+    MockMeshAccess mesh;
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    spaces::ProductSpace product_space(scalar_space, /*components=*/2);
+    const auto dofs_per_cell = static_cast<GlobalIndex>(product_space.dofs_per_element());
+    auto dof_map = createTwoCellDisjointDofMap(dofs_per_cell);
+    auto cut_context = makeTwoCellReferenceCutVolumeContext(marker);
+
+    AssemblyOptions options;
+    options.cut_volume_basis_cache_max_entries = 2u;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView first(2 * dofs_per_cell);
+    TestDenseSystemView second(2 * dofs_per_cell);
+    MassKernel kernel;
+
+    auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        product_space, product_space, kernel,
+        &first, &first, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 2);
+    auto diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 2u);
+    EXPECT_EQ(diagnostics.misses, 2u);
+    EXPECT_EQ(diagnostics.insertions, 2u);
+
+    assembler.resetCutVolumeBasisCacheDiagnostics();
+    result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        product_space, product_space, kernel,
+        &second, &second, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 2u);
+    EXPECT_EQ(diagnostics.hits, 2u);
+    EXPECT_EQ(diagnostics.misses, 0u);
+    EXPECT_EQ(diagnostics.insertions, 0u);
+    expectDenseSystemNear(second, first, 1e-12, "ProductSpace cut-volume basis cache reuse");
+}
+
+TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheForHDivVectorBasis)
+{
+    constexpr int marker = 415;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{1.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 1.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 1.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    spaces::HDivSpace hdiv_space(ElementType::Tetra4, /*order=*/0, BasisType::RaviartThomas);
+    const auto dofs_per_cell = static_cast<GlobalIndex>(hdiv_space.dofs_per_element());
+    auto dof_map = createSingleCellDofMap(dofs_per_cell);
+    auto cut_context = makeSingleCellReferenceCutVolumeContext(marker);
+
+    AssemblyOptions options;
+    options.cut_volume_basis_cache_max_entries = 2u;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dof_map);
+    TestDenseSystemView first(dofs_per_cell);
+    TestDenseSystemView second(dofs_per_cell);
+    HDivVectorBasisProbeKernel kernel;
+
+    auto result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        hdiv_space, hdiv_space, kernel,
+        &first, &first, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.elements_assembled, 1);
+    auto diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 1u);
+    EXPECT_EQ(diagnostics.misses, 1u);
+    EXPECT_EQ(diagnostics.insertions, 1u);
+    EXPECT_EQ(diagnostics.hits, 0u);
+
+    assembler.resetCutVolumeBasisCacheDiagnostics();
+    result = assembler.assembleCutVolumes(
+        mesh, cut_context, marker, geometry::CutIntegrationSide::Negative,
+        hdiv_space, hdiv_space, kernel,
+        &second, &second, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    diagnostics = assembler.cutVolumeBasisCacheDiagnostics();
+    EXPECT_EQ(diagnostics.entries, 1u);
+    EXPECT_EQ(diagnostics.hits, 1u);
+    EXPECT_EQ(diagnostics.misses, 0u);
+    EXPECT_EQ(diagnostics.insertions, 0u);
+    EXPECT_EQ(diagnostics.evictions, 0u);
+    expectDenseSystemNear(second, first, 1e-12, "H(div) vector cut-volume basis cache reuse");
 }
 
 TEST(StandardAssemblerCutInterfaces, MapsReferenceInterfaceMeasureToPhysicalSurface) {
@@ -3193,7 +3854,69 @@ TEST(StandardAssemblerCutInterfaces, AssemblesOneSidedInterfaceLoadOnGeneratedSu
     EXPECT_NEAR(rhs.getVectorEntry(3), load * physical_area / Real{6.0}, 1e-12);
 }
 
-TEST(StandardAssemblerCutInterfaces, RejectsTwoSidedGeneratedInterfaceForms)
+TEST(StandardAssemblerCutInterfaces,
+     BindsMaterialStateOnGeneratedSurfaceByCutTopologyRevision)
+{
+    constexpr int marker = 317;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+    const auto rules = cut_context.interfaceRulesForMarker(marker);
+    ASSERT_EQ(rules.size(), 1u);
+    ASSERT_NE(rules.front(), nullptr);
+    const auto cut_topology_revision =
+        rules.front()->provenance.cut_topology_revision;
+    ASSERT_NE(cut_topology_revision, 0u);
+
+    CutInterfaceMaterialStateCounterKernel kernel;
+    systems::MaterialStateProvider provider(
+        mesh.numCells(),
+        /*boundary_face_ids=*/{},
+        /*interior_face_ids=*/{},
+        /*generated_interface_ids=*/{cut_topology_revision});
+    provider.addKernel(kernel,
+                       kernel.materialStateSpec(),
+                       /*max_cell_qpts=*/0,
+                       /*max_boundary_face_qpts=*/0,
+                       /*max_interior_face_qpts=*/0,
+                       /*max_generated_interface_qpts=*/1);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setMaterialStateProvider(&provider);
+    assembler.initialize();
+
+    auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        nullptr, nullptr, /*assemble_matrix=*/false, /*assemble_vector=*/false);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    ASSERT_EQ(kernel.last_values.size(), 1u);
+    EXPECT_EQ(kernel.last_values.front(), 1);
+
+    result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        nullptr, nullptr, /*assemble_matrix=*/false, /*assemble_vector=*/false);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    ASSERT_EQ(kernel.last_values.size(), 1u);
+    EXPECT_EQ(kernel.last_values.front(), 2);
+}
+
+TEST(StandardAssemblerCutInterfaces, DispatchesTwoSidedGeneratedInterfaceBlocks)
 {
     constexpr int marker = 316;
     ConfigurableSingleTetraMeshAccess mesh(
@@ -3207,7 +3930,166 @@ TEST(StandardAssemblerCutInterfaces, RejectsTwoSidedGeneratedInterfaceForms)
 
     auto dof_map = createSingleCellDofMap(4);
     MockFunctionSpace space;
-    DenseVectorView rhs(4);
+    TestDenseSystemView system(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+    const auto& bindings =
+        cut_context.generatedInterfaceTwoSidedBindingsForMarker(marker);
+    ASSERT_EQ(bindings.size(), 1u);
+    EXPECT_TRUE(bindings.front().complete());
+
+    TwoSidedGeneratedInterfaceDispatchKernel kernel;
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        &system, &system, /*assemble_matrix=*/true, /*assemble_vector=*/true);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    EXPECT_EQ(kernel.calls, 1);
+    EXPECT_EQ(kernel.observed_marker, marker);
+    EXPECT_EQ(kernel.minus_cell, 0);
+    EXPECT_EQ(kernel.plus_cell, 0);
+    EXPECT_EQ(kernel.minus_qpts, kernel.plus_qpts);
+    EXPECT_NEAR(kernel.minus_measure, kernel.plus_measure, 1e-12);
+
+    EXPECT_DOUBLE_EQ(system.getVectorEntry(0), 1.0);
+    EXPECT_DOUBLE_EQ(system.getVectorEntry(1), 2.0);
+    EXPECT_DOUBLE_EQ(system.getMatrixEntry(0, 0), 10.0);
+    EXPECT_DOUBLE_EQ(system.getMatrixEntry(1, 1), 20.0);
+    EXPECT_DOUBLE_EQ(system.getMatrixEntry(2, 3), 30.0);
+    EXPECT_DOUBLE_EQ(system.getMatrixEntry(3, 2), 40.0);
+}
+
+TEST(StandardAssemblerCutInterfaces, SelectsSideSpecificFieldsForGeneratedTwoSidedAssembly)
+{
+    constexpr int marker = 317;
+    constexpr FieldId kMinusField = 401;
+    constexpr FieldId kPlusField = 402;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    TestDenseSystemView rhs(4);
+
+    std::array<FieldSolutionAccess, 2> field_access = {{
+        FieldSolutionAccess{
+            .field = kMinusField,
+            .space = &space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+        },
+        FieldSolutionAccess{
+            .field = kPlusField,
+            .space = &space,
+            .dof_map = &dof_map,
+            .dof_offset = 4,
+        },
+    }};
+    std::vector<Real> current_solution(8, Real{0.0});
+    for (std::size_t i = 0; i < 4; ++i) {
+        current_solution[i] = Real{2.0};
+        current_solution[4 + i] = Real{7.0};
+    }
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    SideSpecificGeneratedInterfaceFieldKernel kernel(kMinusField, kPlusField);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+    assembler.setCurrentSolution(current_solution);
+    assembler.initialize();
+
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        nullptr, &rhs, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    EXPECT_EQ(kernel.calls, 1);
+    EXPECT_EQ(kernel.observed_marker, marker);
+    EXPECT_TRUE(kernel.minus_has_minus);
+    EXPECT_FALSE(kernel.minus_has_plus);
+    EXPECT_FALSE(kernel.plus_has_minus);
+    EXPECT_TRUE(kernel.plus_has_plus);
+    EXPECT_NEAR(kernel.minus_value_sum, Real{2.0} * kernel.minus_measure, 1e-12);
+    EXPECT_NEAR(kernel.plus_value_sum, Real{7.0} * kernel.plus_measure, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(0), kernel.minus_value_sum, 1e-12);
+    EXPECT_NEAR(rhs.getVectorEntry(1), kernel.plus_value_sum, 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces, AssemblesAverageTwoSidedGeneratedInterfaceForm)
+{
+    constexpr int marker = 318;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    DenseMatrixView matrix(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    forms::FormCompiler compiler;
+    const auto u = forms::TrialFunction(space, "u");
+    const auto v = forms::TestFunction(space, "v");
+    auto ir = compiler.compileBilinear((forms::avg(u) * forms::avg(v)).dI(marker));
+    forms::FormKernel kernel(std::move(ir));
+    ASSERT_TRUE(kernel.requiresTwoSidedInterfaceFace());
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        &matrix, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    EXPECT_GT(matrix.getMatrixEntry(0, 0), 0.0);
+    EXPECT_GT(matrix.getMatrixEntry(1, 1), 0.0);
+    EXPECT_GT(matrix.getMatrixEntry(2, 2), 0.0);
+    EXPECT_GT(matrix.getMatrixEntry(3, 3), 0.0);
+}
+
+TEST(StandardAssemblerCutInterfaces, AssemblesJumpTwoSidedGeneratedInterfaceForm)
+{
+    constexpr int marker = 319;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    DenseMatrixView matrix(4);
 
     CutIntegrationContext cut_context;
     cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
@@ -3223,14 +4105,174 @@ TEST(StandardAssemblerCutInterfaces, RejectsTwoSidedGeneratedInterfaceForms)
     assembler.setDofMap(dof_map);
     assembler.initialize();
 
-    try {
-        (void)assembler.assembleCutInterfaces(
-            mesh, cut_context, marker, space, space, kernel,
-            nullptr, &rhs, /*assemble_matrix=*/false, /*assemble_vector=*/true);
-        FAIL() << "Expected generated level-set interface assembly to reject two-sided forms";
-    } catch (const FEException& ex) {
-        const std::string message = ex.what();
-        EXPECT_NE(message.find("one-sided embedded boundaries"), std::string::npos);
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        &matrix, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(matrix.getMatrixEntry(i, j), 0.0, 1e-12);
+        }
+    }
+}
+
+TEST(StandardAssemblerCutInterfaces, TwoPhaseNitscheDiffusionCancelsForContinuousGeneratedTrace)
+{
+    constexpr int marker = 320;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    TestDenseSystemView system(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    forms::FormCompiler compiler;
+    const auto u = forms::TrialFunction(space, "u");
+    const auto v = forms::TestFunction(space, "v");
+    const auto n = forms::FormExpr::normal();
+    const auto k_plus = forms::FormExpr::constant(Real{2.0});
+    const auto k_minus = forms::FormExpr::constant(Real{5.0});
+    const auto avg_flux_u =
+        Real{0.5} * (k_plus * forms::inner(forms::grad(u).plus(), n.plus()) +
+                     k_minus * forms::inner(forms::grad(u).minus(), n.minus()));
+    const auto avg_flux_v =
+        Real{0.5} * (k_plus * forms::inner(forms::grad(v).plus(), n.plus()) +
+                     k_minus * forms::inner(forms::grad(v).minus(), n.minus()));
+    const auto penalty = forms::FormExpr::constant(Real{24.0});
+    auto ir = compiler.compileBilinear(
+        (-avg_flux_u * forms::jump(v) -
+         avg_flux_v * forms::jump(u) +
+         penalty * forms::jump(u) * forms::jump(v)).dI(marker));
+    forms::FormKernel kernel(std::move(ir));
+    ASSERT_TRUE(kernel.requiresTwoSidedInterfaceFace());
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, kernel,
+        &system, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(system.getMatrixEntry(i, j), 0.0, 1e-12);
+        }
+    }
+}
+
+TEST(StandardAssemblerCutInterfaces, BalancedVectorTractionCouplingCancelsOnGeneratedInterface)
+{
+    constexpr int marker = 321;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto scalar_space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    spaces::ProductSpace vector_space(scalar_space, /*components=*/3);
+    auto dof_map = createSingleCellDofMap(12);
+    TestDenseSystemView system(12);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    forms::FormCompiler compiler;
+    const auto v = forms::TestFunction(vector_space, "v");
+    const auto n = forms::FormExpr::normal();
+    const auto traction_scale = forms::FormExpr::constant(Real{3.0});
+    auto ir = compiler.compileLinear(
+        (forms::inner(traction_scale * n.plus(), v.plus()) +
+         forms::inner(traction_scale * n.minus(), v.minus())).dI(marker));
+    forms::FormKernel kernel(std::move(ir));
+    ASSERT_TRUE(kernel.requiresTwoSidedInterfaceFace());
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    const auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, vector_space, vector_space, kernel,
+        nullptr, &system, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+    for (GlobalIndex i = 0; i < 12; ++i) {
+        EXPECT_NEAR(system.getVectorEntry(i), 0.0, 1e-12);
+    }
+}
+
+TEST(StandardAssemblerCutInterfaces, AverageGeneratedTraceMatchesManufacturedSurfaceLoad)
+{
+    constexpr int marker = 322;
+    constexpr Real manufactured_value = Real{4.25};
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{2.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 3.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 4.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+
+    auto dof_map = createSingleCellDofMap(4);
+    MockFunctionSpace space;
+    TestDenseSystemView matrix_system(4);
+    TestDenseSystemView load_system(4);
+
+    CutIntegrationContext cut_context;
+    cut_context.addGeneratedInterfaceDomain(makeReferencePlaneInterfaceDomain(marker));
+
+    forms::FormCompiler compiler;
+    const auto u = forms::TrialFunction(space, "u");
+    const auto v = forms::TestFunction(space, "v");
+    forms::FormKernel matrix_kernel(
+        compiler.compileBilinear((forms::avg(u) * forms::avg(v)).dI(marker)));
+    forms::FormKernel load_kernel(
+        compiler.compileLinear((forms::FormExpr::constant(manufactured_value) *
+                                forms::avg(v)).dI(marker)));
+    ASSERT_TRUE(matrix_kernel.requiresTwoSidedInterfaceFace());
+    ASSERT_TRUE(load_kernel.requiresTwoSidedInterfaceFace());
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    auto result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, matrix_kernel,
+        &matrix_system, nullptr, /*assemble_matrix=*/true, /*assemble_vector=*/false);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+
+    result = assembler.assembleCutInterfaces(
+        mesh, cut_context, marker, space, space, load_kernel,
+        nullptr, &load_system, /*assemble_matrix=*/false, /*assemble_vector=*/true);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        Real action = Real{0.0};
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            action += matrix_system.getMatrixEntry(i, j) * manufactured_value;
+        }
+        EXPECT_NEAR(action, load_system.getVectorEntry(i), 1e-12);
     }
 }
 

@@ -42,10 +42,12 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -685,6 +687,15 @@ std::string summarizeSparsePairsForTrace(std::span<const std::pair<GlobalIndex, 
 [[nodiscard]] bool oopTraceEnabled() noexcept
 {
     return core::kernelTraceEnabled(core::KernelTraceChannel::Assembly);
+}
+
+[[nodiscard]] bool cutVolumeFusionDisabled() noexcept
+{
+    static const bool disabled = [] {
+        const char* env = std::getenv("SVMP_DISABLE_CUT_VOLUME_FUSION");
+        return env && std::string_view(env) != "0";
+    }();
+    return disabled;
 }
 
 void traceLog(const std::string& msg)
@@ -1720,14 +1731,21 @@ assembly::AssemblyResult assembleOperator(
             return material_spec.bytes_per_qpt == 0u;
         };
 
-        auto same_cut_volume_group_key =
+        auto same_cut_volume_marker_side_key =
             [](const CutVolumeAssemblyEntry& lhs,
                const CutVolumeAssemblyEntry& rhs) {
                 const auto& a = *lhs.term;
                 const auto& b = *rhs.term;
                 return a.marker == b.marker &&
-                       a.side == b.side &&
-                       a.test_field == b.test_field &&
+                       a.side == b.side;
+            };
+
+        auto same_cut_volume_insertion_key =
+            [](const CutVolumeAssemblyEntry& lhs,
+               const CutVolumeAssemblyEntry& rhs) {
+                const auto& a = *lhs.term;
+                const auto& b = *rhs.term;
+                return a.test_field == b.test_field &&
                        a.trial_field == b.trial_field &&
                        a.test_space == b.test_space &&
                        a.trial_space == b.trial_space &&
@@ -1746,16 +1764,13 @@ assembly::AssemblyResult assembleOperator(
             grouped[i] = 1;
             std::vector<std::size_t> group;
             group.push_back(i);
-            if (can_compose_cut_volume_term(active_terms[i])) {
-                for (std::size_t j = i + 1u; j < active_terms.size(); ++j) {
-                    if (grouped[j]) {
-                        continue;
-                    }
-                    if (can_compose_cut_volume_term(active_terms[j]) &&
-                        same_cut_volume_group_key(active_terms[i], active_terms[j])) {
-                        grouped[j] = 1;
-                        group.push_back(j);
-                    }
+            for (std::size_t j = i + 1u; j < active_terms.size(); ++j) {
+                if (grouped[j]) {
+                    continue;
+                }
+                if (same_cut_volume_marker_side_key(active_terms[i], active_terms[j])) {
+                    grouped[j] = 1;
+                    group.push_back(j);
                 }
             }
             cut_volume_groups.push_back(std::move(group));
@@ -1782,9 +1797,6 @@ assembly::AssemblyResult assembleOperator(
                 logCutVolumeAssemblyDiagnostics(*cut_context, first.marker, first.side);
             }
 
-            assembler.setRowDofMap(*first.row_dof_map, first.row_dof_offset);
-            assembler.setColDofMap(*first.col_dof_map, first.col_dof_offset);
-
             if (oopTraceEnabled()) {
                 const auto& test_field = system.field_registry_.get(first.test_field);
                 const auto& trial_field = system.field_registry_.get(first.trial_field);
@@ -1803,6 +1815,8 @@ assembly::AssemblyResult assembleOperator(
             const auto cut_term_t0 = AO_TP();
             assembly::AssemblyResult r;
             if (group.size() == 1u) {
+                assembler.setRowDofMap(*first.row_dof_map, first.row_dof_offset);
+                assembler.setColDofMap(*first.col_dof_map, first.col_dof_offset);
                 r = assembler.assembleCutVolumes(
                     mesh,
                     *cut_context,
@@ -1816,28 +1830,121 @@ assembly::AssemblyResult assembleOperator(
                     first_entry.want_matrix,
                     first_entry.want_vector);
             } else {
-                std::vector<CompositeCutVolumeCellKernel::Term> terms;
-                terms.reserve(group.size());
-                for (const auto idx : group) {
-                    const auto& entry = active_terms[idx];
-                    terms.push_back(CompositeCutVolumeCellKernel::Term{
-                        entry.term->kernel,
-                        entry.want_matrix,
-                        entry.want_vector});
+                std::vector<std::vector<std::size_t>> insertion_groups;
+                std::vector<char> insertion_grouped(group.size(), 0);
+                for (std::size_t gi = 0; gi < group.size(); ++gi) {
+                    if (insertion_grouped[gi]) {
+                        continue;
+                    }
+                    insertion_grouped[gi] = 1;
+                    std::vector<std::size_t> insertion_group;
+                    insertion_group.push_back(group[gi]);
+                    if (can_compose_cut_volume_term(active_terms[group[gi]])) {
+                        for (std::size_t gj = gi + 1u; gj < group.size(); ++gj) {
+                            if (insertion_grouped[gj]) {
+                                continue;
+                            }
+                            if (can_compose_cut_volume_term(active_terms[group[gj]]) &&
+                                same_cut_volume_insertion_key(
+                                    active_terms[group[gi]],
+                                    active_terms[group[gj]])) {
+                                insertion_grouped[gj] = 1;
+                                insertion_group.push_back(group[gj]);
+                            }
+                        }
+                    }
+                    insertion_groups.push_back(std::move(insertion_group));
                 }
-                CompositeCutVolumeCellKernel composite(std::move(terms));
-                r = assembler.assembleCutVolumes(
-                    mesh,
-                    *cut_context,
-                    first.marker,
-                    first.side,
-                    *first.test_space,
-                    *first.trial_space,
-                    composite,
-                    want_matrix ? matrix_out : nullptr,
-                    want_vector ? vector_out : nullptr,
-                    want_matrix,
-                    want_vector);
+
+                std::vector<assembly::FusedCellTerm> terms;
+                std::vector<std::unique_ptr<CompositeCutVolumeCellKernel>> composite_storage;
+                terms.reserve(insertion_groups.size());
+                composite_storage.reserve(insertion_groups.size());
+                for (const auto& insertion_group : insertion_groups) {
+                    const auto first_idx = insertion_group.front();
+                    const auto& first_insertion_entry = active_terms[first_idx];
+                    const auto& first_insertion = *first_insertion_entry.term;
+                    bool group_want_matrix = false;
+                    bool group_want_vector = false;
+                    for (const auto idx : insertion_group) {
+                        group_want_matrix = group_want_matrix || active_terms[idx].want_matrix;
+                        group_want_vector = group_want_vector || active_terms[idx].want_vector;
+                    }
+
+                    assembly::AssemblyKernel* kernel = first_insertion.kernel;
+                    if (insertion_group.size() > 1u) {
+                        std::vector<CompositeCutVolumeCellKernel::Term> composite_terms;
+                        composite_terms.reserve(insertion_group.size());
+                        for (const auto idx : insertion_group) {
+                            const auto& entry = active_terms[idx];
+                            composite_terms.push_back(CompositeCutVolumeCellKernel::Term{
+                                entry.term->kernel,
+                                entry.want_matrix,
+                                entry.want_vector});
+                        }
+                        composite_storage.push_back(
+                            std::make_unique<CompositeCutVolumeCellKernel>(
+                                std::move(composite_terms)));
+                        kernel = composite_storage.back().get();
+                    }
+
+                    assembly::FusedCellTerm fused_term;
+                    fused_term.test_space = first_insertion.test_space;
+                    fused_term.trial_space = first_insertion.trial_space;
+                    fused_term.kernel = kernel;
+                    fused_term.row_dof_map = first_insertion.row_dof_map;
+                    fused_term.col_dof_map = first_insertion.col_dof_map;
+                    fused_term.row_dof_offset = first_insertion.row_dof_offset;
+                    fused_term.col_dof_offset = first_insertion.col_dof_offset;
+                    fused_term.matrix_view = group_want_matrix ? matrix_out : nullptr;
+                    fused_term.vector_view = group_want_vector ? vector_out : nullptr;
+                    fused_term.assemble_matrix = group_want_matrix;
+                    fused_term.assemble_vector = group_want_vector;
+                    terms.push_back(fused_term);
+                }
+
+                if (terms.size() == 1u) {
+                    const auto& term = terms.front();
+                    assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
+                    assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+                    r = assembler.assembleCutVolumes(
+                        mesh,
+                        *cut_context,
+                        first.marker,
+                        first.side,
+                        *term.test_space,
+                        *term.trial_space,
+                        *term.kernel,
+                        term.assemble_matrix ? term.matrix_view : nullptr,
+                        term.assemble_vector ? term.vector_view : nullptr,
+                        term.assemble_matrix,
+                        term.assemble_vector);
+                } else if (cutVolumeFusionDisabled()) {
+                    for (const auto& term : terms) {
+                        assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
+                        assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+                        auto part = assembler.assembleCutVolumes(
+                            mesh,
+                            *cut_context,
+                            first.marker,
+                            first.side,
+                            *term.test_space,
+                            *term.trial_space,
+                            *term.kernel,
+                            term.assemble_matrix ? term.matrix_view : nullptr,
+                            term.assemble_vector ? term.vector_view : nullptr,
+                            term.assemble_matrix,
+                            term.assemble_vector);
+                        mergeAssemblyResult(r, part);
+                    }
+                } else {
+                    r = assembler.assembleCutVolumesFused(
+                        mesh,
+                        *cut_context,
+                        first.marker,
+                        first.side,
+                        std::span<const assembly::FusedCellTerm>(terms.data(), terms.size()));
+                }
             }
             mergeAssemblyResult(total, r);
             if (oopTraceEnabled()) {

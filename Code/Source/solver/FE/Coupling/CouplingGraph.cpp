@@ -1646,6 +1646,7 @@ void validateInterfaceRegionTopology(const CouplingContractDeclaration& declarat
         });
         return;
     }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     if (region.system != nullptr && !region.system->hasInterfaceMesh(region.marker)) {
         result.add(CouplingDiagnostic{
             .severity = CouplingDiagnosticSeverity::Error,
@@ -1655,6 +1656,7 @@ void validateInterfaceRegionTopology(const CouplingContractDeclaration& declarat
             .message = "interface-face coupling region is missing registered interface topology",
         });
     }
+#endif
 }
 
 struct ResolvedDeclaredDependency {

@@ -686,6 +686,8 @@ bool LevelSetActiveSideVertexDirichletConstraint::updateValues(
     (void)constraints;
     (void)time;
     (void)dt;
+    // Level-set value changes can change which DOFs are constrained, so this
+    // constraint must be structurally rebuilt instead of value-updated in place.
     return false;
 }
 
@@ -696,6 +698,7 @@ LevelSetActiveSideVertexDirichletConstraint::dependencyDeclaration() const
     out.structural.fe_constraint_layout = true;
     out.structural.mesh_field_layout = true;
     out.structural.mesh_field_values = true;
+    out.structural.active_configuration = true;
     return out;
 }
 

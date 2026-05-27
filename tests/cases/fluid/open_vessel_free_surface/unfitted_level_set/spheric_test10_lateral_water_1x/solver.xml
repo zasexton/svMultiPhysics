@@ -11,6 +11,7 @@
   <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>
 
   <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+  <Combine_time_series>true</Combine_time_series>
   <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
   <Increment_in_saving_VTK_files>1</Increment_in_saving_VTK_files>
   <Start_saving_after_time_step>1</Start_saving_after_time_step>

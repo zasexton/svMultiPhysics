@@ -933,6 +933,33 @@ KernelPtr maybeWrapForADReferenceCheck(KernelPtr primary,
            !options.level_set_cut_domains.empty();
 }
 
+void populateLevelSetCutDomainSpaces(forms::GeometrySensitivityOptions& options,
+                                     const FESystem& system)
+{
+    if (!hasLevelSetCutDomainSensitivity(options)) {
+        return;
+    }
+    for (auto& domain : options.level_set_cut_domains) {
+        if (domain.level_set_field == INVALID_FIELD_ID) {
+            continue;
+        }
+        const auto& rec = system.fieldRecord(domain.level_set_field);
+        FE_CHECK_NOT_NULL(rec.space.get(),
+                          "installCoupledResidual: level-set cut-domain field space");
+        const auto expected = signatureFromSpace(*rec.space);
+        if (domain.level_set_space.has_value()) {
+            FE_THROW_IF(
+                !signaturesMatch(*domain.level_set_space, expected),
+                InvalidArgumentException,
+                "installCoupledResidual: level-set cut-domain field '" +
+                    rec.name +
+                    "' sensitivity space does not match the registered field space");
+        } else {
+            domain.level_set_space = expected;
+        }
+    }
+}
+
 void addLevelSetShapeTangentInterfaceDispatch(
     DomainDispatch& dispatch,
     const forms::GeometrySensitivityOptions& options,
@@ -944,7 +971,9 @@ void addLevelSetShapeTangentInterfaceDispatch(
     if (dispatch.has_cell && cell_terms_are_domain_restricted) {
         return;
     }
-    if (dispatch.has_interface || !dispatch.interface_markers.empty()) {
+    if (std::find(dispatch.interface_markers.begin(),
+                  dispatch.interface_markers.end(),
+                  -1) != dispatch.interface_markers.end()) {
         return;
     }
 
@@ -976,38 +1005,44 @@ void addLevelSetShapeTangentInterfaceDispatch(
             restriction.side == geometry::CutIntegrationSide::Interface) {
             continue;
         }
+        if (!system.fieldParticipatesInUnknownVector(restriction.level_set_field)) {
+            continue;
+        }
         domains.push_back(forms::LevelSetCutDomainSensitivity{
             .level_set_field = restriction.level_set_field,
             .interface_marker = restriction.interface_marker,
             .side = toFormsSide(restriction.side)});
     }
-    if (domains.empty()) {
+    if (domains.empty() && !hasLevelSetCutDomainSensitivity(options.geometry_sensitivity)) {
         return options;
     }
 
-    FE_THROW_IF(
-        options.geometry_sensitivity.mode ==
-            forms::GeometrySensitivityMode::MeshMotionUnknowns,
-        InvalidArgumentException,
-        "installCoupledResidual: cannot combine MeshMotionUnknowns geometry sensitivity "
-        "with equation-level level-set cut-domain shape sensitivity in the same form");
+    if (!domains.empty()) {
+        FE_THROW_IF(
+            options.geometry_sensitivity.mode ==
+                forms::GeometrySensitivityMode::MeshMotionUnknowns,
+            InvalidArgumentException,
+            "installCoupledResidual: cannot combine MeshMotionUnknowns geometry sensitivity "
+            "with equation-level level-set cut-domain shape sensitivity in the same form");
 
-    options.geometry_sensitivity.mode =
-        forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
-    auto& target_domains = options.geometry_sensitivity.level_set_cut_domains;
-    for (const auto& domain : domains) {
-        const auto exists =
-            std::any_of(target_domains.begin(),
-                        target_domains.end(),
-                        [&](const forms::LevelSetCutDomainSensitivity& current) {
-                            return current.level_set_field == domain.level_set_field &&
-                                   current.interface_marker == domain.interface_marker &&
-                                   current.side == domain.side;
-                        });
-        if (!exists) {
-            target_domains.push_back(domain);
+        options.geometry_sensitivity.mode =
+            forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+        auto& target_domains = options.geometry_sensitivity.level_set_cut_domains;
+        for (const auto& domain : domains) {
+            const auto exists =
+                std::any_of(target_domains.begin(),
+                            target_domains.end(),
+                            [&](const forms::LevelSetCutDomainSensitivity& current) {
+                                return current.level_set_field == domain.level_set_field &&
+                                       current.interface_marker == domain.interface_marker &&
+                                       current.side == domain.side;
+                            });
+            if (!exists) {
+                target_domains.push_back(domain);
+            }
         }
     }
+    populateLevelSetCutDomainSpaces(options.geometry_sensitivity, system);
     if (options.geometry_tangent_path == forms::GeometryTangentPath::Auto) {
         options.use_symbolic_tangent = true;
     }
@@ -1080,9 +1115,21 @@ void validateGeometrySensitivityField(const FESystem& system,
                         InvalidArgumentException,
                         "installCoupledResidual: level-set cut-domain field '" +
                             rec.name + "' must be scalar-valued");
+            FE_THROW_IF(!system.fieldParticipatesInUnknownVector(domain.level_set_field),
+                        InvalidArgumentException,
+                        "installCoupledResidual: level-set cut-domain field '" +
+                            rec.name + "' must be an unknown field for geometry sensitivity");
             FE_THROW_IF(domain.interface_marker < 0, InvalidArgumentException,
                         "installCoupledResidual: level-set cut-domain geometry sensitivity "
                         "requires a resolved interface marker");
+            if (domain.level_set_space.has_value()) {
+                const auto expected = signatureFromSpace(*rec.space);
+                FE_THROW_IF(!signaturesMatch(*domain.level_set_space, expected),
+                            InvalidArgumentException,
+                            "installCoupledResidual: level-set cut-domain field '" +
+                                rec.name +
+                                "' sensitivity space does not match the registered field space");
+            }
         }
         return;
     }
@@ -1104,6 +1151,31 @@ void validateGeometrySensitivityField(const FESystem& system,
                 "installCoupledResidual: geometry sensitivity requested for field '" +
                     rec.name +
                     "' but that field is not bound as the system mesh-displacement unknown");
+}
+
+void validateLevelSetCutDomainTrialFields(std::string_view installer,
+                                          std::span<const FieldId> trial_fields,
+                                          const forms::GeometrySensitivityOptions& options)
+{
+    if (!hasLevelSetCutDomainSensitivity(options)) {
+        return;
+    }
+
+    for (const auto& domain : options.level_set_cut_domains) {
+        const FieldId phi_field = domain.level_set_field;
+        if (phi_field == INVALID_FIELD_ID) {
+            continue;
+        }
+        if (std::find(trial_fields.begin(), trial_fields.end(), phi_field) !=
+            trial_fields.end()) {
+            continue;
+        }
+        throw InvalidArgumentException(
+            std::string(installer) +
+            ": level-set cut-domain geometry sensitivity requires level-set field " +
+            std::to_string(phi_field) +
+            " to be present in the trial field list");
+    }
 }
 
 void validateMovingGeometryTangentPath(std::string_view installer,
@@ -1431,6 +1503,10 @@ KernelPtr installResidualForm(
 
     validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
     const FieldId single_trial_field[] = {trial_field};
+    validateLevelSetCutDomainTrialFields(
+        "installResidualForm",
+        std::span<const FieldId>(single_trial_field, 1u),
+        install_options.compiler_options.geometry_sensitivity);
     validateMovingGeometryTangentPath("installResidualForm",
                                       std::span<const FieldId>(single_trial_field, 1u),
                                       residual_form.node(),
@@ -1459,7 +1535,11 @@ KernelPtr installResidualForm(
     FE_THROW_IF(!signaturesMatch(*ir.trialSpace(), expected_trial), InvalidArgumentException,
                 "installResidualForm: TrialFunction space does not match registered trial_field space");
 
-    const auto dispatch = analyzeDispatch(ir);
+    auto dispatch = analyzeDispatch(ir);
+    addLevelSetShapeTangentInterfaceDispatch(
+        dispatch,
+        block_options.compiler_options.geometry_sensitivity,
+        !system.formInstallCellDomainRestrictions().empty());
     FE_THROW_IF(!dispatchHasAnyTerm(dispatch),
                 InvalidArgumentException,
                 "installResidualForm: compiled residual has no integral terms");
@@ -1604,8 +1684,10 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
         withLevelSetCutDomainSensitivity(options.compiler_options, system);
 
     validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
-    forms::FormCompiler compiler(install_options.compiler_options);
-    auto compiled = compiler.compileResidual(blocks);
+    validateLevelSetCutDomainTrialFields(
+        "installResidualBlocks",
+        trial_fields,
+        install_options.compiler_options.geometry_sensitivity);
 
     std::vector<std::vector<KernelPtr>> kernels;
     kernels.resize(blocks.numTestFields());
@@ -1615,18 +1697,36 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
 
     for (std::size_t i = 0; i < blocks.numTestFields(); ++i) {
         for (std::size_t j = 0; j < blocks.numTrialFields(); ++j) {
-            if (i >= compiled.size() || j >= compiled[i].size() || !compiled[i][j].has_value()) continue;
+            if (!blocks.hasBlock(i, j)) {
+                continue;
+            }
 
-            auto ir = std::move(compiled[i][j].value());
-            const auto dispatch = analyzeDispatch(ir);
+            auto block_options = install_options;
+            block_options.compiler_options =
+                compilerOptionsForTrial(install_options.compiler_options,
+                                        trial_fields[j]);
+            const auto lowered = ensureGeometrySensitivityTrialDependency(
+                blocks.block(i, j),
+                system,
+                test_fields[i],
+                trial_fields[j],
+                block_options.compiler_options);
+
+            forms::FormCompiler compiler(block_options.compiler_options);
+            auto ir = compiler.compileResidual(lowered);
+            auto dispatch = analyzeDispatch(ir);
+            addLevelSetShapeTangentInterfaceDispatch(
+                dispatch,
+                block_options.compiler_options.geometry_sensitivity,
+                !system.formInstallCellDomainRestrictions().empty());
             FE_THROW_IF(!dispatchHasAnyTerm(dispatch),
                         InvalidArgumentException,
                         "installResidualBlocks: compiled residual block has no integral terms");
 
             KernelPtr kernel{};
             constexpr auto output = forms::NonlinearKernelOutput::Both;
-            const bool symbolic_primary = wantsSymbolicTangent(install_options.compiler_options);
-            const bool ad_check = wantsADReferenceCheck(install_options.compiler_options);
+            const bool symbolic_primary = wantsSymbolicTangent(block_options.compiler_options);
+            const bool ad_check = wantsADReferenceCheck(block_options.compiler_options);
             std::optional<forms::FormIR> ad_check_ir;
             if (symbolic_primary && ad_check) {
                 ad_check_ir = ir.clone();
@@ -1635,24 +1735,24 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                                   test_fields[i],
                                   trial_fields[j],
                                   dispatch,
-                                  install_options,
+                                  block_options,
                                   symbolic_primary,
                                   ad_check);
             if (symbolic_primary) {
                 kernel = maybeWrapForJIT(std::make_shared<forms::SymbolicNonlinearFormKernel>(
                                          std::move(ir), output),
-                                         install_options);
+                                         block_options);
             } else {
                 kernel = maybeWrapForJIT(
                     std::make_shared<forms::NonlinearFormKernel>(
-                        std::move(ir), install_options.ad_mode),
-                    install_options);
+                        std::move(ir), block_options.ad_mode),
+                    block_options);
             }
             if (ad_check_ir.has_value()) {
                 kernel = maybeWrapForADReferenceCheck(std::move(kernel),
                                                       *ad_check_ir,
                                                       output,
-                                                      install_options,
+                                                      block_options,
                                                       "installResidualBlocks");
             }
             registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
@@ -1696,6 +1796,10 @@ CoupledResidualKernels installCoupledResidual(
         withLevelSetCutDomainSensitivity(options.compiler_options, system);
 
     validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
+    validateLevelSetCutDomainTrialFields(
+        "installCoupledResidual",
+        trial_fields,
+        install_options.compiler_options.geometry_sensitivity);
 
     struct PendingKernelInstall {
         FieldId test_field{INVALID_FIELD_ID};
@@ -1717,7 +1821,9 @@ CoupledResidualKernels installCoupledResidual(
     std::vector<forms::MixedBlockKernelSet::BlockSpec> mixed_block_cell_specs;
     std::vector<forms::MonolithicCellKernel::BlockSpec> monolithic_cell_blocks;
     bool monolithic_cell_feasible = plan->monolithic_cell_requested;
+    bool mixed_block_cell_feasible = true;
     std::string monolithic_disable_reason{};
+    std::string mixed_block_disable_reason{};
 
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
@@ -1854,6 +1960,13 @@ CoupledResidualKernels installCoupledResidual(
                     "installCoupledResidual: monolithic cell fusion disabled for "
                     "level-set cut-domain shape-tangent interface terms";
             }
+            if (block_level_set_cut_sensitivity && dispatch.has_cell &&
+                mixed_block_cell_feasible) {
+                mixed_block_cell_feasible = false;
+                mixed_block_disable_reason =
+                    "installCoupledResidual: mixed-block cell fusion disabled for "
+                    "level-set cut-domain shape-tangent interface terms";
+            }
             if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
                 try {
                     auto tangent_expr = block_geometry_sensitivity
@@ -1972,12 +2085,17 @@ CoupledResidualKernels installCoupledResidual(
         plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
     }
     const bool use_mixed_block_cell_kernel =
-        !plan->monolithic_cell_enabled && mixed_block_cell_specs.size() >= 2u;
+        mixed_block_cell_feasible && !plan->monolithic_cell_enabled &&
+        mixed_block_cell_specs.size() >= 2u;
 
     traceMixedKernelPlan("installCoupledResidual", *plan);
     if (!monolithic_disable_reason.empty() &&
         core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
         core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);
+    }
+    if (!mixed_block_disable_reason.empty() &&
+        core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        core::kernelTraceLog(core::KernelTraceChannel::Selection, mixed_block_disable_reason);
     }
 
     for (const auto& pending : pending_installs) {
@@ -2294,9 +2412,15 @@ CoupledResidualKernels installCoupledResidualMixed(
     std::vector<forms::MixedBlockKernelSet::BlockSpec> mixed_block_cell_specs;
     std::vector<forms::MonolithicCellKernel::BlockSpec> monolithic_cell_blocks;
     bool monolithic_cell_feasible = plan->monolithic_cell_requested;
+    bool mixed_block_cell_feasible = true;
     std::string monolithic_disable_reason{};
+    std::string mixed_block_disable_reason{};
 
     validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
+    validateLevelSetCutDomainTrialFields(
+        "installCoupledResidualMixed",
+        trial_fields,
+        install_options.compiler_options.geometry_sensitivity);
 
     for (std::size_t i = 0; i < residual_blocks.numTestFields(); ++i) {
         if (!residual_blocks.hasBlock(i)) {
@@ -2433,6 +2557,13 @@ CoupledResidualKernels installCoupledResidualMixed(
                     "installCoupledResidualMixed: monolithic cell fusion disabled for "
                     "level-set cut-domain shape-tangent interface terms";
             }
+            if (block_level_set_cut_sensitivity && dispatch.has_cell &&
+                mixed_block_cell_feasible) {
+                mixed_block_cell_feasible = false;
+                mixed_block_disable_reason =
+                    "installCoupledResidualMixed: mixed-block cell fusion disabled for "
+                    "level-set cut-domain shape-tangent interface terms";
+            }
             if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
                 try {
                     auto tangent_expr = block_geometry_sensitivity
@@ -2565,7 +2696,8 @@ CoupledResidualKernels installCoupledResidualMixed(
         plan->semantic_type = MixedKernelSemanticType::MonolithicCell;
     }
     const bool use_mixed_block_cell_kernel =
-        !plan->monolithic_cell_enabled && mixed_block_cell_specs.size() >= 2u;
+        mixed_block_cell_feasible && !plan->monolithic_cell_enabled &&
+        mixed_block_cell_specs.size() >= 2u;
 
     traceMixedKernelPlan("installCoupledResidualMixed", *plan);
     logMixedPlanDiagnostic(op,
@@ -2577,6 +2709,10 @@ CoupledResidualKernels installCoupledResidualMixed(
     if (!monolithic_disable_reason.empty() &&
         core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
         core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);
+    }
+    if (!mixed_block_disable_reason.empty() &&
+        core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        core::kernelTraceLog(core::KernelTraceChannel::Selection, mixed_block_disable_reason);
     }
 
     for (const auto& pending : pending_installs) {
@@ -3047,6 +3183,10 @@ CoupledResidualKernels installFormulation(
     }
 
     validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
+    validateLevelSetCutDomainTrialFields(
+        "installFormulation",
+        std::span<const FieldId>(trial_fields),
+        install_options.compiler_options.geometry_sensitivity);
     validateMovingGeometryTangentPath("installFormulation",
                                       std::span<const FieldId>(trial_fields),
                                       residual.node(),
@@ -3597,7 +3737,25 @@ installMixedBilinear(
     FE_THROW_IF(!bilinear.isValid(), InvalidArgumentException,
                 "installMixedBilinear: invalid form expression");
 
-    forms::FormCompiler compiler(options.compiler_options);
+    auto install_options = options;
+    // Pre-split bilinear forms cannot infer residual-level cut-domain shape
+    // terms.  Keep equation-level cell restrictions as geometry-constant
+    // cut-volume routing; callers that need a phi block must install that
+    // block explicitly.
+    populateLevelSetCutDomainSpaces(
+        install_options.compiler_options.geometry_sensitivity, system);
+    validateGeometrySensitivityField(system, install_options.compiler_options.geometry_sensitivity);
+    FE_THROW_IF(
+        hasLevelSetCutDomainSensitivity(
+            install_options.compiler_options.geometry_sensitivity),
+        InvalidArgumentException,
+        "installMixedBilinear: level-set cut-domain geometry sensitivity is a "
+        "residual-level tangent and cannot be inferred from a pre-split "
+        "bilinear form; use installCoupledResidual()/installFormulation() or "
+        "install explicit differentiated bilinear forms with GeometryConstant "
+        "sensitivity");
+
+    forms::FormCompiler compiler(install_options.compiler_options);
     auto mir = compiler.compileMixed(bilinear, forms::FormKind::Bilinear);
 
     FE_THROW_IF(test_fields.size() != mir.numTestFields(), InvalidArgumentException,
@@ -3608,7 +3766,7 @@ installMixedBilinear(
                 " trial spaces but " + std::to_string(trial_fields.size()) + " trial fields provided");
 
     return system.executeWithOperatorRollback_([&]() {
-        return installMixedFormIR(system, op, test_fields, trial_fields, mir, options);
+        return installMixedFormIR(system, op, test_fields, trial_fields, mir, install_options);
     });
 }
 

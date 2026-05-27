@@ -7,8 +7,10 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <span>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -220,6 +222,33 @@ tetrahedralCornerDecomposition(ElementType type)
     return shifted;
 }
 
+[[nodiscard]] std::pair<Real, Real> coefficientRange(std::span<const Real> coefficients)
+{
+    Real min_value = std::numeric_limits<Real>::infinity();
+    Real max_value = -std::numeric_limits<Real>::infinity();
+    for (const auto value : coefficients) {
+        min_value = std::min(min_value, value);
+        max_value = std::max(max_value, value);
+    }
+    if (!std::isfinite(min_value) || !std::isfinite(max_value)) {
+        throw std::invalid_argument("level-set volume correction requires finite coefficients");
+    }
+    return {min_value, max_value};
+}
+
+[[nodiscard]] std::vector<Real> shiftedSystemSolution(
+    std::span<const Real> solution,
+    std::size_t offset,
+    std::size_t field_dof_count,
+    Real shift)
+{
+    std::vector<Real> shifted(solution.begin(), solution.end());
+    for (std::size_t i = 0; i < field_dof_count; ++i) {
+        shifted[offset + i] += shift;
+    }
+    return shifted;
+}
+
 [[nodiscard]] Real negativeVolumeForLinearTetra(
     const CutInterfaceDomainRequest& request,
     GlobalIndex parent_cell,
@@ -256,6 +285,209 @@ tetrahedralCornerDecomposition(ElementType type)
     return active->negative_volume_fraction * measure;
 }
 
+[[nodiscard]] LevelSetGeneratedInterfaceOptions generatedInterfaceOptionsForVolume(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    const LevelSetVolumeOptions& options)
+{
+    LevelSetGeneratedInterfaceOptions generated;
+    generated.level_set_field_name =
+        options.level_set_field_name.empty()
+            ? system.fieldRecord(level_set_field).name
+            : options.level_set_field_name;
+    generated.domain_id = options.generated_domain_id.empty()
+                              ? std::string{"volume_correction"}
+                              : options.generated_domain_id;
+    generated.requested_interface_marker = options.requested_interface_marker;
+    generated.isovalue = options.isovalue;
+    generated.tolerance = options.tolerance;
+    if (options.quadrature_order.has_value()) {
+        generated.quadrature_order = *options.quadrature_order;
+    }
+    if (options.interface_quadrature_order.has_value()) {
+        generated.interface_quadrature_order =
+            *options.interface_quadrature_order;
+    }
+    if (options.volume_quadrature_order.has_value()) {
+        generated.volume_quadrature_order = *options.volume_quadrature_order;
+    }
+    generated.geometry_mode = options.geometry_mode;
+    generated.implicit_cut_quadrature_backend =
+        options.implicit_cut_quadrature_backend;
+    generated.implicit_cut_fallback_policy =
+        options.implicit_cut_fallback_policy;
+    generated.geometry_tangent_policy = options.geometry_tangent_policy;
+    generated.implicit_cut_root_tolerance =
+        options.implicit_cut_root_tolerance;
+    generated.implicit_cut_root_coordinate_tolerance =
+        options.implicit_cut_root_coordinate_tolerance;
+    generated.implicit_cut_root_max_iterations =
+        options.implicit_cut_root_max_iterations;
+    generated.implicit_cut_max_subdivision_depth =
+        options.implicit_cut_max_subdivision_depth;
+    generated.affected_cell_neighborhood_layers =
+        options.affected_cell_neighborhood_layers;
+    generated.allow_corner_linearized_geometry =
+        options.allow_corner_linearized_geometry;
+    generated.require_production_qualified_implicit_cut_backend =
+        options.require_production_qualified_implicit_cut_backend;
+    return generated;
+}
+
+void populateGeneratedVolumeDiagnostics(
+    LevelSetVolumeResult& result,
+    const LevelSetGeneratedInterfaceResult& generated)
+{
+    result.generated_value_revision = generated.value_revision;
+    result.generated_cell_cache_hits = generated.cell_cache_hits;
+    result.generated_cell_cache_misses = generated.cell_cache_misses;
+    result.generated_cell_cache_unchanged_dof_hits =
+        generated.cell_cache_unchanged_dof_hits;
+    result.generated_cell_refresh_candidate_count =
+        generated.cell_refresh_candidate_count;
+    result.generated_directly_affected_cell_count =
+        generated.directly_affected_cell_count;
+    result.generated_affected_cell_neighborhood_count =
+        generated.affected_cell_neighborhood_count;
+    result.generated_domain_cache_hits = generated.domain_cache_hits;
+    result.generated_linear_full_cell_fast_path_count =
+        generated.linear_full_cell_fast_path_count;
+    result.generated_backend_elapsed_seconds =
+        generated.backend_elapsed_seconds;
+}
+
+void accumulateGeneratedVolumeDiagnostics(
+    LevelSetGlobalShiftCorrectionResult& correction,
+    const LevelSetVolumeResult& volume)
+{
+    ++correction.generated_volume_measurement_count;
+    correction.generated_cell_cache_hits += volume.generated_cell_cache_hits;
+    correction.generated_cell_cache_misses += volume.generated_cell_cache_misses;
+    correction.generated_cell_cache_unchanged_dof_hits +=
+        volume.generated_cell_cache_unchanged_dof_hits;
+    correction.generated_cell_refresh_candidate_count +=
+        volume.generated_cell_refresh_candidate_count;
+    correction.generated_directly_affected_cell_count +=
+        volume.generated_directly_affected_cell_count;
+    correction.generated_affected_cell_neighborhood_count +=
+        volume.generated_affected_cell_neighborhood_count;
+    correction.generated_domain_cache_hits += volume.generated_domain_cache_hits;
+    correction.generated_linear_full_cell_fast_path_count +=
+        volume.generated_linear_full_cell_fast_path_count;
+    correction.generated_backend_elapsed_seconds +=
+        volume.generated_backend_elapsed_seconds;
+}
+
+[[nodiscard]] LevelSetVolumeResult computeGeneratedInterfaceLevelSetVolume(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    const LevelSetVolumeOptions& options,
+    std::span<const Real> solution,
+    LevelSetGeneratedInterfaceLifecycle& lifecycle)
+{
+    LevelSetVolumeResult result;
+    const auto& field_dofs = system.fieldDofHandler(level_set_field);
+    const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
+    const auto offset = static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
+    if (offset + n_field_dofs > solution.size()) {
+        throw std::invalid_argument(
+            "level-set volume calculation received an incompatible system solution span");
+    }
+
+    const auto generated_options =
+        generatedInterfaceOptionsForVolume(system, level_set_field, options);
+    const auto generated =
+        lifecycle.build(system, generated_options, solution);
+    populateGeneratedVolumeDiagnostics(result, generated);
+    if (!generated.success) {
+        result.success = false;
+        result.diagnostic = generated.diagnostic;
+        return result;
+    }
+
+    result.success = true;
+    result.cells = generated.cell_count;
+    result.diagnostic = "generated_interface_quadrature";
+
+    std::set<GlobalIndex> negative_cells;
+    std::set<GlobalIndex> positive_cells;
+    std::set<GlobalIndex> cut_cells;
+    std::unordered_map<GlobalIndex, Real> physical_parent_scale_by_cell;
+    std::vector<std::array<Real, 3>> coordinates;
+    auto physical_parent_scale =
+        [&](GlobalIndex cell, Real reference_parent_measure) {
+        const auto [it, inserted] =
+            physical_parent_scale_by_cell.try_emplace(cell, Real{1.0});
+        if (inserted) {
+            coordinates.clear();
+            system.meshAccess().getCellCoordinates(cell, coordinates);
+            const auto physical_parent_measure =
+                parentMeasure(system.meshAccess().getCellType(cell),
+                              coordinates);
+            it->second =
+                reference_parent_measure > Real{0.0} &&
+                        physical_parent_measure > Real{0.0}
+                    ? physical_parent_measure / reference_parent_measure
+                    : Real{1.0};
+        }
+        return it->second;
+    };
+    for (const auto& fragment : generated.domain.fragments()) {
+        if (fragment.active()) {
+            cut_cells.insert(fragment.parent_cell);
+        }
+    }
+    for (const auto& region : generated.domain.volumeRegions()) {
+        if (!region.active()) {
+            continue;
+        }
+        const auto parent_cell = static_cast<GlobalIndex>(region.parent_cell);
+        const Real scale =
+            physical_parent_scale(parent_cell, region.parent_measure);
+        const Real physical_measure = region.measure * scale;
+        result.total_volume += physical_measure;
+        if (region.side == geometry::CutIntegrationSide::Negative) {
+            negative_cells.insert(parent_cell);
+            result.negative_volume += physical_measure;
+        } else if (region.side == geometry::CutIntegrationSide::Positive) {
+            positive_cells.insert(parent_cell);
+            result.positive_volume += physical_measure;
+        }
+    }
+    for (const auto cell : negative_cells) {
+        if (positive_cells.find(cell) != positive_cells.end()) {
+            cut_cells.insert(cell);
+        }
+    }
+    result.cut_cells = cut_cells.size();
+    for (const auto cell : negative_cells) {
+        if (cut_cells.find(cell) == cut_cells.end()) {
+            ++result.full_negative_cells;
+        }
+    }
+    for (const auto cell : positive_cells) {
+        if (cut_cells.find(cell) == cut_cells.end()) {
+            ++result.full_positive_cells;
+        }
+    }
+    return result;
+}
+
+[[nodiscard]] LevelSetVolumeResult computeGeneratedInterfaceLevelSetVolume(
+    const systems::FESystem& system,
+    FieldId level_set_field,
+    const LevelSetVolumeOptions& options,
+    std::span<const Real> solution)
+{
+    LevelSetGeneratedInterfaceLifecycle lifecycle;
+    return computeGeneratedInterfaceLevelSetVolume(
+        system,
+        level_set_field,
+        options,
+        solution,
+        lifecycle);
+}
+
 } // namespace
 
 LevelSetVolumeResult computeLevelSetCutCellVolume(
@@ -264,6 +496,10 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
     const LevelSetVolumeOptions& options,
     std::span<const Real> coefficients)
 {
+    if (options.use_generated_interface_quadrature) {
+        throw std::invalid_argument(
+            "generated-interface level-set volume calculation requires the FESystem overload");
+    }
     if (!(options.tolerance > 0.0)) {
         throw std::invalid_argument("level-set volume calculation requires a positive tolerance");
     }
@@ -403,6 +639,14 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
     const LevelSetVolumeOptions& options,
     std::span<const Real> solution)
 {
+    if (options.use_generated_interface_quadrature) {
+        return computeGeneratedInterfaceLevelSetVolume(
+            system,
+            level_set_field,
+            options,
+            solution);
+    }
+
     const auto& field_dofs = system.fieldDofHandler(level_set_field);
     const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
     const auto offset = static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
@@ -533,6 +777,153 @@ LevelSetGlobalShiftCorrectionResult applyGlobalLevelSetShiftCorrection(
     std::span<const Real> solution,
     std::vector<Real>& corrected_solution)
 {
+    if (volume_options.use_generated_interface_quadrature) {
+        if (!(correction_options.volume_tolerance > 0.0)) {
+            throw std::invalid_argument(
+                "level-set global shift correction requires a positive volume tolerance");
+        }
+        if (correction_options.max_iterations <= 0) {
+            throw std::invalid_argument(
+                "level-set global shift correction requires positive max_iterations");
+        }
+
+        const auto& field_dofs = system.fieldDofHandler(level_set_field);
+        const auto n_field_dofs =
+            static_cast<std::size_t>(field_dofs.getNumDofs());
+        const auto offset =
+            static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
+        if (offset + n_field_dofs > solution.size()) {
+            throw std::invalid_argument(
+                "level-set global shift correction received an incompatible system solution span");
+        }
+
+        LevelSetGeneratedInterfaceLifecycle volume_lifecycle;
+        auto initial = computeGeneratedInterfaceLevelSetVolume(
+            system,
+            level_set_field,
+            volume_options,
+            solution,
+            volume_lifecycle);
+        if (!initial.success) {
+            LevelSetGlobalShiftCorrectionResult result;
+            result.success = false;
+            result.initial_volume = initial;
+            result.corrected_volume = initial;
+            result.target_negative_volume =
+                correction_options.target_negative_volume;
+            result.initial_negative_volume = initial.negative_volume;
+            result.corrected_negative_volume = initial.negative_volume;
+            result.volume_error =
+                initial.negative_volume -
+                correction_options.target_negative_volume;
+            result.diagnostic = initial.diagnostic;
+            accumulateGeneratedVolumeDiagnostics(result, initial);
+            corrected_solution.assign(solution.begin(), solution.end());
+            return result;
+        }
+        const Real target = correction_options.target_negative_volume;
+        if (target < -correction_options.volume_tolerance ||
+            target > initial.total_volume + correction_options.volume_tolerance) {
+            throw std::invalid_argument(
+                "level-set global shift correction target volume is outside the total volume range");
+        }
+
+        LevelSetGlobalShiftCorrectionResult result;
+        result.target_negative_volume = target;
+        result.initial_negative_volume = initial.negative_volume;
+        result.initial_volume = initial;
+        result.corrected_volume = initial;
+        result.corrected_negative_volume = initial.negative_volume;
+        result.volume_error = initial.negative_volume - target;
+        accumulateGeneratedVolumeDiagnostics(result, initial);
+        corrected_solution.assign(solution.begin(), solution.end());
+        if (std::abs(result.volume_error) <= correction_options.volume_tolerance) {
+            result.success = true;
+            return result;
+        }
+
+        const auto field_coefficients =
+            solution.subspan(offset, n_field_dofs);
+        const auto [min_coeff, max_coeff] =
+            coefficientRange(field_coefficients);
+        const Real pad = std::max(volume_options.tolerance * Real{10.0},
+                                  Real{1.0e-12});
+        Real lower = volume_options.isovalue - max_coeff - pad;
+        Real upper = volume_options.isovalue - min_coeff + pad;
+        if (!(lower < upper)) {
+            lower -= Real{1.0};
+            upper += Real{1.0};
+        }
+
+        Real best_shift = 0.0;
+        Real best_error = std::abs(result.volume_error);
+        LevelSetVolumeResult best_volume = initial;
+        std::vector<Real> best_solution(solution.begin(), solution.end());
+
+        for (int iter = 1; iter <= correction_options.max_iterations; ++iter) {
+            const Real shift = Real{0.5} * (lower + upper);
+            auto shifted = shiftedSystemSolution(
+                solution,
+                offset,
+                n_field_dofs,
+                shift);
+            auto volume = computeGeneratedInterfaceLevelSetVolume(
+                system,
+                level_set_field,
+                volume_options,
+                shifted,
+                volume_lifecycle);
+            accumulateGeneratedVolumeDiagnostics(result, volume);
+            if (!volume.success) {
+                result.success = false;
+                result.applied_shift = best_shift;
+                result.corrected_negative_volume = best_volume.negative_volume;
+                result.volume_error = best_volume.negative_volume - target;
+                result.corrected_volume = best_volume;
+                result.diagnostic = volume.diagnostic;
+                corrected_solution = std::move(best_solution);
+                return result;
+            }
+            const Real signed_error = volume.negative_volume - target;
+            const Real abs_error = std::abs(signed_error);
+            if (abs_error < best_error) {
+                best_error = abs_error;
+                best_shift = shift;
+                best_volume = volume;
+                best_solution = std::move(shifted);
+            }
+
+            result.iterations = iter;
+            if (abs_error <= correction_options.volume_tolerance) {
+                result.success = true;
+                result.applied_shift = best_shift;
+                result.corrected_negative_volume = best_volume.negative_volume;
+                result.volume_error = best_volume.negative_volume - target;
+                result.corrected_volume = best_volume;
+                corrected_solution = std::move(best_solution);
+                return result;
+            }
+
+            if (signed_error > 0.0) {
+                lower = shift;
+            } else {
+                upper = shift;
+            }
+        }
+
+        result.success = best_error <= correction_options.volume_tolerance;
+        result.applied_shift = best_shift;
+        result.corrected_negative_volume = best_volume.negative_volume;
+        result.volume_error = best_volume.negative_volume - target;
+        result.corrected_volume = best_volume;
+        result.diagnostic =
+            result.success
+                ? std::string{}
+                : "level-set global shift correction did not reach the requested volume tolerance";
+        corrected_solution = std::move(best_solution);
+        return result;
+    }
+
     const auto& field_dofs = system.fieldDofHandler(level_set_field);
     const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
     const auto offset = static_cast<std::size_t>(system.fieldDofOffset(level_set_field));

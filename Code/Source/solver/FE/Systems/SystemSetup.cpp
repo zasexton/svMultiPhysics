@@ -278,6 +278,8 @@ void getCellCornerNodes(const assembly::IMeshAccess& access,
     return topology;
 }
 
+#endif
+
 [[nodiscard]] dofs::MeshTopologyInfo participantTopologyFromAccess(
     const assembly::IMeshAccess& access,
     const MeshParticipantInfo& participant,
@@ -418,7 +420,6 @@ void getCellCornerNodes(const assembly::IMeshAccess& access,
     global_handler.finalize();
     return global_handler;
 }
-#endif
 
 #if FE_HAS_MPI
 constexpr std::uint64_t kConsistencyHashSeed = 1469598103934665603ULL;
@@ -4243,7 +4244,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	                dist_pattern->ensureNonEmptyRows();
 	            }
 	        }
-	
+
 		        if (opts.use_constraints_in_assembly && !affine_constraints_.empty()) {
 		            if (pattern) {
 		                auto query = std::make_shared<AffineConstraintsQuery>(affine_constraints_);
@@ -4267,7 +4268,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 		                }
 		            }
 		        }
-	
+
 	        if (pattern && opts.sparsity_options.ensure_diagonal) {
 	            pattern->ensureDiagonal();
 	        }
@@ -4282,7 +4283,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 	                dist_pattern->ensureNonEmptyRows();
 	            }
 	        }
-	
+
 		        if (pattern) {
 		            pattern->finalize();
 		            sparsity_by_op_.emplace(tag, std::move(pattern));
@@ -4563,6 +4564,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     return true;
                 }
             }
+            for (const auto& term : def.interface_faces) {
+                if (term.kernel &&
+                    assembly::hasFlag(term.kernel->getRequiredData(),
+                                      assembly::RequiredData::MaterialState)) {
+                    return true;
+                }
+            }
         }
         return false;
     };
@@ -4579,9 +4587,28 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             interior_faces.push_back(face_id);
         });
 
+        std::vector<std::uint64_t> generated_interface_ids;
+        if (const auto* cut_context = cutIntegrationContext()) {
+            for (const auto& rule : cut_context->interfaceRules()) {
+                if (rule.kind != geometry::CutQuadratureKind::Interface ||
+                    rule.provenance.cut_topology_revision == 0u) {
+                    continue;
+                }
+                generated_interface_ids.push_back(
+                    rule.provenance.cut_topology_revision);
+            }
+            std::sort(generated_interface_ids.begin(),
+                      generated_interface_ids.end());
+            generated_interface_ids.erase(
+                std::unique(generated_interface_ids.begin(),
+                            generated_interface_ids.end()),
+                generated_interface_ids.end());
+        }
+
         auto provider = std::make_unique<MaterialStateProvider>(meshAccess().numCells(),
                                                                 std::move(boundary_faces),
-                                                                std::move(interior_faces));
+                                                                std::move(interior_faces),
+                                                                std::move(generated_interface_ids));
         bool any = false;
 
         const auto register_cell_material_kernel =
@@ -4599,6 +4626,33 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 provider->addKernel(kernel, spec, max_qpts);
                 any = true;
             };
+
+        const auto max_generated_interface_qpts =
+            [&](int requested_marker) -> LocalIndex {
+            const auto* cut_context = cutIntegrationContext();
+            if (cut_context == nullptr) {
+                return 0;
+            }
+            LocalIndex max_qpts = 0;
+            const auto consider_rule =
+                [&](const geometry::CutQuadratureRule& rule) {
+                if (rule.kind != geometry::CutQuadratureKind::Interface) {
+                    return;
+                }
+                const int active_marker = rule.provenance.marker;
+                if (requested_marker >= 0 &&
+                    active_marker != requested_marker) {
+                    return;
+                }
+                max_qpts = std::max(
+                    max_qpts,
+                    static_cast<LocalIndex>(rule.points.size()));
+            };
+            for (const auto& rule : cut_context->interfaceRules()) {
+                consider_rule(rule);
+            }
+            return max_qpts;
+        };
 
         for (const auto& tag : operator_registry_.list()) {
             const auto& def = operator_registry_.get(tag);
@@ -4697,6 +4751,28 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                         /*max_cell_qpts=*/0,
                                         /*max_boundary_face_qpts=*/0,
                                         /*max_interior_face_qpts=*/max_qpts);
+                    any = true;
+                }
+            }
+            for (const auto& term : def.interface_faces) {
+                if (!term.kernel) continue;
+                const auto required = term.kernel->getRequiredData();
+                if (!assembly::hasFlag(required, assembly::RequiredData::MaterialState)) {
+                    continue;
+                }
+
+                const auto spec = term.kernel->materialStateSpec();
+                FE_THROW_IF(spec.bytes_per_qpt == 0u, InvalidArgumentException,
+                            "FESystem::setup: kernel requests MaterialState but bytes_per_qpt == 0 (interface)");
+
+                const auto generated_max_qpts =
+                    max_generated_interface_qpts(term.marker);
+                if (generated_max_qpts > 0) {
+                    provider->addKernel(*term.kernel, spec,
+                                        /*max_cell_qpts=*/0,
+                                        /*max_boundary_face_qpts=*/0,
+                                        /*max_interior_face_qpts=*/0,
+                                        /*max_generated_interface_qpts=*/generated_max_qpts);
                     any = true;
                 }
             }
@@ -5219,15 +5295,15 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                             const std::size_t qmajor = q * n_space_dofs + dof;
                             side.scalar_values_qmajor[qmajor] = entry.scalarValue(scalar_dof, q);
 
-                            const auto& g = entry.gradients[q][scalar_dof];
                             for (std::size_t d = 0; d < 3u; ++d) {
-                                side.ref_gradients_qmajor[qmajor * 3u + d] = g[d];
+                                side.ref_gradients_qmajor[qmajor * 3u + d] =
+                                    entry.gradientValue(scalar_dof, d, q);
                             }
 
-                            const auto& H = entry.hessians[q][scalar_dof];
                             for (std::size_t r = 0; r < 3u; ++r) {
                                 for (std::size_t c = 0; c < 3u; ++c) {
-                                    side.ref_hessians_qmajor[qmajor * 9u + r * 3u + c] = H(r, c);
+                                    side.ref_hessians_qmajor[qmajor * 9u + r * 3u + c] =
+                                        entry.hessianValue(scalar_dof, r, c, q);
                                 }
                             }
                         }

@@ -7,8 +7,9 @@
 
 #include "SerendipityBasis.h"
 #include "LagrangeBasis.h"
-#include "Core/FEException.h"
 #include "NodeOrderingConventions.h"
+#include "Math/DenseLinearAlgebra.h"
+#include "Math/IntegerMath.h"
 
 #include <algorithm>
 #include <array>
@@ -20,16 +21,10 @@ namespace svmp {
 namespace FE {
 namespace basis {
 
+using math::pow_int;
+
 namespace {
 using Vec3 = math::Vector<Real, 3>;
-
-Real powi(Real x, int exponent) {
-    Real value = Real(1);
-    for (int i = 0; i < exponent; ++i) {
-        value *= x;
-    }
-    return value;
-}
 
 int quad_serendipity_superlinear_degree(int ax, int ay) {
     return (ax > 1 ? ax : 0) + (ay > 1 ? ay : 0);
@@ -74,8 +69,9 @@ std::vector<Vec3> quad_serendipity_nodes(int order, std::size_t total_size) {
     }
 
     if (nodes.size() > total_size) {
-        throw FEException("SerendipityBasis: quadrilateral serendipity boundary nodes exceed requested size",
-                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        throw BasisConstructionException(
+            "SerendipityBasis: quadrilateral serendipity boundary nodes exceed requested size",
+            __FILE__, __LINE__, __func__);
     }
 
     const std::size_t interior_count = total_size - nodes.size();
@@ -115,8 +111,9 @@ std::vector<Vec3> quad_serendipity_nodes(int order, std::size_t total_size) {
               });
 
     if (interior_count > interior_candidates.size()) {
-        throw FEException("SerendipityBasis: insufficient quadrilateral interior nodes for requested serendipity order",
-                          __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+        throw BasisConstructionException(
+            "SerendipityBasis: insufficient quadrilateral interior nodes for requested serendipity order",
+            __FILE__, __LINE__, __func__);
     }
 
     nodes.insert(nodes.end(),
@@ -126,60 +123,10 @@ std::vector<Vec3> quad_serendipity_nodes(int order, std::size_t total_size) {
 }
 
 std::vector<Real> invert_dense_matrix(std::vector<Real> matrix, int n, const char* label) {
-    std::vector<Real> inverse(static_cast<std::size_t>(n * n), Real(0));
-    for (int i = 0; i < n; ++i) {
-        inverse[static_cast<std::size_t>(i * n + i)] = Real(1);
-    }
-
-    auto idx = [n](int row, int col) -> std::size_t {
-        return static_cast<std::size_t>(row * n + col);
-    };
-
-    for (int col = 0; col < n; ++col) {
-        int pivot_row = col;
-        Real pivot_abs = std::abs(matrix[idx(col, col)]);
-        for (int row = col + 1; row < n; ++row) {
-            const Real cand_abs = std::abs(matrix[idx(row, col)]);
-            if (cand_abs > pivot_abs) {
-                pivot_abs = cand_abs;
-                pivot_row = row;
-            }
-        }
-
-        if (pivot_abs <= Real(1e-14)) {
-            throw FEException(std::string("SerendipityBasis: singular interpolation matrix for ") + label,
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
-        }
-
-        if (pivot_row != col) {
-            for (int j = 0; j < n; ++j) {
-                std::swap(matrix[idx(col, j)], matrix[idx(pivot_row, j)]);
-                std::swap(inverse[idx(col, j)], inverse[idx(pivot_row, j)]);
-            }
-        }
-
-        const Real pivot = matrix[idx(col, col)];
-        for (int j = 0; j < n; ++j) {
-            matrix[idx(col, j)] /= pivot;
-            inverse[idx(col, j)] /= pivot;
-        }
-
-        for (int row = 0; row < n; ++row) {
-            if (row == col) {
-                continue;
-            }
-            const Real factor = matrix[idx(row, col)];
-            if (std::abs(factor) <= Real(0)) {
-                continue;
-            }
-            for (int j = 0; j < n; ++j) {
-                matrix[idx(row, j)] -= factor * matrix[idx(col, j)];
-                inverse[idx(row, j)] -= factor * inverse[idx(col, j)];
-            }
-        }
-    }
-
-    return inverse;
+    return math::invert_dense_matrix(
+        std::move(matrix),
+        static_cast<std::size_t>(n),
+        std::string("SerendipityBasis interpolation matrix for ") + label);
 }
 
 std::vector<Real> quad_serendipity_inverse_vandermonde(
@@ -188,8 +135,9 @@ std::vector<Real> quad_serendipity_inverse_vandermonde(
     int order) {
     const int n = static_cast<int>(nodes.size());
     if (n == 0 || exponents.size() != nodes.size()) {
-        throw FEException("SerendipityBasis: invalid quadrilateral serendipity interpolation setup",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+        throw BasisConstructionException(
+            "SerendipityBasis: invalid quadrilateral serendipity interpolation setup",
+            __FILE__, __LINE__, __func__);
     }
 
     std::vector<Real> vandermonde(static_cast<std::size_t>(n * n), Real(0));
@@ -202,32 +150,55 @@ std::vector<Real> quad_serendipity_inverse_vandermonde(
         const Real y = nodes[static_cast<std::size_t>(row)][1];
         for (int col = 0; col < n; ++col) {
             const auto [ax, ay] = exponents[static_cast<std::size_t>(col)];
-            vandermonde[idx(row, col)] = powi(x, ax) * powi(y, ay);
+            vandermonde[idx(row, col)] = pow_int(x, ax) * pow_int(y, ay);
         }
     }
 
     const std::string label = "Quad order " + std::to_string(order);
     return invert_dense_matrix(std::move(vandermonde), n, label.c_str());
 }
-// Mesh use a conventional Hex20 node ordering: corners first, then edge
-// midpoints in the order {bottom, top, vertical}. The original polynomial
-// generator for the Hex20 field basis used an axis-grouped edge ordering.
-//
-// This permutation maps Mesh/NodeOrdering index -> internal axis-group index so
-// that SerendipityBasis outputs are consistent with NodeOrderingConventions.
-constexpr std::array<std::size_t, 20> kHex20NodeOrderingToInternal = {
-    0, 1, 2, 3, 4, 5, 6, 7,
-    8, 13, 10, 12,
-    9, 15, 11, 14,
-    16, 17, 19, 18
-};
-
 constexpr std::array<Real, 13> kPyramid13CenterRedistribution = {
     Real(-0.25), Real(-0.25), Real(-0.25), Real(-0.25),
     Real(0),
     Real(0.5), Real(0.5), Real(0.5), Real(0.5),
     Real(0), Real(0), Real(0), Real(0)
 };
+
+constexpr std::array<std::array<int, 3>, 15> kWedge15MonomialExponents = {{
+    {{0, 0, 0}},
+    {{0, 0, 1}},
+    {{0, 0, 2}},
+    {{0, 1, 0}},
+    {{0, 1, 1}},
+    {{0, 1, 2}},
+    {{0, 2, 0}},
+    {{0, 2, 1}},
+    {{1, 0, 0}},
+    {{1, 0, 1}},
+    {{1, 0, 2}},
+    {{1, 1, 0}},
+    {{1, 1, 1}},
+    {{2, 0, 0}},
+    {{2, 0, 1}}
+}};
+
+constexpr std::array<std::array<Real, 15>, 15> kWedge15Coefficients = {{
+    {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0}},
+    {{-0.5, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+    {{0.5, -0, -0, 0.5, -0, -0, -0, -0, -0, -0, -0, -0, -1, -0, -0}},
+    {{-1, 0, -1, -1, 0, -1, 0, 0, 2, 0, 0, 2, -1, 0, 1}},
+    {{1.5, 0, 0.5, -1.5, 0, -0.5, 0, 0, -2, 0, 0, 2, 0, 0, 0}},
+    {{-0.5, -0, 0.5, -0.5, -0, 0.5, -0, -0, -0, -0, -0, -0, 1, -0, -1}},
+    {{1, 0, 1, 1, 0, 1, 0, 0, -2, 0, 0, -2, 0, 0, 0}},
+    {{-1, 0, -1, 1, 0, 1, 0, 0, 2, 0, 0, -2, 0, 0, 0}},
+    {{-1, -1, 0, -1, -1, 0, 2, 0, 0, 2, 0, 0, -1, 1, 0}},
+    {{1.5, 0.5, 0, -1.5, -0.5, 0, -2, 0, 0, 2, 0, 0, 0, 0, 0}},
+    {{-0.5, 0.5, -0, -0.5, 0.5, -0, -0, -0, -0, -0, -0, -0, 1, -1, -0}},
+    {{2, 0, -0, 2, 0, -0, -2, 2, -2, -2, 2, -2, -0, -0, -0}},
+    {{-2, 0, 0, 2, 0, 0, 2, -2, 2, -2, 2, -2, 0, 0, 0}},
+    {{1, 1, -0, 1, 1, -0, -2, -0, -0, -2, -0, -0, -0, -0, -0}},
+    {{-1, -1, -0, 1, 1, -0, 2, -0, -0, -2, -0, -0, -0, -0, -0}}
+}};
 
 static const int hex20_monomial_exponents[20][3] = {
     {0, 0, 0}, {0, 0, 1}, {0, 0, 2}, {0, 1, 0}, {0, 1, 1},
@@ -259,17 +230,22 @@ static const Real hex20_coeffs[20][20] = {
     {0.125, 0.125, -0.125, -0.125, -0.125, -0.125, 0.125, 0.125, -0.25, 0.25, 0.25, -0.25, 0, 0, 0, 0, 0, 0, 0, 0}
 };
 
+inline std::array<Real, 3> quadratic_powers(Real x) {
+    return {Real(1), x, x * x};
+}
+
 void eval_hex20_internal(Real r, Real s, Real t, Real* internal_vals) {
+    const auto rp = quadratic_powers(r);
+    const auto sp = quadratic_powers(s);
+    const auto tp = quadratic_powers(t);
     Real phi[20];
     for (int j = 0; j < 20; ++j) {
         const int a = hex20_monomial_exponents[j][0];
         const int b = hex20_monomial_exponents[j][1];
         const int c = hex20_monomial_exponents[j][2];
-        Real val = Real(1);
-        for (int k = 0; k < a; ++k) val *= r;
-        for (int k = 0; k < b; ++k) val *= s;
-        for (int k = 0; k < c; ++k) val *= t;
-        phi[j] = val;
+        phi[j] = rp[static_cast<std::size_t>(a)] *
+                 sp[static_cast<std::size_t>(b)] *
+                 tp[static_cast<std::size_t>(c)];
     }
     for (int i = 0; i < 20; ++i) {
         Real v = Real(0);
@@ -281,20 +257,27 @@ void eval_hex20_internal(Real r, Real s, Real t, Real* internal_vals) {
 }
 
 void eval_hex20_grad_internal(Real r, Real s, Real t, Gradient* internal_grads) {
+    const auto rp = quadratic_powers(r);
+    const auto sp = quadratic_powers(s);
+    const auto tp = quadratic_powers(t);
     Real dphi_dr[20], dphi_ds[20], dphi_dt[20];
     for (int j = 0; j < 20; ++j) {
         const int a = hex20_monomial_exponents[j][0];
         const int b = hex20_monomial_exponents[j][1];
         const int c = hex20_monomial_exponents[j][2];
 
-        Real ra = Real(1), sb = Real(1), tc = Real(1);
-        for (int k = 0; k < a; ++k) ra *= r;
-        for (int k = 0; k < b; ++k) sb *= s;
-        for (int k = 0; k < c; ++k) tc *= t;
-
-        dphi_dr[j] = (a > 0) ? Real(a) * (a > 1 ? std::pow(r, a - 1) : Real(1)) * sb * tc : Real(0);
-        dphi_ds[j] = (b > 0) ? ra * Real(b) * (b > 1 ? std::pow(s, b - 1) : Real(1)) * tc : Real(0);
-        dphi_dt[j] = (c > 0) ? ra * sb * Real(c) * (c > 1 ? std::pow(t, c - 1) : Real(1)) : Real(0);
+        dphi_dr[j] = (a > 0) ? Real(a) * rp[static_cast<std::size_t>(a - 1)] *
+                                    sp[static_cast<std::size_t>(b)] *
+                                    tp[static_cast<std::size_t>(c)]
+                              : Real(0);
+        dphi_ds[j] = (b > 0) ? rp[static_cast<std::size_t>(a)] *
+                                    Real(b) * sp[static_cast<std::size_t>(b - 1)] *
+                                    tp[static_cast<std::size_t>(c)]
+                              : Real(0);
+        dphi_dt[j] = (c > 0) ? rp[static_cast<std::size_t>(a)] *
+                                    sp[static_cast<std::size_t>(b)] *
+                                    Real(c) * tp[static_cast<std::size_t>(c - 1)]
+                              : Real(0);
     }
 
     for (int i = 0; i < 20; ++i) {
@@ -311,6 +294,9 @@ void eval_hex20_grad_internal(Real r, Real s, Real t, Gradient* internal_grads) 
 }
 
 void eval_hex20_hess_internal(Real r, Real s, Real t, Hessian* internal_hessians) {
+    const auto rp = quadratic_powers(r);
+    const auto sp = quadratic_powers(s);
+    const auto tp = quadratic_powers(t);
     Real d2phi_drr[20], d2phi_dss[20], d2phi_dtt[20];
     Real d2phi_drs[20], d2phi_drt[20], d2phi_dst[20];
     for (int j = 0; j < 20; ++j) {
@@ -318,19 +304,36 @@ void eval_hex20_hess_internal(Real r, Real s, Real t, Hessian* internal_hessians
         const int b = hex20_monomial_exponents[j][1];
         const int c = hex20_monomial_exponents[j][2];
 
-        const Real ra = (a > 0) ? std::pow(r, static_cast<Real>(a)) : Real(1);
-        const Real sb = (b > 0) ? std::pow(s, static_cast<Real>(b)) : Real(1);
-        const Real tc = (c > 0) ? std::pow(t, static_cast<Real>(c)) : Real(1);
-
-        d2phi_drr[j] = (a > 1) ? Real(a * (a - 1)) * std::pow(r, static_cast<Real>(a - 2)) * sb * tc : Real(0);
-        d2phi_dss[j] = (b > 1) ? ra * Real(b * (b - 1)) * std::pow(s, static_cast<Real>(b - 2)) * tc : Real(0);
-        d2phi_dtt[j] = (c > 1) ? ra * sb * Real(c * (c - 1)) * std::pow(t, static_cast<Real>(c - 2)) : Real(0);
+        d2phi_drr[j] = (a > 1) ? Real(a * (a - 1)) *
+                                      rp[static_cast<std::size_t>(a - 2)] *
+                                      sp[static_cast<std::size_t>(b)] *
+                                      tp[static_cast<std::size_t>(c)]
+                                : Real(0);
+        d2phi_dss[j] = (b > 1) ? rp[static_cast<std::size_t>(a)] *
+                                      Real(b * (b - 1)) *
+                                      sp[static_cast<std::size_t>(b - 2)] *
+                                      tp[static_cast<std::size_t>(c)]
+                                : Real(0);
+        d2phi_dtt[j] = (c > 1) ? rp[static_cast<std::size_t>(a)] *
+                                      sp[static_cast<std::size_t>(b)] *
+                                      Real(c * (c - 1)) *
+                                      tp[static_cast<std::size_t>(c - 2)]
+                                : Real(0);
         d2phi_drs[j] = (a > 0 && b > 0) ? Real(a * b) *
-            std::pow(r, static_cast<Real>(a - 1)) * std::pow(s, static_cast<Real>(b - 1)) * tc : Real(0);
+                                              rp[static_cast<std::size_t>(a - 1)] *
+                                              sp[static_cast<std::size_t>(b - 1)] *
+                                              tp[static_cast<std::size_t>(c)]
+                                        : Real(0);
         d2phi_drt[j] = (a > 0 && c > 0) ? Real(a * c) *
-            std::pow(r, static_cast<Real>(a - 1)) * sb * std::pow(t, static_cast<Real>(c - 1)) : Real(0);
-        d2phi_dst[j] = (b > 0 && c > 0) ? ra * Real(b * c) *
-            std::pow(s, static_cast<Real>(b - 1)) * std::pow(t, static_cast<Real>(c - 1)) : Real(0);
+                                              rp[static_cast<std::size_t>(a - 1)] *
+                                              sp[static_cast<std::size_t>(b)] *
+                                              tp[static_cast<std::size_t>(c - 1)]
+                                        : Real(0);
+        d2phi_dst[j] = (b > 0 && c > 0) ? rp[static_cast<std::size_t>(a)] *
+                                              Real(b * c) *
+                                              sp[static_cast<std::size_t>(b - 1)] *
+                                              tp[static_cast<std::size_t>(c - 1)]
+                                        : Real(0);
     }
 
     for (int i = 0; i < 20; ++i) {
@@ -347,6 +350,103 @@ void eval_hex20_hess_internal(Real r, Real s, Real t, Hessian* internal_hessians
         H(2, 0) = H(0, 2);
         H(2, 1) = H(1, 2);
         internal_hessians[i] = H;
+    }
+}
+
+void eval_wedge15_polynomial(Real r,
+                             Real s,
+                             Real t,
+                             Real* values,
+                             Gradient* gradients,
+                             Hessian* hessians) {
+    Real phi[15]{};
+    Real dr[15]{};
+    Real ds[15]{};
+    Real dt[15]{};
+    Real drr[15]{};
+    Real dss[15]{};
+    Real dtt[15]{};
+    Real drs[15]{};
+    Real drt[15]{};
+    Real dst[15]{};
+
+    const auto rp = quadratic_powers(r);
+    const auto sp = quadratic_powers(s);
+    const auto tp = quadratic_powers(t);
+
+    for (int j = 0; j < 15; ++j) {
+        const auto& exponent = kWedge15MonomialExponents[static_cast<std::size_t>(j)];
+        const int a = exponent[0];
+        const int b = exponent[1];
+        const int c = exponent[2];
+        const auto ar = static_cast<std::size_t>(a);
+        const auto bs = static_cast<std::size_t>(b);
+        const auto ct = static_cast<std::size_t>(c);
+
+        const Real ra = rp[ar];
+        const Real sb = sp[bs];
+        const Real tc = tp[ct];
+
+        if (values) {
+            phi[j] = ra * sb * tc;
+        }
+        if (gradients) {
+            dr[j] = (a > 0) ? Real(a) * rp[ar - 1u] * sb * tc : Real(0);
+            ds[j] = (b > 0) ? ra * Real(b) * sp[bs - 1u] * tc : Real(0);
+            dt[j] = (c > 0) ? ra * sb * Real(c) * tp[ct - 1u] : Real(0);
+        }
+        if (hessians) {
+            drr[j] = (a > 1) ? Real(a * (a - 1)) * rp[ar - 2u] * sb * tc : Real(0);
+            dss[j] = (b > 1) ? ra * Real(b * (b - 1)) * sp[bs - 2u] * tc : Real(0);
+            dtt[j] = (c > 1) ? ra * sb * Real(c * (c - 1)) * tp[ct - 2u] : Real(0);
+            drs[j] = (a > 0 && b > 0) ? Real(a * b) * rp[ar - 1u] * sp[bs - 1u] * tc : Real(0);
+            drt[j] = (a > 0 && c > 0) ? Real(a * c) * rp[ar - 1u] * sb * tp[ct - 1u] : Real(0);
+            dst[j] = (b > 0 && c > 0) ? ra * Real(b * c) * sp[bs - 1u] * tp[ct - 1u] : Real(0);
+        }
+    }
+
+    for (int i = 0; i < 15; ++i) {
+        Real value = Real(0);
+        Real gr = Real(0);
+        Real gs = Real(0);
+        Real gt = Real(0);
+        Hessian H{};
+        for (int j = 0; j < 15; ++j) {
+            const Real coefficient =
+                kWedge15Coefficients[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)];
+            if (values) {
+                value += coefficient * phi[j];
+            }
+            if (gradients) {
+                gr += coefficient * dr[j];
+                gs += coefficient * ds[j];
+                gt += coefficient * dt[j];
+            }
+            if (hessians) {
+                H(0, 0) += coefficient * drr[j];
+                H(1, 1) += coefficient * dss[j];
+                H(2, 2) += coefficient * dtt[j];
+                H(0, 1) += coefficient * drs[j];
+                H(0, 2) += coefficient * drt[j];
+                H(1, 2) += coefficient * dst[j];
+            }
+        }
+
+        const std::size_t index = static_cast<std::size_t>(i);
+        if (values) {
+            values[index] = value;
+        }
+        if (gradients) {
+            gradients[index][0] = gr;
+            gradients[index][1] = gs;
+            gradients[index][2] = gt;
+        }
+        if (hessians) {
+            H(1, 0) = H(0, 1);
+            H(2, 0) = H(0, 2);
+            H(2, 1) = H(1, 2);
+            hessians[index] = H;
+        }
     }
 }
 
@@ -367,8 +467,9 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
         size_ = quad_monomial_exponents_.size();
         nodes_ = quad_serendipity_nodes(order_, size_);
         if (nodes_.size() != size_) {
-            throw FEException("SerendipityBasis: quadrilateral serendipity setup produced inconsistent sizes",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+            throw BasisConstructionException(
+                "SerendipityBasis: quadrilateral serendipity setup produced inconsistent sizes",
+                __FILE__, __LINE__, __func__);
         }
         quad_inv_vandermonde_ = quad_serendipity_inverse_vandermonde(nodes_, quad_monomial_exponents_, order_);
     } else if (type == ElementType::Hex8 || type == ElementType::Hex20) {
@@ -412,9 +513,20 @@ SerendipityBasis::SerendipityBasis(ElementType type, int order, bool geometry_mo
     if (nodes_.empty()) {
         nodes_.reserve(size_);
         for (std::size_t i = 0; i < size_; ++i) {
-            nodes_.push_back(NodeOrdering::get_node_coords(element_type_, i));
+            nodes_.push_back(ReferenceNodeLayout::get_node_coords(element_type_, i));
         }
     }
+}
+
+bool SerendipityBasis::cache_identity_words(std::vector<std::uint64_t>& words) const {
+    words.push_back(0x736572656e646970ULL);
+    words.push_back(static_cast<std::uint64_t>(basis_type()));
+    words.push_back(static_cast<std::uint64_t>(element_type_));
+    words.push_back(static_cast<std::uint64_t>(dimension_));
+    words.push_back(static_cast<std::uint64_t>(order_));
+    words.push_back(static_cast<std::uint64_t>(size_));
+    words.push_back(geometry_mode_ ? 1u : 0u);
+    return true;
 }
 
 void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
@@ -427,14 +539,15 @@ void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     if (dimension_ == 2) {
         if (quad_monomial_exponents_.size() != size_ ||
             quad_inv_vandermonde_.size() != size_ * size_) {
-            throw FEException("SerendipityBasis: quadrilateral interpolation tables are not initialized",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+            throw BasisEvaluationException(
+                "SerendipityBasis: quadrilateral interpolation tables are not initialized for value evaluation",
+                __FILE__, __LINE__, __func__);
         }
 
         std::vector<Real> monomials(size_, Real(0));
         for (std::size_t j = 0; j < size_; ++j) {
             const auto [ax, ay] = quad_monomial_exponents_[j];
-            monomials[j] = powi(x, ax) * powi(y, ay);
+            monomials[j] = pow_int(x, ax) * pow_int(y, ay);
         }
 
         for (std::size_t i = 0; i < size_; ++i) {
@@ -444,14 +557,6 @@ void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
             }
             values[i] = value;
         }
-        return;
-    }
-
-    if (dimension_ == 2 && order_ == 1) {
-        values[0] = Real(0.25) * (Real(1) - x) * (Real(1) - y); // bottom-left
-        values[1] = Real(0.25) * (Real(1) + x) * (Real(1) - y); // bottom-right
-        values[2] = Real(0.25) * (Real(1) + x) * (Real(1) + y); // top-right
-        values[3] = Real(0.25) * (Real(1) - x) * (Real(1) + y); // top-left
         return;
     }
 
@@ -468,19 +573,6 @@ void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         values[5] = Real(0.125) * (Real(1) + r) * (Real(1) - s) * (Real(1) + t);
         values[6] = Real(0.125) * (Real(1) + r) * (Real(1) + s) * (Real(1) + t);
         values[7] = Real(0.125) * (Real(1) - r) * (Real(1) + s) * (Real(1) + t);
-        return;
-    }
-
-    if (dimension_ == 2) {
-        // Quadratic serendipity (8-node) on [-1,1]^2
-        values[0] = Real(0.25) * (Real(1) - x) * (Real(1) - y) * (-x - y - Real(1));
-        values[1] = Real(0.25) * (Real(1) + x) * (Real(1) - y) * ( x - y - Real(1));
-        values[2] = Real(0.25) * (Real(1) + x) * (Real(1) + y) * ( x + y - Real(1));
-        values[3] = Real(0.25) * (Real(1) - x) * (Real(1) + y) * (-x + y - Real(1));
-        values[4] = Real(0.5)  * (Real(1) - x * x) * (Real(1) - y);       // mid-bottom
-        values[5] = Real(0.5)  * (Real(1) + x) * (Real(1) - y * y);       // mid-right
-        values[6] = Real(0.5)  * (Real(1) - x * x) * (Real(1) + y);       // mid-top
-        values[7] = Real(0.5)  * (Real(1) - x) * (Real(1) - y * y);       // mid-left
         return;
     }
 
@@ -507,80 +599,24 @@ void SerendipityBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     if (element_type_ == ElementType::Hex20) {
         Real internal_vals[20];
         eval_hex20_internal(r, s, t, internal_vals);
+        const auto mesh_to_basis = ReferenceNodeLayout::mesh_to_basis_ordering(element_type_);
+        BASIS_CHECK_EVAL(mesh_to_basis.size() == size_,
+                         "Hex20 mesh-to-basis ordering is not registered");
         for (std::size_t i = 0; i < 20; ++i) {
-            values[i] = internal_vals[kHex20NodeOrderingToInternal[i]];
+            values[i] = internal_vals[mesh_to_basis[i]];
         }
         return;
     }
 
     if (element_type_ == ElementType::Wedge15) {
-        // Wedge15 serendipity-style field basis: polynomial expansion in monomials r^a s^b t^c
-        static const int wedge15_monomial_exponents[15][3] = {
-            {0, 0, 0},
-            {0, 0, 1},
-            {0, 0, 2},
-            {0, 1, 0},
-            {0, 1, 1},
-            {0, 1, 2},
-            {0, 2, 0},
-            {0, 2, 1},
-            {1, 0, 0},
-            {1, 0, 1},
-            {1, 0, 2},
-            {1, 1, 0},
-            {1, 1, 1},
-            {2, 0, 0},
-            {2, 0, 1}
-        };
-
-        static const Real wedge15_coeffs[15][15] = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
-            {-0.5, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-            {0.5, -0, -0, 0.5, -0, -0, -0, -0, -0, -0, -0, -0, -1, -0, -0},
-            {-1, 0, -1, -1, 0, -1, 0, 0, 2, 0, 0, 2, -1, 0, 1},
-            {1.5, 0, 0.5, -1.5, 0, -0.5, 0, 0, -2, 0, 0, 2, 0, 0, 0},
-            {-0.5, -0, 0.5, -0.5, -0, 0.5, -0, -0, -0, -0, -0, -0, 1, -0, -1},
-            {1, 0, 1, 1, 0, 1, 0, 0, -2, 0, 0, -2, 0, 0, 0},
-            {-1, 0, -1, 1, 0, 1, 0, 0, 2, 0, 0, -2, 0, 0, 0},
-            {-1, -1, 0, -1, -1, 0, 2, 0, 0, 2, 0, 0, -1, 1, 0},
-            {1.5, 0.5, 0, -1.5, -0.5, 0, -2, 0, 0, 2, 0, 0, 0, 0, 0},
-            {-0.5, 0.5, -0, -0.5, 0.5, -0, -0, -0, -0, -0, -0, -0, 1, -1, -0},
-            {2, 0, -0, 2, 0, -0, -2, 2, -2, -2, 2, -2, -0, -0, -0},
-            {-2, 0, 0, 2, 0, 0, 2, -2, 2, -2, 2, -2, 0, 0, 0},
-            {1, 1, -0, 1, 1, -0, -2, -0, -0, -2, -0, -0, -0, -0, -0},
-            {-1, -1, -0, 1, 1, -0, 2, -0, -0, -2, -0, -0, -0, -0, -0}
-        };
-
-        Real phi[15];
-        for (int j = 0; j < 15; ++j) {
-            const int a = wedge15_monomial_exponents[j][0];
-            const int b = wedge15_monomial_exponents[j][1];
-            const int c = wedge15_monomial_exponents[j][2];
-            Real val = Real(1);
-            for (int k = 0; k < a; ++k) val *= r;
-            for (int k = 0; k < b; ++k) val *= s;
-            for (int k = 0; k < c; ++k) val *= t;
-            phi[j] = val;
-        }
-
-        for (int i = 0; i < 15; ++i) {
-            Real v = Real(0);
-            for (int j = 0; j < 15; ++j) {
-                v += wedge15_coeffs[j][i] * phi[j];
-            }
-            values[static_cast<std::size_t>(i)] = v;
-        }
+        eval_wedge15_polynomial(r, s, t, values.data(), nullptr, nullptr);
         return;
     }
 
     if (element_type_ == ElementType::Pyramid13) {
         static const LagrangeBasis parent(ElementType::Pyramid14, 2);
-        std::vector<Real> parent_values;
-        parent.evaluate_values(xi, parent_values);
-        if (parent_values.size() != 14u) {
-            throw FEException("SerendipityBasis: Pyramid14 parent evaluation size mismatch",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
-        }
+        std::array<Real, 14> parent_values{};
+        parent.evaluate_values_to(xi, parent_values.data());
         for (std::size_t i = 0; i < 13; ++i) {
             values[i] = parent_values[i] + kPyramid13CenterRedistribution[i] * parent_values[13];
         }
@@ -599,16 +635,17 @@ void SerendipityBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
     if (dimension_ == 2) {
         if (quad_monomial_exponents_.size() != size_ ||
             quad_inv_vandermonde_.size() != size_ * size_) {
-            throw FEException("SerendipityBasis: quadrilateral interpolation tables are not initialized",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+            throw BasisEvaluationException(
+                "SerendipityBasis: quadrilateral interpolation tables are not initialized for gradient evaluation",
+                __FILE__, __LINE__, __func__);
         }
 
         std::vector<Real> dmon_dx(size_, Real(0));
         std::vector<Real> dmon_dy(size_, Real(0));
         for (std::size_t j = 0; j < size_; ++j) {
             const auto [ax, ay] = quad_monomial_exponents_[j];
-            dmon_dx[j] = (ax > 0) ? Real(ax) * powi(x, ax - 1) * powi(y, ay) : Real(0);
-            dmon_dy[j] = (ay > 0) ? powi(x, ax) * Real(ay) * powi(y, ay - 1) : Real(0);
+            dmon_dx[j] = (ax > 0) ? Real(ax) * pow_int(x, ax - 1) * pow_int(y, ay) : Real(0);
+            dmon_dy[j] = (ay > 0) ? pow_int(x, ax) * Real(ay) * pow_int(y, ay - 1) : Real(0);
         }
 
         for (std::size_t i = 0; i < size_; ++i) {
@@ -622,51 +659,6 @@ void SerendipityBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             gradients[i][0] = gx;
             gradients[i][1] = gy;
         }
-        return;
-    }
-
-    // 2D linear quad (Quad4)
-    if (dimension_ == 2 && order_ == 1) {
-        // dN/dx
-        gradients[0][0] = -Real(0.25) * (Real(1) - y);
-        gradients[1][0] =  Real(0.25) * (Real(1) - y);
-        gradients[2][0] =  Real(0.25) * (Real(1) + y);
-        gradients[3][0] = -Real(0.25) * (Real(1) + y);
-        // dN/dy
-        gradients[0][1] = -Real(0.25) * (Real(1) - x);
-        gradients[1][1] = -Real(0.25) * (Real(1) + x);
-        gradients[2][1] =  Real(0.25) * (Real(1) + x);
-        gradients[3][1] =  Real(0.25) * (Real(1) - x);
-        return;
-    }
-
-    // 2D quadratic serendipity (Quad8)
-    if (dimension_ == 2 && order_ == 2) {
-        // Corner nodes
-        gradients[0][0] = Real(0.25) * (Real(2) * x + y) * (Real(1) - y);
-        gradients[0][1] = Real(0.25) * (Real(1) - x) * (Real(2) * y + x);
-
-        gradients[1][0] = Real(0.25) * (Real(2) * x - y) * (Real(1) - y);
-        gradients[1][1] = Real(0.25) * (Real(1) + x) * (Real(2) * y - x);
-
-        gradients[2][0] = Real(0.25) * (Real(2) * x + y) * (Real(1) + y);
-        gradients[2][1] = Real(0.25) * (Real(1) + x) * (Real(2) * y + x);
-
-        gradients[3][0] = Real(0.25) * (Real(2) * x - y) * (Real(1) + y);
-        gradients[3][1] = Real(0.25) * (Real(1) - x) * (Real(2) * y - x);
-
-        // Mid-edge nodes
-        gradients[4][0] = -x * (Real(1) - y);
-        gradients[4][1] = -Real(0.5) * (Real(1) - x * x);
-
-        gradients[5][0] =  Real(0.5) * (Real(1) - y * y);
-        gradients[5][1] = -y * (Real(1) + x);
-
-        gradients[6][0] = -x * (Real(1) + y);
-        gradients[6][1] =  Real(0.5) * (Real(1) - x * x);
-
-        gradients[7][0] = -Real(0.5) * (Real(1) - y * y);
-        gradients[7][1] = -y * (Real(1) - x);
         return;
     }
 
@@ -751,91 +743,36 @@ void SerendipityBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         const Real r = x, s = y, t = z;
         Gradient internal_grads[20];
         eval_hex20_grad_internal(r, s, t, internal_grads);
+        const auto mesh_to_basis = ReferenceNodeLayout::mesh_to_basis_ordering(element_type_);
+        BASIS_CHECK_EVAL(mesh_to_basis.size() == size_,
+                         "Hex20 mesh-to-basis ordering is not registered");
         for (std::size_t i = 0; i < 20; ++i) {
-            gradients[i] = internal_grads[kHex20NodeOrderingToInternal[i]];
+            gradients[i] = internal_grads[mesh_to_basis[i]];
         }
         return;
     }
 
     // Wedge15 analytical gradients using monomial differentiation
     if (element_type_ == ElementType::Wedge15 && order_ == 2) {
-        const Real r = x, s = y, t = z;
-
-        // Monomial exponents for Wedge15 polynomial basis
-        static const int wedge15_monomial_exponents[15][3] = {
-            {0, 0, 0}, {0, 0, 1}, {0, 0, 2}, {0, 1, 0}, {0, 1, 1},
-            {0, 1, 2}, {0, 2, 0}, {0, 2, 1}, {1, 0, 0}, {1, 0, 1},
-            {1, 0, 2}, {1, 1, 0}, {1, 1, 1}, {2, 0, 0}, {2, 0, 1}
-        };
-
-        // Coefficients matrix (same as in evaluate_values)
-        static const Real wedge15_coeffs[15][15] = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
-            {-0.5, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-            {0.5, -0, -0, 0.5, -0, -0, -0, -0, -0, -0, -0, -0, -1, -0, -0},
-            {-1, 0, -1, -1, 0, -1, 0, 0, 2, 0, 0, 2, -1, 0, 1},
-            {1.5, 0, 0.5, -1.5, 0, -0.5, 0, 0, -2, 0, 0, 2, 0, 0, 0},
-            {-0.5, -0, 0.5, -0.5, -0, 0.5, -0, -0, -0, -0, -0, -0, 1, -0, -1},
-            {1, 0, 1, 1, 0, 1, 0, 0, -2, 0, 0, -2, 0, 0, 0},
-            {-1, 0, -1, 1, 0, 1, 0, 0, 2, 0, 0, -2, 0, 0, 0},
-            {-1, -1, 0, -1, -1, 0, 2, 0, 0, 2, 0, 0, -1, 1, 0},
-            {1.5, 0.5, 0, -1.5, -0.5, 0, -2, 0, 0, 2, 0, 0, 0, 0, 0},
-            {-0.5, 0.5, -0, -0.5, 0.5, -0, -0, -0, -0, -0, -0, -0, 1, -1, -0},
-            {2, 0, -0, 2, 0, -0, -2, 2, -2, -2, 2, -2, -0, -0, -0},
-            {-2, 0, 0, 2, 0, 0, 2, -2, 2, -2, 2, -2, 0, 0, 0},
-            {1, 1, -0, 1, 1, -0, -2, -0, -0, -2, -0, -0, -0, -0, -0},
-            {-1, -1, -0, 1, 1, -0, 2, -0, -0, -2, -0, -0, -0, -0, -0}
-        };
-
-        // Compute monomial derivatives
-        Real dphi_dr[15], dphi_ds[15], dphi_dt[15];
-        for (int j = 0; j < 15; ++j) {
-            const int a = wedge15_monomial_exponents[j][0];
-            const int b = wedge15_monomial_exponents[j][1];
-            const int c = wedge15_monomial_exponents[j][2];
-
-            // Compute r^a, s^b, t^c
-            Real ra = Real(1), sb = Real(1), tc = Real(1);
-            for (int k = 0; k < a; ++k) ra *= r;
-            for (int k = 0; k < b; ++k) sb *= s;
-            for (int k = 0; k < c; ++k) tc *= t;
-
-            // Derivatives
-            dphi_dr[j] = (a > 0) ? Real(a) * (a > 1 ? std::pow(r, a - 1) : Real(1)) * sb * tc : Real(0);
-            dphi_ds[j] = (b > 0) ? ra * Real(b) * (b > 1 ? std::pow(s, b - 1) : Real(1)) * tc : Real(0);
-            dphi_dt[j] = (c > 0) ? ra * sb * Real(c) * (c > 1 ? std::pow(t, c - 1) : Real(1)) : Real(0);
-        }
-
-        // Compute gradients as linear combinations
-        for (int i = 0; i < 15; ++i) {
-            Real gr = Real(0), gs = Real(0), gt = Real(0);
-            for (int j = 0; j < 15; ++j) {
-                gr += wedge15_coeffs[j][i] * dphi_dr[j];
-                gs += wedge15_coeffs[j][i] * dphi_ds[j];
-                gt += wedge15_coeffs[j][i] * dphi_dt[j];
-            }
-            gradients[static_cast<std::size_t>(i)][0] = gr;
-            gradients[static_cast<std::size_t>(i)][1] = gs;
-            gradients[static_cast<std::size_t>(i)][2] = gt;
-        }
+        eval_wedge15_polynomial(x, y, z, nullptr, gradients.data(), nullptr);
         return;
     }
 
     if (element_type_ == ElementType::Pyramid13) {
         static const LagrangeBasis parent(ElementType::Pyramid14, 2);
-        std::vector<Gradient> parent_gradients;
+        std::array<Real, 14u * 3u> parent_gradients{};
         // Pyramid13 inherits the complete-family pyramid apex contract from the
         // parent basis rather than introducing a separate regularized path.
-        parent.evaluate_gradients(xi, parent_gradients);
-        if (parent_gradients.size() != 14u) {
-            throw FEException("SerendipityBasis: Pyramid14 parent gradient size mismatch",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
-        }
+        parent.evaluate_gradients_to(xi, parent_gradients.data());
+        const auto parent_gradient = [&](std::size_t node, std::size_t component) {
+            return parent_gradients[node * 3u + component];
+        };
         for (std::size_t i = 0; i < 13; ++i) {
-            gradients[i] = parent_gradients[i];
-            gradients[i][0] += kPyramid13CenterRedistribution[i] * parent_gradients[13][0];
-            gradients[i][1] += kPyramid13CenterRedistribution[i] * parent_gradients[13][1];
-            gradients[i][2] += kPyramid13CenterRedistribution[i] * parent_gradients[13][2];
+            for (std::size_t c = 0; c < 3u; ++c) {
+                gradients[i][c] =
+                    parent_gradient(i, c) +
+                    kPyramid13CenterRedistribution[i] * parent_gradient(13u, c);
+            }
         }
         return;
     }
@@ -854,8 +791,9 @@ void SerendipityBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
     if (dimension_ == 2) {
         if (quad_monomial_exponents_.size() != size_ ||
             quad_inv_vandermonde_.size() != size_ * size_) {
-            throw FEException("SerendipityBasis: quadrilateral interpolation tables are not initialized",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
+            throw BasisEvaluationException(
+                "SerendipityBasis: quadrilateral interpolation tables are not initialized for Hessian evaluation",
+                __FILE__, __LINE__, __func__);
         }
 
         std::vector<Real> dxx(size_, Real(0));
@@ -863,9 +801,9 @@ void SerendipityBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         std::vector<Real> dyy(size_, Real(0));
         for (std::size_t j = 0; j < size_; ++j) {
             const auto [ax, ay] = quad_monomial_exponents_[j];
-            dxx[j] = (ax > 1) ? Real(ax * (ax - 1)) * powi(x, ax - 2) * powi(y, ay) : Real(0);
-            dxy[j] = (ax > 0 && ay > 0) ? Real(ax * ay) * powi(x, ax - 1) * powi(y, ay - 1) : Real(0);
-            dyy[j] = (ay > 1) ? Real(ay * (ay - 1)) * powi(x, ax) * powi(y, ay - 2) : Real(0);
+            dxx[j] = (ax > 1) ? Real(ax * (ax - 1)) * pow_int(x, ax - 2) * pow_int(y, ay) : Real(0);
+            dxy[j] = (ax > 0 && ay > 0) ? Real(ax * ay) * pow_int(x, ax - 1) * pow_int(y, ay - 1) : Real(0);
+            dyy[j] = (ay > 1) ? Real(ay * (ay - 1)) * pow_int(x, ax) * pow_int(y, ay - 2) : Real(0);
         }
 
         for (std::size_t i = 0; i < size_; ++i) {
@@ -888,10 +826,14 @@ void SerendipityBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
 
     if (geometry_mode_ && element_type_ == ElementType::Hex20) {
         static const LagrangeBasis parent(ElementType::Hex8, 1);
-        std::vector<Hessian> parent_hessians;
-        parent.evaluate_hessians(xi, parent_hessians);
+        std::array<Real, 8u * 9u> parent_hessians{};
+        parent.evaluate_hessians_to(xi, parent_hessians.data());
         for (std::size_t i = 0; i < 8; ++i) {
-            hessians[i] = parent_hessians[i];
+            for (std::size_t r = 0; r < 3; ++r) {
+                for (std::size_t c = 0; c < 3; ++c) {
+                    hessians[i](r, c) = parent_hessians[i * 9u + r * 3u + c];
+                }
+            }
         }
         return;
     }
@@ -899,87 +841,30 @@ void SerendipityBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
     if (element_type_ == ElementType::Hex20 && order_ == 2) {
         Hessian internal_hessians[20];
         eval_hex20_hess_internal(x, y, z, internal_hessians);
+        const auto mesh_to_basis = ReferenceNodeLayout::mesh_to_basis_ordering(element_type_);
+        BASIS_CHECK_EVAL(mesh_to_basis.size() == size_,
+                         "Hex20 mesh-to-basis ordering is not registered");
         for (std::size_t i = 0; i < 20; ++i) {
-            hessians[i] = internal_hessians[kHex20NodeOrderingToInternal[i]];
+            hessians[i] = internal_hessians[mesh_to_basis[i]];
         }
         return;
     }
 
     if (element_type_ == ElementType::Wedge15 && order_ == 2) {
-        static const int wedge15_monomial_exponents[15][3] = {
-            {0, 0, 0}, {0, 0, 1}, {0, 0, 2}, {0, 1, 0}, {0, 1, 1},
-            {0, 1, 2}, {0, 2, 0}, {0, 2, 1}, {1, 0, 0}, {1, 0, 1},
-            {1, 0, 2}, {1, 1, 0}, {1, 1, 1}, {2, 0, 0}, {2, 0, 1}
-        };
-        static const Real wedge15_coeffs[15][15] = {
-            {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0},
-            {-0.5, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-            {0.5, -0, -0, 0.5, -0, -0, -0, -0, -0, -0, -0, -0, -1, -0, -0},
-            {-1, 0, -1, -1, 0, -1, 0, 0, 2, 0, 0, 2, -1, 0, 1},
-            {1.5, 0, 0.5, -1.5, 0, -0.5, 0, 0, -2, 0, 0, 2, 0, 0, 0},
-            {-0.5, -0, 0.5, -0.5, -0, 0.5, -0, -0, -0, -0, -0, -0, 1, -0, -1},
-            {1, 0, 1, 1, 0, 1, 0, 0, -2, 0, 0, -2, 0, 0, 0},
-            {-1, 0, -1, 1, 0, 1, 0, 0, 2, 0, 0, -2, 0, 0, 0},
-            {-1, -1, 0, -1, -1, 0, 2, 0, 0, 2, 0, 0, -1, 1, 0},
-            {1.5, 0.5, 0, -1.5, -0.5, 0, -2, 0, 0, 2, 0, 0, 0, 0, 0},
-            {-0.5, 0.5, -0, -0.5, 0.5, -0, -0, -0, -0, -0, -0, -0, 1, -1, -0},
-            {2, 0, -0, 2, 0, -0, -2, 2, -2, -2, 2, -2, -0, -0, -0},
-            {-2, 0, 0, 2, 0, 0, 2, -2, 2, -2, 2, -2, 0, 0, 0},
-            {1, 1, -0, 1, 1, -0, -2, -0, -0, -2, -0, -0, -0, -0, -0},
-            {-1, -1, -0, 1, 1, -0, 2, -0, -0, -2, -0, -0, -0, -0, -0}
-        };
-
-        Real drr[15], dss[15], dtt[15], drs[15], drt[15], dst[15];
-        for (int j = 0; j < 15; ++j) {
-            const int a = wedge15_monomial_exponents[j][0];
-            const int b = wedge15_monomial_exponents[j][1];
-            const int c = wedge15_monomial_exponents[j][2];
-            drr[j] = (a > 1) ? Real(a * (a - 1)) * std::pow(x, static_cast<Real>(a - 2)) * std::pow(y, static_cast<Real>(b)) * std::pow(z, static_cast<Real>(c)) : Real(0);
-            dss[j] = (b > 1) ? std::pow(x, static_cast<Real>(a)) * Real(b * (b - 1)) * std::pow(y, static_cast<Real>(b - 2)) * std::pow(z, static_cast<Real>(c)) : Real(0);
-            dtt[j] = (c > 1) ? std::pow(x, static_cast<Real>(a)) * std::pow(y, static_cast<Real>(b)) * Real(c * (c - 1)) * std::pow(z, static_cast<Real>(c - 2)) : Real(0);
-            drs[j] = (a > 0 && b > 0) ? Real(a * b) * std::pow(x, static_cast<Real>(a - 1)) * std::pow(y, static_cast<Real>(b - 1)) * std::pow(z, static_cast<Real>(c)) : Real(0);
-            drt[j] = (a > 0 && c > 0) ? Real(a * c) * std::pow(x, static_cast<Real>(a - 1)) * std::pow(y, static_cast<Real>(b)) * std::pow(z, static_cast<Real>(c - 1)) : Real(0);
-            dst[j] = (b > 0 && c > 0) ? std::pow(x, static_cast<Real>(a)) * Real(b * c) * std::pow(y, static_cast<Real>(b - 1)) * std::pow(z, static_cast<Real>(c - 1)) : Real(0);
-        }
-
-        for (int i = 0; i < 15; ++i) {
-            Hessian H{};
-            for (int j = 0; j < 15; ++j) {
-                H(0, 0) += wedge15_coeffs[j][i] * drr[j];
-                H(1, 1) += wedge15_coeffs[j][i] * dss[j];
-                H(2, 2) += wedge15_coeffs[j][i] * dtt[j];
-                H(0, 1) += wedge15_coeffs[j][i] * drs[j];
-                H(0, 2) += wedge15_coeffs[j][i] * drt[j];
-                H(1, 2) += wedge15_coeffs[j][i] * dst[j];
-            }
-            H(1, 0) = H(0, 1);
-            H(2, 0) = H(0, 2);
-            H(2, 1) = H(1, 2);
-            hessians[static_cast<std::size_t>(i)] = H;
-        }
+        eval_wedge15_polynomial(x, y, z, nullptr, nullptr, hessians.data());
         return;
     }
 
     if (element_type_ == ElementType::Pyramid13) {
         static const LagrangeBasis parent(ElementType::Pyramid14, 2);
-        std::vector<Hessian> parent_hessians;
+        std::array<Real, 14u * 9u> parent_hessians{};
         // Pyramid13 inherits the complete-family pyramid apex contract from the
         // parent basis rather than introducing a separate regularized path.
-        parent.evaluate_hessians(xi, parent_hessians);
-        if (parent_hessians.size() != 14u) {
-            throw FEException("SerendipityBasis: Pyramid14 parent Hessian size mismatch",
-                              __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
-        }
+        parent.evaluate_hessians_to(xi, parent_hessians.data());
+        const Hessian center_hessian = load_hessian(parent_hessians.data() + 13u * 9u);
         for (std::size_t i = 0; i < 13; ++i) {
-            hessians[i] = parent_hessians[i];
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    const std::size_t sr = static_cast<std::size_t>(r);
-                    const std::size_t sc = static_cast<std::size_t>(c);
-                    hessians[i](sr, sc) +=
-                        kPyramid13CenterRedistribution[i] * parent_hessians[13](sr, sc);
-                }
-            }
+            hessians[i] = load_hessian(parent_hessians.data() + i * 9u);
+            add_scaled_hessian(hessians[i], center_hessian, kPyramid13CenterRedistribution[i]);
         }
         return;
     }

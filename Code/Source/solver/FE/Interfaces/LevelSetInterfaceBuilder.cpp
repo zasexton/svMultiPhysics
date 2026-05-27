@@ -645,6 +645,44 @@ void orderPolygonPoints(std::vector<CutPointCandidate>& points,
         requested_order);
 }
 
+[[nodiscard]] Real quadratureWeightSum(
+    const std::vector<geometry::CutQuadraturePoint>& points) noexcept
+{
+    Real sum = Real{0.0};
+    for (const auto& point : points) {
+        sum += point.weight;
+    }
+    return sum;
+}
+
+void normalizeQuadratureWeightsToMeasure(
+    std::vector<geometry::CutQuadraturePoint>& points,
+    Real target_measure)
+{
+    if (!(target_measure > Real{0.0}) || !std::isfinite(target_measure) ||
+        points.empty()) {
+        return;
+    }
+
+    const Real sum = quadratureWeightSum(points);
+    if (!(sum > Real{0.0}) || !std::isfinite(sum)) {
+        return;
+    }
+
+    const Real scale_factor = target_measure / sum;
+    if (!(scale_factor > Real{0.0}) || !std::isfinite(scale_factor)) {
+        return;
+    }
+
+    for (auto& point : points) {
+        point.weight *= scale_factor;
+        if (point.reference_measure_factor > Real{0.0} &&
+            std::isfinite(point.reference_measure_factor)) {
+            point.reference_measure_factor *= scale_factor;
+        }
+    }
+}
+
 void addUniquePoint(std::vector<std::array<Real, 3>>& points,
                     const std::array<Real, 3>& point,
                     Real tolerance)
@@ -1222,19 +1260,15 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          geometry::CutIntegrationSide::Negative,
                          request.tolerance);
     const auto positive_moments =
-        cutSideMoments2D(input.node_coordinates,
-                         signed_values,
-                         count,
-                         geometry::CutIntegrationSide::Positive,
-                         request.tolerance);
-    const auto negative_quadrature =
+        complementMoments(parent_moments, negative_moments);
+    auto negative_quadrature =
         cutSideQuadrature2D(input.node_coordinates,
                             signed_values,
                             count,
                             geometry::CutIntegrationSide::Negative,
                             request.tolerance,
                             planar_volume_order);
-    const auto positive_quadrature =
+    auto positive_quadrature =
         cutSideQuadrature2D(input.node_coordinates,
                             signed_values,
                             count,
@@ -1246,6 +1280,12 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             ? clampFraction(negative_moments.measure / parent_measure)
             : Real{0.0};
     fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
+    normalizeQuadratureWeightsToMeasure(
+        negative_quadrature,
+        parent_measure * fragment.negative_volume_fraction);
+    normalizeQuadratureWeightsToMeasure(
+        positive_quadrature,
+        parent_measure * fragment.positive_volume_fraction);
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-segment-0";
@@ -1528,20 +1568,23 @@ LevelSetCellCutResult cutLinearLevelSetCell3D(const CutInterfaceDomainRequest& r
                              request.tolerance);
     const auto negative_moments =
         polyhedronMomentsFromFaces(negative_faces, request.tolerance);
-    auto positive_moments =
-        polyhedronMomentsFromFaces(positive_faces, request.tolerance);
-    if (positive_moments.measure <= Real{1.0e-30}) {
-        positive_moments = complementMoments(parent_moments, negative_moments);
-    }
-    const auto negative_quadrature =
+    const auto positive_moments =
+        complementMoments(parent_moments, negative_moments);
+    auto negative_quadrature =
         polyhedronQuadratureFromFaces(negative_faces, request.tolerance);
-    const auto positive_quadrature =
+    auto positive_quadrature =
         polyhedronQuadratureFromFaces(positive_faces, request.tolerance);
     fragment.negative_volume_fraction =
         parent_measure > Real{0.0}
             ? clampFraction(negative_moments.measure / parent_measure)
             : Real{0.0};
     fragment.positive_volume_fraction = Real{1.0} - fragment.negative_volume_fraction;
+    normalizeQuadratureWeightsToMeasure(
+        negative_quadrature,
+        parent_measure * fragment.negative_volume_fraction);
+    normalizeQuadratureWeightsToMeasure(
+        positive_quadrature,
+        parent_measure * fragment.positive_volume_fraction);
     fragment.min_level_set_value = *std::min_element(signed_values.begin(), signed_values.end());
     fragment.max_level_set_value = *std::max_element(signed_values.begin(), signed_values.end());
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-polygon-0";

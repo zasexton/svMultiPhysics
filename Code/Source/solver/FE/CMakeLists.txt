@@ -77,6 +77,8 @@ option(FE_USE_MPI_WRAPPERS "Use MPI compiler wrappers" OFF)
 option(FE_ENABLE_WARNINGS "Enable additional compiler warnings" ON)
 option(FE_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
 option(FE_ENABLE_SANITIZERS "Enable address/undefined sanitizers" OFF)
+option(FE_ENABLE_IPO "Enable release IPO/LTO for FE targets when supported" OFF)
+option(FE_ENABLE_VECTORIZATION_REPORTS "Emit compiler vectorization diagnostics for FE targets" OFF)
 
 string(TOUPPER "${FE_ENABLE_LLVM_JIT}" _SVMP_FE_ENABLE_LLVM_JIT_MODE)
 if("${_SVMP_FE_ENABLE_LLVM_JIT_MODE}" STREQUAL "TRUE" OR
@@ -202,6 +204,44 @@ function(_svmp_fe_target_enable_warnings target_name)
     endif()
 endfunction()
 
+function(_svmp_fe_target_enable_developer_optimization_reports target_name)
+    if(FE_ENABLE_VECTORIZATION_REPORTS AND TARGET ${target_name})
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(${target_name} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-Rpass=loop-vectorize>
+                $<$<COMPILE_LANGUAGE:CXX>:-Rpass-missed=loop-vectorize>
+                $<$<COMPILE_LANGUAGE:CXX>:-Rpass-analysis=loop-vectorize>
+            )
+        elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${target_name} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:-fopt-info-vec>
+                $<$<COMPILE_LANGUAGE:CXX>:-fopt-info-vec-missed>
+            )
+        elseif(MSVC)
+            target_compile_options(${target_name} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:/Qvec-report:2>
+            )
+        else()
+            message(WARNING "FE: Vectorization reports are not configured for ${CMAKE_CXX_COMPILER_ID}")
+        endif()
+    endif()
+endfunction()
+
+function(_svmp_fe_target_enable_ipo target_name)
+    if(FE_ENABLE_IPO AND TARGET ${target_name})
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT _svmp_fe_ipo_supported
+                            OUTPUT _svmp_fe_ipo_error
+                            LANGUAGES CXX)
+        if(_svmp_fe_ipo_supported)
+            set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+            set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+        else()
+            message(WARNING "FE: IPO/LTO requested but not supported: ${_svmp_fe_ipo_error}")
+        endif()
+    endif()
+endfunction()
+
 # Optimization flags
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
@@ -290,6 +330,7 @@ set(FE_CORE_SOURCES
 
 # Math module sources
 set(FE_MATH_HEADERS
+    Math/AlignedAllocator.h
     Math/TypeTraits.h
     Math/Vector.h
     Math/Matrix.h
@@ -306,7 +347,14 @@ set(FE_MATH_HEADERS
     Math/Tensor.h
     Math/MathUtils.h
     Math/MathConstants.h
+    Math/IntegerMath.h
+    Math/PyramidTensorCoordinates.h
+    Math/DenseLinearAlgebra.h
     Math/LU.h
+)
+
+set(FE_MATH_SOURCES
+    Math/DenseLinearAlgebra.cpp
 )
 
 # NOTE: These modules are planned but not yet implemented
@@ -316,10 +364,13 @@ set(FE_MATH_HEADERS
 	set(FE_BASIS_HEADERS
 	    Basis/BasisExceptions.h
 	    Basis/BasisFunction.h
+	    Basis/BasisIntegerMath.h
+	    Basis/BasisTraits.h
 	    Basis/LagrangeBasis.h
 	    Basis/HierarchicalBasis.h
 	    Basis/OrthogonalPolynomials.h
 	    Basis/VectorBasis.h
+	    Basis/VectorBasisModalPolynomial.h
 	    Basis/CompatibleTensorVectorBasis.h
 	    Basis/TensorBasis.h
 	    Basis/BernsteinBasis.h
@@ -336,12 +387,35 @@ set(FE_MATH_HEADERS
 	    Basis/NodeOrderingConventions.h
 	)
 
+    set(FE_BASIS_PRIVATE_HEADERS
+        Basis/BasisTolerance.h
+        Basis/DenseMatrixUtils.h
+        Basis/LagrangeBasisFast.h
+        Basis/LagrangeBasisPyramid.h
+        Basis/PyramidModalBasis.h
+        Basis/LagrangeBasisSimplex.h
+        Basis/LagrangeBasisUtility.h
+        Basis/ReferenceDerivativeJet.h
+        Basis/VectorBasisDirectSeeds.h
+        Basis/VectorBasisEvaluationHelpers.h
+        Basis/VectorBasisRtConstruction.h
+    )
+
 	set(FE_BASIS_SOURCES
 	    Basis/BasisFunction.cpp
 	    Basis/LagrangeBasis.cpp
+	    Basis/LagrangeBasisPyramid.cpp
+	    Basis/LagrangeBasisSimplex.cpp
 	    Basis/HierarchicalBasis.cpp
 	    Basis/OrthogonalPolynomials.cpp
 	    Basis/VectorBasis.cpp
+	    Basis/VectorBasisBDM.cpp
+	    Basis/VectorBasisDirectSeeds.cpp
+	    Basis/VectorBasisDofAssociations.cpp
+	    Basis/VectorBasisEvaluationHelpers.cpp
+	    Basis/VectorBasisNedelec.cpp
+	    Basis/VectorBasisRaviartThomas.cpp
+	    Basis/VectorBasisRtConstruction.cpp
 	    Basis/CompatibleTensorVectorBasis.cpp
 	    Basis/TensorBasis.cpp
 	    Basis/BernsteinBasis.cpp
@@ -375,6 +449,7 @@ set(FE_QUADRATURE_HEADERS
     Quadrature/SurfaceQuadrature.h
     Quadrature/QuadratureFactory.h
     Quadrature/QuadratureCache.h
+    Quadrature/ReferenceMonomialIntegrals.h
     Quadrature/PositionBasedParams.h
     Quadrature/PositionBasedTriangleQuadrature.h
     Quadrature/PositionBasedTetrahedronQuadrature.h
@@ -397,6 +472,7 @@ set(FE_QUADRATURE_SOURCES
     Quadrature/SurfaceQuadrature.cpp
     Quadrature/QuadratureFactory.cpp
     Quadrature/QuadratureCache.cpp
+    Quadrature/ReferenceMonomialIntegrals.cpp
     Quadrature/PositionBasedTriangleQuadrature.cpp
     Quadrature/PositionBasedTetrahedronQuadrature.cpp
     Quadrature/SymmetricTriangleQuadrature.cpp
@@ -675,6 +751,8 @@ set(FE_ASSEMBLY_HEADERS
     Assembly/ContactPairContext.h
     Assembly/CutDomainAssembler.h
     Assembly/CutIntegrationContext.h
+    Assembly/BatchedProjection.h
+    Assembly/BatchedStiffness.h
     Assembly/InterfacePairContext.h
     Assembly/GeometricNonlinearityHooks.h
     Assembly/JIT/KernelArgs.h
@@ -710,6 +788,8 @@ set(FE_ASSEMBLY_SOURCES
     Assembly/GlobalSystemView.cpp
     Assembly/AssemblyKernel.cpp
     Assembly/AssemblyContext.cpp
+    Assembly/BatchedProjection.cpp
+    Assembly/BatchedStiffness.cpp
     Assembly/StandardAssembler.cpp
     Assembly/AssemblerFactory.cpp
     Assembly/ParallelAssembler.cpp
@@ -1359,6 +1439,8 @@ set(FE_ALL_HEADERS
 
 set(FE_ALL_SOURCES
     ${FE_CORE_SOURCES}
+    ${FE_MATH_SOURCES}
+    ${FE_BASIS_PRIVATE_HEADERS}
     ${FE_BASIS_SOURCES}
     ${FE_QUADRATURE_SOURCES}
     ${FE_ELEMENTS_SOURCES}
@@ -1371,6 +1453,15 @@ set(FE_ALL_SOURCES
     ${FE_MOVINGMESH_SOURCES}
     ${FE_SPARSITY_SOURCES}
 )
+
+if(NOT FE_ENABLE_ASSEMBLY)
+    # BatchEvaluator tests and lightweight users rely on this standalone helper
+    # even when the full Assembly module is intentionally disabled.
+    list(APPEND FE_ALL_HEADERS Assembly/BatchedProjection.h)
+    list(APPEND FE_ALL_SOURCES Assembly/BatchedProjection.cpp)
+    list(APPEND FE_ALL_HEADERS Assembly/BatchedStiffness.h)
+    list(APPEND FE_ALL_SOURCES Assembly/BatchedStiffness.cpp)
+endif()
 
 if(FE_ENABLE_ASSEMBLY)
     list(APPEND FE_ALL_HEADERS ${FE_BACKENDS_HEADERS})
@@ -1452,6 +1543,8 @@ endif()
 add_library(svfe::svfe ALIAS svfe)
 
 _svmp_fe_target_enable_warnings(svfe)
+_svmp_fe_target_enable_developer_optimization_reports(svfe)
+_svmp_fe_target_enable_ipo(svfe)
 
 #------------------------------------------------------------------------------
 # Minimal FE library for DOFs (Core + Math + Quadrature + ReferenceElement +
@@ -1474,13 +1567,16 @@ set(FE_DOFS_MINIMAL_HEADERS
 )
 
 set(FE_DOFS_MINIMAL_SOURCES
-    ${FE_CORE_SOURCES}
-    Basis/BasisFunction.cpp
-    Basis/OrthogonalPolynomials.cpp
-    Basis/LagrangeBasis.cpp
-    Basis/NodeOrderingConventions.cpp
-    ${FE_QUADRATURE_SOURCES}
-    Elements/ReferenceElement.cpp
+	    ${FE_CORE_SOURCES}
+        ${FE_MATH_SOURCES}
+	    Basis/BasisFunction.cpp
+	    Basis/OrthogonalPolynomials.cpp
+	    Basis/LagrangeBasis.cpp
+	    Basis/LagrangeBasisPyramid.cpp
+	    Basis/LagrangeBasisSimplex.cpp
+	    Basis/NodeOrderingConventions.cpp
+	    ${FE_QUADRATURE_SOURCES}
+	    Elements/ReferenceElement.cpp
     Spaces/OrientationManager.cpp
     ${FE_DOFS_SOURCES}
 )
@@ -1807,6 +1903,45 @@ if(FE_ENABLE_ASSEMBLY AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 #------------------------------------------------------------------------------
+# Basis hot-path files: enable optimized release vectorization.
+#
+# Basis evaluation is on the assembly critical path. Keep this targeted and avoid
+# unsafe math flags so partition-of-unity and rational-basis denominator behavior
+# remain governed by normal IEEE semantics.
+#------------------------------------------------------------------------------
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(_FE_BASIS_HOT_FILES
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/LagrangeBasis.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/LagrangeBasisPyramid.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/LagrangeBasisSimplex.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/SpectralBasis.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisBDM.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisDirectSeeds.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisEvaluationHelpers.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisNedelec.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRaviartThomas.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRtConstruction.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BatchEvaluator.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/BatchedProjection.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BernsteinBasis.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BSplineBasis.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/NURBSTensorBasis.cpp
+    )
+
+    set(_FE_BASIS_HOT_FLAGS)
+    foreach(_fe_basis_flag -O3 -ftree-vectorize -funroll-loops)
+        list(APPEND _FE_BASIS_HOT_FLAGS
+            "$<$<CONFIG:Release>:${_fe_basis_flag}>"
+            "$<$<CONFIG:RelWithDebInfo>:${_fe_basis_flag}>"
+        )
+    endforeach()
+
+    set_source_files_properties(${_FE_BASIS_HOT_FILES}
+        PROPERTIES COMPILE_OPTIONS "${_FE_BASIS_HOT_FLAGS}"
+    )
+endif()
+
+#------------------------------------------------------------------------------
 # Optional external solver backends: PETSc / Trilinos
 #------------------------------------------------------------------------------
 
@@ -1983,6 +2118,8 @@ endif()
 #------------------------------------------------------------------------------
 
 if(FE_BUILD_TESTS)
+    find_package(Threads REQUIRED)
+
     # Math module tests
     set(FE_MATH_TEST_SOURCES
         Tests/Unit/Math/test_TypeTraits.cpp
@@ -1998,6 +2135,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Math/test_Rotations.cpp  # Rotation matrices and transformations
         Tests/Unit/Math/test_Interpolation.cpp  # Interpolation utilities
         Tests/Unit/Math/test_QuadratureSupport.cpp  # Quadrature and integration support
+        Tests/Unit/Math/test_DenseLinearAlgebra.cpp
         Tests/Unit/Math/test_main.cpp
     )
 
@@ -2085,6 +2223,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Basis/test_BatchEvaluator.cpp
         Tests/Unit/Basis/test_OrthogonalPolynomials.cpp
         Tests/Unit/Basis/test_BasisHessians.cpp
+        Tests/Unit/Basis/test_ConstexprBasis.cpp
         Tests/Unit/Basis/test_C1Basis.cpp
         Tests/Unit/Basis/test_HigherOrderWedgePyramid.cpp
         Tests/Unit/Basis/test_BasisErrorPaths.cpp
@@ -2093,12 +2232,31 @@ if(FE_BUILD_TESTS)
     )
     add_executable(test_fe_basis ${FE_BASIS_TEST_SOURCES})
     _svmp_fe_target_enable_warnings(test_fe_basis)
+    _svmp_fe_target_enable_developer_optimization_reports(test_fe_basis)
+    _svmp_fe_target_enable_ipo(test_fe_basis)
     target_link_libraries(test_fe_basis
         PRIVATE
             svfe
             ${GTEST_LIBRARIES}
+            Threads::Threads
     )
     add_test(NAME FE_Basis_Tests COMMAND test_fe_basis)
+
+    add_executable(basis_perf_microbench
+        Tests/Benchmarks/basis_perf_microbench.cpp
+    )
+    _svmp_fe_target_enable_warnings(basis_perf_microbench)
+    _svmp_fe_target_enable_developer_optimization_reports(basis_perf_microbench)
+    _svmp_fe_target_enable_ipo(basis_perf_microbench)
+    set_target_properties(basis_perf_microbench PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED ON
+    )
+    target_link_libraries(basis_perf_microbench
+        PRIVATE
+            svfe
+            Threads::Threads
+    )
 
     # Geometry module tests
     set(FE_GEOMETRY_TEST_SOURCES
@@ -3044,6 +3202,8 @@ if(FE_STANDALONE_BUILD)
     message(STATUS "   Coverage:         ${FE_ENABLE_COVERAGE}")
     message(STATUS "   Valgrind:         ${FE_ENABLE_VALGRIND}")
     message(STATUS "   Sanitizers:       ${FE_ENABLE_SANITIZERS}")
+    message(STATUS "   IPO/LTO:          ${FE_ENABLE_IPO}")
+    message(STATUS "   Vector reports:   ${FE_ENABLE_VECTORIZATION_REPORTS}")
     message(STATUS "========================================")
     message(STATUS "")
 endif()

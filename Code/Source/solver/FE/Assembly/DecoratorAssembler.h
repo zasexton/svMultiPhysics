@@ -271,6 +271,17 @@ public:
                                          assemble_matrix, assemble_vector);
     }
 
+    [[nodiscard]] AssemblyResult assembleCutVolumesFused(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        geometry::CutIntegrationSide side,
+        std::span<const FusedCellTerm> terms) override
+    {
+        return base_->assembleCutVolumesFused(
+            mesh, cut_context, interface_marker, side, terms);
+    }
+
     [[nodiscard]] AssemblyResult assembleCutInterfaces(
         const IMeshAccess& mesh,
         const CutIntegrationContext& cut_context,

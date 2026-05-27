@@ -38,6 +38,46 @@ public:
     }
 };
 
+class CompleteFallbackBasis : public BasisFunction {
+public:
+    BasisType basis_type() const noexcept override { return BasisType::Custom; }
+    ElementType element_type() const noexcept override { return ElementType::Triangle3; }
+    int dimension() const noexcept override { return 2; }
+    int order() const noexcept override { return 1; }
+    std::size_t size() const noexcept override { return 2u; }
+
+    void evaluate_values(const math::Vector<Real, 3>& xi,
+                         std::vector<Real>& values) const override
+    {
+        values.resize(size());
+        values[0] = Real(1) + xi[0];
+        values[1] = Real(2) + xi[1];
+    }
+
+    void evaluate_gradients(const math::Vector<Real, 3>&,
+                            std::vector<Gradient>& gradients) const override
+    {
+        gradients.assign(size(), Gradient{});
+        gradients[0][0] = Real(1);
+        gradients[1][1] = Real(1);
+    }
+
+    void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                           std::vector<Hessian>& hessians) const override
+    {
+        hessians.assign(size(), Hessian{});
+        for (std::size_t d = 0; d < hessians.size(); ++d) {
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    hessians[d](r, c) = Real(100) * static_cast<Real>(d + 1u) +
+                                        Real(10) * static_cast<Real>(r) +
+                                        static_cast<Real>(c) + xi[2];
+                }
+            }
+        }
+    }
+};
+
 } // namespace
 
 // =============================================================================
@@ -144,21 +184,21 @@ TEST(BasisErrorPaths, BSplineTooFewKnotsThrows) {
 TEST(BasisErrorPaths, FactoryUnsupportedBasisTypeThrows) {
     BasisRequest req{ElementType::Line2, BasisType::Custom, 1, Continuity::C0, FieldType::Scalar};
     req.custom_id = "missing";
-    EXPECT_THROW(BasisFactory::create(req), BasisConfigurationException);
+    EXPECT_THROW((void)basis_factory::create(req), BasisConfigurationException);
 }
 
 TEST(BasisErrorPaths, FactoryC1VectorFieldThrows) {
     BasisRequest req{ElementType::Line2, BasisType::Lagrange, 3, Continuity::C1, FieldType::Vector};
-    EXPECT_THROW(BasisFactory::create(req), BasisConfigurationException);
+    EXPECT_THROW((void)basis_factory::create(req), BasisConfigurationException);
 }
 
 TEST(BasisErrorPaths, FactoryHCurlWithBernsteinThrows) {
     BasisRequest req{ElementType::Quad4, BasisType::Bernstein, 0, Continuity::H_curl, FieldType::Vector};
-    EXPECT_THROW(BasisFactory::create(req), BasisConfigurationException);
+    EXPECT_THROW((void)basis_factory::create(req), BasisConfigurationException);
 }
 
 TEST(BasisErrorPaths, NodeOrderingInvalidNodeThrows) {
-    EXPECT_THROW((void)NodeOrdering::get_node_coords(ElementType::Quad8, 99u), BasisNodeOrderingException);
+    EXPECT_THROW((void)ReferenceNodeLayout::get_node_coords(ElementType::Quad8, 99u), BasisNodeOrderingException);
 }
 
 TEST(BasisErrorPaths, VectorBasisScalarEvaluationThrows) {
@@ -212,4 +252,69 @@ TEST(BasisErrorPaths, ModalTransformMalformedModalBasisThrowsConstructionExcepti
     MalformedModalBasis modal_basis;
     LagrangeBasis nodal_basis(ElementType::Line2, 1);
     EXPECT_THROW((void)ModalTransform(modal_basis, nodal_basis), BasisConstructionException);
+}
+
+TEST(BasisErrorPaths, BasisFunctionDefaultsThrowForMissingDerivatives) {
+    MalformedModalBasis basis;
+    const math::Vector<Real, 3> xi{Real(0), Real(0), Real(0)};
+    std::vector<Gradient> gradients;
+    std::vector<Hessian> hessians;
+
+    EXPECT_THROW(basis.evaluate_gradients(xi, gradients), BasisEvaluationException);
+    EXPECT_THROW(basis.evaluate_hessians(xi, hessians), BasisEvaluationException);
+}
+
+TEST(BasisErrorPaths, BasisFunctionFallbackWritesFlatAndStridedLayouts) {
+    CompleteFallbackBasis basis;
+    const std::vector<math::Vector<Real, 3>> points = {
+        {Real(0.25), Real(0.5), Real(-0.25)},
+        {Real(-0.5), Real(0.75), Real(0.125)}
+    };
+
+    std::vector<Real> flat_values(basis.size());
+    std::vector<Real> flat_gradients(basis.size() * 3u);
+    std::vector<Real> flat_hessians(basis.size() * 9u);
+    basis.evaluate_values_to(points.front(), flat_values.data());
+    basis.evaluate_gradients_to(points.front(), flat_gradients.data());
+    basis.evaluate_hessians_to(points.front(), flat_hessians.data());
+
+    std::vector<Real> expected_values;
+    std::vector<Gradient> expected_gradients;
+    std::vector<Hessian> expected_hessians;
+    basis.evaluate_all(points.front(), expected_values, expected_gradients, expected_hessians);
+    for (std::size_t d = 0; d < basis.size(); ++d) {
+        EXPECT_EQ(flat_values[d], expected_values[d]);
+        for (std::size_t c = 0; c < 3u; ++c) {
+            EXPECT_EQ(flat_gradients[d * 3u + c], expected_gradients[d][c]);
+        }
+        for (std::size_t rc = 0; rc < 9u; ++rc) {
+            EXPECT_EQ(flat_hessians[d * 9u + rc], expected_hessians[d].data()[rc]);
+        }
+    }
+
+    constexpr std::size_t output_stride = 3u;
+    std::vector<Real> values(basis.size() * output_stride, Real(-99));
+    std::vector<Real> gradients(basis.size() * 3u * output_stride, Real(-99));
+    std::vector<Real> hessians(basis.size() * 9u * output_stride, Real(-99));
+    basis.evaluate_at_quadrature_points_strided(
+        points, output_stride, values.data(), gradients.data(), hessians.data());
+
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        basis.evaluate_all(points[q], expected_values, expected_gradients, expected_hessians);
+        for (std::size_t d = 0; d < basis.size(); ++d) {
+            EXPECT_EQ(values[d * output_stride + q], expected_values[d]);
+            for (std::size_t c = 0; c < 3u; ++c) {
+                EXPECT_EQ(gradients[(d * 3u + c) * output_stride + q],
+                          expected_gradients[d][c]);
+            }
+            for (std::size_t rc = 0; rc < 9u; ++rc) {
+                EXPECT_EQ(hessians[(d * 9u + rc) * output_stride + q],
+                          expected_hessians[d].data()[rc]);
+            }
+        }
+    }
+
+    for (std::size_t d = 0; d < basis.size(); ++d) {
+        EXPECT_EQ(values[d * output_stride + 2u], Real(-99));
+    }
 }

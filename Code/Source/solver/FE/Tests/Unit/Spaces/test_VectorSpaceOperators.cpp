@@ -184,8 +184,8 @@ double integrate_edge_tangential_line_integral(
     int quad_order = 8) {
     const auto ref = elements::ReferenceElement::create(type);
     const auto& edge_nodes = ref.edge_nodes(static_cast<std::size_t>(edge_id));
-    const auto a = basis::NodeOrdering::get_node_coords(type, static_cast<std::size_t>(edge_nodes[0]));
-    const auto b = basis::NodeOrdering::get_node_coords(type, static_cast<std::size_t>(edge_nodes[1]));
+    const auto a = basis::ReferenceNodeLayout::get_node_coords(type, static_cast<std::size_t>(edge_nodes[0]));
+    const auto b = basis::ReferenceNodeLayout::get_node_coords(type, static_cast<std::size_t>(edge_nodes[1]));
     return integrate_segment_tangential_line_integral(field, a, b, quad_order);
 }
 
@@ -208,7 +208,7 @@ std::vector<FunctionSpace::Value> oriented_face_vertices(ElementType type, int f
     vertices.reserve(face_nodes.size());
     for (const auto node : face_nodes) {
         vertices.push_back(
-            basis::NodeOrdering::get_node_coords(type, static_cast<std::size_t>(node)));
+            basis::ReferenceNodeLayout::get_node_coords(type, static_cast<std::size_t>(node)));
     }
 
     FunctionSpace::Value center{};

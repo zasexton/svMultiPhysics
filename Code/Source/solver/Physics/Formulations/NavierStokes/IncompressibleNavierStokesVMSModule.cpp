@@ -17,6 +17,7 @@
 #include "FE/Core/Logger.h"
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/CutCellForms.h"
+#include "FE/Forms/SymbolicDifferentiation.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
 #include "FE/Systems/BoundaryConditionManager.h"
@@ -31,7 +32,10 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <array>
 #include <cmath>
 #include <limits>
@@ -64,6 +68,44 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
 namespace {
 
 using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
+
+bool constrainInactiveActiveDomainVelocity()
+{
+    const char* env = std::getenv("SVMP_CONSTRAIN_INACTIVE_ACTIVE_DOMAIN_VELOCITY");
+    if (env == nullptr || env[0] == '\0') {
+        return true;
+    }
+    return std::string_view(env) != "0" &&
+           std::string_view(env) != "false" &&
+           std::string_view(env) != "FALSE";
+}
+
+bool constrainInactiveActiveDomainVelocity(
+    const FreeSurfaceBoundary& active_domain_boundary)
+{
+    return constrainInactiveActiveDomainVelocity() &&
+           !active_domain_boundary.velocity_extension.enabled;
+}
+
+bool unfittedLevelSetShapeTangentsDisabled()
+{
+    const char* enable_env =
+        std::getenv("SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS");
+    if (enable_env != nullptr && enable_env[0] != '\0' &&
+        std::string_view(enable_env) != "0" &&
+        std::string_view(enable_env) != "false" &&
+        std::string_view(enable_env) != "FALSE") {
+        return false;
+    }
+    const char* disable_env =
+        std::getenv("SVMP_DISABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS");
+    if (disable_env != nullptr && disable_env[0] != '\0') {
+        return std::string_view(disable_env) != "0" &&
+               std::string_view(disable_env) != "false" &&
+               std::string_view(disable_env) != "FALSE";
+    }
+    return true;
+}
 
 [[nodiscard]] bool spacesCompatible(const FE::spaces::FunctionSpace& lhs,
                                     const FE::spaces::FunctionSpace& rhs) noexcept
@@ -384,73 +426,39 @@ std::size_t initializeStateFieldFromMeshVertexField(
 
     const auto field_offset = system.fieldDofOffset(field_id);
     const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
+    std::vector<FE::Real> coefficients(n_field_dofs, FE::Real{0.0});
+    std::vector<std::uint8_t> assigned(n_field_dofs, 0u);
+    const auto projection =
+        system.projectMeshVertexValuesToFieldCoefficients(
+            field_id,
+            std::span<const FE::Real>(
+                reinterpret_cast<const FE::Real*>(mesh_values),
+                entity_count * mesh_components),
+            mesh_components,
+            std::span<FE::Real>(coefficients.data(), coefficients.size()),
+            std::span<std::uint8_t>(assigned.data(), assigned.size()),
+            std::string("IncompressibleNavierStokesVMSModule: ") +
+                std::string(context));
+    if (projection.unassigned_dofs != 0u) {
+        throw std::runtime_error(
+            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
+            " could not safely project " +
+            std::to_string(projection.unassigned_dofs) +
+            " field coefficient(s) from mesh vertices for field '" +
+            rec.name + "'");
+    }
+
     std::vector<FE::GlobalIndex> dofs;
     std::vector<FE::Real> values;
     dofs.reserve(n_field_dofs);
     values.reserve(n_field_dofs);
 
-    bool all_mesh_vertices_have_vertex_dofs = true;
-    for (FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
-        if (entity_map->getVertexDofs(vertex).size() != components) {
-            all_mesh_vertices_have_vertex_dofs = false;
-            break;
+    for (std::size_t dof = 0; dof < coefficients.size(); ++dof) {
+        if (assigned[dof] == 0u) {
+            continue;
         }
-    }
-
-    if (all_mesh_vertices_have_vertex_dofs) {
-        for (FE::GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
-            const auto vertex_dofs = entity_map->getVertexDofs(vertex);
-            const auto v_base = static_cast<std::size_t>(vertex) * mesh_components;
-            for (std::size_t c = 0; c < components; ++c) {
-                dofs.push_back(field_offset + vertex_dofs[c]);
-                values.push_back(mesh_values[v_base + c]);
-            }
-        }
-    } else {
-        std::vector<unsigned char> coefficient_written(n_field_dofs, 0u);
-        for (index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
-            auto [cell_vertices, n_cell_vertices] = local_mesh.cell_vertices_span(cell);
-            if (cell_vertices == nullptr || n_cell_vertices == 0u) {
-                throw std::runtime_error(
-                    "IncompressibleNavierStokesVMSModule: " + std::string(context) +
-                    " cannot initialize from empty cell connectivity");
-            }
-
-            const auto cell_dofs =
-                field_dofs.getCellDofs(static_cast<FE::GlobalIndex>(cell));
-            if (cell_dofs.size() != n_cell_vertices * components) {
-                throw std::runtime_error(
-                    "IncompressibleNavierStokesVMSModule: " + std::string(context) +
-                    " cell DOF count does not match mesh point field connectivity");
-            }
-
-            for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
-                const auto vertex = cell_vertices[local_node];
-                if (vertex < 0 ||
-                    static_cast<std::size_t>(vertex) >= static_cast<std::size_t>(n_vertices)) {
-                    throw std::runtime_error(
-                        "IncompressibleNavierStokesVMSModule: " + std::string(context) +
-                        " found an out-of-range mesh vertex");
-                }
-                const auto v_base = static_cast<std::size_t>(vertex) * mesh_components;
-                for (std::size_t c = 0; c < components; ++c) {
-                    const auto cell_dof_position = c * n_cell_vertices + local_node;
-                    const auto dof = cell_dofs[cell_dof_position];
-                    if (dof < 0 || static_cast<std::size_t>(dof) >= n_field_dofs) {
-                        throw std::runtime_error(
-                            "IncompressibleNavierStokesVMSModule: " + std::string(context) +
-                            " found an out-of-range field DOF");
-                    }
-                    const auto sdof = static_cast<std::size_t>(dof);
-                    if (coefficient_written[sdof] != 0u) {
-                        continue;
-                    }
-                    dofs.push_back(field_offset + dof);
-                    values.push_back(mesh_values[v_base + c]);
-                    coefficient_written[sdof] = 1u;
-                }
-            }
-        }
+        dofs.push_back(field_offset + static_cast<FE::GlobalIndex>(dof));
+        values.push_back(coefficients[dof]);
     }
 
     if (dofs.empty()) {
@@ -1210,6 +1218,136 @@ namespace {
     return FE::forms::FormExpr::asVector(std::move(wall_components));
 }
 
+[[nodiscard]] std::string normalizedFreeSurfaceOptionToken(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    value.erase(std::remove_if(value.begin(), value.end(),
+                               [](unsigned char c) {
+                                   return c == '_' || c == '-' || std::isspace(c);
+                               }),
+                value.end());
+    return value;
+}
+
+[[nodiscard]] bool isHighOrderImplicitGeneratedInterface(
+    const FreeSurfaceBoundary& bc)
+{
+    const auto token =
+        normalizedFreeSurfaceOptionToken(bc.generated_interface_geometry);
+    return token == "highorderimplicit" || token == "implicit" ||
+           token == "saye" || token == "sayeimplicit";
+}
+
+[[nodiscard]] bool isRefreshedFrozenGeometryTangent(
+    const FreeSurfaceBoundary& bc)
+{
+    const auto token =
+        normalizedFreeSurfaceOptionToken(bc.geometry_tangent_policy);
+    return token.empty() || token == "refreshedfrozenquadrature" ||
+           token == "refreshedfrozen" || token == "frozenquadrature";
+}
+
+[[nodiscard]] const char* pressureStabilizationPolicyName(
+    FreeSurfacePressureStabilizationPolicy policy) noexcept
+{
+    switch (policy) {
+    case FreeSurfacePressureStabilizationPolicy::Enabled:
+        return "Enabled";
+    case FreeSurfacePressureStabilizationPolicy::Disabled:
+        return "Disabled";
+    case FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder:
+        return "DisabledForRefreshedFrozenHighOrder";
+    }
+    return "Unknown";
+}
+
+[[nodiscard]] const char* pressureStabilizationDisabledReason(
+    const FreeSurfaceBoundary& bc)
+{
+    switch (bc.cut_cell_stabilization.pressure_policy) {
+    case FreeSurfacePressureStabilizationPolicy::Enabled:
+        return "none";
+    case FreeSurfacePressureStabilizationPolicy::Disabled:
+        return "explicit_policy_disabled";
+    case FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder:
+        break;
+    }
+    return isHighOrderImplicitGeneratedInterface(bc) &&
+                   isRefreshedFrozenGeometryTangent(bc)
+               ? "refreshed_frozen_high_order_policy"
+               : "none";
+}
+
+[[nodiscard]] bool pressureStabilizationDisabledByPolicy(
+    const FreeSurfaceBoundary& bc)
+{
+    return std::string_view(pressureStabilizationDisabledReason(bc)) != "none";
+}
+
+[[nodiscard]] bool pressureStabilizationActive(const FreeSurfaceBoundary& bc)
+{
+    return !pressureStabilizationDisabledByPolicy(bc) &&
+           !FE::forms::bc::isZeroConstantScalarValue(
+               bc.cut_cell_stabilization.pressure_gradient_penalty);
+}
+
+[[nodiscard]] const char* unfittedShapeTangentPolicyName()
+{
+    return unfittedLevelSetShapeTangentsDisabled()
+               ? "disabled_by_default"
+               : "enabled_experimental";
+}
+
+[[nodiscard]] std::string freeSurfaceCurvaturePolicyName(
+    const FreeSurfaceBoundary& bc)
+{
+    if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
+        return "inactive_zero_surface_tension";
+    }
+    if (isUnfittedLevelSet(bc)) {
+        if (!bc.curvature_field_name.empty()) {
+            return "curvature_field_level_set_normal_signed";
+        }
+        if (bc.use_level_set_curvature) {
+            return "raw_level_set_curvature_guarded";
+        }
+        return "supplied_scalar_level_set_normal_signed";
+    }
+    if (bc.use_current_geometry_curvature) {
+        return "current_geometry_curvature";
+    }
+    if (!bc.curvature_field_name.empty()) {
+        return "curvature_field";
+    }
+    return "supplied_scalar";
+}
+
+[[nodiscard]] std::string freeSurfaceCurvatureTangentPolicyName(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    if (FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
+        return "not_applicable";
+    }
+    if (!bc.curvature_field_name.empty()) {
+        const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
+        if (kappa_id != FE::INVALID_FIELD_ID &&
+            system.fieldParticipatesInUnknownVector(kappa_id)) {
+            return "curvature_field_trial_coupled_geometry_curvature_frozen";
+        }
+        return "curvature_field_picard_frozen";
+    }
+    if (isUnfittedLevelSet(bc)) {
+        return "picard_frozen_or_guarded";
+    }
+    return bc.use_current_geometry_curvature
+               ? "geometry_curvature_from_active_geometry_path"
+               : "supplied_scalar_frozen";
+}
+
 void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled)
 {
     if (isUnfittedLevelSet(bc)) {
@@ -1251,9 +1389,15 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc, bool ale_enabled
                     "IncompressibleNavierStokesVMSModule: cut-cell pressure-gradient penalty must be nonnegative");
             }
             if (FE::forms::bc::isZeroConstantScalarValue(cut.velocity_gradient_penalty) &&
-                FE::forms::bc::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
+                !pressureStabilizationActive(bc)) {
                 throw std::invalid_argument(
                     "IncompressibleNavierStokesVMSModule: enabled cut-cell stabilization requires a nonzero penalty");
+            }
+            if (cut.cut_metadata_scale_cap.has_value() &&
+                (!std::isfinite(*cut.cut_metadata_scale_cap) ||
+                 *cut.cut_metadata_scale_cap < FE::Real{1.0})) {
+                throw std::invalid_argument(
+                    "IncompressibleNavierStokesVMSModule: cut-cell metadata scale cap must be finite and at least 1");
             }
         }
         const auto& extension = bc.velocity_extension;
@@ -1394,22 +1538,42 @@ void applyFreeSurfaceCutCellStabilization(
     const auto& cut = bc.cut_cell_stabilization;
     constexpr int supported_derivative_order = 2;
     const auto derivative_order_label = [](int max_order) -> const char* {
+        if (max_order <= 0) {
+            return "disabled";
+        }
         return max_order > 1 ? "1,2" : "1";
     };
+    const bool pressure_stabilization_enabled =
+        pressureStabilizationActive(bc);
+    const int configured_velocity_derivative_order =
+        std::clamp(cut.velocity_max_derivative_order, 1,
+                   supported_derivative_order);
     const int velocity_derivative_order =
-        velocity_polynomial_order > 1 ? supported_derivative_order : 1;
+        std::max(1, std::min(velocity_polynomial_order,
+                             configured_velocity_derivative_order));
     const int pressure_derivative_order =
-        pressure_polynomial_order > 1 ? supported_derivative_order : 1;
+        pressure_stabilization_enabled
+            ? (pressure_polynomial_order > 1 ? supported_derivative_order : 1)
+            : 0;
     const int max_derivative_order =
         velocity_derivative_order > pressure_derivative_order
             ? velocity_derivative_order
             : pressure_derivative_order;
     const bool has_unsupported_derivative_order =
-        velocity_polynomial_order > supported_derivative_order ||
-        pressure_polynomial_order > supported_derivative_order;
-    const auto cut_scale = cut.use_cut_metadata_scale
+        (velocity_polynomial_order > supported_derivative_order &&
+         configured_velocity_derivative_order >= supported_derivative_order) ||
+        (pressure_stabilization_enabled &&
+         pressure_polynomial_order > supported_derivative_order);
+    const bool clamped_velocity_derivative_policy =
+        cut.velocity_max_derivative_order != configured_velocity_derivative_order;
+    auto cut_scale = cut.use_cut_metadata_scale
         ? FE::forms::cutStabilizationScale()
         : FE::forms::FormExpr::constant(1.0);
+    if (cut.use_cut_metadata_scale && cut.cut_metadata_scale_cap.has_value()) {
+        cut_scale = FE::forms::min(
+            cut_scale,
+            FE::forms::FormExpr::constant(*cut.cut_metadata_scale_cap));
+    }
     const auto h_f = FE::forms::avg(FE::forms::hNormal());
     const auto h3 = h_f * h_f * h_f;
     const auto h5 = h3 * h_f * h_f;
@@ -1433,12 +1597,31 @@ void applyFreeSurfaceCutCellStabilization(
         << " active_domain_side=" << active_domain_side
         << " Active_domain_method="
         << activeDomainMethodName(bc.active_domain_method)
+        << " generated_interface_geometry="
+        << bc.generated_interface_geometry
+        << " geometry_tangent_policy="
+        << bc.geometry_tangent_policy
         << " use_cut_metadata_scale="
         << (cut.use_cut_metadata_scale ? "true" : "false")
+        << " cut_metadata_scale_cap=";
+    if (cut.cut_metadata_scale_cap.has_value()) {
+        oss << *cut.cut_metadata_scale_cap;
+    } else {
+        oss << "unbounded";
+    }
+    oss
+        << " pressure_stabilization_policy="
+        << pressureStabilizationPolicyName(cut.pressure_policy)
+        << " pressure_stabilization="
+        << (pressure_stabilization_enabled ? "enabled" : "disabled")
+        << " pressure_disabled_reason="
+        << pressureStabilizationDisabledReason(bc)
         << " facet_scope=cut-adjacent"
         << " velocity_polynomial_order=" << velocity_polynomial_order
         << " pressure_polynomial_order=" << pressure_polynomial_order
         << " derivative_orders=" << derivative_order_label(max_derivative_order)
+        << " velocity_max_derivative_order="
+        << configured_velocity_derivative_order
         << " velocity_derivative_orders="
         << derivative_order_label(velocity_derivative_order)
         << " pressure_derivative_orders="
@@ -1446,7 +1629,11 @@ void applyFreeSurfaceCutCellStabilization(
         << " velocity_scaling="
         << (velocity_derivative_order > 1 ? "h,h^3" : "h")
         << " pressure_scaling="
-        << (pressure_derivative_order > 1 ? "h^3/mu,h^5/mu" : "h^3/mu");
+        << (pressure_derivative_order <= 0
+                ? "disabled"
+                : (pressure_derivative_order > 1
+                       ? "h^3/mu,h^5/mu"
+                       : "h^3/mu"));
     FE_LOG_INFO(oss.str());
 
     if (has_unsupported_derivative_order) {
@@ -1456,6 +1643,13 @@ void applyFreeSurfaceCutCellStabilization(
             "higher-normal-derivative penalties above derivative_order=" +
             std::to_string(supported_derivative_order) +
             " are not yet available");
+    }
+    if (clamped_velocity_derivative_policy) {
+        FE_LOG_WARNING(
+            "IncompressibleNavierStokesVMSModule: "
+            "Cut_cell_velocity_max_derivative_order must be 1 or 2; "
+            "using derivative_order=" +
+            std::to_string(configured_velocity_derivative_order));
     }
 
     if (!bc_forms::isZeroConstantScalarValue(cut.velocity_gradient_penalty)) {
@@ -1500,7 +1694,7 @@ void applyFreeSurfaceCutCellStabilization(
         }
     }
 
-    if (!bc_forms::isZeroConstantScalarValue(cut.pressure_gradient_penalty)) {
+    if (pressure_stabilization_enabled) {
         const auto pressure_penalty = bc_forms::toScalarExpr(
             cut.pressure_gradient_penalty,
             freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", bc));
@@ -1646,7 +1840,8 @@ struct ActiveVolumeDomain {
 {
     if (!isUnfittedLevelSet(bc) ||
         bc.active_domain == FreeSurfaceActiveDomain::None ||
-        bc.active_domain_method != FreeSurfaceActiveDomainMethod::CutVolume) {
+        bc.active_domain_method != FreeSurfaceActiveDomainMethod::CutVolume ||
+        unfittedLevelSetShapeTangentsDisabled()) {
         return FE::forms::FormExpr{};
     }
 
@@ -1697,6 +1892,8 @@ struct ActiveVolumeDomain {
         << " side=" << cutVolumeSideName(side)
         << " domain_role=" << domain_role
         << " sign=" << sign
+        << " experimental_path=unfitted_level_set_shape_tangent"
+        << " qualification=Experimental"
         << " diagnostic=unfitted_free_surface_cut_volume_phi_shape_tangent";
     FE_LOG_INFO(oss.str());
 
@@ -1945,6 +2142,39 @@ void applyFreeSurfaceVelocityExtension(
     return FE::forms::FormExpr::constant(FE::Real{-1.0}) * dphi / grad_norm;
 }
 
+[[nodiscard]] FE::forms::FormExpr unfittedLevelSetInterfacePointMotion(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    if (!isUnfittedLevelSet(bc)) {
+        return FE::forms::FormExpr{};
+    }
+
+    const auto phi_id = resolveLevelSetFieldId(bc, system);
+    const auto& rec = system.fieldRecord(phi_id);
+    if (rec.source_kind == FE::systems::FieldSourceKind::PrescribedData ||
+        !system.fieldParticipatesInUnknownVector(phi_id)) {
+        return FE::forms::FormExpr{};
+    }
+    if (!rec.space || rec.components != 1 || rec.space->value_dimension() != 1) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unfitted free-surface point-location tangent requires a scalar level-set field space");
+    }
+
+    const auto phi =
+        FE::forms::StateField(phi_id, *rec.space, bc.level_set_field_name);
+    const auto dphi =
+        FE::forms::FormExpr::trialFunction(*rec.space, "d" + rec.name);
+    const auto grad_phi = FE::forms::grad(phi);
+    const auto grad_norm =
+        FE::forms::sqrt(FE::forms::inner(grad_phi, grad_phi) +
+                        FE::forms::FormExpr::constant(FE::Real{1.0e-30}));
+    const auto n_level_set = grad_phi / grad_norm;
+    const auto normal_speed =
+        FE::forms::FormExpr::constant(FE::Real{-1.0}) * dphi / grad_norm;
+    return normal_speed * n_level_set;
+}
+
 [[nodiscard]] FE::forms::FormExpr unfittedInterfaceMeasureCurvature(
     const FreeSurfaceBoundary& bc,
     const FE::systems::FESystem& system,
@@ -1956,6 +2186,28 @@ void applyFreeSurfaceVelocityExtension(
     return FE::forms::meanCurvatureFromLevelSet(phi);
 }
 
+[[nodiscard]] FE::forms::FormExpr unfittedTractionCurvature(
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system,
+    const FE::forms::FormExpr& phi)
+{
+    FE::forms::FormExpr curvature;
+    if (!bc.curvature_field_name.empty()) {
+        curvature = freeSurfaceCurvatureField(bc, system);
+    } else if (bc.use_level_set_curvature) {
+        curvature = FE::forms::meanCurvatureFromLevelSet(phi);
+    } else {
+        curvature = FE::forms::bc::toScalarExpr(
+            bc.curvature,
+            freeSurfaceValueName("ns_free_surface_curvature", bc));
+    }
+
+    if (bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
+        return FE::forms::FormExpr::constant(FE::Real{-1.0}) * curvature;
+    }
+    return curvature;
+}
+
 void appendUnfittedInterfaceMeasureShapeTangent(
     FE::forms::FormExpr& shape_tangent_form,
     const FE::forms::FormExpr& residual_integrand,
@@ -1963,6 +2215,9 @@ void appendUnfittedInterfaceMeasureShapeTangent(
     const FE::systems::FESystem& system)
 {
     if (!isUnfittedLevelSet(bc) || !residual_integrand.isValid()) {
+        return;
+    }
+    if (unfittedLevelSetShapeTangentsDisabled()) {
         return;
     }
 
@@ -1985,7 +2240,155 @@ void appendUnfittedInterfaceMeasureShapeTangent(
         " level_set_field='" + bc.level_set_field_name + "'" +
         " curvature_source=" +
         (bc.curvature_field_name.empty() ? "level_set_geometry" : "curvature_field") +
+        " experimental_path=unfitted_level_set_shape_tangent"
+        " qualification=Experimental"
         " diagnostic=unfitted_free_surface_interface_measure_shape_tangent");
+}
+
+[[nodiscard]] FE::forms::FormExpr unfittedInterfaceNormalPointLocationTangent(
+    const FreeSurfaceBoundary& bc,
+    const FE::forms::FormExpr& phi,
+    const FE::forms::FormExpr& point_motion)
+{
+    if (!point_motion.isValid()) {
+        return FE::forms::FormExpr{};
+    }
+
+    const auto grad_phi = FE::forms::grad(phi);
+    const auto grad_norm =
+        FE::forms::sqrt(FE::forms::inner(grad_phi, grad_phi) +
+                        FE::forms::FormExpr::constant(FE::Real{1.0e-30}));
+    const auto n0 = grad_phi / grad_norm;
+    const auto* phi_node = phi.node();
+    const auto* phi_space =
+        phi_node != nullptr ? phi_node->spaceSignature() : nullptr;
+    if (phi_space == nullptr) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule: unfitted free-surface normal tangent requires a level-set field space");
+    }
+    const auto dphi = FE::forms::FormExpr::trialFunction(
+        *phi_space,
+        "d" + bc.level_set_field_name);
+    const auto moved_grad_dphi =
+        FE::forms::grad(dphi) + FE::forms::hessian(phi) * point_motion;
+    auto dn = (moved_grad_dphi -
+               FE::forms::inner(moved_grad_dphi, n0) * n0) / grad_norm;
+    if (bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive) {
+        dn = FE::forms::FormExpr::constant(FE::Real{-1.0}) * dn;
+    }
+    return dn;
+}
+
+void appendUnfittedDynamicStressPointLocationShapeTangent(
+    FE::forms::FormExpr& shape_tangent_form,
+    const FE::forms::FormExpr& traction_scalar,
+    const FE::forms::FormExpr& n,
+    const FE::forms::FormExpr& v,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    if (!isUnfittedLevelSet(bc) || !traction_scalar.isValid()) {
+        return;
+    }
+    if (unfittedLevelSetShapeTangentsDisabled()) {
+        return;
+    }
+
+    const auto point_motion = unfittedLevelSetInterfacePointMotion(bc, system);
+    if (!point_motion.isValid()) {
+        return;
+    }
+    const auto phi = freeSurfaceLevelSet(bc, system);
+    const auto dn = unfittedInterfaceNormalPointLocationTangent(
+        bc, phi, point_motion);
+    if (!dn.isValid()) {
+        return;
+    }
+
+    const auto scalar_point =
+        FE::forms::directionalDerivativeWrtSpatialCoordinate(
+            traction_scalar,
+            point_motion);
+    if (!scalar_point.isValid()) {
+        return;
+    }
+
+    const auto v_point = FE::forms::grad(v) * point_motion;
+    const auto point_tangent =
+        FE::forms::FormExpr::constant(FE::Real{-1.0}) *
+        (scalar_point * FE::forms::inner(n, v) +
+         traction_scalar *
+             (FE::forms::inner(dn, v) + FE::forms::inner(n, v_point)));
+
+    const auto term = point_tangent.dI(bc.interface_marker);
+    shape_tangent_form =
+        shape_tangent_form.isValid() ? shape_tangent_form + term : term;
+
+    FE_LOG_INFO(
+        std::string("IncompressibleNavierStokesVMSModule: adding unfitted free-surface interface point-location shape tangent marker=") +
+        std::to_string(bc.interface_marker) +
+        " level_set_field='" + bc.level_set_field_name + "'" +
+        " experimental_path=unfitted_level_set_shape_tangent"
+        " qualification=Experimental"
+        " diagnostic=unfitted_free_surface_interface_point_location_shape_tangent");
+}
+
+void appendUnfittedKinematicPointLocationShapeTangent(
+    FE::forms::FormExpr& shape_tangent_form,
+    const FE::forms::FormExpr& penalty,
+    const FE::forms::FormExpr& relative_velocity,
+    const FE::forms::FormExpr& n,
+    const FE::forms::FormExpr& v,
+    const FreeSurfaceBoundary& bc,
+    const FE::systems::FESystem& system)
+{
+    if (!isUnfittedLevelSet(bc) || !penalty.isValid()) {
+        return;
+    }
+    if (unfittedLevelSetShapeTangentsDisabled()) {
+        return;
+    }
+
+    const auto point_motion = unfittedLevelSetInterfacePointMotion(bc, system);
+    if (!point_motion.isValid()) {
+        return;
+    }
+    const auto phi = freeSurfaceLevelSet(bc, system);
+    const auto dn = unfittedInterfaceNormalPointLocationTangent(
+        bc, phi, point_motion);
+    if (!dn.isValid()) {
+        return;
+    }
+
+    const auto u_point =
+        FE::forms::directionalDerivativeWrtSpatialCoordinate(
+            relative_velocity,
+            point_motion);
+    if (!u_point.isValid()) {
+        return;
+    }
+    const auto v_point = FE::forms::grad(v) * point_motion;
+
+    const auto u_normal = FE::forms::normalTrace(relative_velocity, n);
+    const auto v_normal = FE::forms::normalTrace(v, n);
+    const auto u_normal_point =
+        FE::forms::inner(u_point, n) + FE::forms::inner(relative_velocity, dn);
+    const auto v_normal_point =
+        FE::forms::inner(v_point, n) + FE::forms::inner(v, dn);
+    const auto point_tangent =
+        penalty * (u_normal_point * v_normal + u_normal * v_normal_point);
+
+    const auto term = point_tangent.dI(bc.interface_marker);
+    shape_tangent_form =
+        shape_tangent_form.isValid() ? shape_tangent_form + term : term;
+
+    FE_LOG_INFO(
+        std::string("IncompressibleNavierStokesVMSModule: adding unfitted free-surface interface point-location shape tangent marker=") +
+        std::to_string(bc.interface_marker) +
+        " level_set_field='" + bc.level_set_field_name + "'" +
+        " experimental_path=unfitted_level_set_shape_tangent"
+        " qualification=Experimental"
+        " diagnostic=unfitted_free_surface_interface_point_location_shape_tangent");
 }
 
 [[nodiscard]] bool appendUniqueExtraTrialField(
@@ -2010,6 +2413,9 @@ void appendUnfittedInterfaceMeasureShapeTangent(
     if (!isUnfittedLevelSet(bc)) {
         return false;
     }
+    if (unfittedLevelSetShapeTangentsDisabled()) {
+        return false;
+    }
     if (bc.active_domain != FreeSurfaceActiveDomain::None &&
         bc.active_domain_method == FreeSurfaceActiveDomainMethod::SmoothedIndicator) {
         return true;
@@ -2029,21 +2435,33 @@ void appendUnfittedFreeSurfaceLevelSetTrialFields(
     FE::systems::FormInstallOptions& install)
 {
     for (const auto& bc : free_surfaces) {
+        const bool shape_tangents_enabled =
+            !unfittedLevelSetShapeTangentsDisabled();
         if (!unfittedFreeSurfaceNeedsLevelSetTrialFieldForNavierStokes(bc)) {
             if (isUnfittedLevelSet(bc)) {
                 const char* cut_volume_shape_tangent =
                     "not_applicable";
+                bool cut_volume_shape_tangent_experimental = false;
                 if (bc.active_domain != FreeSurfaceActiveDomain::None &&
                     bc.active_domain_method ==
-                        FreeSurfaceActiveDomainMethod::CutVolume) {
+                        FreeSurfaceActiveDomainMethod::CutVolume &&
+                    !shape_tangents_enabled) {
+                    cut_volume_shape_tangent = "disabled_by_default";
+                } else if (bc.active_domain != FreeSurfaceActiveDomain::None &&
+                           bc.active_domain_method ==
+                               FreeSurfaceActiveDomainMethod::CutVolume) {
                     const auto phi_id = resolveLevelSetFieldId(bc, system);
                     const auto& rec = system.fieldRecord(phi_id);
-                    cut_volume_shape_tangent =
+                    const bool matrix_only_hadamard =
                         system.fieldParticipatesInUnknownVector(phi_id) &&
-                                rec.source_kind !=
-                                    FE::systems::FieldSourceKind::PrescribedData
+                        rec.source_kind !=
+                            FE::systems::FieldSourceKind::PrescribedData;
+                    cut_volume_shape_tangent =
+                        matrix_only_hadamard
                             ? "matrix_only_hadamard"
                             : "not_installed_non_unknown_or_prescribed_level_set";
+                    cut_volume_shape_tangent_experimental =
+                        matrix_only_hadamard;
                 }
                 std::ostringstream oss;
                 oss << "IncompressibleNavierStokesVMSModule: not adding "
@@ -2058,6 +2476,10 @@ void appendUnfittedFreeSurfaceLevelSetTrialFields(
                     << " cut_volume_phi_shape_tangent="
                     << cut_volume_shape_tangent
                     << " reason=no_explicit_residual_level_set_dependence";
+                if (cut_volume_shape_tangent_experimental) {
+                    oss << " experimental_path=unfitted_level_set_shape_tangent"
+                        << " qualification=Experimental";
+                }
                 FE_LOG_INFO(oss.str());
             }
             continue;
@@ -2080,7 +2502,48 @@ void appendUnfittedFreeSurfaceLevelSetTrialFields(
             << " Active_domain=" << activeDomainName(bc.active_domain)
             << " Active_domain_method="
             << activeDomainMethodName(bc.active_domain_method)
+            << " experimental_path=unfitted_level_set_shape_tangent"
+            << " qualification=Experimental"
             << " diagnostic=unfitted_free_surface_phi_extra_trial";
+        FE_LOG_INFO(oss.str());
+    }
+}
+
+void appendUnfittedFreeSurfaceCurvatureTrialFields(
+    const std::vector<FreeSurfaceBoundary>& free_surfaces,
+    const FE::systems::FESystem& system,
+    FE::systems::FormInstallOptions& install)
+{
+    for (const auto& bc : free_surfaces) {
+        if (!isUnfittedLevelSet(bc) ||
+            bc.curvature_field_name.empty() ||
+            FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension)) {
+            continue;
+        }
+
+        const auto kappa_id = system.findFieldByName(bc.curvature_field_name);
+        if (kappa_id == FE::INVALID_FIELD_ID ||
+            !system.fieldParticipatesInUnknownVector(kappa_id)) {
+            continue;
+        }
+
+        const auto& rec = system.fieldRecord(kappa_id);
+        if (rec.components != 1 || !rec.space || rec.space->value_dimension() != 1) {
+            throw std::invalid_argument(
+                "IncompressibleNavierStokesVMSModule: curvature field '" +
+                bc.curvature_field_name + "' must be scalar");
+        }
+
+        const bool appended = appendUniqueExtraTrialField(install, kappa_id);
+        std::ostringstream oss;
+        oss << "IncompressibleNavierStokesVMSModule: "
+            << (appended ? "added" : "retained")
+            << " unfitted free-surface curvature field as Navier-Stokes trial field"
+            << " marker=" << bc.interface_marker
+            << " curvature_field='" << bc.curvature_field_name << "'"
+            << " field_id=" << kappa_id
+            << " source_kind=" << fieldSourceKindName(rec.source_kind)
+            << " diagnostic=unfitted_free_surface_curvature_trial_field";
         FE_LOG_INFO(oss.str());
     }
 }
@@ -2257,11 +2720,24 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             std::to_string(bc.interface_marker) +
             " level_set_field='" + bc.level_set_field_name + "'" +
             " generated_interface_domain_id='" + bc.generated_interface_domain_id + "'" +
+            " generated_interface_geometry=" + bc.generated_interface_geometry +
+            " geometry_tangent_policy=" + bc.geometry_tangent_policy +
+            " level_set_shape_tangents=" + unfittedShapeTangentPolicyName() +
             " active_domain=" + activeDomainName(bc.active_domain) +
             " active_domain_method=" + activeDomainMethodName(bc.active_domain_method) +
             " dynamic_stress=" + (has_dynamic_stress ? "enabled" : "natural_zero") +
+            " curvature_policy=" + freeSurfaceCurvaturePolicyName(bc) +
+            " curvature_tangent_policy=" +
+            freeSurfaceCurvatureTangentPolicyName(bc, system) +
             " kinematic_enforcement=" + kinematicEnforcementName(bc.kinematic_enforcement) +
             " cut_cell_stabilization=" + (bc.cut_cell_stabilization.enabled ? "enabled" : "disabled") +
+            " pressure_stabilization_policy=" +
+            pressureStabilizationPolicyName(
+                bc.cut_cell_stabilization.pressure_policy) +
+            " pressure_stabilization=" +
+            (pressureStabilizationActive(bc) ? "active" : "inactive") +
+            " pressure_stabilization_disabled_reason=" +
+            pressureStabilizationDisabledReason(bc) +
             " velocity_extension=" + (bc.velocity_extension.enabled ? "enabled" : "disabled"));
     }
     if (!needs_surface_normal) {
@@ -2293,11 +2769,8 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         if (bc::isZeroConstantScalarValue(bc.surface_tension)) {
             return FormExpr::constant(0.0);
         }
-        if (!bc.curvature_field_name.empty()) {
-            return freeSurfaceCurvatureField(bc, system);
-        }
-        if (isUnfittedLevelSet(bc) && bc.use_level_set_curvature) {
-            return meanCurvatureFromLevelSet(phi);
+        if (isUnfittedLevelSet(bc)) {
+            return unfittedTractionCurvature(bc, system, phi);
         }
         if (!isUnfittedLevelSet(bc) && bc.use_current_geometry_curvature) {
             return currentMeanCurvature();
@@ -2308,7 +2781,8 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
     }();
 
     if (has_dynamic_stress) {
-        const auto traction = (-p_ext + gamma * curvature) * n;
+        const auto traction_scalar = -p_ext + gamma * curvature;
+        const auto traction = traction_scalar * n;
         const auto residual_integrand =
             FE::forms::FormExpr::constant(FE::Real{-1.0}) *
             inner(traction, v);
@@ -2317,6 +2791,13 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         appendUnfittedInterfaceMeasureShapeTangent(
             level_set_shape_tangent_form,
             residual_integrand,
+            bc,
+            system);
+        appendUnfittedDynamicStressPointLocationShapeTangent(
+            level_set_shape_tangent_form,
+            traction_scalar,
+            n,
+            v,
             bc,
             system);
     }
@@ -2341,6 +2822,14 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
         appendUnfittedInterfaceMeasureShapeTangent(
             level_set_shape_tangent_form,
             residual_integrand,
+            bc,
+            system);
+        appendUnfittedKinematicPointLocationShapeTangent(
+            level_set_shape_tangent_form,
+            penalty,
+            u - mesh_velocity,
+            n,
+            v,
             bc,
             system);
         return;
@@ -2568,15 +3057,29 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                         FreeSurfaceActiveDomain::LevelSetPositive
                     ? FE::constraints::LevelSetConstraintSide::Positive
                     : FE::constraints::LevelSetConstraintSide::Negative;
-            system.addSystemConstraint(
-                std::make_unique<
-                    FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
-                    u_id,
-                    active_pressure_domain->boundary->level_set_field_name,
-                    side,
-                    active_pressure_domain->boundary->level_set_isovalue,
-                    FE::Real{0.0},
-                    active_pressure_domain->boundary->interface_marker));
+            const bool constrain_inactive_velocity =
+                constrainInactiveActiveDomainVelocity(
+                    *active_pressure_domain->boundary);
+            if (constrain_inactive_velocity) {
+                system.addSystemConstraint(
+                    std::make_unique<
+                        FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
+                        u_id,
+                        active_pressure_domain->boundary->level_set_field_name,
+                        side,
+                        active_pressure_domain->boundary->level_set_isovalue,
+                        FE::Real{0.0},
+                        active_pressure_domain->boundary->interface_marker));
+            } else {
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: inactive active-domain velocity constraints disabled") +
+                    " marker=" +
+                    std::to_string(
+                        active_pressure_domain->boundary->interface_marker) +
+                    " level_set_field='" +
+                    active_pressure_domain->boundary->level_set_field_name +
+                    "' reason=velocity_extension_enabled");
+            }
             system.addSystemConstraint(
                 std::make_unique<
                     FE::constraints::LevelSetActiveSideVertexDirichletConstraint>(
@@ -2905,6 +3408,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         install.recordDynamicViscosity(u_id, options_.viscosity);
     }
     appendUnfittedFreeSurfaceLevelSetTrialFields(
+        effective_free_surfaces, system, install);
+    appendUnfittedFreeSurfaceCurvatureTrialFields(
         effective_free_surfaces, system, install);
     ale_binding.configureInstallOptions(install);
     (void)FE::systems::installFormulation(system, "equations", {u_id, p_id}, residual, install);

@@ -147,18 +147,31 @@ void EntityDofMap::buildReverseMapping() {
 }
 
 void EntityDofMap::finalize() {
-    // Ensure all offset arrays have proper final values
+    auto finalize_offsets = [](std::vector<GlobalIndex>& offsets,
+                               std::size_t data_size) {
+        if (offsets.empty()) {
+            return;
+        }
+        offsets.back() = static_cast<GlobalIndex>(data_size);
+        for (std::size_t i = 1; i < offsets.size(); ++i) {
+            if (offsets[i] < offsets[i - 1]) {
+                offsets[i] = offsets[i - 1];
+            }
+        }
+    };
+
+    // Ensure skipped entities become empty spans instead of inheriting data.
     if (!vertex_offsets_.empty()) {
-        vertex_offsets_.back() = static_cast<GlobalIndex>(vertex_dofs_.size());
+        finalize_offsets(vertex_offsets_, vertex_dofs_.size());
     }
     if (!edge_offsets_.empty()) {
-        edge_offsets_.back() = static_cast<GlobalIndex>(edge_dofs_.size());
+        finalize_offsets(edge_offsets_, edge_dofs_.size());
     }
     if (!face_offsets_.empty()) {
-        face_offsets_.back() = static_cast<GlobalIndex>(face_dofs_.size());
+        finalize_offsets(face_offsets_, face_dofs_.size());
     }
     if (!cell_interior_offsets_.empty()) {
-        cell_interior_offsets_.back() = static_cast<GlobalIndex>(cell_interior_dofs_.size());
+        finalize_offsets(cell_interior_offsets_, cell_interior_dofs_.size());
     }
 
     finalized_ = true;

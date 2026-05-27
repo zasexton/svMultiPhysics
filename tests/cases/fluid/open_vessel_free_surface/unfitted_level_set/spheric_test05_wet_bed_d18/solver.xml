@@ -9,8 +9,17 @@
   <Time_step_size>0.0005</Time_step_size>
   <Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>
   <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>
+  <Enable_adaptive_time_loop>true</Enable_adaptive_time_loop>
+  <Adaptive_time_loop_min_dt>1.5625e-5</Adaptive_time_loop_min_dt>
+  <Adaptive_time_loop_max_dt>5.0e-4</Adaptive_time_loop_max_dt>
+  <Adaptive_time_loop_max_retries>8</Adaptive_time_loop_max_retries>
+  <Adaptive_time_loop_decrease_factor>0.5</Adaptive_time_loop_decrease_factor>
+  <Adaptive_time_loop_increase_factor>1.5</Adaptive_time_loop_increase_factor>
+  <Adaptive_time_loop_target_newton_iterations>6</Adaptive_time_loop_target_newton_iterations>
+  <Adaptive_time_loop_max_steps_multiplier>64</Adaptive_time_loop_max_steps_multiplier>
 
   <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+  <Combine_time_series>true</Combine_time_series>
   <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
   <Increment_in_saving_VTK_files>1</Increment_in_saving_VTK_files>
   <Start_saving_after_time_step>1</Start_saving_after_time_step>
@@ -56,9 +65,12 @@
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
-  <Velocity_source>coupled_field</Velocity_source>
-  <Velocity_field_name>Velocity</Velocity_field_name>
+  <Velocity_source>prescribed_data</Velocity_source>
+  <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
   <Auto_register_velocity_field>true</Auto_register_velocity_field>
+  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Wet_extension_advection_velocity_method>nearest_interface_point</Wet_extension_advection_velocity_method>
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Enable_reinitialization>false</Enable_reinitialization>
@@ -95,8 +107,8 @@
 <Add_equation type="fluid">
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
-  <Max_iterations>9</Max_iterations>
-  <Tolerance>6.0e-4</Tolerance>
+  <Max_iterations>12</Max_iterations>
+  <Tolerance>2.0e-2</Tolerance>
   <Module_options>jit=true; jit_specialization=true</Module_options>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
@@ -108,6 +120,10 @@
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 0.15 0.0</Hydrostatic_pressure_reference_point>
   <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
+  <Node_pressure_constraints>
+    <Id_type>Global_vertex_gid</Id_type>
+    <Values_file_path>pressure_gauge.csv</Values_file_path>
+  </Node_pressure_constraints>
   <Viscosity model="Constant">
     <Value>0.001003</Value>
   </Viscosity>
@@ -122,22 +138,14 @@
     <Volume>true</Volume>
   </Output>
 
-  <LS type="GMRES">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
     <Absolute_tolerance>1.0e-4</Absolute_tolerance>
-    <NS_GM_max_iterations>150</NS_GM_max_iterations>
-    <NS_GM_tolerance>1.0e-4</NS_GM_tolerance>
-    <NS_CG_max_iterations>150</NS_CG_max_iterations>
-    <NS_CG_tolerance>1.0e-4</NS_CG_tolerance>
-    <NS_min_outer_iterations>1</NS_min_outer_iterations>
-    <NS_Schur_preconditioner>blockdiag-l</NS_Schur_preconditioner>
-    <NS_Momentum_approximation>ilu-k</NS_Momentum_approximation>
-    <NS_Use_coupled_outer_FGMRES>true</NS_Use_coupled_outer_FGMRES>
   </LS>
 
   <Add_BC name="wall_left">
@@ -178,7 +186,7 @@
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Use_cut_metadata_scale>true</Use_cut_metadata_scale>
+    <Use_cut_metadata_scale>false</Use_cut_metadata_scale>
     <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>

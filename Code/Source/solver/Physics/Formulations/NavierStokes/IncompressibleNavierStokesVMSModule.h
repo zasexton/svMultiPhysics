@@ -42,6 +42,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,12 @@ enum class FreeSurfaceContactLineModel : std::uint8_t {
 enum class FreeSurfaceWallSlipModel : std::uint8_t {
     None,
     Navier
+};
+
+enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
+    Enabled,
+    Disabled,
+    DisabledForRefreshedFrozenHighOrder
 };
 
 struct IncompressibleNavierStokesVMSOptions {
@@ -170,7 +177,11 @@ struct IncompressibleNavierStokesVMSOptions {
         bool enabled{false};
         ScalarValue velocity_gradient_penalty{1.0};
         ScalarValue pressure_gradient_penalty{1.0};
+        FreeSurfacePressureStabilizationPolicy pressure_policy{
+            FreeSurfacePressureStabilizationPolicy::Enabled};
         bool use_cut_metadata_scale{false};
+        std::optional<FE::Real> cut_metadata_scale_cap{};
+        int velocity_max_derivative_order{2};
     };
 
     struct FreeSurfaceVelocityExtension {
@@ -195,6 +206,8 @@ struct IncompressibleNavierStokesVMSOptions {
         int interface_marker{-1};
         std::string level_set_field_name{"level_set"};
         std::string generated_interface_domain_id{"free_surface"};
+        std::string generated_interface_geometry{"LinearCorner"};
+        std::string geometry_tangent_policy{"RefreshedFrozenQuadrature"};
         FE::Real level_set_isovalue{0.0};
 
         // Optional active-domain restriction for unfitted level-set volume terms.
@@ -205,6 +218,10 @@ struct IncompressibleNavierStokesVMSOptions {
         bool allow_full_domain_unfitted_free_surface{false};
 
         // Dynamic stress balance: sigma(u,p)n = (-p_ext + gamma*kappa)n.
+        // For unfitted level-set boundaries, supplied curvature values and
+        // curvature fields are signed with grad(phi)/|grad(phi)|; the
+        // Navier-Stokes module converts them to the active-domain outward
+        // normal convention used by n before forming the traction.
         ScalarValue external_pressure{0.0};
         ScalarValue surface_tension{0.0};
 

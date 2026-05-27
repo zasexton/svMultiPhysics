@@ -9,18 +9,23 @@
     "element_order": 2
   },
   "run": {
-    "dt": 0.02,
-    "steps": 50,
-    "final_time": 1.0
+    "dt": 0.005,
+    "steps": 200,
+    "final_time": 1.0,
+    "spectral_radius_of_infinite_time_step": 0.5
   },
   "targets": {
     "k": 6.283185307179586,
     "period": 1.0,
+    "motion_model": "sinusoidal_translation",
     "most_important_metrics": [
       "phi_rms_error",
+      "quadrature_phi_l2_error",
       "interface_shift_error",
       "velocity_relative_l2_error",
+      "quadrature_velocity_relative_l2_error",
       "pressure_relative_rms_error",
+      "quadrature_pressure_relative_rms_error",
       "interface_pressure_rms",
       "manufactured_residual_x_max"
     ]
@@ -33,6 +38,18 @@
     "implicit_cut_fallback_policy": "Fail",
     "quadrature_order": 2,
     "interface_quadrature_order": 2,
-    "volume_quadrature_order": 2
+    "volume_quadrature_order": 2,
+    "velocity_pressure_pair": "Taylor-Hood P2/P1",
+    "implicit_cut_max_subdivision_depth": 6,
+    "level_set_advection_velocity_source": "prescribed_data",
+    "level_set_constant_velocity": null,
+    "level_set_transport_form": "advective",
+    "level_set_supg_enabled": true,
+    "level_set_supg_tau_scale": 0.5,
+    "level_set_exact_inflow": false,
+    "use_cut_metadata_scale": false,
+    "cut_cell_velocity_gradient_penalty": 0.1,
+    "cut_cell_velocity_max_derivative_order": 1,
+    "cut_cell_pressure_stabilization_policy": "DisabledForRefreshedFrozenHighOrder"
   }
 }

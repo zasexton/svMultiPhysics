@@ -111,11 +111,11 @@ class CurvedTetra10MeshAccess final : public assembly::IMeshAccess {
 public:
     CurvedTetra10MeshAccess()
     {
-        const auto n_nodes = basis::NodeOrdering::num_nodes(ElementType::Tetra10);
+        const auto n_nodes = basis::ReferenceNodeLayout::num_nodes(ElementType::Tetra10);
         nodes_.reserve(n_nodes);
         cell_.reserve(n_nodes);
         for (std::size_t i = 0; i < n_nodes; ++i) {
-            const auto xi = basis::NodeOrdering::get_node_coords(ElementType::Tetra10, i);
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(ElementType::Tetra10, i);
             std::array<Real, 3> x{xi[0], xi[1], xi[2]};
             if (i == 4) x[2] += Real(0.030);
             if (i == 5) x[0] += Real(0.020);
@@ -197,11 +197,11 @@ public:
           dimension_(element_dimension(cell_type)),
           name_(std::move(name))
     {
-        const auto n_nodes = basis::NodeOrdering::num_nodes(cell_type_);
+        const auto n_nodes = basis::ReferenceNodeLayout::num_nodes(cell_type_);
         nodes_.reserve(n_nodes);
         cell_.reserve(n_nodes);
         for (std::size_t i = 0; i < n_nodes; ++i) {
-            const auto xi = basis::NodeOrdering::get_node_coords(cell_type_, i);
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(cell_type_, i);
             nodes_.push_back(curvedNode(xi));
             cell_.push_back(static_cast<GlobalIndex>(i));
         }

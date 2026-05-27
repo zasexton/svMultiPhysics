@@ -1,12 +1,21 @@
 #include <gtest/gtest.h>
 
+#include "Application/Core/LevelSetCutConfiguration.h"
+#include "Application/Core/SimulationBuilder.h"
 #include "Application/Translators/EquationTranslator.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
+
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+#include <mpi.h>
+#include <cstdlib>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -18,11 +27,57 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
 
 namespace fs = std::filesystem;
+
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+void finalize_mpi_if_needed()
+{
+  int finalized = 0;
+  MPI_Finalized(&finalized);
+  if (!finalized) {
+    MPI_Finalize();
+  }
+}
+#endif
+
+void ensure_mpi_initialized_for_open_vessel_builder()
+{
+#if FE_HAS_MPI || defined(MESH_HAS_MPI)
+  int initialized = 0;
+  MPI_Initialized(&initialized);
+  if (!initialized) {
+    int argc = 0;
+    char** argv = nullptr;
+    MPI_Init(&argc, &argv);
+    std::atexit(finalize_mpi_if_needed);
+  }
+#endif
+}
+
+class ScopedCurrentPath {
+public:
+  explicit ScopedCurrentPath(const fs::path& path)
+      : previous_(fs::current_path())
+  {
+    fs::current_path(path);
+  }
+
+  ~ScopedCurrentPath()
+  {
+    fs::current_path(previous_);
+  }
+
+  ScopedCurrentPath(const ScopedCurrentPath&) = delete;
+  ScopedCurrentPath& operator=(const ScopedCurrentPath&) = delete;
+
+private:
+  fs::path previous_;
+};
 
 std::string trimCopy(std::string value)
 {
@@ -77,6 +132,17 @@ std::shared_ptr<svmp::Mesh> makeTranslatorQuadMesh()
       cell2vertex,
       {shape});
   base->finalize();
+  const auto phi_handle = svmp::MeshFields::attach_field(
+      *base,
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* phi = svmp::MeshFields::field_data_as<svmp::real_t>(*base, phi_handle);
+  phi[0] = -1.0;
+  phi[1] = -1.0;
+  phi[2] = 1.0;
+  phi[3] = 1.0;
   base->register_label("wall_left", 1);
   base->register_label("wall_right", 2);
   base->register_label("wall_bottom", 3);
@@ -164,6 +230,91 @@ void expectText(const tinyxml2::XMLElement& parent,
                 std::string_view expected)
 {
   EXPECT_EQ(text(parent, name), expected) << name;
+}
+
+void setOrAppendText(tinyxml2::XMLDocument& doc,
+                     tinyxml2::XMLElement& parent,
+                     const char* name,
+                     const char* value)
+{
+  auto* element = parent.FirstChildElement(name);
+  if (element == nullptr) {
+    element = doc.NewElement(name);
+    parent.InsertEndChild(element);
+  }
+  element->SetText(value);
+}
+
+fs::path writeBuilderRegressionXml(const fs::path& case_dir)
+{
+  tinyxml2::XMLDocument doc;
+  loadXml(case_dir / "solver.xml", doc);
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  if (root == nullptr) {
+    throw std::runtime_error("solver.xml has no svMultiPhysicsFile root");
+  }
+  auto& fluid =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid");
+  setOrAppendText(doc, fluid, "Enable_level_set_cut_domain", "true");
+  setOrAppendText(doc, fluid, "Level_set_field_name", "phi");
+  setOrAppendText(doc, fluid, "Generated_interface_domain_id",
+                  "open_vessel_surface");
+  setOrAppendText(doc, fluid, "Interface_marker", "101");
+  setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
+  setOrAppendText(doc, fluid, "Active_domain_method", "CutVolume");
+
+  const auto xml_path = fs::temp_directory_path() /
+                        "svmp_open_vessel_unfitted_builder_cut_domain.xml";
+  const auto status = doc.SaveFile(xml_path.string().c_str());
+  if (status != tinyxml2::XML_SUCCESS) {
+    throw std::runtime_error("failed to write " + xml_path.string() + ": " +
+                             doc.ErrorStr());
+  }
+  return xml_path;
+}
+
+fs::path writeUnfittedGuardRegressionXml(
+    const fs::path& case_dir,
+    std::string_view suffix,
+    const std::vector<std::pair<std::string, std::string>>& free_surface_overrides,
+    bool append_second_active_free_surface = false)
+{
+  tinyxml2::XMLDocument doc;
+  loadXml(case_dir / "solver.xml", doc);
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  if (root == nullptr) {
+    throw std::runtime_error("solver.xml has no svMultiPhysicsFile root");
+  }
+  auto& fluid =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid");
+  auto& free_surface =
+      mutableChildWithAttribute(fluid, "Add_BC", "name", "free_surface");
+  for (const auto& [name, value] : free_surface_overrides) {
+    setOrAppendText(doc, free_surface, name.c_str(), value.c_str());
+  }
+
+  if (append_second_active_free_surface) {
+    auto* clone_node = free_surface.DeepClone(&doc);
+    auto* clone = clone_node == nullptr ? nullptr : clone_node->ToElement();
+    if (clone == nullptr) {
+      throw std::runtime_error("failed to clone free_surface BC");
+    }
+    clone->SetAttribute("name", "free_surface_duplicate");
+    setOrAppendText(doc, *clone, "Generated_interface_domain_id",
+                    "duplicate_open_vessel_surface");
+    setOrAppendText(doc, *clone, "Interface_marker", "909");
+    fluid.InsertEndChild(clone);
+  }
+
+  const auto xml_path = fs::temp_directory_path() /
+                        ("svmp_open_vessel_unfitted_guard_" +
+                         std::string(suffix) + ".xml");
+  const auto status = doc.SaveFile(xml_path.string().c_str());
+  if (status != tinyxml2::XML_SUCCESS) {
+    throw std::runtime_error("failed to write " + xml_path.string() + ": " +
+                             doc.ErrorStr());
+  }
+  return xml_path;
 }
 
 void expectReferencedFileExists(const fs::path& base_dir,
@@ -427,6 +578,271 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
   EXPECT_EQ(free_surface->params.at("Level_set_field_name").value, "phi");
   EXPECT_EQ(free_surface->params.at("Generated_interface_domain_id").value,
             "open_vessel_surface");
+}
+
+TEST(OpenVesselExamples, ScopedEquationCutDomainRegistersWithUnfittedFreeSurface)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  tinyxml2::XMLDocument doc;
+  ASSERT_NO_THROW(loadXml(case_dir / "solver.xml", doc));
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(root, nullptr);
+  auto& fluid =
+      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid");
+
+  setOrAppendText(doc, fluid, "Enable_level_set_cut_domain", "true");
+  setOrAppendText(doc, fluid, "Level_set_field_name", "phi");
+  setOrAppendText(doc, fluid, "Generated_interface_domain_id",
+                  "open_vessel_surface");
+  setOrAppendText(doc, fluid, "Interface_marker", "101");
+  setOrAppendText(doc, fluid, "Active_domain", "LevelSetNegative");
+  setOrAppendText(doc, fluid, "Active_domain_method", "CutVolume");
+
+  auto mesh = makeTranslatorQuadMesh();
+  const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
+
+  auto level_set_params = equationParametersFromElement(
+      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set"));
+  svmp::FE::systems::FESystem system(mesh);
+  auto level_set_module =
+      application::translators::EquationTranslator::createModule(
+          *level_set_params,
+          system,
+          meshes);
+  ASSERT_TRUE(level_set_module);
+
+  auto fluid_params = equationParametersFromElement(fluid);
+  const auto requests = application::core::activeCutVolumeRequests(*fluid_params);
+  const auto equation_request = std::find_if(
+      requests.begin(),
+      requests.end(),
+      [](const application::core::ActiveCutVolumeRequest& request) {
+        return request.origin ==
+               application::core::ActiveCutVolumeRequestOrigin::Equation;
+      });
+  ASSERT_NE(equation_request, requests.end());
+  const auto phi = system.findFieldByName("phi");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+  std::vector<svmp::FE::systems::FESystem::FormCellDomainRestriction>
+      restrictions{
+          svmp::FE::systems::FESystem::FormCellDomainRestriction{
+              .interface_marker = equation_request->requested_interface_marker,
+              .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+              .level_set_field = phi,
+              .isovalue = static_cast<svmp::FE::Real>(equation_request->isovalue),
+              .enable_level_set_shape_tangent = true,
+              .diagnostic =
+                  "test_equation_level_level_set_cut_domain_unfitted_free_surface"}};
+  ASSERT_FALSE(restrictions.empty());
+
+  const auto previous = system.formInstallCellDomainRestrictions();
+  system.setFormInstallCellDomainRestrictions(restrictions);
+  std::unique_ptr<svmp::Physics::PhysicsModule> fluid_module;
+  {
+    const ScopedCurrentPath cwd(case_dir);
+    ASSERT_NO_THROW(
+        fluid_module =
+            application::translators::EquationTranslator::createModule(
+                *fluid_params,
+                system,
+                meshes));
+  }
+  system.setFormInstallCellDomainRestrictions(previous);
+
+  ASSERT_TRUE(fluid_module);
+  EXPECT_GT(system.cutVolumeKernelCount(
+                equation_request->requested_interface_marker,
+                svmp::FE::geometry::CutIntegrationSide::Negative),
+            0u);
+  EXPECT_NO_THROW(application::core::validateEquationLevelCutVolumeConsumer(
+      system,
+      *equation_request,
+      equation_request->requested_interface_marker));
+  EXPECT_TRUE(system.formInstallCellDomainRestrictions().empty());
+#endif
+}
+
+TEST(OpenVesselExamples, SimulationBuilderRegistersEquationCutDomainWithUnfittedFreeSurface)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path = writeBuilderRegressionXml(case_dir);
+
+  Parameters params;
+  {
+    const ScopedCurrentPath cwd(case_dir);
+    ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+    application::core::SimulationBuilder builder(params);
+    auto components = builder.build();
+
+    ASSERT_TRUE(components.fe_system);
+    EXPECT_EQ(components.primary_mesh_name, "tank");
+    ASSERT_EQ(components.physics_modules.size(), 2u);
+    EXPECT_TRUE(components.fe_system->formInstallCellDomainRestrictions().empty());
+
+    const auto phi = components.fe_system->findFieldByName("phi");
+    ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(components.fe_system->fieldParticipatesInUnknownVector(phi));
+    EXPECT_TRUE(components.time_history);
+    EXPECT_TRUE(components.linear_solver);
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderAcceptsSuppliedCurvatureSurfaceTension)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path = writeUnfittedGuardRegressionXml(
+      case_dir,
+      "supplied_curvature_surface_tension",
+      {{"Surface_tension", "0.0728"},
+       {"Use_level_set_curvature", "false"},
+       {"Curvature", "2.0"}});
+
+  Parameters params;
+  {
+    const ScopedCurrentPath cwd(case_dir);
+    ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+    application::core::SimulationBuilder builder(params);
+    auto components = builder.build();
+
+    ASSERT_TRUE(components.fe_system);
+    const auto phi = components.fe_system->findFieldByName("phi");
+    ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+
+    svmp::FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "open_vessel_surface";
+    const int interface_marker =
+        svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
+
+    const auto& equations =
+        components.fe_system->operatorDefinition("equations");
+    const auto has_interface_traction =
+        std::any_of(equations.interface_faces.begin(),
+                    equations.interface_faces.end(),
+                    [interface_marker](const auto& term) {
+                      return term.marker == interface_marker;
+                    });
+
+    EXPECT_TRUE(has_interface_traction);
+    EXPECT_TRUE(components.fe_system->formInstallCellDomainRestrictions().empty());
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsNitscheKinematics)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path = writeUnfittedGuardRegressionXml(
+      case_dir,
+      "nitsche_kinematics",
+      {{"Kinematic_enforcement", "Nitsche"},
+       {"Normal_kinematic_policy", "MatchFluidNormalVelocity"}});
+
+  Parameters params;
+  const ScopedCurrentPath cwd(case_dir);
+  ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+  application::core::SimulationBuilder builder(params);
+  try {
+    (void)builder.build();
+    FAIL() << "Expected unfitted Nitsche kinematics to be rejected";
+  } catch (const std::invalid_argument& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("one-sided embedded boundaries"), std::string::npos);
+    EXPECT_NE(message.find("Nitsche free-surface kinematics"),
+              std::string::npos);
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsRawCurvatureSurfaceTension)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path = writeUnfittedGuardRegressionXml(
+      case_dir,
+      "raw_curvature_surface_tension",
+      {{"Surface_tension", "0.0728"}, {"Use_level_set_curvature", "true"}});
+
+  Parameters params;
+  const ScopedCurrentPath cwd(case_dir);
+  ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+  application::core::SimulationBuilder builder(params);
+  try {
+    (void)builder.build();
+    FAIL() << "Expected raw level-set curvature surface tension to be rejected";
+  } catch (const std::invalid_argument& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("raw level-set curvature"), std::string::npos);
+    EXPECT_NE(message.find("not validated"), std::string::npos);
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
+}
+
+TEST(OpenVesselExamples, UnfittedFreeSurfaceBuilderRejectsMultipleActiveDomains)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  ensure_mpi_initialized_for_open_vessel_builder();
+
+  const auto case_dir = openVesselCaseDir("unfitted_level_set");
+  const auto xml_path = writeUnfittedGuardRegressionXml(
+      case_dir,
+      "multiple_active_domains",
+      {},
+      /*append_second_active_free_surface=*/true);
+
+  Parameters params;
+  const ScopedCurrentPath cwd(case_dir);
+  ASSERT_NO_THROW(params.read_xml(xml_path.string()));
+  application::core::SimulationBuilder builder(params);
+  try {
+    (void)builder.build();
+    FAIL() << "Expected multiple active-domain free surfaces to be rejected";
+  } catch (const std::invalid_argument& error) {
+    const std::string message = error.what();
+    EXPECT_NE(message.find("at most one active-domain free surface"),
+              std::string::npos);
+  }
+
+  std::error_code ec;
+  fs::remove(xml_path, ec);
+#endif
 }
 
 TEST(OpenVesselExamples, FittedAleCaseBuildsMeshMotionOopInputs)

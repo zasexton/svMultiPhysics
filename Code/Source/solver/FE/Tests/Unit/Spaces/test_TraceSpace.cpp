@@ -533,10 +533,10 @@ TEST(TraceSpace, EmbedFaceVerticesMatchVolumeVerticesHex) {
     ASSERT_EQ(fverts.size(), 4u);
 
     for (std::size_t i = 0; i < fverts.size(); ++i) {
-        const auto xi_face = basis::NodeOrdering::get_node_coords(ElementType::Quad4, i);
+        const auto xi_face = basis::ReferenceNodeLayout::get_node_coords(ElementType::Quad4, i);
         const auto xi_vol = trace.embed_face_point(xi_face);
         const auto expected =
-            basis::NodeOrdering::get_node_coords(h1->element_type(), static_cast<std::size_t>(fverts[i]));
+            basis::ReferenceNodeLayout::get_node_coords(h1->element_type(), static_cast<std::size_t>(fverts[i]));
         EXPECT_NEAR(xi_vol[0], expected[0], 1e-14);
         EXPECT_NEAR(xi_vol[1], expected[1], 1e-14);
         EXPECT_NEAR(xi_vol[2], expected[2], 1e-14);

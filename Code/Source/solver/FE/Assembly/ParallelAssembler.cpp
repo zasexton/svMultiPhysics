@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <memory>
+#include <unordered_map>
 
 namespace svmp {
 namespace FE {
@@ -501,7 +503,10 @@ public:
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return base_->numBoundaryFaces(); }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return base_->numInteriorFaces(); }
     [[nodiscard]] int dimension() const override { return base_->dimension(); }
-    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
+    {
+        return base_->isOwnedCell(cell_id);
+    }
     [[nodiscard]] ElementType getCellType(GlobalIndex cell_id) const override { return base_->getCellType(cell_id); }
     [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override { return base_->getCellDomainId(cell_id); }
 
@@ -1450,6 +1455,60 @@ AssemblyResult ParallelAssembler::assembleCutVolumes(
         }
 
         return {};
+    });
+}
+
+AssemblyResult ParallelAssembler::assembleCutVolumesFused(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    std::span<const FusedCellTerm> terms)
+{
+    if (!initialized_) {
+        initialize();
+    }
+
+    if (options_.allow_unowned_row_accumulation) {
+        OwnedCellsMeshAccess owned_mesh(mesh);
+        return local_assembler_.assembleCutVolumesFused(
+            owned_mesh, cut_context, interface_marker, side, terms);
+    }
+
+    beginGhostAssemblyIfNeeded();
+
+    return withPolicyMeshAccess(mesh, ghost_policy_, [&](const IMeshAccess& policy_mesh) -> AssemblyResult {
+        std::vector<FusedCellTerm> routed_terms(terms.begin(), terms.end());
+        std::vector<std::unique_ptr<GhostRoutingView>> routed_views;
+        std::unordered_map<GlobalSystemView*, GlobalSystemView*> routed_by_base;
+
+        auto routed_view_for = [&](GlobalSystemView* base) -> GlobalSystemView* {
+            if (base == nullptr) {
+                return nullptr;
+            }
+            auto it = routed_by_base.find(base);
+            if (it != routed_by_base.end()) {
+                return it->second;
+            }
+            auto routed = std::make_unique<GhostRoutingView>(
+                *base, ghost_manager_, ghost_policy_);
+            auto* routed_ptr = routed.get();
+            routed_views.push_back(std::move(routed));
+            routed_by_base.emplace(base, routed_ptr);
+            return routed_ptr;
+        };
+
+        for (auto& t : routed_terms) {
+            if (t.assemble_matrix && t.matrix_view != nullptr) {
+                t.matrix_view = routed_view_for(t.matrix_view);
+            }
+            if (t.assemble_vector && t.vector_view != nullptr) {
+                t.vector_view = routed_view_for(t.vector_view);
+            }
+        }
+
+        return local_assembler_.assembleCutVolumesFused(
+            policy_mesh, cut_context, interface_marker, side, routed_terms);
     });
 }
 

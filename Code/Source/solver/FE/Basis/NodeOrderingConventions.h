@@ -464,14 +464,19 @@
  *
  */
 
+#include <span>
+
 namespace svmp {
 namespace FE {
 namespace basis {
 
 /**
- * @brief Utility functions for node coordinate queries
+ * @brief Basis-side reference node coordinate queries
+ *
+ * This is intentionally named differently from `svmp::NodeOrdering` in Mesh,
+ * which handles mesh-format permutations rather than reference basis layouts.
  */
-class NodeOrdering {
+class ReferenceNodeLayout {
 public:
     /**
      * @brief Get reference coordinates for a node
@@ -506,6 +511,14 @@ public:
      */
     static std::vector<math::Vector<Real, 3>>
     get_lagrange_node_coords(ElementType canonical_type, int order);
+
+    /**
+     * @brief Optional mapping from mesh/reference node order to internal basis order
+     *
+     * Returns an empty span when the public node order is already the basis
+     * table order or no special mapping is registered.
+     */
+    static std::span<const std::size_t> mesh_to_basis_ordering(ElementType elem_type);
 
     /**
      * @brief Check if element is a simplex (triangle, tetrahedron)

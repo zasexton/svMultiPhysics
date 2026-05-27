@@ -59,6 +59,38 @@ std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
     return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<svmp::Mesh> buildTwoQuadStripMesh()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        2.0, 0.0,
+        0.0, 1.0,
+        1.0, 1.0,
+        2.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4, 8};
+    const std::vector<svmp::index_t> cell2vertex = {
+        0, 1, 4, 3,
+        1, 2, 5, 4,
+    };
+
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(
+        /*spatial_dim=*/2,
+        x_ref,
+        cell2vertex_offsets,
+        cell2vertex,
+        {shape, shape});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<svmp::Mesh> buildSingleCellMesh(
     int spatial_dim,
     std::span<const std::array<FE::Real, 3>> coordinates,
@@ -423,6 +455,374 @@ TEST(LevelSetVolume, FESystemOverloadUsesFieldSlice)
     EXPECT_NEAR(result.negative_volume, 1.0 / 48.0, 1.0e-12);
 }
 
+TEST(LevelSetVolume, GeneratedInterfaceVolumeDiscoversInteriorIsland)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 9u);
+    const auto offset = system.fieldDofOffset(phi);
+    constexpr FE::Real radius = FE::Real{0.2};
+    for (std::size_t i = 0; i < 9u; ++i) {
+        const auto xi =
+            FE::basis::ReferenceNodeLayout::get_node_coords(FE::ElementType::Quad9, i);
+        const auto x = FE::Real{0.5} * (xi[0] + FE::Real{1.0});
+        const auto y = FE::Real{0.5} * (xi[1] + FE::Real{1.0});
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            (x - FE::Real{0.5}) * (x - FE::Real{0.5}) +
+            (y - FE::Real{0.5}) * (y - FE::Real{0.5}) -
+            radius * radius;
+    }
+
+    const auto corner_linear = level_set::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        level_set::LevelSetVolumeOptions{},
+        solution);
+    ASSERT_TRUE(corner_linear.success) << corner_linear.diagnostic;
+    EXPECT_EQ(corner_linear.cut_cells, 0u);
+    EXPECT_NEAR(corner_linear.negative_volume, 0.0, 1.0e-12);
+
+    level_set::LevelSetVolumeOptions generated_opts{};
+    generated_opts.use_generated_interface_quadrature = true;
+    generated_opts.level_set_field_name = "phi";
+    generated_opts.generated_domain_id = "interior_island_volume";
+    generated_opts.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    generated_opts.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    generated_opts.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    generated_opts.interface_quadrature_order = 2;
+    generated_opts.volume_quadrature_order = 2;
+    generated_opts.implicit_cut_max_subdivision_depth = 8;
+    generated_opts.require_production_qualified_implicit_cut_backend = true;
+
+    const auto generated = level_set::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        generated_opts,
+        solution);
+    ASSERT_TRUE(generated.success) << generated.diagnostic;
+    EXPECT_EQ(generated.cut_cells, 1u);
+    EXPECT_GT(generated.negative_volume, 0.0);
+    EXPECT_GT(generated.positive_volume, 0.0);
+    EXPECT_NEAR(generated.negative_volume,
+                3.141592653589793238462643383279502884 * radius * radius,
+                3.0e-2);
+#endif
+}
+
+TEST(LevelSetVolume, GeneratedInterfaceGlobalShiftHandlesInteriorIsland)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 9u);
+    const auto offset = system.fieldDofOffset(phi);
+    constexpr FE::Real radius = FE::Real{0.2};
+    for (std::size_t i = 0; i < 9u; ++i) {
+        const auto xi =
+            FE::basis::ReferenceNodeLayout::get_node_coords(FE::ElementType::Quad9, i);
+        const auto x = FE::Real{0.5} * (xi[0] + FE::Real{1.0});
+        const auto y = FE::Real{0.5} * (xi[1] + FE::Real{1.0});
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            (x - FE::Real{0.5}) * (x - FE::Real{0.5}) +
+            (y - FE::Real{0.5}) * (y - FE::Real{0.5}) -
+            radius * radius;
+    }
+
+    level_set::LevelSetVolumeOptions generated_opts{};
+    generated_opts.use_generated_interface_quadrature = true;
+    generated_opts.level_set_field_name = "phi";
+    generated_opts.generated_domain_id = "interior_island_volume_correction";
+    generated_opts.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    generated_opts.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    generated_opts.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    generated_opts.interface_quadrature_order = 1;
+    generated_opts.volume_quadrature_order = 2;
+    generated_opts.implicit_cut_max_subdivision_depth = 8;
+    generated_opts.require_production_qualified_implicit_cut_backend = true;
+
+    auto unqualified_measure_opts = generated_opts;
+    unqualified_measure_opts.require_production_qualified_implicit_cut_backend =
+        false;
+    const auto initial = level_set::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        unqualified_measure_opts,
+        solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    ASSERT_GT(initial.negative_volume, 0.05);
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume =
+        FE::Real{0.5} * initial.negative_volume;
+    correction_opts.volume_tolerance = 5.0e-4;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        system,
+        phi,
+        generated_opts,
+        correction_opts,
+        solution,
+        corrected_solution);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    EXPECT_NEAR(correction.corrected_negative_volume,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
+    ASSERT_EQ(corrected_solution.size(), solution.size());
+    EXPECT_NE(corrected_solution, solution);
+#endif
+}
+
+TEST(LevelSetVolume, GeneratedInterfaceGlobalShiftUsesGeneratedQuadrature)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto pressure_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/1);
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto pressure = system.addField(FE::systems::FieldSpec{
+        .name = "pressure",
+        .space = pressure_space,
+        .components = 1,
+    });
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto n_total_dofs =
+        static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    const auto pressure_offset =
+        static_cast<std::size_t>(system.fieldDofOffset(pressure));
+    const auto pressure_count = static_cast<std::size_t>(
+        system.fieldDofHandler(pressure).getNumDofs());
+    const auto phi_offset =
+        static_cast<std::size_t>(system.fieldDofOffset(phi));
+    const auto& phi_dofs = system.fieldDofHandler(phi);
+    const auto phi_count = static_cast<std::size_t>(phi_dofs.getNumDofs());
+    const auto* entity_map = phi_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> field_coefficients(phi_count, FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < entity_map->numVertices();
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = system.meshAccess().getNodeCoordinates(vertex);
+        field_coefficients[static_cast<std::size_t>(dofs.front())] =
+            x[0] + x[1] - FE::Real{0.5};
+    }
+
+    std::vector<FE::Real> solution(n_total_dofs, FE::Real{7.0});
+    std::copy(field_coefficients.begin(),
+              field_coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(phi_offset));
+    const auto original_solution = solution;
+
+    level_set::LevelSetVolumeOptions generated_opts{};
+    generated_opts.use_generated_interface_quadrature = true;
+    generated_opts.level_set_field_name = "phi";
+    generated_opts.generated_domain_id = "generated_volume_correction";
+    generated_opts.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    generated_opts.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    generated_opts.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    generated_opts.interface_quadrature_order = 2;
+    generated_opts.volume_quadrature_order = 2;
+    generated_opts.implicit_cut_max_subdivision_depth = 8;
+    generated_opts.require_production_qualified_implicit_cut_backend = true;
+
+    const auto initial = level_set::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        generated_opts,
+        solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    EXPECT_EQ(initial.diagnostic, "generated_interface_quadrature");
+    EXPECT_NEAR(initial.negative_volume, 0.125, 1.0e-10);
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 1.0 / 32.0;
+    correction_opts.volume_tolerance = 1.0e-10;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        system,
+        phi,
+        generated_opts,
+        correction_opts,
+        solution,
+        corrected_solution);
+
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    EXPECT_EQ(correction.initial_volume.diagnostic,
+              "generated_interface_quadrature");
+    EXPECT_EQ(correction.corrected_volume.diagnostic,
+              "generated_interface_quadrature");
+    EXPECT_GT(correction.iterations, 0);
+    EXPECT_NEAR(correction.applied_shift, 0.25, 1.0e-8);
+    EXPECT_NEAR(correction.corrected_negative_volume,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
+    ASSERT_EQ(corrected_solution.size(), solution.size());
+    for (std::size_t i = 0; i < pressure_count; ++i) {
+        EXPECT_DOUBLE_EQ(corrected_solution[pressure_offset + i],
+                         original_solution[pressure_offset + i]);
+    }
+    for (std::size_t i = 0; i < phi_count; ++i) {
+        EXPECT_NEAR(corrected_solution[phi_offset + i],
+                    field_coefficients[i] + correction.applied_shift,
+                    1.0e-12);
+    }
+#endif
+}
+
+TEST(LevelSetVolume, GeneratedInterfaceGlobalShiftReusesLifecycleCacheAcrossBisection)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildTwoQuadStripMesh();
+    auto phi_space =
+        std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4,
+                                              /*order=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+
+    const auto n_total_dofs =
+        static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    const auto phi_offset =
+        static_cast<std::size_t>(system.fieldDofOffset(phi));
+    const auto& phi_dofs = system.fieldDofHandler(phi);
+    const auto phi_count = static_cast<std::size_t>(phi_dofs.getNumDofs());
+    const auto* entity_map = phi_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> field_coefficients(phi_count, FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < entity_map->numVertices();
+         ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = system.meshAccess().getNodeCoordinates(vertex);
+        field_coefficients[static_cast<std::size_t>(dofs.front())] =
+            x[0] - FE::Real{0.5};
+    }
+
+    std::vector<FE::Real> solution(n_total_dofs, FE::Real{0.0});
+    std::copy(field_coefficients.begin(),
+              field_coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(phi_offset));
+
+    level_set::LevelSetVolumeOptions generated_opts{};
+    generated_opts.use_generated_interface_quadrature = true;
+    generated_opts.level_set_field_name = "phi";
+    generated_opts.generated_domain_id = "generated_volume_cache_correction";
+    generated_opts.requested_interface_marker = 718;
+    generated_opts.interface_quadrature_order = 1;
+    generated_opts.volume_quadrature_order = 1;
+
+    const auto initial = level_set::computeLevelSetCutCellVolume(
+        system,
+        phi,
+        generated_opts,
+        solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    EXPECT_EQ(initial.cells, 2u);
+    EXPECT_EQ(initial.generated_cell_cache_hits, 0u);
+    EXPECT_EQ(initial.generated_cell_cache_misses, 2u);
+    EXPECT_NEAR(initial.negative_volume, 0.5, 1.0e-12);
+
+    level_set::LevelSetGlobalShiftCorrectionOptions correction_opts{};
+    correction_opts.target_negative_volume = 0.25;
+    correction_opts.volume_tolerance = 1.0e-12;
+    correction_opts.max_iterations = 80;
+
+    std::vector<FE::Real> corrected_solution;
+    const auto correction = level_set::applyGlobalLevelSetShiftCorrection(
+        system,
+        phi,
+        generated_opts,
+        correction_opts,
+        solution,
+        corrected_solution);
+
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    EXPECT_GT(correction.iterations, 0);
+    EXPECT_GT(correction.generated_volume_measurement_count, 1u);
+    EXPECT_GT(correction.generated_cell_cache_hits, 0u);
+    EXPECT_LT(correction.generated_cell_cache_misses,
+              correction.generated_volume_measurement_count *
+                  correction.initial_volume.cells);
+    EXPECT_GT(correction.generated_linear_full_cell_fast_path_count, 0u);
+    EXPECT_GT(correction.corrected_volume.generated_value_revision,
+              correction.initial_volume.generated_value_revision);
+    EXPECT_NEAR(correction.applied_shift, 0.25, 1.0e-8);
+    EXPECT_NEAR(correction.corrected_negative_volume,
+                correction_opts.target_negative_volume,
+                correction_opts.volume_tolerance);
+#endif
+}
+
 TEST(LevelSetVolume, HandlesUncutCells)
 {
     const ScalarFieldFixture fixture;
@@ -726,7 +1126,7 @@ TEST(LevelSetVolume, VolumeCorrectionRefreshesHighOrderCutContextBeforeOutput)
     const auto offset = system.fieldDofOffset(phi);
     for (std::size_t i = 0; i < 9u; ++i) {
         const auto xi =
-            FE::basis::NodeOrdering::get_node_coords(FE::ElementType::Quad9, i);
+            FE::basis::ReferenceNodeLayout::get_node_coords(FE::ElementType::Quad9, i);
         const auto x = FE::Real{0.5} * (xi[0] + FE::Real{1.0});
         const auto y = FE::Real{0.5} * (xi[1] + FE::Real{1.0});
         solution[static_cast<std::size_t>(offset + cell_dofs[i])] =

@@ -12,6 +12,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "FE/Assembly/BatchedStiffness.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/BatchEvaluator.h"
@@ -509,7 +510,7 @@ TEST(StiffnessMatrix, BatchEvaluatorConsistency) {
         wts[q] = quad.weight(q) * detJ;
     }
 
-    batch.assemble_stiffness_contribution(D, wts.data(), K_batch.data());
+    assembly::assemble_stiffness_contribution(batch, D, wts.data(), K_batch.data());
 
     // Compare (note: batch evaluator uses reference gradients, not physical)
     // This test just verifies batch evaluator runs; full consistency needs

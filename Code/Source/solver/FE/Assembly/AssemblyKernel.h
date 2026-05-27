@@ -208,6 +208,19 @@ enum class InterfaceEvaluationSide : std::uint8_t {
     Plus
 };
 
+/**
+ * @brief Optional side filter for auxiliary field data on two-sided interfaces
+ *
+ * Most kernels consume auxiliary fields on every context, so Both is the
+ * default. Generated two-sided interface kernels can request fields only for
+ * the minus or plus side when the formulation has side-specific traces.
+ */
+enum class FieldEvaluationSide : std::uint8_t {
+    Both,
+    Minus,
+    Plus
+};
+
 // Bitwise operators for RequiredData
 inline constexpr RequiredData operator|(RequiredData a, RequiredData b) {
     return static_cast<RequiredData>(
@@ -267,6 +280,7 @@ struct MaterialStateSpec {
 struct FieldRequirement {
     FieldId field{INVALID_FIELD_ID};
     RequiredData required{RequiredData::None};
+    FieldEvaluationSide interface_side{FieldEvaluationSide::Both};
 };
 
 // ============================================================================
@@ -688,10 +702,9 @@ public:
     /**
      * @brief True when interface-face evaluation needs distinct minus/plus contexts.
      *
-     * Generated level-set cut interfaces are one-sided embedded boundaries. They
-     * can evaluate unrestricted or minus-side `dI` terms on the parent cell, but
-     * cannot represent plus-side, jump, or average semantics without an explicit
-     * two-sided interface topology.
+     * Assemblers use this to route plus-side, jump, and average `dI` terms through
+     * their two-sided interface path instead of the one-sided embedded-boundary
+     * path.
      */
     [[nodiscard]] virtual bool requiresTwoSidedInterfaceFace() const noexcept { return false; }
 

@@ -224,6 +224,21 @@ public:
     }
 
     /**
+     * @brief Provide per-integration-point state storage for a generated cut interface
+     *
+     * The default implementation returns an empty view (unsupported).
+     */
+    [[nodiscard]] virtual MaterialStateView getGeneratedInterfaceState(
+        const AssemblyKernel& /*kernel*/,
+        GlobalIndex /*parent_cell_id*/,
+        int /*interface_marker*/,
+        std::uint64_t /*cut_topology_revision*/,
+        LocalIndex /*num_qpts*/)
+    {
+        return {};
+    }
+
+    /**
      * @brief Prepare "work" state from "old" at the start of a time step
      *
      * Default is a no-op.
@@ -340,6 +355,9 @@ struct AssemblyOptions {
     int batch_size{32};                  ///< Elements per batch
     bool use_vectorized_decorator{false}; ///< Wrap selected assembler in VectorizedAssembler
     bool cache_element_data{false};      ///< Cache geometry/basis evaluations
+    std::optional<std::size_t> cut_volume_basis_cache_max_entries{};
+        ///< Max StandardAssembler cut-volume basis cache entries. nullopt reads
+        ///< SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES; 0 disables the cache.
 
     // Scheduling / locality (decorator opt-in)
     bool schedule_elements{false};       ///< Reorder element traversal (cache/locality)
@@ -1132,6 +1150,24 @@ public:
     {
         FE_THROW(FEException, "Assembler::assembleCutVolumes: not implemented");
     }
+
+    /**
+     * @brief Assemble multiple generated cut-volume terms in one rule loop.
+     *
+     * This is the cut-volume counterpart to @ref assembleCellsFused: each term
+     * keeps its own row/column maps and output views, while compatible terms
+     * can share generated-rule traversal and parent-cell geometry setup.
+     *
+     * Default implementation falls back to sequential @ref assembleCutVolumes
+     * calls so callers can use this API with assemblers that do not have a
+     * specialized fused implementation.
+     */
+    [[nodiscard]] virtual AssemblyResult assembleCutVolumesFused(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        geometry::CutIntegrationSide side,
+        std::span<const FusedCellTerm> terms);
 
     /**
      * @brief Assemble one-sided embedded interface kernels on generated cut-interface rules.

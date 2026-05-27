@@ -8,6 +8,7 @@ add_library(svapplication STATIC
   Core/ActiveDomainOutput.cpp
   Core/ApplicationDriver.cpp
   Core/LevelSetCutConfiguration.cpp
+  Core/LevelSetCurvatureSamples.cpp
   Core/LevelSetMaintenanceHistory.cpp
   Core/MeshCollection.cpp
   Core/SimulationBuilder.cpp

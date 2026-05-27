@@ -67,6 +67,27 @@ namespace {
     return out.str();
 }
 
+[[nodiscard]] std::string formatPoint(const std::array<Real, 3>& point)
+{
+    return "(" + formatReal(point[0]) + "," + formatReal(point[1]) + "," +
+           formatReal(point[2]) + ")";
+}
+
+[[nodiscard]] std::string formatPointList(
+    const std::vector<std::array<Real, 3>>& points)
+{
+    std::ostringstream out;
+    out << "[";
+    for (std::size_t i = 0u; i < points.size(); ++i) {
+        if (i > 0u) {
+            out << ",";
+        }
+        out << formatPoint(points[i]);
+    }
+    out << "]";
+    return out.str();
+}
+
 [[nodiscard]] Real rootResidualTolerance(
     const interfaces::CutInterfaceDomainRequest& request) noexcept
 {
@@ -158,6 +179,10 @@ classifyCutStatus(const interfaces::LevelSetCellCutResult& cut,
 void appendDetailedBackendDiagnostics(
     ImplicitCutQuadratureBackendCellResult& result,
     const interfaces::CutInterfaceDomainRequest& request);
+
+void alignLeafCutNormalsWithEvaluator(
+    interfaces::LevelSetCellCutResult& leaf_cut,
+    const ImplicitCutQuadratureBackendCellInput& input);
 
 void setOrderMetadata(ImplicitCutQuadratureBackendCellResult& result,
                       const interfaces::CutInterfaceDomainRequest& request,
@@ -457,6 +482,10 @@ public:
                 interfaces::cutLinearLevelSetCell3D(
                     request, input.linearized_input);
         }
+        if (result.cut.supported && input.evaluator != nullptr &&
+            !input.high_order_sample_points.empty()) {
+            alignLeafCutNormalsWithEvaluator(result.cut, input);
+        }
         reduceOrderMetadataToGeneratedRules(result, request);
         result.diagnostic_status =
             classifyCutStatus(result.cut, result.fallback_used);
@@ -496,6 +525,8 @@ struct Tetrahedron3D {
 struct SayeHyperrectangleDiagnostics {
     int max_depth_reached{0};
     int subdivision_count{0};
+    int terminal_topology_refinement_count{0};
+    int max_terminal_topology_extra_depth{0};
     int root_branch_count{0};
     int root_finder_iteration_count{0};
     int curved_fragment_count{0};
@@ -513,7 +544,10 @@ struct SayeHyperrectangleDiagnostics {
     int curved_fragment_edge_root_mismatch_count{0};
     int curved_fragment_root_solve_edge_root_mismatch{0};
     int curved_fragment_boundary_degenerate_count{0};
+    std::string first_curved_fragment_failure_detail;
 };
+
+constexpr int kTerminalTopologyExtraSubdivisionDepth = 2;
 
 [[nodiscard]] Real rectangleMeasure(const Rectangle2D& rect) noexcept
 {
@@ -732,6 +766,57 @@ void addUniqueRoot(std::vector<std::array<Real, 3>>& roots,
     }
 }
 
+void appendSampledSegmentRoots(
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    Real uniqueness_tolerance,
+    int& iterations,
+    std::vector<std::array<Real, 3>>& roots)
+{
+    constexpr int sample_count = 32;
+    const Real residual_tolerance = rootResidualTolerance(request);
+    const auto point_at = [&](int i) {
+        const Real t =
+            static_cast<Real>(i) / static_cast<Real>(sample_count);
+        return std::array<Real, 3>{{
+            (Real{1.0} - t) * a[0] + t * b[0],
+            (Real{1.0} - t) * a[1] + t * b[1],
+            (Real{1.0} - t) * a[2] + t * b[2],
+        }};
+    };
+
+    std::array<Real, 3> previous = a;
+    Real f_previous = signedLevelSetValue(input, previous);
+    if (!std::isfinite(f_previous)) {
+        return;
+    }
+    if (std::abs(f_previous) <= residual_tolerance) {
+        addUniqueRoot(roots, previous, uniqueness_tolerance);
+    }
+
+    for (int i = 1; i <= sample_count; ++i) {
+        const auto current = point_at(i);
+        const Real f_current = signedLevelSetValue(input, current);
+        if (!std::isfinite(f_current)) {
+            return;
+        }
+        if (std::abs(f_current) <= residual_tolerance) {
+            addUniqueRoot(roots, current, uniqueness_tolerance);
+        } else if (std::abs(f_previous) > residual_tolerance &&
+                   (f_previous < Real{0.0}) != (f_current < Real{0.0})) {
+            std::array<Real, 3> root;
+            if (polishRootOnSegment(
+                    input, request, previous, current, root, iterations)) {
+                addUniqueRoot(roots, root, uniqueness_tolerance);
+            }
+        }
+        previous = current;
+        f_previous = f_current;
+    }
+}
+
 [[nodiscard]] std::vector<std::array<Real, 3>> rectangleEdgeRoots(
     const ImplicitCutQuadratureBackendCellInput& input,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -754,15 +839,13 @@ void addUniqueRoot(std::vector<std::array<Real, 3>>& roots,
     std::vector<std::array<Real, 3>> roots;
     roots.reserve(4u);
     for (const auto& edge : edges) {
-        std::array<Real, 3> root;
-        if (polishRootOnSegment(input,
-                                request,
-                                corners[edge[0]],
-                                corners[edge[1]],
-                                root,
-                                iterations)) {
-            addUniqueRoot(roots, root, uniqueness_tolerance);
-        }
+        appendSampledSegmentRoots(input,
+                                  request,
+                                  corners[edge[0]],
+                                  corners[edge[1]],
+                                  uniqueness_tolerance,
+                                  iterations,
+                                  roots);
     }
     return roots;
 }
@@ -784,17 +867,15 @@ void addUniqueRoot(std::vector<std::array<Real, 3>>& roots,
     }};
     const Real uniqueness_tolerance = rootUniquenessTolerance(request);
     std::vector<std::array<Real, 3>> roots;
-    roots.reserve(4u);
+    roots.reserve(8u);
     for (const auto& edge : edges) {
-        std::array<Real, 3> root;
-        if (polishRootOnSegment(input,
-                                request,
-                                corners[edge[0]],
-                                corners[edge[1]],
-                                root,
-                                iterations)) {
-            addUniqueRoot(roots, root, uniqueness_tolerance);
-        }
+        appendSampledSegmentRoots(input,
+                                  request,
+                                  corners[edge[0]],
+                                  corners[edge[1]],
+                                  uniqueness_tolerance,
+                                  iterations,
+                                  roots);
     }
     return roots;
 }
@@ -1063,15 +1144,13 @@ void appendTriangleSurfaceQuadratureSeeds(
     std::vector<std::array<Real, 3>> roots;
     roots.reserve(3u);
     for (const auto& edge : edges) {
-        std::array<Real, 3> root;
-        if (polishRootOnSegment(input,
-                                request,
-                                corners[edge[0]],
-                                corners[edge[1]],
-                                root,
-                                iterations)) {
-            addUniqueRoot(roots, root, uniqueness_tolerance);
-        }
+        appendSampledSegmentRoots(input,
+                                  request,
+                                  corners[edge[0]],
+                                  corners[edge[1]],
+                                  uniqueness_tolerance,
+                                  iterations,
+                                  roots);
     }
     return roots;
 }
@@ -1124,6 +1203,65 @@ void addUniqueParameter(std::vector<Real>& parameters,
             addUniqueParameter(parameters, line_parameter, tolerance);
         }
     }
+    if (parameters.size() < 2u) {
+        return false;
+    }
+    std::sort(parameters.begin(), parameters.end());
+    const Real min_parameter = parameters.front();
+    const Real max_parameter = parameters.back();
+    const Real span = max_parameter - min_parameter;
+    if (!(span > tolerance) || !std::isfinite(span)) {
+        return false;
+    }
+    start = {{origin[0] + min_parameter * direction[0],
+              origin[1] + min_parameter * direction[1],
+              origin[2] + min_parameter * direction[2]}};
+    end = {{origin[0] + max_parameter * direction[0],
+            origin[1] + max_parameter * direction[1],
+            origin[2] + max_parameter * direction[2]}};
+    guess_fraction = std::clamp(-min_parameter / span, Real{0.0}, Real{1.0});
+    return true;
+}
+
+[[nodiscard]] bool lineRectangleSearchSegment(
+    const Rectangle2D& rect,
+    const std::array<Real, 3>& origin,
+    const std::array<Real, 3>& direction,
+    std::array<Real, 3>& start,
+    std::array<Real, 3>& end,
+    Real& guess_fraction)
+{
+    constexpr Real tolerance = Real{1.0e-12};
+    if (std::abs(direction[0]) <= tolerance &&
+        std::abs(direction[1]) <= tolerance) {
+        return false;
+    }
+
+    std::vector<Real> parameters;
+    parameters.reserve(4u);
+    const auto add_if_inside = [&](Real parameter) {
+        const std::array<Real, 3> point{{
+            origin[0] + parameter * direction[0],
+            origin[1] + parameter * direction[1],
+            origin[2] + parameter * direction[2],
+        }};
+        if (point[0] >= rect.xmin - tolerance &&
+            point[0] <= rect.xmax + tolerance &&
+            point[1] >= rect.ymin - tolerance &&
+            point[1] <= rect.ymax + tolerance) {
+            addUniqueParameter(parameters, parameter, tolerance);
+        }
+    };
+
+    if (std::abs(direction[0]) > tolerance) {
+        add_if_inside((rect.xmin - origin[0]) / direction[0]);
+        add_if_inside((rect.xmax - origin[0]) / direction[0]);
+    }
+    if (std::abs(direction[1]) > tolerance) {
+        add_if_inside((rect.ymin - origin[1]) / direction[1]);
+        add_if_inside((rect.ymax - origin[1]) / direction[1]);
+    }
+
     if (parameters.size() < 2u) {
         return false;
     }
@@ -1710,10 +1848,65 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         return false;
     }
 
+    const auto fail_edge_root_mismatch = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_edge_root_mismatch_count;
+        return false;
+    };
+    const auto fail_seed = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_seed_failure;
+        return false;
+    };
+    const auto fail_search_segment = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_search_segment_failure;
+        return false;
+    };
+    const auto fail_root_solve = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_root_solve_failure;
+        return false;
+    };
+    const auto fail_gradient = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_gradient_failure;
+        return false;
+    };
+    const auto fail_weight = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_weight_failure;
+        return false;
+    };
+
     int local_iterations = 0;
     auto roots = rectangleEdgeRoots(input, request, rect, local_iterations);
     if (roots.size() != 2u) {
-        return false;
+        if (diagnostics.first_curved_fragment_failure_detail.empty()) {
+            const std::array<std::array<Real, 3>, 4> corners{{
+                {{rect.xmin, rect.ymin, 0.0}},
+                {{rect.xmax, rect.ymin, 0.0}},
+                {{rect.xmax, rect.ymax, 0.0}},
+                {{rect.xmin, rect.ymax, 0.0}},
+            }};
+            std::ostringstream detail;
+            detail << "shape=rectangle"
+                   << "; rect=(" << formatReal(rect.xmin) << ","
+                   << formatReal(rect.xmax) << "," << formatReal(rect.ymin)
+                   << "," << formatReal(rect.ymax) << ")"
+                   << "; edge_root_count=" << roots.size()
+                   << "; edge_roots=" << formatPointList(roots)
+                   << "; corner_values=[";
+            for (std::size_t i = 0u; i < corners.size(); ++i) {
+                if (i > 0u) {
+                    detail << ",";
+                }
+                detail << formatReal(signedLevelSetValue(input, corners[i]));
+            }
+            detail << "]";
+            diagnostics.first_curved_fragment_failure_detail = detail.str();
+        }
+        return fail_edge_root_mismatch();
     }
     const auto a = roots[0];
     const auto b = roots[1];
@@ -1721,8 +1914,18 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     const Real dy = b[1] - a[1];
     if (std::abs(dx) <= Real{1.0e-14} &&
         std::abs(dy) <= Real{1.0e-14}) {
-        return false;
+        return fail_seed();
     }
+    const Real chord_length = std::sqrt(dx * dx + dy * dy);
+    if (!(chord_length > Real{1.0e-14}) || !std::isfinite(chord_length)) {
+        return fail_seed();
+    }
+    const std::array<Real, 3> tangent{{
+        dx / chord_length,
+        dy / chord_length,
+        0.0,
+    }};
+    const std::array<Real, 3> transverse{{-tangent[1], tangent[0], 0.0}};
     const bool solve_y_as_function_of_x = std::abs(dx) >= std::abs(dy);
     const auto rule =
         gaussLegendreUnitRule(request.resolvedInterfaceQuadratureOrder());
@@ -1733,63 +1936,188 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
     Real measure = 0.0;
     Real max_root_residual = 0.0;
     Real min_gradient_norm = std::numeric_limits<Real>::infinity();
+    enum class RectanglePolishFailure {
+        SearchSegment,
+        RootSolve,
+        Gradient,
+        Weight,
+    };
     for (const auto& [t, unit_weight] : rule) {
-        const Real x_guess = (Real{1.0} - t) * a[0] + t * b[0];
-        const Real y_guess = (Real{1.0} - t) * a[1] + t * b[1];
-        std::array<Real, 3> point;
-        if (solve_y_as_function_of_x) {
-            if (!solveRootAtFixedX(input,
-                                   request,
-                                   x_guess,
-                                   rect.ymin,
-                                   rect.ymax,
-                                   y_guess,
-                                   point,
-                                   local_iterations)) {
+        const std::array<Real, 3> origin{{
+            (Real{1.0} - t) * a[0] + t * b[0],
+            (Real{1.0} - t) * a[1] + t * b[1],
+            0.0,
+        }};
+        std::array<Real, 3> point{};
+        std::array<Real, 3> normal{};
+        Real root_residual = 0.0;
+        Real gradient_norm = 0.0;
+        Real reference_measure_factor = 0.0;
+        RectanglePolishFailure failure = RectanglePolishFailure::RootSolve;
+        bool accepted = false;
+
+        const auto try_fixed_axis = [&]() {
+            if (solve_y_as_function_of_x) {
+                if (!solveRootAtFixedX(input,
+                                       request,
+                                       origin[0],
+                                       rect.ymin,
+                                       rect.ymax,
+                                       origin[1],
+                                       point,
+                                       local_iterations)) {
+                    failure = RectanglePolishFailure::RootSolve;
+                    return false;
+                }
+            } else if (!solveRootAtFixedY(input,
+                                          request,
+                                          origin[1],
+                                          rect.xmin,
+                                          rect.xmax,
+                                          origin[0],
+                                          point,
+                                          local_iterations)) {
+                failure = RectanglePolishFailure::RootSolve;
                 return false;
             }
-        } else {
-            if (!solveRootAtFixedY(input,
-                                   request,
-                                   y_guess,
-                                   rect.xmin,
-                                   rect.xmax,
-                                   x_guess,
-                                   point,
-                                   local_iterations)) {
+
+            const auto evaluation =
+                input.evaluator->evaluate(input.linearized_input.parent_cell, point);
+            root_residual = std::abs(evaluation.value - input.isovalue);
+            gradient_norm = norm3(evaluation.reference_gradient);
+            if (!std::isfinite(root_residual) ||
+                !std::isfinite(gradient_norm) ||
+                gradient_norm <= Real{1.0e-14}) {
+                failure = RectanglePolishFailure::Gradient;
                 return false;
             }
+            const Real denominator =
+                solve_y_as_function_of_x ? evaluation.reference_gradient[1]
+                                         : evaluation.reference_gradient[0];
+            if (std::abs(denominator) <= Real{1.0e-14}) {
+                failure = RectanglePolishFailure::Gradient;
+                return false;
+            }
+            const Real slope =
+                solve_y_as_function_of_x
+                    ? -evaluation.reference_gradient[0] / denominator
+                    : -evaluation.reference_gradient[1] / denominator;
+            const Real coordinate_span =
+                solve_y_as_function_of_x ? std::abs(dx) : std::abs(dy);
+            reference_measure_factor =
+                coordinate_span * std::sqrt(Real{1.0} + slope * slope);
+            if (!std::isfinite(reference_measure_factor) ||
+                reference_measure_factor <= Real{0.0}) {
+                failure = RectanglePolishFailure::Weight;
+                return false;
+            }
+            normal = normalizedOrDefault(evaluation.reference_gradient);
+            return true;
+        };
+
+        const auto try_transverse_segment = [&]() {
+            std::array<Real, 3> search_start;
+            std::array<Real, 3> search_end;
+            Real guess_fraction = 0.5;
+            if (!lineRectangleSearchSegment(
+                    rect, origin, transverse, search_start, search_end,
+                    guess_fraction)) {
+                failure = RectanglePolishFailure::SearchSegment;
+                return false;
+            }
+            if (!solveRootAlongSegmentNearGuess(input,
+                                                request,
+                                                search_start,
+                                                search_end,
+                                                guess_fraction,
+                                                point,
+                                                local_iterations)) {
+                failure = RectanglePolishFailure::RootSolve;
+                return false;
+            }
+            const auto evaluation =
+                input.evaluator->evaluate(input.linearized_input.parent_cell, point);
+            root_residual = std::abs(evaluation.value - input.isovalue);
+            gradient_norm = norm3(evaluation.reference_gradient);
+            if (!std::isfinite(root_residual) ||
+                !std::isfinite(gradient_norm) ||
+                gradient_norm <= Real{1.0e-14}) {
+                failure = RectanglePolishFailure::Gradient;
+                return false;
+            }
+            const Real transverse_derivative =
+                dot3(evaluation.reference_gradient, transverse);
+            if (std::abs(transverse_derivative) <= Real{1.0e-14}) {
+                failure = RectanglePolishFailure::Gradient;
+                return false;
+            }
+            const Real tangent_derivative =
+                dot3(evaluation.reference_gradient, tangent);
+            const Real height_slope =
+                -tangent_derivative / transverse_derivative;
+            reference_measure_factor =
+                chord_length * std::sqrt(Real{1.0} +
+                                         height_slope * height_slope);
+            if (!std::isfinite(reference_measure_factor) ||
+                reference_measure_factor <= Real{0.0}) {
+                failure = RectanglePolishFailure::Weight;
+                return false;
+            }
+            normal = normalizedOrDefault(evaluation.reference_gradient);
+            return true;
+        };
+
+        accepted = try_fixed_axis() || try_transverse_segment();
+        if (!accepted) {
+            if (diagnostics.first_curved_fragment_failure_detail.empty()) {
+                std::ostringstream detail;
+                detail << "shape=rectangle"
+                       << "; rect=(" << formatReal(rect.xmin) << ","
+                       << formatReal(rect.xmax) << "," << formatReal(rect.ymin)
+                       << "," << formatReal(rect.ymax) << ")"
+                       << "; root_a=" << formatPoint(a)
+                       << "; root_b=" << formatPoint(b)
+                       << "; origin=" << formatPoint(origin)
+                       << "; f_origin="
+                       << formatReal(signedLevelSetValue(input, origin))
+                       << "; transverse=" << formatPoint(transverse);
+                std::array<Real, 3> search_start;
+                std::array<Real, 3> search_end;
+                Real guess_fraction = 0.5;
+                if (lineRectangleSearchSegment(
+                        rect, origin, transverse, search_start, search_end,
+                        guess_fraction)) {
+                    detail << "; search_start=" << formatPoint(search_start)
+                           << "; f_search_start="
+                           << formatReal(
+                                  signedLevelSetValue(input, search_start))
+                           << "; search_end=" << formatPoint(search_end)
+                           << "; f_search_end="
+                           << formatReal(signedLevelSetValue(input, search_end))
+                           << "; guess_fraction="
+                           << formatReal(guess_fraction);
+                } else {
+                    detail << "; search_segment=unavailable";
+                }
+                diagnostics.first_curved_fragment_failure_detail = detail.str();
+            }
+            switch (failure) {
+            case RectanglePolishFailure::SearchSegment:
+                return fail_search_segment();
+            case RectanglePolishFailure::RootSolve:
+                return fail_root_solve();
+            case RectanglePolishFailure::Gradient:
+                return fail_gradient();
+            case RectanglePolishFailure::Weight:
+                return fail_weight();
+            }
         }
-        const auto evaluation =
-            input.evaluator->evaluate(input.linearized_input.parent_cell, point);
-        const Real root_residual =
-            std::abs(evaluation.value - input.isovalue);
-        const Real gradient_norm = norm3(evaluation.reference_gradient);
-        if (!std::isfinite(root_residual) ||
-            !std::isfinite(gradient_norm) ||
-            gradient_norm <= Real{1.0e-14}) {
-            return false;
-        }
+
         max_root_residual = std::max(max_root_residual, root_residual);
         min_gradient_norm = std::min(min_gradient_norm, gradient_norm);
-        const auto normal = normalizedOrDefault(evaluation.reference_gradient);
-        const Real denominator =
-            solve_y_as_function_of_x ? evaluation.reference_gradient[1]
-                                     : evaluation.reference_gradient[0];
-        if (std::abs(denominator) <= Real{1.0e-14}) {
-            return false;
-        }
-        const Real slope =
-            solve_y_as_function_of_x
-                ? -evaluation.reference_gradient[0] / denominator
-                : -evaluation.reference_gradient[1] / denominator;
-        const Real coordinate_span =
-            solve_y_as_function_of_x ? std::abs(dx) : std::abs(dy);
-        const Real reference_measure_factor =
-            coordinate_span * std::sqrt(Real{1.0} + slope * slope);
         const Real weight = unit_weight * reference_measure_factor;
         if (!std::isfinite(weight) || weight <= Real{0.0}) {
-            return false;
+            return fail_weight();
         }
         quadrature_points.push_back(
             interfaces::CutInterfaceQuadraturePoint{
@@ -1806,7 +2134,7 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         measure += weight;
     }
     if (!std::isfinite(measure) || measure <= request.tolerance) {
-        return false;
+        return fail_weight();
     }
 
     fragment.vertices = {
@@ -1861,16 +2189,47 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         return false;
     }
 
+    const auto fail_edge_root_mismatch = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_edge_root_mismatch_count;
+        return false;
+    };
+    const auto fail_seed = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_seed_failure;
+        return false;
+    };
+    const auto fail_search_segment = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_search_segment_failure;
+        return false;
+    };
+    const auto fail_root_solve = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_root_solve_failure;
+        return false;
+    };
+    const auto fail_gradient = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_gradient_failure;
+        return false;
+    };
+    const auto fail_weight = [&]() {
+        ++diagnostics.curved_fragment_failure_count;
+        ++diagnostics.curved_fragment_weight_failure;
+        return false;
+    };
+
     int local_iterations = 0;
     auto roots = triangleEdgeRoots(input, request, tri, local_iterations);
     if (roots.size() != 2u) {
-        return false;
+        return fail_edge_root_mismatch();
     }
     const auto a = roots[0];
     const auto b = roots[1];
     const Real chord_length = distance2D(a, b);
     if (!(chord_length > Real{1.0e-14})) {
-        return false;
+        return fail_seed();
     }
     const std::array<Real, 3> tangent{{
         (b[0] - a[0]) / chord_length,
@@ -1898,7 +2257,7 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         Real guess_fraction = 0.5;
         if (!lineTriangleSearchSegment(
                 tri, origin, transverse, search_start, search_end, guess_fraction)) {
-            return false;
+            return fail_search_segment();
         }
         std::array<Real, 3> point;
         if (!solveRootAlongSegmentNearGuess(input,
@@ -1908,7 +2267,7 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
                                             guess_fraction,
                                             point,
                                             local_iterations)) {
-            return false;
+            return fail_root_solve();
         }
         const auto evaluation =
             input.evaluator->evaluate(input.linearized_input.parent_cell, point);
@@ -1918,12 +2277,12 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         if (!std::isfinite(root_residual) ||
             !std::isfinite(gradient_norm) ||
             gradient_norm <= Real{1.0e-14}) {
-            return false;
+            return fail_gradient();
         }
         const Real transverse_derivative =
             dot3(evaluation.reference_gradient, transverse);
         if (std::abs(transverse_derivative) <= Real{1.0e-14}) {
-            return false;
+            return fail_gradient();
         }
         const Real tangent_derivative =
             dot3(evaluation.reference_gradient, tangent);
@@ -1932,7 +2291,7 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
             chord_length * std::sqrt(Real{1.0} + height_slope * height_slope);
         const Real weight = unit_weight * reference_measure_factor;
         if (!std::isfinite(weight) || weight <= Real{0.0}) {
-            return false;
+            return fail_weight();
         }
 
         max_root_residual = std::max(max_root_residual, root_residual);
@@ -1953,7 +2312,7 @@ tetrahedronVolumeQuadraturePoints(const Tetrahedron3D& tet,
         measure += weight;
     }
     if (!std::isfinite(measure) || measure <= request.tolerance) {
-        return false;
+        return fail_weight();
     }
 
     fragment.vertices = {
@@ -2407,6 +2766,73 @@ void alignLeafCutNormalsWithEvaluator(
         {{rect.xmin, ym, 0.0}},
         {{xm, ym, 0.0}},
     };
+}
+
+[[nodiscard]] bool pointInsideRectangle(
+    const Rectangle2D& rect,
+    const std::array<Real, 3>& point,
+    Real tolerance) noexcept
+{
+    return point[0] >= rect.xmin - tolerance &&
+           point[0] <= rect.xmax + tolerance &&
+           point[1] >= rect.ymin - tolerance &&
+           point[1] <= rect.ymax + tolerance;
+}
+
+[[nodiscard]] bool pointInsideBox(
+    const Box3D& box,
+    const std::array<Real, 3>& point,
+    Real tolerance) noexcept
+{
+    return point[0] >= box.xmin - tolerance &&
+           point[0] <= box.xmax + tolerance &&
+           point[1] >= box.ymin - tolerance &&
+           point[1] <= box.ymax + tolerance &&
+           point[2] >= box.zmin - tolerance &&
+           point[2] <= box.zmax + tolerance;
+}
+
+void appendUniquePoint(std::vector<std::array<Real, 3>>& points,
+                       const std::array<Real, 3>& point,
+                       Real tolerance)
+{
+    const Real tol_sq = tolerance * tolerance;
+    const auto existing =
+        std::find_if(points.begin(), points.end(), [&](const auto& candidate) {
+            const Real dx = candidate[0] - point[0];
+            const Real dy = candidate[1] - point[1];
+            const Real dz = candidate[2] - point[2];
+            return dx * dx + dy * dy + dz * dz <= tol_sq;
+        });
+    if (existing == points.end()) {
+        points.push_back(point);
+    }
+}
+
+void appendHighOrderSamplesInsideRectangle(
+    std::vector<std::array<Real, 3>>& samples,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Rectangle2D& rect,
+    Real tolerance)
+{
+    for (const auto& point : input.high_order_sample_points) {
+        if (pointInsideRectangle(rect, point, tolerance)) {
+            appendUniquePoint(samples, point, tolerance);
+        }
+    }
+}
+
+void appendHighOrderSamplesInsideBox(
+    std::vector<std::array<Real, 3>>& samples,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Box3D& box,
+    Real tolerance)
+{
+    for (const auto& point : input.high_order_sample_points) {
+        if (pointInsideBox(box, point, tolerance)) {
+            appendUniquePoint(samples, point, tolerance);
+        }
+    }
 }
 
 [[nodiscard]] std::vector<std::array<Real, 3>> boxSamplePoints(
@@ -2938,6 +3364,239 @@ void appendLinearizedBoxCut(
     }
 }
 
+void appendUniqueSplitCoordinate(std::vector<Real>& coordinates,
+                                 Real coordinate,
+                                 Real lower,
+                                 Real upper,
+                                 Real tolerance)
+{
+    if (coordinate <= lower + tolerance || coordinate >= upper - tolerance) {
+        return;
+    }
+    const auto existing =
+        std::find_if(coordinates.begin(), coordinates.end(), [&](Real value) {
+            return std::abs(value - coordinate) <= tolerance;
+        });
+    if (existing == coordinates.end()) {
+        coordinates.push_back(coordinate);
+    }
+}
+
+void appendTopologyAwareLinearizedRectangleCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Rectangle2D& rect,
+    Real parent_measure,
+    int terminal_extra_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    int local_iterations = 0;
+    const auto edge_roots =
+        rectangleEdgeRoots(input, request, rect, local_iterations);
+    diagnostics.root_finder_iteration_count += local_iterations;
+    if (edge_roots.size() > 2u &&
+        terminal_extra_depth < kTerminalTopologyExtraSubdivisionDepth) {
+        ++diagnostics.terminal_topology_refinement_count;
+        diagnostics.max_terminal_topology_extra_depth =
+            std::max(diagnostics.max_terminal_topology_extra_depth,
+                     terminal_extra_depth + 1);
+        ++diagnostics.subdivision_count;
+        const Real xm = Real{0.5} * (rect.xmin + rect.xmax);
+        const Real ym = Real{0.5} * (rect.ymin + rect.ymax);
+        const std::array<Rectangle2D, 4> children{{
+            Rectangle2D{rect.xmin, xm, rect.ymin, ym},
+            Rectangle2D{xm, rect.xmax, rect.ymin, ym},
+            Rectangle2D{xm, rect.xmax, ym, rect.ymax},
+            Rectangle2D{rect.xmin, xm, ym, rect.ymax},
+        }};
+        for (const auto& child : children) {
+            appendTopologyAwareLinearizedRectangleCut(cut,
+                                                      request,
+                                                      input,
+                                                      child,
+                                                      parent_measure,
+                                                      terminal_extra_depth + 1,
+                                                      diagnostics);
+        }
+        return;
+    }
+
+    appendLinearizedRectangleCut(cut, request, input, rect, parent_measure,
+                                 diagnostics);
+}
+
+[[nodiscard]] bool appendHintRefinedRectangleCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Rectangle2D& rect,
+    Real parent_measure,
+    const std::vector<std::array<Real, 3>>& samples,
+    int terminal_extra_depth,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    const Real sign_tolerance = request.implicit_cut_root_tolerance;
+    const std::array<std::array<Real, 3>, 4> corners{{
+        {{rect.xmin, rect.ymin, 0.0}},
+        {{rect.xmax, rect.ymin, 0.0}},
+        {{rect.xmax, rect.ymax, 0.0}},
+        {{rect.xmin, rect.ymax, 0.0}},
+    }};
+
+    bool corners_strictly_negative = true;
+    bool corners_strictly_positive = true;
+    std::array<Real, 4> corner_values{{0.0, 0.0, 0.0, 0.0}};
+    std::size_t corner_index = 0u;
+    for (const auto& corner : corners) {
+        const Real value = signedLevelSetValue(input, corner);
+        corner_values[corner_index++] = value;
+        corners_strictly_negative =
+            corners_strictly_negative && value < -sign_tolerance;
+        corners_strictly_positive =
+            corners_strictly_positive && value > sign_tolerance;
+    }
+
+    const Real coordinate_tolerance = rootCoordinateTolerance(request);
+    std::vector<Real> xs{rect.xmin, rect.xmax};
+    std::vector<Real> ys{rect.ymin, rect.ymax};
+    bool found_opposite_sample = false;
+    for (const auto& point : samples) {
+        if (!pointInsideRectangle(rect, point, coordinate_tolerance)) {
+            continue;
+        }
+        const Real value = signedLevelSetValue(input, point);
+        bool opposite_sample =
+            (corners_strictly_positive && value < -sign_tolerance) ||
+            (corners_strictly_negative && value > sign_tolerance);
+        if (!opposite_sample &&
+            !corners_strictly_positive &&
+            !corners_strictly_negative) {
+            const Real sx =
+                (point[0] - rect.xmin) / std::max(rect.xmax - rect.xmin,
+                                                  Real{1.0e-30});
+            const Real sy =
+                (point[1] - rect.ymin) / std::max(rect.ymax - rect.ymin,
+                                                  Real{1.0e-30});
+            const Real bilinear_value =
+                (Real{1.0} - sx) * (Real{1.0} - sy) * corner_values[0] +
+                sx * (Real{1.0} - sy) * corner_values[1] +
+                sx * sy * corner_values[2] +
+                (Real{1.0} - sx) * sy * corner_values[3];
+            opposite_sample =
+                (bilinear_value > sign_tolerance && value < -sign_tolerance) ||
+                (bilinear_value < -sign_tolerance && value > sign_tolerance);
+        }
+        if (!opposite_sample) {
+            continue;
+        }
+        found_opposite_sample = true;
+        appendUniqueSplitCoordinate(
+            xs, point[0], rect.xmin, rect.xmax, coordinate_tolerance);
+        appendUniqueSplitCoordinate(
+            ys, point[1], rect.ymin, rect.ymax, coordinate_tolerance);
+    }
+
+    if (!found_opposite_sample || (xs.size() == 2u && ys.size() == 2u)) {
+        return false;
+    }
+
+    std::sort(xs.begin(), xs.end());
+    std::sort(ys.begin(), ys.end());
+    ++diagnostics.subdivision_count;
+    for (std::size_t iy = 0u; iy + 1u < ys.size(); ++iy) {
+        for (std::size_t ix = 0u; ix + 1u < xs.size(); ++ix) {
+            const Rectangle2D child{xs[ix], xs[ix + 1u], ys[iy], ys[iy + 1u]};
+            if (rectangleMeasure(child) <= Real{0.0}) {
+                continue;
+            }
+            appendTopologyAwareLinearizedRectangleCut(cut,
+                                                      request,
+                                                      input,
+                                                      child,
+                                                      parent_measure,
+                                                      terminal_extra_depth + 1,
+                                                      diagnostics);
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] bool appendHintRefinedBoxCut(
+    interfaces::LevelSetCellCutResult& cut,
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const Box3D& box,
+    Real parent_measure,
+    const std::vector<std::array<Real, 3>>& samples,
+    SayeHyperrectangleDiagnostics& diagnostics)
+{
+    const Real sign_tolerance = request.implicit_cut_root_tolerance;
+    const auto corners = boxVertices(box);
+
+    bool corners_strictly_negative = true;
+    bool corners_strictly_positive = true;
+    for (const auto& corner : corners) {
+        const Real value = signedLevelSetValue(input, corner);
+        corners_strictly_negative =
+            corners_strictly_negative && value < -sign_tolerance;
+        corners_strictly_positive =
+            corners_strictly_positive && value > sign_tolerance;
+    }
+    if (!corners_strictly_negative && !corners_strictly_positive) {
+        return false;
+    }
+
+    const Real coordinate_tolerance = rootCoordinateTolerance(request);
+    std::vector<Real> xs{box.xmin, box.xmax};
+    std::vector<Real> ys{box.ymin, box.ymax};
+    std::vector<Real> zs{box.zmin, box.zmax};
+    bool found_opposite_sample = false;
+    for (const auto& point : samples) {
+        if (!pointInsideBox(box, point, coordinate_tolerance)) {
+            continue;
+        }
+        const Real value = signedLevelSetValue(input, point);
+        const bool opposite_sample =
+            (corners_strictly_positive && value < -sign_tolerance) ||
+            (corners_strictly_negative && value > sign_tolerance);
+        if (!opposite_sample) {
+            continue;
+        }
+        found_opposite_sample = true;
+        appendUniqueSplitCoordinate(
+            xs, point[0], box.xmin, box.xmax, coordinate_tolerance);
+        appendUniqueSplitCoordinate(
+            ys, point[1], box.ymin, box.ymax, coordinate_tolerance);
+        appendUniqueSplitCoordinate(
+            zs, point[2], box.zmin, box.zmax, coordinate_tolerance);
+    }
+    if (!found_opposite_sample ||
+        (xs.size() == 2u && ys.size() == 2u && zs.size() == 2u)) {
+        return false;
+    }
+
+    std::sort(xs.begin(), xs.end());
+    std::sort(ys.begin(), ys.end());
+    std::sort(zs.begin(), zs.end());
+    ++diagnostics.subdivision_count;
+    for (std::size_t iz = 0u; iz + 1u < zs.size(); ++iz) {
+        for (std::size_t iy = 0u; iy + 1u < ys.size(); ++iy) {
+            for (std::size_t ix = 0u; ix + 1u < xs.size(); ++ix) {
+                const Box3D child{xs[ix], xs[ix + 1u],
+                                  ys[iy], ys[iy + 1u],
+                                  zs[iz], zs[iz + 1u]};
+                if (boxMeasure(child) <= Real{0.0}) {
+                    continue;
+                }
+                appendLinearizedBoxCut(
+                    cut, request, input, child, parent_measure, diagnostics);
+            }
+        }
+    }
+    return true;
+}
+
 void appendAdaptiveRectangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -2950,7 +3609,9 @@ void appendAdaptiveRectangleCut(
 {
     diagnostics.max_depth_reached =
         std::max(diagnostics.max_depth_reached, depth);
-    const auto samples = rectangleSamplePoints(rect);
+    auto samples = rectangleSamplePoints(rect);
+    appendHighOrderSamplesInsideRectangle(
+        samples, input, rect, rootCoordinateTolerance(request));
     bool has_negative = false;
     bool has_positive = false;
     Real min_signed = std::numeric_limits<Real>::infinity();
@@ -2979,6 +3640,49 @@ void appendAdaptiveRectangleCut(
     }
 
     if (depth >= max_depth) {
+        int local_iterations = 0;
+        const auto edge_roots =
+            rectangleEdgeRoots(input, request, rect, local_iterations);
+        diagnostics.root_finder_iteration_count += local_iterations;
+        const int extra_depth = depth - max_depth;
+        if (edge_roots.size() > 2u &&
+            extra_depth < kTerminalTopologyExtraSubdivisionDepth) {
+            ++diagnostics.terminal_topology_refinement_count;
+            diagnostics.max_terminal_topology_extra_depth =
+                std::max(diagnostics.max_terminal_topology_extra_depth,
+                         extra_depth + 1);
+            ++diagnostics.subdivision_count;
+            const Real xm = Real{0.5} * (rect.xmin + rect.xmax);
+            const Real ym = Real{0.5} * (rect.ymin + rect.ymax);
+            const std::array<Rectangle2D, 4> children{{
+                Rectangle2D{rect.xmin, xm, rect.ymin, ym},
+                Rectangle2D{xm, rect.xmax, rect.ymin, ym},
+                Rectangle2D{xm, rect.xmax, ym, rect.ymax},
+                Rectangle2D{rect.xmin, xm, ym, rect.ymax},
+            }};
+            for (const auto& child : children) {
+                appendAdaptiveRectangleCut(
+                    cut,
+                    request,
+                    input,
+                    child,
+                    parent_measure,
+                    depth + 1,
+                    max_depth,
+                    diagnostics);
+            }
+            return;
+        }
+        if (appendHintRefinedRectangleCut(cut,
+                                          request,
+                                          input,
+                                          rect,
+                                          parent_measure,
+                                          samples,
+                                          extra_depth,
+                                          diagnostics)) {
+            return;
+        }
         appendLinearizedRectangleCut(
             cut, request, input, rect, parent_measure, diagnostics);
         return;
@@ -3018,7 +3722,9 @@ void appendAdaptiveBoxCut(
 {
     diagnostics.max_depth_reached =
         std::max(diagnostics.max_depth_reached, depth);
-    const auto samples = boxSamplePoints(box);
+    auto samples = boxSamplePoints(box);
+    appendHighOrderSamplesInsideBox(
+        samples, input, box, rootCoordinateTolerance(request));
     bool has_negative = false;
     bool has_positive = false;
     Real min_signed = std::numeric_limits<Real>::infinity();
@@ -3047,6 +3753,10 @@ void appendAdaptiveBoxCut(
     }
 
     if (depth >= max_depth) {
+        if (appendHintRefinedBoxCut(
+                cut, request, input, box, parent_measure, samples, diagnostics)) {
+            return;
+        }
         appendLinearizedBoxCut(
             cut, request, input, box, parent_measure, diagnostics);
         return;
@@ -3233,6 +3943,10 @@ void appendAdaptiveTetrahedronCut(
            "; max_depth_reached=" +
            std::to_string(diagnostics.max_depth_reached) +
            "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; terminal_topology_refinements=" +
+           std::to_string(diagnostics.terminal_topology_refinement_count) +
+           "; max_terminal_topology_extra_depth=" +
+           std::to_string(diagnostics.max_terminal_topology_extra_depth) +
            "; root_branches=" +
            std::to_string(diagnostics.root_branch_count) +
            "; curved_fragments=" +
@@ -3269,6 +3983,10 @@ void appendAdaptiveTetrahedronCut(
                diagnostics.curved_fragment_boundary_degenerate_count);
     appendRootPolishDiagnostics(diagnostic,
                                 diagnostics.root_finder_iteration_count);
+    if (!diagnostics.first_curved_fragment_failure_detail.empty()) {
+        diagnostic += "; first_curved_fragment_failure_detail={" +
+                      diagnostics.first_curved_fragment_failure_detail + "}";
+    }
     return diagnostic;
 }
 
@@ -3282,6 +4000,10 @@ void appendAdaptiveTetrahedronCut(
            "; max_depth_reached=" +
            std::to_string(diagnostics.max_depth_reached) +
            "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; terminal_topology_refinements=" +
+           std::to_string(diagnostics.terminal_topology_refinement_count) +
+           "; max_terminal_topology_extra_depth=" +
+           std::to_string(diagnostics.max_terminal_topology_extra_depth) +
            "; root_branches=" +
            std::to_string(diagnostics.root_branch_count) +
            "; curved_fragments=" +
@@ -3331,6 +4053,10 @@ void appendAdaptiveTetrahedronCut(
            "; max_depth_reached=" +
            std::to_string(diagnostics.max_depth_reached) +
            "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; terminal_topology_refinements=" +
+           std::to_string(diagnostics.terminal_topology_refinement_count) +
+           "; max_terminal_topology_extra_depth=" +
+           std::to_string(diagnostics.max_terminal_topology_extra_depth) +
            "; root_branches=" +
            std::to_string(diagnostics.root_branch_count) +
            "; curved_fragments=" +
@@ -3380,6 +4106,10 @@ void appendAdaptiveTetrahedronCut(
            "; max_depth_reached=" +
            std::to_string(diagnostics.max_depth_reached) +
            "; subdivisions=" + std::to_string(diagnostics.subdivision_count) +
+           "; terminal_topology_refinements=" +
+           std::to_string(diagnostics.terminal_topology_refinement_count) +
+           "; max_terminal_topology_extra_depth=" +
+           std::to_string(diagnostics.max_terminal_topology_extra_depth) +
            "; root_branches=" +
            std::to_string(diagnostics.root_branch_count) +
            "; curved_fragments=" +
@@ -3680,7 +4410,7 @@ public:
         }
 
         const int max_depth =
-            std::max(0, std::min(request.implicit_cut_max_subdivision_depth, 8));
+            std::max(0, request.implicit_cut_max_subdivision_depth);
         SayeHyperrectangleDiagnostics diagnostics;
         if (mesh_dimension == 2) {
             const Rectangle2D root{
@@ -3863,7 +4593,7 @@ public:
         }
 
         const int max_depth =
-            std::max(0, std::min(request.implicit_cut_max_subdivision_depth, 8));
+            std::max(0, request.implicit_cut_max_subdivision_depth);
         SayeHyperrectangleDiagnostics diagnostics;
         if (mesh_dimension == 2) {
             const Triangle2D root{
@@ -4203,6 +4933,10 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
             (mesh_dimension == 3 &&
              interfaces::supportsLinearLevelSetCellCut3D(element_type));
         capability.supports_high_order_geometry = false;
+        capability.supports_refreshed_frozen_quadrature =
+            capability.supports_element_type;
+        capability.supports_differentiated_quadrature =
+            capability.supports_element_type;
         capability.validation_level_set_order = 1;
         if (!capability.supports_element_type) {
             capability.maximum_reported_interface_order = -1;
@@ -4219,6 +4953,9 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
         capability.supports_element_type =
             supportsSayeHyperrectangleMilestone(mesh_dimension, element_type);
         capability.supports_high_order_geometry = true;
+        capability.supports_refreshed_frozen_quadrature =
+            capability.supports_element_type;
+        capability.supports_differentiated_quadrature = false;
         if (capability.supports_element_type && mesh_dimension == 2) {
             capability.qualification =
                 ImplicitCutQuadratureBackendQualification::ProductionQualified;
@@ -4255,6 +4992,9 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
         capability.supports_element_type =
             supportsHighOrderSubcellMilestone(mesh_dimension, element_type);
         capability.supports_high_order_geometry = true;
+        capability.supports_refreshed_frozen_quadrature =
+            capability.supports_element_type;
+        capability.supports_differentiated_quadrature = false;
         if (!capability.supports_element_type) {
             capability.maximum_reported_interface_order = -1;
             capability.maximum_reported_volume_order = -1;
@@ -4275,6 +5015,8 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
             "implemented or production-qualified";
         capability.supports_element_type = false;
         capability.supports_high_order_geometry = true;
+        capability.supports_refreshed_frozen_quadrature = false;
+        capability.supports_differentiated_quadrature = false;
         capability.maximum_reported_interface_order = -1;
         capability.maximum_reported_volume_order = -1;
         return capability;
@@ -4301,6 +5043,10 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
             selected_capability.supports_element_type;
         capability.supports_high_order_geometry =
             selected_capability.supports_high_order_geometry;
+        capability.supports_refreshed_frozen_quadrature =
+            selected_capability.supports_refreshed_frozen_quadrature;
+        capability.supports_differentiated_quadrature =
+            selected_capability.supports_differentiated_quadrature;
         capability.requires_scalar_h1_c0_level_set =
             selected_capability.requires_scalar_h1_c0_level_set;
         capability.minimum_level_set_order =
@@ -4485,9 +5231,21 @@ validateImplicitCutQuadratureBackendCellResult(
             fragment.measure > Real{0.0} &&
             std::abs(interface_weight_sum - fragment.measure) >
                 measureTolerance(request.tolerance, fragment.measure)) {
+            const Real abs_error =
+                std::abs(interface_weight_sum - fragment.measure);
+            const Real tolerance =
+                measureTolerance(request.tolerance, fragment.measure);
             return failedValidation(
                 ImplicitCutQuadratureDiagnosticStatus::Failed,
-                "implicit cut backend interface quadrature weights do not sum to the fragment measure");
+                "implicit cut backend interface quadrature weights do not sum to the fragment measure"
+                "; parent_cell=" +
+                    std::to_string(fragment.parent_cell) +
+                "; fragment_measure=" + formatReal(fragment.measure) +
+                "; interface_weight_sum=" + formatReal(interface_weight_sum) +
+                "; abs_error=" + formatReal(abs_error) +
+                "; tolerance=" + formatReal(tolerance) +
+                "; quadrature_points=" +
+                    std::to_string(fragment.quadrature_points.size()));
         }
         if (fragment.root_polished && fragment.active()) {
             const Real residual_tolerance =
@@ -4555,9 +5313,24 @@ validateImplicitCutQuadratureBackendCellResult(
             region.measure > Real{0.0} &&
             std::abs(volume_weight_sum - region.measure) >
                 measureTolerance(request.tolerance, region.measure)) {
+            const Real abs_error =
+                std::abs(volume_weight_sum - region.measure);
+            const Real tolerance =
+                measureTolerance(request.tolerance, region.measure);
             return failedValidation(
                 ImplicitCutQuadratureDiagnosticStatus::Failed,
-                "implicit cut backend volume quadrature weights do not sum to the region measure");
+                "implicit cut backend volume quadrature weights do not sum to the region measure"
+                "; parent_cell=" +
+                    std::to_string(region.parent_cell) +
+                "; side=" + std::string(sideTopologyToken(region.side)) +
+                "; region_measure=" + formatReal(region.measure) +
+                "; volume_weight_sum=" + formatReal(volume_weight_sum) +
+                "; abs_error=" + formatReal(abs_error) +
+                "; tolerance=" + formatReal(tolerance) +
+                "; parent_measure=" + formatReal(region.parent_measure) +
+                "; volume_fraction=" + formatReal(region.volume_fraction) +
+                "; quadrature_points=" +
+                    std::to_string(region.quadrature_points.size()));
         }
         parent_measure = std::max(parent_measure, region.parent_measure);
         if (region.side == geometry::CutIntegrationSide::Negative) {

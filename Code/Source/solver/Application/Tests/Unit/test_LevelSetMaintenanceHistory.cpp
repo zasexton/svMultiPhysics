@@ -1,12 +1,15 @@
 #include <gtest/gtest.h>
 
+#include "Application/Core/LevelSetCurvatureSamples.h"
 #include "Application/Core/LevelSetMaintenanceHistory.h"
+#include "FE/Assembly/CutIntegrationContext.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 
+#include <cmath>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -172,4 +175,78 @@ TEST(LevelSetMaintenanceHistory, RejectsMismatchedSolutionSizes)
       (void)application::core::copyFieldDofsIntoFeOrderedSolution(
           system, phi, source, target),
       std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureSamples,
+     CollectsGeneratedCutVolumeQuadratureSamplesForActiveSide)
+{
+  auto mesh = buildSingleQuadMesh();
+  auto space =
+      std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4,
+                                                  /*order=*/1);
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto phi = system.addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "phi",
+          .space = space,
+          .components = 1,
+          .source_kind =
+              svmp::FE::systems::FieldSourceKind::PrescribedData});
+  ASSERT_NO_THROW(system.setup());
+  const std::vector<svmp::FE::Real> prescribed_coefficients(
+      4u, svmp::FE::Real{7.0});
+  system.setPrescribedFieldCoefficients(phi, prescribed_coefficients);
+
+  constexpr int marker = 42;
+  auto cut_context =
+      std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+
+  svmp::FE::geometry::CutQuadratureRule rule;
+  rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+  rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+  rule.provenance.parent_entity = 0;
+  rule.provenance.marker = marker;
+  rule.measure = svmp::FE::Real{0.5};
+  rule.parent_measure = svmp::FE::Real{1.0};
+  rule.volume_fraction = svmp::FE::Real{0.5};
+  rule.full_cell_equivalent = false;
+
+  svmp::FE::geometry::CutQuadraturePoint qp;
+  qp.point = {{svmp::FE::Real{0.25}, svmp::FE::Real{0.25}, svmp::FE::Real{0.0}}};
+  qp.parent_coordinate = qp.point;
+  qp.weight = svmp::FE::Real{0.5};
+  rule.points.push_back(qp);
+
+  svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+  metadata.parent_entity = 0;
+  metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+  metadata.volume_fraction = rule.volume_fraction;
+  cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+  system.setCutIntegrationContext(cut_context);
+
+  const svmp::FE::systems::SystemStateView state;
+  const auto negative_samples =
+      application::core::collectLevelSetCurvatureCutVolumeSupplementalSamples(
+          system,
+          state,
+          phi,
+          marker,
+          svmp::FE::geometry::CutIntegrationSide::Negative);
+  ASSERT_EQ(negative_samples.size(), 1u);
+  EXPECT_EQ(negative_samples.front().parent_cell, 0);
+  EXPECT_NEAR(negative_samples.front().value, svmp::FE::Real{7.0}, 1.0e-12);
+  EXPECT_TRUE(std::isfinite(negative_samples.front().coordinate[0]));
+  EXPECT_TRUE(std::isfinite(negative_samples.front().coordinate[1]));
+  EXPECT_TRUE(std::isfinite(negative_samples.front().coordinate[2]));
+
+  const auto positive_samples =
+      application::core::collectLevelSetCurvatureCutVolumeSupplementalSamples(
+          system,
+          state,
+          phi,
+          marker,
+          svmp::FE::geometry::CutIntegrationSide::Positive);
+  EXPECT_TRUE(positive_samples.empty());
 }

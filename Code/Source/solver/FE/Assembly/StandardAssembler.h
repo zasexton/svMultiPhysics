@@ -312,6 +312,13 @@ public:
         bool assemble_matrix,
         bool assemble_vector) override;
 
+    [[nodiscard]] AssemblyResult assembleCutVolumesFused(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        geometry::CutIntegrationSide side,
+        std::span<const FusedCellTerm> terms) override;
+
     [[nodiscard]] AssemblyResult assembleCutInterfaces(
         const IMeshAccess& mesh,
         const CutIntegrationContext& cut_context,
@@ -358,6 +365,20 @@ public:
     [[nodiscard]] bool supportsSolution() const noexcept override { return true; }
     [[nodiscard]] bool supportsSolutionHistory() const noexcept override { return true; }
     [[nodiscard]] bool supportsTimeIntegrationContext() const noexcept override { return true; }
+
+    struct CutVolumeBasisCacheDiagnostics {
+        std::size_t max_entries{0};
+        std::size_t entries{0};
+        std::size_t high_watermark{0};
+        std::size_t hits{0};
+        std::size_t misses{0};
+        std::size_t insertions{0};
+        std::size_t evictions{0};
+    };
+
+    [[nodiscard]] CutVolumeBasisCacheDiagnostics
+    cutVolumeBasisCacheDiagnostics() const noexcept;
+    void resetCutVolumeBasisCacheDiagnostics() noexcept;
     [[nodiscard]] bool supportsDofOffsets() const noexcept override { return true; }
     [[nodiscard]] bool supportsFieldRequirements() const noexcept override { return true; }
     [[nodiscard]] bool supportsMaterialState() const noexcept override { return true; }
@@ -491,6 +512,7 @@ private:
         bool mapping_affine{false};
         Real geom_h{0.0};
         Real geom_volume{0.0};
+        basis::BasisCacheHandle geom_bcache_handle{};
         const basis::BasisCacheEntry* geom_bcache{nullptr};
     };
 
@@ -499,6 +521,15 @@ private:
      *        parallel assembly.
      */
     struct FieldSolutionWorkspace {
+        struct BasisCacheEntryRef {
+            const basis::BasisFunction* basis{nullptr};
+            const quadrature::QuadratureRule* quad{nullptr};
+            bool gradients{false};
+            bool hessians{false};
+            basis::BasisCacheHandle handle{};
+            const basis::BasisCacheEntry* entry{nullptr};
+        };
+
         std::vector<Real> scalar_values_at_pt;
         std::vector<basis::Gradient> scalar_gradients_at_pt;
         std::vector<basis::Hessian> scalar_hessians_at_pt;
@@ -515,6 +546,7 @@ private:
         std::vector<basis::VectorJacobian> vec_jacobians_at_pt;
         std::vector<math::Vector<Real, 3>> vec_curls_at_pt;
         std::vector<Real> vec_divs_at_pt;
+        std::vector<BasisCacheEntryRef> basis_cache_entries;
     };
 
     // =========================================================================
@@ -1019,6 +1051,9 @@ private:
 
     // Cached BasisCacheEntry pointers (hoisted out of per-cell loop).
     // Invalidated when element type or hessian requirement changes.
+    basis::BasisCacheHandle cached_geom_bcache_handle_{};
+    basis::BasisCacheHandle cached_test_bcache_handle_{};
+    basis::BasisCacheHandle cached_trial_bcache_handle_{};
     const basis::BasisCacheEntry* cached_geom_bcache_{nullptr};
     const basis::BasisCacheEntry* cached_test_bcache_{nullptr};
     const basis::BasisCacheEntry* cached_trial_bcache_{nullptr};
@@ -1064,6 +1099,14 @@ private:
         std::string trial_basis_identity{};
         bool has_trial{false};
         bool with_hessians{false};
+        bool with_test_vector_values{false};
+        bool with_test_vector_jacobians{false};
+        bool with_test_vector_curls{false};
+        bool with_test_vector_divergences{false};
+        bool with_trial_vector_values{false};
+        bool with_trial_vector_jacobians{false};
+        bool with_trial_vector_curls{false};
+        bool with_trial_vector_divergences{false};
 
         [[nodiscard]] bool operator==(const CutVolumeBasisCacheKey& other) const noexcept
         {
@@ -1071,7 +1114,15 @@ private:
                    test_basis_identity == other.test_basis_identity &&
                    trial_basis_identity == other.trial_basis_identity &&
                    has_trial == other.has_trial &&
-                   with_hessians == other.with_hessians;
+                   with_hessians == other.with_hessians &&
+                   with_test_vector_values == other.with_test_vector_values &&
+                   with_test_vector_jacobians == other.with_test_vector_jacobians &&
+                   with_test_vector_curls == other.with_test_vector_curls &&
+                   with_test_vector_divergences == other.with_test_vector_divergences &&
+                   with_trial_vector_values == other.with_trial_vector_values &&
+                   with_trial_vector_jacobians == other.with_trial_vector_jacobians &&
+                   with_trial_vector_curls == other.with_trial_vector_curls &&
+                   with_trial_vector_divergences == other.with_trial_vector_divergences;
         }
     };
 
@@ -1086,14 +1137,69 @@ private:
             mix(h, std::hash<std::string>{}(key.trial_basis_identity));
             mix(h, std::hash<bool>{}(key.has_trial));
             mix(h, std::hash<bool>{}(key.with_hessians));
+            mix(h, std::hash<bool>{}(key.with_test_vector_values));
+            mix(h, std::hash<bool>{}(key.with_test_vector_jacobians));
+            mix(h, std::hash<bool>{}(key.with_test_vector_curls));
+            mix(h, std::hash<bool>{}(key.with_test_vector_divergences));
+            mix(h, std::hash<bool>{}(key.with_trial_vector_values));
+            mix(h, std::hash<bool>{}(key.with_trial_vector_jacobians));
+            mix(h, std::hash<bool>{}(key.with_trial_vector_curls));
+            mix(h, std::hash<bool>{}(key.with_trial_vector_divergences));
             return h;
         }
+    };
+
+    struct CutVolumeGeometryCacheKey {
+        std::size_t rule_index{0};
+
+        [[nodiscard]] bool operator==(const CutVolumeGeometryCacheKey& other) const noexcept
+        {
+            return rule_index == other.rule_index;
+        }
+    };
+
+    struct CutVolumeGeometryCacheKeyHash {
+        [[nodiscard]] std::size_t operator()(const CutVolumeGeometryCacheKey& key) const noexcept
+        {
+            return std::hash<std::size_t>{}(key.rule_index);
+        }
+    };
+
+    struct CutVolumeVectorBasisCacheData {
+        std::vector<std::vector<math::Vector<Real, 3>>> values{};
+        std::vector<std::vector<basis::VectorJacobian>> jacobians{};
+        std::vector<std::vector<math::Vector<Real, 3>>> curls{};
+        std::vector<std::vector<Real>> divergences{};
     };
 
     struct CutVolumeBasisCacheEntry {
         basis::BasisCacheEntry test_basis{};
         basis::BasisCacheEntry trial_basis{};
+        CutVolumeVectorBasisCacheData test_vector_basis{};
+        CutVolumeVectorBasisCacheData trial_vector_basis{};
+        bool test_is_vector_basis{false};
+        bool trial_is_vector_basis{false};
         bool has_trial{false};
+        std::uint64_t last_used{0};
+    };
+
+    struct CutVolumeGeometryCacheEntry {
+        GlobalIndex cell_id{-1};
+        ElementType cell_type{ElementType::Unknown};
+        int geometry_order{1};
+        bool mapping_affine{true};
+        std::vector<std::array<Real, 3>> cell_coords{};
+        std::vector<math::Vector<Real, 3>> node_coords{};
+        std::vector<AssemblyContext::Point3D> quad_points{};
+        std::vector<Real> quad_weights{};
+        std::vector<AssemblyContext::Point3D> physical_points{};
+        std::vector<AssemblyContext::Matrix3x3> jacobians{};
+        std::vector<AssemblyContext::Matrix3x3> inverse_jacobians{};
+        std::vector<Real> jacobian_dets{};
+        std::vector<Real> integration_weights{};
+        Real geom_h{0.0};
+        Real geom_volume{0.0};
+        std::uint64_t last_used{0};
     };
 
     const CutVolumeBasisCacheEntry* active_cut_volume_basis_cache_entry_{nullptr};
@@ -1104,6 +1210,33 @@ private:
     std::unordered_map<CutVolumeBasisCacheKey,
                        CutVolumeBasisCacheEntry,
                        CutVolumeBasisCacheKeyHash> cut_volume_basis_cache_{};
+    std::uint64_t cut_volume_basis_cache_clock_{0};
+    std::size_t cut_volume_basis_cache_high_watermark_{0};
+    std::size_t cut_volume_basis_cache_hits_{0};
+    std::size_t cut_volume_basis_cache_misses_{0};
+    std::size_t cut_volume_basis_cache_insertions_{0};
+    std::size_t cut_volume_basis_cache_evictions_{0};
+
+    const CutIntegrationContext* cut_volume_geometry_cache_context_{nullptr};
+    std::uint64_t cut_volume_geometry_cache_signature_{0};
+    std::uint64_t cut_volume_geometry_cache_mesh_geometry_revision_{0};
+    std::uint64_t cut_volume_geometry_cache_mesh_topology_revision_{0};
+    std::uint64_t cut_volume_geometry_cache_active_configuration_epoch_{0};
+    std::uint64_t cut_volume_geometry_cache_coordinate_configuration_key_{0};
+    std::unordered_map<CutVolumeGeometryCacheKey,
+                       CutVolumeGeometryCacheEntry,
+                       CutVolumeGeometryCacheKeyHash> cut_volume_geometry_cache_{};
+    std::uint64_t cut_volume_geometry_cache_clock_{0};
+    std::size_t cut_volume_geometry_cache_hits_{0};
+    std::size_t cut_volume_geometry_cache_misses_{0};
+    std::size_t cut_volume_geometry_cache_insertions_{0};
+    std::size_t cut_volume_geometry_cache_evictions_{0};
+
+    [[nodiscard]] std::size_t cutVolumeBasisCacheMaxEntries() const noexcept;
+    void clearCutVolumeBasisCache() noexcept;
+    void clearCutVolumeGeometryCache() noexcept;
+    void evictLeastRecentCutVolumeBasisCacheEntry() noexcept;
+    void evictLeastRecentCutVolumeGeometryCacheEntry() noexcept;
 
     [[nodiscard]] const CutVolumeBasisCacheEntry*
     getOrCreateCutVolumeBasisCacheEntry(
@@ -1117,6 +1250,24 @@ private:
         const spaces::FunctionSpace& test_space,
         const spaces::FunctionSpace& trial_space,
         RequiredData required_data);
+
+    [[nodiscard]] const CutVolumeGeometryCacheEntry*
+    findCutVolumeGeometryCacheEntry(
+        const CutIntegrationContext& cut_context,
+        std::uint64_t cut_context_signature,
+        std::size_t rule_index,
+        const IMeshAccess& mesh);
+
+    void storeCutVolumeGeometryCacheEntry(
+        std::size_t rule_index,
+        const IMeshAccess& mesh,
+        GlobalIndex cell_id,
+        ElementType cell_type,
+        const AssemblyContext& context);
+
+    void restoreCutVolumeGeometryCacheEntry(
+        AssemblyContext& context,
+        const CutVolumeGeometryCacheEntry& entry);
 
     // Pre-computed coupled-block metadata to avoid virtual calls in fast path.
     // Populated once per block before the cell loop; indexed by block index.
@@ -1133,6 +1284,7 @@ private:
         const quadrature::QuadratureRule* quad{nullptr};
         bool gradients{false};
         bool hessians{false};
+        basis::BasisCacheHandle handle{};
         const basis::BasisCacheEntry* entry{nullptr};
     };
     std::vector<FieldBCacheEntry> cached_field_bcache_;
@@ -1324,6 +1476,7 @@ private:
     struct CachedFieldRecipe {
         FieldId field_id{INVALID_FIELD_ID};
         const FieldAccessPlan* access{nullptr};
+        basis::BasisCacheHandle bcache_handle{};
         const basis::BasisCacheEntry* bcache{nullptr};
         const basis::BasisFunction* basis{nullptr};
         ElementType cell_type{ElementType::Unknown};

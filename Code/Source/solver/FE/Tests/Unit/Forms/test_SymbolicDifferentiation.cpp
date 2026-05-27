@@ -1019,6 +1019,21 @@ TEST(SymbolicDifferentiationImplContract, SpecificTrialFunctionTargetsOnlyMatchi
     EXPECT_GT(countNodes(d_dw, FormExprType::StateField, "u"), 0u);
 }
 
+TEST(SymbolicDifferentiationImplContract, NormalTerminalDirectionalDerivativeTargetsOnlyNormal)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto n = FormExpr::normal();
+    const auto x = FormExpr::coordinate();
+
+    const auto expr = u * n.component(0) + n.component(1) * n.component(2);
+    const auto deriv = directionalDerivativeWrtNormal(expr, x);
+
+    EXPECT_GT(countNodes(deriv, FormExprType::Coordinate), 0u);
+    EXPECT_GT(countNodes(deriv, FormExprType::StateField, "u"), 0u);
+    EXPECT_EQ(countNodes(deriv, FormExprType::TrialFunction), 0u);
+}
+
 TEST(SymbolicDifferentiationImplContract, AuxiliaryOutputTargetDifferentiatesOnlyMatchingSlot)
 {
     const auto y3 = FormExpr::auxiliaryOutputRef(3);

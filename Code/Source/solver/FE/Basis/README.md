@@ -18,7 +18,7 @@ basis::BasisRequest req;
 req.element_type = ElementType::Tetra4;
 req.basis_type   = BasisType::Lagrange;
 req.order        = 2;
-auto basis = basis::BasisFactory::create(req);
+auto basis = basis::basis_factory::create(req);
 
 // Evaluate at a reference point
 math::Vector<Real, 3> xi{0.25, 0.25, 0.25};
@@ -43,7 +43,7 @@ std::span<const Real> N_3_all = entry.scalarValuesForDof(3);
 ## Architecture
 
 ```
-BasisRequest ──> BasisFactory::create() ──> shared_ptr<BasisFunction>
+BasisRequest ──> basis_factory::create() ──> shared_ptr<BasisFunction>
                                                     |
                 ┌───────────────────────────────────┘
                 |
@@ -199,6 +199,11 @@ void evaluate_gradients(xi, gradients) const;
 void evaluate_hessians(xi, hessians) const;
 ```
 
+The barycentric and coefficient-backed evaluators stabilize evaluation at the
+chosen nodes, but they do not change the interpolation problem. For high-order
+interpolation, especially order >= 4, prefer `SpectralBasis` unless an explicit
+equispaced Lagrange node layout is required by the discretization.
+
 **Example:**
 
 ```cpp
@@ -249,10 +254,10 @@ void evaluate_hessians(xi, hessians) const;    // analytic
 
 Gauss-Lobatto-Legendre (GLL) nodal basis for spectral element methods.
 Tensor-product elements (Line, Quad, Hex) use 1D GLL nodes; simplices
-(Triangle, Tetrahedron) use Warp & Blend nodes with an inverse Vandermonde
-transform. Wedge uses a triangle spectral face basis tensorized with a 1D GLL
-line basis. Pyramid uses a rational/modal construction with an inverse
-Vandermonde transform over a blended nodal set.
+(Triangle, Tetrahedron) use Warp & Blend nodes with a Vandermonde-backed
+modal-to-nodal transform. Wedge uses a triangle spectral face basis tensorized
+with a 1D GLL line basis. Pyramid uses a rational/modal construction with the
+same modal-to-nodal transform over a blended nodal set.
 
 ```cpp
 SpectralBasis(ElementType type, int order);
@@ -262,7 +267,7 @@ BasisType basis_type() const noexcept;  // BasisType::Spectral
 // Access to 1D GLL node positions (tensor-product elements only)
 const std::vector<Real>& nodes_1d() const noexcept;
 
-// Whether this uses simplex-style (Warp & Blend / nodal inverse Vandermonde)
+// Whether this uses simplex-style (Warp & Blend / modal-to-nodal transform)
 // construction rather than a pure tensor-product basis
 bool is_simplex() const noexcept;
 
@@ -696,10 +701,9 @@ struct BasisRequest {
 ### Factory Method
 
 ```cpp
-class BasisFactory {
-public:
-    static std::shared_ptr<BasisFunction> create(const BasisRequest& req);
-};
+namespace basis_factory {
+[[nodiscard]] std::shared_ptr<BasisFunction> create(const BasisRequest& req);
+}
 ```
 
 ### Dispatch Logic
@@ -734,6 +738,11 @@ API: its polynomial degree is determined by topology, so `BasisRequest::order`
 must be omitted. The order-bearing families above require an explicit
 `order` value on the request path.
 
+For high-order scalar interpolation, request `BasisType::Spectral` rather than
+generic equispaced `BasisType::Lagrange` unless the equispaced node placement is
+intentional. The factory honors explicit Lagrange requests and does not
+silently substitute spectral nodes.
+
 **B-spline/NURBS multi-dimensional construction**: When `element_type` is
 `Quad4` or `Hex8`, the factory constructs per-axis `BSplineBasis` objects from
 `axis_orders` and `axis_knot_vectors`. Non-rational requests use
@@ -748,7 +757,7 @@ basis::BasisRequest req;
 req.element_type = ElementType::Triangle3;
 req.basis_type   = BasisType::Lagrange;
 req.order        = 2;
-auto basis = basis::BasisFactory::create(req);  // 6 DOFs
+auto basis = basis::basis_factory::create(req);  // 6 DOFs
 
 // C1 Hermite cubic on hexahedra
 basis::BasisRequest hermite_req;
@@ -756,7 +765,7 @@ hermite_req.element_type = ElementType::Hex8;
 hermite_req.basis_type   = BasisType::Hermite;
 hermite_req.order        = 3;
 hermite_req.continuity   = Continuity::C1;
-auto hermite = basis::BasisFactory::create(hermite_req);  // 64 DOFs
+auto hermite = basis::basis_factory::create(hermite_req);  // 64 DOFs
 
 // Raviart-Thomas H(div) on tetrahedra
 basis::BasisRequest rt_req;
@@ -764,13 +773,13 @@ rt_req.element_type = ElementType::Tetra4;
 rt_req.basis_type   = BasisType::RaviartThomas;
 rt_req.order        = 1;
 rt_req.continuity   = Continuity::H_div;
-auto rt = basis::BasisFactory::create(rt_req);
+auto rt = basis::basis_factory::create(rt_req);
 
 // Bubble on wedges: intrinsic order, so omit req.order
 basis::BasisRequest bubble_req;
 bubble_req.element_type = ElementType::Wedge6;
 bubble_req.basis_type   = BasisType::Bubble;
-auto bubble = basis::BasisFactory::create(bubble_req);  // 1 DOF
+auto bubble = basis::basis_factory::create(bubble_req);  // 1 DOF
 
 // Anisotropic 2D B-spline
 basis::BasisRequest bsp_req;
@@ -782,7 +791,7 @@ bsp_req.axis_knot_vectors = {
     {0, 0, 0, 0, 1, 1, 1, 1},  // x: degree 3
     {0, 0, 0, 1, 1, 1}          // y: degree 2
 };
-auto bspline2d = basis::BasisFactory::create(bsp_req);
+auto bspline2d = basis::basis_factory::create(bsp_req);
 
 // Rational 2D NURBS
 basis::BasisRequest nurbs_req;
@@ -800,14 +809,14 @@ nurbs_req.weights = {
     1.0, 1.2, 1.0, 1.0,
     1.0, 1.0, 1.0, 1.0
 };
-auto nurbs2d = basis::BasisFactory::create(nurbs_req);
+auto nurbs2d = basis::basis_factory::create(nurbs_req);
 ```
 
 **Custom basis registration**: `BasisType::Custom` is resolved through a
 registry keyed by `BasisRequest::custom_id`.
 
 ```cpp
-basis::BasisFactory::register_custom(
+basis::basis_factory::register_custom(
     "my-basis",
     [](const basis::BasisRequest& req) -> std::shared_ptr<basis::BasisFunction> {
         return std::make_shared<MyBasis>(req.order);
@@ -818,7 +827,7 @@ custom_req.element_type = ElementType::Line2;
 custom_req.basis_type   = BasisType::Custom;
 custom_req.order        = 2;
 custom_req.custom_id    = "my-basis";
-auto custom = basis::BasisFactory::create(custom_req);
+auto custom = basis::basis_factory::create(custom_req);
 ```
 
 ---
@@ -850,9 +859,9 @@ public:
 
 ### Cache Key
 
-Entries are keyed by the tuple `(cache_identity, quadrature_identity, gradients, hessians)`.
-The `cache_identity()` string encodes all evaluation-relevant state for the basis
-(family, element, order, and for B-splines: knots, weights, per-axis parameters).
+Entries are keyed by structural basis metadata, a hashed quadrature-point
+fingerprint, derivative flags, and a precomputed `cache_identity()` string only
+for stateful bases such as splines and NURBS.
 
 ### BasisCacheEntry
 
@@ -864,28 +873,34 @@ struct BasisCacheEntry {
     // Scalar values in DOF-major SoA layout: [dof * num_qpts + qp]
     std::vector<Real> scalar_values;
 
-    // Gradients: outer = DOF, inner = quadrature points
-    std::vector<std::vector<Gradient>> gradients;
+    // Gradients: [(dof * 3 + component) * num_qpts + qp]
+    std::vector<Real> gradients;
 
-    // Hessians: outer = DOF, inner = quadrature points
-    std::vector<std::vector<Hessian>> hessians;
+    // Hessians: [(dof * 9 + row * 3 + col) * num_qpts + qp]
+    std::vector<Real> hessians;
 
-    // Vector values (H(div)/H(curl)): outer = DOF, inner = QP
-    std::vector<std::vector<math::Vector<Real, 3>>> vector_values;
+    // Vector values: [(dof * 3 + component) * num_qpts + qp]
+    std::vector<Real> vector_values_xyz;
+    std::vector<Real> vector_jacobians;
+    std::vector<Real> vector_curls_xyz;
+    std::vector<Real> vector_divergence;
 
     // Fast scalar access
     Real scalarValue(std::size_t dof, std::size_t qp) const noexcept;
 
     // Contiguous span of all QP values for a single DOF (SIMD-friendly)
     std::span<const Real> scalarValuesForDof(std::size_t dof) const noexcept;
+    std::span<const Real> vectorValuesForDofComponent(std::size_t dof,
+                                                      std::size_t component) const noexcept;
 };
 ```
 
 ### Thread Safety
 
-The internal map is mutex-protected. After initial computation, concurrent reads
-are lock-free via `shared_ptr`. Typical usage: first call computes and caches;
-all subsequent calls return the cached entry.
+The internal map is mutex-protected. Warm hits use a shared lock and return a
+stable `shared_ptr`-owned entry. Cold misses are coordinated per key so only one
+thread computes a given basis/quadrature entry while competing callers wait for
+the result.
 
 For bases that intentionally throw on exact gradients/Hessians at singular
 reference points, `BasisCache` preserves the raw basis contract. In particular,
@@ -929,25 +944,14 @@ public:
                    bool compute_gradients = true,
                    bool compute_hessians = false);
 
-    const BatchedBasisData& data() const;
-    std::size_t num_basis() const;
-    std::size_t num_quad_points() const;
+	    const BatchedBasisData& data() const;
+	    std::size_t num_basis() const;
+	    std::size_t num_quad_points() const;
+	};
 
-    // Field interpolation: result[j] = sum_i coeffs[i] * N_i(q_j) * weights[j]
-    void weighted_sum(const Real* coeffs,
-                      const Real* weights,
-                      Real* result) const;
-
-    // Gradient interpolation
-    void weighted_gradient_sum(const Real* coeffs,
-                               const Real* weights,
-                               Real* result) const;
-
-    // Stiffness assembly: K_ij += w_q * dN_i . (D . dN_j)
-    void assemble_stiffness_contribution(const Real* D,
-                                         const Real* weights,
-                                         Real* K) const;
-};
+	// Assembly-side projection helpers:
+	assembly::weighted_sum(eval, coeffs, weights, result);
+	assembly::weighted_gradient_sum(eval, coeffs, weights, result);
 ```
 
 `BatchEvaluator` preserves the same singular-point contract as the raw basis.
@@ -984,17 +988,11 @@ struct BatchedBasisData {
 ```cpp
 basis::BatchEvaluator eval(*basis, quad, /*gradients=*/true);
 
-// Element stiffness assembly with identity material tensor
-std::vector<Real> D = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // 3x3 identity
-std::vector<Real> jac_weights(eval.num_quad_points());
-std::vector<Real> K(eval.num_basis() * eval.num_basis(), 0.0);
-eval.assemble_stiffness_contribution(D.data(), jac_weights.data(), K.data());
-
 // Field interpolation
 std::vector<Real> coeffs(eval.num_basis());  // DOF values
 std::vector<Real> weights(eval.num_quad_points());
 std::vector<Real> result(eval.num_quad_points());
-eval.weighted_sum(coeffs.data(), weights.data(), result.data());
+assembly::weighted_sum(eval, coeffs.data(), weights.data(), result.data());
 ```
 
 ---
@@ -1009,10 +1007,11 @@ used internally by `HierarchicalBasis` and `SpectralBasis`.
 ```cpp
 // Legendre polynomials
 Real legendre(int n, Real x);
-std::pair<Real, Real> legendre_with_derivative(int n, Real x);
+UnivariateFirstDerivative legendre_derivative(int n, Real x);
 std::vector<Real> legendre_sequence(int n, Real x);
-std::pair<std::vector<Real>, std::vector<Real>>
-    legendre_sequence_with_derivatives(int n, Real x);
+PolynomialSequenceDerivatives legendre_sequence_derivatives(int n, Real x);
+PolynomialSequenceSecondDerivatives
+    legendre_sequence_second_derivatives(int n, Real x);
 
 // Integrated Legendre (for hierarchical bases)
 Real integrated_legendre(int n, Real x);
@@ -1023,20 +1022,26 @@ Real jacobi_derivative(int n, Real alpha, Real beta, Real x);
 
 // 2D simplex: Dubiner basis on the reference triangle
 Real dubiner(int p, int q, Real xi, Real eta);
-std::tuple<Real, Real, Real>
-    dubiner_with_derivatives(int p, int q, Real xi, Real eta);
+BivariateFirstDerivatives
+    dubiner_derivatives(int p, int q, Real xi, Real eta);
 
 // 3D simplex: Proriol polynomial on the reference tetrahedron
 Real proriol(int p, int q, int r, Real xi, Real eta, Real zeta);
-std::tuple<Real, Real, Real, Real>
-    proriol_with_derivatives(int p, int q, int r, Real xi, Real eta, Real zeta);
+TrivariateFirstDerivatives
+    proriol_derivatives(int p, int q, int r, Real xi, Real eta, Real zeta);
 ```
+
+Derivative APIs use named result structs only, so call sites read fields by
+semantic name instead of unpacking `std::pair` or `std::tuple` compatibility
+wrappers.
 
 ### ModalTransform (`ModalTransform.h`)
 
 Converts between modal (hierarchical) and nodal (Lagrange) representations via
-Vandermonde matrix and its inverse. Useful for p-adaptivity workflows and
-representation conversion.
+a Vandermonde matrix. `nodal_to_modal()` uses a stored factorization instead of
+an explicit inverse; the inverse accessor is retained for diagnostics and
+compatibility and materializes the inverse on demand. Useful for p-adaptivity
+workflows and representation conversion.
 
 ```cpp
 class ModalTransform {
@@ -1047,13 +1052,13 @@ public:
     // Modal-to-nodal: nodal = V * modal
     std::vector<Real> modal_to_nodal(const std::vector<Real>& modal_coeffs) const;
 
-    // Nodal-to-modal: modal = V^{-1} * nodal
+    // Nodal-to-modal: solve V * modal = nodal
     std::vector<Real> nodal_to_modal(const std::vector<Real>& nodal_values) const;
 
     const std::vector<std::vector<Real>>& vandermonde() const noexcept;
-    const std::vector<std::vector<Real>>& vandermonde_inverse() const noexcept;
+    const std::vector<std::vector<Real>>& vandermonde_inverse() const;
 
-    // Condition number estimate (infinity norm) for numerical stability diagnostics
+    // Rank-revealing SVD condition estimate for numerical stability diagnostics
     Real condition_number() const;
 };
 ```
@@ -1073,13 +1078,37 @@ auto roundtrip    = transform.modal_to_nodal(modal_coeffs);
 Real cond = transform.condition_number();  // Check stability
 ```
 
+### Dense Transform Storage
+
+Dense Basis transform helpers use row-major flat storage:
+`matrix[row * cols + col]`. Vandermonde matrices are assembled as
+`V[node, modal] = phi_modal(node)`. `ModalTransform::nodal_to_modal()` stores
+an LU factorization of `V`. Spectral simplex/pyramid and Lagrange pyramid
+modal-to-nodal evaluation materialize row-major hot transforms through the
+shared LU-backed dense inverse helper; spectral fused `evaluate_all()` also
+keeps a modal-major copy so value, gradient, and Hessian accumulation can sweep
+contiguous coefficients. A factorized `V^T` hot solve was benchmarked for these
+modal-to-nodal paths but not retained because the materialized transform was
+faster in the default Basis microbenchmark. The explicit legacy inverse
+accessor in `ModalTransform` remains lazy and uses the same dense factorization
+helper.
+
 ### NodeOrderingConventions (`NodeOrderingConventions.h`)
 
 Comprehensive reference-element node coordinates and ordering conventions for
 all supported element enums, aligned with VTK numbering.
 
+Basis currently owns this reference-node ordering contract because scalar,
+vector, tensor-product, and modal bases use it to define DOF locations and to
+verify nodal output order. Elements, Spaces, Geometry, Systems, and LevelSet may
+include this header as a shared reference-coordinate oracle, but the header
+should remain limited to reference node coordinates, ordering, and topology
+classification. Mesh ownership, physical geometry mapping, and assembly-space
+behavior belong in their own modules. Edge and face adjacency tables that are
+not basis-node-ordering contracts should stay in `Elements/ReferenceElement`.
+
 ```cpp
-class NodeOrdering {
+class ReferenceNodeLayout {
 public:
     // Reference coordinates for a specific node
     static math::Vector<Real, 3> get_node_coords(ElementType elem_type,
@@ -1225,7 +1254,7 @@ available through `GenericBasisSpace`.
 | `Bubble` | canonical line/triangle/tetra/quad/hex/wedge/pyramid topologies with the matching node-count aliases (`Line3`, `Triangle6`, `Tetra10`, `Quad8/9`, `Hex20/27`, `Wedge15/18`, `Pyramid13/14`) | scalar interior enrichment, `C0`/`L2` | generic basis-backed element path | `GenericBasisSpace` | one interior mode per topology; pyramid uses a quintic polynomial bubble |
 | `BSpline` | scalar: `Line2`, `Quad4`, `Hex8` with per-axis orders; vector: compatible-tensor `Quad4`/`Hex8` path with per-axis orders | scalar `C0`/`L2`; vector `H(div)` / `H(curl)` on the compatible-tensor path | generic basis-backed element path for scalar; `GeneralBasisElement` for the vector compatible-tensor path | scalar: `H1Space`, `L2Space`; vector: `HDivSpace`, `HCurlSpace` | tensor-product-only by design for scalar; vector support is intentionally limited to quadrilateral and hexahedral compatible-tensor spaces |
 | `NURBS` | scalar: `Line2`, `Quad4`, `Hex8` with per-axis orders; vector: compatible-tensor `Quad4`/`Hex8` path with per-axis orders | scalar `C0`/`L2`; vector `H(div)` / `H(curl)` on the compatible-tensor path | generic basis-backed element path for scalar; `GeneralBasisElement` for the vector compatible-tensor path | scalar: `H1Space`, `L2Space`; vector: `HDivSpace`, `HCurlSpace` | tensor-product-only by design for scalar; vector support is intentionally limited to quadrilateral and hexahedral compatible-tensor spaces |
-| `Custom` | request-defined | scalar, typically `C0`/`L2` | generic basis-backed element path after `BasisFactory::register_custom(...)` | `GenericBasisSpace` | registry-backed runtime contract keyed by `custom_id` |
+| `Custom` | request-defined | scalar, typically `C0`/`L2` | generic basis-backed element path after `basis_factory::register_custom(...)` | `GenericBasisSpace` | registry-backed runtime contract keyed by `custom_id` |
 | `RaviartThomas` | triangle, quad, tetra, hex: existing implemented order range; wedge, pyramid: arbitrary implemented order via direct `k=1,2` regressions plus moment-fitted hybrid path for `k>=3` | vector, `H(div)` | `VectorElement` | `HDivSpace` | exact divergence path; repo qualification currently covers hybrid orders `0`-`3` |
 | `Nedelec` | triangle, quad, tetra, hex: existing implemented order range; wedge, pyramid: arbitrary implemented order via direct `k=1,2` regressions plus moment-fitted hybrid path for `k>=3` | vector, `H(curl)` | `VectorElement` | `HCurlSpace` | exact curl path; repo qualification currently covers hybrid orders `0`-`3` |
 | `BDM` | `Triangle3` and `Tetra4`: orders `>= 1`; `Quad4`/`Quad8`/`Quad9`: order `1` | vector, `H(div)` | `VectorElement` | `HDivSpace` | explicit family selection required; higher-order quadrilateral and hybrid-cell BDM-like families remain out of scope until defined as explicit families |
@@ -1242,7 +1271,7 @@ All basis module errors inherit from `BasisException` (which inherits from
 | `BasisConfigurationException` | Invalid `BasisRequest` fields (missing required order, explicit order on `Bubble`, missing knot vector, incompatible continuity/field type, empty `custom_id`, negative order) |
 | `BasisElementCompatibilityException` | Requested element topology is not supported by the basis family (e.g., `SerendipityBasis` on `Triangle3`, `HermiteBasis` on `Tetra4`) |
 | `BasisEvaluationException` | Evaluation request cannot be satisfied (e.g., calling `evaluate_values()` on a vector basis, calling `evaluate_divergence()` on a scalar basis) |
-| `BasisNodeOrderingException` | Invalid node index or coordinate lookup failure in `NodeOrdering` |
+| `BasisNodeOrderingException` | Invalid node index or coordinate lookup failure in `ReferenceNodeLayout` |
 | `BasisConstructionException` | Internal failure during basis setup (e.g., singular Vandermonde matrix, custom factory returned null) |
 
 Convenience macros for throwing within implementations:
@@ -1274,7 +1303,7 @@ point.
 post-processing queries, testing).
 
 ```cpp
-auto basis = BasisFactory::create(req);
+auto basis = basis_factory::create(req);
 math::Vector<Real, 3> xi{0.25, 0.25, 0.0};
 std::vector<Real> values;
 basis->evaluate_values(xi, values);
@@ -1297,20 +1326,21 @@ Real val = entry.scalarValue(dof, qp);
 auto span = entry.scalarValuesForDof(dof);
 ```
 
-### BatchEvaluator (SIMD-Optimized Assembly)
+### BatchEvaluator (SIMD-Optimized Basis Data)
 
 Evaluates all basis functions at all quadrature points with SIMD-aligned
-memory. Provides fused assembly operations (weighted sums, stiffness
-contributions) that vectorize across quadrature points.
+memory. Weighted basis and gradient sums live in `FE/Assembly` next to
+operator-specific element contractions such as
+`assembly::assemble_stiffness_contribution`.
 
 **Use when**: building element-level matrices and vectors in performance-critical
-assembly loops. The fused operations (`weighted_sum`, `assemble_stiffness_contribution`)
-avoid materializing intermediate products.
+assembly loops. The fused interpolation operations avoid materializing
+intermediate products.
 
 ```cpp
 BatchEvaluator eval(*basis, quad, /*gradients=*/true);
-eval.weighted_sum(coeffs, weights, result);               // Field interpolation
-eval.assemble_stiffness_contribution(D, jac_w, K);        // Stiffness matrix
+assembly::weighted_sum(eval, coeffs, weights, result);        // Field interpolation
+assembly::assemble_stiffness_contribution(eval, D, jac_w, K); // Assembly helper
 ```
 
 ### Decision Guide
@@ -1330,7 +1360,7 @@ eval.assemble_stiffness_contribution(D, jac_w, K);        // Stiffness matrix
 | Component | Thread safety |
 |---|---|
 | `BasisFunction` subclasses | All `evaluate_*` methods are `const` and stateless; safe for concurrent reads from multiple threads. No mutable state after construction. |
-| `BasisFactory::create()` | Safe to call concurrently for non-custom types. Custom registry access is mutex-protected. |
+| `basis_factory::create()` | Safe to call concurrently for non-custom types. Custom registry access is mutex-protected. |
 | `BasisCache::instance()` | Thread-safe singleton. `get_or_compute()` uses a mutex for the initial computation; subsequent reads of the same entry are lock-free via `shared_ptr`. |
 | `BatchEvaluator` | Not thread-safe. Each thread should construct its own instance or use separate instances. The `data()` accessor is read-only and safe for concurrent reads. |
 | `ModalTransform` | Immutable after construction; safe for concurrent reads. |
@@ -1353,7 +1383,7 @@ basis::BasisRequest req;
 req.element_type = ElementType::Tetra4;
 req.basis_type   = BasisType::Lagrange;
 req.order        = 2;
-auto basis = basis::BasisFactory::create(req);  // -> LagrangeBasis, 10 DOFs
+auto basis = basis::basis_factory::create(req);  // -> LagrangeBasis, 10 DOFs
 
 // 2. Get quadrature rule for the element type
 auto& quad = quadrature::get_rule(ElementType::Tetra4, /*degree=*/4);
@@ -1374,14 +1404,14 @@ for (auto& cell : mesh.cells()) {
         for (std::size_t i = 0; i < cached.num_dofs; ++i) {
             // Reference-space values/gradients from cache
             Real N_i = cached.scalarValue(i, qp);
-            const auto& dN_ref_i = cached.gradients[i][qp];
+            auto dN_ref_i = cached.gradientVector(i, qp);
 
             // Physical gradients: dN_phys = J^{-T} * dN_ref
             auto dN_phys_i = J.inverse_transpose(qp) * dN_ref_i;
 
             // Assemble local contributions...
             for (std::size_t j = 0; j < cached.num_dofs; ++j) {
-                const auto& dN_ref_j = cached.gradients[j][qp];
+                auto dN_ref_j = cached.gradientVector(j, qp);
                 auto dN_phys_j = J.inverse_transpose(qp) * dN_ref_j;
 
                 K_local(i, j) += w * dot(dN_phys_i, dN_phys_j);

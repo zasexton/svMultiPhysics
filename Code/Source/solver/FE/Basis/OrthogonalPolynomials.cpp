@@ -6,24 +6,64 @@
  */
 
 #include "OrthogonalPolynomials.h"
-#include "detail/ReferenceDerivativeJet.h"
+#include "BasisTolerance.h"
+#include "Math/IntegerMath.h"
+#include "Math/MathConstants.h"
+#include "ReferenceDerivativeJet.h"
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <utility>
 
 namespace svmp {
 namespace FE {
 namespace basis {
 namespace orthopoly {
 
+using math::pow_int;
+
 namespace {
 
 using detail::Jet3;
 
+std::size_t legendre_sequence_count(int n, const char* name) {
+    if (n < 0) {
+        throw std::invalid_argument(name);
+    }
+    return static_cast<std::size_t>(n + 1);
+}
+
+void check_legendre_span(int n, std::span<Real> values, const char* name) {
+    const auto required = legendre_sequence_count(n, name);
+    if (values.size() < required) {
+        throw std::invalid_argument(name);
+    }
+}
+
+std::size_t jacobi_sequence_count(int n, const char* name) {
+    if (n < 0) {
+        throw std::invalid_argument(name);
+    }
+    return static_cast<std::size_t>(n + 1);
+}
+
+void check_jacobi_span(int n, std::span<Real> values, const char* name) {
+    const auto required = jacobi_sequence_count(n, name);
+    if (values.size() < required) {
+        throw std::invalid_argument(name);
+    }
+}
+
 Jet3 lift_jacobi(int n, Real alpha, Real beta, const Jet3& arg) {
+    const auto poly = jacobi_with_second_derivative(n, alpha, beta, arg.value);
     return detail::compose_univariate(arg,
-                                      jacobi(n, alpha, beta, arg.value),
-                                      jacobi_derivative(n, alpha, beta, arg.value),
-                                      jacobi_second_derivative(n, alpha, beta, arg.value));
+                                      poly.value,
+                                      poly.derivative,
+                                      poly.second_derivative);
+}
+
+Real collapsed_coordinate_tolerance() noexcept {
+    return detail::basis_scaled_tolerance(Real(1), Real(10));
 }
 
 } // namespace
@@ -46,7 +86,7 @@ Real legendre(int n, Real x) {
     return p1;
 }
 
-std::pair<Real, Real> legendre_with_derivative(int n, Real x) {
+UnivariateFirstDerivative legendre_derivative(int n, Real x) {
     if (n == 0) {
         return {Real(1), Real(0)};
     }
@@ -56,14 +96,20 @@ std::pair<Real, Real> legendre_with_derivative(int n, Real x) {
 
     Real p0 = Real(1);
     Real p1 = x;
+    Real dp0 = Real(0);
+    Real dp1 = Real(1);
     for (int k = 2; k <= n; ++k) {
-        Real pk = ((Real(2 * k - 1) * x * p1) - Real(k - 1) * p0) / Real(k);
+        const Real a = Real(2 * k - 1);
+        const Real b = Real(k - 1);
+        Real pk = (a * x * p1 - b * p0) / Real(k);
+        Real dpk = (a * (p1 + x * dp1) - b * dp0) / Real(k);
         p0 = p1;
         p1 = pk;
+        dp0 = dp1;
+        dp1 = dpk;
     }
 
-    Real derivative = Real(n) / (Real(1) - x * x) * (p0 - x * p1);
-    return {p1, derivative};
+    return {p1, dp1};
 }
 
 Real integrated_legendre(int n, Real x) {
@@ -128,34 +174,124 @@ Real jacobi_second_derivative(int n, Real alpha, Real beta, Real x) {
     return factor * jacobi(n - 2, alpha + Real(2), beta + Real(2), x);
 }
 
+UnivariateDerivatives jacobi_with_second_derivative(int n, Real alpha, Real beta, Real x) {
+    if (n < 0) {
+        throw std::invalid_argument("jacobi_with_second_derivative order");
+    }
+    if (n == 0) {
+        return {Real(1), Real(0), Real(0)};
+    }
+
+    Real pkm1 = Real(1);
+    Real pk = Real(0.5) * ((alpha - beta) + (alpha + beta + Real(2)) * x);
+    Real dpkm1 = Real(0);
+    Real dpk = Real(0.5) * (alpha + beta + Real(2));
+    Real ddpkm1 = Real(0);
+    Real ddpk = Real(0);
+
+    if (n == 1) {
+        return {pk, dpk, ddpk};
+    }
+
+    for (int k = 1; k < n; ++k) {
+        const Real kf = static_cast<Real>(k);
+        const Real two_k_ab = Real(2) * kf + alpha + beta;
+
+        const Real denom = Real(2) * (kf + Real(1)) * (kf + alpha + beta + Real(1)) * two_k_ab;
+        const Real b_slope = (two_k_ab + Real(1)) * (two_k_ab + Real(2)) * two_k_ab;
+        const Real b = b_slope * x + (two_k_ab + Real(1)) * (alpha * alpha - beta * beta);
+        const Real c = Real(2) * (kf + alpha) * (kf + beta) * (two_k_ab + Real(2));
+
+        const Real pnext = (b * pk - c * pkm1) / denom;
+        const Real dpnext = (b_slope * pk + b * dpk - c * dpkm1) / denom;
+        const Real ddpnext = (Real(2) * b_slope * dpk + b * ddpk - c * ddpkm1) / denom;
+
+        pkm1 = pk;
+        pk = pnext;
+        dpkm1 = dpk;
+        dpk = dpnext;
+        ddpkm1 = ddpk;
+        ddpk = ddpnext;
+    }
+
+    return {pk, dpk, ddpk};
+}
+
+void jacobi_sequence_with_second_derivatives_to(int n,
+                                                Real alpha,
+                                                Real beta,
+                                                Real x,
+                                                std::span<Real> values,
+                                                std::span<Real> derivatives,
+                                                std::span<Real> second_derivatives) {
+    check_jacobi_span(n, values, "jacobi_sequence_with_second_derivatives_to values");
+    check_jacobi_span(n, derivatives, "jacobi_sequence_with_second_derivatives_to derivatives");
+    check_jacobi_span(n, second_derivatives,
+                      "jacobi_sequence_with_second_derivatives_to second derivatives");
+
+    values[0] = Real(1);
+    derivatives[0] = Real(0);
+    second_derivatives[0] = Real(0);
+    if (n == 0) {
+        return;
+    }
+
+    values[1] = Real(0.5) * ((alpha - beta) + (alpha + beta + Real(2)) * x);
+    derivatives[1] = Real(0.5) * (alpha + beta + Real(2));
+    second_derivatives[1] = Real(0);
+
+    for (int k = 1; k < n; ++k) {
+        const std::size_t prev = static_cast<std::size_t>(k);
+        const std::size_t prev2 = static_cast<std::size_t>(k - 1);
+        const std::size_t next = static_cast<std::size_t>(k + 1);
+        const Real kf = static_cast<Real>(k);
+        const Real two_k_ab = Real(2) * kf + alpha + beta;
+
+        const Real denom = Real(2) * (kf + Real(1)) * (kf + alpha + beta + Real(1)) * two_k_ab;
+        const Real b_slope = (two_k_ab + Real(1)) * (two_k_ab + Real(2)) * two_k_ab;
+        const Real b = b_slope * x + (two_k_ab + Real(1)) * (alpha * alpha - beta * beta);
+        const Real c = Real(2) * (kf + alpha) * (kf + beta) * (two_k_ab + Real(2));
+
+        values[next] = (b * values[prev] - c * values[prev2]) / denom;
+        derivatives[next] =
+            (b_slope * values[prev] + b * derivatives[prev] - c * derivatives[prev2]) / denom;
+        second_derivatives[next] =
+            (Real(2) * b_slope * derivatives[prev] +
+             b * second_derivatives[prev] -
+             c * second_derivatives[prev2]) / denom;
+    }
+}
+
 Real dubiner(int p, int q, Real xi, Real eta) {
     // Map to collapsed coordinates on reference triangle (xi>=0, eta>=0, xi+eta<=1)
+    const Real eps = collapsed_coordinate_tolerance();
     const Real one_minus_eta = Real(1) - eta;
-    Real a = (std::abs(one_minus_eta) > std::numeric_limits<Real>::epsilon())
+    Real a = (std::abs(one_minus_eta) > eps)
              ? (Real(2) * xi / one_minus_eta - Real(1))
              : Real(-1);
     Real b = Real(2) * eta - Real(1);
 
-    Real factor = std::pow(one_minus_eta, static_cast<Real>(p));
+    Real factor = pow_int(one_minus_eta, p);
     return factor * jacobi(p, Real(0), Real(0), a) * jacobi(q, Real(2 * p + 1), Real(0), b);
 }
 
 Real proriol(int p, int q, int r, Real xi, Real eta, Real zeta) {
     // Collapsed coordinates on tetrahedron (xi,eta,zeta >=0, xi+eta+zeta<=1)
+    const Real eps = collapsed_coordinate_tolerance();
     const Real one_minus_eta_zeta = Real(1) - eta - zeta;
-    Real a = (std::abs(one_minus_eta_zeta) > std::numeric_limits<Real>::epsilon())
+    Real a = (std::abs(one_minus_eta_zeta) > eps)
              ? (Real(2) * xi / one_minus_eta_zeta - Real(1))
              : Real(-1);
 
     const Real one_minus_zeta = Real(1) - zeta;
-    Real b = (std::abs(one_minus_zeta) > std::numeric_limits<Real>::epsilon())
+    Real b = (std::abs(one_minus_zeta) > eps)
              ? (Real(2) * eta / one_minus_zeta - Real(1))
              : Real(-1);
 
     Real c = Real(2) * zeta - Real(1);
 
-    Real factor = std::pow(one_minus_eta_zeta, static_cast<Real>(p)) *
-                  std::pow(one_minus_zeta, static_cast<Real>(q));
+    Real factor = pow_int(one_minus_eta_zeta, p) *
+                  pow_int(one_minus_zeta, q);
 
     return factor *
            jacobi(p, Real(0), Real(0), a) *
@@ -163,34 +299,41 @@ Real proriol(int p, int q, int r, Real xi, Real eta, Real zeta) {
            jacobi(r, Real(2 * p + 2 * q + 2), Real(0), c);
 }
 
-std::vector<Real> legendre_sequence(int n, Real x) {
-    std::vector<Real> seq(static_cast<std::size_t>(n + 1), Real(0));
-    seq[0] = Real(1);
+void legendre_sequence_to(int n, Real x, std::span<Real> values) {
+    check_legendre_span(n, values, "legendre_sequence_to values");
+    values[0] = Real(1);
     if (n == 0) {
-        return seq;
+        return;
     }
-    seq[1] = x;
+    values[1] = x;
     for (int k = 2; k <= n; ++k) {
-        seq[static_cast<std::size_t>(k)] =
-            ((Real(2 * k - 1) * x * seq[static_cast<std::size_t>(k - 1)]) -
-             Real(k - 1) * seq[static_cast<std::size_t>(k - 2)]) / Real(k);
+        values[static_cast<std::size_t>(k)] =
+            ((Real(2 * k - 1) * x * values[static_cast<std::size_t>(k - 1)]) -
+             Real(k - 1) * values[static_cast<std::size_t>(k - 2)]) / Real(k);
     }
+}
+
+std::vector<Real> legendre_sequence(int n, Real x) {
+    std::vector<Real> seq(legendre_sequence_count(n, "legendre_sequence order"), Real(0));
+    legendre_sequence_to(n, x, std::span<Real>(seq.data(), seq.size()));
     return seq;
 }
 
-std::pair<std::vector<Real>, std::vector<Real>> legendre_sequence_with_derivatives(int n, Real x) {
-    std::vector<Real> vals(static_cast<std::size_t>(n + 1), Real(0));
-    std::vector<Real> derivs(static_cast<std::size_t>(n + 1), Real(0));
-
-    vals[0] = Real(1);
-    derivs[0] = Real(0);
+void legendre_sequence_with_derivatives_to(int n,
+                                           Real x,
+                                           std::span<Real> values,
+                                           std::span<Real> derivatives) {
+    check_legendre_span(n, values, "legendre_sequence_with_derivatives_to values");
+    check_legendre_span(n, derivatives, "legendre_sequence_with_derivatives_to derivatives");
+    values[0] = Real(1);
+    derivatives[0] = Real(0);
 
     if (n == 0) {
-        return {vals, derivs};
+        return;
     }
 
-    vals[1] = x;
-    derivs[1] = Real(1);
+    values[1] = x;
+    derivatives[1] = Real(1);
 
     // Use recurrence: P_k = ((2k-1)*x*P_{k-1} - (k-1)*P_{k-2}) / k
     // Derivative: P'_k = ((2k-1)*(P_{k-1} + x*P'_{k-1}) - (k-1)*P'_{k-2}) / k
@@ -200,26 +343,42 @@ std::pair<std::vector<Real>, std::vector<Real>> legendre_sequence_with_derivativ
         const Real c2 = Real(k - 1);
         const Real c3 = Real(k);
 
-        vals[ku] = (c1 * x * vals[ku - 1] - c2 * vals[ku - 2]) / c3;
-        derivs[ku] = (c1 * (vals[ku - 1] + x * derivs[ku - 1]) - c2 * derivs[ku - 2]) / c3;
+        values[ku] = (c1 * x * values[ku - 1] - c2 * values[ku - 2]) / c3;
+        derivatives[ku] =
+            (c1 * (values[ku - 1] + x * derivatives[ku - 1]) - c2 * derivatives[ku - 2]) / c3;
     }
-
-    return {vals, derivs};
 }
 
-std::tuple<std::vector<Real>, std::vector<Real>, std::vector<Real>>
-legendre_sequence_with_second_derivatives(int n, Real x) {
-    std::vector<Real> vals(static_cast<std::size_t>(n + 1), Real(0));
-    std::vector<Real> derivs(static_cast<std::size_t>(n + 1), Real(0));
-    std::vector<Real> second_derivs(static_cast<std::size_t>(n + 1), Real(0));
+PolynomialSequenceDerivatives legendre_sequence_derivatives(int n, Real x) {
+    const auto count = legendre_sequence_count(n, "legendre_sequence_with_derivatives order");
+    std::vector<Real> vals(count, Real(0));
+    std::vector<Real> derivs(count, Real(0));
+    legendre_sequence_with_derivatives_to(n,
+                                          x,
+                                          std::span<Real>(vals.data(), vals.size()),
+                                          std::span<Real>(derivs.data(), derivs.size()));
+    return {std::move(vals), std::move(derivs)};
+}
 
-    vals[0] = Real(1);
+void legendre_sequence_with_second_derivatives_to(int n,
+                                                  Real x,
+                                                  std::span<Real> values,
+                                                  std::span<Real> derivatives,
+                                                  std::span<Real> second_derivatives) {
+    check_legendre_span(n, values, "legendre_sequence_with_second_derivatives_to values");
+    check_legendre_span(n, derivatives, "legendre_sequence_with_second_derivatives_to derivatives");
+    check_legendre_span(n, second_derivatives,
+                        "legendre_sequence_with_second_derivatives_to second derivatives");
+    values[0] = Real(1);
+    derivatives[0] = Real(0);
+    second_derivatives[0] = Real(0);
     if (n == 0) {
-        return {vals, derivs, second_derivs};
+        return;
     }
 
-    vals[1] = x;
-    derivs[1] = Real(1);
+    values[1] = x;
+    derivatives[1] = Real(1);
+    second_derivatives[1] = Real(0);
 
     for (int k = 2; k <= n; ++k) {
         const std::size_t ku = static_cast<std::size_t>(k);
@@ -227,20 +386,82 @@ legendre_sequence_with_second_derivatives(int n, Real x) {
         const Real c2 = Real(k - 1);
         const Real c3 = Real(k);
 
-        vals[ku] = (c1 * x * vals[ku - 1] - c2 * vals[ku - 2]) / c3;
-        derivs[ku] = (c1 * (vals[ku - 1] + x * derivs[ku - 1]) - c2 * derivs[ku - 2]) / c3;
-        second_derivs[ku] = jacobi_second_derivative(k, Real(0), Real(0), x);
+        values[ku] = (c1 * x * values[ku - 1] - c2 * values[ku - 2]) / c3;
+        derivatives[ku] =
+            (c1 * (values[ku - 1] + x * derivatives[ku - 1]) - c2 * derivatives[ku - 2]) / c3;
+        second_derivatives[ku] =
+            (c1 * (Real(2) * derivatives[ku - 1] + x * second_derivatives[ku - 1]) -
+             c2 * second_derivatives[ku - 2]) / c3;
     }
-
-    return {vals, derivs, second_derivs};
 }
 
-std::tuple<Real, Real, Real> dubiner_with_derivatives(int p, int q, Real xi, Real eta) {
+PolynomialSequenceSecondDerivatives legendre_sequence_second_derivatives(int n, Real x) {
+    const auto count = legendre_sequence_count(n, "legendre_sequence_with_second_derivatives order");
+    std::vector<Real> vals(count, Real(0));
+    std::vector<Real> derivs(count, Real(0));
+    std::vector<Real> second_derivs(count, Real(0));
+    legendre_sequence_with_second_derivatives_to(
+        n,
+        x,
+        std::span<Real>(vals.data(), vals.size()),
+        std::span<Real>(derivs.data(), derivs.size()),
+        std::span<Real>(second_derivs.data(), second_derivs.size()));
+    return {std::move(vals), std::move(derivs), std::move(second_derivs)};
+}
+
+std::vector<Real> gll_nodes(int num_points) {
+    if (num_points < 2) {
+        throw std::invalid_argument(
+            "gll_nodes requires at least 2 points");
+    }
+    if (num_points > 128) {
+        throw std::invalid_argument(
+            "gll_nodes num_points exceeds safe limit");
+    }
+
+    const int n = num_points;
+    std::vector<Real> nodes(static_cast<std::size_t>(n));
+
+    nodes.front() = Real(-1);
+    nodes.back() = Real(1);
+
+    if (n == 2) {
+        return nodes;
+    }
+
+    const Real tolerance = Real(1e-14);
+    const int interior = n - 2;
+    const int half = (interior + 1) / 2;
+
+    for (int i = 0; i < half; ++i) {
+        Real x_root = -std::cos(math::constants::PI * Real(i + 1) / Real(n - 1));
+        Real x_prev = std::numeric_limits<Real>::max();
+
+        while (std::abs(x_root - x_prev) > tolerance) {
+            x_prev = x_root;
+            const auto pn1 = legendre_derivative(n - 1, x_root);
+            const auto pn2 = legendre_derivative(n - 2, x_root);
+
+            const Real f = x_root * pn1.value - pn2.value;
+            const Real fp = pn1.value + x_root * pn1.derivative - pn2.derivative;
+            x_root = x_prev - f / fp;
+        }
+
+        const std::size_t left_index = static_cast<std::size_t>(i + 1);
+        const std::size_t right_index = static_cast<std::size_t>(n - 2 - i);
+        nodes[left_index] = x_root;
+        nodes[right_index] = -x_root;
+    }
+
+    return nodes;
+}
+
+BivariateFirstDerivatives dubiner_derivatives(int p, int q, Real xi, Real eta) {
     // Dubiner basis on reference triangle: (xi>=0, eta>=0, xi+eta<=1)
     // psi_{p,q}(xi,eta) = (1-eta)^p * P_p^{0,0}(a) * P_q^{2p+1,0}(b)
     // where a = 2*xi/(1-eta) - 1, b = 2*eta - 1
 
-    const Real eps = std::numeric_limits<Real>::epsilon() * Real(10);
+    const Real eps = collapsed_coordinate_tolerance();
     const Real one_minus_eta = Real(1) - eta;
 
     Real a, da_dxi, da_deta;
@@ -258,41 +479,37 @@ std::tuple<Real, Real, Real> dubiner_with_derivatives(int p, int q, Real xi, Rea
     Real b = Real(2) * eta - Real(1);
     Real db_deta = Real(2);
 
-    // Compute Jacobi polynomials and derivatives
-    Real Pa = jacobi(p, Real(0), Real(0), a);
-    Real Pa_deriv = jacobi_derivative(p, Real(0), Real(0), a);
-
-    Real Qb = jacobi(q, Real(2 * p + 1), Real(0), b);
-    Real Qb_deriv = jacobi_derivative(q, Real(2 * p + 1), Real(0), b);
+    const auto pa = jacobi_with_second_derivative(p, Real(0), Real(0), a);
+    const auto qb = jacobi_with_second_derivative(q, Real(2 * p + 1), Real(0), b);
 
     // factor = (1-eta)^p
-    Real factor = (p > 0) ? std::pow(one_minus_eta, static_cast<Real>(p)) : Real(1);
-    Real dfactor_deta = (p > 0) ? Real(-p) * std::pow(one_minus_eta, static_cast<Real>(p - 1)) : Real(0);
+    Real factor = (p > 0) ? pow_int(one_minus_eta, p) : Real(1);
+    Real dfactor_deta = (p > 0) ? Real(-p) * pow_int(one_minus_eta, p - 1) : Real(0);
 
     // psi = factor * Pa * Qb
-    Real value = factor * Pa * Qb;
+    Real value = factor * pa.value * qb.value;
 
     // d(psi)/d(xi) = factor * dPa/da * da/dxi * Qb
-    Real dxi = factor * Pa_deriv * da_dxi * Qb;
+    Real dxi = factor * pa.derivative * da_dxi * qb.value;
 
     // d(psi)/d(eta) = dfactor/deta * Pa * Qb + factor * dPa/da * da/deta * Qb + factor * Pa * dQb/db * db/deta
-    Real deta = dfactor_deta * Pa * Qb
-              + factor * Pa_deriv * da_deta * Qb
-              + factor * Pa * Qb_deriv * db_deta;
+    Real deta = dfactor_deta * pa.value * qb.value
+              + factor * pa.derivative * da_deta * qb.value
+              + factor * pa.value * qb.derivative * db_deta;
 
     return {value, dxi, deta};
 }
 
 BivariateDerivatives dubiner_with_second_derivatives(int p, int q, Real xi, Real eta) {
-    const Real eps = std::numeric_limits<Real>::epsilon() * Real(10);
+    const Real eps = collapsed_coordinate_tolerance();
     const Real one_minus_eta = Real(1) - eta;
 
     if (std::abs(one_minus_eta) <= eps) {
-        const auto [value, dxi, deta] = dubiner_with_derivatives(p, q, xi, eta);
+        const auto first = dubiner_derivatives(p, q, xi, eta);
         BivariateDerivatives out;
-        out.value = value;
-        out.dxi = dxi;
-        out.deta = deta;
+        out.value = first.value;
+        out.dxi = first.dxi;
+        out.deta = first.deta;
         return out;
     }
 
@@ -316,13 +533,13 @@ BivariateDerivatives dubiner_with_second_derivatives(int p, int q, Real xi, Real
     return out;
 }
 
-std::tuple<Real, Real, Real, Real> proriol_with_derivatives(int p, int q, int r,
-                                                             Real xi, Real eta, Real zeta) {
+TrivariateFirstDerivatives proriol_derivatives(int p, int q, int r,
+                                               Real xi, Real eta, Real zeta) {
     // Proriol basis on reference tetrahedron: (xi,eta,zeta>=0, xi+eta+zeta<=1)
     // psi_{p,q,r} = (1-eta-zeta)^p * (1-zeta)^q * P_p^{0,0}(a) * P_q^{2p+1,0}(b) * P_r^{2p+2q+2,0}(c)
     // where a = 2*xi/(1-eta-zeta) - 1, b = 2*eta/(1-zeta) - 1, c = 2*zeta - 1
 
-    const Real eps = std::numeric_limits<Real>::epsilon() * Real(10);
+    const Real eps = collapsed_coordinate_tolerance();
 
     const Real one_minus_eta_zeta = Real(1) - eta - zeta;
     const Real one_minus_zeta = Real(1) - zeta;
@@ -356,60 +573,56 @@ std::tuple<Real, Real, Real, Real> proriol_with_derivatives(int p, int q, int r,
     Real c = Real(2) * zeta - Real(1);
     Real dc_dzeta = Real(2);
 
-    // Jacobi polynomials and derivatives
-    Real Pa = jacobi(p, Real(0), Real(0), a);
-    Real Pa_deriv = jacobi_derivative(p, Real(0), Real(0), a);
-
-    Real Qb = jacobi(q, Real(2 * p + 1), Real(0), b);
-    Real Qb_deriv = jacobi_derivative(q, Real(2 * p + 1), Real(0), b);
-
-    Real Rc = jacobi(r, Real(2 * p + 2 * q + 2), Real(0), c);
-    Real Rc_deriv = jacobi_derivative(r, Real(2 * p + 2 * q + 2), Real(0), c);
+    const auto pa = jacobi_with_second_derivative(p, Real(0), Real(0), a);
+    const auto qb = jacobi_with_second_derivative(q, Real(2 * p + 1), Real(0), b);
+    const auto rc = jacobi_with_second_derivative(r, Real(2 * p + 2 * q + 2), Real(0), c);
 
     // factor1 = (1-eta-zeta)^p
-    Real factor1 = (p > 0) ? std::pow(one_minus_eta_zeta, static_cast<Real>(p)) : Real(1);
-    Real df1_deta = (p > 0) ? Real(-p) * std::pow(one_minus_eta_zeta, static_cast<Real>(p - 1)) : Real(0);
+    Real factor1 = (p > 0) ? pow_int(one_minus_eta_zeta, p) : Real(1);
+    Real df1_deta = (p > 0) ? Real(-p) * pow_int(one_minus_eta_zeta, p - 1) : Real(0);
     Real df1_dzeta = df1_deta; // same since d/deta and d/dzeta of (1-eta-zeta) are both -1
 
     // factor2 = (1-zeta)^q
-    Real factor2 = (q > 0) ? std::pow(one_minus_zeta, static_cast<Real>(q)) : Real(1);
-    Real df2_dzeta = (q > 0) ? Real(-q) * std::pow(one_minus_zeta, static_cast<Real>(q - 1)) : Real(0);
+    Real factor2 = (q > 0) ? pow_int(one_minus_zeta, q) : Real(1);
+    Real df2_dzeta = (q > 0) ? Real(-q) * pow_int(one_minus_zeta, q - 1) : Real(0);
 
     // psi = factor1 * factor2 * Pa * Qb * Rc
-    Real value = factor1 * factor2 * Pa * Qb * Rc;
+    Real value = factor1 * factor2 * pa.value * qb.value * rc.value;
 
     // d(psi)/d(xi) = factor1 * factor2 * dPa/da * da/dxi * Qb * Rc
-    Real dxi = factor1 * factor2 * Pa_deriv * da_dxi * Qb * Rc;
+    Real dxi = factor1 * factor2 * pa.derivative * da_dxi * qb.value * rc.value;
 
     // d(psi)/d(eta): chain rule on factor1, Pa(a), Qb(b)
-    Real deta = df1_deta * factor2 * Pa * Qb * Rc
-              + factor1 * factor2 * Pa_deriv * da_deta * Qb * Rc
-              + factor1 * factor2 * Pa * Qb_deriv * db_deta * Rc;
+    Real deta = df1_deta * factor2 * pa.value * qb.value * rc.value
+              + factor1 * factor2 * pa.derivative * da_deta * qb.value * rc.value
+              + factor1 * factor2 * pa.value * qb.derivative * db_deta * rc.value;
 
     // d(psi)/d(zeta): chain rule on factor1, factor2, Pa(a), Qb(b), Rc(c)
-    Real dzeta = df1_dzeta * factor2 * Pa * Qb * Rc
-               + factor1 * df2_dzeta * Pa * Qb * Rc
-               + factor1 * factor2 * Pa_deriv * da_dzeta * Qb * Rc
-               + factor1 * factor2 * Pa * Qb_deriv * db_dzeta * Rc
-               + factor1 * factor2 * Pa * Qb * Rc_deriv * dc_dzeta;
+    Real dzeta = df1_dzeta * factor2 * pa.value * qb.value * rc.value
+               + factor1 * df2_dzeta * pa.value * qb.value * rc.value
+               + factor1 * factor2 * pa.derivative * da_dzeta * qb.value * rc.value
+               + factor1 * factor2 * pa.value * qb.derivative * db_dzeta * rc.value
+               + factor1 * factor2 * pa.value * qb.value * rc.derivative * dc_dzeta;
 
-    return {value, dxi, deta, dzeta};
+    TrivariateFirstDerivatives out;
+    out.value = value;
+    out.gradient[0] = dxi;
+    out.gradient[1] = deta;
+    out.gradient[2] = dzeta;
+    return out;
 }
 
 TrivariateDerivatives proriol_with_second_derivatives(int p, int q, int r,
                                                       Real xi, Real eta, Real zeta) {
-    const Real eps = std::numeric_limits<Real>::epsilon() * Real(10);
+    const Real eps = collapsed_coordinate_tolerance();
     const Real one_minus_eta_zeta = Real(1) - eta - zeta;
     const Real one_minus_zeta = Real(1) - zeta;
 
     if (std::abs(one_minus_eta_zeta) <= eps || std::abs(one_minus_zeta) <= eps) {
-        const auto [value, dxi, deta, dzeta] =
-            proriol_with_derivatives(p, q, r, xi, eta, zeta);
+        const auto first = proriol_derivatives(p, q, r, xi, eta, zeta);
         TrivariateDerivatives out;
-        out.value = value;
-        out.gradient[0] = dxi;
-        out.gradient[1] = deta;
-        out.gradient[2] = dzeta;
+        out.value = first.value;
+        out.gradient = first.gradient;
         return out;
     }
 

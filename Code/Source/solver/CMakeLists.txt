@@ -443,6 +443,9 @@ if(ENABLE_UNIT_TEST)
   # (lhs.nReq, FSILS_subLsType::pipelined_gmres). Tracked separately; filtering
   # here keeps run_all_unit_tests buildable for the basis comparison harness.
   list(FILTER TEST_SOURCES EXCLUDE REGEX ".*test_fsils_pipelined_gmres\\.cpp$")
+  # perf_microbench_main.cpp is the entry point for the standalone
+  # perf_microbench_one target below; including it here overrides gtest_main.
+  list(FILTER TEST_SOURCES EXCLUDE REGEX ".*basis_comparison_tests/perf_microbench_main\\.cpp$")
   list(LENGTH TEST_SOURCES TEST_SOURCES_COUNT)
   message(STATUS "Found ${TEST_SOURCES_COUNT} test files")
   foreach(TEST_SOURCE ${TEST_SOURCES})

@@ -66,6 +66,13 @@ Real integrate_volume_weight(const svmp::FE::geometry::CutQuadratureRule& rule)
     return value;
 }
 
+void expect_volume_rule_constant_exact(
+    const svmp::FE::geometry::CutQuadratureRule& rule,
+    Real tolerance)
+{
+    EXPECT_NEAR(integrate_volume_weight(rule), rule.measure, tolerance);
+}
+
 Real integrate_volume_coordinate(const svmp::FE::geometry::CutQuadratureRule& rule,
                                  std::size_t component)
 {
@@ -711,6 +718,59 @@ TEST(LevelSetInterfaceBuilder, PreservesSmallVolumeFractionsNearVertexAndEdge)
     EXPECT_EQ(rules[0].side, svmp::FE::geometry::CutIntegrationSide::Negative);
     ASSERT_EQ(rules[0].points.size(), 6u);
     EXPECT_NEAR(integrate_volume_weight(rules[0]), t, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceBuilder, VolumeQuadratureMatchesConservativeToleranceBandFractions)
+{
+    auto request = make_request(/*marker=*/33);
+    request.tolerance = 1.0e-12;
+    LevelSetInterfaceDomain domain(request);
+    appendLinearLevelSetCellCut2D(
+        domain,
+        LevelSetCellCutInput{.parent_cell = 8,
+                             .element_type = ElementType::Quad4,
+                             .node_coordinates = {{{0.0, 0.0, 0.0}},
+                                                  {{1.0, 0.0, 0.0}},
+                                                  {{1.0, 1.0, 0.0}},
+                                                  {{0.0, 1.0, 0.0}}},
+                             .level_set_values = {-2.0e-12,
+                                                  1.0,
+                                                  2.0e-12,
+                                                  -5.0e-13}});
+
+    const auto summary = domain.summary();
+    EXPECT_EQ(summary.active_fragment_count, 1u);
+    EXPECT_EQ(summary.active_volume_region_count, 2u);
+    ASSERT_EQ(domain.fragments().size(), 1u);
+    const auto& fragment = domain.fragments().front();
+    EXPECT_NEAR(fragment.negative_volume_fraction +
+                    fragment.positive_volume_fraction,
+                1.0,
+                1.0e-14);
+    EXPECT_GT(fragment.negative_volume_fraction, 0.0);
+    EXPECT_GT(fragment.positive_volume_fraction, 0.0);
+
+    const auto volume_rules = domain.volumeQuadratureRules();
+    ASSERT_EQ(volume_rules.size(), 2u);
+    Real total_measure = 0.0;
+    Real total_weight = 0.0;
+    bool saw_negative = false;
+    bool saw_positive = false;
+    for (const auto& rule : volume_rules) {
+        expect_volume_rule_constant_exact(rule, 1.0e-14);
+        total_measure += rule.measure;
+        total_weight += integrate_volume_weight(rule);
+        saw_negative =
+            saw_negative ||
+            rule.side == svmp::FE::geometry::CutIntegrationSide::Negative;
+        saw_positive =
+            saw_positive ||
+            rule.side == svmp::FE::geometry::CutIntegrationSide::Positive;
+    }
+    EXPECT_TRUE(saw_negative);
+    EXPECT_TRUE(saw_positive);
+    EXPECT_NEAR(total_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(total_weight, 1.0, 1.0e-14);
 }
 
 TEST(LevelSetInterfaceBuilder, SerialGeneratedInterfaceFragmentCounts)

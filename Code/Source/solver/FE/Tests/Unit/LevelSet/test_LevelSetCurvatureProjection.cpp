@@ -339,6 +339,54 @@ FE::Real curvatureGraphTotalVariation(
     return total;
 }
 
+FE::Real maxAbsDifference(const std::vector<FE::Real>& lhs,
+                          const std::vector<FE::Real>& rhs)
+{
+    FE::Real value = FE::Real{0.0};
+    const auto n = std::min(lhs.size(), rhs.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        value = std::max(value, std::abs(lhs[i] - rhs[i]));
+    }
+    return value;
+}
+
+FE::Real circleCurvatureMeanError(int nx, FE::Real h, FE::Real radius)
+{
+    StructuredQuadMeshAccess mesh(nx, nx, h);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()), 0.0);
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        const auto x = mesh.getNodeCoordinates(v);
+        phi[static_cast<std::size_t>(v)] =
+            std::sqrt(x[0] * x[0] + x[1] * x[1]) - radius;
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+    if (!result.success) {
+        throw std::runtime_error(result.diagnostic);
+    }
+
+    FE::Real error_sum = 0.0;
+    std::size_t samples = 0u;
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        const auto x = mesh.getNodeCoordinates(v);
+        const auto r = std::sqrt(x[0] * x[0] + x[1] * x[1]);
+        if (r < radius - FE::Real{0.05} || r > radius + FE::Real{0.05}) {
+            continue;
+        }
+        error_sum += std::abs(
+            curvature[static_cast<std::size_t>(v)] - FE::Real{1.0} / r);
+        ++samples;
+    }
+    if (samples == 0u) {
+        throw std::runtime_error("no circle curvature samples in narrow band");
+    }
+    return error_sum / static_cast<FE::Real>(samples);
+}
+
 } // namespace
 
 TEST(LevelSetCurvatureProjection, RecoversCircleCurvatureFromSignedDistance)
@@ -379,6 +427,63 @@ TEST(LevelSetCurvatureProjection, RecoversCircleCurvatureFromSignedDistance)
     }
     ASSERT_GT(samples, 0u);
     EXPECT_LT(error_sum / static_cast<FE::Real>(samples), 0.08);
+}
+
+TEST(LevelSetCurvatureProjection, CircleCurvatureErrorImprovesWithRefinement)
+{
+    constexpr FE::Real radius = 0.30;
+    const auto coarse_error =
+        circleCurvatureMeanError(/*nx=*/8, /*h=*/0.10, radius);
+    const auto fine_error =
+        circleCurvatureMeanError(/*nx=*/16, /*h=*/0.05, radius);
+
+    EXPECT_LT(fine_error, coarse_error);
+    EXPECT_LT(fine_error, 0.08);
+}
+
+TEST(LevelSetCurvatureProjection, NarrowBandRestrictsRecoveryToInterfaceVertices)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/16, /*ny=*/16, /*h=*/0.05);
+    constexpr FE::Real radius = 0.30;
+    constexpr FE::Real band_width = 0.055;
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()), 0.0);
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        const auto x = mesh.getNodeCoordinates(v);
+        phi[static_cast<std::size_t>(v)] =
+            std::sqrt(x[0] * x[0] + x[1] * x[1]) - radius;
+    }
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = band_width;
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(curvature.size(), phi.size());
+    EXPECT_DOUBLE_EQ(result.narrow_band_width, band_width);
+    EXPECT_GT(result.narrow_band_vertices, 0u);
+    EXPECT_GT(result.skipped_far_vertices, 0u);
+    EXPECT_EQ(result.narrow_band_vertices + result.skipped_far_vertices,
+              result.vertices);
+    EXPECT_LT(result.fitted_vertices, result.vertices);
+
+    FE::Real error_sum = 0.0;
+    std::size_t samples = 0u;
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        const auto index = static_cast<std::size_t>(v);
+        const auto x = mesh.getNodeCoordinates(v);
+        const auto r = std::sqrt(x[0] * x[0] + x[1] * x[1]);
+        if (std::abs(phi[index]) <= band_width) {
+            error_sum += std::abs(curvature[index] - FE::Real{1.0} / r);
+            ++samples;
+        } else {
+            EXPECT_DOUBLE_EQ(curvature[index], FE::Real{0.0});
+        }
+    }
+    ASSERT_GT(samples, 0u);
+    EXPECT_LT(error_sum / static_cast<FE::Real>(samples), 0.10);
 }
 
 TEST(LevelSetCurvatureProjection, RecoversSphereCurvatureFromSignedDistance)
@@ -469,12 +574,105 @@ TEST(LevelSetCurvatureProjection, SupplementalSamplesAllowUnderresolvedQuadratic
     ASSERT_TRUE(result.success) << result.diagnostic;
     EXPECT_EQ(curvature.size(), phi.size());
     EXPECT_EQ(result.supplemental_samples, samples.size());
+    EXPECT_DOUBLE_EQ(result.supplemental_sample_weight, FE::Real{1.0});
     EXPECT_EQ(result.vertices_with_supplemental_samples, phi.size());
     EXPECT_GE(result.supplemental_sample_rows, samples.size() * phi.size());
     EXPECT_EQ(result.fitted_vertices, phi.size());
     EXPECT_GT(result.max_abs_curvature, FE::Real{0.0});
     EXPECT_LT(result.max_normalized_fit_residual, FE::Real{1.0e-10});
     EXPECT_LT(result.mean_normalized_fit_residual, FE::Real{1.0e-10});
+}
+
+TEST(LevelSetCurvatureProjection, SupplementalSampleWeightControlsFitInfluence)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/3, /*ny=*/3, /*h=*/0.25);
+    const auto phi_function = [](const std::array<FE::Real, 3>& x) {
+        return x[0] + FE::Real{0.25} * x[0] * x[0] +
+               FE::Real{0.50} * x[1] * x[1];
+    };
+
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()), 0.0);
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        phi[static_cast<std::size_t>(v)] = phi_function(mesh.getNodeCoordinates(v));
+    }
+
+    std::vector<level_set::LevelSetCurvatureProjectionSample> samples{
+        level_set::LevelSetCurvatureProjectionSample{
+            .parent_cell = 4,
+            .coordinate = {{FE::Real{0.04}, FE::Real{-0.03}, FE::Real{0.0}}},
+            .value = phi_function({{FE::Real{0.04},
+                                    FE::Real{-0.03},
+                                    FE::Real{0.0}}}) +
+                     FE::Real{0.08}},
+    };
+
+    level_set::LevelSetCurvatureProjectionOptions low_weight_options;
+    low_weight_options.max_neighbor_rings = 2;
+    low_weight_options.supplemental_sample_weight = FE::Real{1.0e-4};
+    std::vector<FE::Real> low_weight_curvature;
+    const auto low_weight = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, low_weight_options, low_weight_curvature);
+    ASSERT_TRUE(low_weight.success) << low_weight.diagnostic;
+    EXPECT_DOUBLE_EQ(low_weight.supplemental_sample_weight,
+                     low_weight_options.supplemental_sample_weight);
+
+    auto high_weight_options = low_weight_options;
+    high_weight_options.supplemental_sample_weight = FE::Real{1.0e4};
+    std::vector<FE::Real> high_weight_curvature;
+    const auto high_weight = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, high_weight_options, high_weight_curvature);
+    ASSERT_TRUE(high_weight.success) << high_weight.diagnostic;
+    EXPECT_DOUBLE_EQ(high_weight.supplemental_sample_weight,
+                     high_weight_options.supplemental_sample_weight);
+
+    EXPECT_GT(maxAbsDifference(low_weight_curvature, high_weight_curvature),
+              FE::Real{1.0e-2});
+}
+
+TEST(LevelSetCurvatureProjection, RejectsNonpositiveSupplementalSampleWeight)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/2, /*ny=*/2, /*h=*/1.0);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()),
+                              FE::Real{0.0});
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.supplemental_sample_weight = FE::Real{0.0};
+    std::vector<FE::Real> curvature;
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection, RejectsNegativeNarrowBandWidth)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/2, /*ny=*/2, /*h=*/1.0);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()),
+                              FE::Real{0.0});
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.narrow_band_width = FE::Real{-1.0e-3};
+    std::vector<FE::Real> curvature;
+    EXPECT_THROW((void)level_set::projectLevelSetMeanCurvatureToVertices(
+                     mesh, phi, options, curvature),
+                 std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection, FailsClosedWhenNarrowBandHasNoVertices)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/2, /*ny=*/2, /*h=*/1.0);
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()),
+                              FE::Real{1.0});
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.narrow_band_width = FE::Real{1.0e-3};
+    std::vector<FE::Real> curvature;
+    const auto result = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.narrow_band_vertices, 0u);
+    EXPECT_EQ(result.skipped_far_vertices, result.vertices);
+    EXPECT_NE(result.diagnostic.find("narrow band"), std::string::npos);
 }
 
 TEST(LevelSetCurvatureProjection, FailsClosedWhenFitResidualLimitIsExceeded)
@@ -508,6 +706,53 @@ TEST(LevelSetCurvatureProjection, FailsClosedWhenFitResidualLimitIsExceeded)
     EXPECT_FALSE(result.success);
     EXPECT_GT(result.fit_residual_failure_vertices, 0u);
     EXPECT_NE(result.diagnostic.find("residual"), std::string::npos);
+}
+
+TEST(LevelSetCurvatureProjection, FailsClosedWhenZeroFallbackLimitIsExceeded)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/16, /*ny=*/16, /*h=*/0.05);
+    constexpr FE::Real radius = 0.25;
+    constexpr FE::Real corner_plateau = 10.0;
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()), 0.0);
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        const auto x = mesh.getNodeCoordinates(v);
+        phi[static_cast<std::size_t>(v)] =
+            std::sqrt(x[0] * x[0] + x[1] * x[1]) - radius;
+        if (x[0] <= FE::Real{-0.25} && x[1] <= FE::Real{-0.25}) {
+            phi[static_cast<std::size_t>(v)] = corner_plateau;
+        }
+    }
+
+    const std::vector<level_set::LevelSetCurvatureProjectionSample> samples{
+        level_set::LevelSetCurvatureProjectionSample{
+            .parent_cell = 0,
+            .coordinate = {{FE::Real{-0.375},
+                            FE::Real{-0.375},
+                            FE::Real{0.0}}},
+            .value = corner_plateau},
+    };
+
+    level_set::LevelSetCurvatureProjectionOptions options;
+    options.max_neighbor_rings = 2;
+    options.narrow_band_width = FE::Real{0.055};
+    std::vector<FE::Real> curvature;
+    const auto allowed = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+
+    ASSERT_TRUE(allowed.success) << allowed.diagnostic;
+    ASSERT_GT(allowed.fitted_vertices, 0u);
+    ASSERT_GT(allowed.zero_fallback_vertices, 0u);
+
+    options.max_zero_fallback_vertices = 0;
+    const auto rejected = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature);
+
+    EXPECT_FALSE(rejected.success);
+    EXPECT_EQ(rejected.zero_fallback_vertices, allowed.zero_fallback_vertices);
+    EXPECT_NE(rejected.diagnostic.find("zero fallback vertices"),
+              std::string::npos);
+    EXPECT_NE(rejected.diagnostic.find("configured limit"),
+              std::string::npos);
 }
 
 TEST(LevelSetCurvatureProjection,
@@ -549,6 +794,16 @@ TEST(LevelSetCurvatureProjection,
     for (const auto value : curvature) {
         EXPECT_TRUE(std::isfinite(value));
     }
+
+    options.max_neighbor_fallback_vertices = 0;
+    const auto rejected = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, options, curvature);
+    EXPECT_FALSE(rejected.success);
+    EXPECT_EQ(rejected.fallback_vertices, result.fallback_vertices);
+    EXPECT_NE(rejected.diagnostic.find("neighbor fallback vertices"),
+              std::string::npos);
+    EXPECT_NE(rejected.diagnostic.find("configured limit"),
+              std::string::npos);
 }
 
 TEST(LevelSetCurvatureProjection, OptionalSmoothingReducesCurvatureGraphVariation)
@@ -590,6 +845,74 @@ TEST(LevelSetCurvatureProjection, OptionalSmoothingReducesCurvatureGraphVariatio
 
     ASSERT_TRUE(smoothed.success) << smoothed.diagnostic;
     EXPECT_EQ(smoothed.smoothing_iterations_applied, 3u);
+    EXPECT_GT(smoothed.smoothing_mean_abs_update, FE::Real{0.0});
+    EXPECT_GT(smoothed.smoothing_max_abs_update, FE::Real{0.0});
+    EXPECT_LT(curvatureGraphTotalVariation(mesh, smoothed_curvature),
+              curvatureGraphTotalVariation(mesh, unsmoothed_curvature));
+}
+
+TEST(LevelSetCurvatureProjection,
+     ParsesCurvatureSmoothingModesAndRejectsUnknownTokens)
+{
+    EXPECT_EQ(level_set::parseLevelSetCurvatureSmoothingMode("local_graph"),
+              level_set::LevelSetCurvatureSmoothingMode::LocalGraph);
+    EXPECT_EQ(level_set::parseLevelSetCurvatureSmoothingMode("mass-stiffness"),
+              level_set::LevelSetCurvatureSmoothingMode::MassStiffnessOperator);
+    EXPECT_EQ(level_set::parseLevelSetCurvatureSmoothingMode("helmholtz"),
+              level_set::LevelSetCurvatureSmoothingMode::MassStiffnessOperator);
+    EXPECT_STREQ(level_set::levelSetCurvatureSmoothingModeName(
+                     level_set::LevelSetCurvatureSmoothingMode::
+                         MassStiffnessOperator),
+                 "mass_stiffness_operator");
+    EXPECT_THROW((void)level_set::parseLevelSetCurvatureSmoothingMode(
+                     "unsupported"),
+                 std::invalid_argument);
+}
+
+TEST(LevelSetCurvatureProjection,
+     MassStiffnessOperatorSmoothingReducesCurvatureGraphVariation)
+{
+    StructuredQuadMeshAccess mesh(/*nx=*/8, /*ny=*/8, /*h=*/0.08);
+    const auto phi_function = [](const std::array<FE::Real, 3>& x) {
+        return x[0] + FE::Real{0.20} * x[0] * x[0] +
+               FE::Real{0.35} * x[1] * x[1];
+    };
+
+    std::vector<FE::Real> phi(static_cast<std::size_t>(mesh.numVertices()), 0.0);
+    FE::GlobalIndex center_vertex = 0;
+    FE::Real center_distance2 = std::numeric_limits<FE::Real>::infinity();
+    for (FE::GlobalIndex v = 0; v < mesh.numVertices(); ++v) {
+        const auto x = mesh.getNodeCoordinates(v);
+        phi[static_cast<std::size_t>(v)] = phi_function(x);
+        const FE::Real distance2 = x[0] * x[0] + x[1] * x[1];
+        if (distance2 < center_distance2) {
+            center_distance2 = distance2;
+            center_vertex = v;
+        }
+    }
+    phi[static_cast<std::size_t>(center_vertex)] += FE::Real{0.03};
+
+    level_set::LevelSetCurvatureProjectionOptions unsmoothed_options;
+    unsmoothed_options.max_neighbor_rings = 2;
+    std::vector<FE::Real> unsmoothed_curvature;
+    const auto unsmoothed = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, unsmoothed_options, unsmoothed_curvature);
+    ASSERT_TRUE(unsmoothed.success) << unsmoothed.diagnostic;
+
+    auto smoothed_options = unsmoothed_options;
+    smoothed_options.smoothing_mode =
+        level_set::LevelSetCurvatureSmoothingMode::MassStiffnessOperator;
+    smoothed_options.smoothing_iterations = 2;
+    smoothed_options.smoothing_relaxation = 0.5;
+    std::vector<FE::Real> smoothed_curvature;
+    const auto smoothed = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, smoothed_options, smoothed_curvature);
+
+    ASSERT_TRUE(smoothed.success) << smoothed.diagnostic;
+    EXPECT_EQ(smoothed.smoothing_mode,
+              level_set::LevelSetCurvatureSmoothingMode::MassStiffnessOperator);
+    EXPECT_EQ(smoothed.smoothing_iterations_applied, 2u);
+    EXPECT_GT(smoothed.smoothing_operator_edges, 0u);
     EXPECT_GT(smoothed.smoothing_mean_abs_update, FE::Real{0.0});
     EXPECT_GT(smoothed.smoothing_max_abs_update, FE::Real{0.0});
     EXPECT_LT(curvatureGraphTotalVariation(mesh, smoothed_curvature),
@@ -660,9 +983,31 @@ TEST(LevelSetCurvatureProjection, WorkspaceReusesMeshAndSampleAdjacency)
         mesh, phi, samples, options, curvature, workspace);
     ASSERT_TRUE(third.success) << third.diagnostic;
     EXPECT_TRUE(third.reused_vertex_adjacency);
-    EXPECT_FALSE(third.reused_sample_adjacency);
+    EXPECT_TRUE(third.reused_sample_adjacency);
     EXPECT_EQ(third.vertex_adjacency_builds, 1u);
-    EXPECT_EQ(third.sample_adjacency_builds, 2u);
+    EXPECT_EQ(third.sample_adjacency_builds, 1u);
+
+    samples.front().parent_cell = static_cast<FE::MeshIndex>(-1);
+    samples.front().value =
+        phi_function(samples.front().coordinate, FE::Real{0.01});
+    const auto fourth = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature, workspace);
+    ASSERT_TRUE(fourth.success) << fourth.diagnostic;
+    EXPECT_TRUE(fourth.reused_vertex_adjacency);
+    EXPECT_FALSE(fourth.reused_sample_adjacency);
+    EXPECT_EQ(fourth.vertex_adjacency_builds, 1u);
+    EXPECT_EQ(fourth.sample_adjacency_builds, 2u);
+
+    samples.front().coordinate[0] += FE::Real{0.01};
+    samples.front().value =
+        phi_function(samples.front().coordinate, FE::Real{0.01});
+    const auto fifth = level_set::projectLevelSetMeanCurvatureToVertices(
+        mesh, phi, samples, options, curvature, workspace);
+    ASSERT_TRUE(fifth.success) << fifth.diagnostic;
+    EXPECT_TRUE(fifth.reused_vertex_adjacency);
+    EXPECT_FALSE(fifth.reused_sample_adjacency);
+    EXPECT_EQ(fifth.vertex_adjacency_builds, 1u);
+    EXPECT_EQ(fifth.sample_adjacency_builds, 3u);
 }
 
 TEST(LevelSetCurvatureProjection,

@@ -8,6 +8,7 @@ endif()
 enable_testing()
 
 add_executable(test_application
+  Unit/test_ApplicationDriverLevelSetWorkflows.cpp
   Unit/test_ActiveDomainOutput.cpp
   Unit/test_EquationTranslator.cpp
   Unit/test_LevelSetCutConfiguration.cpp
@@ -21,8 +22,10 @@ add_executable(test_application
   Unit/test_OpenVesselStabilizationMetadata.cpp
   ../Core/ActiveDomainOutput.cpp
   ../Core/LevelSetCutConfiguration.cpp
+  ../Core/LevelSetCurvatureSamples.cpp
   ../Core/LevelSetMaintenanceHistory.cpp
   ../Core/MeshCollection.cpp
+  ../Core/SimulationBuilder.cpp
   ../Translators/EquationTranslator.cpp
   ../Translators/LevelSetEquationTranslator.cpp
   ../Translators/MeshTranslator.cpp

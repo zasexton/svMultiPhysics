@@ -9,9 +9,12 @@
 
 #include "Analysis/AnalysisNumericGuards.h"
 
-#include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/Interfaces/GenericMatrix.h"
 #include "Core/MpiCollectiveTrace.h"
+
+#if defined(FE_HAS_FSILS)
+#include "Backends/FSILS/FsilsMatrix.h"
+#endif
 
 #if defined(FE_HAS_EIGEN)
 #include "Backends/Eigen/EigenMatrix.h"
@@ -103,20 +106,6 @@ struct NumericEntryValue {
 [[nodiscard]] bool almostZero(Real value, Real tolerance) noexcept
 {
     return std::abs(value) <= tolerance;
-}
-
-[[nodiscard]] GlobalDofId backendToFeDof(const backends::FsilsShared& shared,
-                                         GlobalDofId backend_dof) noexcept
-{
-    const auto perm = shared.dof_permutation;
-    if (!perm || perm->empty()) {
-        return backend_dof;
-    }
-    if (backend_dof < 0 ||
-        static_cast<std::size_t>(backend_dof) >= perm->inverse.size()) {
-        return INVALID_GLOBAL_INDEX;
-    }
-    return perm->inverse[static_cast<std::size_t>(backend_dof)];
 }
 
 [[nodiscard]] std::vector<GlobalDofId> sortedUniqueInRange(std::vector<GlobalDofId> values,
@@ -724,6 +713,21 @@ private:
 };
 #endif
 
+#if defined(FE_HAS_FSILS)
+[[nodiscard]] GlobalDofId backendToFeDof(const backends::FsilsShared& shared,
+                                         GlobalDofId backend_dof) noexcept
+{
+    const auto perm = shared.dof_permutation;
+    if (!perm || perm->empty()) {
+        return backend_dof;
+    }
+    if (backend_dof < 0 ||
+        static_cast<std::size_t>(backend_dof) >= perm->inverse.size()) {
+        return INVALID_GLOBAL_INDEX;
+    }
+    return perm->inverse[static_cast<std::size_t>(backend_dof)];
+}
+
 class FsilsSparseRowScanSource final : public SparseRowScanSource {
 public:
     explicit FsilsSparseRowScanSource(const backends::FsilsMatrix& matrix)
@@ -831,6 +835,7 @@ private:
 
     const backends::FsilsMatrix& matrix_;
 };
+#endif
 
 #if defined(FE_HAS_PETSC)
 class PetscSparseRowScanSource final : public SparseRowScanSource {
@@ -1168,9 +1173,11 @@ makeSparseRowScanSource(const backends::GenericMatrix& matrix)
             return nullptr;
 
         case backends::BackendKind::FSILS:
+#if defined(FE_HAS_FSILS)
             if (const auto* fsils = dynamic_cast<const backends::FsilsMatrix*>(&matrix)) {
                 return std::make_unique<FsilsSparseRowScanSource>(*fsils);
             }
+#endif
             return nullptr;
 
         case backends::BackendKind::PETSc:

@@ -16,6 +16,10 @@ Common reported quantities:
 - generated-interface measure and normals for level-set runs
 - mesh quality metrics for fitted ALE runs
 
+Focused unfitted level-set qualification evidence for the 2026-05-22
+active/inactive cut-volume retention review is recorded in
+`Documentation/unfitted_level_set_free_surface_qualification_log_20260522.md`.
+
 ## Generated Literature Geometry Fixtures
 
 The following mesh fixtures expand the open-vessel coverage beyond the small
@@ -82,6 +86,28 @@ vertex on the selected active side. This is a diagnostic and validation aid for
 `Velocity_source=prescribed_data` transport fields, not a PDE-based normal,
 harmonic, or fast-marching extension. Coupled-field level-set advection does
 not use this application-side copy unless the wet-extension option is enabled.
+
+This is separate from the Navier-Stokes unfitted free-surface
+`Enable_velocity_extension` option. That option installs a PDE diffusion term
+for the velocity field on the inactive generated cut-volume side. When it is
+enabled, the active cut context must retain both active and inactive generated
+cut-volume rules. The physical one-fluid Navier-Stokes mass, momentum, and
+pressure terms remain restricted to the active wet side. The inactive-side
+homogeneous velocity clamp is disabled for this PDE-extension mode so the
+extension solve can own those inactive velocity DOFs; inactive pressure support
+constraints remain active.
+
+The unfitted validation path remains one-fluid. The exterior side is passive
+except for explicitly requested constraints, diagnostics, stabilization support,
+or extension terms. Two-phase density/viscosity jumps, pressure enrichment, and
+two-sided interface jump conditions require separate two-phase CutFEM
+qualification.
+
+High-order implicit generated-interface cases use a refreshed-frozen geometry
+contract unless they explicitly select and qualify a differentiated
+linear-corner path. The interface and cut-volume quadrature are regenerated
+from the current nonlinear state, but high-order quadrature sensitivities are
+not part of the default Navier-Stokes Jacobian.
 
 ## Level-Set Maintenance Policy
 

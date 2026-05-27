@@ -940,6 +940,118 @@ private:
     std::shared_ptr<FE::elements::Element> triangle_{};
 };
 
+class ThreeQuadStripMeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 3; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 3; }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override { return 8; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return 7; }
+    [[nodiscard]] std::uint64_t topologyRevision() const override { return 11; }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override { return 13; }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override { return 17; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override
+    {
+        return true;
+    }
+
+    [[nodiscard]] FE::ElementType getCellType(
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return FE::ElementType::Quad4;
+    }
+
+    void getCellNodes(FE::GlobalIndex cell_id,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        if (cell_id == 0) {
+            nodes = {0, 1, 5, 4};
+        } else if (cell_id == 1) {
+            nodes = {1, 2, 6, 5};
+        } else {
+            nodes = {2, 3, 7, 6};
+        }
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex cell_id,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        std::vector<FE::GlobalIndex> nodes;
+        getCellNodes(cell_id, nodes);
+        coords.clear();
+        coords.reserve(nodes.size());
+        for (const auto node : nodes) {
+            coords.push_back(getNodeCoordinates(node));
+        }
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face_id*/,
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+        callback(2);
+    }
+
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    std::array<std::array<FE::Real, 3>, 8> nodes_{{
+        {{0.0, 0.0, 0.0}},
+        {{1.0, 0.0, 0.0}},
+        {{2.0, 0.0, 0.0}},
+        {{3.0, 0.0, 0.0}},
+        {{0.0, 1.0, 0.0}},
+        {{1.0, 1.0, 0.0}},
+        {{2.0, 1.0, 0.0}},
+        {{3.0, 1.0, 0.0}},
+    }};
+};
+
 class MixedHexTetraMeshAccess final : public FE::assembly::IMeshAccess {
 public:
     explicit MixedHexTetraMeshAccess(bool reverse_cell_iteration = false)
@@ -1211,6 +1323,26 @@ private:
     topo.vertex_gids = {0, 1, 2, 3};
     topo.cell_gids = {0};
     topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+[[nodiscard]] FE::systems::SetupInputs makeThreeQuadStripSetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 3;
+    topo.n_vertices = 8;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 4, 8, 12};
+    topo.cell2vertex_data = {0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6};
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5, 6, 7};
+    topo.cell_gids = {0, 1, 2};
+    topo.cell_owner_ranks = {0, 0, 0};
 
     FE::systems::SetupInputs inputs;
     inputs.topology_override = std::move(topo);
@@ -1615,6 +1747,51 @@ void expectSingleParentVolumeRulesPartitionMeasure(
     EXPECT_NEAR(total_measure, parent_measure, tolerance);
 }
 
+void expectAffineXCutNormalOrientationAndSideConvention(
+    const FE::interfaces::LevelSetInterfaceDomain& domain,
+    FE::Real cut_coordinate)
+{
+    constexpr FE::Real normal_tol = 1.0e-12;
+    constexpr FE::Real point_tol = 1.0e-11;
+    const std::array<FE::Real, 3> grad_phi{{1.0, 0.0, 0.0}};
+
+    std::size_t interface_points = 0u;
+    for (const auto& rule : domain.interfaceQuadratureRules()) {
+        EXPECT_EQ(rule.kind, FE::geometry::CutQuadratureKind::Interface);
+        EXPECT_EQ(rule.side, FE::geometry::CutIntegrationSide::Interface);
+        for (const auto& point : rule.points) {
+            EXPECT_NEAR(vectorNorm(point.normal), 1.0, normal_tol);
+            EXPECT_NEAR(vectorDot(point.normal, grad_phi), 1.0, normal_tol);
+            EXPECT_NEAR(point.point[0], cut_coordinate, point_tol);
+            EXPECT_LE(std::abs(point.level_set_residual), point_tol);
+            ++interface_points;
+        }
+    }
+    EXPECT_GT(interface_points, 0u);
+
+    std::size_t negative_points = 0u;
+    std::size_t positive_points = 0u;
+    for (const auto& rule : domain.volumeQuadratureRules()) {
+        EXPECT_EQ(rule.kind, FE::geometry::CutQuadratureKind::Volume);
+        ASSERT_TRUE(rule.side == FE::geometry::CutIntegrationSide::Negative ||
+                    rule.side == FE::geometry::CutIntegrationSide::Positive);
+        for (const auto& point : rule.points) {
+            EXPECT_NEAR(vectorNorm(point.normal), 1.0, normal_tol);
+            if (rule.side == FE::geometry::CutIntegrationSide::Negative) {
+                EXPECT_NEAR(vectorDot(point.normal, grad_phi), 1.0, normal_tol);
+                EXPECT_LE(point.point[0], cut_coordinate + point_tol);
+                ++negative_points;
+            } else {
+                EXPECT_NEAR(vectorDot(point.normal, grad_phi), -1.0, normal_tol);
+                EXPECT_GE(point.point[0], cut_coordinate - point_tol);
+                ++positive_points;
+            }
+        }
+    }
+    EXPECT_GT(negative_points, 0u);
+    EXPECT_GT(positive_points, 0u);
+}
+
 void expectGeneratedCutRulesAreFinite(
     const FE::interfaces::LevelSetInterfaceDomain& domain)
 {
@@ -1689,12 +1866,12 @@ FE::math::Vector<FE::Real, 3> curvedHexPhysicalPoint(
 std::shared_ptr<FE::geometry::GeometryMapping> makeCurvedHex27Mapping()
 {
     std::vector<FE::math::Vector<FE::Real, 3>> nodes;
-    nodes.reserve(FE::basis::NodeOrdering::num_nodes(FE::ElementType::Hex27));
+    nodes.reserve(FE::basis::ReferenceNodeLayout::num_nodes(FE::ElementType::Hex27));
     for (std::size_t i = 0;
-         i < FE::basis::NodeOrdering::num_nodes(FE::ElementType::Hex27);
+         i < FE::basis::ReferenceNodeLayout::num_nodes(FE::ElementType::Hex27);
          ++i) {
         nodes.push_back(curvedHexPhysicalPoint(
-            FE::basis::NodeOrdering::get_node_coords(FE::ElementType::Hex27, i)));
+            FE::basis::ReferenceNodeLayout::get_node_coords(FE::ElementType::Hex27, i)));
     }
 
     FE::geometry::MappingRequest request{};
@@ -1905,6 +2082,101 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadEllipseCut(
     return lifecycle.build(system, options, solution);
 }
 
+level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
+    const std::function<FE::Real(const std::array<FE::Real, 3>&)>& level_set_function,
+    int subdivision_depth,
+    int interface_order,
+    int volume_order,
+    int interface_marker)
+{
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.setup({}, makeSingleQuadSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            level_set_function(x);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_max_subdivision_depth = subdivision_depth;
+    options.interface_quadrature_order = interface_order;
+    options.volume_quadrature_order = volume_order;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    return lifecycle.build(system, options, solution);
+}
+
+level_set::LevelSetGeneratedInterfaceResult
+buildSingleQuad9LinearCornerEvaluatorNormalFlipCut()
+{
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    system.setup({}, makeSingleQuadSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        FE::Real value = x[1];
+        if (std::abs(x[0]) < FE::Real{1.0e-14} &&
+            std::abs(x[1] + FE::Real{1.0}) < FE::Real{1.0e-14}) {
+            value = FE::Real{3.0};
+        } else if (std::abs(x[0]) < FE::Real{1.0e-14} &&
+                   std::abs(x[1] - FE::Real{1.0}) < FE::Real{1.0e-14}) {
+            value = FE::Real{-3.0};
+        }
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] = value;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = 980;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::LinearCorner;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::LinearCorner;
+    options.interface_quadrature_order = 0;
+    options.volume_quadrature_order = 1;
+    options.allow_corner_linearized_geometry = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    return lifecycle.build(system, options, solution);
+}
+
 level_set::LevelSetGeneratedInterfaceResult buildSingleHexSayeCut(
     const std::function<FE::Real(const std::array<FE::Real, 3>&)>& level_set_function,
     int subdivision_depth,
@@ -1959,12 +2231,17 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleTriangleHighOrderSubcellC
     int interface_marker,
     int subdivision_depth = 3,
     int interface_order = 1,
-    int volume_order = 2)
+    int volume_order = 2,
+    FE::ElementType element_type = FE::ElementType::Triangle6,
+    int level_set_order = 2)
 {
     const auto mesh =
-        std::make_shared<SingleTriangleMeshAccess>(FE::ElementType::Triangle6);
+        std::make_shared<SingleTriangleMeshAccess>(element_type);
     auto scalar_space =
-        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+        FE::spaces::Space(FE::spaces::SpaceType::H1,
+                          mesh,
+                          level_set_order,
+                          /*components=*/1);
 
     FE::systems::FESystem system(mesh);
     const auto phi = system.addField(FE::systems::FieldSpec{
@@ -2090,7 +2367,8 @@ level_set::LevelSetGeneratedInterfaceResult buildSayeAffineHyperrectangleCut(
     FE::Real cut_coordinate,
     int subdivision_depth = 3,
     int interface_order = 1,
-    int volume_order = 2)
+    int volume_order = 2,
+    bool require_production_qualified_backend = false)
 {
     const bool is_2d = element_type == FE::ElementType::Quad4 ||
                        element_type == FE::ElementType::Quad8 ||
@@ -2139,6 +2417,8 @@ level_set::LevelSetGeneratedInterfaceResult buildSayeAffineHyperrectangleCut(
     options.implicit_cut_max_subdivision_depth = subdivision_depth;
     options.interface_quadrature_order = interface_order;
     options.volume_quadrature_order = volume_order;
+    options.require_production_qualified_implicit_cut_backend =
+        require_production_qualified_backend;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     return lifecycle.build(system, options, solution);
@@ -2150,7 +2430,8 @@ level_set::LevelSetGeneratedInterfaceResult buildHighOrderSubcellAffineSimplexCu
     FE::Real cut_coordinate,
     int subdivision_depth = 3,
     int interface_order = 1,
-    int volume_order = 2)
+    int volume_order = 2,
+    bool require_production_qualified_backend = false)
 {
     const bool is_2d = element_type == FE::ElementType::Triangle3 ||
                        element_type == FE::ElementType::Triangle6;
@@ -2203,6 +2484,8 @@ level_set::LevelSetGeneratedInterfaceResult buildHighOrderSubcellAffineSimplexCu
     options.implicit_cut_max_subdivision_depth = subdivision_depth;
     options.interface_quadrature_order = interface_order;
     options.volume_quadrature_order = volume_order;
+    options.require_production_qualified_implicit_cut_backend =
+        require_production_qualified_backend;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     return lifecycle.build(system, options, solution);
@@ -2392,6 +2675,78 @@ TEST(LevelSetInterfaceLifecycle, BuildsDomainFromScalarField)
     EXPECT_EQ(volume_rules.front().provenance.achieved_quadrature_order, 1);
 }
 
+TEST(LevelSetInterfaceLifecycle, SideOnlyActiveVolumeFilteringReusesGeneratedDomain)
+{
+    constexpr int interface_marker = 782;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.interface_quadrature_order = 0;
+    options.volume_quadrature_order = 1;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    ASSERT_GT(initial.summary.negative_volume_measure, 0.0);
+    ASSERT_GT(initial.summary.positive_volume_measure, 0.0);
+    EXPECT_EQ(initial.domain_cache_hits, 0u);
+
+    FE::assembly::CutIntegrationContext negative_context;
+    negative_context.addGeneratedInterfaceDomain(
+        initial.domain,
+        FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_FALSE(negative_context.generatedVolumeRulesForMarkerAndSide(
+        interface_marker,
+        FE::geometry::CutIntegrationSide::Negative).empty());
+    EXPECT_TRUE(negative_context.generatedVolumeRulesForMarkerAndSide(
+        interface_marker,
+        FE::geometry::CutIntegrationSide::Positive).empty());
+
+    const auto side_only_rebuild = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(side_only_rebuild.success) << side_only_rebuild.diagnostic;
+    EXPECT_EQ(side_only_rebuild.domain_cache_hits, 1u);
+    EXPECT_EQ(side_only_rebuild.cell_cache_misses, 0u);
+    EXPECT_EQ(side_only_rebuild.backend_elapsed_seconds, 0.0);
+    EXPECT_NEAR(side_only_rebuild.summary.negative_volume_measure,
+                initial.summary.negative_volume_measure,
+                1.0e-12);
+    EXPECT_NEAR(side_only_rebuild.summary.positive_volume_measure,
+                initial.summary.positive_volume_measure,
+                1.0e-12);
+
+    FE::assembly::CutIntegrationContext positive_context;
+    positive_context.addGeneratedInterfaceDomain(
+        side_only_rebuild.domain,
+        FE::geometry::CutIntegrationSide::Positive);
+    EXPECT_TRUE(positive_context.generatedVolumeRulesForMarkerAndSide(
+        interface_marker,
+        FE::geometry::CutIntegrationSide::Negative).empty());
+    EXPECT_FALSE(positive_context.generatedVolumeRulesForMarkerAndSide(
+        interface_marker,
+        FE::geometry::CutIntegrationSide::Positive).empty());
+}
+
 TEST(LevelSetInterfaceLifecycle, ReusesUnchangedGeneratedInterfaceCells)
 {
     constexpr int interface_marker = 874;
@@ -2432,6 +2787,7 @@ TEST(LevelSetInterfaceLifecycle, ReusesUnchangedGeneratedInterfaceCells)
     EXPECT_EQ(initial.cell_count, 2u);
     EXPECT_EQ(initial.cell_cache_hits, 0u);
     EXPECT_EQ(initial.cell_cache_misses, 2u);
+    EXPECT_EQ(initial.cell_refresh_candidate_count, 2u);
     EXPECT_EQ(initial.domain_cache_hits, 0u);
     EXPECT_GT(initial.backend_elapsed_seconds, 0.0);
 
@@ -2441,6 +2797,8 @@ TEST(LevelSetInterfaceLifecycle, ReusesUnchangedGeneratedInterfaceCells)
     EXPECT_EQ(repeated.cell_count, 2u);
     EXPECT_EQ(repeated.cell_cache_hits, 2u);
     EXPECT_EQ(repeated.cell_cache_misses, 0u);
+    EXPECT_EQ(repeated.cell_cache_unchanged_dof_hits, 0u);
+    EXPECT_EQ(repeated.cell_refresh_candidate_count, 0u);
     EXPECT_EQ(repeated.domain_cache_hits, 1u);
     EXPECT_EQ(repeated.backend_elapsed_seconds, 0.0);
     EXPECT_NEAR(repeated.summary.negative_volume_measure,
@@ -2458,11 +2816,24 @@ TEST(LevelSetInterfaceLifecycle, ReusesUnchangedGeneratedInterfaceCells)
     EXPECT_EQ(updated.cell_count, 2u);
     EXPECT_EQ(updated.cell_cache_hits, 1u);
     EXPECT_EQ(updated.cell_cache_misses, 1u);
+    EXPECT_EQ(updated.cell_cache_unchanged_dof_hits, 1u);
+    EXPECT_EQ(updated.cell_refresh_candidate_count, 1u);
     EXPECT_EQ(updated.domain_cache_hits, 0u);
     EXPECT_GT(updated.backend_elapsed_seconds, 0.0);
     EXPECT_GT(std::abs(updated.summary.negative_volume_measure -
                        repeated.summary.negative_volume_measure),
               1.0e-4);
+
+    level_set::LevelSetGeneratedInterfaceLifecycle fresh_lifecycle;
+    const auto fresh_updated = fresh_lifecycle.build(system, options, solution);
+    ASSERT_TRUE(fresh_updated.success) << fresh_updated.diagnostic;
+    EXPECT_NEAR(updated.summary.negative_volume_measure,
+                fresh_updated.summary.negative_volume_measure,
+                1.0e-12);
+    EXPECT_EQ(updated.domain.fragments().size(),
+              fresh_updated.domain.fragments().size());
+    EXPECT_EQ(updated.domain.volumeRegions().size(),
+              fresh_updated.domain.volumeRegions().size());
 }
 
 TEST(LevelSetInterfaceLifecycle, ReusesCellsAcrossUnrelatedMeshFieldLayoutChanges)
@@ -2502,6 +2873,7 @@ TEST(LevelSetInterfaceLifecycle, ReusesCellsAcrossUnrelatedMeshFieldLayoutChange
     ASSERT_TRUE(initial.success) << initial.diagnostic;
     EXPECT_EQ(initial.cell_cache_hits, 0u);
     EXPECT_EQ(initial.cell_cache_misses, 2u);
+    EXPECT_EQ(initial.cell_refresh_candidate_count, 2u);
     EXPECT_EQ(initial.domain_cache_hits, 0u);
 
     mesh->setFieldLayoutRevision(99u);
@@ -2509,8 +2881,75 @@ TEST(LevelSetInterfaceLifecycle, ReusesCellsAcrossUnrelatedMeshFieldLayoutChange
     ASSERT_TRUE(repeated.success) << repeated.diagnostic;
     EXPECT_EQ(repeated.cell_cache_hits, 2u);
     EXPECT_EQ(repeated.cell_cache_misses, 0u);
+    EXPECT_EQ(repeated.cell_refresh_candidate_count, 0u);
     EXPECT_EQ(repeated.domain_cache_hits, 1u);
     EXPECT_EQ(repeated.backend_elapsed_seconds, 0.0);
+}
+
+TEST(LevelSetInterfaceLifecycle, TracksAffectedCellNeighborhoodForIncrementalRefresh)
+{
+    constexpr int interface_marker = 876;
+    const auto mesh = std::make_shared<ThreeQuadStripMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeThreeQuadStripSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex, x[0] - FE::Real{0.5});
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.tolerance = 1.0e-12;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 1;
+    options.affected_cell_neighborhood_layers = 1;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    EXPECT_EQ(initial.cell_count, 3u);
+    EXPECT_EQ(initial.cell_cache_hits, 0u);
+    EXPECT_EQ(initial.cell_cache_misses, 3u);
+    EXPECT_EQ(initial.cell_refresh_candidate_count, 3u);
+    EXPECT_EQ(initial.affected_cell_neighborhood_layers, 1);
+
+    setFieldComponentValue(solution, system, phi, 0, FE::Real{-0.75});
+    const auto updated = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(updated.success) << updated.diagnostic;
+    EXPECT_EQ(updated.value_revision, initial.value_revision + 1u);
+    EXPECT_EQ(updated.cell_count, 3u);
+    EXPECT_EQ(updated.cell_cache_hits, 2u);
+    EXPECT_EQ(updated.cell_cache_misses, 1u);
+    EXPECT_EQ(updated.cell_cache_unchanged_dof_hits, 2u);
+    EXPECT_EQ(updated.cell_refresh_candidate_count, 1u);
+    EXPECT_EQ(updated.affected_cell_neighborhood_layers, 1);
+    EXPECT_EQ(updated.directly_affected_cell_count, 1u);
+    EXPECT_EQ(updated.affected_cell_neighborhood_count, 2u);
+    EXPECT_EQ(updated.domain_cache_hits, 0u);
+
+    level_set::LevelSetGeneratedInterfaceLifecycle fresh_lifecycle;
+    const auto fresh_updated = fresh_lifecycle.build(system, options, solution);
+    ASSERT_TRUE(fresh_updated.success) << fresh_updated.diagnostic;
+    EXPECT_NEAR(updated.summary.negative_volume_measure,
+                fresh_updated.summary.negative_volume_measure,
+                1.0e-12);
+    EXPECT_EQ(updated.domain.fragments().size(),
+              fresh_updated.domain.fragments().size());
+    EXPECT_EQ(updated.domain.volumeRegions().size(),
+              fresh_updated.domain.volumeRegions().size());
 }
 
 TEST(LevelSetInterfaceLifecycle, ReusesLinearFullCellsAcrossMagnitudeChanges)
@@ -2547,6 +2986,7 @@ TEST(LevelSetInterfaceLifecycle, ReusesLinearFullCellsAcrossMagnitudeChanges)
     ASSERT_TRUE(initial.success) << initial.diagnostic;
     EXPECT_EQ(initial.cell_cache_hits, 0u);
     EXPECT_EQ(initial.cell_cache_misses, 1u);
+    EXPECT_EQ(initial.cell_refresh_candidate_count, 1u);
     EXPECT_EQ(initial.linear_full_cell_fast_path_count, 1u);
     EXPECT_EQ(initial.backend_elapsed_seconds, 0.0);
     EXPECT_NEAR(initial.summary.negative_volume_measure, 0.0, 1.0e-12);
@@ -2559,6 +2999,9 @@ TEST(LevelSetInterfaceLifecycle, ReusesLinearFullCellsAcrossMagnitudeChanges)
     ASSERT_TRUE(shifted.success) << shifted.diagnostic;
     EXPECT_EQ(shifted.cell_cache_hits, 1u);
     EXPECT_EQ(shifted.cell_cache_misses, 0u);
+    EXPECT_EQ(shifted.cell_cache_unchanged_dof_hits, 0u);
+    EXPECT_EQ(shifted.cell_refresh_candidate_count, 0u);
+    EXPECT_EQ(shifted.domain_cache_hits, 1u);
     EXPECT_EQ(shifted.linear_full_cell_fast_path_count, 1u);
     EXPECT_EQ(shifted.backend_elapsed_seconds, 0.0);
     EXPECT_NEAR(shifted.summary.negative_volume_measure, 0.0, 1.0e-12);
@@ -2625,6 +3068,145 @@ TEST(LevelSetInterfaceLifecycle, HighOrderImplicitBypassesBackendForLinearFullCe
     EXPECT_EQ(rules.front().provenance.implicit_quadrature_backend,
               "SayeHyperrectangle");
     EXPECT_EQ(rules.front().provenance.implicit_fallback_status, "None");
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedHighOrderDiscoversSameSignCornerInteriorIsland)
+{
+    constexpr int interface_marker = 880;
+    const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_GE(cell_dofs.size(), 9u);
+    const auto offset = system.fieldDofOffset(phi);
+    constexpr FE::Real radius = FE::Real{0.05};
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        const auto x = mesh->getNodeCoordinates(static_cast<FE::GlobalIndex>(i));
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
+            x[0] * x[0] + x[1] * x[1] - radius * radius;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.0);
+    EXPECT_GT(result.summary.positive_volume_measure, 0.0);
+    EXPECT_EQ(result.diagnostic.find("same-sign-corner"), std::string::npos)
+        << result.diagnostic;
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualifiedHighOrderDiscoversSerendipityInteriorProbeIsland)
+{
+    constexpr int interface_marker = 882;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad8);
+    auto scalar_space =
+        makeAffineFixtureScalarSpace(FE::ElementType::Quad8, mesh);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), 8u);
+    const auto offset = system.fieldDofOffset(phi);
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        const FE::Real value = i < 4u ? FE::Real{1.0} : FE::Real{0.1};
+        solution[static_cast<std::size_t>(offset + cell_dofs[i])] = value;
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.0);
+    EXPECT_GT(result.summary.positive_volume_measure, 0.0);
+    EXPECT_EQ(result.diagnostic.find("same-sign-corner"), std::string::npos)
+        << result.diagnostic;
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     Saye3DTerminalBoxUsesInteriorHintToSplitSameSignCorners)
+{
+    constexpr int interface_marker = 884;
+    constexpr FE::Real radius = FE::Real{0.15};
+    const auto result = buildSingleHexSayeCut(
+        [radius](const std::array<FE::Real, 3>& x) {
+            return x[0] * x[0] + x[1] * x[1] + x[2] * x[2] -
+                   radius * radius;
+        },
+        /*subdivision_depth=*/0,
+        /*interface_order=*/2,
+        /*volume_order=*/2,
+        interface_marker);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.interface_marker, interface_marker);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 1u);
+    EXPECT_NE(result.diagnostic.find("high_order_downgrade=true"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_GT(result.summary.active_fragment_count, 0u);
+    EXPECT_GT(result.summary.negative_volume_measure, 0.0);
+    EXPECT_GT(result.summary.positive_volume_measure, 0.0);
 }
 
 TEST(LevelSetInterfaceLifecycle, LinearCorner2DSegmentSupportsHigherInterfaceQuadrature)
@@ -2756,7 +3338,126 @@ TEST(LevelSetInterfaceLifecycle, QuadraturePolicyKeyChangesWithBackendOptions)
 }
 
 TEST(LevelSetInterfaceLifecycle,
-     RejectsDifferentiatedQuadratureTangentPolicyUntilSensitivitiesExist)
+     AcceptsDifferentiatedQuadratureForLinearCornerTangentPolicy)
+{
+    constexpr int interface_marker = 94;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "linear_differentiated";
+    options.geometry_tangent_policy =
+        level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.geometry_tangent_policy,
+              level_set::GeometryTangentPolicy::DifferentiatedQuadrature);
+    EXPECT_EQ(result.domain.request().geometry_tangent_policy,
+              "DifferentiatedQuadrature");
+    ASSERT_FALSE(result.domain.interfaceQuadratureRules().empty());
+    EXPECT_EQ(result.domain.interfaceQuadratureRules().front()
+	                  .provenance.geometry_tangent_policy,
+	              "DifferentiatedQuadrature");
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     GeneratedInterfaceTwoSidedBindingsExposeParentCellSides)
+{
+    constexpr int interface_marker = 914;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "two_sided_binding";
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+
+    const auto bindings = result.domain.twoSidedParentCellBindings();
+    ASSERT_EQ(bindings.size(), result.domain.summary().active_fragment_count);
+    ASSERT_FALSE(bindings.empty());
+
+    std::set<std::uint64_t> negative_region_ids;
+    std::set<std::uint64_t> positive_region_ids;
+    for (const auto& region : result.domain.volumeRegions()) {
+        if (!region.active()) {
+            continue;
+        }
+        if (region.side == FE::geometry::CutIntegrationSide::Negative) {
+            negative_region_ids.insert(region.stable_id);
+        } else if (region.side == FE::geometry::CutIntegrationSide::Positive) {
+            positive_region_ids.insert(region.stable_id);
+        }
+    }
+    ASSERT_FALSE(negative_region_ids.empty());
+    ASSERT_FALSE(positive_region_ids.empty());
+
+    for (const auto& binding : bindings) {
+        EXPECT_TRUE(binding.complete());
+        EXPECT_EQ(binding.interface_marker, interface_marker);
+        EXPECT_EQ(binding.parent_cell, 0);
+        EXPECT_EQ(binding.minus_side,
+                  FE::interfaces::CutInterfaceSideTag::Negative);
+        EXPECT_EQ(binding.plus_side,
+                  FE::interfaces::CutInterfaceSideTag::Positive);
+        EXPECT_GT(binding.interface_stable_id, 0u);
+        EXPECT_FALSE(binding.interface_topology_id.empty());
+        EXPECT_FALSE(binding.negative_volume_region_stable_ids.empty());
+        EXPECT_FALSE(binding.positive_volume_region_stable_ids.empty());
+        for (const auto stable_id : binding.negative_volume_region_stable_ids) {
+            EXPECT_NE(negative_region_ids.find(stable_id),
+                      negative_region_ids.end());
+        }
+        for (const auto stable_id : binding.positive_volume_region_stable_ids) {
+            EXPECT_NE(positive_region_ids.find(stable_id),
+                      positive_region_ids.end());
+        }
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     RejectsHighOrderDifferentiatedQuadratureTangentPolicyUntilSensitivitiesExist)
 {
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto scalar_space =
@@ -2780,22 +3481,23 @@ TEST(LevelSetInterfaceLifecycle,
 
     level_set::LevelSetGeneratedInterfaceOptions options{};
     options.level_set_field_name = "phi";
+    options.geometry_mode = level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
     options.geometry_tangent_policy =
         level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
 
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     try {
         (void)lifecycle.build(system, options, solution);
-        FAIL() << "Expected differentiated quadrature tangent policy rejection";
+        FAIL() << "Expected high-order differentiated quadrature tangent policy rejection";
     } catch (const std::invalid_argument& ex) {
         const std::string message = ex.what();
         EXPECT_NE(message.find("DifferentiatedQuadrature"), std::string::npos);
-        EXPECT_NE(message.find("point"), std::string::npos);
-        EXPECT_NE(message.find("weight"), std::string::npos);
-        EXPECT_NE(message.find("measure"), std::string::npos);
-        EXPECT_NE(message.find("normal"), std::string::npos);
+        EXPECT_NE(message.find("LinearCorner"), std::string::npos);
+        EXPECT_NE(message.find("regenerated-rule"), std::string::npos);
+        EXPECT_NE(message.find("curvature"), std::string::npos);
         EXPECT_NE(message.find("topology"), std::string::npos);
-        EXPECT_NE(message.find("sensitivities"), std::string::npos);
     }
 }
 
@@ -2843,12 +3545,18 @@ TEST(LevelSetInterfaceLifecycle, ReportsQuadratureSensitivityCapabilityStub)
     EXPECT_EQ(refreshed.policy,
               level_set::GeometryTangentPolicy::RefreshedFrozenQuadrature);
     EXPECT_FALSE(refreshed.complete());
-    EXPECT_FALSE(refreshed.point_location_sensitivity_available);
+    EXPECT_TRUE(refreshed.point_location_sensitivity_available);
     EXPECT_FALSE(refreshed.quadrature_weight_sensitivity_available);
-    EXPECT_FALSE(refreshed.measure_sensitivity_available);
-    EXPECT_FALSE(refreshed.normal_sensitivity_available);
+    EXPECT_TRUE(refreshed.measure_sensitivity_available);
+    EXPECT_TRUE(refreshed.normal_sensitivity_available);
     EXPECT_FALSE(refreshed.topology_transition_sensitivity_available);
     EXPECT_NE(refreshed.diagnostic.find("fixed during tangent assembly"),
+              std::string::npos);
+    EXPECT_NE(refreshed.diagnostic.find("point-location"),
+              std::string::npos);
+    EXPECT_NE(refreshed.diagnostic.find("interface-measure"),
+              std::string::npos);
+    EXPECT_NE(refreshed.diagnostic.find("normal"),
               std::string::npos);
 
     const auto differentiated =
@@ -2857,20 +3565,20 @@ TEST(LevelSetInterfaceLifecycle, ReportsQuadratureSensitivityCapabilityStub)
     EXPECT_EQ(differentiated.policy,
               level_set::GeometryTangentPolicy::DifferentiatedQuadrature);
     EXPECT_FALSE(differentiated.complete());
-    EXPECT_FALSE(differentiated.point_location_sensitivity_available);
-    EXPECT_FALSE(differentiated.quadrature_weight_sensitivity_available);
-    EXPECT_FALSE(differentiated.measure_sensitivity_available);
-    EXPECT_FALSE(differentiated.normal_sensitivity_available);
+    EXPECT_TRUE(differentiated.point_location_sensitivity_available);
+    EXPECT_TRUE(differentiated.quadrature_weight_sensitivity_available);
+    EXPECT_TRUE(differentiated.measure_sensitivity_available);
+    EXPECT_TRUE(differentiated.normal_sensitivity_available);
     EXPECT_FALSE(differentiated.topology_transition_sensitivity_available);
-    EXPECT_NE(differentiated.diagnostic.find("reserved"),
+    EXPECT_NE(differentiated.diagnostic.find("LinearCorner"),
               std::string::npos);
-    EXPECT_NE(differentiated.diagnostic.find("point"), std::string::npos);
-    EXPECT_NE(differentiated.diagnostic.find("weight"), std::string::npos);
-    EXPECT_NE(differentiated.diagnostic.find("measure"), std::string::npos);
-    EXPECT_NE(differentiated.diagnostic.find("normal"), std::string::npos);
+    EXPECT_NE(differentiated.diagnostic.find("exact first-order"),
+              std::string::npos);
+    EXPECT_NE(differentiated.diagnostic.find("regenerated-rule"),
+              std::string::npos);
+    EXPECT_NE(differentiated.diagnostic.find("curvature"),
+              std::string::npos);
     EXPECT_NE(differentiated.diagnostic.find("topology"), std::string::npos);
-    EXPECT_NE(differentiated.diagnostic.find("sensitivities"),
-              std::string::npos);
 }
 
 TEST(LevelSetCellEvaluator, P1ReproducesCornerValuesAndReferenceGradient)
@@ -3391,6 +4099,167 @@ TEST(LevelSetInterfaceLifecycle,
                   std::string::npos);
         EXPECT_NE(message.find("element_type=Triangle3"),
                   std::string::npos);
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     ProductionQualificationRequirementCoversFamilyMatrix)
+{
+    constexpr FE::Real cut = 0.37;
+
+    struct PromotedCase {
+        FE::ElementType element_type{FE::ElementType::Unknown};
+        const char* element_name{""};
+    };
+    const std::array<PromotedCase, 3> promoted{{
+        {FE::ElementType::Quad4, "Quad4"},
+        {FE::ElementType::Quad8, "Quad8"},
+        {FE::ElementType::Quad9, "Quad9"},
+    }};
+
+    int marker = 916;
+    for (const auto& test_case : promoted) {
+        SCOPED_TRACE(test_case.element_name);
+        const auto result =
+            buildSayeAffineHyperrectangleCut(
+                test_case.element_type,
+                marker++,
+                cut,
+                /*subdivision_depth=*/3,
+                /*interface_order=*/1,
+                /*volume_order=*/2,
+                /*require_production_qualified_backend=*/true);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.domain.request().required_implicit_cut_backend_qualification,
+                  "ProductionQualified");
+        EXPECT_EQ(result.implicit_cut_quadrature_backend,
+                  level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+        EXPECT_EQ(result.corner_linearized_cell_count, 0u);
+        EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u)
+            << result.diagnostic;
+    }
+
+    struct RejectedCase {
+        FE::ElementType element_type{FE::ElementType::Unknown};
+        level_set::ImplicitCutQuadratureBackend backend{
+            level_set::ImplicitCutQuadratureBackend::Auto};
+        const char* element_name{""};
+    };
+    const std::array<RejectedCase, 7> rejected{{
+        {FE::ElementType::Triangle3,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         "Triangle3"},
+        {FE::ElementType::Triangle6,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         "Triangle6"},
+        {FE::ElementType::Tetra4,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         "Tetra4"},
+        {FE::ElementType::Tetra10,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         "Tetra10"},
+        {FE::ElementType::Hex8,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         "Hex8"},
+        {FE::ElementType::Hex20,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         "Hex20"},
+        {FE::ElementType::Hex27,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         "Hex27"},
+    }};
+
+    for (const auto& test_case : rejected) {
+        SCOPED_TRACE(test_case.element_name);
+        try {
+            if (test_case.backend ==
+                level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle) {
+                (void)buildSayeAffineHyperrectangleCut(
+                    test_case.element_type,
+                    marker++,
+                    cut,
+                    /*subdivision_depth=*/3,
+                    /*interface_order=*/1,
+                    /*volume_order=*/2,
+                    /*require_production_qualified_backend=*/true);
+            } else {
+                (void)buildHighOrderSubcellAffineSimplexCut(
+                    test_case.element_type,
+                    marker++,
+                    cut,
+                    /*subdivision_depth=*/3,
+                    /*interface_order=*/1,
+                    /*volume_order=*/2,
+                    /*require_production_qualified_backend=*/true);
+            }
+            FAIL() << "Expected production qualification to reject "
+                   << test_case.element_name;
+        } catch (const std::invalid_argument& ex) {
+            const std::string message = ex.what();
+            EXPECT_NE(message.find("required=ProductionQualified"),
+                      std::string::npos);
+            EXPECT_NE(message.find("capability_state=Experimental"),
+                      std::string::npos);
+            EXPECT_NE(message.find(std::string("element_type=") +
+                                   test_case.element_name),
+                      std::string::npos);
+        }
+    }
+
+    for (const auto type : {FE::ElementType::Wedge6,
+                            FE::ElementType::Pyramid5}) {
+        const char* element_name =
+            type == FE::ElementType::Wedge6 ? "Wedge6" : "Pyramid5";
+        SCOPED_TRACE(element_name);
+        const auto mesh =
+            std::make_shared<SingleUnsupportedMixedCellMeshAccess>(type);
+        auto scalar_space =
+            FE::spaces::Space(FE::spaces::SpaceType::H1,
+                              mesh,
+                              /*order=*/1,
+                              /*components=*/1);
+
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = scalar_space,
+            .components = 1,
+        });
+        ASSERT_NO_THROW(
+            system.setup({}, makeSingleUnsupportedMixedCellSetupInputs(type)));
+
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+            const auto x = mesh->getNodeCoordinates(vertex);
+            setFieldComponentValue(solution, system, phi, vertex, x[0]);
+        }
+
+        level_set::LevelSetGeneratedInterfaceOptions options{};
+        options.level_set_field_name = "phi";
+        options.requested_interface_marker = marker++;
+        options.domain_id = "water-air";
+        options.geometry_mode =
+            level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+        options.implicit_cut_quadrature_backend =
+            level_set::ImplicitCutQuadratureBackend::Auto;
+        options.interface_quadrature_order = 1;
+        options.volume_quadrature_order = 1;
+        options.require_production_qualified_implicit_cut_backend = true;
+
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        try {
+            (void)lifecycle.build(system, options, solution);
+            FAIL() << "Expected production qualification to fail closed for "
+                   << element_name;
+        } catch (const std::invalid_argument& ex) {
+            const std::string message = ex.what();
+            EXPECT_NE(message.find("backend=Auto"), std::string::npos);
+            EXPECT_NE(message.find(std::string("element_type=") + element_name),
+                      std::string::npos);
+            EXPECT_NE(message.find("required=ProductionQualified"),
+                      std::string::npos);
+        }
     }
 }
 
@@ -4117,6 +4986,14 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityCoversAllElementFamilies)
                 level_set::implicitCutQuadratureBackendDriver(backend);
             EXPECT_EQ(driver.supports(mesh_dimension, type), supported);
             EXPECT_EQ(capability.supports_element_type, supported);
+            EXPECT_EQ(capability.supports_refreshed_frozen_quadrature,
+                      supported &&
+                          backend !=
+                              level_set::ImplicitCutQuadratureBackend::MomentFit);
+            EXPECT_EQ(capability.supports_differentiated_quadrature,
+                      supported &&
+                          backend ==
+                              level_set::ImplicitCutQuadratureBackend::LinearCorner);
             EXPECT_EQ(capability.maximum_reported_interface_order,
                       supported ? max_interface_order : -1);
             EXPECT_EQ(capability.maximum_reported_volume_order,
@@ -4373,6 +5250,115 @@ TEST(LevelSetInterfaceLifecycle, RecursiveBackendReportsStructuredMilestoneCount
               std::string::npos);
     EXPECT_NE(result.cut.diagnostic.find("backend_elapsed_seconds="),
               std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, RecursiveBackendsHonorConfiguredDepthAboveEight)
+{
+    constexpr int requested_depth = 9;
+
+    FE::interfaces::CutInterfaceDomainRequest request{};
+    request.source =
+        FE::interfaces::LevelSetInterfaceSource::fromEvaluator("depth-level-set", 0, 1);
+    request.interface_marker = 905;
+    request.quadrature_order = 2;
+    request.interface_quadrature_order = 2;
+    request.volume_quadrature_order = 2;
+    request.implicit_cut_max_subdivision_depth = requested_depth;
+
+    {
+        const auto mesh =
+            std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
+        auto scalar_space = FE::spaces::Space(
+            FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = scalar_space,
+            .components = 1,
+        });
+        ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 1.0);
+        const auto evaluator =
+            level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+        level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+        backend_input.linearized_input.parent_cell = 0;
+        backend_input.linearized_input.element_type = FE::ElementType::Quad9;
+        backend_input.linearized_input.node_coordinates = {
+            mesh->getNodeCoordinates(0),
+            mesh->getNodeCoordinates(1),
+            mesh->getNodeCoordinates(2),
+            mesh->getNodeCoordinates(3),
+        };
+        backend_input.linearized_input.level_set_values.assign(4u, 1.0);
+        backend_input.evaluator = &evaluator;
+        backend_input.reference_min = {{-1.0, -1.0, 0.0}};
+        backend_input.reference_max = {{1.0, 1.0, 0.0}};
+
+        const auto& backend =
+            level_set::implicitCutQuadratureBackendDriver(
+                level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+        const auto result = backend.cut(/*mesh_dimension=*/2, request, backend_input);
+
+        ASSERT_TRUE(result.cut.supported) << result.cut.diagnostic;
+        EXPECT_EQ(result.selected_backend,
+                  level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+        EXPECT_NE(result.cut.diagnostic.find("max_depth_limit=9"),
+                  std::string::npos);
+        EXPECT_NE(result.cut.diagnostic.find("selected_backend=SayeHyperrectangle"),
+                  std::string::npos);
+        EXPECT_NE(result.cut.diagnostic.find("fallback_used=false"),
+                  std::string::npos);
+    }
+
+    {
+        const auto mesh =
+            std::make_shared<SingleTriangleMeshAccess>(FE::ElementType::Triangle6);
+        auto scalar_space = FE::spaces::Space(
+            FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = scalar_space,
+            .components = 1,
+        });
+        ASSERT_NO_THROW(system.setup({}, makeSingleTriangleSetupInputs()));
+
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 1.0);
+        const auto evaluator =
+            level_set::makeLevelSetCellEvaluator(system, phi, solution);
+
+        level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+        backend_input.linearized_input.parent_cell = 0;
+        backend_input.linearized_input.element_type = FE::ElementType::Triangle6;
+        backend_input.linearized_input.node_coordinates = {
+            mesh->getNodeCoordinates(0),
+            mesh->getNodeCoordinates(1),
+            mesh->getNodeCoordinates(2),
+        };
+        backend_input.linearized_input.level_set_values.assign(3u, 1.0);
+        backend_input.evaluator = &evaluator;
+
+        const auto& backend =
+            level_set::implicitCutQuadratureBackendDriver(
+                level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+        const auto result = backend.cut(/*mesh_dimension=*/2, request, backend_input);
+
+        ASSERT_TRUE(result.cut.supported) << result.cut.diagnostic;
+        EXPECT_EQ(result.selected_backend,
+                  level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+        EXPECT_NE(result.cut.diagnostic.find("max_depth_limit=9"),
+                  std::string::npos);
+        EXPECT_NE(result.cut.diagnostic.find("selected_backend=HighOrderSubcell"),
+                  std::string::npos);
+        EXPECT_NE(result.cut.diagnostic.find("fallback_used=false"),
+                  std::string::npos);
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, HighOrderImplicitFallbackPolicyFailsClosed)
@@ -4871,6 +5857,128 @@ TEST(LevelSetInterfaceLifecycle, BackendMetadataReachesCutIntegrationContext)
               "RefreshedFrozenQuadrature");
 }
 
+TEST(LevelSetInterfaceLifecycle,
+     LinearDifferentiatedQuadraturePublishesCutSensitivityMetadata)
+{
+    constexpr int interface_marker = 1843;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto temperature = system.addField(FE::systems::FieldSpec{
+        .name = "temperature",
+        .space = scalar_space,
+        .components = 1,
+    });
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    ASSERT_GT(system.fieldDofOffset(phi), system.fieldDofOffset(temperature));
+
+    const auto* phi_entity_map = system.fieldDofHandler(phi).getEntityDofMap();
+    ASSERT_NE(phi_entity_map, nullptr);
+    std::vector<FE::MeshIndex> expected_parent_dofs;
+    expected_parent_dofs.reserve(4);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = phi_entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        ASSERT_GE(dofs.front(), 0);
+        expected_parent_dofs.push_back(static_cast<FE::MeshIndex>(
+            system.fieldDofOffset(phi) + static_cast<std::size_t>(dofs.front())));
+    }
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, phi, vertex,
+                               x[0] + x[1] + x[2] - FE::Real(0.5));
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 1;
+    options.geometry_tangent_policy =
+        level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+
+    const auto expect_metadata =
+        [&](const level_set::LevelSetGeneratedInterfaceResult& built) {
+            FE::assembly::CutIntegrationContext context;
+            ASSERT_NO_THROW(context.addGeneratedInterfaceDomain(built.domain));
+
+            ASSERT_FALSE(context.sensitivityMetadata().empty());
+            bool saw_interface_metadata = false;
+            bool saw_volume_metadata = false;
+            for (const auto& metadata : context.sensitivityMetadata()) {
+                EXPECT_EQ(metadata.provenance_id, "field:" + std::to_string(phi));
+                EXPECT_EQ(metadata.source_stable_id,
+                          static_cast<std::uint64_t>(phi));
+                EXPECT_EQ(metadata.quadrature_policy_key,
+                          built.domain.request().quadrature_policy_key);
+                EXPECT_TRUE(metadata.ad_compatible);
+                EXPECT_TRUE(metadata.measure_sensitivity_available);
+                EXPECT_TRUE(metadata.quadrature_weight_sensitivity_available);
+                ASSERT_EQ(metadata.parent_geometry_dofs.size(), 4u);
+                EXPECT_EQ(metadata.parent_geometry_dofs, expected_parent_dofs);
+                ASSERT_FALSE(metadata.samples.empty());
+                for (const auto& sample : metadata.samples) {
+                    EXPECT_EQ(sample.influencing_parent_geometry_dofs,
+                              metadata.parent_geometry_dofs);
+                    ASSERT_EQ(sample.shape_values.size(),
+                              metadata.parent_geometry_dofs.size());
+                    ASSERT_EQ(sample.shape_gradients.size(),
+                              metadata.parent_geometry_dofs.size());
+                    ASSERT_EQ(sample.influencing_parent_geometry_dofs.size(),
+                              sample.shape_values.size());
+                    FE::Real value_sum = 0.0;
+                    std::array<FE::Real, 3> gradient_sum{{0.0, 0.0, 0.0}};
+                    for (std::size_t i = 0; i < sample.shape_values.size(); ++i) {
+                        value_sum += sample.shape_values[i];
+                        gradient_sum[0] += sample.shape_gradients[i][0];
+                        gradient_sum[1] += sample.shape_gradients[i][1];
+                        gradient_sum[2] += sample.shape_gradients[i][2];
+                    }
+                    EXPECT_NEAR(value_sum, 1.0, 1.0e-12);
+                    EXPECT_NEAR(gradient_sum[0], 0.0, 1.0e-12);
+                    EXPECT_NEAR(gradient_sum[1], 0.0, 1.0e-12);
+                    EXPECT_NEAR(gradient_sum[2], 0.0, 1.0e-12);
+                }
+                if (metadata.target_kind == "generated_level_set_interface") {
+                    saw_interface_metadata = true;
+                    EXPECT_TRUE(metadata.location_sensitivity_available);
+                    EXPECT_TRUE(metadata.normal_sensitivity_available);
+                } else if (metadata.target_kind == "generated_level_set_cut_volume") {
+                    saw_volume_metadata = true;
+                    EXPECT_FALSE(metadata.location_sensitivity_available);
+                    EXPECT_FALSE(metadata.normal_sensitivity_available);
+                } else {
+                    ADD_FAILURE() << "unexpected generated sensitivity target kind: "
+                                  << metadata.target_kind;
+                }
+            }
+            EXPECT_TRUE(saw_interface_metadata);
+            EXPECT_TRUE(saw_volume_metadata);
+        };
+
+    expect_metadata(result);
+
+    const auto cached_result = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(cached_result.success) << cached_result.diagnostic;
+    EXPECT_EQ(cached_result.domain_cache_hits, 1u);
+    expect_metadata(cached_result);
+}
+
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP1LineMatchesLinearMeasures)
 {
     constexpr int interface_marker = 84;
@@ -5198,12 +6306,63 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleCircleErrorsDecreaseUnd
     const FE::Real fine_length_error =
         std::abs(fine.summary.measure - expected_length);
 
-    EXPECT_LT(fine_area_error, coarse_area_error);
-    EXPECT_LT(fine_length_error, coarse_length_error);
+    EXPECT_LT(fine_area_error, 0.75 * coarse_area_error);
+    EXPECT_LT(fine_length_error, 0.75 * coarse_length_error);
     EXPECT_EQ(fine.implicit_cut_quadrature_backend,
               level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
     EXPECT_EQ(fine.implicit_cut_fallback_cell_count, 0u);
     EXPECT_EQ(fine.achieved_interface_quadrature_order, 1);
+    EXPECT_EQ(fine.achieved_volume_quadrature_order, 2);
+    EXPECT_GT(fine.summary.active_fragment_count,
+              coarse.summary.active_fragment_count);
+}
+
+TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleCircleErrorsDecreaseUnderPRefinement)
+{
+    constexpr FE::Real radius = 0.5;
+    constexpr FE::Real pi = 3.141592653589793238462643383279502884;
+    const FE::Real expected_area = pi * radius * radius / 4.0;
+    const FE::Real expected_length = pi * radius / 2.0;
+    const auto circle = [](const std::array<FE::Real, 3>& x) {
+        return x[0] * x[0] + x[1] * x[1] - radius * radius;
+    };
+
+    const auto coarse = buildSingleTriangleHighOrderSubcellCut(
+        circle,
+        /*interface_marker=*/1908,
+        /*subdivision_depth=*/6,
+        /*interface_order=*/1,
+        /*volume_order=*/1,
+        FE::ElementType::Triangle3,
+        /*level_set_order=*/1);
+    const auto fine = buildSingleTriangleHighOrderSubcellCut(
+        circle,
+        /*interface_marker=*/1909,
+        /*subdivision_depth=*/6,
+        /*interface_order=*/2,
+        /*volume_order=*/2,
+        FE::ElementType::Triangle6,
+        /*level_set_order=*/2);
+    ASSERT_TRUE(coarse.success) << coarse.diagnostic;
+    ASSERT_TRUE(fine.success) << fine.diagnostic;
+
+    const FE::Real coarse_area_error =
+        std::abs(coarse.summary.negative_volume_measure - expected_area);
+    const FE::Real fine_area_error =
+        std::abs(fine.summary.negative_volume_measure - expected_area);
+    const FE::Real coarse_length_error =
+        std::abs(coarse.summary.measure - expected_length);
+    const FE::Real fine_length_error =
+        std::abs(fine.summary.measure - expected_length);
+
+    EXPECT_LT(fine_area_error, 0.75 * coarse_area_error);
+    EXPECT_LT(fine_length_error, 0.75 * coarse_length_error);
+    EXPECT_EQ(coarse.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(fine.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
+    EXPECT_EQ(fine.implicit_cut_fallback_cell_count, 0u);
+    EXPECT_EQ(fine.achieved_interface_quadrature_order, 2);
     EXPECT_EQ(fine.achieved_volume_quadrature_order, 2);
     EXPECT_GT(fine.summary.active_fragment_count,
               coarse.summary.active_fragment_count);
@@ -5784,6 +6943,73 @@ TEST(LevelSetInterfaceLifecycle, Affine3DCutRulesIntegratePolynomialMomentsToAdv
                 2.0e-12);
 }
 
+TEST(LevelSetInterfaceLifecycle, PromotedAffineCutRulesUseConsistentNormalsAndSides)
+{
+    constexpr FE::Real cut = 0.37;
+    struct Case {
+        FE::ElementType element_type;
+        level_set::ImplicitCutQuadratureBackend backend;
+        int marker;
+    };
+    const std::array<Case, 10> cases{{
+        {FE::ElementType::Triangle3,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         2140},
+        {FE::ElementType::Triangle6,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         2141},
+        {FE::ElementType::Quad4,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         2142},
+        {FE::ElementType::Quad8,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         2143},
+        {FE::ElementType::Quad9,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         2144},
+        {FE::ElementType::Tetra4,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         2145},
+        {FE::ElementType::Tetra10,
+         level_set::ImplicitCutQuadratureBackend::HighOrderSubcell,
+         2146},
+        {FE::ElementType::Hex8,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         2147},
+        {FE::ElementType::Hex20,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         2148},
+        {FE::ElementType::Hex27,
+         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
+         2149},
+    }};
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(static_cast<int>(test_case.element_type));
+        SCOPED_TRACE(static_cast<int>(test_case.backend));
+        const auto result =
+            test_case.backend ==
+                    level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle
+                ? buildSayeAffineHyperrectangleCut(
+                      test_case.element_type,
+                      test_case.marker,
+                      cut,
+                      /*subdivision_depth=*/3,
+                      /*interface_order=*/1,
+                      /*volume_order=*/2)
+                : buildHighOrderSubcellAffineSimplexCut(
+                      test_case.element_type,
+                      test_case.marker,
+                      cut,
+                      /*subdivision_depth=*/3,
+                      /*interface_order=*/1,
+                      /*volume_order=*/2);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+        expectAffineXCutNormalOrientationAndSideConvention(result.domain, cut);
+    }
+}
+
 TEST(LevelSetInterfaceLifecycle, Affine2DCutRulesImprovePolynomialMomentsUnderQRefinement)
 {
     constexpr FE::Real cut = 0.37;
@@ -6103,8 +7329,8 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTetraSphereCapErrorsDecreaseUnd
     const FE::Real fine_area_error =
         std::abs(fine.summary.measure - expected_area);
 
-    EXPECT_LT(fine_volume_error, coarse_volume_error);
-    EXPECT_LT(fine_area_error, coarse_area_error);
+    EXPECT_LT(fine_volume_error, 0.75 * coarse_volume_error);
+    EXPECT_LT(fine_area_error, 0.75 * coarse_area_error);
     EXPECT_EQ(fine.implicit_cut_quadrature_backend,
               level_set::ImplicitCutQuadratureBackend::HighOrderSubcell);
     EXPECT_EQ(fine.implicit_cut_fallback_cell_count, 0u);
@@ -6208,7 +7434,7 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleQuadP3DofMovesGeometryAndQuad
     const auto& field_dofs = system.fieldDofHandler(phi);
     const auto cell_dofs = field_dofs.getCellDofs(0);
     const auto dof_coordinates =
-        FE::basis::NodeOrdering::get_lagrange_node_coords(FE::ElementType::Quad4, 3);
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(FE::ElementType::Quad4, 3);
     ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
     const auto offset = system.fieldDofOffset(phi);
 
@@ -6291,7 +7517,7 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleP3DofMovesGeometryAndQu
     const auto& field_dofs = system.fieldDofHandler(phi);
     const auto cell_dofs = field_dofs.getCellDofs(0);
     const auto dof_coordinates =
-        FE::basis::NodeOrdering::get_lagrange_node_coords(FE::ElementType::Triangle3, 3);
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(FE::ElementType::Triangle3, 3);
     ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
     const auto offset = system.fieldDofOffset(phi);
 
@@ -6681,8 +7907,8 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleCircleErrorsDecreaseUnderHAnd
     const FE::Real fine_h_length_error =
         std::abs(fine_h.summary.measure - expected_length);
 
-    EXPECT_LT(fine_h_area_error, coarse_h_area_error);
-    EXPECT_LT(fine_h_length_error, coarse_h_length_error);
+    EXPECT_LT(fine_h_area_error, 0.75 * coarse_h_area_error);
+    EXPECT_LT(fine_h_length_error, 0.75 * coarse_h_length_error);
     EXPECT_EQ(fine_h.achieved_interface_quadrature_order, 1);
     EXPECT_EQ(fine_h.achieved_volume_quadrature_order, 2);
     EXPECT_GT(fine_h.summary.active_fragment_count,
@@ -6753,8 +7979,8 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleEllipseErrorsDecreaseUnderHRe
     const FE::Real fine_length_error =
         std::abs(fine.summary.measure - expected_length);
 
-    EXPECT_LT(fine_area_error, coarse_area_error);
-    EXPECT_LT(fine_length_error, coarse_length_error);
+    EXPECT_LT(fine_area_error, 0.75 * coarse_area_error);
+    EXPECT_LT(fine_length_error, 0.75 * coarse_length_error);
     EXPECT_EQ(fine.implicit_cut_quadrature_backend,
               level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
     EXPECT_EQ(fine.implicit_cut_fallback_cell_count, 0u);
@@ -6855,7 +8081,7 @@ TEST(LevelSetInterfaceLifecycle, MultipleComponentsInSingleParentCellProduceSepa
         const auto& field_dofs = system.fieldDofHandler(phi);
         const auto cell_dofs = field_dofs.getCellDofs(0);
         const auto dof_coordinates =
-            FE::basis::NodeOrdering::get_lagrange_node_coords(
+            FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
                 FE::ElementType::Quad4,
                 4);
         ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
@@ -6941,7 +8167,7 @@ TEST(LevelSetInterfaceLifecycle, MultipleComponentsInSingleParentCellProduceSepa
         const auto& field_dofs = system.fieldDofHandler(phi);
         const auto cell_dofs = field_dofs.getCellDofs(0);
         const auto dof_coordinates =
-            FE::basis::NodeOrdering::get_lagrange_node_coords(
+            FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
                 FE::ElementType::Triangle3,
                 4);
         ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
@@ -7054,6 +8280,90 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleNearTangentCircleReturnsRules
             EXPECT_TRUE(std::isfinite(point.normal[1]));
         }
     }
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     LinearCornerQuad9AlignsNormalsWithHighOrderEvaluatorGradient)
+{
+    const auto result = buildSingleQuad9LinearCornerEvaluatorNormalFlipCut();
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.domain.request().implicit_geometry_mode, "LinearCorner");
+    EXPECT_EQ(result.domain.request().implicit_quadrature_backend, "LinearCorner");
+    EXPECT_EQ(result.corner_linearized_cell_count, 1u);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u);
+
+    const auto interface_rules = result.domain.interfaceQuadratureRules();
+    ASSERT_EQ(interface_rules.size(), 1u);
+    ASSERT_EQ(interface_rules.front().points.size(), 1u);
+    const auto& point = interface_rules.front().points.front();
+    EXPECT_NEAR(point.point[0], 0.0, 1.0e-12);
+    EXPECT_NEAR(point.point[1], 0.0, 1.0e-12);
+    EXPECT_NEAR(vectorNorm(point.normal), 1.0, 1.0e-12);
+    EXPECT_NEAR(point.normal[0], 0.0, 1.0e-12);
+    EXPECT_LT(point.normal[1], -0.99);
+
+    expectSingleParentVolumeRulesPartitionMeasure(result.domain, 1.0e-12);
+    expectGeneratedCutRulesAreFinite(result.domain);
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     SayeHyperrectangleMixedCornerLeafUsesMidpointHintRefinement)
+{
+    const auto result = buildSingleQuadSayeCut(
+        [](const std::array<FE::Real, 3>& x) {
+            return x[0] - FE::Real{1.01} + FE::Real{0.02} * x[1] * x[1];
+        },
+        /*subdivision_depth=*/0,
+        /*interface_order=*/2,
+        /*volume_order=*/2,
+        /*interface_marker=*/1886);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u)
+        << result.diagnostic;
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 2);
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+    EXPECT_NE(result.diagnostic.find("fallback_used=false"), std::string::npos);
+    EXPECT_EQ(result.diagnostic.find("first_curved_fragment_failure_detail"),
+              std::string::npos);
+    EXPECT_GT(result.summary.active_fragment_count, 1u);
+}
+
+TEST(LevelSetInterfaceLifecycle,
+     SayeHyperrectangleTerminalMultiCrossingLeafRefinesLocally)
+{
+    constexpr FE::Real radius = 1.1;
+    const auto result = buildSingleQuadSayeCut(
+        [](const std::array<FE::Real, 3>& x) {
+            return x[0] * x[0] + x[1] * x[1] - radius * radius;
+        },
+        /*subdivision_depth=*/0,
+        /*interface_order=*/2,
+        /*volume_order=*/2,
+        /*interface_marker=*/1887);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.implicit_cut_quadrature_backend,
+              level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
+    EXPECT_EQ(result.implicit_cut_fallback_cell_count, 0u)
+        << result.diagnostic;
+    EXPECT_EQ(result.achieved_interface_quadrature_order, 2)
+        << result.diagnostic;
+    EXPECT_EQ(result.achieved_volume_quadrature_order, 2);
+    EXPECT_NE(result.diagnostic.find("terminal_topology_refinements="),
+              std::string::npos);
+    EXPECT_EQ(result.diagnostic.find("terminal_topology_refinements=0"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_EQ(result.diagnostic.find("first_curved_fragment_failure_detail"),
+              std::string::npos)
+        << result.diagnostic;
+    EXPECT_GT(result.summary.active_fragment_count, 1u);
+    expectSingleParentVolumeRulesPartitionMeasure(result.domain, 1.0e-10);
+    expectGeneratedCutRulesAreFinite(result.domain);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAndArea)
@@ -7240,8 +8550,8 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleSphereAndEllipsoidErrorsDecre
         const FE::Real fine_area_error =
             std::abs(fine.summary.measure - expected_area);
 
-        EXPECT_LT(fine_volume_error, coarse_volume_error);
-        EXPECT_LT(fine_area_error, coarse_area_error);
+        EXPECT_LT(fine_volume_error, 0.75 * coarse_volume_error);
+        EXPECT_LT(fine_area_error, 0.75 * coarse_area_error);
         EXPECT_EQ(fine.implicit_cut_quadrature_backend,
                   level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
         EXPECT_LE(fine.implicit_cut_fallback_cell_count,
@@ -7288,8 +8598,8 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleSphereAndEllipsoidErrorsDecre
         const FE::Real fine_area_error =
             std::abs(fine.summary.measure - expected_area);
 
-        EXPECT_LT(fine_volume_error, coarse_volume_error);
-        EXPECT_LT(fine_area_error, coarse_area_error);
+        EXPECT_LT(fine_volume_error, 0.75 * coarse_volume_error);
+        EXPECT_LT(fine_area_error, 0.75 * coarse_area_error);
         EXPECT_EQ(fine.implicit_cut_quadrature_backend,
                   level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle);
         EXPECT_LE(fine.implicit_cut_fallback_cell_count,
@@ -7693,7 +9003,7 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleReferenceRulesMapToCurvedHexG
     const auto offset = system.fieldDofOffset(phi);
     for (std::size_t i = 0; i < 27u; ++i) {
         const auto xi =
-            FE::basis::NodeOrdering::get_node_coords(FE::ElementType::Hex27, i);
+            FE::basis::ReferenceNodeLayout::get_node_coords(FE::ElementType::Hex27, i);
         solution[static_cast<std::size_t>(offset + cell_dofs[i])] =
             xi[2] - cut_zeta;
     }

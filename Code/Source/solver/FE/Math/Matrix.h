@@ -42,7 +42,7 @@ class Matrix : public MatrixExpr<Matrix<T, M, N>> {
     static_assert(M > 0 && N > 0, "Matrix dimensions must be positive");
 
 private:
-    alignas(kFEPreferredAlignmentBytes) T data_[M * N];  // Row-major storage, cache-line/SIMD alignment
+    alignas(kFEFixedObjectAlignmentBytes) T data_[M * N];  // Row-major, SIMD-friendly storage
 
     // Helper to compute linear index from (i,j)
     static constexpr std::size_t index(std::size_t i, std::size_t j) {
@@ -775,7 +775,7 @@ class Matrix<T, 2, 2> : public MatrixExpr<Matrix<T, 2, 2>> {
     static constexpr std::size_t N = 2;
 
 private:
-    alignas(kFEPreferredAlignmentBytes) T data_[4];
+    alignas(kFEFixedObjectAlignmentBytes) T data_[4];
 
     static constexpr std::size_t index(std::size_t i, std::size_t j) {
         return i * 2 + j;
@@ -1011,7 +1011,7 @@ class Matrix<T, 3, 3> : public MatrixExpr<Matrix<T, 3, 3>> {
     static constexpr std::size_t N = 3;
 
 private:
-    alignas(kFEPreferredAlignmentBytes) T data_[9];
+    alignas(kFEFixedObjectAlignmentBytes) T data_[9];
 
     static constexpr std::size_t index(std::size_t i, std::size_t j) {
         return i * 3 + j;

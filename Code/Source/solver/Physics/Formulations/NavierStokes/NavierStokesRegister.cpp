@@ -2148,6 +2148,32 @@ parse_free_surface_wall_slip_model(std::string_view raw, std::string_view contex
       " must be one of None or Navier.");
 }
 
+svmp::Physics::formulations::navier_stokes::FreeSurfacePressureStabilizationPolicy
+parse_free_surface_pressure_stabilization_policy(std::string_view raw,
+                                                 std::string_view context)
+{
+  using svmp::Physics::formulations::navier_stokes::FreeSurfacePressureStabilizationPolicy;
+  const auto token = normalized_token(raw);
+  if (token.empty() || token == "enabled" || token == "enable" ||
+      token == "on" || token == "true") {
+    return FreeSurfacePressureStabilizationPolicy::Enabled;
+  }
+  if (token == "disabled" || token == "disable" ||
+      token == "off" || token == "false") {
+    return FreeSurfacePressureStabilizationPolicy::Disabled;
+  }
+  if (token == "disabledforrefreshedfrozenhighorder" ||
+      token == "disableforrefreshedfrozenhighorder" ||
+      token == "refreshedfrozenhighorderdisabled" ||
+      token == "highorderrefreshedfrozendisabled") {
+    return FreeSurfacePressureStabilizationPolicy::
+        DisabledForRefreshedFrozenHighOrder;
+  }
+  throw std::runtime_error(
+      "[svMultiPhysics::Physics] " + std::string(context) +
+      " must be one of Enabled, Disabled, or DisabledForRefreshedFrozenHighOrder.");
+}
+
 std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
                                                  std::string_view context)
 {
@@ -2451,6 +2477,23 @@ void append_free_surface_bc(
              "Interface_domain_id", "InterfaceDomainId"})) {
       fs.generated_interface_domain_id = *domain_id;
     }
+    if (const auto geometry = first_defined_string(
+            bc.params,
+            {"Generated_interface_geometry", "GeneratedInterfaceGeometry",
+             "Implicit_geometry_mode", "ImplicitGeometryMode",
+             "Generated_interface_geometry_mode",
+             "GeneratedInterfaceGeometryMode"})) {
+      fs.generated_interface_geometry = *geometry;
+    }
+    if (const auto tangent_policy = first_defined_string(
+            bc.params,
+            {"Geometry_tangent_policy", "GeometryTangentPolicy",
+             "Generated_interface_geometry_tangent_policy",
+             "GeneratedInterfaceGeometryTangentPolicy",
+             "Implicit_geometry_tangent_policy",
+             "ImplicitGeometryTangentPolicy"})) {
+      fs.geometry_tangent_policy = *tangent_policy;
+    }
     if (const auto isovalue = first_defined_double(
             bc.params,
             {"Level_set_isovalue", "LevelSetIsovalue", "Interface_isovalue", "InterfaceIsovalue"})) {
@@ -2589,11 +2632,52 @@ void append_free_surface_bc(
       fs.cut_cell_stabilization.enabled = true;
     }
   }
+  if (const auto pressure_policy = first_defined_string(
+          bc.params,
+          {"Cut_cell_pressure_stabilization_policy",
+           "CutCellPressureStabilizationPolicy",
+           "Pressure_ghost_penalty_policy",
+           "PressureGhostPenaltyPolicy"})) {
+    fs.cut_cell_stabilization.pressure_policy =
+        parse_free_surface_pressure_stabilization_policy(
+            *pressure_policy,
+            "Free-surface Cut_cell_pressure_stabilization_policy");
+  }
   if (const auto use_cut_scale = first_defined_bool(
           bc.params,
           {"Use_cut_metadata_scale", "UseCutMetadataScale",
            "Use_cut_stabilization_scale", "UseCutStabilizationScale"})) {
     fs.cut_cell_stabilization.use_cut_metadata_scale = *use_cut_scale;
+  }
+  if (const auto cut_scale_cap = first_defined_double(
+          bc.params,
+          {"Cut_cell_metadata_scale_cap", "CutCellMetadataScaleCap",
+           "Cut_cell_stabilization_scale_cap", "CutCellStabilizationScaleCap",
+           "Cut_metadata_scale_cap", "CutMetadataScaleCap"})) {
+    if (!std::isfinite(*cut_scale_cap) || *cut_scale_cap < 1.0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface "
+          "Cut_cell_metadata_scale_cap must be finite and at least 1.");
+    }
+    fs.cut_cell_stabilization.cut_metadata_scale_cap =
+        static_cast<svmp::FE::Real>(*cut_scale_cap);
+  }
+  if (const auto velocity_max_derivative_order = first_defined_int(
+          bc.params,
+          {"Cut_cell_velocity_max_derivative_order",
+           "CutCellVelocityMaxDerivativeOrder",
+           "Velocity_ghost_penalty_max_derivative_order",
+           "VelocityGhostPenaltyMaxDerivativeOrder",
+           "Velocity_gradient_ghost_penalty_max_derivative_order",
+           "VelocityGradientGhostPenaltyMaxDerivativeOrder"})) {
+    if (*velocity_max_derivative_order < 1 ||
+        *velocity_max_derivative_order > 2) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Free-surface "
+          "Cut_cell_velocity_max_derivative_order must be 1 or 2.");
+    }
+    fs.cut_cell_stabilization.velocity_max_derivative_order =
+        *velocity_max_derivative_order;
   }
 
   const auto velocity_extension_enabled = first_defined_bool(

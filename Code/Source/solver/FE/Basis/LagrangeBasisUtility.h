@@ -1,5 +1,5 @@
-#ifndef SVMP_FE_BASIS_DETAIL_LAGRANGEBASISUTILITYDETAIL_H
-#define SVMP_FE_BASIS_DETAIL_LAGRANGEBASISUTILITYDETAIL_H
+#ifndef SVMP_FE_BASIS_LAGRANGEBASISUTILITY_H
+#define SVMP_FE_BASIS_LAGRANGEBASISUTILITY_H
 
 // Private helper for LagrangeBasis internals.
 // This header is only intended to be included after the FE basis scalar types
@@ -10,7 +10,7 @@ namespace FE {
 namespace basis {
 namespace detail {
 
-inline Real equispaced_pm_one_coord(int i, int order) {
+inline constexpr Real equispaced_pm_one_coord(int i, int order) {
     if (order <= 0) {
         return Real(0);
     }
@@ -22,4 +22,4 @@ inline Real equispaced_pm_one_coord(int i, int order) {
 } // namespace FE
 } // namespace svmp
 
-#endif // SVMP_FE_BASIS_DETAIL_LAGRANGEBASISUTILITYDETAIL_H
+#endif // SVMP_FE_BASIS_LAGRANGEBASISUTILITY_H

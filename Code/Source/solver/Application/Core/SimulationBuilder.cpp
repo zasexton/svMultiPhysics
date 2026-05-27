@@ -350,13 +350,17 @@ svmp::FE::geometry::CutIntegrationSide toCutIntegrationSide(
              : svmp::FE::geometry::CutIntegrationSide::Negative;
 }
 
-std::vector<svmp::FE::systems::FESystem::FormCellDomainRestriction>
+struct EquationCellDomainRestriction {
+  application::core::ActiveCutVolumeRequest request{};
+  svmp::FE::systems::FESystem::FormCellDomainRestriction restriction{};
+};
+
+std::vector<EquationCellDomainRestriction>
 equationCellDomainRestrictions(
     const svmp::FE::systems::FESystem& system,
     const EquationParameters& equation)
 {
-  std::vector<svmp::FE::systems::FESystem::FormCellDomainRestriction>
-      restrictions;
+  std::vector<EquationCellDomainRestriction> restrictions;
   const auto requests = application::core::activeCutVolumeRequests(equation);
   for (const auto& request : requests) {
     if (request.origin != application::core::ActiveCutVolumeRequestOrigin::Equation) {
@@ -364,41 +368,28 @@ equationCellDomainRestrictions(
     }
 
     const auto field_id = system.findFieldByName(request.level_set_field_name);
-    int marker = request.requested_interface_marker;
-    if (marker < 0) {
-      if (field_id == svmp::FE::INVALID_FIELD_ID) {
-        const std::string equation_type =
-            equation.type.defined() ? equation.type.value() : std::string{"<unknown>"};
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Equation-level level-set cut domain for equation '" +
-            equation_type + "' references level-set field '" +
-            request.level_set_field_name +
-            "' before that field is registered. Declare the level_set equation before "
-            "the cut-domain consumer, or set Interface_marker explicitly.");
-      }
-
-      svmp::FE::interfaces::GeneratedInterfaceMarkerKey key{};
-      key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(field_id);
-      key.domain_id = request.domain_id;
-      key.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
-      key.requested_marker = request.requested_interface_marker;
-      marker = svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
-    }
+    const int marker =
+        application::core::requireResolvedActiveCutVolumeInterfaceMarker(
+            system, request);
 
     const std::string equation_type =
         equation.type.defined() ? equation.type.value() : std::string{};
     restrictions.push_back(
-        svmp::FE::systems::FESystem::FormCellDomainRestriction{
-            .interface_marker = marker,
-            .side = toCutIntegrationSide(request.active_side),
-            .level_set_field = field_id,
-            .isovalue = static_cast<svmp::FE::Real>(request.isovalue),
-            .enable_level_set_shape_tangent =
-                field_id != svmp::FE::INVALID_FIELD_ID,
-            .diagnostic =
-                "equation_level_level_set_cut_domain equation_type='" +
-                equation_type + "' domain_id='" + request.domain_id +
-                "' level_set_field='" + request.level_set_field_name + "'"});
+        EquationCellDomainRestriction{
+            .request = request,
+            .restriction =
+                svmp::FE::systems::FESystem::FormCellDomainRestriction{
+                    .interface_marker = marker,
+                    .side = toCutIntegrationSide(request.active_side),
+                    .level_set_field = field_id,
+                    .isovalue = static_cast<svmp::FE::Real>(request.isovalue),
+                    .enable_level_set_shape_tangent =
+                        field_id != svmp::FE::INVALID_FIELD_ID,
+                    .diagnostic =
+                        "equation_level_level_set_cut_domain equation_type='" +
+                        equation_type + "' domain_id='" + request.domain_id +
+                        "' level_set_field='" +
+                        request.level_set_field_name + "'"}});
   }
   return restrictions;
 }
@@ -821,24 +812,30 @@ void SimulationBuilder::createPhysicsModules()
               << " domains=" << static_cast<int>(eq_params->domains.size())
               << " bcs=" << static_cast<int>(eq_params->boundary_conditions.size()) << std::endl;
 
-    const auto previous_cell_restrictions =
-        components_.fe_system->formInstallCellDomainRestrictions();
-    const auto cell_restrictions =
+    const auto equation_cut_restrictions =
         equationCellDomainRestrictions(*components_.fe_system, *eq_params);
+    std::vector<svmp::FE::systems::FESystem::FormCellDomainRestriction>
+        cell_restrictions;
+    cell_restrictions.reserve(equation_cut_restrictions.size());
+    for (const auto& cut_restriction : equation_cut_restrictions) {
+      cell_restrictions.push_back(cut_restriction.restriction);
+    }
     if (!cell_restrictions.empty()) {
       oopCout() << "[svMultiPhysics::Application]   Applying equation-level cut-domain cell restriction count="
                 << static_cast<int>(cell_restrictions.size()) << std::endl;
     }
-    components_.fe_system->setFormInstallCellDomainRestrictions(cell_restrictions);
-    std::unique_ptr<svmp::Physics::PhysicsModule> module;
-    try {
-      module = application::translators::EquationTranslator::createModule(*eq_params, *components_.fe_system,
-                                                                          components_.meshes);
-    } catch (...) {
-      components_.fe_system->setFormInstallCellDomainRestrictions(previous_cell_restrictions);
-      throw;
+    auto cell_restriction_scope =
+        components_.fe_system->scopedFormInstallCellDomainRestrictions(
+            std::move(cell_restrictions));
+    auto module = application::translators::EquationTranslator::createModule(
+        *eq_params, *components_.fe_system, components_.meshes);
+    cell_restriction_scope.restore();
+    for (const auto& cut_restriction : equation_cut_restrictions) {
+      application::core::validateEquationLevelCutVolumeConsumer(
+          *components_.fe_system,
+          cut_restriction.request,
+          cut_restriction.restriction.interface_marker);
     }
-    components_.fe_system->setFormInstallCellDomainRestrictions(previous_cell_restrictions);
     components_.physics_modules.push_back(std::move(module));
   }
 

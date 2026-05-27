@@ -664,6 +664,59 @@ struct CutInterfaceDomainSummary {
     Real positive_volume_measure{0.0};
 };
 
+struct GeneratedInterfaceSensitivitySample {
+    std::array<Real, 3> parent_parametric_coordinate{{0.0, 0.0, 0.0}};
+    std::vector<MeshIndex> influencing_parent_geometry_dofs{};
+    std::vector<Real> shape_values{};
+    std::vector<std::array<Real, 3>> shape_gradients{};
+};
+
+struct GeneratedInterfaceSensitivityRecord {
+    MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
+    std::string target_kind{};
+    std::string construction_policy{};
+    std::string provenance_id{};
+    std::uint64_t source_stable_id{0};
+    std::uint64_t cut_topology_revision{0};
+    std::uint64_t quadrature_policy_key{0};
+    bool ad_compatible{false};
+    bool location_sensitivity_available{false};
+    bool jacobian_sensitivity_available{false};
+    bool measure_sensitivity_available{false};
+    bool normal_sensitivity_available{false};
+    bool quadrature_weight_sensitivity_available{false};
+    std::vector<MeshIndex> parent_geometry_dofs{};
+    std::vector<GeneratedInterfaceSensitivitySample> samples{};
+};
+
+struct GeneratedInterfaceTwoSidedBinding {
+    int interface_marker{-1};
+    MeshIndex parent_cell{static_cast<MeshIndex>(-1)};
+    std::uint64_t interface_stable_id{0};
+    std::string interface_topology_id{};
+    std::array<Real, 3> normal{{1.0, 0.0, 0.0}};
+    CutInterfaceSideTag minus_side{CutInterfaceSideTag::Negative};
+    CutInterfaceSideTag plus_side{CutInterfaceSideTag::Positive};
+    std::vector<std::uint64_t> negative_volume_region_stable_ids{};
+    std::vector<std::uint64_t> positive_volume_region_stable_ids{};
+
+    [[nodiscard]] bool hasNegativeSide() const noexcept {
+        return !negative_volume_region_stable_ids.empty();
+    }
+
+    [[nodiscard]] bool hasPositiveSide() const noexcept {
+        return !positive_volume_region_stable_ids.empty();
+    }
+
+    [[nodiscard]] bool complete() const noexcept {
+        return interface_marker >= 0 &&
+               parent_cell >= static_cast<MeshIndex>(0) &&
+               interface_stable_id != 0 &&
+               hasNegativeSide() &&
+               hasPositiveSide();
+    }
+};
+
 [[nodiscard]] inline std::uint64_t cutInterfaceStableId(
     int interface_marker,
     MeshIndex parent_cell,
@@ -752,6 +805,11 @@ public:
         return volume_regions_;
     }
 
+    [[nodiscard]] const std::vector<GeneratedInterfaceSensitivityRecord>&
+    sensitivityRecords() const noexcept {
+        return sensitivity_records_;
+    }
+
     [[nodiscard]] std::vector<MeshIndex> cutCells() const {
         std::vector<MeshIndex> cells;
         for (const auto& fragment : fragments_) {
@@ -767,6 +825,7 @@ public:
     void clearFragments() {
         fragments_.clear();
         volume_regions_.clear();
+        sensitivity_records_.clear();
     }
 
     void addFragment(CutInterfaceFragment fragment) {
@@ -804,6 +863,14 @@ public:
         volume_regions_.push_back(std::move(region));
     }
 
+    void clearSensitivityRecords() {
+        sensitivity_records_.clear();
+    }
+
+    void addSensitivityRecord(GeneratedInterfaceSensitivityRecord record) {
+        sensitivity_records_.push_back(std::move(record));
+    }
+
     [[nodiscard]] std::vector<geometry::CutQuadratureRule> interfaceQuadratureRules() const {
         std::vector<geometry::CutQuadratureRule> rules;
         rules.reserve(fragments_.size());
@@ -826,6 +893,53 @@ public:
         }
         std::sort(rules.begin(), rules.end(), cutQuadratureRuleDeterministicLess);
         return rules;
+    }
+
+    [[nodiscard]] std::vector<GeneratedInterfaceTwoSidedBinding>
+    twoSidedParentCellBindings() const {
+        std::vector<GeneratedInterfaceTwoSidedBinding> bindings;
+        bindings.reserve(fragments_.size());
+        for (const auto& fragment : fragments_) {
+            if (!fragment.active()) {
+                continue;
+            }
+            GeneratedInterfaceTwoSidedBinding binding;
+            binding.interface_marker = fragment.interface_marker;
+            binding.parent_cell = fragment.parent_cell;
+            binding.interface_stable_id = fragment.stable_id;
+            binding.interface_topology_id = fragment.topology_id;
+            binding.normal = fragment.normal;
+            binding.minus_side = fragment.minus_side;
+            binding.plus_side = fragment.plus_side;
+            for (const auto& region : volume_regions_) {
+                if (!region.active() ||
+                    region.parent_cell != fragment.parent_cell ||
+                    region.interface_marker != fragment.interface_marker) {
+                    continue;
+                }
+                if (region.side == geometry::CutIntegrationSide::Negative) {
+                    binding.negative_volume_region_stable_ids.push_back(
+                        region.stable_id);
+                } else if (region.side == geometry::CutIntegrationSide::Positive) {
+                    binding.positive_volume_region_stable_ids.push_back(
+                        region.stable_id);
+                }
+            }
+            bindings.push_back(std::move(binding));
+        }
+        std::sort(bindings.begin(),
+                  bindings.end(),
+                  [](const GeneratedInterfaceTwoSidedBinding& a,
+                     const GeneratedInterfaceTwoSidedBinding& b) noexcept {
+                      if (a.parent_cell != b.parent_cell) {
+                          return a.parent_cell < b.parent_cell;
+                      }
+                      if (a.interface_marker != b.interface_marker) {
+                          return a.interface_marker < b.interface_marker;
+                      }
+                      return a.interface_stable_id < b.interface_stable_id;
+                  });
+        return bindings;
     }
 
     [[nodiscard]] CutInterfaceDomainSummary summary() const noexcept {
@@ -865,6 +979,7 @@ private:
     CutInterfaceDomainRequest request_{};
     std::vector<CutInterfaceFragment> fragments_{};
     std::vector<CutInterfaceVolumeRegion> volume_regions_{};
+    std::vector<GeneratedInterfaceSensitivityRecord> sensitivity_records_{};
 };
 
 } // namespace interfaces

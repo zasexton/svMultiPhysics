@@ -34,6 +34,12 @@ namespace basis {
  * simplices, tensorized triangle-line grids on wedges, and a rational nodal
  * pyramid construction on `Pyramid5`.
  *
+ * The evaluator is numerically stabilized for those nodes, but the
+ * interpolation problem itself remains the equispaced Lagrange problem. For
+ * high-order interpolation, especially order >= 4, prefer `SpectralBasis`
+ * (GLL / Warp & Blend nodes) unless exact equispaced nodal placement is part
+ * of the requested discretization.
+ *
  * For the rational pyramid family, basis values remain exact at the apex.
  * Gradients and Hessians are analytic on the supported interior reference
  * domain, but the exact-apex nodal derivative limit is not unique and those
@@ -48,10 +54,10 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return nodes_.size(); }
+    bool cache_identity_is_structural() const noexcept override { return true; }
 
     const std::vector<math::Vector<Real, 3>>& nodes() const noexcept { return nodes_; }
 
-    // D2: `final` lets the compiler devirtualize when the static type is LagrangeBasis.
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const final;
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
@@ -65,21 +71,31 @@ public:
 
     void evaluate_at_quadrature_points(
         const std::vector<math::Vector<Real, 3>>& points,
-        Real* values_out,
-        Real* gradients_out,
-        Real* hessians_out) const final;
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const final;
+    void evaluate_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const final;
 
-    // D3: Raw-pointer output API. Caller must pre-size buffers to size().
-    // No vector resize cost on the hot path.
-    void evaluate_values_to(const math::Vector<Real, 3>& xi, Real* values_out) const final;
-    void evaluate_gradients_to(const math::Vector<Real, 3>& xi, Real* gradients_out) const final;
-    void evaluate_hessians_to(const math::Vector<Real, 3>& xi, Real* hessians_out) const final;
+    // Raw-pointer output API. Caller must pre-size buffers to size().
+    void evaluate_values_to(const math::Vector<Real, 3>& xi, Real* SVMP_RESTRICT values_out) const final;
+    void evaluate_gradients_to(const math::Vector<Real, 3>& xi, Real* SVMP_RESTRICT gradients_out) const final;
+    void evaluate_hessians_to(const math::Vector<Real, 3>& xi, Real* SVMP_RESTRICT hessians_out) const final;
 
 private:
     using TensorNodeIndex = std::array<std::size_t, 3>;
     using WedgeNodeIndex = std::array<std::size_t, 2>;
+    using VectorEvaluationDispatch = void (LagrangeBasis::*)(
+        const math::Vector<Real, 3>&,
+        std::vector<Real>*,
+        std::vector<Gradient>*,
+        std::vector<Hessian>*) const;
 
-    // Cached topology (C5) — encoded as int because the topology enum lives in
+    // Cached topology encoded as int because the topology enum lives in
     // the .cpp anon namespace. Set once in init_nodes.
     int topology_id_ = 0;
 
@@ -93,7 +109,7 @@ private:
     std::vector<std::array<int, 4>> simplex_exponents_;
     std::vector<WedgeNodeIndex> wedge_indices_;
 
-    // C1+C6: precomputed Horner-form coefficients of the 1D Lagrange basis.
+    // Precomputed Horner-form coefficients of the 1D Lagrange basis.
     // Layout per axis (n_axis = nodes_1d_.size() = order_+1):
     //   axis_v_coeffs_[i * n_axis + k] = coeff of x^k in L_i(x), 0 <= i,k < n_axis
     //   axis_d_coeffs_[i * (n_axis - 1) + k] = coeff of x^k in L_i'(x)
@@ -102,8 +118,11 @@ private:
     std::vector<Real> axis_v_coeffs_;
     std::vector<Real> axis_d_coeffs_;
     std::vector<Real> axis_d2_coeffs_;
+    std::vector<Real> axis_barycentric_weights_;
+    VectorEvaluationDispatch vector_evaluation_dispatch_{nullptr};
 
     void init_nodes();
+    void init_evaluation_dispatch();
     void build_point_nodes();
     void build_tensor_product_nodes(int dimensions);
     void build_simplex_nodes();
@@ -111,6 +130,38 @@ private:
     void build_pyramid_nodes();
     void init_equispaced_1d_nodes();
     void compute_axis_monomial_coefficients();
+    void evaluate_point_vectors(const math::Vector<Real, 3>& xi,
+                                std::vector<Real>* values,
+                                std::vector<Gradient>* gradients,
+                                std::vector<Hessian>* hessians) const;
+    void evaluate_tensor_product_vectors(const math::Vector<Real, 3>& xi,
+                                         std::vector<Real>* values,
+                                         std::vector<Gradient>* gradients,
+                                         std::vector<Hessian>* hessians) const;
+    void evaluate_triangle_vectors(const math::Vector<Real, 3>& xi,
+                                   std::vector<Real>* values,
+                                   std::vector<Gradient>* gradients,
+                                   std::vector<Hessian>* hessians) const;
+    void evaluate_tetrahedron_vectors(const math::Vector<Real, 3>& xi,
+                                      std::vector<Real>* values,
+                                      std::vector<Gradient>* gradients,
+                                      std::vector<Hessian>* hessians) const;
+    void evaluate_wedge_vectors(const math::Vector<Real, 3>& xi,
+                                std::vector<Real>* values,
+                                std::vector<Gradient>* gradients,
+                                std::vector<Hessian>* hessians) const;
+    void evaluate_pyramid_vectors(const math::Vector<Real, 3>& xi,
+                                  std::vector<Real>* values,
+                                  std::vector<Gradient>* gradients,
+                                  std::vector<Hessian>* hessians) const;
+    void evaluate_unsupported_vectors(const math::Vector<Real, 3>& xi,
+                                      std::vector<Real>* values,
+                                      std::vector<Gradient>* gradients,
+                                      std::vector<Hessian>* hessians) const;
+    void evaluate_all_to(const math::Vector<Real, 3>& xi,
+                         Real* SVMP_RESTRICT values_out,
+                         Real* SVMP_RESTRICT gradients_out,
+                         Real* SVMP_RESTRICT hessians_out) const;
 };
 
 } // namespace basis

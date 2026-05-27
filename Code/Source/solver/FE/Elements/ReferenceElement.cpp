@@ -15,7 +15,7 @@ namespace svmp {
 namespace FE {
 namespace elements {
 
-using svmp::FE::basis::NodeOrdering;
+using svmp::FE::basis::ReferenceNodeLayout;
 using svmp::FE::quadrature::QuadratureFactory;
 using svmp::FE::QuadratureType;
 
@@ -174,8 +174,8 @@ ReferenceElement ReferenceElement::create(ElementType type) {
                           __FILE__, __LINE__, __func__, FEStatus::InvalidElement);
     }
 
-    // Node count comes from NodeOrdering
-    ref.num_nodes_ = basis::NodeOrdering::num_nodes(type);
+    // Node count comes from ReferenceNodeLayout
+    ref.num_nodes_ = basis::ReferenceNodeLayout::num_nodes(type);
 
     // Build topology based on canonical linear element
     const ElementType base = canonical(type);

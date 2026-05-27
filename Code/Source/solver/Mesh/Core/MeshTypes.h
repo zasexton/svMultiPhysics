@@ -131,6 +131,8 @@ enum class ConstraintKind {
   Mortar     // Non-conforming interface topology
 };
 
+#ifndef SVMP_CELL_FAMILY_DEFINED
+#define SVMP_CELL_FAMILY_DEFINED 1
 enum class CellFamily {
   Point,
   Line,
@@ -143,6 +145,7 @@ enum class CellFamily {
   Polygon,
   Polyhedron
 };
+#endif
 
 enum class ReorderAlgo {
   None,

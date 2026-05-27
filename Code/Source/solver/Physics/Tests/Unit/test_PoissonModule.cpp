@@ -12,6 +12,7 @@
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
+#include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
@@ -280,6 +281,75 @@ std::vector<FE::Real> solveSteadySystem(FE::systems::FESystem& system,
     return std::vector<FE::Real>(u_span.begin(), u_span.end());
 }
 
+std::shared_ptr<FE::assembly::CutIntegrationContext>
+makePoissonSingleTetraGeneratedCutContext(FE::FieldId phi_field,
+                                          int marker,
+                                          std::uint64_t source_revision)
+{
+    auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
+
+    FE::geometry::CutQuadratureRule rule;
+    rule.kind = FE::geometry::CutQuadratureKind::Volume;
+    rule.side = FE::geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = FE::Real{1.0} / FE::Real{6.0};
+    rule.measure = FE::Real{1.0} / FE::Real{12.0};
+    rule.volume_fraction = FE::Real{0.5};
+    rule.frame = FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.source_value_revision = source_revision;
+    rule.points.push_back(FE::geometry::CutQuadraturePoint{
+        .point = {{FE::Real{0.25}, FE::Real{0.25}, FE::Real{0.25}}},
+        .weight = rule.measure,
+    });
+
+    FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.side = FE::geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.source_value_revision = source_revision;
+    cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+
+    FE::interfaces::CutInterfaceDomainRequest domain_request;
+    domain_request.source =
+        FE::interfaces::LevelSetInterfaceSource::fromField(
+            phi_field,
+            0u,
+            source_revision);
+    domain_request.interface_marker = marker;
+    domain_request.quadrature_order = 0;
+    domain_request.interface_quadrature_order = 0;
+    domain_request.volume_quadrature_order = 0;
+    FE::interfaces::LevelSetInterfaceDomain domain(domain_request);
+
+    FE::interfaces::CutInterfaceFragment fragment;
+    fragment.interface_marker = marker;
+    fragment.parent_cell = 0;
+    fragment.local_fragment_index = 0;
+    fragment.stable_id = 1;
+    fragment.kind = FE::interfaces::CutInterfaceFragmentKind::Polygon;
+    fragment.measure = std::sqrt(FE::Real{3.0}) / FE::Real{8.0};
+    fragment.normal = {{
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0}),
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0}),
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0}),
+    }};
+    FE::interfaces::CutInterfaceQuadraturePoint interface_qp;
+    interface_qp.point = {{
+        FE::Real{1.0} / FE::Real{6.0},
+        FE::Real{1.0} / FE::Real{6.0},
+        FE::Real{1.0} / FE::Real{6.0},
+    }};
+    interface_qp.parent_coordinate = interface_qp.point;
+    interface_qp.normal = fragment.normal;
+    interface_qp.weight = fragment.measure;
+    fragment.quadrature_points.push_back(interface_qp);
+    domain.addFragment(std::move(fragment));
+    cut_context->addGeneratedInterfaceDomain(domain);
+
+    return cut_context;
+}
+
 } // namespace
 
 TEST(PoissonModule, AssembledJacobianMatchesFiniteDifference)
@@ -332,6 +402,345 @@ TEST(PoissonModule, AssembledJacobianMatchesFiniteDifference)
                                            /*eps=*/1e-6,
                                            /*rtol=*/1e-6,
                                            /*atol=*/1e-10);
+}
+
+TEST(PoissonModule, LevelSetCutDomainRestrictionInstallsShapeTangentForScalarPhysics)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    auto space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Tetra4, /*order=*/1);
+    const auto phi_field = system.addField(
+        FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+
+    constexpr int marker = 714;
+    system.setFormInstallCellDomainRestrictions({
+        FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "poisson_level_set_cut_domain_regression"}});
+
+    formulations::poisson::PoissonOptions opts;
+    opts.field_name = "Temperature";
+    opts.diffusion = 2.0;
+    opts.source = 0.5;
+
+    formulations::poisson::PoissonModule module(space, opts);
+    module.registerOn(system);
+    system.setFormInstallCellDomainRestrictions({});
+
+    const auto u_field = system.findFieldByName("Temperature");
+    ASSERT_NE(u_field, FE::INVALID_FIELD_ID);
+
+    const auto& def = system.operatorDefinition("equations");
+    EXPECT_TRUE(def.cells.empty());
+    const auto scalar_cut = std::find_if(
+        def.cut_volumes.begin(),
+        def.cut_volumes.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.side == FE::geometry::CutIntegrationSide::Negative &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == u_field;
+        });
+    ASSERT_NE(scalar_cut, def.cut_volumes.end());
+
+    const auto phi_cut = std::find_if(
+        def.cut_volumes.begin(),
+        def.cut_volumes.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.side == FE::geometry::CutIntegrationSide::Negative &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_cut, def.cut_volumes.end());
+
+    const auto phi_interface = std::find_if(
+        def.interface_faces.begin(),
+        def.interface_faces.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_interface, def.interface_faces.end());
+    EXPECT_EQ(phi_interface->kernel, phi_cut->kernel);
+}
+
+TEST(PoissonModule, LevelSetCutDomainRestrictionAssemblesScalarCutVolume)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    auto space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Tetra4, /*order=*/1);
+    const auto phi_field = system.addField(
+        FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+
+    constexpr int marker = 715;
+    constexpr std::uint64_t source_revision = 1;
+    system.setFormInstallCellDomainRestrictions({
+        FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "poisson_level_set_cut_domain_assembly_regression"}});
+
+    formulations::poisson::PoissonOptions opts;
+    opts.field_name = "Temperature";
+    opts.diffusion = 2.0;
+    opts.source = 0.5;
+
+    formulations::poisson::PoissonModule module(space, opts);
+    module.registerOn(system);
+    system.setFormInstallCellDomainRestrictions({});
+
+    auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    FE::geometry::CutQuadratureRule rule;
+    rule.kind = FE::geometry::CutQuadratureKind::Volume;
+    rule.side = FE::geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = FE::Real{1.0} / FE::Real{6.0};
+    rule.measure = FE::Real{1.0} / FE::Real{12.0};
+    rule.volume_fraction = FE::Real{0.5};
+    rule.frame = FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.provenance.source_value_revision = source_revision;
+    rule.points.push_back(FE::geometry::CutQuadraturePoint{
+        .point = {{FE::Real{0.25}, FE::Real{0.25}, FE::Real{0.25}}},
+        .weight = rule.measure,
+    });
+
+    FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.side = FE::geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = rule.volume_fraction;
+    metadata.source_value_revision = source_revision;
+    cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+
+    FE::interfaces::CutInterfaceDomainRequest domain_request;
+    domain_request.source =
+        FE::interfaces::LevelSetInterfaceSource::fromField(
+            phi_field,
+            0u,
+            source_revision);
+    domain_request.interface_marker = marker;
+    domain_request.quadrature_order = 0;
+    domain_request.interface_quadrature_order = 0;
+    domain_request.volume_quadrature_order = 0;
+    FE::interfaces::LevelSetInterfaceDomain domain(domain_request);
+    FE::interfaces::CutInterfaceFragment fragment;
+    fragment.interface_marker = marker;
+    fragment.parent_cell = 0;
+    fragment.local_fragment_index = 0;
+    fragment.stable_id = 1;
+    fragment.kind = FE::interfaces::CutInterfaceFragmentKind::Polygon;
+    fragment.measure = std::sqrt(FE::Real{3.0}) / FE::Real{8.0};
+    fragment.normal = {{
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0}),
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0}),
+        FE::Real{1.0} / std::sqrt(FE::Real{3.0}),
+    }};
+    FE::interfaces::CutInterfaceQuadraturePoint interface_qp;
+    interface_qp.point = {{
+        FE::Real{1.0} / FE::Real{6.0},
+        FE::Real{1.0} / FE::Real{6.0},
+        FE::Real{1.0} / FE::Real{6.0},
+    }};
+    interface_qp.parent_coordinate = interface_qp.point;
+    interface_qp.normal = fragment.normal;
+    interface_qp.weight = fragment.measure;
+    fragment.quadrature_points.push_back(interface_qp);
+    domain.addFragment(std::move(fragment));
+    cut_context->addGeneratedInterfaceDomain(domain);
+
+    system.setCutIntegrationContext(cut_context);
+    system.setup({}, makeSingleTetraSetupInputs());
+
+    const auto temperature_field = system.findFieldByName("Temperature");
+    ASSERT_NE(temperature_field, FE::INVALID_FIELD_ID);
+    const auto& def = system.operatorDefinition("equations");
+    EXPECT_FALSE(def.cut_volumes.empty());
+    EXPECT_FALSE(def.interface_faces.empty());
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_EQ(n, 8);
+
+    std::vector<FE::Real> values(static_cast<std::size_t>(n), FE::Real{1.0});
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(values);
+
+    FE::assembly::DenseMatrixView matrix(n);
+    FE::assembly::DenseVectorView residual(n);
+    FE::systems::AssemblyRequest req;
+    req.op = "equations";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    const auto result = system.assemble(req, state, &matrix, &residual);
+    ASSERT_TRUE(result.success) << result.error_message;
+    EXPECT_GT(result.matrix_entries_inserted, 0);
+    EXPECT_GT(result.vector_entries_inserted, 0);
+    EXPECT_GT(result.interface_faces_assembled, 0);
+}
+
+TEST(PoissonModule,
+     LevelSetCutDomainRestrictionPrescribedGeometryJacobianMatchesFiniteDifference)
+{
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    auto space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Tetra4, /*order=*/1);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    constexpr int marker = 716;
+    constexpr std::uint64_t source_revision = 1;
+    system.setFormInstallCellDomainRestrictions({
+        FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = false,
+            .diagnostic = "poisson_level_set_cut_domain_fd_regression"}});
+
+    formulations::poisson::PoissonOptions opts;
+    opts.field_name = "Temperature";
+    opts.diffusion = 1.7;
+    opts.source = 0.35;
+
+    formulations::poisson::PoissonModule module(space, opts);
+    module.registerOn(system);
+    system.setFormInstallCellDomainRestrictions({});
+    system.setCutIntegrationContext(
+        makePoissonSingleTetraGeneratedCutContext(
+            phi_field, marker, source_revision));
+    system.setup({}, makeSingleTetraSetupInputs());
+    const std::vector<FE::Real> prescribed_phi{
+        FE::Real{-0.25}, FE::Real{0.15}, FE::Real{-0.10}, FE::Real{0.20}};
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        std::span<const FE::Real>(prescribed_phi.data(),
+                                  prescribed_phi.size()));
+
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_EQ(n, 4);
+    std::vector<FE::Real> values(static_cast<std::size_t>(n), FE::Real{0.0});
+    values[0] = FE::Real{0.11};
+    values[1] = FE::Real{-0.03};
+    values[2] = FE::Real{0.07};
+    values[3] = FE::Real{0.19};
+
+    FE::systems::SystemStateView state;
+    state.u = std::span<const FE::Real>(values);
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        "equations",
+        /*eps=*/1.0e-6,
+        /*rtol=*/1.0e-6,
+        /*atol=*/1.0e-10);
+}
+
+TEST(PoissonModule,
+     LevelSetCutDomainRestrictionPrescribedGeometrySolveConservesGeneratedMeasure)
+{
+    std::string backend_error;
+    auto factory = tryCreateBackend(FE::backends::BackendKind::Eigen,
+                                    backend_error);
+    if (!factory) {
+        GTEST_SKIP() << "Requires Eigen backend: " << backend_error;
+    }
+
+    auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+
+    auto space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Tetra4, /*order=*/1);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    constexpr int marker = 717;
+    constexpr std::uint64_t source_revision = 1;
+    system.setFormInstallCellDomainRestrictions({
+        FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = false,
+            .diagnostic = "poisson_level_set_cut_domain_solve_regression"}});
+
+    formulations::poisson::PoissonOptions opts;
+    opts.field_name = "Temperature";
+    opts.diffusion = 1.2;
+    opts.source = 0.4;
+
+    formulations::poisson::PoissonModule module(space, opts);
+    module.registerOn(system);
+    system.setFormInstallCellDomainRestrictions({});
+
+    const auto temperature_field = system.findFieldByName("Temperature");
+    ASSERT_NE(temperature_field, FE::INVALID_FIELD_ID);
+    std::vector<FE::constraints::VertexDirichletValue> anchor = {
+        {.vertex_id = 0, .value = 0.0},
+    };
+    system.addSystemConstraint(
+        std::make_unique<FE::constraints::VertexDirichletConstraint>(
+            temperature_field,
+            std::move(anchor),
+            FE::constraints::VertexIdMode::LocalVertexId));
+
+    system.setCutIntegrationContext(
+        makePoissonSingleTetraGeneratedCutContext(
+            phi_field, marker, source_revision));
+    system.setup({}, makeSingleTetraSetupInputs());
+    const std::vector<FE::Real> prescribed_phi{
+        FE::Real{-0.25}, FE::Real{0.15}, FE::Real{-0.10}, FE::Real{0.20}};
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        std::span<const FE::Real>(prescribed_phi.data(),
+                                  prescribed_phi.size()));
+
+    ASSERT_TRUE(system.constraints().isConstrained(0));
+    const auto* cut_context = system.cutIntegrationContext();
+    ASSERT_NE(cut_context, nullptr);
+    const auto rules =
+        cut_context->generatedVolumeRulesForMarkerAndSide(
+            marker, FE::geometry::CutIntegrationSide::Negative);
+    ASSERT_EQ(rules.size(), 1u);
+    ASSERT_NE(rules.front(), nullptr);
+    EXPECT_NEAR(rules.front()->measure,
+                rules.front()->parent_measure * rules.front()->volume_fraction,
+                FE::Real{1.0e-14});
+    EXPECT_NEAR(rules.front()->measure,
+                FE::Real{1.0} / FE::Real{12.0},
+                FE::Real{1.0e-14});
+    EXPECT_NEAR(rules.front()->volume_fraction, FE::Real{0.5},
+                FE::Real{1.0e-14});
+
+    const auto solution = solveSteadySystem(system,
+                                            *factory,
+                                            FE::backends::SolverMethod::Direct,
+                                            FE::backends::PreconditionerType::None);
+    ASSERT_EQ(solution.size(), static_cast<std::size_t>(4));
+    EXPECT_NEAR(solution.front(), FE::Real{0.0}, FE::Real{1.0e-12});
+    for (const auto value : solution) {
+        EXPECT_TRUE(std::isfinite(value));
+    }
 }
 
 TEST(PoissonModule, CoupledNeumannRCRUsesModernAuxiliaryPath)

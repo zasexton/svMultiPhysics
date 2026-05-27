@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "FE/Quadrature/QuadratureFactory.h"
+#include "FE/Quadrature/GaussLobattoQuadrature.h"
 #include "FE/Core/FEException.h"
 #include "FE/Core/Types.h"
 #include <cmath>
@@ -101,6 +102,24 @@ TEST(QuadratureFactory, GaussLobattoUsesCeilForEvenOrders) {
         acc += quad->weight(i) * (x * x * x * x);
     }
     EXPECT_NEAR(acc, 2.0 / 5.0, 1e-12);
+}
+
+TEST(QuadratureFactory, GaussLobattoRawWeightsMatchKnownFivePointRule) {
+    const auto [nodes, weights] = GaussLobattoQuadrature1D::generate_raw(5);
+    ASSERT_EQ(nodes.size(), 5u);
+    ASSERT_EQ(weights.size(), 5u);
+
+    EXPECT_NEAR(nodes[0], -1.0, 1e-14);
+    EXPECT_NEAR(nodes[1], -std::sqrt(3.0 / 7.0), 1e-12);
+    EXPECT_NEAR(nodes[2], 0.0, 1e-12);
+    EXPECT_NEAR(nodes[3], std::sqrt(3.0 / 7.0), 1e-12);
+    EXPECT_NEAR(nodes[4], 1.0, 1e-14);
+
+    EXPECT_NEAR(weights[0], 1.0 / 10.0, 1e-14);
+    EXPECT_NEAR(weights[1], 49.0 / 90.0, 1e-14);
+    EXPECT_NEAR(weights[2], 32.0 / 45.0, 1e-14);
+    EXPECT_NEAR(weights[3], 49.0 / 90.0, 1e-14);
+    EXPECT_NEAR(weights[4], 1.0 / 10.0, 1e-14);
 }
 
 TEST(QuadratureFactory, PointElementCreates0DQuadrature) {

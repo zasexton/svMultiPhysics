@@ -14,7 +14,9 @@
  */
 
 #include "Basis/VectorBasis.h"
+#include <cstdint>
 #include <memory>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -65,6 +67,9 @@ public:
     std::size_t size() const noexcept override { return size_; }
 
     std::string cache_identity() const override;
+    bool cache_identity_words(std::vector<std::uint64_t>& words) const override;
+    bool cache_identity_fingerprint(std::uint64_t& hash_a,
+                                    std::uint64_t& hash_b) const override;
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
@@ -74,9 +79,19 @@ public:
 
     void evaluate_divergence(const math::Vector<Real, 3>& xi,
                              std::vector<Real>& divergence) const override;
+    bool supports_divergence() const noexcept override { return family_ == Family::HDiv; }
 
     void evaluate_curl(const math::Vector<Real, 3>& xi,
                        std::vector<math::Vector<Real, 3>>& curl) const override;
+    bool supports_curl() const noexcept override { return family_ == Family::HCurl; }
+
+    void evaluate_vector_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const override;
 
     std::vector<DofAssociation> dof_associations() const override { return associations_; }
 
@@ -89,6 +104,10 @@ private:
     std::size_t size_{0};
     std::vector<std::shared_ptr<BasisFunction>> component_bases_;
     std::vector<DofAssociation> associations_;
+    std::string cache_identity_;
+    std::vector<std::uint64_t> cache_identity_words_;
+    std::uint64_t cache_identity_hash_a_{0};
+    std::uint64_t cache_identity_hash_b_{0};
 };
 
 } // namespace basis

@@ -86,10 +86,12 @@ void MaterialStateProvider::AlignedBuffer::reset() noexcept
 
 MaterialStateProvider::MaterialStateProvider(GlobalIndex num_cells,
                                              std::vector<GlobalIndex> boundary_face_ids,
-                                             std::vector<GlobalIndex> interior_face_ids)
+                                             std::vector<GlobalIndex> interior_face_ids,
+                                             std::vector<std::uint64_t> generated_interface_ids)
     : num_cells_(num_cells)
     , boundary_face_ids_(std::move(boundary_face_ids))
     , interior_face_ids_(std::move(interior_face_ids))
+    , generated_interface_ids_(std::move(generated_interface_ids))
 {
     FE_THROW_IF(num_cells_ < 0, InvalidArgumentException, "MaterialStateProvider: num_cells must be non-negative");
 
@@ -110,6 +112,15 @@ MaterialStateProvider::MaterialStateProvider(GlobalIndex num_cells,
         FE_THROW_IF(!inserted, InvalidArgumentException,
                     "MaterialStateProvider: duplicate interior face id");
     }
+
+    generated_interface_index_.reserve(generated_interface_ids_.size());
+    for (std::size_t i = 0; i < generated_interface_ids_.size(); ++i) {
+        const auto id = generated_interface_ids_[i];
+        const auto [ins_it, inserted] = generated_interface_index_.emplace(id, i);
+        (void)ins_it;
+        FE_THROW_IF(!inserted, InvalidArgumentException,
+                    "MaterialStateProvider: duplicate generated interface id");
+    }
 }
 
 MaterialStateProvider::~MaterialStateProvider() = default;
@@ -121,14 +132,19 @@ void MaterialStateProvider::addKernel(const assembly::AssemblyKernel& kernel,
                                       assembly::MaterialStateSpec spec,
                                       LocalIndex max_cell_qpts,
                                       LocalIndex max_boundary_face_qpts,
-                                      LocalIndex max_interior_face_qpts)
+                                      LocalIndex max_interior_face_qpts,
+                                      LocalIndex max_generated_interface_qpts)
 {
     FE_THROW_IF(max_cell_qpts < 0, InvalidArgumentException, "MaterialStateProvider: max_cell_qpts must be >= 0");
     FE_THROW_IF(max_boundary_face_qpts < 0, InvalidArgumentException,
                 "MaterialStateProvider: max_boundary_face_qpts must be >= 0");
     FE_THROW_IF(max_interior_face_qpts < 0, InvalidArgumentException,
                 "MaterialStateProvider: max_interior_face_qpts must be >= 0");
-    FE_THROW_IF(max_cell_qpts == 0 && max_boundary_face_qpts == 0 && max_interior_face_qpts == 0,
+    FE_THROW_IF(max_generated_interface_qpts < 0, InvalidArgumentException,
+                "MaterialStateProvider: max_generated_interface_qpts must be >= 0");
+    FE_THROW_IF(max_cell_qpts == 0 && max_boundary_face_qpts == 0 &&
+                    max_interior_face_qpts == 0 &&
+                    max_generated_interface_qpts == 0,
                 InvalidArgumentException,
                 "MaterialStateProvider: at least one max_*_qpts must be > 0");
     FE_THROW_IF(spec.bytes_per_qpt == 0u, InvalidArgumentException, "MaterialStateProvider: bytes_per_qpt must be > 0");
@@ -248,6 +264,56 @@ void MaterialStateProvider::addKernel(const assembly::AssemblyKernel& kernel,
             }
         }
 
+        const auto prev_max_gq = it->second.max_generated_interface_qpts;
+        it->second.max_generated_interface_qpts =
+            std::max(it->second.max_generated_interface_qpts,
+                     max_generated_interface_qpts);
+        if (it->second.max_generated_interface_qpts != prev_max_gq) {
+            it->second.generated_interface_stride_bytes =
+                static_cast<std::size_t>(
+                    it->second.max_generated_interface_qpts) *
+                it->second.stride_bytes;
+            const std::size_t total_bytes =
+                generated_interface_ids_.size() *
+                it->second.generated_interface_stride_bytes;
+            if (total_bytes == 0u) {
+                it->second.generated_interface_old.reset();
+                it->second.generated_interface_work.reset();
+            } else {
+                AlignedBuffer new_old;
+                AlignedBuffer new_work;
+                new_old.allocate(total_bytes, it->second.alignment);
+                new_work.allocate(total_bytes, it->second.alignment);
+
+                const std::size_t prev_stride =
+                    static_cast<std::size_t>(prev_max_gq) *
+                    it->second.stride_bytes;
+                const std::size_t copy_bytes =
+                    std::min(prev_stride,
+                             it->second.generated_interface_stride_bytes);
+                if (copy_bytes > 0u &&
+                    it->second.generated_interface_old.data != nullptr &&
+                    it->second.generated_interface_work.data != nullptr) {
+                    for (std::size_t f = 0; f < generated_interface_ids_.size(); ++f) {
+                        std::memcpy(
+                            new_old.data +
+                                f * it->second.generated_interface_stride_bytes,
+                            it->second.generated_interface_old.data +
+                                f * prev_stride,
+                            copy_bytes);
+                        std::memcpy(
+                            new_work.data +
+                                f * it->second.generated_interface_stride_bytes,
+                            it->second.generated_interface_work.data +
+                                f * prev_stride,
+                            copy_bytes);
+                    }
+                }
+                it->second.generated_interface_old = std::move(new_old);
+                it->second.generated_interface_work = std::move(new_work);
+            }
+        }
+
         return;
     }
 
@@ -280,6 +346,19 @@ void MaterialStateProvider::addKernel(const assembly::AssemblyKernel& kernel,
     if (interior_total_bytes > 0u) {
         state.interior_old.allocate(interior_total_bytes, state.alignment);
         state.interior_work.allocate(interior_total_bytes, state.alignment);
+    }
+
+    state.max_generated_interface_qpts = max_generated_interface_qpts;
+    state.generated_interface_stride_bytes =
+        static_cast<std::size_t>(state.max_generated_interface_qpts) *
+        state.stride_bytes;
+    const std::size_t generated_interface_total_bytes =
+        generated_interface_ids_.size() * state.generated_interface_stride_bytes;
+    if (generated_interface_total_bytes > 0u) {
+        state.generated_interface_old.allocate(generated_interface_total_bytes,
+                                               state.alignment);
+        state.generated_interface_work.allocate(generated_interface_total_bytes,
+                                                state.alignment);
     }
 
     states_.emplace(key, std::move(state));
@@ -373,6 +452,52 @@ assembly::MaterialStateView MaterialStateProvider::getInteriorFaceState(const as
                                        work_lifecycle_};
 }
 
+assembly::MaterialStateView MaterialStateProvider::getGeneratedInterfaceState(
+    const assembly::AssemblyKernel& kernel,
+    GlobalIndex /*parent_cell_id*/,
+    int /*interface_marker*/,
+    std::uint64_t cut_topology_revision,
+    LocalIndex num_qpts)
+{
+    auto it = states_.find(&kernel);
+    if (it == states_.end()) {
+        return {};
+    }
+
+    const auto idx_it = generated_interface_index_.find(cut_topology_revision);
+    if (idx_it == generated_interface_index_.end()) {
+        return {};
+    }
+
+    FE_THROW_IF(num_qpts < 0 ||
+                    num_qpts > it->second.max_generated_interface_qpts,
+                InvalidArgumentException,
+                "MaterialStateProvider: requested generated-interface num_qpts exceeds allocated max_qpts");
+
+    if (it->second.generated_interface_old.data == nullptr ||
+        it->second.generated_interface_work.data == nullptr) {
+        return {};
+    }
+
+    const auto idx = idx_it->second;
+    auto* old_base =
+        it->second.generated_interface_old.data +
+        idx * it->second.generated_interface_stride_bytes;
+    auto* work_base =
+        it->second.generated_interface_work.data +
+        idx * it->second.generated_interface_stride_bytes;
+    return assembly::MaterialStateView{
+        old_base,
+        work_base,
+        it->second.bytes_per_qpt,
+        it->second.stride_bytes,
+        it->second.alignment,
+        std::span<const state::StateVariableMetadata>(
+            it->second.variables.data(), it->second.variables.size()),
+        state::StateVariableLifecycle::CommittedOld,
+        work_lifecycle_};
+}
+
 void MaterialStateProvider::beginTimeStep()
 {
     for (auto& kv : states_) {
@@ -396,6 +521,18 @@ void MaterialStateProvider::beginTimeStep()
                         "MaterialStateProvider: beginTimeStep interior size mismatch");
             std::memcpy(state.interior_work.data, state.interior_old.data, state.interior_old.size_bytes);
         }
+
+        if (state.generated_interface_old.data != nullptr &&
+            state.generated_interface_work.data != nullptr) {
+            FE_THROW_IF(
+                state.generated_interface_old.size_bytes !=
+                    state.generated_interface_work.size_bytes,
+                FEException,
+                "MaterialStateProvider: beginTimeStep generated-interface size mismatch");
+            std::memcpy(state.generated_interface_work.data,
+                        state.generated_interface_old.data,
+                        state.generated_interface_old.size_bytes);
+        }
     }
     work_lifecycle_ = state::StateVariableLifecycle::TrialWork;
 }
@@ -407,6 +544,8 @@ void MaterialStateProvider::commitTimeStep()
         std::swap(state.buffer_old, state.buffer_work);
         std::swap(state.boundary_old, state.boundary_work);
         std::swap(state.interior_old, state.interior_work);
+        std::swap(state.generated_interface_old,
+                  state.generated_interface_work);
     }
     work_lifecycle_ = state::StateVariableLifecycle::Accepted;
 }
@@ -501,6 +640,45 @@ state::StateFrameTransformResult MaterialStateProvider::applyStateFrameTransform
                          kernel_state.interior_face_stride_bytes,
                          kernel_state.max_interior_face_qpts,
                          &interior_face_ids_);
+
+            if (kernel_state.generated_interface_old.data != nullptr &&
+                kernel_state.generated_interface_work.data != nullptr &&
+                !generated_interface_ids_.empty() &&
+                kernel_state.max_generated_interface_qpts > 0) {
+                for (std::size_t entity = 0;
+                     entity < generated_interface_ids_.size();
+                     ++entity) {
+                    for (LocalIndex q = 0;
+                         q < kernel_state.max_generated_interface_qpts;
+                         ++q) {
+                        const auto q_offset =
+                            entity *
+                                kernel_state
+                                    .generated_interface_stride_bytes +
+                            static_cast<std::size_t>(q) *
+                                kernel_state.stride_bytes +
+                            variable.offset_bytes;
+                        state::StateVariableTransformContext ctx;
+                        ctx.request = request;
+                        ctx.storage_domain =
+                            state::StateStorageDomain::
+                                MaterialGeneratedInterfaceQuadrature;
+                        ctx.storage_name = "generated-interface";
+                        ctx.entity_id = static_cast<GlobalIndex>(
+                            generated_interface_ids_[entity]);
+                        ctx.quadrature_point = static_cast<int>(q);
+                        ctx.variable = variable;
+                        ctx.old_value = std::span<const std::byte>(
+                            kernel_state.generated_interface_old.data + q_offset,
+                            variable.size_bytes);
+                        ctx.work_value = std::span<std::byte>(
+                            kernel_state.generated_interface_work.data + q_offset,
+                            variable.size_bytes);
+                        kernel_state.frame_transform_hook(ctx);
+                        ++result.variable_instances_transformed;
+                    }
+                }
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 #include "Assembly/CutDomainAssembler.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Core/AlignedAllocator.h"
 #include "Geometry/CutQuadrature.h"
 #include "Forms/FormCompiler.h"
@@ -43,6 +44,46 @@ using svmp::FE::assembly::ContextType;
 using svmp::FE::assembly::RequiredData;
 
 using JITConstants = std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>>;
+
+[[nodiscard]] bool containsFormExprType(const FormExprNode& node,
+                                        FormExprType type)
+{
+    if (node.type() == type) {
+        return true;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsFormExprType(*child, type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] FormExprNode::SpaceSignature spaceSignatureFor(
+    const svmp::FE::spaces::FunctionSpace& space)
+{
+    FormExprNode::SpaceSignature sig;
+    sig.space_type = space.space_type();
+    sig.field_type = space.field_type();
+    sig.continuity = space.continuity();
+    sig.value_dimension = space.value_dimension();
+    sig.topological_dimension = space.topological_dimension();
+    sig.polynomial_order = space.polynomial_order();
+    sig.element_type = space.element_type();
+    return sig;
+}
+
+[[nodiscard]] bool spaceSignaturesEqual(const FormExprNode::SpaceSignature& a,
+                                        const FormExprNode::SpaceSignature& b)
+{
+    return a.space_type == b.space_type &&
+           a.field_type == b.field_type &&
+           a.continuity == b.continuity &&
+           a.value_dimension == b.value_dimension &&
+           a.topological_dimension == b.topological_dimension &&
+           a.polynomial_order == b.polynomial_order &&
+           a.element_type == b.element_type;
+}
 
 [[nodiscard]] JITConstants makeCutConstants(const CutQuadratureRule& rule,
                                             Real side_indicator,
@@ -562,6 +603,351 @@ void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
                                 "many-point-fixed-geometry-interface",
                                 /*quadrature_order=*/6);
     return rule;
+}
+
+[[nodiscard]] Real quadraticLevelSetAt(const std::array<Real, 3>& x)
+{
+    return Real(-0.18) +
+           x[0] +
+           Real(0.35) * x[1] -
+           Real(0.25) * x[2] +
+           Real(0.40) * x[0] * x[0] +
+           Real(0.20) * x[1] * x[1] -
+           Real(0.10) * x[2] * x[2] +
+           Real(0.15) * x[0] * x[1];
+}
+
+[[nodiscard]] AssemblyContext::Point3D pointOnQuadraticLevelSet(Real y, Real z)
+{
+    const Real a = Real(0.40);
+    const Real b = Real(1.0) + Real(0.15) * y;
+    const Real c =
+        Real(-0.18) +
+        Real(0.35) * y -
+        Real(0.25) * z +
+        Real(0.20) * y * y -
+        Real(0.10) * z * z;
+    const Real disc = b * b - Real(4.0) * a * c;
+    if (!(disc >= Real(0.0))) {
+        throw std::runtime_error("pointOnQuadraticLevelSet: no real root");
+    }
+    const Real x = (-b + std::sqrt(disc)) / (Real(2.0) * a);
+    if (!(x >= Real(0.0) && x + y + z <= Real(1.0))) {
+        throw std::runtime_error(
+            "pointOnQuadraticLevelSet: root outside reference tetrahedron");
+    }
+    return {{x, y, z}};
+}
+
+[[nodiscard]] std::vector<Real> quadraticTetraP2LevelSetCoefficients(
+    const svmp::FE::spaces::FunctionSpace& space)
+{
+    const auto n_dofs = space.dofs_per_element();
+    if (n_dofs != svmp::FE::basis::ReferenceNodeLayout::num_nodes(svmp::FE::ElementType::Tetra10)) {
+        throw std::runtime_error(
+            "quadraticTetraP2LevelSetCoefficients expects a Tetra P2 scalar space");
+    }
+
+    std::vector<Real> coeffs(n_dofs, Real(0.0));
+    for (std::size_t i = 0u; i < coeffs.size(); ++i) {
+        const auto xi =
+            svmp::FE::basis::ReferenceNodeLayout::get_node_coords(svmp::FE::ElementType::Tetra10, i);
+        coeffs[i] = quadraticLevelSetAt({xi[0], xi[1], xi[2]});
+    }
+    return coeffs;
+}
+
+[[nodiscard]] AssemblyContext::Vector3D normalized3(const AssemblyContext::Vector3D& v)
+{
+    const Real n = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (!(n > Real(1.0e-14))) {
+        throw std::runtime_error("normalized3: degenerate vector");
+    }
+    return {{v[0] / n, v[1] / n, v[2] / n}};
+}
+
+[[nodiscard]] Real meanCurvatureFromGradientHessian(
+    const AssemblyContext::Vector3D& gradient,
+    const AssemblyContext::Matrix3x3& hessian)
+{
+    const Real g2 = gradient[0] * gradient[0] +
+                    gradient[1] * gradient[1] +
+                    gradient[2] * gradient[2];
+    if (!(g2 > Real(1.0e-28))) {
+        throw std::runtime_error("meanCurvatureFromGradientHessian: degenerate gradient");
+    }
+    const Real g = std::sqrt(g2);
+    const Real trace = hessian[0][0] + hessian[1][1] + hessian[2][2];
+    Real g_h_g = Real(0.0);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            g_h_g += gradient[static_cast<std::size_t>(r)] *
+                     hessian[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
+                     gradient[static_cast<std::size_t>(c)];
+        }
+    }
+    return trace / g - g_h_g / (g2 * g);
+}
+
+[[nodiscard]] CutQuadratureRule makeQuadraticLevelSetReferenceTetraInterfaceRule(
+    int marker,
+    const svmp::FE::spaces::FunctionSpace& space,
+    std::span<const Real> level_set_coefficients,
+    int perturb_dof = -1,
+    Real perturbation = Real(0.0),
+    bool move_points_with_level_set = false)
+{
+    const auto n_dofs = space.dofs_per_element();
+    if (level_set_coefficients.size() != n_dofs) {
+        throw std::runtime_error(
+            "makeQuadraticLevelSetReferenceTetraInterfaceRule: coefficient size mismatch");
+    }
+    if (perturb_dof >= static_cast<int>(n_dofs)) {
+        throw std::runtime_error(
+            "makeQuadraticLevelSetReferenceTetraInterfaceRule: perturbation DOF out of range");
+    }
+
+    const std::array<AssemblyContext::Point3D, 4> qpts{{
+        pointOnQuadraticLevelSet(Real(0.17), Real(0.11)),
+        pointOnQuadraticLevelSet(Real(0.28), Real(0.09)),
+        pointOnQuadraticLevelSet(Real(0.12), Real(0.16)),
+        pointOnQuadraticLevelSet(Real(0.19), Real(0.25)),
+    }};
+    const std::array<Real, 4> base_weights{{
+        Real(0.019),
+        Real(0.017),
+        Real(0.016),
+        Real(0.013),
+    }};
+
+    CutQuadratureRule rule;
+    rule.kind = CutQuadratureKind::Interface;
+    rule.side = CutIntegrationSide::Interface;
+    rule.parent_measure = Real(1.0) / Real(6.0);
+    rule.points.reserve(qpts.size());
+
+    const auto& basis = space.element().basis();
+    std::vector<Real> values;
+    std::vector<svmp::FE::basis::Gradient> gradients;
+    std::vector<svmp::FE::basis::Hessian> hessians;
+    for (std::size_t q = 0u; q < qpts.size(); ++q) {
+        auto qp = qpts[q];
+        svmp::FE::math::Vector<Real, 3> xi{qp[0], qp[1], qp[2]};
+        basis.evaluate_all(xi, values, gradients, hessians);
+        if (values.size() != n_dofs ||
+            gradients.size() != n_dofs ||
+            hessians.size() != n_dofs) {
+            throw std::runtime_error(
+                "makeQuadraticLevelSetReferenceTetraInterfaceRule: basis size mismatch");
+        }
+
+        AssemblyContext::Vector3D gradient{{0.0, 0.0, 0.0}};
+        AssemblyContext::Matrix3x3 hessian{};
+        for (std::size_t a = 0u; a < n_dofs; ++a) {
+            const Real coeff = level_set_coefficients[a];
+            for (int d = 0; d < 3; ++d) {
+                gradient[static_cast<std::size_t>(d)] +=
+                    coeff * gradients[a][static_cast<std::size_t>(d)];
+            }
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    hessian[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
+                        coeff * hessians[a](static_cast<std::size_t>(r),
+                                             static_cast<std::size_t>(c));
+                }
+            }
+        }
+
+        AssemblyContext::Vector3D perturbed_gradient = gradient;
+        Real weight = base_weights[q];
+        if (perturb_dof >= 0 && perturbation != Real(0.0)) {
+            const auto p = static_cast<std::size_t>(perturb_dof);
+            const auto normal = normalized3(gradient);
+            for (int d = 0; d < 3; ++d) {
+                perturbed_gradient[static_cast<std::size_t>(d)] +=
+                    perturbation * gradients[p][static_cast<std::size_t>(d)];
+            }
+            const Real grad_norm =
+                std::sqrt(gradient[0] * gradient[0] +
+                          gradient[1] * gradient[1] +
+                          gradient[2] * gradient[2]);
+            const Real normal_speed = -perturbation * values[p] / grad_norm;
+            const Real curvature = meanCurvatureFromGradientHessian(gradient, hessian);
+            weight *= Real(1.0) + curvature * normal_speed;
+            if (move_points_with_level_set) {
+                for (int d = 0; d < 3; ++d) {
+                    qp[static_cast<std::size_t>(d)] +=
+                        normal_speed * normal[static_cast<std::size_t>(d)];
+                }
+                xi = svmp::FE::math::Vector<Real, 3>{qp[0], qp[1], qp[2]};
+                basis.evaluate_all(xi, values, gradients, hessians);
+                if (values.size() != n_dofs ||
+                    gradients.size() != n_dofs ||
+                    hessians.size() != n_dofs) {
+                    throw std::runtime_error(
+                        "makeQuadraticLevelSetReferenceTetraInterfaceRule: moved-point basis size mismatch");
+                }
+                perturbed_gradient = {{0.0, 0.0, 0.0}};
+                for (std::size_t a = 0u; a < n_dofs; ++a) {
+                    const Real coeff =
+                        level_set_coefficients[a] +
+                        (a == p ? perturbation : Real(0.0));
+                    for (int d = 0; d < 3; ++d) {
+                        perturbed_gradient[static_cast<std::size_t>(d)] +=
+                            coeff * gradients[a][static_cast<std::size_t>(d)];
+                    }
+                }
+            }
+        }
+
+        if (!(weight > Real(0.0))) {
+            throw std::runtime_error(
+                "makeQuadraticLevelSetReferenceTetraInterfaceRule: non-positive perturbed weight");
+        }
+        rule.points.push_back({qp, normalized3(perturbed_gradient), weight});
+        rule.measure += weight;
+    }
+    rule.volume_fraction = Real(0.0);
+    rule.exact_for_constants = true;
+    rule.provenance_id = "quadrature-local-level-set-shape-interface";
+    markRuleAsHighOrderImplicit(rule,
+                                marker,
+                                "quadrature-local-level-set-shape-interface",
+                                /*quadrature_order=*/4);
+    return rule;
+}
+
+[[nodiscard]] svmp::FE::assembly::CutIntegrationContext
+makeQuadraticLevelSetReferenceTetraInterfaceContext(
+    int marker,
+    const svmp::FE::spaces::FunctionSpace& space,
+    std::span<const Real> level_set_coefficients,
+    int perturb_dof = -1,
+    Real perturbation = Real(0.0),
+    bool move_points_with_level_set = false)
+{
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addInterfaceRule(
+        makeQuadraticLevelSetReferenceTetraInterfaceRule(
+            marker,
+            space,
+            level_set_coefficients,
+            perturb_dof,
+            perturbation,
+            move_points_with_level_set));
+    return cut_context;
+}
+
+[[nodiscard]] Real levelSetGradientNormAtReferencePoint(
+    const svmp::FE::spaces::FunctionSpace& space,
+    std::span<const Real> level_set_coefficients,
+    const AssemblyContext::Point3D& point)
+{
+    const auto n_dofs = space.dofs_per_element();
+    if (level_set_coefficients.size() != n_dofs) {
+        throw std::runtime_error(
+            "levelSetGradientNormAtReferencePoint: coefficient size mismatch");
+    }
+
+    const auto& basis = space.element().basis();
+    std::vector<svmp::FE::basis::Gradient> gradients;
+    svmp::FE::math::Vector<Real, 3> xi{point[0], point[1], point[2]};
+    basis.evaluate_gradients(xi, gradients);
+    if (gradients.size() != n_dofs) {
+        throw std::runtime_error(
+            "levelSetGradientNormAtReferencePoint: basis gradient size mismatch");
+    }
+
+    AssemblyContext::Vector3D gradient{{0.0, 0.0, 0.0}};
+    for (std::size_t a = 0u; a < n_dofs; ++a) {
+        for (int d = 0; d < 3; ++d) {
+            gradient[static_cast<std::size_t>(d)] +=
+                level_set_coefficients[a] *
+                gradients[a][static_cast<std::size_t>(d)];
+        }
+    }
+    return std::sqrt(gradient[0] * gradient[0] +
+                     gradient[1] * gradient[1] +
+                     gradient[2] * gradient[2]);
+}
+
+[[nodiscard]] Real basisValueAtReferencePoint(
+    const svmp::FE::spaces::FunctionSpace& space,
+    std::size_t dof,
+    const AssemblyContext::Point3D& point)
+{
+    const auto n_dofs = space.dofs_per_element();
+    if (dof >= n_dofs) {
+        throw std::runtime_error("basisValueAtReferencePoint: DOF out of range");
+    }
+
+    const auto& basis = space.element().basis();
+    std::vector<Real> values;
+    svmp::FE::math::Vector<Real, 3> xi{point[0], point[1], point[2]};
+    basis.evaluate_values(xi, values);
+    if (values.size() != n_dofs) {
+        throw std::runtime_error(
+            "basisValueAtReferencePoint: basis value size mismatch");
+    }
+    return values[dof];
+}
+
+[[nodiscard]] svmp::FE::assembly::CutIntegrationContext
+makeQuadraticLevelSetReferenceTetraVolumeShapeFDContext(
+    int marker,
+    CutIntegrationSide side,
+    const svmp::FE::spaces::FunctionSpace& space,
+    std::span<const Real> level_set_coefficients,
+    int perturb_dof = -1,
+    Real perturbation = Real(0.0))
+{
+    auto volume_rule = makeManyPointReferenceTetraCutRule(side);
+    markRuleAsHighOrderImplicit(volume_rule,
+                                marker,
+                                "quadrature-local-level-set-shape-volume",
+                                /*quadrature_order=*/4);
+
+    const auto interface_rule =
+        makeQuadraticLevelSetReferenceTetraInterfaceRule(
+            marker, space, level_set_coefficients);
+
+    if (perturb_dof >= 0 && perturbation != Real(0.0)) {
+        const auto p = static_cast<std::size_t>(perturb_dof);
+        const Real side_sign =
+            side == CutIntegrationSide::Negative ? Real{-1.0} : Real{1.0};
+        for (const auto& qp : interface_rule.points) {
+            const Real basis_value =
+                basisValueAtReferencePoint(space, p, qp.point);
+            const Real grad_norm =
+                levelSetGradientNormAtReferencePoint(
+                    space, level_set_coefficients, qp.point);
+            if (!(grad_norm > Real(1.0e-14))) {
+                throw std::runtime_error(
+                    "makeQuadraticLevelSetReferenceTetraVolumeShapeFDContext: degenerate level-set gradient");
+            }
+            const Real delta_weight =
+                side_sign * perturbation * basis_value * qp.weight / grad_norm;
+            volume_rule.points.push_back(
+                svmp::FE::geometry::CutQuadraturePoint{
+                    qp.point, qp.normal, delta_weight});
+            volume_rule.measure += delta_weight;
+        }
+        volume_rule.volume_fraction =
+            volume_rule.measure / volume_rule.parent_measure;
+    }
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = volume_rule.volume_fraction;
+    metadata.side = side;
+    metadata.embedded_normal = volume_rule.points.front().normal;
+    metadata.cut_topology_id = volume_rule.provenance.cut_topology_id;
+    metadata.cut_topology_revision = volume_rule.provenance.cut_topology_revision;
+
+    svmp::FE::assembly::CutIntegrationContext cut_context;
+    cut_context.addVolumeRule(std::move(metadata), std::move(volume_rule));
+    cut_context.addInterfaceRule(interface_rule);
+    return cut_context;
 }
 
 void populateP1ReferenceTetraCutContext(AssemblyContext& ctx,
@@ -1291,6 +1677,733 @@ TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDiffere
         deterministicScalarCoefficients(space.dofs_per_element()),
         /*eps=*/Real(2.0e-6),
         /*tol=*/Real(2.0e-6));
+}
+
+TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsInterfaceMeasureTerm)
+{
+    constexpr int marker = 83;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+
+    const auto phi = TrialFunction(space, "phi");
+    const auto v = TestFunction(space, "v");
+    const auto residual = (phi * v).dI(marker);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+
+    int marker_interface_terms = 0;
+    bool found_curvature_measure_term = false;
+    for (const auto& term : kernel.tangentIR().terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace ||
+            term.interface_marker != marker) {
+            continue;
+        }
+        ++marker_interface_terms;
+        if (term.integrand.node() != nullptr &&
+            containsFormExprType(*term.integrand.node(),
+                                 FormExprType::Divergence)) {
+            found_curvature_measure_term = true;
+        }
+    }
+
+    EXPECT_GE(marker_interface_terms, 2);
+    EXPECT_TRUE(found_curvature_measure_term);
+}
+
+TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsNormalTerminalVariation)
+{
+    constexpr int marker = 84;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto n = FormExpr::normal();
+    const auto residual = ((u + n.component(0)) * v).dI(marker);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+
+    bool found_normal_variation_term = false;
+    for (const auto& term : kernel.tangentIR().terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace ||
+            term.interface_marker != marker ||
+            term.integrand.node() == nullptr) {
+            continue;
+        }
+        const auto& integrand = *term.integrand.node();
+        if (!containsFormExprType(integrand, FormExprType::Divergence) &&
+            containsFormExprType(integrand, FormExprType::Gradient) &&
+            containsFormExprType(integrand, FormExprType::TrialFunction)) {
+            found_normal_variation_term = true;
+        }
+    }
+
+    EXPECT_TRUE(found_normal_variation_term);
+}
+
+TEST(CutCellForms, LevelSetCutDomainShapeTangentUsesConfiguredLevelSetSpace)
+{
+    constexpr int marker = 187;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space residual_space(svmp::FE::ElementType::Tetra4,
+                                             /*order=*/1);
+    svmp::FE::spaces::H1Space level_set_space(svmp::FE::ElementType::Tetra4,
+                                              /*order=*/2);
+
+    const auto u = TrialFunction(residual_space, "u");
+    const auto v = TestFunction(residual_space, "v");
+    const auto residual =
+        ((u + FormExpr::constant(Real{0.5})) * v)
+            .dCutVolume(marker, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative,
+            .level_set_space = spaceSignatureFor(level_set_space)});
+    compiler.setOptions(std::move(options));
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+
+    ASSERT_TRUE(kernel.tangentIR().trialSpace().has_value());
+    EXPECT_TRUE(spaceSignaturesEqual(*kernel.tangentIR().trialSpace(),
+                                     spaceSignatureFor(level_set_space)));
+
+    const auto field_requirements = kernel.fieldRequirements();
+    const auto phi_requirement =
+        std::find_if(field_requirements.begin(),
+                     field_requirements.end(),
+                     [](const svmp::FE::assembly::FieldRequirement& req) {
+                         return req.field == phi_field;
+                     });
+    ASSERT_NE(phi_requirement, field_requirements.end());
+    EXPECT_TRUE(svmp::FE::assembly::hasFlag(
+        phi_requirement->required,
+        svmp::FE::assembly::RequiredData::SolutionGradients));
+}
+
+TEST(CutCellForms, LevelSetCutDomainInterfaceNormalMeasureTangentMatchesQuadratureLocalFD)
+{
+    constexpr int marker = 85;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    const auto n_dofs = static_cast<svmp::FE::GlobalIndex>(space.dofs_per_element());
+    const auto level_set_coefficients =
+        quadraticTetraP2LevelSetCoefficients(space);
+
+    const auto phi = TrialFunction(space, "phi");
+    const auto v = TestFunction(space, "v");
+    const auto n = FormExpr::normal();
+    const auto residual =
+        ((Real(0.37) * phi +
+          Real(1.15) * n.component(0) -
+          Real(0.22) * n.component(1) +
+          Real(0.09) * n.component(2)) * v).dI(marker);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto matrix_ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel matrix_kernel(
+        std::move(matrix_ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(matrix_kernel.resolveInlinableConstitutives());
+
+    const auto field_requirements = matrix_kernel.fieldRequirements();
+    const auto phi_requirement =
+        std::find_if(field_requirements.begin(),
+                     field_requirements.end(),
+                     [](const svmp::FE::assembly::FieldRequirement& req) {
+                         return req.field == phi_field;
+                     });
+    ASSERT_NE(phi_requirement, field_requirements.end());
+    EXPECT_TRUE(svmp::FE::assembly::hasFlag(
+        phi_requirement->required,
+        svmp::FE::assembly::RequiredData::SolutionGradients));
+    EXPECT_TRUE(svmp::FE::assembly::hasFlag(
+        phi_requirement->required,
+        svmp::FE::assembly::RequiredData::SolutionHessians));
+
+    FormCompiler vector_compiler;
+    auto vector_ir = vector_compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel vector_kernel(
+        std::move(vector_ir), NonlinearKernelOutput::VectorOnly);
+    ASSERT_NO_THROW(vector_kernel.resolveInlinableConstitutives());
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    std::array<svmp::FE::assembly::FieldSolutionAccess, 1> field_access{{
+        svmp::FE::assembly::FieldSolutionAccess{
+            .field = phi_field,
+            .space = &space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+            .coefficient_source =
+                svmp::FE::assembly::FieldSolutionAccess::CoefficientSource::PrescribedData,
+            .prescribed_coefficients = std::span<const Real>(level_set_coefficients),
+            .prescribed_revision = 1u,
+        }
+    }};
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+
+    const auto base_context =
+        makeQuadraticLevelSetReferenceTetraInterfaceContext(
+            marker, space, level_set_coefficients);
+
+    svmp::FE::assembly::DenseMatrixView jacobian(n_dofs);
+    svmp::FE::assembly::DenseVectorView residual_vector(n_dofs);
+    jacobian.zero();
+    residual_vector.zero();
+
+    assembler.setCurrentSolution(level_set_coefficients);
+    const auto assembled = assembler.assembleCutInterfaces(
+        mesh, base_context, marker, space, space, matrix_kernel,
+        &jacobian, &residual_vector,
+        /*assemble_matrix=*/true,
+        /*assemble_vector=*/true);
+    ASSERT_EQ(assembled.interface_faces_assembled, svmp::FE::GlobalIndex{1});
+
+    const Real eps = Real(1.0e-6);
+    const Real tolerance = Real(5.0e-5);
+    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto solution_plus = level_set_coefficients;
+        auto solution_minus = level_set_coefficients;
+        solution_plus[static_cast<std::size_t>(j)] += eps;
+        solution_minus[static_cast<std::size_t>(j)] -= eps;
+
+        const auto plus_context =
+            makeQuadraticLevelSetReferenceTetraInterfaceContext(
+                marker, space, level_set_coefficients,
+                static_cast<int>(j), eps,
+                /*move_points_with_level_set=*/true);
+        const auto minus_context =
+            makeQuadraticLevelSetReferenceTetraInterfaceContext(
+                marker, space, level_set_coefficients,
+                static_cast<int>(j), -eps,
+                /*move_points_with_level_set=*/true);
+
+        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
+        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
+        residual_plus.zero();
+        residual_minus.zero();
+
+        assembler.setCurrentSolution(solution_plus);
+        (void)assembler.assembleCutInterfaces(
+            mesh, plus_context, marker, space, space, vector_kernel,
+            nullptr, &residual_plus,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+        assembler.setCurrentSolution(solution_minus);
+        (void)assembler.assembleCutInterfaces(
+            mesh, minus_context, marker, space, space, vector_kernel,
+            nullptr, &residual_minus,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+
+        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real finite_difference =
+                (residual_plus.getVectorEntry(i) -
+                 residual_minus.getVectorEntry(i)) /
+                (Real(2.0) * eps);
+            EXPECT_NEAR(jacobian.getMatrixEntry(i, j),
+                        finite_difference,
+                        tolerance)
+                << "row=" << i << " col=" << j;
+        }
+    }
+}
+
+TEST(CutCellForms, LevelSetCutDomainCutVolumeShapeTangentMatchesQuadratureLocalFD)
+{
+    constexpr int marker = 86;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    const auto n_dofs = static_cast<svmp::FE::GlobalIndex>(space.dofs_per_element());
+    const auto level_set_coefficients =
+        quadraticTetraP2LevelSetCoefficients(space);
+
+    const auto phi = TrialFunction(space, "phi");
+    const auto v = TestFunction(space, "v");
+    const auto x = FormExpr::coordinate();
+    const auto residual =
+        ((Real(0.43) * phi +
+          Real(0.21) * x.component(0) -
+          Real(0.14) * x.component(1) +
+          Real(0.08) * x.component(2) +
+          FormExpr::constant(Real(0.62))) * v)
+             .dCutVolume(marker, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto matrix_ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel matrix_kernel(
+        std::move(matrix_ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(matrix_kernel.resolveInlinableConstitutives());
+
+    FormCompiler vector_compiler;
+    auto vector_ir = vector_compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel vector_kernel(
+        std::move(vector_ir), NonlinearKernelOutput::VectorOnly);
+    ASSERT_NO_THROW(vector_kernel.resolveInlinableConstitutives());
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    std::array<svmp::FE::assembly::FieldSolutionAccess, 1> field_access{{
+        svmp::FE::assembly::FieldSolutionAccess{
+            .field = phi_field,
+            .space = &space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+            .coefficient_source =
+                svmp::FE::assembly::FieldSolutionAccess::CoefficientSource::PrescribedData,
+            .prescribed_coefficients = std::span<const Real>(level_set_coefficients),
+            .prescribed_revision = 1u,
+        }
+    }};
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+
+    const auto base_context =
+        makeQuadraticLevelSetReferenceTetraVolumeShapeFDContext(
+            marker,
+            CutIntegrationSide::Negative,
+            space,
+            level_set_coefficients);
+
+    svmp::FE::assembly::DenseMatrixView jacobian(n_dofs);
+    svmp::FE::assembly::DenseVectorView residual_vector(n_dofs);
+    jacobian.zero();
+    residual_vector.zero();
+
+    assembler.setCurrentSolution(level_set_coefficients);
+    const auto volume_assembled = assembler.assembleCutVolumes(
+        mesh, base_context, marker, CutIntegrationSide::Negative, space, space,
+        matrix_kernel, &jacobian, &residual_vector,
+        /*assemble_matrix=*/true,
+        /*assemble_vector=*/true);
+    ASSERT_EQ(volume_assembled.elements_assembled, svmp::FE::GlobalIndex{1});
+    const auto interface_assembled = assembler.assembleCutInterfaces(
+        mesh, base_context, marker, space, space, matrix_kernel,
+        &jacobian, nullptr,
+        /*assemble_matrix=*/true,
+        /*assemble_vector=*/false);
+    ASSERT_EQ(interface_assembled.interface_faces_assembled,
+              svmp::FE::GlobalIndex{1});
+
+    const Real eps = Real(1.0e-6);
+    const Real tolerance = Real(7.5e-6);
+    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto solution_plus = level_set_coefficients;
+        auto solution_minus = level_set_coefficients;
+        solution_plus[static_cast<std::size_t>(j)] += eps;
+        solution_minus[static_cast<std::size_t>(j)] -= eps;
+
+        const auto plus_context =
+            makeQuadraticLevelSetReferenceTetraVolumeShapeFDContext(
+                marker,
+                CutIntegrationSide::Negative,
+                space,
+                level_set_coefficients,
+                static_cast<int>(j),
+                eps);
+        const auto minus_context =
+            makeQuadraticLevelSetReferenceTetraVolumeShapeFDContext(
+                marker,
+                CutIntegrationSide::Negative,
+                space,
+                level_set_coefficients,
+                static_cast<int>(j),
+                -eps);
+
+        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
+        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
+        residual_plus.zero();
+        residual_minus.zero();
+
+        assembler.setCurrentSolution(solution_plus);
+        (void)assembler.assembleCutVolumes(
+            mesh, plus_context, marker, CutIntegrationSide::Negative, space,
+            space, vector_kernel, nullptr, &residual_plus,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+        assembler.setCurrentSolution(solution_minus);
+        (void)assembler.assembleCutVolumes(
+            mesh, minus_context, marker, CutIntegrationSide::Negative, space,
+            space, vector_kernel, nullptr, &residual_minus,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+
+        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real finite_difference =
+                (residual_plus.getVectorEntry(i) -
+                 residual_minus.getVectorEntry(i)) /
+                (Real(2.0) * eps);
+            EXPECT_NEAR(jacobian.getMatrixEntry(i, j),
+                        finite_difference,
+                        tolerance)
+                << "row=" << i << " col=" << j;
+        }
+    }
+}
+
+TEST(CutCellForms, LevelSetCutDomainInterfaceShapeTangentMatchesQuadratureLocalFD)
+{
+    constexpr int marker = 87;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+    const auto n_dofs = static_cast<svmp::FE::GlobalIndex>(space.dofs_per_element());
+    const auto level_set_coefficients =
+        quadraticTetraP2LevelSetCoefficients(space);
+
+    const auto phi = TrialFunction(space, "phi");
+    const auto v = TestFunction(space, "v");
+    const auto x = FormExpr::coordinate();
+    const auto n = FormExpr::normal();
+    const auto residual =
+        ((Real(0.43) * phi +
+          Real(0.21) * x.component(0) -
+          Real(0.14) * x.component(1) +
+          Real(0.08) * x.component(2) +
+          Real(0.11) * n.component(0) -
+          Real(0.07) * n.component(1) +
+          Real(0.06) * inner(grad(phi), n) +
+          FormExpr::constant(Real(0.62))) * v)
+             .dI(marker);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto matrix_ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel matrix_kernel(
+        std::move(matrix_ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(matrix_kernel.resolveInlinableConstitutives());
+
+    FormCompiler vector_compiler;
+    auto vector_ir = vector_compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel vector_kernel(
+        std::move(vector_ir), NonlinearKernelOutput::VectorOnly);
+    ASSERT_NO_THROW(vector_kernel.resolveInlinableConstitutives());
+
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
+    std::array<svmp::FE::assembly::FieldSolutionAccess, 1> field_access{{
+        svmp::FE::assembly::FieldSolutionAccess{
+            .field = phi_field,
+            .space = &space,
+            .dof_map = &dof_map,
+            .dof_offset = 0,
+            .coefficient_source =
+                svmp::FE::assembly::FieldSolutionAccess::CoefficientSource::PrescribedData,
+            .prescribed_coefficients = std::span<const Real>(level_set_coefficients),
+            .prescribed_revision = 1u,
+        }
+    }};
+
+    svmp::FE::assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setFieldSolutionAccess(field_access);
+
+    const auto base_context =
+        makeQuadraticLevelSetReferenceTetraInterfaceContext(
+            marker,
+            space,
+            level_set_coefficients);
+
+    svmp::FE::assembly::DenseMatrixView jacobian(n_dofs);
+    svmp::FE::assembly::DenseVectorView residual_vector(n_dofs);
+    jacobian.zero();
+    residual_vector.zero();
+
+    assembler.setCurrentSolution(level_set_coefficients);
+    const auto interface_assembled = assembler.assembleCutInterfaces(
+        mesh, base_context, marker, space, space, matrix_kernel,
+        &jacobian, &residual_vector,
+        /*assemble_matrix=*/true,
+        /*assemble_vector=*/true);
+    ASSERT_EQ(interface_assembled.interface_faces_assembled,
+              svmp::FE::GlobalIndex{1});
+
+    const Real eps = Real(1.0e-6);
+    const Real tolerance = Real(1.0e-5);
+    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto solution_plus = level_set_coefficients;
+        auto solution_minus = level_set_coefficients;
+        solution_plus[static_cast<std::size_t>(j)] += eps;
+        solution_minus[static_cast<std::size_t>(j)] -= eps;
+
+        const auto plus_context =
+            makeQuadraticLevelSetReferenceTetraInterfaceContext(
+                marker,
+                space,
+                level_set_coefficients,
+                static_cast<int>(j),
+                eps,
+                /*move_points_with_level_set=*/true);
+        const auto minus_context =
+            makeQuadraticLevelSetReferenceTetraInterfaceContext(
+                marker,
+                space,
+                level_set_coefficients,
+                static_cast<int>(j),
+                -eps,
+                /*move_points_with_level_set=*/true);
+
+        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
+        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
+        residual_plus.zero();
+        residual_minus.zero();
+
+        assembler.setCurrentSolution(solution_plus);
+        (void)assembler.assembleCutInterfaces(
+            mesh, plus_context, marker, space, space, vector_kernel,
+            nullptr, &residual_plus,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+        assembler.setCurrentSolution(solution_minus);
+        (void)assembler.assembleCutInterfaces(
+            mesh, minus_context, marker, space, space, vector_kernel,
+            nullptr, &residual_minus,
+            /*assemble_matrix=*/false,
+            /*assemble_vector=*/true);
+
+        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real finite_difference =
+                (residual_plus.getVectorEntry(i) -
+                 residual_minus.getVectorEntry(i)) /
+                (Real(2.0) * eps);
+            EXPECT_NEAR(jacobian.getMatrixEntry(i, j),
+                        finite_difference,
+                        tolerance)
+                << "row=" << i << " col=" << j;
+        }
+    }
+}
+
+TEST(CutCellForms, LevelSetCutDomainInterfaceMeasureTangentExpandsAllMarkers)
+{
+    constexpr int marker_a = 183;
+    constexpr int marker_b = 184;
+    constexpr svmp::FE::FieldId phi_field = 17;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+
+    const auto phi = TrialFunction(space, "phi");
+    const auto v = TestFunction(space, "v");
+    const auto residual = (phi * v).dI();
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker_a,
+            .side = CutVolumeSide::Negative});
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker_b,
+            .side = CutVolumeSide::Positive});
+    compiler.setOptions(std::move(options));
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+
+    std::vector<int> curvature_term_markers;
+    for (const auto& term : kernel.tangentIR().terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace ||
+            term.integrand.node() == nullptr ||
+            !containsFormExprType(*term.integrand.node(),
+                                  FormExprType::Divergence)) {
+            continue;
+        }
+        curvature_term_markers.push_back(term.interface_marker);
+    }
+    std::sort(curvature_term_markers.begin(), curvature_term_markers.end());
+
+    const std::vector<int> expected_markers = {marker_a, marker_b};
+    EXPECT_EQ(curvature_term_markers, expected_markers);
+}
+
+TEST(CutCellForms, LevelSetCutDomainInterfaceTangentKeepsDistinctFieldsOnSameMarker)
+{
+    constexpr int marker = 185;
+    constexpr svmp::FE::FieldId phi_a = 17;
+    constexpr svmp::FE::FieldId phi_b = 18;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+
+    const auto phi = TrialFunction(space, "phi");
+    const auto v = TestFunction(space, "v");
+    const auto residual = (phi * v).dI(marker);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_a,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_a,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Positive});
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_b,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+
+    int curvature_measure_terms = 0;
+    for (const auto& term : kernel.tangentIR().terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace ||
+            term.interface_marker != marker ||
+            term.integrand.node() == nullptr ||
+            !containsFormExprType(*term.integrand.node(),
+                                  FormExprType::Divergence)) {
+            continue;
+        }
+        ++curvature_measure_terms;
+    }
+
+    EXPECT_EQ(curvature_measure_terms, 2);
+}
+
+TEST(CutCellForms,
+     LevelSetCutDomainTangentDifferentiatesEachConfiguredLevelSetField)
+{
+    constexpr int marker = 186;
+    constexpr svmp::FE::FieldId phi_a = 17;
+    constexpr svmp::FE::FieldId phi_b = 18;
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto phi_a_state = FormExpr::stateField(phi_a, space, "phi_a");
+    const auto phi_b_state = FormExpr::stateField(phi_b, space, "phi_b");
+    const auto integrand =
+        (phi_a_state + Real(2.0) * phi_b_state + Real(0.0) * u) * v;
+    const auto residual =
+        integrand.dI(marker) +
+        integrand.dCutVolume(marker, CutVolumeSide::Negative);
+
+    FormCompiler compiler;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode =
+        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_a,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        LevelSetCutDomainSensitivity{
+            .level_set_field = phi_b,
+            .interface_marker = marker,
+            .side = CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+
+    auto ir = compiler.compileResidual(residual);
+    SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
+    ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
+
+    int interface_integrand_derivative_terms = 0;
+    int cut_volume_integrand_derivative_terms = 0;
+    for (const auto& term : kernel.tangentIR().terms()) {
+        if (term.integrand.node() == nullptr) {
+            continue;
+        }
+        const auto text = term.integrand.node()->toString();
+        const bool has_trial_variation =
+            text.find("du") != std::string::npos;
+        const bool has_curvature_measure =
+            containsFormExprType(*term.integrand.node(),
+                                 FormExprType::Divergence);
+        if (term.domain == IntegralDomain::InterfaceFace &&
+            term.interface_marker == marker && !has_curvature_measure &&
+            has_trial_variation) {
+            ++interface_integrand_derivative_terms;
+        }
+        if (term.domain == IntegralDomain::CutVolume &&
+            term.interface_marker == marker &&
+            term.cut_volume_side == CutVolumeSide::Negative &&
+            has_trial_variation) {
+            ++cut_volume_integrand_derivative_terms;
+        }
+    }
+
+    EXPECT_GE(interface_integrand_derivative_terms, 2);
+    EXPECT_GE(cut_volume_integrand_derivative_terms, 2);
 }
 
 TEST(CutCellForms, HighOrderCutInterfaceManyPointRuleRemapsBasisEvaluation)

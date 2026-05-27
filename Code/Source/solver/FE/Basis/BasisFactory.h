@@ -14,18 +14,6 @@
  */
 
 #include "BasisFunction.h"
-#include "LagrangeBasis.h"
-#include "HierarchicalBasis.h"
-#include "VectorBasis.h"
-#include "CompatibleTensorVectorBasis.h"
-#include "TensorBasis.h"
-#include "BernsteinBasis.h"
-#include "BSplineBasis.h"
-#include "NURBSTensorBasis.h"
-#include "SpectralBasis.h"
-#include "SerendipityBasis.h"
-#include "HermiteBasis.h"
-#include "BubbleBasis.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -51,15 +39,16 @@ struct BasisRequest {
     std::string custom_id{};
 };
 
-class BasisFactory {
-public:
-    using CustomFactory = std::function<std::shared_ptr<BasisFunction>(const BasisRequest&)>;
+namespace basis_factory {
 
-    static std::shared_ptr<BasisFunction> create(const BasisRequest& req);
-    static void register_custom(std::string custom_id, CustomFactory factory);
-    static void unregister_custom(const std::string& custom_id);
-    static void clear_custom_registry_for_tests();
-};
+using CustomFactory = std::function<std::shared_ptr<BasisFunction>(const BasisRequest&)>;
+
+[[nodiscard]] std::shared_ptr<BasisFunction> create(const BasisRequest& req);
+void register_custom(std::string custom_id, CustomFactory factory);
+void unregister_custom(const std::string& custom_id);
+void clear_custom_registry_for_tests();
+
+} // namespace basis_factory
 
 } // namespace basis
 } // namespace FE

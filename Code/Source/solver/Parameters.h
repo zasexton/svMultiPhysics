@@ -1531,10 +1531,18 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<bool> verbose;
     Parameter<bool> warning;
     Parameter<bool> use_new_oop_solver;
+    Parameter<bool> enable_adaptive_time_loop;
 
+    Parameter<double> adaptive_time_loop_decrease_factor;
+    Parameter<double> adaptive_time_loop_increase_factor;
+    Parameter<double> adaptive_time_loop_max_dt;
+    Parameter<double> adaptive_time_loop_min_dt;
     Parameter<double> spectral_radius_of_infinite_time_step;
     Parameter<double> time_step_size;
 
+    Parameter<int> adaptive_time_loop_max_retries;
+    Parameter<int> adaptive_time_loop_max_steps_multiplier;
+    Parameter<int> adaptive_time_loop_target_newton_iterations;
     Parameter<int> increment_in_saving_restart_files;
     Parameter<int> increment_in_saving_vtk_files;
     Parameter<int> number_of_spatial_dimensions;

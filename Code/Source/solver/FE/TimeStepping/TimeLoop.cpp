@@ -1625,8 +1625,15 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     std::unique_ptr<backends::GenericVector> vsvo_pred{};
     int order_next = 0;
 
-    const double time_tol = 100.0 * std::numeric_limits<double>::epsilon()
-        * std::max(1.0, std::abs(t_end));
+    const double nominal_time_span = std::max({
+        1.0,
+        std::abs(t_end),
+        std::abs(options_.t0),
+        std::abs(t_end - options_.t0),
+        static_cast<double>(options_.max_steps) * std::abs(options_.dt),
+    });
+    const double time_tol =
+        1000.0 * std::numeric_limits<double>::epsilon() * nominal_time_span;
 
     const bool adaptive = static_cast<bool>(options_.step_controller);
     const int max_retries = adaptive ? std::max(0, options_.step_controller->maxRetries()) : 0;

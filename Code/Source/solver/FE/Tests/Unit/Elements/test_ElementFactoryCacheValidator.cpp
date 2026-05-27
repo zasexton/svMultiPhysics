@@ -223,8 +223,8 @@ TEST(ElementFactory, CreatesGenericScalarBasisBackedElements) {
 }
 
 TEST(ElementFactory, CreatesRegisteredCustomScalarElement) {
-    basis::BasisFactory::clear_custom_registry_for_tests();
-    basis::BasisFactory::register_custom(
+    basis::basis_factory::clear_custom_registry_for_tests();
+    basis::basis_factory::register_custom(
         "test-element-custom",
         [](const basis::BasisRequest& req) -> std::shared_ptr<basis::BasisFunction> {
             return std::make_shared<TestCustomElementBasis>(req.order.value_or(1));
@@ -250,7 +250,7 @@ TEST(ElementFactory, CreatesRegisteredCustomScalarElement) {
     EXPECT_EQ(elem->basis_ptr()->basis_type(), BasisType::Custom);
     EXPECT_EQ(elem->basis_ptr()->order(), 2);
 
-    basis::BasisFactory::clear_custom_registry_for_tests();
+    basis::basis_factory::clear_custom_registry_for_tests();
 }
 
 TEST(ElementCache, AggregatesBasisAndJacobianCaches) {

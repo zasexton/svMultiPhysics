@@ -320,6 +320,13 @@ public:
         bool assemble_matrix,
         bool assemble_vector) override;
 
+    [[nodiscard]] AssemblyResult assembleCutVolumesFused(
+        const IMeshAccess& mesh,
+        const CutIntegrationContext& cut_context,
+        int interface_marker,
+        geometry::CutIntegrationSide side,
+        std::span<const FusedCellTerm> terms) override;
+
     [[nodiscard]] AssemblyResult assembleCutInterfaces(
         const IMeshAccess& mesh,
         const CutIntegrationContext& cut_context,

@@ -307,7 +307,7 @@ void FaceRestriction::compute_dof_maps_from_nodes(const std::vector<Vec3>& nodes
 
     // Vertex maps: locate a node coincident with each reference vertex.
     for (int v = 0; v < topology_.num_vertices; ++v) {
-        const Vec3 vx = basis::NodeOrdering::get_node_coords(elem_type_, static_cast<std::size_t>(v));
+        const Vec3 vx = basis::ReferenceNodeLayout::get_node_coords(elem_type_, static_cast<std::size_t>(v));
         for (std::size_t i = 0; i < nodes.size(); ++i) {
             if (nodes[i].approx_equal(vx, kGeomTol)) {
                 vertex_dof_maps_[static_cast<std::size_t>(v)].push_back(static_cast<int>(i));
@@ -319,8 +319,8 @@ void FaceRestriction::compute_dof_maps_from_nodes(const std::vector<Vec3>& nodes
     // Edge maps: collect all DOFs whose reference node lies on the edge segment.
     for (int e = 0; e < topology_.num_edges; ++e) {
         const auto& edge = topology_.edge_vertices[static_cast<std::size_t>(e)];
-        const Vec3 v0 = basis::NodeOrdering::get_node_coords(elem_type_, static_cast<std::size_t>(edge.first));
-        const Vec3 v1 = basis::NodeOrdering::get_node_coords(elem_type_, static_cast<std::size_t>(edge.second));
+        const Vec3 v0 = basis::ReferenceNodeLayout::get_node_coords(elem_type_, static_cast<std::size_t>(edge.first));
+        const Vec3 v1 = basis::ReferenceNodeLayout::get_node_coords(elem_type_, static_cast<std::size_t>(edge.second));
 
         auto& edofs = edge_dof_maps_[static_cast<std::size_t>(e)];
         for (std::size_t i = 0; i < nodes.size(); ++i) {
@@ -338,7 +338,7 @@ void FaceRestriction::compute_dof_maps_from_nodes(const std::vector<Vec3>& nodes
         std::vector<Vec3> fcoords;
         fcoords.reserve(fverts.size());
         for (int v : fverts) {
-            fcoords.push_back(basis::NodeOrdering::get_node_coords(elem_type_, static_cast<std::size_t>(v)));
+            fcoords.push_back(basis::ReferenceNodeLayout::get_node_coords(elem_type_, static_cast<std::size_t>(v)));
         }
 
         auto& fdofs = face_dof_maps_[static_cast<std::size_t>(f)];

@@ -190,12 +190,12 @@ class MovingCurvedTetra10MeshAccess final : public assembly::IMeshAccess {
 public:
     MovingCurvedTetra10MeshAccess()
     {
-        const auto n_nodes = basis::NodeOrdering::num_nodes(ElementType::Tetra10);
+        const auto n_nodes = basis::ReferenceNodeLayout::num_nodes(ElementType::Tetra10);
         reference_nodes_.reserve(n_nodes);
         current_nodes_.reserve(n_nodes);
         cell_.reserve(n_nodes);
         for (std::size_t i = 0; i < n_nodes; ++i) {
-            const auto xi = basis::NodeOrdering::get_node_coords(ElementType::Tetra10, i);
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(ElementType::Tetra10, i);
             const Real x = xi[0];
             const Real y = xi[1];
             const Real z = xi[2];

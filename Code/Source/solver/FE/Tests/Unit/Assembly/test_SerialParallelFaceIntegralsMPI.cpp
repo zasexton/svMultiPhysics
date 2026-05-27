@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/ParallelAssembler.h"
 #include "Assembly/StandardAssembler.h"
@@ -12,6 +13,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 
@@ -21,6 +23,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -432,6 +435,78 @@ std::vector<int> partitionFourCellsBlock(int world_size)
     return owners;
 }
 
+CutIntegrationContext makeTwoTetraGeneratedInterfaceContext(int marker)
+{
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1}, 0u, 1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 0;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 0;
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+    const auto normal = std::array<Real, 3>{{
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+    }};
+    const auto add_cell = [&](GlobalIndex cell_id, std::uint64_t stable_base) {
+        interfaces::CutInterfaceFragment fragment;
+        fragment.interface_marker = marker;
+        fragment.parent_cell = cell_id;
+        fragment.local_fragment_index = 0;
+        fragment.stable_id = stable_base;
+        fragment.kind = interfaces::CutInterfaceFragmentKind::Polygon;
+        fragment.measure = std::sqrt(Real{3.0}) / Real{8.0};
+        fragment.normal = normal;
+
+        interfaces::CutInterfaceQuadraturePoint qp;
+        qp.point = {{Real{1.0} / Real{6.0},
+                     Real{1.0} / Real{6.0},
+                     Real{1.0} / Real{6.0}}};
+        qp.parent_coordinate = qp.point;
+        qp.normal = normal;
+        qp.weight = fragment.measure;
+        fragment.quadrature_points.push_back(qp);
+        domain.addFragment(std::move(fragment));
+
+        interfaces::CutInterfaceVolumeRegion negative_region;
+        negative_region.interface_marker = marker;
+        negative_region.parent_cell = cell_id;
+        negative_region.local_region_index = 0;
+        negative_region.stable_id = stable_base + 1u;
+        negative_region.side = geometry::CutIntegrationSide::Negative;
+        negative_region.measure = Real{0.05};
+        negative_region.parent_measure = Real{1.0} / Real{6.0};
+        negative_region.volume_fraction =
+            negative_region.measure / negative_region.parent_measure;
+        negative_region.centroid = {{Real{0.1}, Real{0.1}, Real{0.1}}};
+        negative_region.normal = normal;
+        domain.addVolumeRegion(std::move(negative_region));
+
+        interfaces::CutInterfaceVolumeRegion positive_region;
+        positive_region.interface_marker = marker;
+        positive_region.parent_cell = cell_id;
+        positive_region.local_region_index = 1;
+        positive_region.stable_id = stable_base + 2u;
+        positive_region.side = geometry::CutIntegrationSide::Positive;
+        positive_region.measure = Real{0.10};
+        positive_region.parent_measure = Real{1.0} / Real{6.0};
+        positive_region.volume_fraction =
+            positive_region.measure / positive_region.parent_measure;
+        positive_region.centroid = {{Real{0.3}, Real{0.1}, Real{0.1}}};
+        positive_region.normal = normal;
+        domain.addVolumeRegion(std::move(positive_region));
+    };
+
+    add_cell(0, 100u);
+    add_cell(1, 200u);
+
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    return context;
+}
+
 struct GlobalAssemblyResult {
     std::vector<Real> matrix;
     std::vector<Real> vector;
@@ -718,6 +793,123 @@ TEST(SerialParallelFaceIntegralsMPI, DGPenaltyInteriorFaceAssemblyMatchesSerialA
         DenseMatrixView A_local(n_dofs);
         A_local.zero();
         (void)assembler.assembleInteriorFaces(mesh, space, space, kernel, A_local, nullptr);
+        assembler.finalize(&A_local, nullptr);
+        return allreduceSum(A_local.data(), comm);
+    };
+
+    const auto owned_rows = assemble_parallel(GhostPolicy::OwnedRowsOnly);
+    const auto reverse_scatter = assemble_parallel(GhostPolicy::ReverseScatter);
+
+    if (rank == 0) {
+        constexpr Real tol = 1e-12;
+        EXPECT_LT(maxAbsDiff(ref_matrix, owned_rows), tol);
+        EXPECT_LT(maxAbsDiff(ref_matrix, reverse_scatter), tol);
+        EXPECT_LT(maxAbsDiff(owned_rows, reverse_scatter), tol);
+    }
+}
+
+TEST(SerialParallelFaceIntegralsMPI,
+     TwoSidedGeneratedInterfaceAssemblyMatchesSerialAcrossCellOwnership)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with 2+ MPI ranks to enable this test";
+    }
+
+    constexpr int marker = 728;
+    const auto cell_owners = partitionTwoCells(size);
+    TwoTetraFaceMeshAccess mesh(cell_owners, rank);
+    const auto topo = buildTwoTetraTopology(cell_owners, rank, size);
+    const auto cut_context = makeTwoTetraGeneratedInterfaceContext(marker);
+
+    const auto& bindings =
+        cut_context.generatedInterfaceTwoSidedBindingsForMarker(marker);
+    ASSERT_EQ(bindings.size(), 2u);
+    for (const auto& binding : bindings) {
+        EXPECT_TRUE(binding.complete());
+    }
+
+    spaces::L2Space space(ElementType::Tetra4, /*order=*/1);
+    dofs::DofHandler dof_handler;
+    dofs::DofDistributionOptions dof_opts;
+    dof_opts.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
+    dof_opts.ownership = dofs::OwnershipStrategy::CellOwner;
+    dof_opts.my_rank = rank;
+    dof_opts.world_size = size;
+    dof_opts.mpi_comm = comm;
+    dof_handler.distributeDofs(topo, space, dof_opts);
+    dof_handler.finalize();
+
+    const GlobalIndex n_dofs = dof_handler.getNumDofs();
+    ASSERT_EQ(n_dofs, 8);
+
+    forms::FormCompiler compiler;
+    const auto u = forms::TrialFunction(space, "u");
+    const auto v = forms::TestFunction(space, "v");
+    auto ir = compiler.compileBilinear(
+        (u.plus() * v.minus() + Real{2.0} * u.minus() * v.plus()).dI(marker));
+    forms::FormKernel kernel(std::move(ir));
+    ASSERT_TRUE(kernel.requiresTwoSidedInterfaceFace());
+    kernel.resolveInlinableConstitutives();
+
+    std::vector<Real> ref_matrix;
+    if (rank == 0) {
+        std::vector<int> all_owned = {0, 0};
+        TwoTetraFaceMeshAccess serial_mesh(all_owned, /*my_rank=*/0);
+
+        DenseMatrixView A_ref(n_dofs);
+        A_ref.zero();
+
+        StandardAssembler assembler;
+        assembler.setDofHandler(dof_handler);
+        const auto result =
+            assembler.assembleCutInterfaces(
+                serial_mesh,
+                cut_context,
+                marker,
+                space,
+                space,
+                kernel,
+                &A_ref,
+                nullptr,
+                /*assemble_matrix=*/true,
+                /*assemble_vector=*/false);
+        EXPECT_TRUE(result.success);
+        EXPECT_EQ(result.interface_faces_assembled, 2);
+        assembler.finalize(&A_ref, nullptr);
+
+        ref_matrix.assign(A_ref.data().begin(), A_ref.data().end());
+    }
+
+    auto assemble_parallel = [&](GhostPolicy policy) -> std::vector<Real> {
+        ParallelAssembler assembler;
+        assembler.setComm(comm);
+        assembler.setDofHandler(dof_handler);
+
+        AssemblyOptions opts;
+        opts.ghost_policy = policy;
+        opts.deterministic = true;
+        opts.overlap_communication = false;
+        assembler.setOptions(opts);
+        assembler.initialize();
+
+        DenseMatrixView A_local(n_dofs);
+        A_local.zero();
+        const auto result =
+            assembler.assembleCutInterfaces(
+                mesh,
+                cut_context,
+                marker,
+                space,
+                space,
+                kernel,
+                &A_local,
+                nullptr,
+                /*assemble_matrix=*/true,
+                /*assemble_vector=*/false);
+        EXPECT_TRUE(result.success);
         assembler.finalize(&A_local, nullptr);
         return allreduceSum(A_local.data(), comm);
     };

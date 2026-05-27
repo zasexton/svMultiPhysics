@@ -99,6 +99,8 @@ TEST(ConstraintDependencyTest,
     EXPECT_TRUE(deps.structural.fe_constraint_layout);
     EXPECT_TRUE(deps.structural.mesh_field_layout);
     EXPECT_TRUE(deps.structural.mesh_field_values);
+    EXPECT_TRUE(deps.structural.active_configuration);
+    EXPECT_FALSE(deps.value.mesh_field_values);
 
     ConstraintRevisionSnapshot cached;
     cached.valid = true;
@@ -116,6 +118,10 @@ TEST(ConstraintDependencyTest,
 
     current = cached;
     current.fe_constraint_layout += 1;
+    EXPECT_TRUE(structural_dependency_changed(deps, cached, current));
+
+    current = cached;
+    current.active_configuration += 1;
     EXPECT_TRUE(structural_dependency_changed(deps, cached, current));
 }
 

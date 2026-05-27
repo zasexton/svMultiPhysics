@@ -1860,8 +1860,12 @@ void expect_sensitivity_metadata_shape_identities(
     ASSERT_FALSE(metadata.parent_geometry_dofs.empty());
     ASSERT_FALSE(metadata.samples.empty());
     for (const auto& sample : metadata.samples) {
+        EXPECT_EQ(sample.influencing_parent_geometry_dofs,
+                  metadata.parent_geometry_dofs);
         ASSERT_EQ(sample.shape_values.size(), metadata.parent_geometry_dofs.size());
         ASSERT_EQ(sample.shape_gradients.size(), metadata.parent_geometry_dofs.size());
+        ASSERT_EQ(sample.influencing_parent_geometry_dofs.size(),
+                  sample.shape_values.size());
         Real value_sum = 0.0;
         std::array<Real, 3> gradient_sum{{0.0, 0.0, 0.0}};
         for (std::size_t i = 0; i < sample.shape_values.size(); ++i) {
@@ -2021,6 +2025,44 @@ void expect_linearized_sensitivity_path_visibility(
 
 } // namespace
 #endif
+
+TEST(CutIntegrationInfrastructure, ContentRevisionTracksGeneratedRuleMutations)
+{
+    CutInterfaceDomainRequest request;
+    request.source = LevelSetInterfaceSource::fromField(/*field_id=*/4,
+                                                        /*layout_revision=*/1,
+                                                        /*value_revision=*/3);
+    request.interface_marker = 51;
+    request.quadrature_policy_key = 19;
+
+    LevelSetInterfaceDomain domain(request);
+    const LevelSetCellCutInput input{
+        .parent_cell = 7,
+        .element_type = ElementType::Quad4,
+        .node_coordinates = {{{0.0, 0.0, 0.0}},
+                             {{1.0, 0.0, 0.0}},
+                             {{1.0, 1.0, 0.0}},
+                             {{0.0, 1.0, 0.0}}},
+        .level_set_values = {-0.5, 0.5, 0.5, -0.5}};
+    appendLinearLevelSetCellCut2D(domain, input);
+
+    CutIntegrationContext context;
+    EXPECT_EQ(context.contentRevision(), 0u);
+
+    context.addGeneratedInterfaceDomain(domain);
+    const auto imported_revision = context.contentRevision();
+    EXPECT_GT(imported_revision, 0u);
+
+    context.setExpectedGeneratedSourceValueRevision(51, 3u);
+    EXPECT_EQ(context.contentRevision(), imported_revision);
+
+    context.setExpectedGeneratedSourceValueRevision(51, 4u);
+    const auto updated_expected_revision = context.contentRevision();
+    EXPECT_GT(updated_expected_revision, imported_revision);
+
+    context.clear();
+    EXPECT_GT(context.contentRevision(), updated_expected_revision);
+}
 
 TEST(CutIntegrationInfrastructure, ImportsGeneratedLevelSetInterfaceDomainByMarker)
 {

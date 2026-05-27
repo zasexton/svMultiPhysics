@@ -10,6 +10,7 @@
 #include "FE/Basis/TensorBasis.h"
 
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <random>
 
@@ -370,6 +371,240 @@ TEST(BSplineBasis, NonUniformKnotsMatchReferenceGradientsAndHessians) {
     }
 }
 
+TEST(BSplineBasis, FusedValuesAndGradientsMatchIndependentCalls) {
+    const struct Case {
+        BSplineBasis basis;
+        Real tolerance;
+    } cases[] = {
+        {BSplineBasis(3, make_open_uniform_knots(3, /*num_basis=*/7)), Real(1e-12)},
+        {BSplineBasis(2,
+                      make_open_uniform_knots(2, /*num_basis=*/6),
+                      {Real(1), Real(0.8), Real(1.4), Real(0.9), Real(1.1), Real(1)}),
+         Real(1e-12)}
+    };
+
+    const Real points[] = {Real(-0.73), Real(-0.2), Real(0.41), Real(0.88)};
+    for (const auto& c : cases) {
+        for (Real xi0 : points) {
+            const math::Vector<Real, 3> xi{xi0, Real(0), Real(0)};
+            std::vector<Real> expected_values;
+            std::vector<Gradient> expected_gradients;
+            std::vector<Real> fused_values;
+            std::vector<Gradient> fused_gradients;
+
+            c.basis.evaluate_values(xi, expected_values);
+            c.basis.evaluate_gradients(xi, expected_gradients);
+            c.basis.evaluate_values_and_gradients(xi, fused_values, fused_gradients);
+
+            ASSERT_EQ(fused_values.size(), expected_values.size());
+            ASSERT_EQ(fused_gradients.size(), expected_gradients.size());
+            for (std::size_t i = 0; i < c.basis.size(); ++i) {
+                EXPECT_NEAR(fused_values[i], expected_values[i], c.tolerance)
+                    << "xi=" << xi0 << ", i=" << i;
+                EXPECT_NEAR(fused_gradients[i][0], expected_gradients[i][0], c.tolerance)
+                    << "xi=" << xi0 << ", i=" << i;
+            }
+        }
+    }
+}
+
+TEST(BSplineBasis, ActiveSupportMatchesDenseEvaluation) {
+    const struct Case {
+        BSplineBasis basis;
+        Real tolerance;
+    } cases[] = {
+        {BSplineBasis(3, make_open_uniform_knots(3, /*num_basis=*/7)), Real(1e-12)},
+        {BSplineBasis(2,
+                      make_open_uniform_knots(2, /*num_basis=*/6),
+                      {Real(1), Real(0.8), Real(1.4), Real(0.9), Real(1.1), Real(1)}),
+         Real(1e-12)}
+    };
+
+    const Real points[] = {Real(-0.61), Real(0.13), Real(0.72)};
+    for (const auto& c : cases) {
+        for (Real xi0 : points) {
+            const math::Vector<Real, 3> xi{xi0, Real(0), Real(0)};
+            std::vector<Real> dense_values;
+            std::vector<Gradient> dense_gradients;
+            std::vector<Hessian> dense_hessians;
+            c.basis.evaluate_all(xi, dense_values, dense_gradients, dense_hessians);
+
+            std::vector<Real> active_values;
+            std::vector<Real> active_first;
+            std::vector<Real> active_second;
+            const auto range =
+                c.basis.evaluate_active_support(xi, active_values, &active_first, &active_second);
+
+            ASSERT_EQ(active_values.size(), range.count);
+            ASSERT_EQ(active_first.size(), range.count);
+            ASSERT_EQ(active_second.size(), range.count);
+            EXPECT_LE(range.count, static_cast<std::size_t>(c.basis.order() + 1));
+            ASSERT_LE(range.first_index + range.count, c.basis.size());
+
+            for (std::size_t offset = 0; offset < range.count; ++offset) {
+                const std::size_t global = range.first_index + offset;
+                EXPECT_NEAR(active_values[offset], dense_values[global], c.tolerance)
+                    << "xi=" << xi0 << ", i=" << global;
+                EXPECT_NEAR(active_first[offset], dense_gradients[global][0], c.tolerance)
+                    << "xi=" << xi0 << ", i=" << global;
+                EXPECT_NEAR(active_second[offset], dense_hessians[global](0, 0), Real(1e-10))
+                    << "xi=" << xi0 << ", i=" << global;
+            }
+        }
+    }
+}
+
+TEST(BSplineBasis, EvaluateAllRawAndQuadratureOutputsMatchIndependentCalls) {
+    auto check_basis = [](const BSplineBasis& basis,
+                          const std::vector<Real>& xi_values,
+                          Real tolerance) {
+        std::vector<math::Vector<Real, 3>> points;
+        points.reserve(xi_values.size());
+        for (Real xi : xi_values) {
+            points.push_back({xi, Real(0), Real(0)});
+        }
+
+        const std::size_t num_dofs = basis.size();
+        const std::size_t num_qpts = points.size();
+
+        std::vector<Real> expected_values;
+        std::vector<Gradient> expected_gradients;
+        std::vector<Hessian> expected_hessians;
+        std::vector<Real> fused_values;
+        std::vector<Gradient> fused_gradients;
+        std::vector<Hessian> fused_hessians;
+
+        basis.evaluate_values(points.front(), expected_values);
+        basis.evaluate_gradients(points.front(), expected_gradients);
+        basis.evaluate_hessians(points.front(), expected_hessians);
+        basis.evaluate_all(points.front(), fused_values, fused_gradients, fused_hessians);
+
+        ASSERT_EQ(fused_values.size(), expected_values.size());
+        ASSERT_EQ(fused_gradients.size(), expected_gradients.size());
+        ASSERT_EQ(fused_hessians.size(), expected_hessians.size());
+        for (std::size_t i = 0; i < num_dofs; ++i) {
+            EXPECT_NEAR(fused_values[i], expected_values[i], tolerance) << "fused value i=" << i;
+            EXPECT_NEAR(fused_gradients[i][0], expected_gradients[i][0], tolerance)
+                << "fused gradient i=" << i;
+            EXPECT_NEAR(fused_hessians[i](0, 0), expected_hessians[i](0, 0), tolerance)
+                << "fused hessian i=" << i;
+        }
+
+        std::vector<Real> raw_values(num_dofs);
+        std::vector<Real> raw_gradients(num_dofs * 3u);
+        std::vector<Real> raw_hessians(num_dofs * 9u);
+        basis.evaluate_values_to(points.front(), raw_values.data());
+        basis.evaluate_gradients_to(points.front(), raw_gradients.data());
+        basis.evaluate_hessians_to(points.front(), raw_hessians.data());
+        for (std::size_t i = 0; i < num_dofs; ++i) {
+            EXPECT_NEAR(raw_values[i], expected_values[i], tolerance) << "raw value i=" << i;
+            EXPECT_NEAR(raw_gradients[i * 3u], expected_gradients[i][0], tolerance)
+                << "raw gradient i=" << i;
+            EXPECT_NEAR(raw_hessians[i * 9u], expected_hessians[i](0, 0), tolerance)
+                << "raw hessian i=" << i;
+        }
+
+        std::vector<Real> q_values(num_dofs * num_qpts);
+        std::vector<Real> q_gradients(num_dofs * 3u * num_qpts);
+        std::vector<Real> q_hessians(num_dofs * 9u * num_qpts);
+        basis.evaluate_at_quadrature_points(points,
+                                            q_values.data(),
+                                            q_gradients.data(),
+                                            q_hessians.data());
+        for (std::size_t q = 0; q < num_qpts; ++q) {
+            basis.evaluate_all(points[q], fused_values, fused_gradients, fused_hessians);
+            for (std::size_t i = 0; i < num_dofs; ++i) {
+                EXPECT_NEAR(q_values[i * num_qpts + q], fused_values[i], tolerance)
+                    << "q value dof=" << i << " q=" << q;
+                EXPECT_NEAR(q_gradients[(i * 3u) * num_qpts + q], fused_gradients[i][0], tolerance)
+                    << "q gradient dof=" << i << " q=" << q;
+                EXPECT_NEAR(q_hessians[(i * 9u) * num_qpts + q], fused_hessians[i](0, 0), tolerance)
+                    << "q hessian dof=" << i << " q=" << q;
+            }
+        }
+    };
+
+    BSplineBasis bspline(3, make_open_uniform_knots(3, /*num_basis=*/7));
+    check_basis(bspline, {Real(-0.55), Real(-0.1), Real(0.42)}, Real(1e-11));
+
+    BSplineBasis rational(2,
+                          make_open_uniform_knots(2, /*num_basis=*/6),
+                          {Real(1), Real(0.7), Real(1.5), Real(0.9), Real(1.2), Real(1)});
+    check_basis(rational, {Real(-0.48), Real(0.18), Real(0.67)}, Real(1e-10));
+}
+
+TEST(BSplineBasis, RawOutputsOverwriteDirtyBuffersCompletely) {
+    BSplineBasis basis(2, make_open_uniform_knots(2, /*num_basis=*/6));
+    const std::vector<math::Vector<Real, 3>> points = {
+        {Real(-0.72), Real(0), Real(0)},
+        {Real(0.15), Real(0), Real(0)},
+        {Real(0.68), Real(0), Real(0)}
+    };
+    const std::size_t num_dofs = basis.size();
+    const std::size_t num_qpts = points.size();
+    constexpr Real sentinel = Real(913.25);
+
+    std::vector<Real> values(num_dofs, sentinel);
+    std::vector<Real> gradients(num_dofs * 3u, sentinel);
+    std::vector<Real> hessians(num_dofs * 9u, sentinel);
+    basis.evaluate_values_to(points[1], values.data());
+    basis.evaluate_gradients_to(points[1], gradients.data());
+    basis.evaluate_hessians_to(points[1], hessians.data());
+
+    std::vector<Real> expected_values;
+    std::vector<Gradient> expected_gradients;
+    std::vector<Hessian> expected_hessians;
+    basis.evaluate_all(points[1], expected_values, expected_gradients, expected_hessians);
+    for (std::size_t dof = 0; dof < num_dofs; ++dof) {
+        EXPECT_NEAR(values[dof], expected_values[dof], Real(1e-12));
+        for (std::size_t component = 0; component < 3u; ++component) {
+            EXPECT_NEAR(gradients[dof * 3u + component],
+                        expected_gradients[dof][component],
+                        Real(1e-12));
+        }
+        for (std::size_t component = 0; component < 9u; ++component) {
+            const std::size_t row = component / 3u;
+            const std::size_t col = component % 3u;
+            EXPECT_NEAR(hessians[dof * 9u + component],
+                        expected_hessians[dof](row, col),
+                        Real(1e-10));
+        }
+    }
+
+    const std::size_t stride = num_qpts + 2u;
+    std::vector<Real> q_values(num_dofs * stride, sentinel);
+    std::vector<Real> q_gradients(num_dofs * 3u * stride, sentinel);
+    std::vector<Real> q_hessians(num_dofs * 9u * stride, sentinel);
+    basis.evaluate_at_quadrature_points_strided(points,
+                                                stride,
+                                                q_values.data(),
+                                                q_gradients.data(),
+                                                q_hessians.data());
+    for (std::size_t q = 0; q < num_qpts; ++q) {
+        basis.evaluate_all(points[q], expected_values, expected_gradients, expected_hessians);
+        for (std::size_t dof = 0; dof < num_dofs; ++dof) {
+            EXPECT_NEAR(q_values[dof * stride + q], expected_values[dof], Real(1e-12));
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(q_gradients[(dof * 3u + component) * stride + q],
+                            expected_gradients[dof][component],
+                            Real(1e-12));
+            }
+            for (std::size_t component = 0; component < 9u; ++component) {
+                const std::size_t row = component / 3u;
+                const std::size_t col = component % 3u;
+                EXPECT_NEAR(q_hessians[(dof * 9u + component) * stride + q],
+                            expected_hessians[dof](row, col),
+                            Real(1e-10));
+            }
+        }
+    }
+    for (std::size_t dof = 0; dof < num_dofs; ++dof) {
+        for (std::size_t pad = num_qpts; pad < stride; ++pad) {
+            EXPECT_DOUBLE_EQ(q_values[dof * stride + pad], sentinel);
+        }
+    }
+}
+
 TEST(BSplineBasis, RepeatedInteriorKnotsPreserveExpectedContinuityDrop) {
     // Quadratic spline with a repeated interior knot at u=0.5 (multiplicity 2).
     // Values remain continuous, but first derivatives exhibit the expected jump
@@ -400,6 +635,17 @@ TEST(BSplineBasis, RepeatedInteriorKnotsPreserveExpectedContinuityDrop) {
 
     EXPECT_LT(max_value_gap, Real(1e-4));
     EXPECT_GT(max_gradient_jump, Real(1.0));
+}
+
+TEST(BSplineBasis, NearlyRepeatedInteriorKnotsRemainFinite) {
+    const Real tiny_gap = std::numeric_limits<Real>::epsilon() * Real(8);
+    BSplineBasis basis(2, {Real(0), Real(0), Real(0), Real(0.5), Real(0.5) + tiny_gap,
+                           Real(1), Real(1), Real(1)});
+
+    const Real xi_mid = map_u_to_xi(basis, Real(0.5));
+    expect_partition_of_unity_and_finite(basis, {xi_mid, Real(0), Real(0)}, Real(1e-12));
+    expect_partition_of_unity_and_finite(basis, {xi_mid + Real(1e-10), Real(0), Real(0)}, Real(1e-12));
+    expect_partition_of_unity_and_finite(basis, {xi_mid - Real(1e-10), Real(0), Real(0)}, Real(1e-12));
 }
 
 TEST(BSplineBasis, ClampedBoundaryOneSidedDerivativesMatchFiniteDifference) {
@@ -655,6 +901,222 @@ TEST(BSplineBasis, NURBSTensorQuadPartitionOfUnityAndScalingInvariance) {
     }
 }
 
+TEST(BSplineBasis, NURBSTensorEvaluateAllMatchesIndependentCalls) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.45), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    const NURBSTensorBasis basis(
+        bx,
+        by,
+        {
+            Real(1.0), Real(0.9), Real(1.2), Real(1.1),
+            Real(0.8), Real(1.3), Real(1.6), Real(0.95),
+            Real(1.4), Real(0.7), Real(1.05), Real(1.2),
+            Real(0.85), Real(1.1), Real(0.92), Real(1.5),
+        },
+        {4, 4});
+
+    const math::Vector<Real, 3> xi{Real(0.18), Real(-0.22), Real(0)};
+    std::vector<Real> values_ref, values_all;
+    std::vector<Gradient> gradients_ref, gradients_all;
+    std::vector<Hessian> hessians_ref, hessians_all;
+
+    basis.evaluate_values(xi, values_ref);
+    basis.evaluate_gradients(xi, gradients_ref);
+    basis.evaluate_hessians(xi, hessians_ref);
+    basis.evaluate_all(xi, values_all, gradients_all, hessians_all);
+
+    ASSERT_EQ(values_all.size(), values_ref.size());
+    ASSERT_EQ(gradients_all.size(), gradients_ref.size());
+    ASSERT_EQ(hessians_all.size(), hessians_ref.size());
+    for (std::size_t i = 0; i < values_ref.size(); ++i) {
+        EXPECT_NEAR(values_all[i], values_ref[i], Real(1e-14));
+        for (std::size_t d = 0; d < 3u; ++d) {
+            EXPECT_NEAR(gradients_all[i][d], gradients_ref[i][d], Real(1e-12));
+            for (std::size_t e = 0; e < 3u; ++e) {
+                EXPECT_NEAR(hessians_all[i](d, e), hessians_ref[i](d, e), Real(1e-10));
+            }
+        }
+    }
+}
+
+TEST(BSplineBasis, NURBSTensorActiveSupportMatchesDenseEvaluation) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.45), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    const NURBSTensorBasis basis(
+        bx,
+        by,
+        {
+            Real(1.0), Real(0.9), Real(1.2), Real(1.1),
+            Real(0.8), Real(1.3), Real(1.6), Real(0.95),
+            Real(1.4), Real(0.7), Real(1.05), Real(1.2),
+            Real(0.85), Real(1.1), Real(0.92), Real(1.5),
+        },
+        {4, 4});
+
+    const math::Vector<Real, 3> xi{Real(0.18), Real(-0.22), Real(0)};
+    std::vector<Real> dense_values;
+    std::vector<Gradient> dense_gradients;
+    std::vector<Hessian> dense_hessians;
+    basis.evaluate_all(xi, dense_values, dense_gradients, dense_hessians);
+
+    std::vector<std::size_t> active_indices;
+    std::vector<Real> active_values;
+    std::vector<Gradient> active_gradients;
+    std::vector<Hessian> active_hessians;
+    const auto range = basis.evaluate_active_support(
+        xi, active_indices, &active_values, &active_gradients, &active_hessians);
+
+    ASSERT_EQ(active_indices.size(), active_values.size());
+    ASSERT_EQ(active_indices.size(), active_gradients.size());
+    ASSERT_EQ(active_indices.size(), active_hessians.size());
+    ASSERT_LE(active_indices.size(), range.compact_size(basis.dimension()));
+    EXPECT_GT(range.counts[0], 0u);
+    EXPECT_GT(range.counts[1], 0u);
+
+    std::vector<bool> seen(basis.size(), false);
+    for (std::size_t pos = 0; pos < active_indices.size(); ++pos) {
+        const std::size_t global = active_indices[pos];
+        ASSERT_LT(global, basis.size());
+        EXPECT_FALSE(seen[global]) << "duplicate active index " << global;
+        seen[global] = true;
+        EXPECT_NEAR(active_values[pos], dense_values[global], Real(1e-14))
+            << "active value i=" << global;
+        for (std::size_t d = 0; d < 3u; ++d) {
+            EXPECT_NEAR(active_gradients[pos][d], dense_gradients[global][d], Real(1e-12))
+                << "active gradient i=" << global << " d=" << d;
+            for (std::size_t e = 0; e < 3u; ++e) {
+                EXPECT_NEAR(active_hessians[pos](d, e), dense_hessians[global](d, e), Real(1e-10))
+                    << "active hessian i=" << global << " (" << d << "," << e << ")";
+            }
+        }
+    }
+
+    std::vector<std::size_t> range_only_indices;
+    const auto range_only = basis.evaluate_active_support(xi, range_only_indices);
+    EXPECT_EQ(range_only.first_indices, range.first_indices);
+    EXPECT_EQ(range_only.counts, range.counts);
+    EXPECT_EQ(range_only_indices.size(), range_only.compact_size(basis.dimension()));
+}
+
+TEST(BSplineBasis, NURBSTensorRawAndQuadratureOutputsMatchVectorEvaluation) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.45), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+    const NURBSTensorBasis basis(
+        bx,
+        by,
+        {
+            Real(1.0), Real(0.9), Real(1.2), Real(1.1),
+            Real(0.8), Real(1.3), Real(1.6), Real(0.95),
+            Real(1.4), Real(0.7), Real(1.05), Real(1.2),
+            Real(0.85), Real(1.1), Real(0.92), Real(1.5),
+        },
+        {4, 4});
+
+    const std::vector<math::Vector<Real, 3>> points = {
+        {Real(0.18), Real(-0.22), Real(0)},
+        {Real(-0.42), Real(0.35), Real(0)},
+        {Real(0.61), Real(0.58), Real(0)}
+    };
+    const std::size_t num_dofs = basis.size();
+    const std::size_t num_qpts = points.size();
+
+    std::vector<Real> expected_values;
+    std::vector<Gradient> expected_gradients;
+    std::vector<Hessian> expected_hessians;
+    basis.evaluate_all(points.front(), expected_values, expected_gradients, expected_hessians);
+
+    std::vector<Real> raw_values(num_dofs);
+    std::vector<Real> raw_gradients(num_dofs * 3u);
+    std::vector<Real> raw_hessians(num_dofs * 9u);
+    basis.evaluate_values_to(points.front(), raw_values.data());
+    basis.evaluate_gradients_to(points.front(), raw_gradients.data());
+    basis.evaluate_hessians_to(points.front(), raw_hessians.data());
+
+    for (std::size_t i = 0; i < num_dofs; ++i) {
+        EXPECT_NEAR(raw_values[i], expected_values[i], Real(1e-14)) << "raw value i=" << i;
+        for (int a = 0; a < 3; ++a) {
+            const auto sa = static_cast<std::size_t>(a);
+            EXPECT_NEAR(raw_gradients[i * 3u + sa], expected_gradients[i][sa], Real(1e-12))
+                << "raw gradient i=" << i << " component=" << a;
+            for (int b = 0; b < 3; ++b) {
+                const auto sb = static_cast<std::size_t>(b);
+                EXPECT_NEAR(raw_hessians[i * 9u + static_cast<std::size_t>(a * 3 + b)],
+                            expected_hessians[i](sa, sb),
+                            Real(1e-10))
+                    << "raw hessian i=" << i << " component=(" << a << "," << b << ")";
+            }
+        }
+    }
+
+    std::vector<Real> q_values(num_dofs * num_qpts);
+    std::vector<Real> q_gradients(num_dofs * 3u * num_qpts);
+    std::vector<Real> q_hessians(num_dofs * 9u * num_qpts);
+    basis.evaluate_at_quadrature_points(points,
+                                        q_values.data(),
+                                        q_gradients.data(),
+                                        q_hessians.data());
+
+    for (std::size_t q = 0; q < num_qpts; ++q) {
+        basis.evaluate_all(points[q], expected_values, expected_gradients, expected_hessians);
+        for (std::size_t i = 0; i < num_dofs; ++i) {
+            EXPECT_NEAR(q_values[i * num_qpts + q], expected_values[i], Real(1e-14))
+                << "q value dof=" << i << " q=" << q;
+            for (int a = 0; a < 3; ++a) {
+                const auto sa = static_cast<std::size_t>(a);
+                EXPECT_NEAR(q_gradients[(i * 3u + sa) * num_qpts + q],
+                            expected_gradients[i][sa],
+                            Real(1e-12))
+                    << "q gradient dof=" << i << " component=" << a << " q=" << q;
+                for (int b = 0; b < 3; ++b) {
+                    const auto sb = static_cast<std::size_t>(b);
+                    EXPECT_NEAR(q_hessians[(i * 9u + static_cast<std::size_t>(a * 3 + b)) * num_qpts + q],
+                                expected_hessians[i](sa, sb),
+                                Real(1e-10))
+                        << "q hessian dof=" << i << " component=(" << a << "," << b << ") q=" << q;
+                }
+            }
+        }
+    }
+
+    const std::size_t stride = num_qpts + 2u;
+    std::vector<Real> strided_values(num_dofs * stride, Real(-7));
+    std::vector<Real> strided_gradients(num_dofs * 3u * stride, Real(-7));
+    std::vector<Real> strided_hessians(num_dofs * 9u * stride, Real(-7));
+    basis.evaluate_at_quadrature_points_strided(points,
+                                                stride,
+                                                strided_values.data(),
+                                                strided_gradients.data(),
+                                                strided_hessians.data());
+
+    for (std::size_t q = 0; q < num_qpts; ++q) {
+        basis.evaluate_all(points[q], expected_values, expected_gradients, expected_hessians);
+        for (std::size_t i = 0; i < num_dofs; ++i) {
+            EXPECT_NEAR(strided_values[i * stride + q], expected_values[i], Real(1e-14))
+                << "strided value dof=" << i << " q=" << q;
+            for (int a = 0; a < 3; ++a) {
+                const auto sa = static_cast<std::size_t>(a);
+                EXPECT_NEAR(strided_gradients[(i * 3u + sa) * stride + q],
+                            expected_gradients[i][sa],
+                            Real(1e-12))
+                    << "strided gradient dof=" << i << " component=" << a << " q=" << q;
+                for (int b = 0; b < 3; ++b) {
+                    const auto sb = static_cast<std::size_t>(b);
+                    EXPECT_NEAR(strided_hessians[(i * 9u + static_cast<std::size_t>(a * 3 + b)) * stride + q],
+                                expected_hessians[i](sa, sb),
+                                Real(1e-10))
+                        << "strided hessian dof=" << i << " component=(" << a << "," << b << ") q=" << q;
+                }
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < num_dofs; ++i) {
+        for (std::size_t pad = num_qpts; pad < stride; ++pad) {
+            EXPECT_DOUBLE_EQ(strided_values[i * stride + pad], Real(-7));
+        }
+    }
+}
+
 TEST(BSplineBasis, NURBSTensorQuadGradientsMatchFiniteDifference) {
     const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.45), Real(1), Real(1), Real(1)});
     const BSplineBasis by(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
@@ -725,6 +1187,57 @@ TEST(BSplineBasis, AnisotropicTensorQuadGradientsMatchFiniteDifference) {
     }
 }
 
+TEST(BSplineBasis, TensorProductStridedOutputsMatchVectorEvaluation) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.35), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.2), Real(0.8), Real(1), Real(1)});
+    const TensorProductBasis<BSplineBasis> basis(bx, by);
+    const std::vector<math::Vector<Real, 3>> points = {
+        {Real(-0.82), Real(-0.65), Real(0)},
+        {Real(-0.15), Real(0.2), Real(0)},
+        {Real(0.7), Real(0.75), Real(0)}
+    };
+    const std::size_t num_dofs = basis.size();
+    const std::size_t num_qpts = points.size();
+    const std::size_t stride = num_qpts + 3u;
+
+    std::vector<Real> values(num_dofs * stride, Real(-11));
+    std::vector<Real> gradients(num_dofs * 3u * stride, Real(-11));
+    std::vector<Real> hessians(num_dofs * 9u * stride, Real(-11));
+    basis.evaluate_at_quadrature_points_strided(points,
+                                                stride,
+                                                values.data(),
+                                                gradients.data(),
+                                                hessians.data());
+
+    std::vector<Real> expected_values;
+    std::vector<Gradient> expected_gradients;
+    std::vector<Hessian> expected_hessians;
+    for (std::size_t q = 0; q < num_qpts; ++q) {
+        basis.evaluate_all(points[q], expected_values, expected_gradients, expected_hessians);
+        for (std::size_t i = 0; i < num_dofs; ++i) {
+            EXPECT_NEAR(values[i * stride + q], expected_values[i], Real(1e-14));
+            for (int a = 0; a < 3; ++a) {
+                const auto sa = static_cast<std::size_t>(a);
+                EXPECT_NEAR(gradients[(i * 3u + sa) * stride + q],
+                            expected_gradients[i][sa],
+                            Real(1e-12));
+                for (int b = 0; b < 3; ++b) {
+                    const auto sb = static_cast<std::size_t>(b);
+                    EXPECT_NEAR(hessians[(i * 9u + static_cast<std::size_t>(a * 3 + b)) * stride + q],
+                                expected_hessians[i](sa, sb),
+                                Real(1e-10));
+                }
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < num_dofs; ++i) {
+        for (std::size_t pad = num_qpts; pad < stride; ++pad) {
+            EXPECT_DOUBLE_EQ(values[i * stride + pad], Real(-11));
+        }
+    }
+}
+
 TEST(BSplineBasis, AnisotropicTensorHexGradientsMatchFiniteDifference) {
     const BSplineBasis bx(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
     const BSplineBasis by(2, {Real(0), Real(0), Real(0), Real(0.4), Real(1), Real(1), Real(1)});
@@ -764,37 +1277,147 @@ TEST(BSplineBasis, DegreeZeroBehavior) {
     for (Real xi0 : xi_pts) {
         math::Vector<Real, 3> xi{xi0, Real(0), Real(0)};
         std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        std::vector<Real> fused_values;
+        std::vector<Gradient> fused_gradients;
+        std::vector<Hessian> fused_hessians;
         basis.evaluate_values(xi, values);
+        basis.evaluate_gradients(xi, gradients);
+        basis.evaluate_hessians(xi, hessians);
+        basis.evaluate_all(xi, fused_values, fused_gradients, fused_hessians);
 
         ASSERT_EQ(values.size(), basis.size());
+        ASSERT_EQ(gradients.size(), basis.size());
+        ASSERT_EQ(hessians.size(), basis.size());
+        ASSERT_EQ(fused_values.size(), basis.size());
+        ASSERT_EQ(fused_gradients.size(), basis.size());
+        ASSERT_EQ(fused_hessians.size(), basis.size());
         const Real sum = std::accumulate(values.begin(), values.end(), Real(0));
         EXPECT_NEAR(sum, Real(1), 1e-14);
 
         int active = 0;
-        for (Real value : values) {
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            const Real value = values[i];
             if (std::abs(value) > Real(1e-14)) {
                 ++active;
             }
+            EXPECT_NEAR(fused_values[i], value, Real(1e-14));
+            EXPECT_EQ(gradients[i][0], Real(0));
+            EXPECT_EQ(hessians[i](0, 0), Real(0));
+            EXPECT_EQ(fused_gradients[i][0], Real(0));
+            EXPECT_EQ(fused_hessians[i](0, 0), Real(0));
         }
         EXPECT_EQ(active, 1);
     }
 }
 
-TEST(BSplineBasis, OutOfRangeXiClampsToBoundary) {
+TEST(BSplineBasis, DegreeOneEvaluateAllKeepsSecondDerivativesZero) {
+    BSplineBasis basis(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
+
+    const Real xi_pts[] = {map_u_to_xi(basis, Real(0.125)),
+                           map_u_to_xi(basis, Real(0.5)),
+                           map_u_to_xi(basis, Real(0.875))};
+    for (Real xi0 : xi_pts) {
+        math::Vector<Real, 3> xi{xi0, Real(0), Real(0)};
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        std::vector<Real> fused_values;
+        std::vector<Gradient> fused_gradients;
+        std::vector<Hessian> fused_hessians;
+
+        basis.evaluate_values(xi, values);
+        basis.evaluate_gradients(xi, gradients);
+        basis.evaluate_hessians(xi, hessians);
+        basis.evaluate_all(xi, fused_values, fused_gradients, fused_hessians);
+
+        ASSERT_EQ(fused_values.size(), basis.size());
+        ASSERT_EQ(fused_gradients.size(), basis.size());
+        ASSERT_EQ(fused_hessians.size(), basis.size());
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            EXPECT_NEAR(fused_values[i], values[i], Real(1e-14));
+            EXPECT_NEAR(fused_gradients[i][0], gradients[i][0], Real(1e-14));
+            EXPECT_NEAR(hessians[i](0, 0), Real(0), Real(1e-14));
+            EXPECT_NEAR(fused_hessians[i](0, 0), Real(0), Real(1e-14));
+        }
+    }
+}
+
+TEST(BSplineBasis, RationalDegreeOneHessiansMatchGradientFiniteDifference) {
+    BSplineBasis basis(1,
+                       {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)},
+                       {Real(1), Real(1.4), Real(0.8), Real(1.2)});
+
+    const Real eps = Real(1e-6);
+    const Real xi_pts[] = {map_u_to_xi(basis, Real(0.125)),
+                           map_u_to_xi(basis, Real(0.5)),
+                           map_u_to_xi(basis, Real(0.875))};
+    for (Real xi0 : xi_pts) {
+        math::Vector<Real, 3> xi{xi0, Real(0), Real(0)};
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        std::vector<Real> fused_values;
+        std::vector<Gradient> fused_gradients;
+        std::vector<Hessian> fused_hessians;
+        basis.evaluate_values(xi, values);
+        basis.evaluate_gradients(xi, gradients);
+        basis.evaluate_hessians(xi, hessians);
+        basis.evaluate_all(xi, fused_values, fused_gradients, fused_hessians);
+
+        math::Vector<Real, 3> xi_p{xi0 + eps, Real(0), Real(0)};
+        math::Vector<Real, 3> xi_m{xi0 - eps, Real(0), Real(0)};
+        std::vector<Gradient> gradients_p;
+        std::vector<Gradient> gradients_m;
+        basis.evaluate_gradients(xi_p, gradients_p);
+        basis.evaluate_gradients(xi_m, gradients_m);
+
+        Real hessian_sum = Real(0);
+        ASSERT_EQ(values.size(), basis.size());
+        ASSERT_EQ(gradients.size(), basis.size());
+        ASSERT_EQ(hessians.size(), basis.size());
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            EXPECT_NEAR(fused_values[i], values[i], Real(1e-12));
+            EXPECT_NEAR(fused_gradients[i][0], gradients[i][0], Real(1e-12));
+            EXPECT_NEAR(fused_hessians[i](0, 0), hessians[i](0, 0), Real(1e-12));
+            const Real fd = (gradients_p[i][0] - gradients_m[i][0]) / (Real(2) * eps);
+            EXPECT_NEAR(hessians[i](0, 0), fd, Real(1e-5));
+            hessian_sum += hessians[i](0, 0);
+        }
+        EXPECT_NEAR(hessian_sum, Real(0), Real(1e-11));
+    }
+}
+
+TEST(BSplineBasis, OutOfRangeXiThrowsAndRoundoffEndpointSnaps) {
     BSplineBasis basis(2, make_open_uniform_knots(2, /*num_basis=*/5));
 
-    std::vector<Real> vals_left, vals_right, vals_below, vals_above;
+    std::vector<Real> vals_left, vals_right, vals_below_tol, vals_above_tol;
     basis.evaluate_values(math::Vector<Real, 3>{Real(-1), Real(0), Real(0)}, vals_left);
     basis.evaluate_values(math::Vector<Real, 3>{Real(1), Real(0), Real(0)}, vals_right);
-    basis.evaluate_values(math::Vector<Real, 3>{Real(-1.5), Real(0), Real(0)}, vals_below);
-    basis.evaluate_values(math::Vector<Real, 3>{Real(1.5), Real(0), Real(0)}, vals_above);
+    basis.evaluate_values(math::Vector<Real, 3>{Real(-1) - std::numeric_limits<Real>::epsilon(), Real(0), Real(0)},
+                          vals_below_tol);
+    basis.evaluate_values(math::Vector<Real, 3>{Real(1) + std::numeric_limits<Real>::epsilon(), Real(0), Real(0)},
+                          vals_above_tol);
 
-    ASSERT_EQ(vals_left.size(), vals_below.size());
-    ASSERT_EQ(vals_right.size(), vals_above.size());
+    ASSERT_EQ(vals_left.size(), vals_below_tol.size());
+    ASSERT_EQ(vals_right.size(), vals_above_tol.size());
     for (std::size_t i = 0; i < vals_left.size(); ++i) {
-        EXPECT_NEAR(vals_left[i], vals_below[i], 1e-14);
-        EXPECT_NEAR(vals_right[i], vals_above[i], 1e-14);
+        EXPECT_NEAR(vals_left[i], vals_below_tol[i], 1e-14);
+        EXPECT_NEAR(vals_right[i], vals_above_tol[i], 1e-14);
     }
+
+    std::vector<Real> values;
+    EXPECT_THROW(basis.evaluate_values(math::Vector<Real, 3>{Real(-1.5), Real(0), Real(0)}, values),
+                 BasisEvaluationException);
+    EXPECT_THROW(basis.evaluate_values(math::Vector<Real, 3>{Real(1.5), Real(0), Real(0)}, values),
+                 BasisEvaluationException);
+    std::vector<Gradient> gradients;
+    EXPECT_THROW(basis.evaluate_gradients(math::Vector<Real, 3>{Real(1.5), Real(0), Real(0)}, gradients),
+                 BasisEvaluationException);
+    std::vector<Hessian> hessians;
+    EXPECT_THROW(basis.evaluate_hessians(math::Vector<Real, 3>{Real(-1.5), Real(0), Real(0)}, hessians),
+                 BasisEvaluationException);
 }
 
 TEST(BSplineBasis, RationalBasisReportsCorrectSemanticType) {
@@ -808,4 +1431,30 @@ TEST(BSplineBasis, RationalBasisReportsCorrectSemanticType) {
     EXPECT_EQ(nurbs.basis_type(), BasisType::NURBS);
     EXPECT_FALSE(bspline.is_rational());
     EXPECT_TRUE(nurbs.is_rational());
+}
+
+TEST(BSplineBasis, RationalWeightsMustBeFiniteAndPositive) {
+    const int degree = 2;
+    auto knots = make_open_uniform_knots(degree, /*num_basis=*/5);
+
+    EXPECT_THROW(BSplineBasis(degree, knots, {Real(1), Real(0), Real(1), Real(1), Real(1)}),
+                 BasisConfigurationException);
+    EXPECT_THROW(BSplineBasis(degree, knots, {Real(1), Real(-0.5), Real(1), Real(1), Real(1)}),
+                 BasisConfigurationException);
+    EXPECT_THROW(BSplineBasis(degree,
+                              knots,
+                              {Real(1), std::numeric_limits<Real>::infinity(), Real(1), Real(1), Real(1)}),
+                 BasisConfigurationException);
+}
+
+TEST(BSplineBasis, NURBSTensorWeightsMustBeFiniteAndPositive) {
+    const BSplineBasis bx(1, {Real(0), Real(0), Real(0.5), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.5), Real(1), Real(1)});
+
+    EXPECT_THROW(NURBSTensorBasis(bx, by, {Real(1), Real(1), Real(0), Real(1), Real(1), Real(1),
+                                           Real(1), Real(1), Real(1)}),
+                 BasisConfigurationException);
+    EXPECT_THROW(NURBSTensorBasis(bx, by, {Real(1), Real(1), Real(1), Real(1), Real(-1), Real(1),
+                                           Real(1), Real(1), Real(1)}),
+                 BasisConfigurationException);
 }

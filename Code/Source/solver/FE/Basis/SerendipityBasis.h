@@ -21,6 +21,7 @@
 #include "BasisFunction.h"
 
 #include <array>
+#include <cstdint>
 
 namespace svmp {
 namespace FE {
@@ -36,6 +37,7 @@ public:
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return size_; }
     const std::vector<math::Vector<Real, 3>>& nodes() const noexcept { return nodes_; }
+    bool cache_identity_words(std::vector<std::uint64_t>& words) const override;
 
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
@@ -53,6 +55,7 @@ private:
     std::size_t size_;
     std::vector<math::Vector<Real, 3>> nodes_;
     std::vector<std::array<int, 2>> quad_monomial_exponents_;
+    // Row-major inverse Vandermonde, indexed as [monomial, basis].
     std::vector<Real> quad_inv_vandermonde_;
 
     // When true, this basis is used purely for geometry mapping and may use

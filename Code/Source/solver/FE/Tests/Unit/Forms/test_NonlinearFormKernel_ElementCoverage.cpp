@@ -350,12 +350,12 @@ public:
         const auto ref = elements::ReferenceElement::create(elem_type_);
         dim_ = ref.dimension();
 
-        const auto n_nodes = basis::NodeOrdering::num_nodes(elem_type_);
+        const auto n_nodes = basis::ReferenceNodeLayout::num_nodes(elem_type_);
         nodes_.reserve(n_nodes);
         cell_.reserve(n_nodes);
 
         for (std::size_t i = 0; i < n_nodes; ++i) {
-            const auto xi = basis::NodeOrdering::get_node_coords(elem_type_, i);
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(elem_type_, i);
             nodes_.push_back({xi[0], xi[1], xi[2]});
             cell_.push_back(static_cast<GlobalIndex>(i));
         }

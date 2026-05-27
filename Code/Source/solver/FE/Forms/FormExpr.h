@@ -103,10 +103,21 @@ enum class CutVolumeSide : std::uint8_t {
     Positive
 };
 
+struct SpaceSignature {
+    spaces::SpaceType space_type{};
+    FieldType field_type{FieldType::Scalar};
+    Continuity continuity{Continuity::C0};
+    int value_dimension{1};
+    int topological_dimension{0};
+    int polynomial_order{1};
+    ElementType element_type{ElementType::Unknown};
+};
+
 struct LevelSetCutDomainSensitivity {
     FieldId level_set_field{INVALID_FIELD_ID};
     int interface_marker{-1};
     CutVolumeSide side{CutVolumeSide::Negative};
+    std::optional<SpaceSignature> level_set_space{};
 };
 
 struct GeometrySensitivityOptions {
@@ -463,15 +474,7 @@ public:
     [[nodiscard]] virtual bool hasTest() const noexcept = 0;
     [[nodiscard]] virtual bool hasTrial() const noexcept = 0;
 
-    struct SpaceSignature {
-        spaces::SpaceType space_type{};
-        FieldType field_type{FieldType::Scalar};
-        Continuity continuity{Continuity::C0};
-        int value_dimension{1};
-        int topological_dimension{0};
-        int polynomial_order{1};
-        ElementType element_type{ElementType::Unknown};
-    };
+    using SpaceSignature = ::svmp::FE::forms::SpaceSignature;
 
 	    // Optional payload accessors (used by compiler/evaluator without RTTI)
 	    [[nodiscard]] virtual std::optional<Real> constantValue() const { return std::nullopt; }

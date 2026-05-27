@@ -437,6 +437,51 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
+     UpdateConstraintsRebuildsAfterMeshFieldValueChange)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0}));
+
+    ASSERT_NO_THROW(system.setup());
+    EXPECT_TRUE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
+    EXPECT_TRUE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+
+    const auto phi_handle =
+        MeshFields::get_field_handle(mesh->local_mesh(), EntityKind::Vertex, "phi");
+    auto* phi = MeshFields::field_data_as<real_t>(mesh->local_mesh(), phi_handle);
+    ASSERT_NE(phi, nullptr);
+    phi[2] = -1.0;
+    phi[5] = -1.0;
+    EXPECT_TRUE(system.constraintStateStaleForCurrentRevisions());
+
+    system.updateConstraints(/*time=*/0.0, /*dt=*/0.0);
+
+    EXPECT_FALSE(system.constraintStateStaleForCurrentRevisions());
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 0)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 1)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 2)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 3)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 4)));
+    EXPECT_FALSE(system.constraints().isConstrained(vertexDof(system, pressure, 5)));
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
      RebuildUsesRetainedCutVolumeSupportWhenContextIsAvailable)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

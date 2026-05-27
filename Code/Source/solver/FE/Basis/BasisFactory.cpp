@@ -6,12 +6,25 @@
  */
 
 #include "BasisFactory.h"
-#include "Core/FEException.h"
+
+#include "BernsteinBasis.h"
+#include "BSplineBasis.h"
+#include "BubbleBasis.h"
+#include "CompatibleTensorVectorBasis.h"
+#include "HermiteBasis.h"
+#include "HierarchicalBasis.h"
+#include "LagrangeBasis.h"
+#include "NURBSTensorBasis.h"
+#include "SerendipityBasis.h"
+#include "SpectralBasis.h"
+#include "TensorBasis.h"
+#include "VectorBasis.h"
 
 #include <algorithm>
 #include <array>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -34,6 +47,117 @@ int require_basis_order(const BasisRequest& req,
 }
 
 void reject_explicit_basis_order(const BasisRequest& req,
+                                 const char* message);
+
+enum class DescriptorOrderPolicy {
+    RequiredNonNegative,
+    MustOmit
+};
+
+using DescriptorFactory =
+    std::shared_ptr<BasisFunction> (*)(const BasisRequest&, int);
+
+struct BasisDescriptor {
+    BasisType canonical_type;
+    std::array<BasisType, 1> aliases;
+    DescriptorOrderPolicy order_policy;
+    const char* missing_order_message;
+    const char* negative_order_message;
+    const char* explicit_order_message;
+    DescriptorFactory factory;
+};
+
+template <typename BasisT>
+std::shared_ptr<BasisFunction> create_ordered_descriptor_basis(const BasisRequest& req,
+                                                               int order) {
+    return std::make_shared<BasisT>(req.element_type, order);
+}
+
+std::shared_ptr<BasisFunction> create_bubble_descriptor_basis(const BasisRequest& req,
+                                                              int /*order*/) {
+    return std::make_shared<BubbleBasis>(req.element_type);
+}
+
+constexpr std::array<BasisDescriptor, 7> scalar_basis_descriptors() {
+    return {{
+        {BasisType::Lagrange,
+         {BasisType::Lagrange},
+         DescriptorOrderPolicy::RequiredNonNegative,
+         "BasisFactory: Lagrange creation requires an explicit order",
+         "BasisFactory: Lagrange requires non-negative order",
+         nullptr,
+         &create_ordered_descriptor_basis<LagrangeBasis>},
+        {BasisType::Hierarchical,
+         {BasisType::Hierarchical},
+         DescriptorOrderPolicy::RequiredNonNegative,
+         "BasisFactory: Hierarchical creation requires an explicit order",
+         "BasisFactory: Hierarchical requires non-negative order",
+         nullptr,
+         &create_ordered_descriptor_basis<HierarchicalBasis>},
+        {BasisType::Bernstein,
+         {BasisType::Bernstein},
+         DescriptorOrderPolicy::RequiredNonNegative,
+         "BasisFactory: Bernstein creation requires an explicit order",
+         "BasisFactory: Bernstein requires non-negative order",
+         nullptr,
+         &create_ordered_descriptor_basis<BernsteinBasis>},
+        {BasisType::Spectral,
+         {BasisType::Spectral},
+         DescriptorOrderPolicy::RequiredNonNegative,
+         "BasisFactory: Spectral creation requires an explicit order",
+         "BasisFactory: Spectral requires non-negative order",
+         nullptr,
+         &create_ordered_descriptor_basis<SpectralBasis>},
+        {BasisType::Serendipity,
+         {BasisType::Serendipity},
+         DescriptorOrderPolicy::RequiredNonNegative,
+         "BasisFactory: Serendipity creation requires an explicit order",
+         "BasisFactory: Serendipity requires non-negative order",
+         nullptr,
+         &create_ordered_descriptor_basis<SerendipityBasis>},
+        {BasisType::Hermite,
+         {BasisType::Hermite},
+         DescriptorOrderPolicy::RequiredNonNegative,
+         "BasisFactory: Hermite creation requires an explicit order",
+         "BasisFactory: Hermite requires non-negative order",
+         nullptr,
+         &create_ordered_descriptor_basis<HermiteBasis>},
+        {BasisType::Bubble,
+         {BasisType::Bubble},
+         DescriptorOrderPolicy::MustOmit,
+         nullptr,
+         nullptr,
+         "BasisFactory: Bubble requests must omit order; order is intrinsic to the topology",
+         &create_bubble_descriptor_basis},
+    }};
+}
+
+const BasisDescriptor* find_scalar_basis_descriptor(BasisType basis_type) {
+    static constexpr auto descriptors = scalar_basis_descriptors();
+    for (const BasisDescriptor& descriptor : descriptors) {
+        if (descriptor.canonical_type == basis_type ||
+            std::find(descriptor.aliases.begin(), descriptor.aliases.end(), basis_type) !=
+                descriptor.aliases.end()) {
+            return &descriptor;
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<BasisFunction> create_from_descriptor(const BasisDescriptor& descriptor,
+                                                      const BasisRequest& req) {
+    int order = 0;
+    if (descriptor.order_policy == DescriptorOrderPolicy::RequiredNonNegative) {
+        order = require_basis_order(req,
+                                    descriptor.missing_order_message,
+                                    descriptor.negative_order_message);
+    } else {
+        reject_explicit_basis_order(req, descriptor.explicit_order_message);
+    }
+    return descriptor.factory(req, order);
+}
+
+void reject_explicit_basis_order(const BasisRequest& req,
                                  const char* message) {
     if (req.order.has_value()) {
         throw BasisConfigurationException(message,
@@ -41,7 +165,7 @@ void reject_explicit_basis_order(const BasisRequest& req,
     }
 }
 
-using CustomRegistryMap = std::unordered_map<std::string, BasisFactory::CustomFactory>;
+using CustomRegistryMap = std::unordered_map<std::string, basis_factory::CustomFactory>;
 
 CustomRegistryMap& custom_registry() {
     static CustomRegistryMap registry;
@@ -295,12 +419,12 @@ std::vector<BSplineBasis> make_tensor_axes(const BasisRequest& req,
                                            int dim) {
     const bool use_axis_data = !req.axis_orders.empty() || !req.axis_knot_vectors.empty();
     if (use_axis_data) {
-        FE_CHECK_ARG(req.axis_orders.empty() || req.axis_orders.size() == static_cast<std::size_t>(dim),
+        BASIS_CHECK_CONFIG(req.axis_orders.empty() || req.axis_orders.size() == static_cast<std::size_t>(dim),
                      "BasisFactory: vector spline/NURBS axis_orders size must match tensor dimension");
-        FE_CHECK_ARG(req.axis_knot_vectors.empty() || req.axis_knot_vectors.size() == static_cast<std::size_t>(dim),
+        BASIS_CHECK_CONFIG(req.axis_knot_vectors.empty() || req.axis_knot_vectors.size() == static_cast<std::size_t>(dim),
                      "BasisFactory: vector spline/NURBS axis_knot_vectors size must match tensor dimension");
     } else {
-        FE_CHECK_ARG(!req.knot_vector.empty(),
+        BASIS_CHECK_CONFIG(!req.knot_vector.empty(),
                      "BasisFactory: vector spline/NURBS construction requires knot vectors");
     }
 
@@ -315,47 +439,18 @@ std::vector<BSplineBasis> make_tensor_axes(const BasisRequest& req,
 std::size_t tensor_product_size(const std::vector<int>& extents) {
     std::size_t size = 1u;
     for (int extent : extents) {
-        FE_CHECK_ARG(extent > 0, "BasisFactory: tensor extents must be positive");
+        BASIS_CHECK_CONFIG(extent > 0, "BasisFactory: tensor extents must be positive");
         size *= static_cast<std::size_t>(extent);
     }
     return size;
 }
 
-std::size_t flatten_tensor_index(const std::vector<int>& extents,
-                                 const std::vector<int>& index) {
-    FE_CHECK_ARG(extents.size() == index.size(),
-                 "BasisFactory: tensor index dimension mismatch");
-    std::size_t linear = 0u;
-    std::size_t stride = 1u;
-    for (std::size_t axis = 0; axis < extents.size(); ++axis) {
-        FE_CHECK_ARG(index[axis] >= 0 && index[axis] < extents[axis],
-                     "BasisFactory: tensor index out of bounds");
-        linear += stride * static_cast<std::size_t>(index[axis]);
-        stride *= static_cast<std::size_t>(extents[axis]);
-    }
-    return linear;
-}
-
-bool advance_tensor_index(std::vector<int>& index,
-                          const std::vector<int>& extents) {
-    FE_CHECK_ARG(index.size() == extents.size(),
-                 "BasisFactory: tensor index dimension mismatch");
-    for (std::size_t axis = 0; axis < index.size(); ++axis) {
-        ++index[axis];
-        if (index[axis] < extents[axis]) {
-            return true;
-        }
-        index[axis] = 0;
-    }
-    return false;
-}
-
 BSplineBasis make_reduced_bspline_axis(const BSplineBasis& axis) {
-    FE_CHECK_ARG(axis.order() >= 1,
+    BASIS_CHECK_CONFIG(axis.order() >= 1,
                  "BasisFactory: compatible spline/NURBS vector bases require axis order >= 1");
 
     auto knots = axis.knots();
-    FE_CHECK_ARG(knots.size() >= 2u,
+    BASIS_CHECK_CONFIG(knots.size() >= 2u,
                  "BasisFactory: spline knot vector too short for compatible vector basis");
     knots.erase(knots.begin());
     knots.pop_back();
@@ -363,7 +458,7 @@ BSplineBasis make_reduced_bspline_axis(const BSplineBasis& axis) {
 }
 
 std::vector<int> infer_tensor_extents(const std::vector<BSplineBasis>& axes) {
-    FE_CHECK_ARG(axes.size() == 2u || axes.size() == 3u,
+    BASIS_CHECK_CONFIG(axes.size() == 2u || axes.size() == 3u,
                  "BasisFactory: compatible tensor extents require two or three axes");
     std::vector<int> extents;
     extents.reserve(axes.size());
@@ -376,26 +471,41 @@ std::vector<int> infer_tensor_extents(const std::vector<BSplineBasis>& axes) {
 std::vector<Real> reduce_tensor_weights(const std::vector<Real>& weights,
                                       const std::vector<int>& extents,
                                       int axis) {
-    FE_CHECK_ARG(axis >= 0 && axis < static_cast<int>(extents.size()),
+    BASIS_CHECK_CONFIG(axis >= 0 && axis < static_cast<int>(extents.size()),
                  "BasisFactory: invalid reduced tensor axis");
-    FE_CHECK_ARG(weights.size() == tensor_product_size(extents),
+    BASIS_CHECK_CONFIG(weights.size() == tensor_product_size(extents),
                  "BasisFactory: NURBS weights size does not match tensor extents");
-    FE_CHECK_ARG(extents[static_cast<std::size_t>(axis)] > 1,
+    BASIS_CHECK_CONFIG(extents[static_cast<std::size_t>(axis)] > 1,
                  "BasisFactory: compatible spline/NURBS vector bases require at least two control points per axis");
 
     std::vector<int> reduced_extents = extents;
     --reduced_extents[static_cast<std::size_t>(axis)];
-    std::vector<Real> reduced(tensor_product_size(reduced_extents), Real(0));
+    const std::size_t reduced_size = tensor_product_size(reduced_extents);
+    std::vector<Real> reduced(reduced_size, Real(0));
 
-    std::vector<int> reduced_index(reduced_extents.size(), 0);
-    do {
-        std::vector<int> src0 = reduced_index;
-        std::vector<int> src1 = reduced_index;
-        ++src1[static_cast<std::size_t>(axis)];
-        reduced[flatten_tensor_index(reduced_extents, reduced_index)] =
-            Real(0.5) * (weights[flatten_tensor_index(extents, src0)] +
-                         weights[flatten_tensor_index(extents, src1)]);
-    } while (advance_tensor_index(reduced_index, reduced_extents));
+    const std::size_t dim = extents.size();
+    std::array<std::size_t, 3> input_strides{1u, 1u, 1u};
+    for (std::size_t d = 1; d < dim; ++d) {
+        input_strides[d] = input_strides[d - 1u] *
+                           static_cast<std::size_t>(extents[d - 1u]);
+    }
+
+    for (std::size_t linear = 0; linear < reduced_size; ++linear) {
+        std::array<int, 3> index{0, 0, 0};
+        std::size_t remaining = linear;
+        for (std::size_t d = 0; d < dim; ++d) {
+            const auto extent = static_cast<std::size_t>(reduced_extents[d]);
+            index[d] = static_cast<int>(remaining % extent);
+            remaining /= extent;
+        }
+
+        std::size_t input0 = 0u;
+        for (std::size_t d = 0; d < dim; ++d) {
+            input0 += static_cast<std::size_t>(index[d]) * input_strides[d];
+        }
+        const std::size_t input1 = input0 + input_strides[static_cast<std::size_t>(axis)];
+        reduced[linear] = Real(0.5) * (weights[input0] + weights[input1]);
+    }
 
     return reduced;
 }
@@ -406,9 +516,9 @@ std::shared_ptr<BasisFunction> make_compatible_component_basis(
     const std::vector<int>& base_extents,
     const std::vector<Real>& weights,
     const std::vector<bool>& reduce_axes) {
-    FE_CHECK_ARG(base_axes.size() == base_extents.size(),
+    BASIS_CHECK_CONFIG(base_axes.size() == base_extents.size(),
                  "BasisFactory: compatible component basis extent mismatch");
-    FE_CHECK_ARG(base_axes.size() == reduce_axes.size(),
+    BASIS_CHECK_CONFIG(base_axes.size() == reduce_axes.size(),
                  "BasisFactory: compatible component basis axis mask mismatch");
 
     std::vector<BSplineBasis> axes;
@@ -424,7 +534,7 @@ std::shared_ptr<BasisFunction> make_compatible_component_basis(
         return std::make_shared<TensorProductBasis<BSplineBasis>>(axes[0], axes[1], axes[2]);
     }
 
-    FE_CHECK_ARG(semantic_basis_type == BasisType::NURBS,
+    BASIS_CHECK_CONFIG(semantic_basis_type == BasisType::NURBS,
                  "BasisFactory: compatible component basis requires BSpline or NURBS semantics");
 
     std::vector<Real> component_weights = weights;
@@ -510,7 +620,7 @@ std::vector<DofAssociation> build_quad_compatible_vector_associations(
         return associations;
     }
 
-    FE_CHECK_ARG(family == CompatibleTensorVectorBasis::Family::HDiv,
+    BASIS_CHECK_CONFIG(family == CompatibleTensorVectorBasis::Family::HDiv,
                  "BasisFactory: unsupported compatible vector family");
 
     const int nx = first_extents[0];
@@ -651,7 +761,7 @@ std::vector<DofAssociation> build_hex_compatible_vector_associations(
         return associations;
     }
 
-    FE_CHECK_ARG(family == CompatibleTensorVectorBasis::Family::HCurl,
+    BASIS_CHECK_CONFIG(family == CompatibleTensorVectorBasis::Family::HCurl,
                  "BasisFactory: unsupported compatible vector family");
 
     const auto& ex = component_extents[0];
@@ -754,12 +864,12 @@ std::shared_ptr<BasisFunction> create_compatible_tensor_vector_basis(
     const BasisRequest& req,
     Continuity continuity) {
     const int dim = spline_tensor_dimension(req.element_type);
-    FE_CHECK_ARG(req.element_type == ElementType::Quad4 || req.element_type == ElementType::Hex8,
+    BASIS_CHECK_CONFIG(req.element_type == ElementType::Quad4 || req.element_type == ElementType::Hex8,
                  "BasisFactory: compatible spline/NURBS H(div)/H(curl) bases are intentionally limited to Quad4 and Hex8");
 
     const auto axes = make_tensor_axes(req, dim);
     const auto base_extents = infer_tensor_extents(axes);
-    FE_CHECK_ARG(std::all_of(base_extents.begin(),
+    BASIS_CHECK_CONFIG(std::all_of(base_extents.begin(),
                              base_extents.end(),
                              [](int extent) { return extent >= 2; }),
                  "BasisFactory: compatible spline/NURBS vector bases require at least two basis functions per axis");
@@ -851,7 +961,7 @@ std::shared_ptr<BasisFunction> create_compatible_tensor_vector_basis(
 
 } // namespace
 
-std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
+std::shared_ptr<BasisFunction> basis_factory::create(const BasisRequest& req) {
     // Vector-valued conforming bases take precedence
     if (req.continuity == Continuity::H_div) {
         validate_vector_factory_request(req, Continuity::H_div);
@@ -904,83 +1014,47 @@ std::shared_ptr<BasisFunction> BasisFactory::create(const BasisRequest& req) {
                                           __FILE__, __LINE__, __func__);
     }
 
-    switch (req.basis_type) {
-        case BasisType::Lagrange:
-            return std::make_shared<LagrangeBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: Lagrange creation requires an explicit order",
-                                    "BasisFactory: Lagrange requires non-negative order"));
-        case BasisType::Hierarchical:
-            return std::make_shared<HierarchicalBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: Hierarchical creation requires an explicit order",
-                                    "BasisFactory: Hierarchical requires non-negative order"));
-        case BasisType::Bernstein:
-            return std::make_shared<BernsteinBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: Bernstein creation requires an explicit order",
-                                    "BasisFactory: Bernstein requires non-negative order"));
-        case BasisType::BSpline:
-            return create_bspline_basis(req);
-        case BasisType::NURBS:
-            return create_nurbs_basis(req);
-        case BasisType::Spectral:
-            return std::make_shared<SpectralBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: Spectral creation requires an explicit order",
-                                    "BasisFactory: Spectral requires non-negative order"));
-        case BasisType::Serendipity:
-            return std::make_shared<SerendipityBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: Serendipity creation requires an explicit order",
-                                    "BasisFactory: Serendipity requires non-negative order"));
-        case BasisType::Hermite:
-            return std::make_shared<HermiteBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: Hermite creation requires an explicit order",
-                                    "BasisFactory: Hermite requires non-negative order"));
-        case BasisType::Bubble:
-            reject_explicit_basis_order(req,
-                                        "BasisFactory: Bubble requests must omit order; order is intrinsic to the topology");
-            return std::make_shared<BubbleBasis>(req.element_type);
-        case BasisType::Custom: {
-            if (req.custom_id.empty()) {
-                throw BasisConfigurationException("BasisFactory: BasisType::Custom requires a non-empty custom_id",
+    if (req.basis_type == BasisType::BSpline) {
+        return create_bspline_basis(req);
+    }
+    if (req.basis_type == BasisType::NURBS) {
+        return create_nurbs_basis(req);
+    }
+    if (req.basis_type == BasisType::Custom) {
+        if (req.custom_id.empty()) {
+            throw BasisConfigurationException("BasisFactory: BasisType::Custom requires a non-empty custom_id",
+                                              __FILE__, __LINE__, __func__);
+        }
+
+        basis_factory::CustomFactory factory;
+        {
+            std::lock_guard<std::mutex> lock(custom_registry_mutex());
+            const auto it = custom_registry().find(req.custom_id);
+            if (it == custom_registry().end()) {
+                throw BasisConfigurationException("BasisFactory: unknown custom basis id \"" + req.custom_id + "\"",
                                                   __FILE__, __LINE__, __func__);
             }
-
-            CustomFactory factory;
-            {
-                std::lock_guard<std::mutex> lock(custom_registry_mutex());
-                const auto it = custom_registry().find(req.custom_id);
-                if (it == custom_registry().end()) {
-                    throw BasisConfigurationException("BasisFactory: unknown custom basis id \"" + req.custom_id + "\"",
-                                                      __FILE__, __LINE__, __func__);
-                }
-                factory = it->second;
-            }
-
-            auto basis = factory(req);
-            if (!basis) {
-                throw BasisConstructionException("BasisFactory: custom basis factory returned null",
-                                                 __FILE__, __LINE__, __func__);
-            }
-            return basis;
+            factory = it->second;
         }
-        default:
-            throw BasisConfigurationException("Unsupported basis type in BasisFactory",
-                                              __FILE__, __LINE__, __func__);
+
+        auto basis = factory(req);
+        if (!basis) {
+            throw BasisConstructionException("BasisFactory: custom basis factory returned null",
+                                             __FILE__, __LINE__, __func__);
+        }
+        return basis;
     }
+
+    if (const BasisDescriptor* descriptor = find_scalar_basis_descriptor(req.basis_type)) {
+        return create_from_descriptor(*descriptor, req);
+    }
+
+    throw BasisConfigurationException("Unsupported basis type in BasisFactory",
+                                      __FILE__, __LINE__, __func__);
 }
 
-void BasisFactory::register_custom(std::string custom_id,
-                                   CustomFactory factory) {
+void basis_factory::register_custom(std::string custom_id,
+                                    basis_factory::CustomFactory factory) {
     if (custom_id.empty()) {
         throw BasisConfigurationException("BasisFactory: custom_id must not be empty",
                                           __FILE__, __LINE__, __func__);
@@ -998,7 +1072,7 @@ void BasisFactory::register_custom(std::string custom_id,
     }
 }
 
-void BasisFactory::unregister_custom(const std::string& custom_id) {
+void basis_factory::unregister_custom(const std::string& custom_id) {
     if (custom_id.empty()) {
         throw BasisConfigurationException("BasisFactory: custom_id must not be empty",
                                           __FILE__, __LINE__, __func__);
@@ -1011,7 +1085,7 @@ void BasisFactory::unregister_custom(const std::string& custom_id) {
     }
 }
 
-void BasisFactory::clear_custom_registry_for_tests() {
+void basis_factory::clear_custom_registry_for_tests() {
     std::lock_guard<std::mutex> lock(custom_registry_mutex());
     custom_registry().clear();
 }

@@ -23,6 +23,7 @@
 #include "Forms/Tensor/TensorInterpreter.h"
 #include "Forms/Tensor/TensorIR.h"
 #include "Forms/Value.h"
+#include "Forms/Vocabulary.h"
 
 #include "Assembly/AssemblyContext.h"
 #include "Math/Eigensolvers.h"
@@ -13517,10 +13518,11 @@ void FormKernel::computeInterfaceFace(
     const auto n_trial_minus = ctx_minus.numTrialDofs();
     const auto n_test_plus = ctx_plus.numTestDofs();
     const auto n_trial_plus = ctx_plus.numTrialDofs();
+    const bool one_sided_embedded = &ctx_plus == &ctx_minus;
 
     if (ir_.kind() == FormKind::Linear) {
         output_minus.reserve(n_test_minus, n_trial_minus, false, true);
-        output_plus.reserve(n_test_plus, n_trial_plus, false, false);
+        output_plus.reserve(n_test_plus, n_trial_plus, false, !one_sided_embedded);
         coupling_mp.reserve(n_test_minus, n_trial_plus, false, false);
         coupling_pm.reserve(n_test_plus, n_trial_minus, false, false);
 
@@ -13530,7 +13532,6 @@ void FormKernel::computeInterfaceFace(
         coupling_pm.clear();
 
         const auto n_qpts = ctx_minus.numQuadraturePoints();
-        const auto* time_ctx = ctx_minus.timeIntegrationContext();
 
         if (!inlined_state_updates_.interface_face.empty()) {
             for (LocalIndex q = 0; q < n_qpts; ++q) {
@@ -13538,40 +13539,61 @@ void FormKernel::computeInterfaceFace(
                                                      constitutive_state_.get(),
                                                      inlined_state_updates_.interface_face,
                                                      Side::Minus, q);
-            }
-        }
-
-        ConstitutiveCallCacheReal constitutive_cache;
-        EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Linear, Side::Minus, Side::Minus,
-                        0, 0, constitutive_state_.get(), &constitutive_cache};
-
-        const auto& terms = ir_.terms();
-        for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
-            const auto& term = terms[term_index];
-            if (term.domain != IntegralDomain::InterfaceFace) continue;
-            if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
-            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
-            if (term_weight == 0.0) continue;
-
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_minus.integrationWeight(q);
-                for (LocalIndex i = 0; i < n_test_minus; ++i) {
-                    env.i = i;
-                    const Real s = evalScalarIntegrandTensorAware(term_index,
-                                                                  term.integrand,
-                                                                  tensor_term_ir_,
-                                                                  tensor_term_fallback_,
-                                                                  env,
-                                                                  Side::Minus,
-                                                                  q);
-                    output_minus.vectorEntry(i) += (term_weight * w) * s;
+                const auto* base_minus = ctx_minus.materialStateWorkBase();
+                const auto* base_plus = ctx_plus.materialStateWorkBase();
+                if (!one_sided_embedded && base_plus != nullptr && base_plus != base_minus) {
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Linear,
+                                                         constitutive_state_.get(),
+                                                         inlined_state_updates_.interface_face,
+                                                         Side::Plus, q);
                 }
             }
         }
+
+        auto assembleVector = [&](Side eval_side,
+                                  Side test_active,
+                                  assembly::KernelOutput& out,
+                                  LocalIndex n_test) {
+            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
+            const auto* side_time_ctx = ctx_eval.timeIntegrationContext();
+            ConstitutiveCallCacheReal constitutive_cache;
+            EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Linear, test_active, test_active,
+                            0, 0, constitutive_state_.get(), &constitutive_cache};
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const Real w = ctx_eval.integrationWeight(q);
+                for (LocalIndex i = 0; i < n_test; ++i) {
+                    env.i = i;
+                    Real sum_q = Real{0.0};
+                    const auto& terms = ir_.terms();
+                    for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
+                        const auto& term = terms[term_index];
+                        if (term.domain != IntegralDomain::InterfaceFace) continue;
+                        if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                        const Real term_weight = termWeightFor(side_time_ctx, term.time_derivative_order);
+                        if (term_weight == 0.0) continue;
+                        const Real s = evalScalarIntegrandTensorAware(term_index,
+                                                                      term.integrand,
+                                                                      tensor_term_ir_,
+                                                                      tensor_term_fallback_,
+                                                                      env,
+                                                                      eval_side,
+                                                                      q);
+                        sum_q += term_weight * s;
+                    }
+                    out.vectorEntry(i) += w * sum_q;
+                }
+            }
+        };
+
+        assembleVector(Side::Minus, Side::Minus, output_minus, n_test_minus);
+        if (!one_sided_embedded) {
+            assembleVector(Side::Plus, Side::Plus, output_plus, n_test_plus);
+        }
+
         output_minus.has_matrix = false;
         output_minus.has_vector = true;
         output_plus.has_matrix = false;
-        output_plus.has_vector = false;
+        output_plus.has_vector = !one_sided_embedded;
         coupling_mp.has_matrix = false;
         coupling_mp.has_vector = false;
         coupling_pm.has_matrix = false;
@@ -15471,7 +15493,7 @@ namespace {
 // Symbolic tangent caching (per-process, in-memory)
 // ============================================================================
 
-inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 1u;
+inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 4u;
 inline constexpr std::size_t kSymbolicTangentCacheMaxEntries = 128u;
 
 [[nodiscard]] std::uint64_t fnv1aInit64() noexcept
@@ -15518,6 +15540,18 @@ inline void hashTag64(std::uint64_t& h, std::uint64_t tag) noexcept
     hashPod64(h, static_cast<std::int32_t>(sig.polynomial_order));
     hashPod64(h, static_cast<std::uint8_t>(sig.element_type));
     return h;
+}
+
+[[nodiscard]] bool spaceSignatureEqual(const FormExprNode::SpaceSignature& a,
+                                       const FormExprNode::SpaceSignature& b) noexcept
+{
+    return a.space_type == b.space_type &&
+           a.field_type == b.field_type &&
+           a.continuity == b.continuity &&
+           a.value_dimension == b.value_dimension &&
+           a.topological_dimension == b.topological_dimension &&
+           a.polynomial_order == b.polynomial_order &&
+           a.element_type == b.element_type;
 }
 
 using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
@@ -15701,6 +15735,12 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         hashPod64(h, static_cast<std::uint16_t>(domain.level_set_field));
         hashPod64(h, static_cast<std::int32_t>(domain.interface_marker));
         hashPod64(h, static_cast<std::uint8_t>(domain.side));
+        hashPod64(h, domain.level_set_space.has_value() ? std::uint8_t{1u}
+                                                         : std::uint8_t{0u});
+        if (domain.level_set_space.has_value()) {
+            const auto sh = hashSpaceSignature64(*domain.level_set_space);
+            hashPod64(h, sh);
+        }
     }
     hashPod64(h, residual_ir.geometrySensitivityActive() ? std::uint8_t{1u} : std::uint8_t{0u});
 
@@ -15814,6 +15854,23 @@ private:
     return expr.transformNodes(transform);
 }
 
+[[nodiscard]] bool containsFormExprType(const FormExprNode* node,
+                                        FormExprType type) noexcept
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == type) {
+        return true;
+    }
+    for (const auto& child : node->childrenShared()) {
+        if (child && containsFormExprType(child.get(), type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct FunctionSymbolNames {
     std::optional<std::string> test{};
     std::optional<std::string> trial{};
@@ -15892,7 +15949,8 @@ SymbolicNonlinearFormKernel& SymbolicNonlinearFormKernel::operator=(SymbolicNonl
 assembly::RequiredData SymbolicNonlinearFormKernel::getRequiredData() const noexcept
 {
     auto req = residual_ir_.requiredData() | assembly::RequiredData::SolutionCoefficients;
-    if (tangent_ready_ && tangent_ir_.isCompiled()) {
+    if (output_ != NonlinearKernelOutput::VectorOnly &&
+        tangent_ready_ && tangent_ir_.isCompiled()) {
         req |= tangent_ir_.requiredData();
     }
     if (material_state_spec_.bytes_per_qpt > 0u) {
@@ -15903,7 +15961,12 @@ assembly::RequiredData SymbolicNonlinearFormKernel::getRequiredData() const noex
 
 std::vector<assembly::FieldRequirement> SymbolicNonlinearFormKernel::fieldRequirements() const
 {
-    return residual_ir_.fieldRequirements();
+    if (output_ == NonlinearKernelOutput::VectorOnly ||
+        !tangent_ready_ || !tangent_ir_.isCompiled()) {
+        return residual_ir_.fieldRequirements();
+    }
+    return mergeFieldRequirements(residual_ir_.fieldRequirements(),
+                                  tangent_ir_.fieldRequirements());
 }
 
 assembly::MaterialStateSpec SymbolicNonlinearFormKernel::materialStateSpec() const noexcept
@@ -15942,10 +16005,21 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         geometry_sensitivity.mode ==
             GeometrySensitivityMode::LevelSetCutDomainUnknowns &&
         !geometry_sensitivity.level_set_cut_domains.empty();
-    const FieldId sensitivity_field =
-        level_set_cut_geometry_sensitivity
-            ? geometry_sensitivity.level_set_cut_domains.front().level_set_field
-            : geometry_sensitivity.mesh_motion_field;
+    const FieldId mesh_sensitivity_field = geometry_sensitivity.mesh_motion_field;
+    const auto residual_function_names = firstFunctionSymbolNames(residual_ir_);
+    const auto geometry_trial_symbol = [&]() -> std::string {
+        if (!residual_function_names.trial.has_value()) {
+            return "dlevel_set";
+        }
+        const auto& name = *residual_function_names.trial;
+        if (name.empty() || name == "u") {
+            return "du";
+        }
+        if (name == "v") {
+            return "dv";
+        }
+        return "d" + name;
+    }();
 
     const auto append_term = [](FormExpr& accumulator, const FormExpr& term) {
         if (!term.isValid()) {
@@ -15953,11 +16027,77 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         }
         accumulator = accumulator.isValid() ? accumulator + term : term;
     };
+    const auto normalize_level_set_trial_symbol =
+        [&](const FormExpr& expr) -> FormExpr {
+            if (!expr.isValid() || expr.node() == nullptr) {
+                return expr;
+            }
+            return expr.transformNodes(
+                [&](const FormExprNode& n) -> std::optional<FormExpr> {
+                    if (n.type() != FormExprType::TrialFunction) {
+                        return std::nullopt;
+                    }
+                    const auto* sig = n.spaceSignature();
+                    FE_THROW_IF(!sig, InvalidArgumentException,
+                                "SymbolicNonlinearFormKernel: level-set cut-domain "
+                                "trial variation missing SpaceSignature");
+                    return FormExpr::trialFunction(*sig, geometry_trial_symbol);
+                });
+        };
+    const auto level_set_space_signature =
+        [&](const LevelSetCutDomainSensitivity& domain)
+            -> const FormExprNode::SpaceSignature& {
+            if (domain.level_set_space.has_value()) {
+                return *domain.level_set_space;
+            }
+            return *residual_ir_.trialSpace();
+        };
+    const auto level_set_integrand_derivative =
+        [&](const IntegralTerm& term,
+            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            const auto& phi_space = level_set_space_signature(domain);
+            const bool level_set_is_active_trial =
+                residual_ir_.trialSpace().has_value() &&
+                spaceSignatureEqual(phi_space, *residual_ir_.trialSpace());
+            if (level_set_is_active_trial) {
+                return normalize_level_set_trial_symbol(
+                    differentiateResidual(term.integrand,
+                                          domain.level_set_field,
+                                          trial_state_field,
+                                          geometry_sensitivity));
+            }
+            const auto wrt_level_set = FormExpr::stateField(
+                domain.level_set_field, phi_space, "level_set");
+            return normalize_level_set_trial_symbol(
+                differentiateResidual(term.integrand,
+                                      wrt_level_set,
+                                      trial_state_field));
+        };
     const auto cut_domain_matches =
         [](const LevelSetCutDomainSensitivity& domain,
            int marker,
            CutVolumeSide side) noexcept {
             return domain.interface_marker == marker && domain.side == side;
+        };
+    const auto interface_domain_matches =
+        [](const LevelSetCutDomainSensitivity& domain,
+           int marker) noexcept {
+            return marker < 0 || domain.interface_marker == marker;
+        };
+    struct EmittedCutVolumeDerivative {
+        int marker{-1};
+        CutVolumeSide side{CutVolumeSide::Negative};
+        FieldId field{INVALID_FIELD_ID};
+    };
+    const auto cut_volume_derivative_emitted =
+        [](std::span<const EmittedCutVolumeDerivative> emitted,
+           const EmittedCutVolumeDerivative& candidate) noexcept {
+            return std::find_if(emitted.begin(), emitted.end(),
+                                [&](const EmittedCutVolumeDerivative& value) {
+                                    return value.marker == candidate.marker &&
+                                           value.side == candidate.side &&
+                                           value.field == candidate.field;
+                                }) != emitted.end();
         };
     const auto shape_tangent_integrand =
         [&](const IntegralTerm& term,
@@ -15967,10 +16107,11 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
             }
             const auto primal_integrand =
                 rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            const auto& phi_space = level_set_space_signature(domain);
             const auto phi = FormExpr::stateField(
-                domain.level_set_field, *residual_ir_.trialSpace(), "level_set");
+                domain.level_set_field, phi_space, "level_set");
             const auto dphi =
-                FormExpr::trialFunction(*residual_ir_.trialSpace(), "dlevel_set");
+                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
             const auto grad_phi = grad(phi);
             const auto grad_norm =
                 sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
@@ -15978,6 +16119,92 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                                   ? Real{-1.0}
                                   : Real{1.0};
             return FormExpr::constant(sign) * primal_integrand * dphi / grad_norm;
+        };
+    const auto interface_measure_tangent_integrand =
+        [&](const IntegralTerm& term,
+            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            if (!residual_ir_.trialSpace().has_value()) {
+                return FormExpr{};
+            }
+            const auto primal_integrand =
+                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            const auto& phi_space = level_set_space_signature(domain);
+            const auto phi = FormExpr::stateField(
+                domain.level_set_field, phi_space, "level_set");
+            const auto dphi =
+                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
+            const auto grad_phi = grad(phi);
+            const auto grad_norm =
+                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
+            const auto normal_speed =
+                FormExpr::constant(Real{-1.0}) * dphi / grad_norm;
+            return meanCurvatureFromLevelSet(phi) * normal_speed * primal_integrand;
+        };
+    const auto level_set_point_motion =
+        [&](const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            if (!residual_ir_.trialSpace().has_value()) {
+                return FormExpr{};
+            }
+            const auto& phi_space = level_set_space_signature(domain);
+            const auto phi = FormExpr::stateField(
+                domain.level_set_field, phi_space, "level_set");
+            const auto dphi =
+                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
+            const auto grad_phi = grad(phi);
+            const auto grad_norm =
+                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
+            const auto n0 = grad_phi / grad_norm;
+            const auto normal_speed =
+                FormExpr::constant(Real{-1.0}) * dphi / grad_norm;
+            return normal_speed * n0;
+        };
+    const auto interface_point_tangent_integrand =
+        [&](const IntegralTerm& term,
+            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            const auto point_motion = level_set_point_motion(domain);
+            if (!point_motion.isValid()) {
+                return FormExpr{};
+            }
+            const auto primal_integrand =
+                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            return directionalDerivativeWrtSpatialCoordinate(primal_integrand,
+                                                             point_motion);
+        };
+    const auto level_set_normal_variation =
+        [&](const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            if (!residual_ir_.trialSpace().has_value()) {
+                return FormExpr{};
+            }
+            const auto& phi_space = level_set_space_signature(domain);
+            const auto phi = FormExpr::stateField(
+                domain.level_set_field, phi_space, "level_set");
+            const auto dphi =
+                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
+            const auto grad_phi = grad(phi);
+            const auto grad_norm =
+                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
+            const auto n0 = grad_phi / grad_norm;
+            const auto grad_dphi = grad(dphi);
+            const auto point_motion = level_set_point_motion(domain);
+            const auto moved_grad_dphi =
+                grad_dphi + hessian(phi) * point_motion;
+            return (moved_grad_dphi - inner(moved_grad_dphi, n0) * n0) /
+                   grad_norm;
+        };
+    const auto interface_normal_tangent_integrand =
+        [&](const IntegralTerm& term,
+            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
+            if (!containsFormExprType(term.integrand.node(), FormExprType::Normal)) {
+                return FormExpr{};
+            }
+            const auto normal_variation = level_set_normal_variation(domain);
+            if (!normal_variation.isValid()) {
+                return FormExpr{};
+            }
+            const auto primal_integrand =
+                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            return directionalDerivativeWrtNormal(primal_integrand,
+                                                  normal_variation);
         };
 
     FormExpr tangent_form{};
@@ -15988,10 +16215,12 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         }
 
         FormExpr dI = geometry_sensitivity_active
-            ? differentiateResidual(term.integrand,
-                                    sensitivity_field,
-                                    trial_state_field,
-                                    geometry_sensitivity)
+            ? (level_set_cut_geometry_sensitivity
+                   ? FormExpr{}
+                   : differentiateResidual(term.integrand,
+                                           mesh_sensitivity_field,
+                                           trial_state_field,
+                                           geometry_sensitivity))
             : differentiateResidual(term.integrand);
 
         if (mesh_geometry_sensitivity) {
@@ -16003,11 +16232,27 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         switch (term.domain) {
             case IntegralDomain::Cell:
                 if (level_set_cut_geometry_sensitivity) {
+                    std::vector<EmittedCutVolumeDerivative> emitted_derivatives;
                     for (const auto& domain :
                          geometry_sensitivity.level_set_cut_domains) {
-                        append_term(tangent_form,
-                                    dI.dCutVolume(domain.interface_marker,
-                                                  domain.side));
+                        const EmittedCutVolumeDerivative emitted{
+                            domain.interface_marker,
+                            domain.side,
+                            domain.level_set_field};
+                        if (!cut_volume_derivative_emitted(
+                                std::span<const EmittedCutVolumeDerivative>(
+                                    emitted_derivatives.data(),
+                                    emitted_derivatives.size()),
+                                emitted)) {
+                            emitted_derivatives.push_back(emitted);
+                            append_term(
+                                tangent_form,
+                                level_set_integrand_derivative(
+                                    term,
+                                    domain)
+                                    .dCutVolume(domain.interface_marker,
+                                                domain.side));
+                        }
                         append_term(tangent_form,
                                     shape_tangent_integrand(term, domain)
                                         .dI(domain.interface_marker));
@@ -16017,19 +16262,113 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                 }
                 break;
             case IntegralDomain::Boundary:
-                append_term(tangent_form, dI.ds(term.boundary_marker));
+                if (level_set_cut_geometry_sensitivity) {
+                    std::vector<FieldId> emitted_fields;
+                    for (const auto& domain :
+                         geometry_sensitivity.level_set_cut_domains) {
+                        if (std::find(emitted_fields.begin(),
+                                      emitted_fields.end(),
+                                      domain.level_set_field) !=
+                            emitted_fields.end()) {
+                            continue;
+                        }
+                        emitted_fields.push_back(domain.level_set_field);
+                        append_term(
+                            tangent_form,
+                            level_set_integrand_derivative(
+                                term,
+                                domain)
+                                .ds(term.boundary_marker));
+                    }
+                } else {
+                    append_term(tangent_form, dI.ds(term.boundary_marker));
+                }
                 break;
             case IntegralDomain::InteriorFace:
-                append_term(tangent_form, dI.dS(term.interface_marker));
+                if (level_set_cut_geometry_sensitivity) {
+                    std::vector<FieldId> emitted_fields;
+                    for (const auto& domain :
+                         geometry_sensitivity.level_set_cut_domains) {
+                        if (std::find(emitted_fields.begin(),
+                                      emitted_fields.end(),
+                                      domain.level_set_field) !=
+                            emitted_fields.end()) {
+                            continue;
+                        }
+                        emitted_fields.push_back(domain.level_set_field);
+                        append_term(
+                            tangent_form,
+                            level_set_integrand_derivative(
+                                term,
+                                domain)
+                                .dS(term.interface_marker));
+                    }
+                } else {
+                    append_term(tangent_form, dI.dS(term.interface_marker));
+                }
                 break;
             case IntegralDomain::InterfaceFace:
-                append_term(tangent_form, dI.dI(term.interface_marker));
+                if (level_set_cut_geometry_sensitivity) {
+                    std::vector<std::pair<int, FieldId>> emitted_derivatives;
+                    std::vector<std::pair<int, FieldId>> emitted_shape_terms;
+                    for (const auto& domain :
+                         geometry_sensitivity.level_set_cut_domains) {
+                        if (!interface_domain_matches(domain,
+                                                      term.interface_marker)) {
+                            continue;
+                        }
+                        const int emitted_marker =
+                            term.interface_marker < 0
+                                ? domain.interface_marker
+                                : term.interface_marker;
+                        if (emitted_marker < 0) {
+                            continue;
+                        }
+                        const auto emitted_domain =
+                            std::pair<int, FieldId>{emitted_marker,
+                                                    domain.level_set_field};
+                        if (std::find(emitted_derivatives.begin(),
+                                      emitted_derivatives.end(),
+                                      emitted_domain) ==
+                            emitted_derivatives.end()) {
+                            emitted_derivatives.push_back(emitted_domain);
+                            append_term(
+                                tangent_form,
+                                level_set_integrand_derivative(
+                                    term,
+                                    domain)
+                                    .dI(emitted_marker));
+                        }
+                        if (std::find(emitted_shape_terms.begin(),
+                                      emitted_shape_terms.end(),
+                                      emitted_domain) !=
+                            emitted_shape_terms.end()) {
+                            continue;
+                        }
+                        emitted_shape_terms.push_back(emitted_domain);
+                        append_term(tangent_form,
+                                    interface_measure_tangent_integrand(term, domain)
+                                        .dI(emitted_marker));
+                        const auto point_tangent =
+                            interface_point_tangent_integrand(term, domain);
+                        if (point_tangent.isValid()) {
+                            append_term(tangent_form,
+                                        point_tangent.dI(emitted_marker));
+                        }
+                        const auto normal_tangent =
+                            interface_normal_tangent_integrand(term, domain);
+                        if (normal_tangent.isValid()) {
+                            append_term(tangent_form,
+                                        normal_tangent.dI(emitted_marker));
+                        }
+                    }
+                } else {
+                    append_term(tangent_form, dI.dI(term.interface_marker));
+                }
                 break;
             case IntegralDomain::CutVolume:
-                append_term(tangent_form,
-                            dI.dCutVolume(term.interface_marker,
-                                          term.cut_volume_side));
                 if (level_set_cut_geometry_sensitivity) {
+                    std::vector<EmittedCutVolumeDerivative> emitted_derivatives;
                     for (const auto& domain :
                          geometry_sensitivity.level_set_cut_domains) {
                         if (!cut_domain_matches(domain,
@@ -16037,10 +16376,32 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                                                 term.cut_volume_side)) {
                             continue;
                         }
+                        const EmittedCutVolumeDerivative emitted{
+                            domain.interface_marker,
+                            domain.side,
+                            domain.level_set_field};
+                        if (!cut_volume_derivative_emitted(
+                                std::span<const EmittedCutVolumeDerivative>(
+                                    emitted_derivatives.data(),
+                                    emitted_derivatives.size()),
+                                emitted)) {
+                            emitted_derivatives.push_back(emitted);
+                            append_term(
+                                tangent_form,
+                                level_set_integrand_derivative(
+                                    term,
+                                    domain)
+                                    .dCutVolume(term.interface_marker,
+                                                term.cut_volume_side));
+                        }
                         append_term(tangent_form,
                                     shape_tangent_integrand(term, domain)
                                         .dI(domain.interface_marker));
                     }
+                } else {
+                    append_term(tangent_form,
+                                dI.dCutVolume(term.interface_marker,
+                                              term.cut_volume_side));
                 }
                 break;
         }

@@ -635,6 +635,36 @@ AssemblyResult ColoredAssembler::assembleInteriorFaces(
         mesh, test_space, trial_space, kernel, matrix_view, vector_view, interior_facet_marker);
 }
 
+AssemblyResult ColoredAssembler::assembleCutVolumes(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    const spaces::FunctionSpace& test_space,
+    const spaces::FunctionSpace& trial_space,
+    AssemblyKernel& kernel,
+    GlobalSystemView* matrix_view,
+    GlobalSystemView* vector_view,
+    bool assemble_matrix,
+    bool assemble_vector)
+{
+    return base().assembleCutVolumes(mesh, cut_context, interface_marker, side,
+                                     test_space, trial_space, kernel,
+                                     matrix_view, vector_view,
+                                     assemble_matrix, assemble_vector);
+}
+
+AssemblyResult ColoredAssembler::assembleCutVolumesFused(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    std::span<const FusedCellTerm> terms)
+{
+    return base().assembleCutVolumesFused(
+        mesh, cut_context, interface_marker, side, terms);
+}
+
 AssemblyResult ColoredAssembler::assembleCellsFused(
     const IMeshAccess& mesh,
     std::span<const FusedCellTerm> terms)

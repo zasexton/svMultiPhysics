@@ -164,6 +164,19 @@ public:
     }
 };
 
+class ReferencePointQuadratureRule final : public quadrature::QuadratureRule {
+public:
+    ReferencePointQuadratureRule(ElementType element_type,
+                                 int dimension,
+                                 int order,
+                                 std::vector<quadrature::QuadPoint> points)
+        : quadrature::QuadratureRule(to_mesh_family(element_type), dimension, order)
+    {
+        std::vector<Real> weights(points.size(), Real(1));
+        set_data(std::move(points), std::move(weights));
+    }
+};
+
 [[nodiscard]] bool isTransientCutVolumeQuadratureRule(
     const quadrature::QuadratureRule& rule) noexcept
 {
@@ -228,7 +241,7 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
     return h;
 }
 
-[[nodiscard]] std::size_t cutVolumeBasisCacheMaxEntries() noexcept
+[[nodiscard]] std::size_t cutVolumeBasisCacheMaxEntriesFromEnv() noexcept
 {
     static const std::size_t max_entries = [] {
         const char* env = std::getenv("SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES");
@@ -327,6 +340,62 @@ void remapCutInterfaceSurfaceGeometry(AssemblyContext& context,
 
     context.setNormals(normals);
     context.markGeometryDirty();
+}
+
+void orientGeneratedInterfaceContextForSide(
+    AssemblyContext& context,
+    interfaces::CutInterfaceSideTag side)
+{
+    if (side == interfaces::CutInterfaceSideTag::Positive) {
+        return;
+    }
+    FE_THROW_IF(side != interfaces::CutInterfaceSideTag::Negative,
+                FEException,
+                "generated cut-interface two-sided assembly requires explicit negative/positive side tags");
+
+    auto flip = [](std::span<const AssemblyContext::Vector3D> normals) {
+        std::vector<AssemblyContext::Vector3D> flipped;
+        flipped.reserve(normals.size());
+        for (const auto& normal : normals) {
+            flipped.push_back(
+                AssemblyContext::Vector3D{{-normal[0], -normal[1], -normal[2]}});
+        }
+        return flipped;
+    };
+
+    const auto normals = flip(context.normals());
+    context.setNormals(normals);
+    if (!context.referenceNormals().empty()) {
+        const auto reference_normals = flip(context.referenceNormals());
+        context.setReferenceNormals(reference_normals);
+    }
+    if (!context.currentNormals().empty()) {
+        const auto current_normals = flip(context.currentNormals());
+        context.setCurrentNormals(current_normals);
+    }
+    context.markGeometryDirty();
+}
+
+[[nodiscard]] bool fieldRequirementAppliesToSide(
+    const FieldRequirement& requirement,
+    FieldEvaluationSide side) noexcept
+{
+    return requirement.interface_side == FieldEvaluationSide::Both ||
+           requirement.interface_side == side;
+}
+
+[[nodiscard]] std::vector<FieldRequirement> fieldRequirementsForInterfaceSide(
+    const std::vector<FieldRequirement>& requirements,
+    FieldEvaluationSide side)
+{
+    std::vector<FieldRequirement> out;
+    out.reserve(requirements.size());
+    for (const auto& requirement : requirements) {
+        if (fieldRequirementAppliesToSide(requirement, side)) {
+            out.push_back(requirement);
+        }
+    }
+    return out;
 }
 
 [[nodiscard]] bool isFullSideVolumeRule(const geometry::CutQuadratureRule& rule) noexcept
@@ -1538,7 +1607,13 @@ void StandardAssembler::setSparsityPattern(const sparsity::SparsityPattern* spar
 
 void StandardAssembler::setOptions(const AssemblyOptions& options)
 {
+    const auto previous_cut_basis_cache_max_entries =
+        cutVolumeBasisCacheMaxEntries();
     options_ = normalizeStandardAssemblerOptions(options);
+    if (cutVolumeBasisCacheMaxEntries() != previous_cut_basis_cache_max_entries) {
+        clearCutVolumeBasisCache();
+        clearCutVolumeGeometryCache();
+    }
 }
 
 void StandardAssembler::setCurrentSolution(std::span<const Real> solution)
@@ -1605,10 +1680,11 @@ std::vector<FieldRequirement> StandardAssembler::effectiveFieldRequirements(
 
     auto add_or_merge = [&out](FieldId field, RequiredData bits = RequiredData::SolutionValues) {
         auto it = std::find_if(out.begin(), out.end(), [&](const FieldRequirement& req) {
-            return req.field == field;
+            return req.field == field &&
+                   req.interface_side == FieldEvaluationSide::Both;
         });
         if (it == out.end()) {
-            out.push_back(FieldRequirement{field, bits});
+            out.push_back(FieldRequirement{field, bits, FieldEvaluationSide::Both});
         } else {
             it->required |= bits;
         }
@@ -1901,12 +1977,10 @@ void StandardAssembler::setCutIntegrationContext(const CutIntegrationContext* co
 {
     cut_integration_context_ = context;
     if (context != cut_volume_basis_cache_context_) {
-        cut_volume_basis_cache_.clear();
-        cut_volume_basis_cache_context_ = nullptr;
-        cut_volume_basis_cache_signature_ = 0;
-        cut_volume_basis_cache_mesh_geometry_revision_ = 0;
-        cut_volume_basis_cache_mesh_topology_revision_ = 0;
-        active_cut_volume_basis_cache_entry_ = nullptr;
+        clearCutVolumeBasisCache();
+    }
+    if (context != cut_volume_geometry_cache_context_) {
+        clearCutVolumeGeometryCache();
     }
 }
 
@@ -1948,6 +2022,88 @@ void StandardAssembler::setMaterialStateProvider(IMaterialStateProvider* provide
 const AssemblyOptions& StandardAssembler::getOptions() const noexcept
 {
     return options_;
+}
+
+StandardAssembler::CutVolumeBasisCacheDiagnostics
+StandardAssembler::cutVolumeBasisCacheDiagnostics() const noexcept
+{
+    CutVolumeBasisCacheDiagnostics diagnostics;
+    diagnostics.max_entries = cutVolumeBasisCacheMaxEntries();
+    diagnostics.entries = cut_volume_basis_cache_.size();
+    diagnostics.high_watermark = cut_volume_basis_cache_high_watermark_;
+    diagnostics.hits = cut_volume_basis_cache_hits_;
+    diagnostics.misses = cut_volume_basis_cache_misses_;
+    diagnostics.insertions = cut_volume_basis_cache_insertions_;
+    diagnostics.evictions = cut_volume_basis_cache_evictions_;
+    return diagnostics;
+}
+
+void StandardAssembler::resetCutVolumeBasisCacheDiagnostics() noexcept
+{
+    cut_volume_basis_cache_high_watermark_ = cut_volume_basis_cache_.size();
+    cut_volume_basis_cache_hits_ = 0;
+    cut_volume_basis_cache_misses_ = 0;
+    cut_volume_basis_cache_insertions_ = 0;
+    cut_volume_basis_cache_evictions_ = 0;
+}
+
+std::size_t StandardAssembler::cutVolumeBasisCacheMaxEntries() const noexcept
+{
+    if (options_.cut_volume_basis_cache_max_entries.has_value()) {
+        return *options_.cut_volume_basis_cache_max_entries;
+    }
+    return cutVolumeBasisCacheMaxEntriesFromEnv();
+}
+
+void StandardAssembler::clearCutVolumeBasisCache() noexcept
+{
+    cut_volume_basis_cache_.clear();
+    cut_volume_basis_cache_context_ = nullptr;
+    cut_volume_basis_cache_signature_ = 0;
+    cut_volume_basis_cache_mesh_geometry_revision_ = 0;
+    cut_volume_basis_cache_mesh_topology_revision_ = 0;
+    active_cut_volume_basis_cache_entry_ = nullptr;
+}
+
+void StandardAssembler::clearCutVolumeGeometryCache() noexcept
+{
+    cut_volume_geometry_cache_.clear();
+    cut_volume_geometry_cache_context_ = nullptr;
+    cut_volume_geometry_cache_signature_ = 0;
+    cut_volume_geometry_cache_mesh_geometry_revision_ = 0;
+    cut_volume_geometry_cache_mesh_topology_revision_ = 0;
+    cut_volume_geometry_cache_active_configuration_epoch_ = 0;
+    cut_volume_geometry_cache_coordinate_configuration_key_ = 0;
+}
+
+void StandardAssembler::evictLeastRecentCutVolumeBasisCacheEntry() noexcept
+{
+    if (cut_volume_basis_cache_.empty()) {
+        return;
+    }
+    auto victim = cut_volume_basis_cache_.begin();
+    for (auto it = cut_volume_basis_cache_.begin(); it != cut_volume_basis_cache_.end(); ++it) {
+        if (it->second.last_used < victim->second.last_used) {
+            victim = it;
+        }
+    }
+    cut_volume_basis_cache_.erase(victim);
+    ++cut_volume_basis_cache_evictions_;
+}
+
+void StandardAssembler::evictLeastRecentCutVolumeGeometryCacheEntry() noexcept
+{
+    if (cut_volume_geometry_cache_.empty()) {
+        return;
+    }
+    auto victim = cut_volume_geometry_cache_.begin();
+    for (auto it = cut_volume_geometry_cache_.begin(); it != cut_volume_geometry_cache_.end(); ++it) {
+        if (it->second.last_used < victim->second.last_used) {
+            victim = it;
+        }
+    }
+    cut_volume_geometry_cache_.erase(victim);
+    ++cut_volume_geometry_cache_evictions_;
 }
 
 bool StandardAssembler::isConfigured() const noexcept
@@ -2060,12 +2216,8 @@ void StandardAssembler::reset()
     coloring_ownership_revision_ = 0;
     coloring_numbering_revision_ = 0;
     coloring_dof_revisions_.clear();
-    cut_volume_basis_cache_.clear();
-    cut_volume_basis_cache_context_ = nullptr;
-    cut_volume_basis_cache_signature_ = 0;
-    cut_volume_basis_cache_mesh_geometry_revision_ = 0;
-    cut_volume_basis_cache_mesh_topology_revision_ = 0;
-    active_cut_volume_basis_cache_entry_ = nullptr;
+    clearCutVolumeBasisCache();
+    clearCutVolumeGeometryCache();
     initialized_ = false;
 }
 
@@ -2078,12 +2230,8 @@ void StandardAssembler::invalidateGeometryCaches()
     cached_mapping_affine_ = false;
     cached_geom_h_ = 0.0;
     cached_geom_volume_ = 0.0;
-    cut_volume_basis_cache_.clear();
-    cut_volume_basis_cache_context_ = nullptr;
-    cut_volume_basis_cache_signature_ = 0;
-    cut_volume_basis_cache_mesh_geometry_revision_ = 0;
-    cut_volume_basis_cache_mesh_topology_revision_ = 0;
-    active_cut_volume_basis_cache_entry_ = nullptr;
+    clearCutVolumeBasisCache();
+    clearCutVolumeGeometryCache();
 }
 
 void StandardAssembler::invalidateTopologyLayoutCaches()
@@ -5252,6 +5400,7 @@ void StandardAssembler::prepareGeometry(
     const bool transient_cut_quad_rule = isTransientCutVolumeQuadratureRule(quad_rule);
     const bool quadrature_rule_changed = cached_quad_rule_.get() != &quad_rule;
     if (quadrature_rule_changed || transient_cut_quad_rule) {
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
         cached_geom_bcache_ = nullptr;
         cached_field_bcache_.clear();
         cached_field_recipes_valid_ = false;
@@ -5279,6 +5428,9 @@ void StandardAssembler::prepareGeometry(
         cached_mapping_type_ = cell_type;
         cached_mapping_order_ = geom_order;
         // Invalidate cached BasisCacheEntry pointers — will be re-looked-up below.
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_test_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_trial_bcache_handle_ = basis::BasisCacheHandle{};
         cached_geom_bcache_ = nullptr;
         cached_test_bcache_ = nullptr;
         cached_trial_bcache_ = nullptr;
@@ -5326,8 +5478,9 @@ void StandardAssembler::prepareGeometry(
                 mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false));
             geom_bcache_ptr = &*local_geom_bcache;
         } else {
-            cached_geom_bcache_ = &basis::BasisCache::instance().get_or_compute(
+            cached_geom_bcache_handle_ = basis::BasisCache::instance().prewarm_handle(
                 mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false);
+            cached_geom_bcache_ = &cached_geom_bcache_handle_.entry();
             geom_bcache_ptr = cached_geom_bcache_;
         }
     }
@@ -5339,10 +5492,10 @@ void StandardAssembler::prepareGeometry(
         // Affine element: Jacobian is constant across all QPs.
         math::Matrix<Real, 3, 3> J{};
         for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-            const auto& grad_a = geom_bcache.gradients[0][a];
             for (int j = 0; j < dim; ++j) {
                 for (int i = 0; i < 3; ++i) {
-                    J(i, j) += geom_nodes[a][i] * grad_a[j];
+                    J(i, j) += geom_nodes[a][i] *
+                               geom_bcache.gradientValue(a, static_cast<std::size_t>(j), 0u);
                 }
             }
         }
@@ -5418,10 +5571,10 @@ void StandardAssembler::prepareGeometry(
 
             math::Matrix<Real, 3, 3> J{};
             for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                const auto& grad_a = geom_bcache.gradients[qidx][a];
                 for (int j = 0; j < dim; ++j) {
                     for (int i = 0; i < 3; ++i) {
-                        J(i, j) += geom_nodes[a][i] * grad_a[j];
+                        J(i, j) += geom_nodes[a][i] *
+                                   geom_bcache.gradientValue(a, static_cast<std::size_t>(j), qidx);
                     }
                 }
             }
@@ -5532,6 +5685,7 @@ void StandardAssembler::prepareGeometry(
         ws.mapping = geometry::MappingFactory::create(map_request, ws.node_coords);
         ws.mapping_type = cell_type;
         ws.mapping_order = geom_order;
+        ws.geom_bcache_handle = basis::BasisCacheHandle{};
         ws.geom_bcache = nullptr;
     } else {
         ws.mapping->resetNodes(ws.node_coords);
@@ -5555,8 +5709,9 @@ void StandardAssembler::prepareGeometry(
     const auto& quad_weights = quad_rule.weights();
 
     if (!ws.geom_bcache) {
-        ws.geom_bcache = &basis::BasisCache::instance().get_or_compute(
+        ws.geom_bcache_handle = basis::BasisCache::instance().prewarm_handle(
             mapping->geometryBasis(), quad_rule, /*gradients=*/true, /*hessians=*/false);
+        ws.geom_bcache = &ws.geom_bcache_handle.entry();
     }
     const auto& geom_bcache = *ws.geom_bcache;
     const auto& geom_nodes = mapping->nodes();
@@ -5565,10 +5720,10 @@ void StandardAssembler::prepareGeometry(
     if (mapping->isAffine()) {
         math::Matrix<Real, 3, 3> J{};
         for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-            const auto& grad_a = geom_bcache.gradients[0][a];
             for (int j = 0; j < dim; ++j)
                 for (int i = 0; i < 3; ++i)
-                    J(i, j) += geom_nodes[a][i] * grad_a[j];
+                    J(i, j) += geom_nodes[a][i] *
+                               geom_bcache.gradientValue(a, static_cast<std::size_t>(j), 0u);
         }
 
         if (dim == 1) {
@@ -5635,10 +5790,10 @@ void StandardAssembler::prepareGeometry(
             ctx_phys_pts[q] = {x0, x1, x2};
             math::Matrix<Real, 3, 3> J{};
             for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                const auto& grad_a = geom_bcache.gradients[qidx][a];
                 for (int j = 0; j < dim; ++j)
                     for (int i = 0; i < 3; ++i)
-                        J(i, j) += geom_nodes[a][i] * grad_a[j];
+                        J(i, j) += geom_nodes[a][i] *
+                                   geom_bcache.gradientValue(a, static_cast<std::size_t>(j), qidx);
             }
             if (dim == 1) {
                 const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
@@ -5748,6 +5903,9 @@ void StandardAssembler::prepareBasis(
     if (transient_cut_quad_rule ||
         &quad_rule != cached_quad_rule_ptr_ ||
         need_basis_hessians != cached_need_hessians_) {
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_test_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_trial_bcache_handle_ = basis::BasisCacheHandle{};
         cached_geom_bcache_ = nullptr;
         cached_test_bcache_ = nullptr;
         cached_trial_bcache_ = nullptr;
@@ -6055,6 +6213,10 @@ void StandardAssembler::prepareBasis(
         (hasFlag(required_data, RequiredData::PhysicalGradients) ||
          hasFlag(required_data, RequiredData::SolutionGradients) ||
          required_data == RequiredData::None);
+    const bool need_test_vector_derivatives =
+        need_test_vector_jacobians || need_basis_curls || need_basis_divergences;
+    const bool need_trial_vector_derivatives =
+        need_trial_vector_jacobians || need_basis_curls || need_basis_divergences;
 
     if (test_is_vector_basis) {
         scratch_basis_values_.clear();
@@ -6176,8 +6338,9 @@ void StandardAssembler::prepareBasis(
             test_bcache = &*local_test_bcache;
         } else {
             if (!cached_test_bcache_) {
-                cached_test_bcache_ = &basis::BasisCache::instance().get_or_compute(
+                cached_test_bcache_handle_ = basis::BasisCache::instance().prewarm_handle(
                     test_basis, quad_rule, true, need_basis_hessians);
+                cached_test_bcache_ = &cached_test_bcache_handle_.entry();
             }
             test_bcache = cached_test_bcache_;
         }
@@ -6192,8 +6355,9 @@ void StandardAssembler::prepareBasis(
             trial_bcache = &*local_trial_bcache;
         } else {
             if (!cached_trial_bcache_) {
-                cached_trial_bcache_ = &basis::BasisCache::instance().get_or_compute(
+                cached_trial_bcache_handle_ = basis::BasisCache::instance().prewarm_handle(
                     trial_basis, quad_rule, true, need_basis_hessians);
+                cached_trial_bcache_ = &cached_trial_bcache_handle_.entry();
             }
             trial_bcache = cached_trial_bcache_;
         }
@@ -6205,6 +6369,110 @@ void StandardAssembler::prepareBasis(
     auto& vec_jacobians_at_pt = scratch_vec_jacobians_at_pt_;
     auto& vec_curls_at_pt = scratch_vec_curls_at_pt_;
     auto& vec_divs_at_pt = scratch_vec_divs_at_pt_;
+    const auto* test_vector_cut_cache =
+        (cut_volume_basis_cache != nullptr && test_is_vector_basis)
+            ? &cut_volume_basis_cache->test_vector_basis
+            : nullptr;
+    const auto* trial_vector_cut_cache =
+        (cut_volume_basis_cache != nullptr && &test_space != &trial_space && trial_is_vector_basis &&
+         cut_volume_basis_cache->has_trial)
+            ? &cut_volume_basis_cache->trial_vector_basis
+            : nullptr;
+    const auto vector_cache_entry_usable =
+        [&](const basis::BasisCacheEntry* entry,
+            LocalIndex expected_dofs,
+            bool need_jacobians,
+            bool need_curls,
+            bool need_divergences) -> bool {
+            const auto n_qpts_local = static_cast<std::size_t>(n_qpts);
+            if (entry == nullptr ||
+                entry->num_qpts != n_qpts_local ||
+                entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                entry->vector_values_xyz.size() <
+                    static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
+                return false;
+            }
+            if (need_jacobians &&
+                entry->vector_jacobians.size() <
+                    static_cast<std::size_t>(expected_dofs) * 9u * n_qpts_local) {
+                return false;
+            }
+            if (need_curls &&
+                entry->vector_curls_xyz.size() <
+                    static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
+                return false;
+            }
+            if (need_divergences &&
+                entry->vector_divergence.size() <
+                    static_cast<std::size_t>(expected_dofs) * n_qpts_local) {
+                return false;
+            }
+            return true;
+        };
+    auto get_vector_basis_cache =
+        [&](const basis::BasisFunction& basis,
+            LocalIndex expected_dofs,
+            bool need_derivatives,
+            bool need_jacobians,
+            bool need_curls,
+            bool need_divergences,
+            std::optional<basis::BasisCacheEntry>& local_cache) -> const basis::BasisCacheEntry* {
+            const basis::BasisCacheEntry* entry = nullptr;
+            if (transient_cut_quad_rule) {
+                local_cache.emplace(basis::BasisCache::instance().compute_uncached(
+                    basis, quad_rule, need_derivatives, false));
+                entry = &*local_cache;
+            } else {
+                for (const auto& fc : cached_field_bcache_) {
+                    if (fc.basis == &basis &&
+                        fc.quad == &quad_rule &&
+                        fc.gradients == need_derivatives &&
+                        fc.hessians == false) {
+                        entry = fc.entry;
+                        break;
+                    }
+                }
+                if (!entry) {
+                    auto handle = basis::BasisCache::instance().prewarm_handle(
+                        basis, quad_rule, need_derivatives, false);
+                    entry = &handle.entry();
+                    cached_field_bcache_.push_back(
+                        {&basis, &quad_rule, need_derivatives, false, std::move(handle), entry});
+                }
+            }
+            return vector_cache_entry_usable(entry,
+                                             expected_dofs,
+                                             need_jacobians,
+                                             need_curls,
+                                             need_divergences)
+                       ? entry
+                       : nullptr;
+        };
+    const basis::BasisCacheEntry* test_vector_bcache = nullptr;
+    if (test_is_vector_basis &&
+        test_vector_cut_cache == nullptr &&
+        (need_test_vector_values || need_test_vector_derivatives)) {
+        test_vector_bcache = get_vector_basis_cache(test_basis,
+                                                    n_test_dofs,
+                                                    need_test_vector_derivatives,
+                                                    need_test_vector_jacobians,
+                                                    need_basis_curls,
+                                                    need_basis_divergences,
+                                                    local_test_bcache);
+    }
+    const basis::BasisCacheEntry* trial_vector_bcache = nullptr;
+    if (&test_space != &trial_space &&
+        trial_is_vector_basis &&
+        trial_vector_cut_cache == nullptr &&
+        (need_trial_vector_values || need_trial_vector_derivatives)) {
+        trial_vector_bcache = get_vector_basis_cache(trial_basis,
+                                                     n_trial_dofs,
+                                                     need_trial_vector_derivatives,
+                                                     need_trial_vector_jacobians,
+                                                     need_basis_curls,
+                                                     need_basis_divergences,
+                                                     local_trial_bcache);
+    }
 
     // Read geometry from context arena (populated by prepareGeometry)
     const auto ctx_quad_pts_r = context.quadraturePoints();
@@ -6269,17 +6537,48 @@ void StandardAssembler::prepareBasis(
         }
 
         if (test_is_vector_basis) {
-            if (need_test_vector_values || (need_test_vector_jacobians && !cached_mapping_affine_)) {
-                test_basis.evaluate_vector_values(xi, vec_values_at_pt);
+            const auto qsz = static_cast<std::size_t>(q);
+            const std::vector<math::Vector<Real, 3>>* test_vec_values = nullptr;
+            const std::vector<basis::VectorJacobian>* test_vec_jacobians = nullptr;
+            const std::vector<math::Vector<Real, 3>>* test_vec_curls = nullptr;
+            const std::vector<Real>* test_vec_divergences = nullptr;
+
+            if (!test_vector_bcache &&
+                (need_test_vector_values || (need_test_vector_jacobians && !cached_mapping_affine_))) {
+                if (test_vector_cut_cache != nullptr &&
+                    qsz < test_vector_cut_cache->values.size()) {
+                    test_vec_values = &test_vector_cut_cache->values[qsz];
+                } else {
+                    test_basis.evaluate_vector_values(xi, vec_values_at_pt);
+                    test_vec_values = &vec_values_at_pt;
+                }
             }
-            if (need_test_vector_jacobians) {
-                test_basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+            if (!test_vector_bcache && need_test_vector_jacobians) {
+                if (test_vector_cut_cache != nullptr &&
+                    qsz < test_vector_cut_cache->jacobians.size()) {
+                    test_vec_jacobians = &test_vector_cut_cache->jacobians[qsz];
+                } else {
+                    test_basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                    test_vec_jacobians = &vec_jacobians_at_pt;
+                }
             }
-            if (need_basis_curls) {
-                test_basis.evaluate_curl(xi, vec_curls_at_pt);
+            if (!test_vector_bcache && need_basis_curls) {
+                if (test_vector_cut_cache != nullptr &&
+                    qsz < test_vector_cut_cache->curls.size()) {
+                    test_vec_curls = &test_vector_cut_cache->curls[qsz];
+                } else {
+                    test_basis.evaluate_curl(xi, vec_curls_at_pt);
+                    test_vec_curls = &vec_curls_at_pt;
+                }
             }
-            if (need_basis_divergences) {
-                test_basis.evaluate_divergence(xi, vec_divs_at_pt);
+            if (!test_vector_bcache && need_basis_divergences) {
+                if (test_vector_cut_cache != nullptr &&
+                    qsz < test_vector_cut_cache->divergences.size()) {
+                    test_vec_divergences = &test_vector_cut_cache->divergences[qsz];
+                } else {
+                    test_basis.evaluate_divergence(xi, vec_divs_at_pt);
+                    test_vec_divergences = &vec_divs_at_pt;
+                }
             }
 
             const auto cont = test_space.continuity();
@@ -6287,7 +6586,9 @@ void StandardAssembler::prepareBasis(
                 const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
 
                 if (need_test_vector_values) {
-                    const auto& vref = vec_values_at_pt[static_cast<std::size_t>(i)];
+                    const auto vref = test_vector_bcache
+                        ? test_vector_bcache->vectorValue(static_cast<std::size_t>(i), qsz)
+                        : (*test_vec_values)[static_cast<std::size_t>(i)];
                     AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                     if (cont == Continuity::H_curl) {
                         for (int r = 0; r < dim; ++r) {
@@ -6312,14 +6613,21 @@ void StandardAssembler::prepareBasis(
 
                 if (need_test_vector_jacobians) {
                     const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
-                    const auto& vref_for_gradient =
-                        cached_mapping_affine_ ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(i)];
+                    const auto vref_for_gradient =
+                        cached_mapping_affine_
+                            ? zero_vref
+                            : (test_vector_bcache
+                                   ? test_vector_bcache->vectorValue(static_cast<std::size_t>(i), qsz)
+                                   : (*test_vec_values)[static_cast<std::size_t>(i)]);
+                    const basis::VectorJacobian jac_ref = test_vector_bcache
+                        ? test_vector_bcache->vectorJacobianMatrix(static_cast<std::size_t>(i), qsz)
+                        : (*test_vec_jacobians)[static_cast<std::size_t>(i)];
                     scratch_basis_vector_jacobians_[idx] =
                         transformVectorBasisJacobian(J,
                                                      J_inv,
                                                      det_J,
                                                      vref_for_gradient,
-                                                     vec_jacobians_at_pt[static_cast<std::size_t>(i)],
+                                                     jac_ref,
                                                      cont,
                                                      cached_mapping_affine_,
                                                      piola_geometry ? &*piola_geometry : nullptr,
@@ -6327,7 +6635,9 @@ void StandardAssembler::prepareBasis(
                 }
 
                 if (need_basis_curls) {
-                    const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(i)];
+                    const auto cref = test_vector_bcache
+                        ? test_vector_bcache->vectorCurl(static_cast<std::size_t>(i), qsz)
+                        : (*test_vec_curls)[static_cast<std::size_t>(i)];
                     AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
                     const Real inv_det = Real(1) / det_J;
                     for (int r = 0; r < 3; ++r) {
@@ -6342,8 +6652,11 @@ void StandardAssembler::prepareBasis(
                 }
 
                 if (need_basis_divergences) {
+                    const Real div_ref = test_vector_bcache
+                        ? test_vector_bcache->vectorDivergenceValue(static_cast<std::size_t>(i), qsz)
+                        : (*test_vec_divergences)[static_cast<std::size_t>(i)];
                     scratch_basis_divergences_[idx] =
-                        vec_divs_at_pt[static_cast<std::size_t>(i)] / det_J;
+                        div_ref / det_J;
                 }
             }
         } else {
@@ -6358,8 +6671,10 @@ void StandardAssembler::prepareBasis(
 
                 scratch_basis_values_[idx] = test_bcache->scalarValue(sisz, qsz);
 
-                const auto& g = test_bcache->gradients[qsz][sisz];
-                scratch_ref_gradients_[idx] = {g[0], g[1], g[2]};
+                scratch_ref_gradients_[idx] = {
+                    test_bcache->gradientValue(sisz, 0u, qsz),
+                    test_bcache->gradientValue(sisz, 1u, qsz),
+                    test_bcache->gradientValue(sisz, 2u, qsz)};
 
                 const auto& grad_ref = scratch_ref_gradients_[idx];
                 AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
@@ -6376,12 +6691,14 @@ void StandardAssembler::prepareBasis(
                 scratch_phys_gradients_[idx_phys] = grad_phys;
 
                 if (need_basis_hessians) {
-                    const auto& hess = test_bcache->hessians[qsz][sisz];
                     AssemblyContext::Matrix3x3 H_ref{};
                     for (int r = 0; r < 3; ++r) {
                         for (int c = 0; c < 3; ++c) {
                             H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                hess(static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+                                test_bcache->hessianValue(sisz,
+                                                          static_cast<std::size_t>(r),
+                                                          static_cast<std::size_t>(c),
+                                                          qsz);
                         }
                     }
                     scratch_ref_hessians_[idx] = H_ref;
@@ -6411,17 +6728,48 @@ void StandardAssembler::prepareBasis(
 
         if (&test_space != &trial_space) {
             if (trial_is_vector_basis) {
-                if (need_trial_vector_values || (need_trial_vector_jacobians && !cached_mapping_affine_)) {
-                    trial_basis.evaluate_vector_values(xi, vec_values_at_pt);
+                const auto qsz = static_cast<std::size_t>(q);
+                const std::vector<math::Vector<Real, 3>>* trial_vec_values = nullptr;
+                const std::vector<basis::VectorJacobian>* trial_vec_jacobians = nullptr;
+                const std::vector<math::Vector<Real, 3>>* trial_vec_curls = nullptr;
+                const std::vector<Real>* trial_vec_divergences = nullptr;
+
+                if (!trial_vector_bcache &&
+                    (need_trial_vector_values || (need_trial_vector_jacobians && !cached_mapping_affine_))) {
+                    if (trial_vector_cut_cache != nullptr &&
+                        qsz < trial_vector_cut_cache->values.size()) {
+                        trial_vec_values = &trial_vector_cut_cache->values[qsz];
+                    } else {
+                        trial_basis.evaluate_vector_values(xi, vec_values_at_pt);
+                        trial_vec_values = &vec_values_at_pt;
+                    }
                 }
-                if (need_trial_vector_jacobians) {
-                    trial_basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                if (!trial_vector_bcache && need_trial_vector_jacobians) {
+                    if (trial_vector_cut_cache != nullptr &&
+                        qsz < trial_vector_cut_cache->jacobians.size()) {
+                        trial_vec_jacobians = &trial_vector_cut_cache->jacobians[qsz];
+                    } else {
+                        trial_basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                        trial_vec_jacobians = &vec_jacobians_at_pt;
+                    }
                 }
-                if (need_basis_curls) {
-                    trial_basis.evaluate_curl(xi, vec_curls_at_pt);
+                if (!trial_vector_bcache && need_basis_curls) {
+                    if (trial_vector_cut_cache != nullptr &&
+                        qsz < trial_vector_cut_cache->curls.size()) {
+                        trial_vec_curls = &trial_vector_cut_cache->curls[qsz];
+                    } else {
+                        trial_basis.evaluate_curl(xi, vec_curls_at_pt);
+                        trial_vec_curls = &vec_curls_at_pt;
+                    }
                 }
-                if (need_basis_divergences) {
-                    trial_basis.evaluate_divergence(xi, vec_divs_at_pt);
+                if (!trial_vector_bcache && need_basis_divergences) {
+                    if (trial_vector_cut_cache != nullptr &&
+                        qsz < trial_vector_cut_cache->divergences.size()) {
+                        trial_vec_divergences = &trial_vector_cut_cache->divergences[qsz];
+                    } else {
+                        trial_basis.evaluate_divergence(xi, vec_divs_at_pt);
+                        trial_vec_divergences = &vec_divs_at_pt;
+                    }
                 }
 
                 const auto cont = trial_space.continuity();
@@ -6429,7 +6777,9 @@ void StandardAssembler::prepareBasis(
                     const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
 
                     if (need_trial_vector_values) {
-                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        const auto vref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorValue(static_cast<std::size_t>(j), qsz)
+                            : (*trial_vec_values)[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                         if (cont == Continuity::H_curl) {
                             for (int r = 0; r < dim; ++r) {
@@ -6454,14 +6804,21 @@ void StandardAssembler::prepareBasis(
 
                     if (need_trial_vector_jacobians) {
                         const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
-                        const auto& vref_for_gradient =
-                            cached_mapping_affine_ ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(j)];
+                        const auto vref_for_gradient =
+                            cached_mapping_affine_
+                                ? zero_vref
+                                : (trial_vector_bcache
+                                       ? trial_vector_bcache->vectorValue(static_cast<std::size_t>(j), qsz)
+                                       : (*trial_vec_values)[static_cast<std::size_t>(j)]);
+                        const basis::VectorJacobian jac_ref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorJacobianMatrix(static_cast<std::size_t>(j), qsz)
+                            : (*trial_vec_jacobians)[static_cast<std::size_t>(j)];
                         trial_basis_vector_jacobians[idx] =
                             transformVectorBasisJacobian(J,
                                                          J_inv,
                                                          det_J,
                                                          vref_for_gradient,
-                                                         vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                         jac_ref,
                                                          cont,
                                                          cached_mapping_affine_,
                                                          piola_geometry ? &*piola_geometry : nullptr,
@@ -6469,7 +6826,9 @@ void StandardAssembler::prepareBasis(
                     }
 
                     if (need_basis_curls) {
-                        const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(j)];
+                        const auto cref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorCurl(static_cast<std::size_t>(j), qsz)
+                            : (*trial_vec_curls)[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
                         const Real inv_det = Real(1) / det_J;
                         for (int r = 0; r < 3; ++r) {
@@ -6484,8 +6843,11 @@ void StandardAssembler::prepareBasis(
                     }
 
                     if (need_basis_divergences) {
+                        const Real div_ref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorDivergenceValue(static_cast<std::size_t>(j), qsz)
+                            : (*trial_vec_divergences)[static_cast<std::size_t>(j)];
                         trial_basis_divergences[idx] =
-                            vec_divs_at_pt[static_cast<std::size_t>(j)] / det_J;
+                            div_ref / det_J;
                     }
                 }
             } else {
@@ -6500,8 +6862,10 @@ void StandardAssembler::prepareBasis(
 
                     trial_basis_values[idx] = trial_bcache->scalarValue(sjsz, qsz);
 
-                    const auto& g = trial_bcache->gradients[qsz][sjsz];
-                    trial_ref_gradients[idx] = {g[0], g[1], g[2]};
+                    trial_ref_gradients[idx] = {
+                        trial_bcache->gradientValue(sjsz, 0u, qsz),
+                        trial_bcache->gradientValue(sjsz, 1u, qsz),
+                        trial_bcache->gradientValue(sjsz, 2u, qsz)};
 
                     const auto& grad_ref = trial_ref_gradients[idx];
                     AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
@@ -6514,12 +6878,14 @@ void StandardAssembler::prepareBasis(
                     trial_phys_gradients[idx_phys] = grad_phys;
 
                     if (need_basis_hessians) {
-                        const auto& hess = trial_bcache->hessians[qsz][sjsz];
                         AssemblyContext::Matrix3x3 H_ref{};
                         for (int r = 0; r < 3; ++r) {
                             for (int c = 0; c < 3; ++c) {
                                 H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                    hess(static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+                                    trial_bcache->hessianValue(sjsz,
+                                                               static_cast<std::size_t>(r),
+                                                               static_cast<std::size_t>(c),
+                                                               qsz);
                             }
                         }
                         trial_ref_hessians[idx] = H_ref;
@@ -6730,10 +7096,59 @@ StandardAssembler::getOrCreateCutVolumeBasisCacheEntry(
     const auto& trial_element = getElement(trial_space, cell_id, cell_type);
     const auto& test_basis = test_element.basis();
     const auto& trial_basis = trial_element.basis();
-    if (test_basis.is_vector_valued() ||
-        (&test_space != &trial_space && trial_basis.is_vector_valued())) {
+    const bool same_space = (&test_space == &trial_space);
+    const bool test_is_vector_basis = test_basis.is_vector_valued();
+    const bool trial_is_vector_basis = trial_basis.is_vector_valued();
+    const bool need_basis_curls = hasFlag(required_data, RequiredData::BasisCurls);
+    const bool need_basis_divergences = hasFlag(required_data, RequiredData::BasisDivergences);
+    const bool need_test_vector_values =
+        test_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::BasisValues) ||
+         hasFlag(required_data, RequiredData::SolutionValues) ||
+         required_data == RequiredData::None);
+    const bool need_trial_vector_values =
+        trial_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::BasisValues) ||
+         hasFlag(required_data, RequiredData::SolutionValues) ||
+         required_data == RequiredData::None);
+    const bool need_test_vector_jacobians =
+        test_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::PhysicalGradients) ||
+         hasFlag(required_data, RequiredData::SolutionGradients) ||
+         required_data == RequiredData::None);
+    const bool need_trial_vector_jacobians =
+        trial_is_vector_basis &&
+        (hasFlag(required_data, RequiredData::PhysicalGradients) ||
+         hasFlag(required_data, RequiredData::SolutionGradients) ||
+         required_data == RequiredData::None);
+
+    const auto vector_basis_cacheable =
+        [&](const spaces::FunctionSpace& space, bool is_vector_basis) {
+            if (!is_vector_basis) {
+                return true;
+            }
+            const auto continuity = space.continuity();
+            if (continuity != Continuity::H_curl && continuity != Continuity::H_div) {
+                return false;
+            }
+            if (continuity == Continuity::H_curl && need_basis_divergences) {
+                return false;
+            }
+            if (continuity == Continuity::H_div && need_basis_curls) {
+                return false;
+            }
+            return true;
+        };
+    if (!vector_basis_cacheable(test_space, test_is_vector_basis) ||
+        (!same_space && !vector_basis_cacheable(trial_space, trial_is_vector_basis))) {
         return nullptr;
     }
+
+    const bool mapping_affine = mesh.getCellGeometryOrder(cell_id) <= 1;
+    const bool cache_test_vector_values =
+        need_test_vector_values || (need_test_vector_jacobians && !mapping_affine);
+    const bool cache_trial_vector_values =
+        need_trial_vector_values || (need_trial_vector_jacobians && !mapping_affine);
 
     const auto mesh_geometry_revision = mesh.geometryRevision();
     const auto mesh_topology_revision = mesh.topologyRevision();
@@ -6741,48 +7156,268 @@ StandardAssembler::getOrCreateCutVolumeBasisCacheEntry(
         cut_volume_basis_cache_signature_ != cut_context_signature ||
         cut_volume_basis_cache_mesh_geometry_revision_ != mesh_geometry_revision ||
         cut_volume_basis_cache_mesh_topology_revision_ != mesh_topology_revision) {
-        cut_volume_basis_cache_.clear();
+        clearCutVolumeBasisCache();
         cut_volume_basis_cache_context_ = &cut_context;
         cut_volume_basis_cache_signature_ = cut_context_signature;
         cut_volume_basis_cache_mesh_geometry_revision_ = mesh_geometry_revision;
         cut_volume_basis_cache_mesh_topology_revision_ = mesh_topology_revision;
     }
 
+    const auto max_entries = cutVolumeBasisCacheMaxEntries();
+    if (max_entries == 0u) {
+        return nullptr;
+    }
+    while (cut_volume_basis_cache_.size() > max_entries) {
+        evictLeastRecentCutVolumeBasisCacheEntry();
+    }
+
     CutVolumeBasisCacheKey key;
     key.rule_index = rule_index;
     key.test_basis_identity = test_basis.cache_identity();
-    key.has_trial = (&test_space != &trial_space);
+    key.has_trial = !same_space;
     key.trial_basis_identity = key.has_trial ? trial_basis.cache_identity() : std::string{};
     key.with_hessians = need_basis_hessians;
+    key.with_test_vector_values = test_is_vector_basis && cache_test_vector_values;
+    key.with_test_vector_jacobians = test_is_vector_basis && need_test_vector_jacobians;
+    key.with_test_vector_curls = test_is_vector_basis && need_basis_curls;
+    key.with_test_vector_divergences = test_is_vector_basis && need_basis_divergences;
+    key.with_trial_vector_values = key.has_trial && trial_is_vector_basis && cache_trial_vector_values;
+    key.with_trial_vector_jacobians = key.has_trial && trial_is_vector_basis && need_trial_vector_jacobians;
+    key.with_trial_vector_curls = key.has_trial && trial_is_vector_basis && need_basis_curls;
+    key.with_trial_vector_divergences = key.has_trial && trial_is_vector_basis && need_basis_divergences;
 
     const auto found = cut_volume_basis_cache_.find(key);
     if (found != cut_volume_basis_cache_.end()) {
+        ++cut_volume_basis_cache_hits_;
+        found->second.last_used = ++cut_volume_basis_cache_clock_;
         return &found->second;
     }
-    const auto max_entries = cutVolumeBasisCacheMaxEntries();
-    if (max_entries == 0u || cut_volume_basis_cache_.size() >= max_entries) {
-        return nullptr;
+    ++cut_volume_basis_cache_misses_;
+    while (cut_volume_basis_cache_.size() >= max_entries) {
+        evictLeastRecentCutVolumeBasisCacheEntry();
     }
 
     CutVolumeBasisCacheEntry entry;
-    entry.test_basis = basis::BasisCache::instance().compute_uncached(
-        test_basis,
-        quad_rule,
-        /*gradients=*/true,
-        need_basis_hessians);
-    entry.has_trial = key.has_trial;
-    if (entry.has_trial) {
-        entry.trial_basis = basis::BasisCache::instance().compute_uncached(
-            trial_basis,
+    entry.test_is_vector_basis = test_is_vector_basis;
+    entry.trial_is_vector_basis = key.has_trial && trial_is_vector_basis;
+    const auto populate_vector_basis_cache =
+        [&](const basis::BasisFunction& basis,
+            bool with_values,
+            bool with_jacobians,
+            bool with_curls,
+            bool with_divergences,
+            CutVolumeVectorBasisCacheData& data) {
+            const auto& points = quad_rule.points();
+            if (with_values) {
+                data.values.resize(points.size());
+            }
+            if (with_jacobians) {
+                data.jacobians.resize(points.size());
+            }
+            if (with_curls) {
+                data.curls.resize(points.size());
+            }
+            if (with_divergences) {
+                data.divergences.resize(points.size());
+            }
+            for (std::size_t qp = 0; qp < points.size(); ++qp) {
+                if (with_values) {
+                    basis.evaluate_vector_values(points[qp], data.values[qp]);
+                }
+                if (with_jacobians) {
+                    basis.evaluate_vector_jacobians(points[qp], data.jacobians[qp]);
+                }
+                if (with_curls) {
+                    basis.evaluate_curl(points[qp], data.curls[qp]);
+                }
+                if (with_divergences) {
+                    basis.evaluate_divergence(points[qp], data.divergences[qp]);
+                }
+            }
+        };
+    if (test_is_vector_basis) {
+        populate_vector_basis_cache(test_basis,
+                                    key.with_test_vector_values,
+                                    key.with_test_vector_jacobians,
+                                    key.with_test_vector_curls,
+                                    key.with_test_vector_divergences,
+                                    entry.test_vector_basis);
+    } else {
+        entry.test_basis = basis::BasisCache::instance().compute_uncached(
+            test_basis,
             quad_rule,
             /*gradients=*/true,
             need_basis_hessians);
     }
+    entry.has_trial = key.has_trial;
+    if (entry.has_trial) {
+        if (trial_is_vector_basis) {
+            populate_vector_basis_cache(trial_basis,
+                                        key.with_trial_vector_values,
+                                        key.with_trial_vector_jacobians,
+                                        key.with_trial_vector_curls,
+                                        key.with_trial_vector_divergences,
+                                        entry.trial_vector_basis);
+        } else {
+            entry.trial_basis = basis::BasisCache::instance().compute_uncached(
+                trial_basis,
+                quad_rule,
+                /*gradients=*/true,
+                need_basis_hessians);
+        }
+    }
+    entry.last_used = ++cut_volume_basis_cache_clock_;
 
     const auto [it, inserted] =
         cut_volume_basis_cache_.emplace(std::move(key), std::move(entry));
     (void)inserted;
+    if (inserted) {
+        ++cut_volume_basis_cache_insertions_;
+        cut_volume_basis_cache_high_watermark_ =
+            std::max(cut_volume_basis_cache_high_watermark_,
+                     cut_volume_basis_cache_.size());
+    }
     return &it->second;
+}
+
+const StandardAssembler::CutVolumeGeometryCacheEntry*
+StandardAssembler::findCutVolumeGeometryCacheEntry(
+    const CutIntegrationContext& cut_context,
+    std::uint64_t cut_context_signature,
+    std::size_t rule_index,
+    const IMeshAccess& mesh)
+{
+    const auto max_entries = cutVolumeBasisCacheMaxEntries();
+    if (max_entries == 0u) {
+        return nullptr;
+    }
+
+    const auto mesh_geometry_revision = mesh.geometryRevision();
+    const auto mesh_topology_revision = mesh.topologyRevision();
+    const auto active_configuration_epoch = mesh.activeConfigurationEpoch();
+    const auto coordinate_configuration_key = mesh.coordinateConfigurationKey();
+    if (cut_volume_geometry_cache_context_ != &cut_context ||
+        cut_volume_geometry_cache_signature_ != cut_context_signature ||
+        cut_volume_geometry_cache_mesh_geometry_revision_ != mesh_geometry_revision ||
+        cut_volume_geometry_cache_mesh_topology_revision_ != mesh_topology_revision ||
+        cut_volume_geometry_cache_active_configuration_epoch_ != active_configuration_epoch ||
+        cut_volume_geometry_cache_coordinate_configuration_key_ != coordinate_configuration_key) {
+        clearCutVolumeGeometryCache();
+        cut_volume_geometry_cache_context_ = &cut_context;
+        cut_volume_geometry_cache_signature_ = cut_context_signature;
+        cut_volume_geometry_cache_mesh_geometry_revision_ = mesh_geometry_revision;
+        cut_volume_geometry_cache_mesh_topology_revision_ = mesh_topology_revision;
+        cut_volume_geometry_cache_active_configuration_epoch_ = active_configuration_epoch;
+        cut_volume_geometry_cache_coordinate_configuration_key_ = coordinate_configuration_key;
+    }
+
+    while (cut_volume_geometry_cache_.size() > max_entries) {
+        evictLeastRecentCutVolumeGeometryCacheEntry();
+    }
+
+    const CutVolumeGeometryCacheKey key{rule_index};
+    const auto found = cut_volume_geometry_cache_.find(key);
+    if (found == cut_volume_geometry_cache_.end()) {
+        ++cut_volume_geometry_cache_misses_;
+        return nullptr;
+    }
+
+    ++cut_volume_geometry_cache_hits_;
+    found->second.last_used = ++cut_volume_geometry_cache_clock_;
+    return &found->second;
+}
+
+void StandardAssembler::storeCutVolumeGeometryCacheEntry(
+    std::size_t rule_index,
+    const IMeshAccess& mesh,
+    GlobalIndex cell_id,
+    ElementType cell_type,
+    const AssemblyContext& context)
+{
+    const auto max_entries = cutVolumeBasisCacheMaxEntries();
+    if (max_entries == 0u) {
+        return;
+    }
+    while (cut_volume_geometry_cache_.size() >= max_entries) {
+        evictLeastRecentCutVolumeGeometryCacheEntry();
+    }
+
+    CutVolumeGeometryCacheEntry entry;
+    entry.cell_id = cell_id;
+    entry.cell_type = cell_type;
+    entry.geometry_order = mesh.getCellGeometryOrder(cell_id);
+    entry.mapping_affine = cached_mapping_affine_;
+    entry.cell_coords = cell_coords_;
+    entry.node_coords = scratch_node_coords_;
+    const auto quad_points = context.quadraturePoints();
+    const auto quad_weights = context.quadratureWeights();
+    const auto physical_points = context.physicalPoints();
+    const auto jacobians = context.jacobians();
+    const auto inverse_jacobians = context.inverseJacobians();
+    const auto jacobian_dets = context.jacobianDets();
+    const auto integration_weights = context.integrationWeights();
+    entry.quad_points.assign(quad_points.begin(), quad_points.end());
+    entry.quad_weights.assign(quad_weights.begin(), quad_weights.end());
+    entry.physical_points.assign(physical_points.begin(), physical_points.end());
+    entry.jacobians.assign(jacobians.begin(), jacobians.end());
+    entry.inverse_jacobians.assign(inverse_jacobians.begin(), inverse_jacobians.end());
+    entry.jacobian_dets.assign(jacobian_dets.begin(), jacobian_dets.end());
+    entry.integration_weights.assign(integration_weights.begin(), integration_weights.end());
+    entry.geom_h = cached_geom_h_;
+    entry.geom_volume = cached_geom_volume_;
+    entry.last_used = ++cut_volume_geometry_cache_clock_;
+
+    const CutVolumeGeometryCacheKey key{rule_index};
+    const auto [it, inserted] =
+        cut_volume_geometry_cache_.insert_or_assign(key, std::move(entry));
+    (void)it;
+    (void)inserted;
+    ++cut_volume_geometry_cache_insertions_;
+}
+
+void StandardAssembler::restoreCutVolumeGeometryCacheEntry(
+    AssemblyContext& context,
+    const CutVolumeGeometryCacheEntry& entry)
+{
+    cell_coords_ = entry.cell_coords;
+    scratch_node_coords_ = entry.node_coords;
+
+    const bool use_affine = (entry.geometry_order <= 1);
+    if (entry.cell_type != cached_mapping_type_ ||
+        entry.geometry_order != cached_mapping_order_ ||
+        !cached_mapping_) {
+        geometry::MappingRequest map_request;
+        map_request.element_type = entry.cell_type;
+        map_request.geometry_order = entry.geometry_order;
+        map_request.use_affine = use_affine;
+        cached_mapping_ = geometry::MappingFactory::create(map_request, scratch_node_coords_);
+        cached_mapping_type_ = entry.cell_type;
+        cached_mapping_order_ = entry.geometry_order;
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_test_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_trial_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_geom_bcache_ = nullptr;
+        cached_test_bcache_ = nullptr;
+        cached_trial_bcache_ = nullptr;
+        cached_field_bcache_.clear();
+    } else {
+        cached_mapping_->resetNodes(scratch_node_coords_);
+    }
+    cached_mapping_affine_ = cached_mapping_->isAffine();
+
+    context.setQuadratureData(entry.quad_points, entry.quad_weights);
+    context.setPhysicalPoints(entry.physical_points);
+    context.setJacobianData(entry.jacobians, entry.inverse_jacobians, entry.jacobian_dets);
+    context.setIntegrationWeights(entry.integration_weights);
+    cached_geom_h_ = entry.geom_h;
+    cached_geom_volume_ = entry.geom_volume;
+    context.markGeometryDirty();
+
+    cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+    cached_geom_bcache_ = nullptr;
+    cached_quad_rule_.reset();
+    cached_field_bcache_.clear();
+    cached_field_recipes_valid_ = false;
 }
 
 void StandardAssembler::prepareContext(
@@ -7096,6 +7731,14 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     const auto cut_basis_cache_max_entries = cutVolumeBasisCacheMaxEntries();
     const std::uint64_t cut_context_basis_signature =
         cut_basis_cache_max_entries > 0u ? cutVolumeBasisContextSignature(cut_context) : 0u;
+    const auto cut_basis_cache_hits_before = cut_volume_basis_cache_hits_;
+    const auto cut_basis_cache_misses_before = cut_volume_basis_cache_misses_;
+    const auto cut_basis_cache_insertions_before = cut_volume_basis_cache_insertions_;
+    const auto cut_basis_cache_evictions_before = cut_volume_basis_cache_evictions_;
+    const auto cut_geometry_cache_hits_before = cut_volume_geometry_cache_hits_;
+    const auto cut_geometry_cache_misses_before = cut_volume_geometry_cache_misses_;
+    const auto cut_geometry_cache_insertions_before = cut_volume_geometry_cache_insertions_;
+    const auto cut_geometry_cache_evictions_before = cut_volume_geometry_cache_evictions_;
     std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
@@ -7153,6 +7796,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         std::optional<CutVolumeQuadratureRule> cut_rule;
         const quadrature::QuadratureRule* active_rule = nullptr;
         const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
+        const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
+        bool active_rule_is_partial_cut = false;
         if (isFullSideVolumeRule(rule)) {
             const auto type_key = static_cast<std::size_t>(cell_type);
             if (type_key < full_cell_rule_cache.size()) {
@@ -7169,9 +7814,15 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         } else {
             cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
             active_rule = &*cut_rule;
+            active_rule_is_partial_cut = true;
             cached_quad_rule_ptr_ = nullptr;
             basis_scratch_valid_ = false;
             if (cut_basis_cache_max_entries > 0u) {
+                cut_volume_geometry_cache_entry = findCutVolumeGeometryCacheEntry(
+                    cut_context,
+                    cut_context_basis_signature,
+                    rule_index,
+                    mesh);
                 cut_volume_basis_cache_entry = getOrCreateCutVolumeBasisCacheEntry(
                     cut_context,
                     cut_context_basis_signature,
@@ -7194,7 +7845,14 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         cut_rule_time += cut_now() - stage_start;
 
         stage_start = cut_now();
-        prepareGeometry(context_, mesh, cell_id, *active_rule);
+        if (cut_volume_geometry_cache_entry != nullptr) {
+            restoreCutVolumeGeometryCacheEntry(context_, *cut_volume_geometry_cache_entry);
+        } else {
+            prepareGeometry(context_, mesh, cell_id, *active_rule);
+            if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
+                storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
+            }
+        }
         cut_geometry_time += cut_now() - stage_start;
 
         stage_start = cut_now();
@@ -7370,6 +8028,10 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             "[CUT_VOLUME_TIMING] rank=%d marker=%d side=%s matrix=%d vector=%d "
             "indexed=%d rules_considered=%zu rules_assembled=%zu full_rules=%zu "
             "partial_rules=%zu cacheable_basis_rules=%zu basis_cache_entries=%zu "
+            "basis_cache_max_entries=%zu basis_cache_hits=%zu basis_cache_misses=%zu "
+            "basis_cache_insertions=%zu basis_cache_evictions=%zu "
+            "geometry_cache_entries=%zu geometry_cache_hits=%zu geometry_cache_misses=%zu "
+            "geometry_cache_insertions=%zu geometry_cache_evictions=%zu "
             "qpts=%zu total=%9.6f setup=%9.6f filter=%9.6f "
             "dofs=%9.6f rule=%9.6f geometry=%9.6f basis=%9.6f frame=%9.6f "
             "context=%9.6f jit=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
@@ -7386,6 +8048,616 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             cut_partial_rules,
             cut_basis_cacheable_rules,
             cut_volume_basis_cache_.size(),
+            cut_basis_cache_max_entries,
+            cut_volume_basis_cache_hits_ - cut_basis_cache_hits_before,
+            cut_volume_basis_cache_misses_ - cut_basis_cache_misses_before,
+            cut_volume_basis_cache_insertions_ - cut_basis_cache_insertions_before,
+            cut_volume_basis_cache_evictions_ - cut_basis_cache_evictions_before,
+            cut_volume_geometry_cache_.size(),
+            cut_volume_geometry_cache_hits_ - cut_geometry_cache_hits_before,
+            cut_volume_geometry_cache_misses_ - cut_geometry_cache_misses_before,
+            cut_volume_geometry_cache_insertions_ - cut_geometry_cache_insertions_before,
+            cut_volume_geometry_cache_evictions_ - cut_geometry_cache_evictions_before,
+            cut_quadrature_points,
+            result.elapsed_time_seconds,
+            cut_setup_time,
+            cut_filter_time,
+            cut_dof_time,
+            cut_rule_time,
+            cut_geometry_time,
+            cut_basis_time,
+            cut_frame_time,
+            cut_context_time,
+            cut_jit_time,
+            cut_solution_time,
+            cut_field_time,
+            cut_material_time,
+            cut_kernel_time,
+            cut_orientation_time,
+            cut_insert_time);
+    }
+    return result;
+}
+
+AssemblyResult StandardAssembler::assembleCutVolumesFused(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    std::span<const FusedCellTerm> terms)
+{
+    AssemblyResult result;
+    if (terms.empty()) {
+        return result;
+    }
+
+    const auto start_time = std::chrono::steady_clock::now();
+    const bool cut_timing = cutVolumeTimingEnabled();
+    auto cut_now = [&]() -> double {
+        if (!cut_timing) {
+            return 0.0;
+        }
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    };
+    const double cut_start = cut_now();
+    double cut_setup_time = 0.0;
+    double cut_filter_time = 0.0;
+    double cut_dof_time = 0.0;
+    double cut_rule_time = 0.0;
+    double cut_geometry_time = 0.0;
+    double cut_basis_time = 0.0;
+    double cut_frame_time = 0.0;
+    double cut_context_time = 0.0;
+    double cut_jit_time = 0.0;
+    double cut_solution_time = 0.0;
+    double cut_field_time = 0.0;
+    double cut_material_time = 0.0;
+    double cut_kernel_time = 0.0;
+    double cut_orientation_time = 0.0;
+    double cut_insert_time = 0.0;
+    std::size_t cut_rules_considered = 0u;
+    std::size_t cut_rules_assembled = 0u;
+    std::size_t cut_full_rules = 0u;
+    std::size_t cut_partial_rules = 0u;
+    std::size_t cut_quadrature_points = 0u;
+    std::size_t cut_basis_cacheable_rules = 0u;
+
+    if (!initialized_) {
+        initialize();
+    }
+    ensureCellDofTables(mesh);
+
+    for (const auto& t : terms) {
+        FE_CHECK_NOT_NULL(t.kernel, "StandardAssembler::assembleCutVolumesFused: kernel");
+        FE_CHECK_NOT_NULL(t.test_space, "StandardAssembler::assembleCutVolumesFused: test_space");
+        FE_CHECK_NOT_NULL(t.trial_space, "StandardAssembler::assembleCutVolumesFused: trial_space");
+        FE_CHECK_NOT_NULL(t.row_dof_map, "StandardAssembler::assembleCutVolumesFused: row_dof_map");
+        FE_CHECK_NOT_NULL(t.col_dof_map, "StandardAssembler::assembleCutVolumesFused: col_dof_map");
+
+        if (t.matrix_view && t.assemble_matrix &&
+            t.matrix_view->getPhase() == AssemblyPhase::NotStarted) {
+            t.matrix_view->beginAssemblyPhase();
+        }
+        if (t.vector_view && t.assemble_vector &&
+            t.vector_view != t.matrix_view &&
+            t.vector_view->getPhase() == AssemblyPhase::NotStarted) {
+            t.vector_view->beginAssemblyPhase();
+        }
+
+        if (!t.kernel->hasCell()) {
+            continue;
+        }
+        (void)getCellDofTable(mesh, t.row_dof_map, t.row_dof_offset);
+        (void)getCellDofTable(mesh, t.col_dof_map, t.col_dof_offset);
+    }
+    for (const auto& access : field_solution_access_) {
+        if (access.dof_map != nullptr &&
+            access.dof_map->getNumCells() == mesh.numCells()) {
+            (void)getCellDofTable(mesh, access.dof_map, access.dof_offset);
+        }
+    }
+    ensureFieldAccessPlans(mesh);
+    ensureResolvedVectorTables(mesh);
+    for (const auto& t : terms) {
+        if (t.assemble_matrix && t.matrix_view &&
+            t.matrix_view->insertionCapabilities().resolved_matrix_entries) {
+            ensureResolvedMatrixTable(mesh, t.row_dof_map, t.row_dof_offset,
+                                      t.col_dof_map, t.col_dof_offset,
+                                      t.matrix_view);
+        }
+    }
+    ensureCellConstrainedFlags(mesh);
+
+    struct TermData {
+        RequiredData required_data{RequiredData::None};
+        std::vector<FieldRequirement> field_requirements;
+        bool need_solution{false};
+        bool need_field_solutions{false};
+        bool need_material_state{false};
+        MaterialStateSpec material_state_spec{};
+    };
+
+    std::vector<TermData> term_data(terms.size());
+    LocalIndex max_dofs = 0;
+    bool any_has_cell = false;
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        const auto& t = terms[ti];
+        max_dofs = std::max(max_dofs, t.row_dof_map->getMaxDofsPerCell());
+        max_dofs = std::max(max_dofs, t.col_dof_map->getMaxDofsPerCell());
+        if (!t.kernel->hasCell() || (!t.assemble_matrix && !t.assemble_vector)) {
+            continue;
+        }
+        any_has_cell = true;
+        auto& td = term_data[ti];
+        td.required_data = t.kernel->getRequiredData();
+        td.field_requirements =
+            effectiveFieldRequirements(td.required_data, t.kernel->fieldRequirements());
+        td.need_field_solutions = !td.field_requirements.empty();
+        td.need_solution =
+            hasFlag(td.required_data, RequiredData::SolutionCoefficients) ||
+            hasFlag(td.required_data, RequiredData::SolutionValues) ||
+            hasFlag(td.required_data, RequiredData::SolutionGradients) ||
+            hasFlag(td.required_data, RequiredData::SolutionHessians) ||
+            hasFlag(td.required_data, RequiredData::SolutionLaplacians);
+        td.need_material_state = hasFlag(td.required_data, RequiredData::MaterialState);
+        td.material_state_spec = t.kernel->materialStateSpec();
+        if (td.need_material_state) {
+            FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                        "StandardAssembler::assembleCutVolumesFused: kernel requires material state but no material state provider was set");
+            FE_THROW_IF(td.material_state_spec.bytes_per_qpt == 0, FEException,
+                        "StandardAssembler::assembleCutVolumesFused: kernel requires material state but materialStateSpec().bytes_per_qpt == 0");
+        }
+    }
+
+    if (!any_has_cell) {
+        result.elapsed_time_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+        return result;
+    }
+
+    const auto& rules = cut_context.volumeRules();
+    const auto indexed_rule_indices =
+        cut_context.generatedVolumeRuleIndexSpanForMarkerAndSide(interface_marker, side);
+    const bool use_indexed_rules = !indexed_rule_indices.empty();
+    context_.reserve(max_dofs,
+                     selectedVolumeRuleReserveCount(
+                         rules, indexed_rule_indices, interface_marker, side),
+                     mesh.dimension());
+
+    const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
+    struct TermScratch {
+        std::span<const GlobalIndex> row_dofs{};
+        std::span<const GlobalIndex> col_dofs{};
+        std::optional<OwnedRowOnlyView> owned_matrix_view;
+        std::optional<OwnedRowOnlyView> owned_vector_view;
+        GlobalSystemView* insert_matrix{nullptr};
+        GlobalSystemView* insert_vector{nullptr};
+    };
+    std::vector<TermScratch> term_scratch(terms.size());
+    for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+        auto& ts = term_scratch[ti];
+        const auto& t = terms[ti];
+        ts.insert_matrix = t.matrix_view;
+        ts.insert_vector = t.vector_view;
+        if (owned_rows_only) {
+            if (t.matrix_view && t.assemble_matrix) {
+                ts.owned_matrix_view.emplace(*t.matrix_view, *t.row_dof_map,
+                                             t.row_dof_offset, options_.row_owner_rank);
+                ts.insert_matrix = &*ts.owned_matrix_view;
+            }
+            if (t.vector_view && t.assemble_vector) {
+                if (t.vector_view == t.matrix_view && ts.owned_matrix_view) {
+                    ts.insert_vector = ts.insert_matrix;
+                } else {
+                    ts.owned_vector_view.emplace(*t.vector_view, *t.row_dof_map,
+                                                 t.row_dof_offset, options_.row_owner_rank);
+                    ts.insert_vector = &*ts.owned_vector_view;
+                }
+            }
+        }
+    }
+
+    cut_setup_time = cut_now() - cut_start;
+
+    const auto& metadata = cut_context.metadata();
+    const auto cut_basis_cache_max_entries = cutVolumeBasisCacheMaxEntries();
+    const std::uint64_t cut_context_basis_signature =
+        cut_basis_cache_max_entries > 0u ? cutVolumeBasisContextSignature(cut_context) : 0u;
+    const auto cut_basis_cache_hits_before = cut_volume_basis_cache_hits_;
+    const auto cut_basis_cache_misses_before = cut_volume_basis_cache_misses_;
+    const auto cut_basis_cache_insertions_before = cut_volume_basis_cache_insertions_;
+    const auto cut_basis_cache_evictions_before = cut_volume_basis_cache_evictions_;
+    const auto cut_geometry_cache_hits_before = cut_volume_geometry_cache_hits_;
+    const auto cut_geometry_cache_misses_before = cut_volume_geometry_cache_misses_;
+    const auto cut_geometry_cache_insertions_before = cut_volume_geometry_cache_insertions_;
+    const auto cut_geometry_cache_evictions_before = cut_volume_geometry_cache_evictions_;
+    std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
+    std::vector<Real> cut_jit_constants;
+    constexpr forms::CutCellParameterSlots cut_parameter_slots{};
+    const auto cut_parameter_count =
+        static_cast<std::size_t>(forms::cutCellParameterCount(cut_parameter_slots));
+    cut_jit_constants.assign(jit_constants_.begin(), jit_constants_.end());
+    if (cut_jit_constants.size() < cut_parameter_count) {
+        cut_jit_constants.resize(cut_parameter_count, Real{0.0});
+    }
+
+    const auto first_active_term_index = [&]() -> std::size_t {
+        for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+            if (terms[ti].kernel->hasCell() &&
+                (terms[ti].assemble_matrix || terms[ti].assemble_vector)) {
+                return ti;
+            }
+        }
+        return std::size_t{0};
+    }();
+    const auto& first_active_term = terms[first_active_term_index];
+
+    const auto iteration_count = use_indexed_rules ? indexed_rule_indices.size() : rules.size();
+    for (std::size_t ordinal = 0u; ordinal < iteration_count; ++ordinal) {
+        double stage_start = cut_now();
+        const auto rule_index = use_indexed_rules ? indexed_rule_indices[ordinal] : ordinal;
+        if (rule_index >= rules.size()) {
+            cut_filter_time += cut_now() - stage_start;
+            continue;
+        }
+        const auto& rule = rules[rule_index];
+        ++cut_rules_considered;
+        if (!use_indexed_rules &&
+            (rule.kind != geometry::CutQuadratureKind::Volume ||
+             rule.provenance.marker != interface_marker ||
+             rule.side != side)) {
+            cut_filter_time += cut_now() - stage_start;
+            continue;
+        }
+        cut_filter_time += cut_now() - stage_start;
+
+        FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
+                    "StandardAssembler::assembleCutVolumesFused: only reference-frame cut-volume rules are supported");
+        FE_THROW_IF(rule.points.empty(), FEException,
+                    "StandardAssembler::assembleCutVolumesFused: cut-volume rule has no quadrature points");
+
+        GlobalIndex cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
+        if (rule_index < metadata.size() && metadata[rule_index].parent_entity >= 0) {
+            cell_id = static_cast<GlobalIndex>(metadata[rule_index].parent_entity);
+        }
+        FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
+                    "StandardAssembler::assembleCutVolumesFused: cut-volume parent cell is out of range");
+        if (!owned_rows_only && !mesh.isOwnedCell(cell_id)) {
+            continue;
+        }
+
+        stage_start = cut_now();
+        const auto cell_type = mesh.getCellType(cell_id);
+        std::shared_ptr<const quadrature::QuadratureRule> full_cell_rule;
+        std::optional<CutVolumeQuadratureRule> cut_rule;
+        const quadrature::QuadratureRule* active_rule = nullptr;
+        const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
+        const bool active_rule_is_full_side = isFullSideVolumeRule(rule);
+        bool active_rule_is_partial_cut = false;
+        if (active_rule_is_full_side) {
+            const auto type_key = static_cast<std::size_t>(cell_type);
+            if (type_key < full_cell_rule_cache.size()) {
+                auto& cached_rule = full_cell_rule_cache[type_key];
+                if (!cached_rule) {
+                    cached_rule = resolveQuadratureRule(
+                        *first_active_term.test_space, cell_id, cell_type);
+                }
+                full_cell_rule = cached_rule;
+            } else {
+                full_cell_rule = resolveQuadratureRule(
+                    *first_active_term.test_space, cell_id, cell_type);
+            }
+            active_rule = full_cell_rule.get();
+            ++cut_full_rules;
+        } else {
+            cut_rule.emplace(rule, to_mesh_family(cell_type), mesh.dimension());
+            active_rule = &*cut_rule;
+            active_rule_is_partial_cut = true;
+            cached_quad_rule_ptr_ = nullptr;
+            basis_scratch_valid_ = false;
+            if (cut_basis_cache_max_entries > 0u) {
+                cut_volume_geometry_cache_entry = findCutVolumeGeometryCacheEntry(
+                    cut_context,
+                    cut_context_basis_signature,
+                    rule_index,
+                    mesh);
+            }
+            ++cut_partial_rules;
+        }
+        FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumesFused: active quadrature rule");
+        cut_quadrature_points += active_rule->num_points();
+        cut_rule_time += cut_now() - stage_start;
+
+        stage_start = cut_now();
+        if (cut_volume_geometry_cache_entry != nullptr) {
+            restoreCutVolumeGeometryCacheEntry(context_, *cut_volume_geometry_cache_entry);
+        } else {
+            prepareGeometry(context_, mesh, cell_id, *active_rule);
+            if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
+                storeCutVolumeGeometryCacheEntry(rule_index, mesh, cell_id, cell_type, context_);
+            }
+        }
+        std::string current_geometry_rule_identity = active_rule->cache_identity();
+        cut_geometry_time += cut_now() - stage_start;
+
+        bool assembled_rule = false;
+        for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+            const auto& t = terms[ti];
+            const auto& td = term_data[ti];
+            auto& ts = term_scratch[ti];
+            if (!t.kernel->hasCell() || (!t.assemble_matrix && !t.assemble_vector)) {
+                continue;
+            }
+
+            stage_start = cut_now();
+            ts.row_dofs = getCellDofsCached(mesh, cell_id, t.row_dof_map, t.row_dof_offset);
+            ts.col_dofs = getCellDofsCached(mesh, cell_id, t.col_dof_map, t.col_dof_offset);
+            cut_dof_time += cut_now() - stage_start;
+
+            const quadrature::QuadratureRule* term_rule = active_rule;
+            std::shared_ptr<const quadrature::QuadratureRule> term_full_cell_rule;
+            if (active_rule_is_full_side && t.test_space != first_active_term.test_space) {
+                term_full_cell_rule = resolveQuadratureRule(*t.test_space, cell_id, cell_type);
+                term_rule = term_full_cell_rule.get();
+            }
+            if (active_rule_is_full_side &&
+                term_rule->cache_identity() != current_geometry_rule_identity) {
+                stage_start = cut_now();
+                prepareGeometry(context_, mesh, cell_id, *term_rule);
+                current_geometry_rule_identity = term_rule->cache_identity();
+                cut_geometry_time += cut_now() - stage_start;
+            }
+
+            const CutVolumeBasisCacheEntry* cut_volume_basis_cache_entry = nullptr;
+            if (active_rule_is_partial_cut && cut_basis_cache_max_entries > 0u) {
+                stage_start = cut_now();
+                cut_volume_basis_cache_entry = getOrCreateCutVolumeBasisCacheEntry(
+                    cut_context,
+                    cut_context_basis_signature,
+                    rule_index,
+                    *term_rule,
+                    mesh,
+                    cell_id,
+                    cell_type,
+                    *t.test_space,
+                    *t.trial_space,
+                    td.required_data);
+                if (cut_volume_basis_cache_entry != nullptr) {
+                    ++cut_basis_cacheable_rules;
+                }
+                cut_rule_time += cut_now() - stage_start;
+            }
+
+            stage_start = cut_now();
+            const auto* previous_cut_volume_basis_cache_entry =
+                active_cut_volume_basis_cache_entry_;
+            active_cut_volume_basis_cache_entry_ = cut_volume_basis_cache_entry;
+            try {
+                prepareBasis(context_, mesh, cell_id, *t.test_space, *t.trial_space,
+                             td.required_data, *term_rule);
+            } catch (...) {
+                active_cut_volume_basis_cache_entry_ =
+                    previous_cut_volume_basis_cache_entry;
+                throw;
+            }
+            active_cut_volume_basis_cache_entry_ =
+                previous_cut_volume_basis_cache_entry;
+            cut_basis_time += cut_now() - stage_start;
+
+            stage_start = cut_now();
+            prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type,
+                                         *term_rule, td.required_data);
+            cut_frame_time += cut_now() - stage_start;
+
+            stage_start = cut_now();
+            context_.setCutVolumeDomain(interface_marker, rule.side);
+            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
+            context_.setTimeIntegrationContext(time_integration_);
+            context_.setTime(time_);
+            context_.setTimeStep(dt_);
+            context_.setRealParameterGetter(get_real_param_);
+            context_.setParameterGetter(get_param_);
+            context_.setUserData(user_data_);
+            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+            context_.clearAllPreviousSolutionData();
+            cut_context_time += cut_now() - stage_start;
+
+            stage_start = cut_now();
+            cut_jit_constants[cut_parameter_slots.volume_fraction] = rule.volume_fraction;
+            cut_jit_constants[cut_parameter_slots.side_indicator] =
+                forms::cutSideIndicatorValue(rule.side);
+            cut_jit_constants[cut_parameter_slots.embedded_normal[0]] =
+                rule.points.front().normal[0];
+            cut_jit_constants[cut_parameter_slots.embedded_normal[1]] =
+                rule.points.front().normal[1];
+            cut_jit_constants[cut_parameter_slots.embedded_normal[2]] =
+                rule.points.front().normal[2];
+            cut_jit_constants[cut_parameter_slots.stabilization_scale] = Real{0.0};
+            cut_jit_constants[cut_parameter_slots.quadrature_weight_sensitivity] = Real{0.0};
+            context_.setJITConstants(cut_jit_constants);
+            cut_jit_time += cut_now() - stage_start;
+
+            FE_THROW_IF(ts.row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
+                        "StandardAssembler::assembleCutVolumesFused: row DOF count does not match test space element DOFs");
+            FE_THROW_IF(ts.col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
+                        "StandardAssembler::assembleCutVolumesFused: column DOF count does not match trial space element DOFs");
+
+            if (td.need_solution) {
+                stage_start = cut_now();
+                FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
+                            "StandardAssembler::assembleCutVolumesFused: kernel requires solution but no solution was set");
+                local_solution_coeffs_.resize(ts.col_dofs.size());
+                gatherCellVectorCoefficients(cell_id, t.col_dof_map, t.col_dof_offset,
+                                             ts.col_dofs, current_solution_view_,
+                                             current_solution_, local_solution_coeffs_,
+                                             "StandardAssembler::assembleCutVolumesFused", true);
+                if (context_.trialUsesVectorBasis()) {
+                    applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+                                                  std::span<Real>(local_solution_coeffs_));
+                }
+                context_.setSolutionCoefficients(local_solution_coeffs_);
+
+                if (time_integration_ != nullptr) {
+                    const int required = requiredHistoryStates(time_integration_);
+                    if (required > 0) {
+                        FE_THROW_IF(previous_solutions_.size() < static_cast<std::size_t>(required), FEException,
+                                    "StandardAssembler::assembleCutVolumesFused: time integration requires " +
+                                        std::to_string(required) + " history states, but only " +
+                                        std::to_string(previous_solutions_.size()) + " were provided");
+                        if (local_prev_solution_coeffs_.size() < static_cast<std::size_t>(required)) {
+                            local_prev_solution_coeffs_.resize(static_cast<std::size_t>(required));
+                        }
+                        for (int k = 1; k <= required; ++k) {
+                            const auto& prev = previous_solutions_[static_cast<std::size_t>(k - 1)];
+                            const auto* prev_view =
+                                (static_cast<std::size_t>(k - 1) < previous_solution_views_.size())
+                                    ? previous_solution_views_[static_cast<std::size_t>(k - 1)]
+                                    : nullptr;
+                            FE_THROW_IF(prev.empty() && prev_view == nullptr, FEException,
+                                        "StandardAssembler::assembleCutVolumesFused: previous solution (k=" +
+                                            std::to_string(k) + ") not set");
+                            auto& local_prev = local_prev_solution_coeffs_[static_cast<std::size_t>(k - 1)];
+                            gatherCellVectorCoefficients(cell_id, t.col_dof_map,
+                                                         t.col_dof_offset,
+                                                         ts.col_dofs, prev_view, prev,
+                                                         local_prev,
+                                                         "StandardAssembler::assembleCutVolumesFused", true);
+                            if (context_.trialUsesVectorBasis()) {
+                                applyVectorBasisGlobalToLocal(mesh, cell_id, *t.trial_space,
+                                                              std::span<Real>(local_prev));
+                            }
+                            context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                        }
+                    }
+                }
+                cut_solution_time += cut_now() - stage_start;
+            }
+
+            if (td.need_field_solutions) {
+                stage_start = cut_now();
+                populateFieldSolutionData(context_, mesh, cell_id, td.field_requirements);
+                cut_field_time += cut_now() - stage_start;
+            }
+            stage_start = cut_now();
+            populateMovingDomainFieldData(context_, td.required_data,
+                                          "StandardAssembler::assembleCutVolumesFused");
+            cut_field_time += cut_now() - stage_start;
+
+            if (td.need_material_state) {
+                stage_start = cut_now();
+                auto view = material_state_provider_->getCellState(
+                    *t.kernel, cell_id, context_.numQuadraturePoints());
+                FE_THROW_IF(!view, FEException,
+                            "StandardAssembler::assembleCutVolumesFused: material state provider returned null storage");
+                FE_THROW_IF(view.bytes_per_qpt != td.material_state_spec.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleCutVolumesFused: material state bytes_per_qpt mismatch");
+                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleCutVolumesFused: invalid material state stride");
+                context_.setMaterialState(view.data_old, view.data_work, view.bytes_per_qpt,
+                                          view.stride_bytes, view.alignment, view.variables,
+                                          view.old_lifecycle, view.work_lifecycle);
+                cut_material_time += cut_now() - stage_start;
+            }
+
+            stage_start = cut_now();
+            const bool want_matrix = t.assemble_matrix && ts.insert_matrix != nullptr;
+            const bool want_vector = t.assemble_vector && ts.insert_vector != nullptr;
+            prepareKernelOutputRequest(kernel_output_,
+                                       context_.numTestDofs(),
+                                       context_.numTrialDofs(),
+                                       want_matrix,
+                                       want_vector);
+            t.kernel->computeCell(context_, kernel_output_);
+            cut_kernel_time += cut_now() - stage_start;
+
+            if (context_.testUsesVectorBasis() || context_.trialUsesVectorBasis()) {
+                stage_start = cut_now();
+                applyVectorBasisOutputOrientation(mesh, cell_id, *t.test_space,
+                                                  cell_id, *t.trial_space,
+                                                  kernel_output_);
+                cut_orientation_time += cut_now() - stage_start;
+            }
+
+            stage_start = cut_now();
+            insertLocalForCell(cell_id, t.row_dof_map, t.row_dof_offset,
+                               t.col_dof_map, t.col_dof_offset,
+                               kernel_output_, ts.row_dofs, ts.col_dofs,
+                               want_matrix ? ts.insert_matrix : nullptr,
+                               want_vector ? ts.insert_vector : nullptr);
+            cut_insert_time += cut_now() - stage_start;
+
+            assembled_rule = true;
+            if (kernel_output_.has_matrix) {
+                result.matrix_entries_inserted +=
+                    static_cast<GlobalIndex>(ts.row_dofs.size() * ts.col_dofs.size());
+            }
+            if (kernel_output_.has_vector) {
+                result.vector_entries_inserted += static_cast<GlobalIndex>(ts.row_dofs.size());
+            }
+            if (term_full_cell_rule) {
+                cached_quad_rule_ptr_ = nullptr;
+            }
+        }
+
+        if (assembled_rule) {
+            result.elements_assembled++;
+            ++cut_rules_assembled;
+        }
+    }
+
+    const auto end_time = std::chrono::steady_clock::now();
+    result.elapsed_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    if (cut_timing) {
+        int rank = 0;
+#if FE_HAS_MPI
+        int mpi_initialized = 0;
+        MPI_Initialized(&mpi_initialized);
+        if (mpi_initialized) {
+            MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        }
+#endif
+        std::fprintf(stderr,
+            "[CUT_VOLUME_TIMING] rank=%d marker=%d side=%s matrix=%d vector=%d "
+            "fused=1 terms=%zu indexed=%d rules_considered=%zu rules_assembled=%zu full_rules=%zu "
+            "partial_rules=%zu cacheable_basis_rules=%zu basis_cache_entries=%zu "
+            "basis_cache_max_entries=%zu basis_cache_hits=%zu basis_cache_misses=%zu "
+            "basis_cache_insertions=%zu basis_cache_evictions=%zu "
+            "geometry_cache_entries=%zu geometry_cache_hits=%zu geometry_cache_misses=%zu "
+            "geometry_cache_insertions=%zu geometry_cache_evictions=%zu "
+            "qpts=%zu total=%9.6f setup=%9.6f filter=%9.6f "
+            "dofs=%9.6f rule=%9.6f geometry=%9.6f basis=%9.6f frame=%9.6f "
+            "context=%9.6f jit=%9.6f solution=%9.6f field=%9.6f material=%9.6f "
+            "kernel=%9.6f orient=%9.6f insert=%9.6f\n",
+            rank,
+            interface_marker,
+            cutVolumeTimingSideName(side),
+            std::any_of(terms.begin(), terms.end(), [](const auto& t) {
+                return t.assemble_matrix;
+            }) ? 1 : 0,
+            std::any_of(terms.begin(), terms.end(), [](const auto& t) {
+                return t.assemble_vector;
+            }) ? 1 : 0,
+            terms.size(),
+            use_indexed_rules ? 1 : 0,
+            cut_rules_considered,
+            cut_rules_assembled,
+            cut_full_rules,
+            cut_partial_rules,
+            cut_basis_cacheable_rules,
+            cut_volume_basis_cache_.size(),
+            cut_basis_cache_max_entries,
+            cut_volume_basis_cache_hits_ - cut_basis_cache_hits_before,
+            cut_volume_basis_cache_misses_ - cut_basis_cache_misses_before,
+            cut_volume_basis_cache_insertions_ - cut_basis_cache_insertions_before,
+            cut_volume_basis_cache_evictions_ - cut_basis_cache_evictions_before,
+            cut_volume_geometry_cache_.size(),
+            cut_volume_geometry_cache_hits_ - cut_geometry_cache_hits_before,
+            cut_volume_geometry_cache_misses_ - cut_geometry_cache_misses_before,
+            cut_volume_geometry_cache_insertions_ - cut_geometry_cache_insertions_before,
+            cut_volume_geometry_cache_evictions_ - cut_geometry_cache_evictions_before,
             cut_quadrature_points,
             result.elapsed_time_seconds,
             cut_setup_time,
@@ -7437,14 +8709,13 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
 
     const bool use_interface_kernel = kernel.hasInterfaceFace();
     const bool use_single_sided_kernel = !use_interface_kernel && kernel.hasSingleSidedInterfaceFace();
+    const bool use_two_sided_kernel =
+        use_interface_kernel && kernel.requiresTwoSidedInterfaceFace();
     if (!use_interface_kernel && !use_single_sided_kernel) {
         result.elapsed_time_seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
         return result;
     }
-    FE_THROW_IF(use_interface_kernel && kernel.requiresTwoSidedInterfaceFace(), FEException,
-                "StandardAssembler::assembleCutInterfaces: generated level-set cut interfaces are one-sided embedded boundaries; "
-                "dI forms using plus-side, jump, or average semantics require an explicit two-sided InterfaceMesh/CutFEM path");
 
     FE_THROW_IF(row_dof_scope_ == DofEntityScope::InterfaceFace ||
                     col_dof_scope_ == DofEntityScope::InterfaceFace ||
@@ -7457,6 +8728,14 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
     const auto kernel_field_requirements = kernel.fieldRequirements();
     const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
     const bool need_field_solutions = !field_requirements.empty();
+    std::vector<FieldRequirement> minus_field_requirements;
+    std::vector<FieldRequirement> plus_field_requirements;
+    if (use_two_sided_kernel && need_field_solutions) {
+        minus_field_requirements =
+            fieldRequirementsForInterfaceSide(field_requirements, FieldEvaluationSide::Minus);
+        plus_field_requirements =
+            fieldRequirementsForInterfaceSide(field_requirements, FieldEvaluationSide::Plus);
+    }
     const bool need_solution =
         hasFlag(required_data, RequiredData::SolutionCoefficients) ||
         hasFlag(required_data, RequiredData::SolutionValues) ||
@@ -7464,8 +8743,14 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
         hasFlag(required_data, RequiredData::SolutionHessians) ||
         hasFlag(required_data, RequiredData::SolutionLaplacians);
     const bool need_material_state = hasFlag(required_data, RequiredData::MaterialState);
-    FE_THROW_IF(need_material_state, FEException,
-                "StandardAssembler::assembleCutInterfaces: material state on generated cut interfaces is not supported");
+    const auto material_state_spec =
+        need_material_state ? kernel.materialStateSpec() : MaterialStateSpec{};
+    if (need_material_state) {
+        FE_THROW_IF(material_state_provider_ == nullptr, FEException,
+                    "StandardAssembler::assembleCutInterfaces: kernel requires material state but no provider is configured");
+        FE_THROW_IF(material_state_spec.bytes_per_qpt == 0u, FEException,
+                    "StandardAssembler::assembleCutInterfaces: kernel requires MaterialState but bytes_per_qpt is zero");
+    }
 
     FE_CHECK_NOT_NULL(row_dof_map_, "StandardAssembler::assembleCutInterfaces: row_dof_map");
     if (!col_dof_map_) {
@@ -7516,6 +8801,13 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                               col_dof_map_->getMaxDofsPerCell()),
                      selectedInterfaceRuleReserveCount(selected_rules),
                      mesh.dimension());
+    AssemblyContext context_plus;
+    if (use_two_sided_kernel) {
+        context_plus.reserve(std::max(row_dof_map_->getMaxDofsPerCell(),
+                                      col_dof_map_->getMaxDofsPerCell()),
+                             selectedInterfaceRuleReserveCount(selected_rules),
+                             mesh.dimension());
+    }
 
     const bool owned_rows_only = requiresOwnedRowFiltering(options_, mesh);
     std::optional<OwnedRowOnlyView> owned_row_matrix;
@@ -7558,6 +8850,12 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                         "StandardAssembler::assembleCutInterfaces: only reference-frame cut-interface rules are supported");
             FE_THROW_IF(rule.points.empty(), FEException,
                         "StandardAssembler::assembleCutInterfaces: cut-interface rule has no quadrature points");
+            const auto* two_sided_binding =
+                use_two_sided_kernel ? cut_context.twoSidedBindingForInterfaceRule(rule) : nullptr;
+            FE_THROW_IF(use_two_sided_kernel &&
+                            (two_sided_binding == nullptr || !two_sided_binding->complete()),
+                        FEException,
+                        "StandardAssembler::assembleCutInterfaces: two-sided generated interface rule is missing a complete minus/plus parent-cell binding");
 
             const auto cell_id = static_cast<GlobalIndex>(rule.provenance.parent_entity);
             FE_THROW_IF(cell_id < 0 || cell_id >= mesh.numCells(), FEException,
@@ -7580,23 +8878,51 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
             remapCutInterfaceSurfaceGeometry(
                 context_, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
             context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
-            context_.setMaterialState(nullptr, nullptr, 0u, 0u);
-            context_.setTimeIntegrationContext(time_integration_);
-            context_.setTime(time_);
-            context_.setTimeStep(dt_);
-            context_.setRealParameterGetter(get_real_param_);
-            context_.setParameterGetter(get_param_);
-            context_.setUserData(user_data_);
-            context_.setJITConstants(jit_constants_);
-            context_.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
-            context_.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
-            context_.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
-            context_.clearAllPreviousSolutionData();
+
+            if (use_two_sided_kernel) {
+                prepareGeometry(context_plus, mesh, cell_id, cut_rule);
+                prepareBasis(context_plus, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
+                prepareFrameExplicitGeometry(context_plus, mesh, cell_id, cell_type, cut_rule, required_data);
+                remapCutInterfaceSurfaceGeometry(
+                    context_plus, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
+                context_plus.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
+                orientGeneratedInterfaceContextForSide(
+                    context_, two_sided_binding->minus_side);
+                orientGeneratedInterfaceContextForSide(
+                    context_plus, two_sided_binding->plus_side);
+            }
+
+            auto bind_cut_interface_common_context = [&](AssemblyContext& ctx) {
+                ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
+                ctx.setTimeIntegrationContext(time_integration_);
+                ctx.setTime(time_);
+                ctx.setTimeStep(dt_);
+                ctx.setRealParameterGetter(get_real_param_);
+                ctx.setParameterGetter(get_param_);
+                ctx.setUserData(user_data_);
+                ctx.setJITConstants(jit_constants_);
+                ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+                ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
+                ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
+                ctx.clearAllPreviousSolutionData();
+            };
+            bind_cut_interface_common_context(context_);
+            if (use_two_sided_kernel) {
+                bind_cut_interface_common_context(context_plus);
+            }
 
             FE_THROW_IF(row_dofs.size() != static_cast<std::size_t>(context_.numTestDofs()), FEException,
                         "StandardAssembler::assembleCutInterfaces: row DOF count does not match test space element DOFs");
             FE_THROW_IF(col_dofs.size() != static_cast<std::size_t>(context_.numTrialDofs()), FEException,
                         "StandardAssembler::assembleCutInterfaces: column DOF count does not match trial space element DOFs");
+            if (use_two_sided_kernel) {
+                FE_THROW_IF(context_plus.numQuadraturePoints() != context_.numQuadraturePoints(), FEException,
+                            "StandardAssembler::assembleCutInterfaces: mismatched quadrature point counts for two-sided generated interface");
+                FE_THROW_IF(context_plus.numTestDofs() != context_.numTestDofs() ||
+                                context_plus.numTrialDofs() != context_.numTrialDofs(),
+                            FEException,
+                            "StandardAssembler::assembleCutInterfaces: mismatched parent-cell DOF counts for two-sided generated interface");
+            }
 
             if (need_solution) {
                 FE_THROW_IF(current_solution_view_ == nullptr && current_solution_.empty(), FEException,
@@ -7611,6 +8937,9 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                                                   std::span<Real>(local_solution_coeffs_));
                 }
                 context_.setSolutionCoefficients(local_solution_coeffs_);
+                if (use_two_sided_kernel) {
+                    context_plus.setSolutionCoefficients(local_solution_coeffs_);
+                }
 
                 if (time_integration_ != nullptr) {
                     const int required = requiredHistoryStates(time_integration_);
@@ -7641,25 +8970,87 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                                                               std::span<Real>(local_prev));
                             }
                             context_.setPreviousSolutionCoefficientsK(k, local_prev);
+                            if (use_two_sided_kernel) {
+                                context_plus.setPreviousSolutionCoefficientsK(k, local_prev);
+                            }
                         }
                     }
                 }
             }
 
             if (need_field_solutions) {
-                populateFieldSolutionData(context_, mesh, cell_id, field_requirements);
+                populateFieldSolutionData(
+                    context_,
+                    mesh,
+                    cell_id,
+                    use_two_sided_kernel ? minus_field_requirements : field_requirements);
+                if (use_two_sided_kernel) {
+                    populateFieldSolutionData(
+                        context_plus,
+                        mesh,
+                        cell_id,
+                        plus_field_requirements);
+                }
             }
             populateMovingDomainFieldData(context_, required_data,
                                           "StandardAssembler::assembleCutInterfaces");
+            if (use_two_sided_kernel) {
+                populateMovingDomainFieldData(context_plus, required_data,
+                                              "StandardAssembler::assembleCutInterfaces");
+            }
+            if (need_material_state) {
+                auto view = material_state_provider_->getGeneratedInterfaceState(
+                    kernel,
+                    cell_id,
+                    active_marker,
+                    rule.provenance.cut_topology_revision,
+                    context_.numQuadraturePoints());
+                FE_THROW_IF(!view, FEException,
+                            "StandardAssembler::assembleCutInterfaces: material state provider returned null generated-interface storage");
+                FE_THROW_IF(view.bytes_per_qpt != material_state_spec.bytes_per_qpt,
+                            FEException,
+                            "StandardAssembler::assembleCutInterfaces: material state bytes_per_qpt mismatch");
+                FE_THROW_IF(view.stride_bytes < view.bytes_per_qpt, FEException,
+                            "StandardAssembler::assembleCutInterfaces: invalid material state stride");
+                context_.setMaterialState(view.data_old, view.data_work,
+                                          view.bytes_per_qpt,
+                                          view.stride_bytes, view.alignment,
+                                          view.variables,
+                                          view.old_lifecycle,
+                                          view.work_lifecycle);
+                if (use_two_sided_kernel) {
+                    context_plus.setMaterialState(view.data_old, view.data_work,
+                                                  view.bytes_per_qpt,
+                                                  view.stride_bytes, view.alignment,
+                                                  view.variables,
+                                                  view.old_lifecycle,
+                                                  view.work_lifecycle);
+                }
+            }
 
             prepareKernelOutputRequest(kernel_output_,
                                        context_.numTestDofs(),
                                        context_.numTrialDofs(),
                                        assemble_matrix && insert_matrix_view != nullptr,
                                        assemble_vector && insert_vector_view != nullptr);
+            prepareKernelOutputRequest(output_plus,
+                                       use_two_sided_kernel ? context_plus.numTestDofs() : context_.numTestDofs(),
+                                       use_two_sided_kernel ? context_plus.numTrialDofs() : context_.numTrialDofs(),
+                                       use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
+                                       use_two_sided_kernel && assemble_vector && insert_vector_view != nullptr);
+            prepareKernelOutputRequest(coupling_mp,
+                                       context_.numTestDofs(),
+                                       use_two_sided_kernel ? context_plus.numTrialDofs() : context_.numTrialDofs(),
+                                       use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
+                                       false);
+            prepareKernelOutputRequest(coupling_pm,
+                                       use_two_sided_kernel ? context_plus.numTestDofs() : context_.numTestDofs(),
+                                       context_.numTrialDofs(),
+                                       use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
+                                       false);
             if (use_interface_kernel) {
                 kernel_impl.computeInterfaceFace(
-                    context_, context_, active_marker,
+                    context_, use_two_sided_kernel ? context_plus : context_, active_marker,
                     kernel_output_, output_plus, coupling_mp, coupling_pm);
             } else {
                 kernel_impl.computeBoundaryFace(context_, active_marker, kernel_output_);
@@ -7669,19 +9060,70 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                 applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
                                                   cell_id, trial_space, kernel_output_);
             }
+            if (use_two_sided_kernel &&
+                (context_plus.testUsesVectorBasis() || context_plus.trialUsesVectorBasis())) {
+                if (output_plus.has_matrix || output_plus.has_vector) {
+                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                                      cell_id, trial_space, output_plus);
+                }
+                if (coupling_mp.has_matrix) {
+                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                                      cell_id, trial_space, coupling_mp);
+                }
+                if (coupling_pm.has_matrix) {
+                    applyVectorBasisOutputOrientation(mesh, cell_id, test_space,
+                                                      cell_id, trial_space, coupling_pm);
+                }
+            }
 
             insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
                                col_dof_map_, col_dof_offset_,
                                kernel_output_, row_dofs, col_dofs,
                                assemble_matrix ? insert_matrix_view : nullptr,
                                assemble_vector ? insert_vector_view : nullptr);
+            if (use_two_sided_kernel && (output_plus.has_matrix || output_plus.has_vector)) {
+                insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
+                                   col_dof_map_, col_dof_offset_,
+                                   output_plus, row_dofs, col_dofs,
+                                   assemble_matrix ? insert_matrix_view : nullptr,
+                                   assemble_vector ? insert_vector_view : nullptr);
+            }
+            if (use_two_sided_kernel && coupling_mp.has_matrix &&
+                assemble_matrix && insert_matrix_view != nullptr) {
+                insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
+                                                     coupling_mp.local_matrix);
+            }
+            if (use_two_sided_kernel && coupling_pm.has_matrix &&
+                assemble_matrix && insert_matrix_view != nullptr) {
+                insert_matrix_view->addMatrixEntries(row_dofs, col_dofs,
+                                                     coupling_pm.local_matrix);
+            }
 
             ++result.interface_faces_assembled;
-            if (kernel_output_.has_matrix) {
+            if (assemble_matrix && insert_matrix_view != nullptr && kernel_output_.has_matrix) {
                 result.matrix_entries_inserted +=
                     static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
             }
-            if (kernel_output_.has_vector) {
+            if (assemble_matrix && insert_matrix_view != nullptr &&
+                use_two_sided_kernel && output_plus.has_matrix) {
+                result.matrix_entries_inserted +=
+                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+            }
+            if (assemble_matrix && insert_matrix_view != nullptr &&
+                use_two_sided_kernel && coupling_mp.has_matrix) {
+                result.matrix_entries_inserted +=
+                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+            }
+            if (assemble_matrix && insert_matrix_view != nullptr &&
+                use_two_sided_kernel && coupling_pm.has_matrix) {
+                result.matrix_entries_inserted +=
+                    static_cast<GlobalIndex>(row_dofs.size() * col_dofs.size());
+            }
+            if (assemble_vector && insert_vector_view != nullptr && kernel_output_.has_vector) {
+                result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
+            }
+            if (assemble_vector && insert_vector_view != nullptr &&
+                use_two_sided_kernel && output_plus.has_vector) {
                 result.vector_entries_inserted += static_cast<GlobalIndex>(row_dofs.size());
             }
         }
@@ -8085,17 +9527,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         for (std::size_t si = 0; si < ns; ++si) {
                             const auto ref_idx = si * nq + q;
                             coupled_scalar_ref_grads_[ref_idx] = {
-                                bcache.gradients[q][si][0],
-                                bcache.gradients[q][si][1],
-                                bcache.gradients[q][si][2]
+                                bcache.gradientValue(si, 0u, q),
+                                bcache.gradientValue(si, 1u, q),
+                                bcache.gradientValue(si, 2u, q)
                             };
                             if (need_hess) {
                                 AssemblyContext::Matrix3x3 Hr{};
                                 for (int r = 0; r < 3; ++r) {
                                     for (int c = 0; c < 3; ++c) {
                                         Hr[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                            bcache.hessians[q][si](static_cast<std::size_t>(r),
-                                                                   static_cast<std::size_t>(c));
+                                            bcache.hessianValue(si,
+                                                                static_cast<std::size_t>(r),
+                                                                static_cast<std::size_t>(c),
+                                                                q);
                                     }
                                 }
                                 coupled_scalar_ref_hess_[ref_idx] = Hr;
@@ -10760,17 +12204,19 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         for (std::size_t si = 0; si < ns; ++si) {
                             const auto ref_idx = si * nq + q;
                             coupled_scalar_ref_grads_[ref_idx] = {
-                                bcache.gradients[q][si][0],
-                                bcache.gradients[q][si][1],
-                                bcache.gradients[q][si][2]
+                                bcache.gradientValue(si, 0u, q),
+                                bcache.gradientValue(si, 1u, q),
+                                bcache.gradientValue(si, 2u, q)
                             };
                             if (need_hess) {
                                 AssemblyContext::Matrix3x3 Hr{};
                                 for (int r = 0; r < 3; ++r)
                                     for (int c = 0; c < 3; ++c)
                                         Hr[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                                            bcache.hessians[q][si](static_cast<std::size_t>(r),
-                                                                    static_cast<std::size_t>(c));
+                                            bcache.hessianValue(si,
+                                                                static_cast<std::size_t>(r),
+                                                                static_cast<std::size_t>(c),
+                                                                q);
                                 coupled_scalar_ref_hess_[ref_idx] = Hr;
                             }
                             coupled_scalar_basis_values_[q * ns + si] =
@@ -12688,6 +14134,127 @@ void StandardAssembler::prepareContextFace(
     auto& vec_curls_at_pt = scratch_vec_curls_at_pt_;
     auto& vec_divs_at_pt = scratch_vec_divs_at_pt_;
 
+    const bool need_test_vector_derivatives =
+        need_test_vector_jacobians || need_basis_curls || need_basis_divergences;
+    const bool need_trial_vector_derivatives =
+        need_trial_vector_jacobians || need_basis_curls || need_basis_divergences;
+
+    auto build_face_basis_points =
+        [&](const spaces::FunctionSpace& space,
+            bool force_face_reference_coords) {
+            std::vector<quadrature::QuadPoint> points;
+            points.reserve(static_cast<std::size_t>(n_qpts));
+            for (LocalIndex q = 0; q < n_qpts; ++q) {
+                const auto qidx = static_cast<std::size_t>(q);
+                const auto& xi_cell = scratch_quad_points_[qidx];
+                const auto& xi_trace_face_point = scratch_face_quad_points_[qidx];
+
+                math::Vector<Real, 3> xi_embedded_face{};
+                if (face_type == ElementType::Line2) {
+                    xi_embedded_face = math::Vector<Real, 3>{
+                        Real(2) * xi_trace_face_point[0] - Real(1),
+                        Real(0),
+                        Real(0)};
+                } else if (face_type == ElementType::Quad4) {
+                    xi_embedded_face = math::Vector<Real, 3>{
+                        Real(2) * xi_trace_face_point[0] - Real(1),
+                        Real(2) * xi_trace_face_point[1] - Real(1),
+                        Real(0)};
+                } else {
+                    xi_embedded_face = math::Vector<Real, 3>{
+                        xi_trace_face_point[0],
+                        xi_trace_face_point[1],
+                        xi_trace_face_point[2]};
+                }
+
+                if (force_face_reference_coords) {
+                    points.push_back(xi_embedded_face);
+                } else if (uses_trace_face_reference_coords(space)) {
+                    points.push_back(math::Vector<Real, 3>{
+                        xi_trace_face_point[0],
+                        xi_trace_face_point[1],
+                        xi_trace_face_point[2]});
+                } else {
+                    points.push_back(math::Vector<Real, 3>{
+                        xi_cell[0],
+                        xi_cell[1],
+                        xi_cell[2]});
+                }
+            }
+            return points;
+        };
+
+    const auto vector_cache_entry_usable =
+        [&](const basis::BasisCacheEntry* entry,
+            LocalIndex expected_dofs,
+            bool need_jacobians,
+            bool need_curls,
+            bool need_divergences) -> bool {
+            const auto n_qpts_local = static_cast<std::size_t>(n_qpts);
+            if (entry == nullptr ||
+                entry->num_qpts != n_qpts_local ||
+                entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                entry->vector_values_xyz.size() <
+                    static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
+                return false;
+            }
+            if (need_jacobians &&
+                entry->vector_jacobians.size() <
+                    static_cast<std::size_t>(expected_dofs) * 9u * n_qpts_local) {
+                return false;
+            }
+            if (need_curls &&
+                entry->vector_curls_xyz.size() <
+                    static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
+                return false;
+            }
+            if (need_divergences &&
+                entry->vector_divergence.size() <
+                    static_cast<std::size_t>(expected_dofs) * n_qpts_local) {
+                return false;
+            }
+            return true;
+        };
+
+    std::optional<ReferencePointQuadratureRule> test_vector_face_quad;
+    std::optional<ReferencePointQuadratureRule> trial_vector_face_quad;
+    const basis::BasisCacheEntry* test_vector_bcache = nullptr;
+    const basis::BasisCacheEntry* trial_vector_bcache = nullptr;
+    if (test_is_vector_basis && (need_test_vector_values || need_test_vector_derivatives)) {
+        test_vector_face_quad.emplace(test_basis.element_type(),
+                                      test_basis.dimension(),
+                                      quad_order,
+                                      build_face_basis_points(test_space,
+                                                              force_test_face_reference_coords));
+        const auto& entry = basis::BasisCache::instance().get_or_compute(
+            test_basis, *test_vector_face_quad, need_test_vector_derivatives, false);
+        if (vector_cache_entry_usable(&entry,
+                                      n_test_dofs,
+                                      need_test_vector_jacobians,
+                                      need_basis_curls,
+                                      need_basis_divergences)) {
+            test_vector_bcache = &entry;
+        }
+    }
+    if (&test_space != &trial_space &&
+        trial_is_vector_basis &&
+        (need_trial_vector_values || need_trial_vector_derivatives)) {
+        trial_vector_face_quad.emplace(trial_basis.element_type(),
+                                       trial_basis.dimension(),
+                                       quad_order,
+                                       build_face_basis_points(trial_space,
+                                                               force_trial_face_reference_coords));
+        const auto& entry = basis::BasisCache::instance().get_or_compute(
+            trial_basis, *trial_vector_face_quad, need_trial_vector_derivatives, false);
+        if (vector_cache_entry_usable(&entry,
+                                      n_trial_dofs,
+                                      need_trial_vector_jacobians,
+                                      need_basis_curls,
+                                      need_basis_divergences)) {
+            trial_vector_bcache = &entry;
+        }
+    }
+
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const math::Vector<Real, 3> xi{
             scratch_quad_points_[q][0],
@@ -12782,16 +14349,18 @@ void StandardAssembler::prepareContextFace(
         }
 
         if (test_is_vector_basis) {
-            if (need_test_vector_values || (need_test_vector_jacobians && !face_mapping_affine)) {
+            const auto qsz = static_cast<std::size_t>(q);
+            if (!test_vector_bcache &&
+                (need_test_vector_values || (need_test_vector_jacobians && !face_mapping_affine))) {
                 test_basis.evaluate_vector_values(xi_test, vec_values_at_pt);
             }
-            if (need_test_vector_jacobians) {
+            if (!test_vector_bcache && need_test_vector_jacobians) {
                 test_basis.evaluate_vector_jacobians(xi_test, vec_jacobians_at_pt);
             }
-            if (need_basis_curls) {
+            if (!test_vector_bcache && need_basis_curls) {
                 test_basis.evaluate_curl(xi_test, vec_curls_at_pt);
             }
-            if (need_basis_divergences) {
+            if (!test_vector_bcache && need_basis_divergences) {
                 test_basis.evaluate_divergence(xi_test, vec_divs_at_pt);
             }
 
@@ -12800,7 +14369,9 @@ void StandardAssembler::prepareContextFace(
                 const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
 
                 if (need_test_vector_values) {
-                    const auto& vref = vec_values_at_pt[static_cast<std::size_t>(i)];
+                    const auto vref = test_vector_bcache
+                        ? test_vector_bcache->vectorValue(static_cast<std::size_t>(i), qsz)
+                        : vec_values_at_pt[static_cast<std::size_t>(i)];
                     AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                     if (cont == Continuity::H_curl) {
                         for (int r = 0; r < dim; ++r) {
@@ -12826,14 +14397,21 @@ void StandardAssembler::prepareContextFace(
 
                 if (need_test_vector_jacobians) {
                     const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
-                    const auto& vref_for_gradient =
-                        face_mapping_affine ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(i)];
+                    const math::Vector<Real, 3> vref_for_gradient =
+                        face_mapping_affine
+                            ? zero_vref
+                            : (test_vector_bcache
+                                   ? test_vector_bcache->vectorValue(static_cast<std::size_t>(i), qsz)
+                                   : vec_values_at_pt[static_cast<std::size_t>(i)]);
+                    const basis::VectorJacobian jac_ref = test_vector_bcache
+                        ? test_vector_bcache->vectorJacobianMatrix(static_cast<std::size_t>(i), qsz)
+                        : vec_jacobians_at_pt[static_cast<std::size_t>(i)];
                     scratch_basis_vector_jacobians_[idx] =
                         transformVectorBasisJacobian(J,
                                                      J_inv,
                                                      det_J,
                                                      vref_for_gradient,
-                                                     vec_jacobians_at_pt[static_cast<std::size_t>(i)],
+                                                     jac_ref,
                                                      cont,
                                                      face_mapping_affine,
                                                      piola_geometry ? &*piola_geometry : nullptr,
@@ -12841,7 +14419,9 @@ void StandardAssembler::prepareContextFace(
                 }
 
                 if (need_basis_curls) {
-                    const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(i)];
+                    const auto cref = test_vector_bcache
+                        ? test_vector_bcache->vectorCurl(static_cast<std::size_t>(i), qsz)
+                        : vec_curls_at_pt[static_cast<std::size_t>(i)];
                     AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
                     const Real inv_det = Real(1) / det_J;
                     for (int r = 0; r < 3; ++r) {
@@ -12856,8 +14436,11 @@ void StandardAssembler::prepareContextFace(
                 }
 
                 if (need_basis_divergences) {
+                    const Real div_ref = test_vector_bcache
+                        ? test_vector_bcache->vectorDivergenceValue(static_cast<std::size_t>(i), qsz)
+                        : vec_divs_at_pt[static_cast<std::size_t>(i)];
                     scratch_basis_divergences_[idx] =
-                        vec_divs_at_pt[static_cast<std::size_t>(i)] / det_J;
+                        div_ref / det_J;
                 }
             }
         } else {
@@ -12927,16 +14510,18 @@ void StandardAssembler::prepareContextFace(
 
         if (&test_space != &trial_space) {
             if (trial_is_vector_basis) {
-                if (need_trial_vector_values || (need_trial_vector_jacobians && !face_mapping_affine)) {
+                const auto qsz = static_cast<std::size_t>(q);
+                if (!trial_vector_bcache &&
+                    (need_trial_vector_values || (need_trial_vector_jacobians && !face_mapping_affine))) {
                     trial_basis.evaluate_vector_values(xi_trial, vec_values_at_pt);
                 }
-                if (need_trial_vector_jacobians) {
+                if (!trial_vector_bcache && need_trial_vector_jacobians) {
                     trial_basis.evaluate_vector_jacobians(xi_trial, vec_jacobians_at_pt);
                 }
-                if (need_basis_curls) {
+                if (!trial_vector_bcache && need_basis_curls) {
                     trial_basis.evaluate_curl(xi_trial, vec_curls_at_pt);
                 }
-                if (need_basis_divergences) {
+                if (!trial_vector_bcache && need_basis_divergences) {
                     trial_basis.evaluate_divergence(xi_trial, vec_divs_at_pt);
                 }
 
@@ -12945,7 +14530,9 @@ void StandardAssembler::prepareContextFace(
                     const std::size_t idx = static_cast<std::size_t>(j * n_qpts + q);
 
                     if (need_trial_vector_values) {
-                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        const auto vref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorValue(static_cast<std::size_t>(j), qsz)
+                            : vec_values_at_pt[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                         if (cont == Continuity::H_curl) {
                             for (int r = 0; r < dim; ++r) {
@@ -12971,14 +14558,21 @@ void StandardAssembler::prepareContextFace(
 
                     if (need_trial_vector_jacobians) {
                         const math::Vector<Real, 3> zero_vref{0.0, 0.0, 0.0};
-                        const auto& vref_for_gradient =
-                            face_mapping_affine ? zero_vref : vec_values_at_pt[static_cast<std::size_t>(j)];
+                        const math::Vector<Real, 3> vref_for_gradient =
+                            face_mapping_affine
+                                ? zero_vref
+                                : (trial_vector_bcache
+                                       ? trial_vector_bcache->vectorValue(static_cast<std::size_t>(j), qsz)
+                                       : vec_values_at_pt[static_cast<std::size_t>(j)]);
+                        const basis::VectorJacobian jac_ref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorJacobianMatrix(static_cast<std::size_t>(j), qsz)
+                            : vec_jacobians_at_pt[static_cast<std::size_t>(j)];
                         trial_basis_vector_jacobians[idx] =
                             transformVectorBasisJacobian(J,
                                                          J_inv,
                                                          det_J,
                                                          vref_for_gradient,
-                                                         vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                         jac_ref,
                                                          cont,
                                                          face_mapping_affine,
                                                          piola_geometry ? &*piola_geometry : nullptr,
@@ -12986,7 +14580,9 @@ void StandardAssembler::prepareContextFace(
                     }
 
                     if (need_basis_curls) {
-                        const auto& cref = vec_curls_at_pt[static_cast<std::size_t>(j)];
+                        const auto cref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorCurl(static_cast<std::size_t>(j), qsz)
+                            : vec_curls_at_pt[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D cphys{0.0, 0.0, 0.0};
                         const Real inv_det = Real(1) / det_J;
                         for (int r = 0; r < 3; ++r) {
@@ -13001,8 +14597,11 @@ void StandardAssembler::prepareContextFace(
                     }
 
                     if (need_basis_divergences) {
+                        const Real div_ref = trial_vector_bcache
+                            ? trial_vector_bcache->vectorDivergenceValue(static_cast<std::size_t>(j), qsz)
+                            : vec_divs_at_pt[static_cast<std::size_t>(j)];
                         trial_basis_divergences[idx] =
-                            vec_divs_at_pt[static_cast<std::size_t>(j)] / det_J;
+                            div_ref / det_J;
                     }
                 }
             } else {
@@ -13955,24 +15554,37 @@ void StandardAssembler::populateFieldSolutionData(
                     return false;
                 }
                 if (need_gradients_local) {
-                    if (entry->gradients.size() < n_qpts_local) {
+                    if (entry->gradients.size() <
+                        static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
                         return false;
-                    }
-                    for (std::size_t q = 0; q < n_qpts_local; ++q) {
-                        if (entry->gradients[q].size() < static_cast<std::size_t>(expected_dofs)) {
-                            return false;
-                        }
                     }
                 }
                 if (need_hessians_local) {
-                    if (entry->hessians.size() < n_qpts_local) {
+                    if (entry->hessians.size() <
+                        static_cast<std::size_t>(expected_dofs) * 9u * n_qpts_local) {
                         return false;
                     }
-                    for (std::size_t q = 0; q < n_qpts_local; ++q) {
-                        if (entry->hessians[q].size() < static_cast<std::size_t>(expected_dofs)) {
-                            return false;
-                        }
-                    }
+                }
+                return true;
+            };
+
+        const auto vector_cache_entry_usable =
+            [&](const basis::BasisCacheEntry* entry,
+                LocalIndex expected_dofs,
+                bool need_gradients_local) -> bool {
+                const auto n_qpts_local =
+                    static_cast<std::size_t>(context.numQuadraturePoints());
+                if (entry == nullptr ||
+                    entry->num_qpts != n_qpts_local ||
+                    entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                    entry->vector_values_xyz.size() <
+                        static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
+                    return false;
+                }
+                if (need_gradients_local &&
+                    entry->vector_jacobians.size() <
+                        static_cast<std::size_t>(expected_dofs) * 9u * n_qpts_local) {
+                    return false;
                 }
                 return true;
             };
@@ -14080,11 +15692,12 @@ void StandardAssembler::populateFieldSolutionData(
 	                    }
 	                }
 	                if (!field_bcache) {
-	                    field_bcache = &basis::BasisCache::instance().get_or_compute(
+	                    auto handle = basis::BasisCache::instance().prewarm_handle(
 	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+                        field_bcache = &handle.entry();
 	                    cached_field_bcache_.push_back(
                             {&basis, cached_quad_rule_.get(),
-                             need_gradients, need_hessians, field_bcache});
+                             need_gradients, need_hessians, std::move(handle), field_bcache});
 	                }
 	            }
                 if (!cache_entry_usable(field_bcache, n_dofs, need_gradients, need_hessians)) {
@@ -14102,14 +15715,18 @@ void StandardAssembler::populateFieldSolutionData(
             //  - hessians: zero for P1 (constant gradient → zero curvature)
             const bool p1_affine_grad = cached_mapping_affine_ && need_gradients &&
                                         field_bcache && n_qpts >= 2 && n_dofs > 0 &&
-                                        field_bcache->gradients.size() >= 2 &&
+                                        field_bcache->gradients.size() >=
+                                            static_cast<std::size_t>(n_dofs) * 3u *
+                                                static_cast<std::size_t>(n_qpts) &&
                                         [&]() -> bool {
                                             for (LocalIndex j = 0; j < n_dofs; ++j) {
-                                                const auto& g0 = field_bcache->gradients[0][static_cast<std::size_t>(j)];
-                                                const auto& g1 = field_bcache->gradients[1][static_cast<std::size_t>(j)];
+                                                const auto sj = static_cast<std::size_t>(j);
                                                 for (int d = 0; d < dim; ++d) {
-                                                    if (g0[static_cast<std::size_t>(d)] != g1[static_cast<std::size_t>(d)])
+                                                    const auto sd = static_cast<std::size_t>(d);
+                                                    if (field_bcache->gradientValue(sj, sd, 0u) !=
+                                                        field_bcache->gradientValue(sj, sd, 1u)) {
                                                         return false;
+                                                    }
                                                 }
                                             }
                                             return true;
@@ -14156,23 +15773,29 @@ void StandardAssembler::populateFieldSolutionData(
                     val += coef * basis_val;
 
                     if (do_grad_accum) {
-                        const auto& gref = field_bcache
-                            ? field_bcache->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
-                            : gradients_at_pt[static_cast<std::size_t>(j)];
                         for (int d = 0; d < dim; ++d) {
-                            gref_sum[d] += coef * gref[static_cast<std::size_t>(d)];
+                            const auto sd = static_cast<std::size_t>(d);
+                            const Real gref = field_bcache
+                                ? field_bcache->gradientValue(static_cast<std::size_t>(j),
+                                                              sd,
+                                                              static_cast<std::size_t>(q))
+                                : gradients_at_pt[static_cast<std::size_t>(j)][sd];
+                            gref_sum[sd] += coef * gref;
                         }
                     }
 
                     if (do_hess_accum) {
-                        const auto& hess_j = field_bcache
-                            ? field_bcache->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
-                            : hessians_at_pt[static_cast<std::size_t>(j)];
                         for (int r = 0; r < dim; ++r) {
                             for (int c = 0; c < dim; ++c) {
+                                const auto sr = static_cast<std::size_t>(r);
+                                const auto sc = static_cast<std::size_t>(c);
+                                const Real hess = field_bcache
+                                    ? field_bcache->hessianValue(static_cast<std::size_t>(j),
+                                                                 sr, sc,
+                                                                 static_cast<std::size_t>(q))
+                                    : hessians_at_pt[static_cast<std::size_t>(j)](sr, sc);
                                 H_ref_sum[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                                    coef * hess_j(static_cast<std::size_t>(r),
-                                                   static_cast<std::size_t>(c));
+                                    coef * hess;
                             }
                         }
                     }
@@ -14318,6 +15941,30 @@ void StandardAssembler::populateFieldSolutionData(
 
                 auto& vec_values_at_pt = scratch_vec_values_at_pt_;
                 auto& vec_jacobians_at_pt = scratch_vec_jacobians_at_pt_;
+                const basis::BasisCacheEntry* field_vector_bcache = nullptr;
+                if (cached_quad_rule_ &&
+                    static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
+                    for (const auto& fc : cached_field_bcache_) {
+                        if (fc.basis == &basis &&
+                            fc.quad == cached_quad_rule_.get() &&
+                            fc.gradients == need_gradients &&
+                            fc.hessians == false) {
+                            field_vector_bcache = fc.entry;
+                            break;
+                        }
+                    }
+                    if (!field_vector_bcache) {
+                        auto handle = basis::BasisCache::instance().prewarm_handle(
+                            basis, *cached_quad_rule_, need_gradients, false);
+                        field_vector_bcache = &handle.entry();
+                        cached_field_bcache_.push_back(
+                            {&basis, cached_quad_rule_.get(),
+                             need_gradients, false, std::move(handle), field_vector_bcache});
+                    }
+                }
+                if (!vector_cache_entry_usable(field_vector_bcache, n_dofs, need_gradients)) {
+                    field_vector_bcache = nullptr;
+                }
                 std::shared_ptr<geometry::GeometryMapping> piola_mapping;
                 bool vector_gradient_affine = true;
                 if (need_gradients) {
@@ -14328,9 +15975,11 @@ void StandardAssembler::populateFieldSolutionData(
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
-                    basis.evaluate_vector_values(xi, vec_values_at_pt);
-                    if (need_gradients) {
-                        basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                    if (!field_vector_bcache) {
+                        basis.evaluate_vector_values(xi, vec_values_at_pt);
+                        if (need_gradients) {
+                            basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                        }
                     }
 
                     const auto J = context.jacobian(q);
@@ -14351,7 +16000,10 @@ void StandardAssembler::populateFieldSolutionData(
                     AssemblyContext::Matrix3x3 grad_u{};
                     for (LocalIndex j = 0; j < n_dofs; ++j) {
                         const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        const auto vref = field_vector_bcache
+                            ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
+                                                               static_cast<std::size_t>(q))
+                            : vec_values_at_pt[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                         if (cont == Continuity::H_curl) {
                             for (int r = 0; r < dim; ++r) {
@@ -14377,12 +16029,16 @@ void StandardAssembler::populateFieldSolutionData(
                         u[1] += coef * vphys[1];
                         u[2] += coef * vphys[2];
                         if (need_gradients) {
+                            const basis::VectorJacobian jac_ref = field_vector_bcache
+                                ? field_vector_bcache->vectorJacobianMatrix(static_cast<std::size_t>(j),
+                                                                            static_cast<std::size_t>(q))
+                                : vec_jacobians_at_pt[static_cast<std::size_t>(j)];
                             const auto grad_phi =
                                 transformVectorBasisJacobian(J,
                                                              J_inv,
                                                              det_J,
                                                              vref,
-                                                             vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                             jac_ref,
                                                              cont,
                                                              vector_gradient_affine,
                                                              piola_geometry ? &*piola_geometry : nullptr,
@@ -14429,10 +16085,12 @@ void StandardAssembler::populateFieldSolutionData(
                                              AssemblyContext::Vector3D{0.0, 0.0, 0.0});
 
                         for (LocalIndex q = 0; q < n_qpts; ++q) {
-                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                                           qpts[static_cast<std::size_t>(q)][1],
-                                                           qpts[static_cast<std::size_t>(q)][2]};
-                            basis.evaluate_vector_values(xi, vec_values_at_pt);
+                            if (!field_vector_bcache) {
+                                const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                               qpts[static_cast<std::size_t>(q)][1],
+                                                               qpts[static_cast<std::size_t>(q)][2]};
+                                basis.evaluate_vector_values(xi, vec_values_at_pt);
+                            }
 
                             const auto J = context.jacobian(q);
                             const auto J_inv = context.inverseJacobian(q);
@@ -14441,7 +16099,10 @@ void StandardAssembler::populateFieldSolutionData(
                             AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
                             for (LocalIndex j = 0; j < n_dofs; ++j) {
                                 const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                                const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                                const auto vref = field_vector_bcache
+                                    ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
+                                                                       static_cast<std::size_t>(q))
+                                    : vec_values_at_pt[static_cast<std::size_t>(j)];
                                 AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                                 if (cont == Continuity::H_curl) {
                                     for (int r = 0; r < dim; ++r) {
@@ -14517,11 +16178,12 @@ void StandardAssembler::populateFieldSolutionData(
 	                    }
 	                }
 	                if (!field_bcache_ps) {
-	                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
+	                    auto handle = basis::BasisCache::instance().prewarm_handle(
 	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
+                        field_bcache_ps = &handle.entry();
 	                    cached_field_bcache_.push_back(
                             {&basis, cached_quad_rule_.get(),
-                             need_gradients, need_hessians, field_bcache_ps});
+                             need_gradients, need_hessians, std::move(handle), field_bcache_ps});
 	                }
 	            }
                 if (!cache_entry_usable(field_bcache_ps, n_scalar_dofs,
@@ -14567,23 +16229,28 @@ void StandardAssembler::populateFieldSolutionData(
                         val_c += coef * basis_val;
 
                         if (need_gradients) {
-                            const auto& gref = field_bcache_ps
-                                ? field_bcache_ps->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
-                                : gradients_at_pt[static_cast<std::size_t>(sj)];
                             for (int d = 0; d < dim; ++d) {
-                                gref_sum_c[d] += coef * gref[static_cast<std::size_t>(d)];
+                                const auto sd = static_cast<std::size_t>(d);
+                                const Real gref = field_bcache_ps
+                                    ? field_bcache_ps->gradientValue(static_cast<std::size_t>(sj),
+                                                                     sd,
+                                                                     static_cast<std::size_t>(q))
+                                    : gradients_at_pt[static_cast<std::size_t>(sj)][sd];
+                                gref_sum_c[sd] += coef * gref;
                             }
                         }
 
                         if (need_hessians) {
-                            const auto& hess_sj = field_bcache_ps
-                                ? field_bcache_ps->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
-                                : hessians_at_pt[static_cast<std::size_t>(sj)];
                             for (int r = 0; r < dim; ++r) {
                                 for (int c = 0; c < dim; ++c) {
-                                    H_ref_sum_c[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                                        coef * hess_sj(static_cast<std::size_t>(r),
-                                                        static_cast<std::size_t>(c));
+                                    const auto sr = static_cast<std::size_t>(r);
+                                    const auto sc = static_cast<std::size_t>(c);
+                                    const Real hess = field_bcache_ps
+                                        ? field_bcache_ps->hessianValue(static_cast<std::size_t>(sj),
+                                                                        sr, sc,
+                                                                        static_cast<std::size_t>(q))
+                                        : hessians_at_pt[static_cast<std::size_t>(sj)](sr, sc);
+                                    H_ref_sum_c[sr][sc] += coef * hess;
                                 }
                             }
                         }
@@ -14764,51 +16431,99 @@ void StandardAssembler::populateFieldSolutionData(
     auto& scalar_hessians = ws.fsd_scalar_hessians;
     auto& scalar_laplacians = ws.fsd_scalar_laplacians;
 
-	    auto& vector_values = ws.fsd_vector_values;
-	    auto& vector_jacobians = ws.fsd_vector_jacobians;
-	    auto& vector_component_hessians = ws.fsd_vector_comp_hessians;
-	    auto& vector_component_laplacians = ws.fsd_vector_comp_laplacians;
-        const auto cache_entry_usable =
-            [&](const basis::BasisCacheEntry* entry,
-                LocalIndex expected_dofs,
-                bool need_gradients_local,
-                bool need_hessians_local) -> bool {
-                if (entry == nullptr ||
-                    entry->num_qpts != static_cast<std::size_t>(context.numQuadraturePoints()) ||
-                    entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
-                    entry->scalar_values.size() <
-                        static_cast<std::size_t>(expected_dofs) *
-                        static_cast<std::size_t>(context.numQuadraturePoints())) {
+    auto& vector_values = ws.fsd_vector_values;
+    auto& vector_jacobians = ws.fsd_vector_jacobians;
+    auto& vector_component_hessians = ws.fsd_vector_comp_hessians;
+    auto& vector_component_laplacians = ws.fsd_vector_comp_laplacians;
+    const auto cache_entry_usable =
+        [&](const basis::BasisCacheEntry* entry,
+            LocalIndex expected_dofs,
+            bool need_gradients_local,
+            bool need_hessians_local) -> bool {
+            if (entry == nullptr ||
+                entry->num_qpts != static_cast<std::size_t>(context.numQuadraturePoints()) ||
+                entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                entry->scalar_values.size() <
+                    static_cast<std::size_t>(expected_dofs) *
+                    static_cast<std::size_t>(context.numQuadraturePoints())) {
+                return false;
+            }
+            if (need_gradients_local) {
+                if (entry->gradients.size() < static_cast<std::size_t>(expected_dofs) *
+                                                   3u *
+                                                   static_cast<std::size_t>(context.numQuadraturePoints())) {
                     return false;
                 }
-                if (need_gradients_local) {
-                    if (entry->gradients.size() <
-                        static_cast<std::size_t>(context.numQuadraturePoints())) {
-                        return false;
-                    }
-                    for (std::size_t q = 0;
-                         q < static_cast<std::size_t>(context.numQuadraturePoints()); ++q) {
-                        if (entry->gradients[q].size() <
-                            static_cast<std::size_t>(expected_dofs)) {
-                            return false;
-                        }
-                    }
+            }
+            if (need_hessians_local) {
+                if (entry->hessians.size() < static_cast<std::size_t>(expected_dofs) *
+                                                  9u *
+                                                  static_cast<std::size_t>(context.numQuadraturePoints())) {
+                    return false;
                 }
-                if (need_hessians_local) {
-                    if (entry->hessians.size() <
-                        static_cast<std::size_t>(context.numQuadraturePoints())) {
-                        return false;
-                    }
-                    for (std::size_t q = 0;
-                         q < static_cast<std::size_t>(context.numQuadraturePoints()); ++q) {
-                        if (entry->hessians[q].size() <
-                            static_cast<std::size_t>(expected_dofs)) {
-                            return false;
-                        }
-                    }
+            }
+            return true;
+        };
+
+    const auto vector_cache_entry_usable =
+        [&](const basis::BasisCacheEntry* entry,
+            LocalIndex expected_dofs,
+            bool need_gradients_local) -> bool {
+            const auto n_qpts_local =
+                static_cast<std::size_t>(context.numQuadraturePoints());
+            if (entry == nullptr ||
+                entry->num_qpts != n_qpts_local ||
+                entry->num_dofs != static_cast<std::size_t>(expected_dofs) ||
+                entry->vector_values_xyz.size() <
+                    static_cast<std::size_t>(expected_dofs) * 3u * n_qpts_local) {
+                return false;
+            }
+            if (need_gradients_local &&
+                entry->vector_jacobians.size() <
+                    static_cast<std::size_t>(expected_dofs) * 9u * n_qpts_local) {
+                return false;
+            }
+            return true;
+        };
+
+    const auto workspace_basis_cache_entry =
+        [&](const basis::BasisFunction& basis_fn,
+            bool need_gradients_local,
+            bool need_hessians_local) -> const basis::BasisCacheEntry* {
+            if (!cached_quad_rule_ ||
+                static_cast<LocalIndex>(cached_quad_rule_->num_points()) !=
+                    context.numQuadraturePoints()) {
+                return nullptr;
+            }
+
+            const auto* quad = cached_quad_rule_.get();
+            for (const auto& entry : ws.basis_cache_entries) {
+                if (entry.basis == &basis_fn &&
+                    entry.quad == quad &&
+                    entry.gradients == need_gradients_local &&
+                    entry.hessians == need_hessians_local) {
+                    return entry.entry;
                 }
-                return true;
-            };
+            }
+
+            // Serial setup paths may already have prewarmed shared handles.
+            for (const auto& entry : cached_field_bcache_) {
+                if (entry.basis == &basis_fn &&
+                    entry.quad == quad &&
+                    entry.gradients == need_gradients_local &&
+                    entry.hessians == need_hessians_local) {
+                    return entry.entry;
+                }
+            }
+
+            auto handle = basis::BasisCache::instance().prewarm_handle(
+                basis_fn, *quad, need_gradients_local, need_hessians_local);
+            const auto* entry = &handle.entry();
+            ws.basis_cache_entries.push_back(
+                {&basis_fn, quad, need_gradients_local, need_hessians_local,
+                 std::move(handle), entry});
+            return entry;
+        };
 
     for (const auto& req : requirements) {
         FE_THROW_IF(req.field == INVALID_FIELD_ID, FEException,
@@ -14898,32 +16613,15 @@ void StandardAssembler::populateFieldSolutionData(
                 scalar_laplacians.clear();
             }
 
-            // Use BasisCache for field basis evaluations when quad rule is available.
-            // Read-only lookup in pre-populated cache; do NOT insert on miss
-            // (this overload may run from multiple threads).
-	            const basis::BasisCacheEntry* field_bcache = nullptr;
-	            if (cached_quad_rule_ &&
-	                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
-	                for (const auto& fc : cached_field_bcache_) {
-	                    if (fc.basis == &basis &&
-                            fc.quad == cached_quad_rule_.get() &&
-                            fc.gradients == need_gradients &&
-                            fc.hessians == need_hessians) {
-	                        field_bcache = fc.entry;
-	                        break;
-	                    }
-	                }
-                // Cache miss: query the global thread-safe BasisCache singleton
-                // but do NOT insert into cached_field_bcache_ (shared state).
-                if (!field_bcache) {
-	                    field_bcache = &basis::BasisCache::instance().get_or_compute(
-	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
-	                }
-	            }
-                if (!cache_entry_usable(field_bcache, n_dofs,
-                                        need_gradients, need_hessians)) {
-                    field_bcache = nullptr;
-                }
+            // Use a workspace-local handle cache in parallel paths. It keeps
+            // shared assembler state read-only and avoids repeated
+            // BasisCache key/hash/map work after the first cell on a worker.
+            const basis::BasisCacheEntry* field_bcache =
+                workspace_basis_cache_entry(basis, need_gradients, need_hessians);
+            if (!cache_entry_usable(field_bcache, n_dofs,
+                                    need_gradients, need_hessians)) {
+                field_bcache = nullptr;
+            }
 
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_span = context.inverseJacobians();
@@ -14961,23 +16659,28 @@ void StandardAssembler::populateFieldSolutionData(
                     val += coef * basis_val;
 
                     if (need_gradients) {
-                        const auto& gref = field_bcache
-                            ? field_bcache->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
-                            : gradients_at_pt[static_cast<std::size_t>(j)];
                         for (int d = 0; d < dim; ++d) {
-                            gref_sum[d] += coef * gref[static_cast<std::size_t>(d)];
+                            const auto sd = static_cast<std::size_t>(d);
+                            const Real gref = field_bcache
+                                ? field_bcache->gradientValue(static_cast<std::size_t>(j),
+                                                              sd,
+                                                              static_cast<std::size_t>(q))
+                                : gradients_at_pt[static_cast<std::size_t>(j)][sd];
+                            gref_sum[sd] += coef * gref;
                         }
                     }
 
                     if (need_hessians) {
-                        const auto& hess_j = field_bcache
-                            ? field_bcache->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(j)]
-                            : hessians_at_pt[static_cast<std::size_t>(j)];
                         for (int r = 0; r < dim; ++r) {
                             for (int c = 0; c < dim; ++c) {
-                                H_ref_sum[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                                    coef * hess_j(static_cast<std::size_t>(r),
-                                                   static_cast<std::size_t>(c));
+                                const auto sr = static_cast<std::size_t>(r);
+                                const auto sc = static_cast<std::size_t>(c);
+                                const Real hess = field_bcache
+                                    ? field_bcache->hessianValue(static_cast<std::size_t>(j),
+                                                                 sr, sc,
+                                                                 static_cast<std::size_t>(q))
+                                    : hessians_at_pt[static_cast<std::size_t>(j)](sr, sc);
+                                H_ref_sum[sr][sc] += coef * hess;
                             }
                         }
                     }
@@ -15106,6 +16809,11 @@ void StandardAssembler::populateFieldSolutionData(
 
                 auto& vec_values_at_pt = ws.vec_values_at_pt;
                 auto& vec_jacobians_at_pt = ws.vec_jacobians_at_pt;
+                const basis::BasisCacheEntry* field_vector_bcache =
+                    workspace_basis_cache_entry(basis, need_gradients, false);
+                if (!vector_cache_entry_usable(field_vector_bcache, n_dofs, need_gradients)) {
+                    field_vector_bcache = nullptr;
+                }
                 std::shared_ptr<geometry::GeometryMapping> piola_mapping;
                 bool vector_gradient_affine = true;
                 if (need_gradients) {
@@ -15116,9 +16824,11 @@ void StandardAssembler::populateFieldSolutionData(
                     const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
                                                    qpts[static_cast<std::size_t>(q)][1],
                                                    qpts[static_cast<std::size_t>(q)][2]};
-                    basis.evaluate_vector_values(xi, vec_values_at_pt);
-                    if (need_gradients) {
-                        basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                    if (!field_vector_bcache) {
+                        basis.evaluate_vector_values(xi, vec_values_at_pt);
+                        if (need_gradients) {
+                            basis.evaluate_vector_jacobians(xi, vec_jacobians_at_pt);
+                        }
                     }
 
                     const auto J = context.jacobian(q);
@@ -15139,7 +16849,10 @@ void StandardAssembler::populateFieldSolutionData(
                     AssemblyContext::Matrix3x3 grad_u{};
                     for (LocalIndex j = 0; j < n_dofs; ++j) {
                         const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                        const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                        const auto vref = field_vector_bcache
+                            ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
+                                                               static_cast<std::size_t>(q))
+                            : vec_values_at_pt[static_cast<std::size_t>(j)];
                         AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                         if (cont == Continuity::H_curl) {
                             for (int r = 0; r < dim; ++r) {
@@ -15165,12 +16878,16 @@ void StandardAssembler::populateFieldSolutionData(
                         u[1] += coef * vphys[1];
                         u[2] += coef * vphys[2];
                         if (need_gradients) {
+                            const basis::VectorJacobian jac_ref = field_vector_bcache
+                                ? field_vector_bcache->vectorJacobianMatrix(static_cast<std::size_t>(j),
+                                                                            static_cast<std::size_t>(q))
+                                : vec_jacobians_at_pt[static_cast<std::size_t>(j)];
                             const auto grad_phi =
                                 transformVectorBasisJacobian(J,
                                                              J_inv,
                                                              det_J,
                                                              vref,
-                                                             vec_jacobians_at_pt[static_cast<std::size_t>(j)],
+                                                             jac_ref,
                                                              cont,
                                                              vector_gradient_affine,
                                                              piola_geometry ? &*piola_geometry : nullptr,
@@ -15217,10 +16934,12 @@ void StandardAssembler::populateFieldSolutionData(
                                              AssemblyContext::Vector3D{0.0, 0.0, 0.0});
 
                         for (LocalIndex q = 0; q < n_qpts; ++q) {
-                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                                           qpts[static_cast<std::size_t>(q)][1],
-                                                           qpts[static_cast<std::size_t>(q)][2]};
-                            basis.evaluate_vector_values(xi, vec_values_at_pt);
+                            if (!field_vector_bcache) {
+                                const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+                                                               qpts[static_cast<std::size_t>(q)][1],
+                                                               qpts[static_cast<std::size_t>(q)][2]};
+                                basis.evaluate_vector_values(xi, vec_values_at_pt);
+                            }
 
                             const auto J = context.jacobian(q);
                             const auto J_inv = context.inverseJacobian(q);
@@ -15229,7 +16948,10 @@ void StandardAssembler::populateFieldSolutionData(
                             AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
                             for (LocalIndex j = 0; j < n_dofs; ++j) {
                                 const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                                const auto& vref = vec_values_at_pt[static_cast<std::size_t>(j)];
+                                const auto vref = field_vector_bcache
+                                    ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
+                                                                       static_cast<std::size_t>(q))
+                                    : vec_values_at_pt[static_cast<std::size_t>(j)];
                                 AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
                                 if (cont == Continuity::H_curl) {
                                     for (int r = 0; r < dim; ++r) {
@@ -15290,31 +17012,14 @@ void StandardAssembler::populateFieldSolutionData(
                 vector_component_laplacians.clear();
             }
 
-            // Use BasisCache for ProductSpace field basis evaluations.
-            // Read-only lookup in pre-populated cache; do NOT insert on miss.
-	            const basis::BasisCacheEntry* field_bcache_ps = nullptr;
-	            if (cached_quad_rule_ &&
-	                static_cast<LocalIndex>(cached_quad_rule_->num_points()) == n_qpts) {
-	                for (const auto& fc : cached_field_bcache_) {
-	                    if (fc.basis == &basis &&
-                            fc.quad == cached_quad_rule_.get() &&
-                            fc.gradients == need_gradients &&
-                            fc.hessians == need_hessians) {
-	                        field_bcache_ps = fc.entry;
-	                        break;
-	                    }
-	                }
-                // Cache miss: query the global thread-safe BasisCache singleton
-                // but do NOT insert into cached_field_bcache_ (shared state).
-                if (!field_bcache_ps) {
-	                    field_bcache_ps = &basis::BasisCache::instance().get_or_compute(
-	                        basis, *cached_quad_rule_, need_gradients, need_hessians);
-	                }
-	            }
-                if (!cache_entry_usable(field_bcache_ps, n_scalar_dofs,
-                                        need_gradients, need_hessians)) {
-                    field_bcache_ps = nullptr;
-                }
+            // Use BasisCache for ProductSpace field basis evaluations through
+            // the workspace-local handle cache.
+            const basis::BasisCacheEntry* field_bcache_ps =
+                workspace_basis_cache_entry(basis, need_gradients, need_hessians);
+            if (!cache_entry_usable(field_bcache_ps, n_scalar_dofs,
+                                    need_gradients, need_hessians)) {
+                field_bcache_ps = nullptr;
+            }
 
             // Get inverse Jacobians span once (avoid per-QP accessor overhead).
             const auto ctx_inv_jacs_ps = context.inverseJacobians();
@@ -15354,23 +17059,28 @@ void StandardAssembler::populateFieldSolutionData(
                         val_c += coef * basis_val;
 
                         if (need_gradients) {
-                            const auto& gref = field_bcache_ps
-                                ? field_bcache_ps->gradients[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
-                                : gradients_at_pt[static_cast<std::size_t>(sj)];
                             for (int d = 0; d < dim; ++d) {
-                                gref_sum_c[d] += coef * gref[static_cast<std::size_t>(d)];
+                                const auto sd = static_cast<std::size_t>(d);
+                                const Real gref = field_bcache_ps
+                                    ? field_bcache_ps->gradientValue(static_cast<std::size_t>(sj),
+                                                                     sd,
+                                                                     static_cast<std::size_t>(q))
+                                    : gradients_at_pt[static_cast<std::size_t>(sj)][sd];
+                                gref_sum_c[sd] += coef * gref;
                             }
                         }
 
                         if (need_hessians) {
-                            const auto& hess_sj = field_bcache_ps
-                                ? field_bcache_ps->hessians[static_cast<std::size_t>(q)][static_cast<std::size_t>(sj)]
-                                : hessians_at_pt[static_cast<std::size_t>(sj)];
                             for (int r = 0; r < dim; ++r) {
                                 for (int c = 0; c < dim; ++c) {
-                                    H_ref_sum_c[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                                        coef * hess_sj(static_cast<std::size_t>(r),
-                                                        static_cast<std::size_t>(c));
+                                    const auto sr = static_cast<std::size_t>(r);
+                                    const auto sc = static_cast<std::size_t>(c);
+                                    const Real hess = field_bcache_ps
+                                        ? field_bcache_ps->hessianValue(static_cast<std::size_t>(sj),
+                                                                        sr, sc,
+                                                                        static_cast<std::size_t>(q))
+                                        : hessians_at_pt[static_cast<std::size_t>(sj)](sr, sc);
+                                    H_ref_sum_c[sr][sc] += coef * hess;
                                 }
                             }
                         }
@@ -16007,8 +17717,9 @@ void StandardAssembler::ensureFieldRecipes(
             if (first_cell >= 0) {
                 const ElementType cell_type = mesh.getCellType(first_cell);
                 const auto& element = getElement(space, first_cell, cell_type);
-                recipe.bcache = &basis::BasisCache::instance().get_or_compute(
+                recipe.bcache_handle = basis::BasisCache::instance().prewarm_handle(
                     element.basis(), *cached_quad_rule_, need_grads, need_hess);
+                recipe.bcache = &recipe.bcache_handle.entry();
             }
         }
 
@@ -16098,13 +17809,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
             }
 
             if (ctx_inv_jacs.size() < n_qpts_sz ||
-                recipe.bcache->gradients.size() < n_qpts_sz) {
-                return false;
-            }
-            for (std::size_t q = 0; q < n_qpts_sz; ++q) {
-                if (recipe.bcache->gradients[q].size() < n_scalar_sz) {
+                recipe.bcache->gradients.size() < n_scalar_sz * 3u * n_qpts_sz) {
                     return false;
-                }
             }
             return true;
         };
@@ -16275,10 +17981,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
 
             if (field_bcache && !field_bcache->scalar_values.empty()) {
                 // Fast path: use cached reference basis.
-                // BasisCache gradients are stored as [qp][dof].
                 const auto& sv = field_bcache->scalar_values;
-                const auto& sg = field_bcache->gradients;
-                const bool have_grads = want_gradients && !sg.empty();
+                const bool have_grads = want_gradients && !field_bcache->gradients.empty();
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     Real val_sum = 0.0;
@@ -16289,11 +17993,11 @@ void StandardAssembler::populateFieldSolutionDataFast(
                                          static_cast<std::size_t>(n_qpts) +
                                          static_cast<std::size_t>(q)];
                         if (have_grads) {
-                            const auto& gi = sg[static_cast<std::size_t>(q)]
-                                               [static_cast<std::size_t>(i)];
-                            gref0 += c * gi[0];
-                            gref1 += c * gi[1];
-                            gref2 += c * gi[2];
+                            const auto si = static_cast<std::size_t>(i);
+                            const auto sq = static_cast<std::size_t>(q);
+                            gref0 += c * field_bcache->gradientValue(si, 0u, sq);
+                            gref1 += c * field_bcache->gradientValue(si, 1u, sq);
+                            gref2 += c * field_bcache->gradientValue(si, 2u, sq);
                         }
                     }
                     if (want_values) {
@@ -16359,8 +18063,7 @@ void StandardAssembler::populateFieldSolutionDataFast(
 
             if (field_bcache && !field_bcache->scalar_values.empty()) {
                 const auto& sv = field_bcache->scalar_values;
-                const auto& sg = field_bcache->gradients;
-                const bool have_grads = want_gradients && !sg.empty();
+                const bool have_grads = want_gradients && !field_bcache->gradients.empty();
 
                 for (LocalIndex q = 0; q < n_qpts; ++q) {
                     AssemblyContext::Vector3D v_sum{0.0, 0.0, 0.0};
@@ -16372,11 +18075,11 @@ void StandardAssembler::populateFieldSolutionDataFast(
                                            static_cast<std::size_t>(q)];
                         Real gref0 = 0, gref1 = 0, gref2 = 0;
                         if (have_grads) {
-                            const auto& gi = sg[static_cast<std::size_t>(q)]
-                                               [static_cast<std::size_t>(si)];
-                            gref0 = gi[0];
-                            gref1 = gi[1];
-                            gref2 = gi[2];
+                            const auto ssi = static_cast<std::size_t>(si);
+                            const auto sq = static_cast<std::size_t>(q);
+                            gref0 = field_bcache->gradientValue(ssi, 0u, sq);
+                            gref1 = field_bcache->gradientValue(ssi, 1u, sq);
+                            gref2 = field_bcache->gradientValue(ssi, 2u, sq);
                         }
 
                         for (int comp = 0; comp < vdim; ++comp) {

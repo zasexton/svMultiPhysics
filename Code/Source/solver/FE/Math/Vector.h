@@ -39,7 +39,7 @@ class Vector : public VectorExpr<Vector<T, N>> {
     static_assert(N > 0, "Vector dimension must be positive");
 
 private:
-    alignas(kFEPreferredAlignmentBytes) T data_[N];  // Cache-line/SIMD alignment
+    alignas(kFEFixedObjectAlignmentBytes) T data_[N];  // SIMD-friendly alignment
 
 public:
     // Type definitions

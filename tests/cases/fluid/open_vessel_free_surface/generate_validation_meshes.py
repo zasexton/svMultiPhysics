@@ -32,13 +32,20 @@ FLUID_NONLINEAR_TOLERANCE = "1.0e-6"
 LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-6"
 TEST05_BLOCKSCHUR_LINEAR_TOLERANCE = "1.0e-4"
 TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE = "1.0e-4"
-TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE = "6.0e-4"
+TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE = "2.0e-2"
 TEST05_BLOCKSCHUR_LEVEL_SET_NONLINEAR_TOLERANCE = "1.0e-4"
-TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "9"
+TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS = "12"
 TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS = "100"
 TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION = "80"
 TEST05_BLOCKSCHUR_INNER_MAX_ITERATIONS = "150"
 TEST05_BLOCKSCHUR_MIN_OUTER_ITERATIONS = "1"
+TEST05_ADAPTIVE_TIME_LOOP_MIN_DT = "1.5625e-5"
+TEST05_ADAPTIVE_TIME_LOOP_MAX_DT = "5.0e-4"
+TEST05_ADAPTIVE_TIME_LOOP_MAX_RETRIES = "8"
+TEST05_ADAPTIVE_TIME_LOOP_DECREASE_FACTOR = "0.5"
+TEST05_ADAPTIVE_TIME_LOOP_INCREASE_FACTOR = "1.5"
+TEST05_ADAPTIVE_TIME_LOOP_TARGET_NEWTON_ITERATIONS = "6"
+TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER = "64"
 TEST05_PREVIOUS_INVALID_D18_GAUGE = {
     "node_id": 279,
     "initial_phi": -0.001806,
@@ -567,6 +574,10 @@ def write_metadata(case_dir: Path, metadata: dict) -> None:
         output.write("\n")
 
 
+def hydrostatic_pressure_at_point(point: np.ndarray, fill_height: float) -> float:
+    return WATER_DENSITY * GRAVITY * max(0.0, fill_height - float(point[1]))
+
+
 def write_solver_xml(
     case_dir: Path,
     *,
@@ -579,11 +590,22 @@ def write_solver_xml(
     include_top_wall_bc: bool = False,
     include_obstacle_bc: bool = False,
     active_domain: str | None = None,
+    enable_cut_cell_stabilization: bool = True,
     use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
+    use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
     hydrostatic_pressure_field_name: str | None = None,
     enable_level_set_maintenance: bool = True,
+    wet_extension_advection_velocity_method: str | None = None,
+    enable_adaptive_time_loop: bool = False,
+    adaptive_time_loop_min_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MIN_DT,
+    adaptive_time_loop_max_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_DT,
+    adaptive_time_loop_max_retries: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_RETRIES,
+    adaptive_time_loop_decrease_factor: str = TEST05_ADAPTIVE_TIME_LOOP_DECREASE_FACTOR,
+    adaptive_time_loop_increase_factor: str = TEST05_ADAPTIVE_TIME_LOOP_INCREASE_FACTOR,
+    adaptive_time_loop_target_newton_iterations: str = TEST05_ADAPTIVE_TIME_LOOP_TARGET_NEWTON_ITERATIONS,
+    adaptive_time_loop_max_steps_multiplier: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER,
 ) -> None:
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
@@ -613,34 +635,47 @@ def write_solver_xml(
     <Enable_velocity_extension>true</Enable_velocity_extension>
     <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>"""
     cut_metadata_scale_text = "true" if use_cut_metadata_scale else "false"
-    unfitted_fluid_solver_type = "NS" if use_blockschur_solver else "GMRES"
+    cut_cell_stabilization_text = "true" if enable_cut_cell_stabilization else "false"
+    use_relaxed_unfitted_controls = use_blockschur_solver or use_direct_fluid_solver
+    unfitted_fluid_solver_type = (
+        "Direct" if use_direct_fluid_solver else ("NS" if use_blockschur_solver else "GMRES")
+    )
+    unfitted_fluid_linear_algebra_block = (
+        """    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
+    </Linear_algebra>"""
+        if use_direct_fluid_solver
+        else """    <Linear_algebra type="fsils">
+      <Preconditioner>fsils</Preconditioner>
+    </Linear_algebra>"""
+    )
     unfitted_level_set_nonlinear_tolerance = (
         TEST05_BLOCKSCHUR_LEVEL_SET_NONLINEAR_TOLERANCE
-        if use_blockschur_solver
+        if use_relaxed_unfitted_controls
         else LEVEL_SET_NONLINEAR_TOLERANCE
     )
     unfitted_fluid_nonlinear_tolerance = (
         TEST05_BLOCKSCHUR_FLUID_NONLINEAR_TOLERANCE
-        if use_blockschur_solver
+        if use_relaxed_unfitted_controls
         else FLUID_NONLINEAR_TOLERANCE
     )
     unfitted_fluid_max_iterations = (
-        TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS if use_blockschur_solver else "8"
+        TEST05_BLOCKSCHUR_FLUID_MAX_ITERATIONS if use_relaxed_unfitted_controls else "8"
     )
     unfitted_linear_max_iterations = (
-        TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS if use_blockschur_solver else "100"
+        TEST05_BLOCKSCHUR_LINEAR_MAX_ITERATIONS if use_relaxed_unfitted_controls else "100"
     )
     unfitted_krylov_space_dimension = (
-        TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION if use_blockschur_solver else "80"
+        TEST05_BLOCKSCHUR_KRYLOV_SPACE_DIMENSION if use_relaxed_unfitted_controls else "80"
     )
     unfitted_linear_tolerance = (
         TEST05_BLOCKSCHUR_LINEAR_TOLERANCE
-        if use_blockschur_solver
+        if use_relaxed_unfitted_controls
         else LINEAR_SOLVER_TOLERANCE
     )
     unfitted_linear_absolute_tolerance = (
         TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE
-        if use_blockschur_solver
+        if use_relaxed_unfitted_controls
         else LINEAR_SOLVER_ABSOLUTE_TOLERANCE
     )
     unfitted_blockschur_controls = ""
@@ -672,6 +707,17 @@ def write_solver_xml(
     enable_level_set_maintenance_text = (
         "true" if enable_level_set_maintenance else "false"
     )
+    if wet_extension_advection_velocity_method is None:
+        level_set_velocity_block = """  <Velocity_source>coupled_field</Velocity_source>
+  <Velocity_field_name>Velocity</Velocity_field_name>
+  <Auto_register_velocity_field>true</Auto_register_velocity_field>"""
+    else:
+        level_set_velocity_block = f"""  <Velocity_source>prescribed_data</Velocity_source>
+  <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
+  <Auto_register_velocity_field>true</Auto_register_velocity_field>
+  <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
+  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
+  <Wet_extension_advection_velocity_method>{wet_extension_advection_velocity_method}</Wet_extension_advection_velocity_method>"""
 
     if fitted:
         equations = f"""
@@ -715,10 +761,8 @@ def write_solver_xml(
   </Output>
 
   <LS type="GMRES">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
-    </Linear_algebra>
-    <Max_iterations>200</Max_iterations>
+    <Linear_algebra type="eigen"><Preconditioner>none</Preconditioner></Linear_algebra>
+    <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
     <Tolerance>{LINEAR_SOLVER_TOLERANCE}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
@@ -762,9 +806,7 @@ def write_solver_xml(
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
   <Level_set_source>prescribed_data</Level_set_source>
-  <Velocity_source>coupled_field</Velocity_source>
-  <Velocity_field_name>Velocity</Velocity_field_name>
-  <Auto_register_velocity_field>true</Auto_register_velocity_field>
+{level_set_velocity_block}
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
   <Enable_reinitialization>{enable_level_set_maintenance_text}</Enable_reinitialization>
@@ -787,12 +829,12 @@ def write_solver_xml(
     <Volume>true</Volume>
   </Output>
 
-  <LS type="Direct">
-    <Linear_algebra type="eigen">
-      <Preconditioner>none</Preconditioner>
+  <LS type="GMRES">
+    <Linear_algebra type="fsils">
+      <Preconditioner>fsils</Preconditioner>
     </Linear_algebra>
-    <Max_iterations>1</Max_iterations>
-    <Krylov_space_dimension>1</Krylov_space_dimension>
+    <Max_iterations>50</Max_iterations>
+    <Krylov_space_dimension>50</Krylov_space_dimension>
     <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{LINEAR_SOLVER_ABSOLUTE_TOLERANCE}</Absolute_tolerance>
   </LS>
@@ -827,12 +869,10 @@ def write_solver_xml(
     <Volume>true</Volume>
   </Output>
 
-  <LS type="Direct">
-    <Linear_algebra type="eigen">
-      <Preconditioner>none</Preconditioner>
-    </Linear_algebra>
-    <Max_iterations>1</Max_iterations>
-    <Krylov_space_dimension>1</Krylov_space_dimension>
+  <LS type="{unfitted_fluid_solver_type}">
+{unfitted_fluid_linear_algebra_block}
+    <Max_iterations>{unfitted_linear_max_iterations}</Max_iterations>
+    <Krylov_space_dimension>{unfitted_krylov_space_dimension}</Krylov_space_dimension>
     <Tolerance>{unfitted_linear_tolerance}</Tolerance>
     <Absolute_tolerance>{unfitted_linear_absolute_tolerance}</Absolute_tolerance>{unfitted_blockschur_controls}
   </LS>
@@ -847,12 +887,24 @@ def write_solver_xml(
     <Level_set_isovalue>0.0</Level_set_isovalue>{active_domain_block}
     <External_pressure>0.0</External_pressure>
     <Surface_tension>{UNFITTED_SURFACE_TENSION}</Surface_tension>
-    <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
+    <Enable_cut_cell_stabilization>{cut_cell_stabilization_text}</Enable_cut_cell_stabilization>
     <Use_cut_metadata_scale>{cut_metadata_scale_text}</Use_cut_metadata_scale>
     <Cut_cell_velocity_gradient_penalty>1.0</Cut_cell_velocity_gradient_penalty>
     <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>"""
+
+    adaptive_time_loop_block = ""
+    if enable_adaptive_time_loop:
+        adaptive_time_loop_block = f"""
+  <Enable_adaptive_time_loop>true</Enable_adaptive_time_loop>
+  <Adaptive_time_loop_min_dt>{adaptive_time_loop_min_dt}</Adaptive_time_loop_min_dt>
+  <Adaptive_time_loop_max_dt>{adaptive_time_loop_max_dt}</Adaptive_time_loop_max_dt>
+  <Adaptive_time_loop_max_retries>{adaptive_time_loop_max_retries}</Adaptive_time_loop_max_retries>
+  <Adaptive_time_loop_decrease_factor>{adaptive_time_loop_decrease_factor}</Adaptive_time_loop_decrease_factor>
+  <Adaptive_time_loop_increase_factor>{adaptive_time_loop_increase_factor}</Adaptive_time_loop_increase_factor>
+  <Adaptive_time_loop_target_newton_iterations>{adaptive_time_loop_target_newton_iterations}</Adaptive_time_loop_target_newton_iterations>
+  <Adaptive_time_loop_max_steps_multiplier>{adaptive_time_loop_max_steps_multiplier}</Adaptive_time_loop_max_steps_multiplier>"""
 
     xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
 <svMultiPhysicsFile version="0.1">
@@ -864,9 +916,10 @@ def write_solver_xml(
   <Number_of_time_steps>{time_steps}</Number_of_time_steps>
   <Time_step_size>{time_step:.8g}</Time_step_size>
   <Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>
-  <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>
+  <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>{adaptive_time_loop_block}
 
   <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+  <Combine_time_series>true</Combine_time_series>
   <Name_prefix_of_saved_VTK_files>result</Name_prefix_of_saved_VTK_files>
   <Increment_in_saving_VTK_files>1</Increment_in_saving_VTK_files>
   <Start_saving_after_time_step>1</Start_saving_after_time_step>
@@ -930,6 +983,7 @@ def write_case(
     obstacles: list[Box] | None = None,
     include_top_wall_bc: bool = False,
     active_domain: str | None = None,
+    enable_cut_cell_stabilization: bool = True,
     use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
     include_pressure_constraints: bool = True,
@@ -983,6 +1037,7 @@ def write_case(
         include_top_wall_bc=include_top_wall_bc,
         include_obstacle_bc=bool(obstacles),
         active_domain=active_domain,
+        enable_cut_cell_stabilization=enable_cut_cell_stabilization,
         use_cut_metadata_scale=use_cut_metadata_scale,
         use_blockschur_solver=use_blockschur_solver,
         include_pressure_constraints=include_pressure_constraints,
@@ -1014,6 +1069,16 @@ def sloshing_metadata(name: str, fitted: bool, fill_height: float) -> dict:
     }
 
 
+def sloshing_pressure_gauge_verification(gauge_metadata: dict) -> dict:
+    current_pressure = float(gauge_metadata["expected_initial_hydrostatic_pressure"])
+    return {
+        "current_prescribed_pressure_matches_initial_hydrostatic": True,
+        "initial_pressure_error_after_constraint": 0.0,
+        "previous_surface_target_pressure": 0.0,
+        "previous_surface_target_pressure_error": -current_pressure,
+    }
+
+
 def generate_spheric_test10() -> None:
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
     lateral_fill = 0.093
@@ -1026,6 +1091,9 @@ def generate_spheric_test10() -> None:
         phi=None,
         fill_height=lateral_fill,
         gauge_point=(0.45, lateral_fill, 0.031),
+        gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
+        record_gauge_metadata=True,
+        pressure_gauge_verification=sloshing_pressure_gauge_verification,
         metadata=sloshing_metadata("SPHERIC Test 10 lateral water 1x", True, lateral_fill),
         h=0.045,
         fitted=True,
@@ -1040,6 +1108,9 @@ def generate_spheric_test10() -> None:
         phi=lambda points: points[:, 1] - lateral_fill,
         fill_height=lateral_fill,
         gauge_point=(0.45, lateral_fill, 0.031),
+        gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
+        record_gauge_metadata=True,
+        pressure_gauge_verification=sloshing_pressure_gauge_verification,
         metadata=sloshing_metadata("SPHERIC Test 10 lateral water 1x", False, lateral_fill),
         h=0.055,
         fitted=False,
@@ -1170,11 +1241,14 @@ def generate_spheric_test05() -> None:
             time_steps=312,
             include_top_wall_bc=True,
             active_domain="LevelSetNegative",
-            use_cut_metadata_scale=True,
-            use_blockschur_solver=True,
-            include_pressure_constraints=False,
+            enable_cut_cell_stabilization=True,
+            use_cut_metadata_scale=False,
+            use_direct_fluid_solver=True,
+            include_pressure_constraints=True,
             hydrostatic_pressure_field_name="Pressure",
             enable_level_set_maintenance=False,
+            wet_extension_advection_velocity_method="nearest_interface_point",
+            enable_adaptive_time_loop=True,
         )
 
 

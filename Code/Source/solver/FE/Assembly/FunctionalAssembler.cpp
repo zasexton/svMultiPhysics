@@ -424,11 +424,10 @@ void prepareCellContext(AssemblyContext& context,
             const auto sisz = static_cast<std::size_t>(si);
             const auto qsz = static_cast<std::size_t>(q);
             scratch.basis_values[idx] = basis_cache.scalarValue(sisz, qsz);
-            const auto& grad = basis_cache.gradients[qsz][sisz];
             scratch.ref_gradients[idx] = {
-                grad[0],
-                grad[1],
-                grad[2]};
+                basis_cache.gradientValue(sisz, 0u, qsz),
+                basis_cache.gradientValue(sisz, 1u, qsz),
+                basis_cache.gradientValue(sisz, 2u, qsz)};
 
             const auto& grad_ref = scratch.ref_gradients[idx];
             const auto& J_inv = scratch.inv_jacobians[q];
@@ -441,12 +440,14 @@ void prepareCellContext(AssemblyContext& context,
             scratch.phys_gradients[idx_phys] = grad_phys;
 
             if (need_basis_hessians) {
-                const auto& hess = basis_cache.hessians[qsz][sisz];
                 AssemblyContext::Matrix3x3 H_ref{};
                 for (int r = 0; r < 3; ++r) {
                     for (int c = 0; c < 3; ++c) {
                         H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                            hess(static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+                            basis_cache.hessianValue(sisz,
+                                                     static_cast<std::size_t>(r),
+                                                     static_cast<std::size_t>(c),
+                                                     qsz);
                     }
                 }
                 ref_hessians[idx] = H_ref;

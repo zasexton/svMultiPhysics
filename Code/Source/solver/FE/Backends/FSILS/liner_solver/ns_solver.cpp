@@ -52,6 +52,7 @@
 #include "omp_la.h"
 
 #include "Array3.h"
+#include "Math/DenseLinearAlgebra.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -621,87 +622,22 @@ bool invert_dense_matrix(int n,
                          const std::vector<double>& matrix,
                          std::vector<double>& inverse)
 {
-  if (n <= 0 || matrix.size() != static_cast<std::size_t>(n * n)) {
+  if (n <= 0 || matrix.size() != static_cast<std::size_t>(n) * static_cast<std::size_t>(n)) {
     inverse.clear();
     return false;
   }
 
-  std::vector<double> a = matrix;
-  inverse.assign(static_cast<std::size_t>(n * n), 0.0);
-  for (int i = 0; i < n; ++i) {
-    inverse[static_cast<std::size_t>(i) * static_cast<std::size_t>(n) +
-            static_cast<std::size_t>(i)] = 1.0;
+  try {
+    auto dense_inverse = svmp::FE::math::invert_dense_matrix(
+        std::vector<svmp::FE::Real>(matrix.begin(), matrix.end()),
+        static_cast<std::size_t>(n),
+        "FSILS dense matrix");
+    inverse.assign(dense_inverse.begin(), dense_inverse.end());
+    return true;
+  } catch (const std::exception&) {
+    inverse.clear();
+    return false;
   }
-
-  for (int col = 0; col < n; ++col) {
-    int pivot = col;
-    double pivot_abs = std::abs(a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-                                  static_cast<std::size_t>(col)]);
-    for (int row = col + 1; row < n; ++row) {
-      const double cand =
-          std::abs(a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
-                     static_cast<std::size_t>(col)]);
-      if (cand > pivot_abs) {
-        pivot = row;
-        pivot_abs = cand;
-      }
-    }
-
-    if (!(pivot_abs > 1e-30)) {
-      inverse.clear();
-      return false;
-    }
-
-    if (pivot != col) {
-      for (int j = 0; j < n; ++j) {
-        std::swap(a[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
-                    static_cast<std::size_t>(j)],
-                  a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-                    static_cast<std::size_t>(j)]);
-        std::swap(inverse[static_cast<std::size_t>(pivot) * static_cast<std::size_t>(n) +
-                          static_cast<std::size_t>(j)],
-                  inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-                          static_cast<std::size_t>(j)]);
-      }
-    }
-
-    const double diag =
-        a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-          static_cast<std::size_t>(col)];
-    const double inv_diag = 1.0 / diag;
-    for (int j = 0; j < n; ++j) {
-      a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-        static_cast<std::size_t>(j)] *= inv_diag;
-      inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-              static_cast<std::size_t>(j)] *= inv_diag;
-    }
-
-    for (int row = 0; row < n; ++row) {
-      if (row == col) {
-        continue;
-      }
-      const double factor =
-          a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
-            static_cast<std::size_t>(col)];
-      if (std::abs(factor) <= 1e-30) {
-        continue;
-      }
-      for (int j = 0; j < n; ++j) {
-        a[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
-          static_cast<std::size_t>(j)] -=
-            factor *
-            a[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-              static_cast<std::size_t>(j)];
-        inverse[static_cast<std::size_t>(row) * static_cast<std::size_t>(n) +
-                static_cast<std::size_t>(j)] -=
-            factor *
-            inverse[static_cast<std::size_t>(col) * static_cast<std::size_t>(n) +
-                    static_cast<std::size_t>(j)];
-      }
-    }
-  }
-
-  return true;
 }
 
 void build_explicit_block_corrections(

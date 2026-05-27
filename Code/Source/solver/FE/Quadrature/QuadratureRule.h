@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -39,6 +41,13 @@ namespace quadrature {
 
 /// Convenience alias for quadrature point representation in reference space
 using QuadPoint = math::Vector<Real, 3>;
+
+struct QuadraturePointFingerprint {
+    int dimension{0};
+    std::size_t num_points{0};
+    std::uint64_t points_hash_a{0};
+    std::uint64_t points_hash_b{0};
+};
 
 /**
  * @brief Base class for quadrature rules over reference elements
@@ -72,6 +81,10 @@ public:
     /// Bulk accessors
     const std::vector<QuadPoint>& points() const noexcept { return points_; }
     const std::vector<Real>& weights() const noexcept { return weights_; }
+
+    /// Cached coordinate-only fingerprint for consumers whose values depend on
+    /// reference points but not quadrature weights.
+    QuadraturePointFingerprint point_fingerprint() const noexcept { return point_fingerprint_; }
 
     /// Stable semantic identity used by BasisCache
     virtual std::string cache_identity() const;
@@ -109,6 +122,7 @@ protected:
 
 private:
     std::string build_cache_identity() const;
+    QuadraturePointFingerprint build_point_fingerprint() const noexcept;
 
     svmp::CellFamily cell_family_;
     int dimension_;
@@ -116,6 +130,7 @@ private:
     std::vector<QuadPoint> points_;
     std::vector<Real> weights_;
     std::string cache_identity_;
+    QuadraturePointFingerprint point_fingerprint_;
 };
 
 // --------------------------------------------------------------------------------
@@ -129,6 +144,7 @@ inline void QuadratureRule::set_data(std::vector<QuadPoint> pts, std::vector<Rea
     }
     points_ = std::move(pts);
     weights_ = std::move(wts);
+    point_fingerprint_ = build_point_fingerprint();
     cache_identity_ = build_cache_identity();
 }
 
@@ -165,6 +181,38 @@ inline std::string QuadratureRule::build_cache_identity() const {
         oss << "|pt=" << pt[0] << ',' << pt[1] << ',' << pt[2];
     }
     return oss.str();
+}
+
+inline QuadraturePointFingerprint QuadratureRule::build_point_fingerprint() const noexcept {
+    auto real_bits = [](Real value) noexcept {
+        static_assert(sizeof(Real) <= sizeof(std::uint64_t),
+                      "Quadrature point fingerprints assume Real fits in 64 bits");
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &value, sizeof(Real));
+        return bits;
+    };
+    auto mix_hash = [](std::uint64_t& seed, std::uint64_t value) noexcept {
+        seed ^= value + 0x9e3779b97f4a7c15ULL + (seed << 6u) + (seed >> 2u);
+    };
+
+    QuadraturePointFingerprint fingerprint;
+    fingerprint.dimension = dimension_;
+    fingerprint.num_points = points_.size();
+    fingerprint.points_hash_a = 1469598103934665603ULL;
+    fingerprint.points_hash_b = 1099511628211ULL;
+
+    mix_hash(fingerprint.points_hash_a, static_cast<std::uint64_t>(fingerprint.dimension));
+    mix_hash(fingerprint.points_hash_a, static_cast<std::uint64_t>(fingerprint.num_points));
+    mix_hash(fingerprint.points_hash_b, static_cast<std::uint64_t>(fingerprint.num_points));
+    mix_hash(fingerprint.points_hash_b, static_cast<std::uint64_t>(fingerprint.dimension));
+    for (const auto& point : points_) {
+        for (std::size_t component = 0; component < 3u; ++component) {
+            const std::uint64_t bits = real_bits(point[component]);
+            mix_hash(fingerprint.points_hash_a, bits);
+            mix_hash(fingerprint.points_hash_b, bits ^ (0xbf58476d1ce4e5b9ULL + component));
+        }
+    }
+    return fingerprint;
 }
 
 inline Real QuadratureRule::reference_measure() const noexcept {

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import math
 import os
 import re
 import signal
@@ -25,10 +26,18 @@ import pyvista as pv
 
 ROOT = Path(__file__).resolve().parents[4]
 CASE_ROOT = ROOT / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set"
+TOOLS_DIR = ROOT / "tools"
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
+
+from collate_vtk_time_series import collate_time_series
+
 CASES = {
     "mini2d": None,
     "static2d": None,
     "capillaryarc2d": None,
+    "droplet2d": None,
+    "capillarywave2d": None,
     "curvedtet3d": None,
     "open2d": CASE_ROOT,
     "d18": CASE_ROOT / "spheric_test05_wet_bed_d18",
@@ -42,6 +51,8 @@ CASE_COPY_ENTRIES = {
 }
 CASE_GATE_X = {
     "capillaryarc2d": 0.5,
+    "droplet2d": 0.5,
+    "capillarywave2d": 0.5,
     "mini2d": 0.4,
     "static2d": 0.5,
     "open2d": 0.5,
@@ -61,8 +72,15 @@ HIGH_ORDER_MPI_MOTION_CASES = ("sloshing2d",)
 HIGH_ORDER_CAPILLARY_PROJECTION_CASES = ("sloshing2d",)
 HIGH_ORDER_CAPILLARY_RESPONSE_CASES = ("capillaryarc2d",)
 HIGH_ORDER_CAPILLARY_BALANCE_CASES = ("capillaryarc2d",)
+HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES = ("droplet2d",)
+HIGH_ORDER_CAPILLARY_WAVE_CASES = ("capillarywave2d",)
 HIGH_ORDER_VOLUME_CORRECTED_MOTION_CASES = ("sloshing2d",)
-HIGH_ORDER_SYNTHETIC_CASES = {"capillaryarc2d", "curvedtet3d"}
+HIGH_ORDER_SYNTHETIC_CASES = {
+    "capillaryarc2d",
+    "capillarywave2d",
+    "curvedtet3d",
+    "droplet2d",
+}
 CUT_CONTEXT_VOLUME_RE = re.compile(r"active_side_volume=([-+0-9.eE]+)")
 CUT_ASSEMBLY_VOLUME_RE = re.compile(r"(?<!_)active_wet_volume=([-+0-9.eE]+)")
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=('[^']*'|\"[^\"]*\"|[^\s\]]+)")
@@ -119,6 +137,16 @@ TRANSIENT_SOLVE_RE = re.compile(
     r" abs_tol=(?P<newton_abs_tol>[-+0-9.eE]+),"
     r" rel_tol=(?P<newton_rel_tol>[-+0-9.eE]+)\)"
 )
+TIMELOOP_ADAPTIVE_RE = re.compile(
+    r"TimeLoop adaptive controller enabled:"
+    r" min_dt=(?P<min_dt>[-+0-9.eE]+)"
+    r" max_dt=(?P<max_dt>[-+0-9.eE]+)"
+    r" max_retries=(?P<max_retries>[0-9]+)"
+    r" decrease_factor=(?P<decrease_factor>[-+0-9.eE]+)"
+    r" increase_factor=(?P<increase_factor>[-+0-9.eE]+)"
+    r" target_newton_iterations=(?P<target_newton_iterations>[0-9]+)"
+    r" max_steps=(?P<max_steps>[0-9]+)"
+)
 TIMELOOP_NONLINEAR_RE = re.compile(
     r"TimeLoop: nonlinear_done step=(?P<step>[0-9]+)"
     r" time=(?P<time>[-+0-9.eE]+)"
@@ -168,6 +196,13 @@ STATIC_INTERFACE_HEIGHT = 0.53
 CAPILLARY_ARC_CENTER_X = 0.5
 CAPILLARY_ARC_CENTER_Y = -0.3
 CAPILLARY_ARC_RADIUS = 0.8
+CAPILLARY_DROPLET_CENTER_X = 0.5
+CAPILLARY_DROPLET_CENTER_Y = 0.5
+CAPILLARY_DROPLET_RADIUS = 0.3
+CAPILLARY_WAVE_BASE_HEIGHT = 0.5
+CAPILLARY_WAVE_AMPLITUDE = 0.004
+CAPILLARY_WAVE_WAVELENGTH = 1.0
+CAPILLARY_WAVE_DENSITY = 998.2
 STATE_SYNC_CUT_CONTEXT_PROVENANCES = {
     "accepted",
     "residual",
@@ -335,11 +370,16 @@ def configure_solver(solver_xml: Path,
                      cut_cell_velocity_gradient_penalty: float | None = None,
                      cut_cell_pressure_gradient_penalty: float | None = None,
                      surface_tension: float | None = None,
+                     wet_extension_advection_velocity_method: str | None = None,
                      projected_curvature_field: str | None = None,
                      curvature_projection_cadence_steps: int | None = None,
                      curvature_projection_max_normalized_fit_residual: float | None = None,
+                     curvature_projection_max_neighbor_fallback_vertices: int | None = None,
+                     curvature_projection_max_zero_fallback_vertices: int | None = None,
+                     curvature_projection_narrow_band_width: float | None = None,
                      curvature_projection_smoothing_iterations: int | None = None,
                      curvature_projection_smoothing_relaxation: float | None = None,
+                     curvature_projection_smoothing_mode: str | None = None,
                      enable_volume_correction: bool | None = None,
                      volume_correction_cadence_steps: int | None = None,
                      volume_correction_use_initial_volume: bool | None = None,
@@ -357,8 +397,7 @@ def configure_solver(solver_xml: Path,
 
     set_text(general, "Number_of_time_steps", str(steps))
     set_text(general, "Save_results_to_VTK_format", "false" if disable_vtk_output else "true")
-    if disable_vtk_output:
-        set_text(general, "Combine_time_series", "false")
+    set_text(general, "Combine_time_series", "false" if disable_vtk_output else "true")
     set_text(general, "Name_prefix_of_saved_VTK_files", "result")
     save_increment = vtk_save_increment if vtk_save_increment is not None else 1
     start_step = start_saving_after_step if start_saving_after_step is not None else 1
@@ -484,6 +523,21 @@ def configure_solver(solver_xml: Path,
         )
     if surface_tension is not None:
         set_text(free_surface, "Surface_tension", f"{surface_tension:.16g}")
+    if wet_extension_advection_velocity_method is not None:
+        level_set = level_set_equation(root)
+        constant_velocity = level_set.find("Constant_velocity")
+        if constant_velocity is not None:
+            level_set.remove(constant_velocity)
+        set_text(level_set, "Velocity_source", "prescribed_data")
+        set_text(level_set, "Velocity_field_name", "LevelSetAdvectionVelocity")
+        set_text(level_set, "Auto_register_velocity_field", "true")
+        set_text(level_set, "Use_wet_extension_advection_velocity", "true")
+        set_text(level_set, "Source_velocity_field_name", "Velocity")
+        set_text(
+            level_set,
+            "Wet_extension_advection_velocity_method",
+            wet_extension_advection_velocity_method,
+        )
     if projected_curvature_field:
         level_set = level_set_equation(root)
         set_text(level_set, "Enable_curvature_projection", "true")
@@ -501,6 +555,24 @@ def configure_solver(solver_xml: Path,
                 "Curvature_projection_max_normalized_fit_residual",
                 f"{curvature_projection_max_normalized_fit_residual:.16g}",
             )
+        if curvature_projection_max_neighbor_fallback_vertices is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_max_neighbor_fallback_vertices",
+                str(curvature_projection_max_neighbor_fallback_vertices),
+            )
+        if curvature_projection_max_zero_fallback_vertices is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_max_zero_fallback_vertices",
+                str(curvature_projection_max_zero_fallback_vertices),
+            )
+        if curvature_projection_narrow_band_width is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_narrow_band_width",
+                f"{curvature_projection_narrow_band_width:.16g}",
+            )
         if curvature_projection_smoothing_iterations is not None:
             set_text(
                 level_set,
@@ -512,6 +584,12 @@ def configure_solver(solver_xml: Path,
                 level_set,
                 "Curvature_projection_smoothing_relaxation",
                 f"{curvature_projection_smoothing_relaxation:.16g}",
+            )
+        if curvature_projection_smoothing_mode is not None:
+            set_text(
+                level_set,
+                "Curvature_projection_smoothing_mode",
+                curvature_projection_smoothing_mode,
             )
     if enable_volume_correction is not None:
         level_set = level_set_equation(root)
@@ -680,6 +758,8 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
         env["SVMP_JIT_TRACE_SPECIALIZATION"] = "1"
     if args.enable_jit_cache_diagnostics:
         env["SVMP_JIT_CACHE_DIAGNOSTICS"] = "1"
+    if args.trace_level_set_advection_velocity:
+        env["SVMP_TRACE_LEVEL_SET_ADVECTION"] = "1"
     if args.enable_adaptive_time_loop:
         env["SVMP_TIMELOOP_ADAPTIVE"] = "1"
         env["SVMP_VTK_OUTPUT_FINAL_TIME"] = "1"
@@ -710,6 +790,19 @@ def case_artifact_ignore(_path: str, names: list[str]) -> set[str]:
         elif name.startswith("restart") or name.endswith(".log"):
             ignored.add(name)
     return ignored
+
+
+def collate_solver_time_series(run_dir: Path, args: argparse.Namespace) -> dict[str, Any]:
+    if args.disable_vtk_output:
+        return {"generated": False, "reason": "vtk_output_disabled"}
+    try:
+        return collate_time_series(run_dir)
+    except Exception as exc:  # pragma: no cover - diagnostic path only
+        return {
+            "generated": False,
+            "reason": "collation_error",
+            "error": str(exc),
+        }
 
 
 def copy_selected_entries(source_root: Path,
@@ -1051,6 +1144,173 @@ def write_capillary_arc2d_case(case_dir: Path,
             "The wall-supported circular arc starts from zero velocity and zero gravity.",
             "A zero active pressure preload exercises capillary response.",
             "A negative gamma/R active pressure preload exercises a Laplace-style capillary balance.",
+        ],
+    }
+    (case_dir / "benchmark.json").write_text(
+        json.dumps(benchmark, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
+def capillary_droplet2d_phi(points: np.ndarray) -> np.ndarray:
+    return np.sqrt((points[:, 0] - CAPILLARY_DROPLET_CENTER_X) ** 2 +
+                   (points[:, 1] - CAPILLARY_DROPLET_CENTER_Y) ** 2) - (
+                       CAPILLARY_DROPLET_RADIUS)
+
+
+def write_capillary_droplet2d_case(case_dir: Path,
+                                   steps: int,
+                                   pressure_jump: float = 0.0) -> None:
+    write_mini_case(case_dir, steps, static=True)
+
+    mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
+    grid = pv.read(mesh_path)
+    points = np.asarray(grid.points, dtype=float)
+    phi = capillary_droplet2d_phi(points)
+    grid.point_data["phi"] = phi
+    grid.point_data["Pressure"] = np.where(phi < 0.0, pressure_jump, 0.0)
+    grid.point_data["Velocity"] = np.zeros((points.shape[0], 3), dtype=float)
+    grid.save(mesh_path)
+
+    gauge_point = np.array([
+        CAPILLARY_DROPLET_CENTER_X,
+        CAPILLARY_DROPLET_CENTER_Y,
+        0.0,
+    ], dtype=float)
+    gauge_node = int(np.argmin(np.linalg.norm(points - gauge_point, axis=1)))
+    (case_dir / "pressure_gauge.csv").write_text(
+        f"node_id,pressure\n{gauge_node},{pressure_jump:.16g}\n",
+        encoding="utf-8")
+    benchmark = {
+        "benchmark": "synthetic zero-gravity capillary droplet equilibrium smoke",
+        "representation": "unfitted_level_set",
+        "capillary_geometry": "droplet2d",
+        "capillary_radius": CAPILLARY_DROPLET_RADIUS,
+        "initial_active_pressure": pressure_jump,
+        "dimensions_m": {
+            "tank_length": 1.0,
+            "tank_height": 1.0,
+            "profile_window_x_min": 0.5,
+        },
+        "pressure_gauge": {
+            "node_id": gauge_node,
+            "expected_initial_hydrostatic_pressure": pressure_jump,
+        },
+        "notes": [
+            "The closed circular droplet starts from zero velocity and zero gravity.",
+            "A negative gamma/R active pressure preload exercises a static capillary equilibrium.",
+        ],
+    }
+    (case_dir / "benchmark.json").write_text(
+        json.dumps(benchmark, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+
+def capillary_wave_wavenumber() -> float:
+    return 2.0 * math.pi / CAPILLARY_WAVE_WAVELENGTH
+
+
+def capillary_wave_omega(surface_tension: float) -> float:
+    k = capillary_wave_wavenumber()
+    return math.sqrt(max(float(surface_tension), 0.0) * k ** 3 / CAPILLARY_WAVE_DENSITY)
+
+
+def capillary_wave_height(x: np.ndarray,
+                          time_s: float,
+                          surface_tension: float) -> np.ndarray:
+    k = capillary_wave_wavenumber()
+    omega = capillary_wave_omega(surface_tension)
+    return (
+        CAPILLARY_WAVE_BASE_HEIGHT +
+        CAPILLARY_WAVE_AMPLITUDE * np.cos(k * x) * math.cos(omega * time_s)
+    )
+
+
+def capillary_wave2d_phi(points: np.ndarray) -> np.ndarray:
+    return points[:, 1] - capillary_wave_height(points[:, 0], 0.0, 1.0)
+
+
+def nearest_negative_level_set_node(points: np.ndarray,
+                                    phi: np.ndarray,
+                                    target: np.ndarray) -> int:
+    active = np.flatnonzero(phi < 0.0)
+    if active.size == 0:
+        raise ValueError("synthetic case has no negative level-set vertices")
+    distances = np.linalg.norm(points[active] - target, axis=1)
+    return int(active[int(np.argmin(distances))])
+
+
+def write_capillary_wave_reference_profile(profile_path: Path,
+                                           time_s: float,
+                                           surface_tension: float) -> None:
+    xs = np.linspace(0.0, 1.0, 129)
+    ys = capillary_wave_height(xs, time_s, surface_tension)
+    # compare_test05_profiles treats reference-profile files as centimeters.
+    np.savetxt(profile_path, np.column_stack((100.0 * xs, 100.0 * ys)),
+               fmt="%.16g")
+
+
+def write_capillary_wave2d_case(case_dir: Path,
+                                steps: int,
+                                surface_tension: float,
+                                time_step_size: float | None) -> None:
+    write_mini_case(case_dir, steps, static=True)
+
+    mesh_path = case_dir / "mesh/background/mesh-complete.mesh.vtu"
+    grid = pv.read(mesh_path)
+    points = np.asarray(grid.points, dtype=float)
+    phi = capillary_wave2d_phi(points)
+    grid.point_data["phi"] = phi
+    grid.point_data["Pressure"] = np.zeros(points.shape[0], dtype=float)
+    grid.point_data["Velocity"] = np.zeros((points.shape[0], 3), dtype=float)
+    grid.save(mesh_path)
+
+    dt = 0.001 if time_step_size is None else float(time_step_size)
+    final_time = float(steps) * dt
+    profile_path = case_dir / "capillary_wave_reference_profile.csv"
+    write_capillary_wave_reference_profile(profile_path, final_time, surface_tension)
+
+    gauge_point = np.array([0.5, CAPILLARY_WAVE_BASE_HEIGHT, 0.0], dtype=float)
+    gauge_node = nearest_negative_level_set_node(points, phi, gauge_point)
+    (case_dir / "pressure_gauge.csv").write_text(
+        f"node_id,pressure\n{gauge_node},0.0\n",
+        encoding="utf-8")
+
+    k = capillary_wave_wavenumber()
+    omega = capillary_wave_omega(surface_tension)
+    benchmark = {
+        "benchmark": "synthetic small-amplitude capillary wave smoke",
+        "representation": "unfitted_level_set",
+        "capillary_geometry": "standing_wave_2d",
+        "capillary_wave": {
+            "mode": "standing_cosine",
+            "base_height": CAPILLARY_WAVE_BASE_HEIGHT,
+            "amplitude": CAPILLARY_WAVE_AMPLITUDE,
+            "wavelength": CAPILLARY_WAVE_WAVELENGTH,
+            "wavenumber": k,
+            "density": CAPILLARY_WAVE_DENSITY,
+            "surface_tension": float(surface_tension),
+            "omega": omega,
+            "final_time_s": final_time,
+        },
+        "dimensions_m": {
+            "tank_length": 1.0,
+            "tank_height": 1.0,
+            "profile_window_x_min": 0.5,
+            "profile_window_x_max": 1.0,
+        },
+        "pressure_gauge": {
+            "node_id": gauge_node,
+            "expected_initial_hydrostatic_pressure": 0.0,
+        },
+        "reference_profiles": [
+            {
+                "time_s": final_time,
+                "path": str(profile_path),
+            },
+        ],
+        "notes": [
+            "The initial interface is a small standing cosine perturbation.",
+            "The reference profile uses omega^2 = gamma k^3 / rho for a pure capillary wave.",
         ],
     }
     (case_dir / "benchmark.json").write_text(
@@ -1534,6 +1794,13 @@ def top_counts(counts: dict[str, int], limit: int = 24) -> dict[str, int]:
 
 def increment_count(counts: dict[str, int], key: str) -> None:
     counts[key] = counts.get(key, 0) + 1
+
+
+def diagnostic_flag(record: dict[str, Any], name: str) -> bool:
+    value = record.get(name, 0)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return bool(value)
 
 
 def parse_count_summary(value: Any) -> dict[str, int]:
@@ -2066,6 +2333,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {
         "solver_controls": {},
         "cut_context_rebuilds": [],
+        "cut_context_refresh_skips": [],
         "cut_volume_assemblies": [],
         "hydrostatic_initializations": [],
         "pressure_gauge_checks": [],
@@ -2097,6 +2365,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         "eigen_factorization_diagnostics": [],
         "active_pressure_support_constraints": [],
         "curvature_projections": [],
+        "level_set_advection_velocity_updates": [],
         "level_set_volume_corrections": [],
         "level_set_maintenance": [],
         "level_set_nonconservative_warnings": [],
@@ -2133,6 +2402,7 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
         linear_match = LINEAR_SOLVER_RE.search(line)
         time_stepping_match = TIME_STEPPING_RE.search(line)
         transient_match = TRANSIENT_SOLVE_RE.search(line)
+        adaptive_match = TIMELOOP_ADAPTIVE_RE.search(line)
         nonlinear_match = TIMELOOP_NONLINEAR_RE.search(line)
         accepted_match = TIMELOOP_ACCEPTED_RE.search(line)
         rejected_match = TIMELOOP_REJECTED_RE.search(line)
@@ -2144,6 +2414,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["solver_controls"]["time_stepping"] = convert_match(time_stepping_match)
         elif transient_match is not None:
             diagnostics["solver_controls"]["transient_solve"] = convert_match(transient_match)
+        elif adaptive_match is not None:
+            diagnostics["solver_controls"]["adaptive_time_loop"] = convert_match(adaptive_match)
         elif nonlinear_match is not None:
             diagnostics["time_loop"]["nonlinear_records"].append(convert_match(nonlinear_match))
         elif accepted_match is not None:
@@ -2154,6 +2426,8 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
             diagnostics["time_loop"]["dt_updates"].append(convert_match(dt_updated_match))
         elif vtk_match is not None:
             diagnostics["time_loop"]["vtk_outputs"].append(vtk_match.group("path").strip())
+        elif "diagnostic=cut_context_refresh_skip" in line:
+            diagnostics["cut_context_refresh_skips"].append(parse_key_values(line))
         elif "Active-domain cut context" in line:
             record = parse_key_values(line)
             diagnostics["cut_context_rebuilds"].append(record)
@@ -2163,6 +2437,10 @@ def parse_solver_diagnostics(solver_output: str) -> dict[str, Any]:
                 diagnostics["process_memory"].append(memory_record)
         elif "diagnostic=process_memory" in line:
             diagnostics["process_memory"].append(parse_key_values(line))
+        elif "Updated level-set advection velocity" in line:
+            diagnostics["level_set_advection_velocity_updates"].append(
+                parse_key_values(line)
+            )
         elif "cut-volume active-domain diagnostics" in line:
             diagnostics["cut_volume_assemblies"].append(parse_key_values(line))
         elif "hydrostatic pressure initialization" in line:
@@ -2571,6 +2849,17 @@ def cut_context_rebuild_provenance_counts(diagnostics: dict[str, Any]) -> dict[s
     return counts
 
 
+def cut_context_refresh_skip_provenance_counts(diagnostics: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in diagnostics.get("cut_context_refresh_skips", []):
+        if not isinstance(record, dict):
+            continue
+        provenance = record.get("provenance")
+        key = str(provenance) if provenance else "missing"
+        increment_count(counts, key)
+    return counts
+
+
 def generated_cell_cache_summary(diagnostics: dict[str, Any]) -> dict[str, int]:
     records = diagnostics.get("cut_context_rebuilds", [])
     if not isinstance(records, list):
@@ -2579,6 +2868,8 @@ def generated_cell_cache_summary(diagnostics: dict[str, Any]) -> dict[str, int]:
         "rebuilds_with_cell_cache": 0,
         "total_hits": 0,
         "total_misses": 0,
+        "unchanged_dof_hits": 0,
+        "refresh_candidates": 0,
         "domain_hits": 0,
         "full_miss_rebuilds": 0,
     }
@@ -2593,6 +2884,12 @@ def generated_cell_cache_summary(diagnostics: dict[str, Any]) -> dict[str, int]:
         summary["rebuilds_with_cell_cache"] += 1
         summary["total_hits"] += hits
         summary["total_misses"] += misses
+        unchanged_dof_hits = record.get("generated_cell_cache_unchanged_dof_hits")
+        if isinstance(unchanged_dof_hits, int):
+            summary["unchanged_dof_hits"] += unchanged_dof_hits
+        refresh_candidates = record.get("generated_cell_refresh_candidates")
+        if isinstance(refresh_candidates, int):
+            summary["refresh_candidates"] += refresh_candidates
         domain_hits = record.get("generated_domain_cache_hits")
         if isinstance(domain_hits, int):
             summary["domain_hits"] += domain_hits
@@ -2688,6 +2985,53 @@ def assembly_efficiency_errors(metrics: dict[str, Any],
         elif float(value) > float(threshold):
             errors.append(
                 f"{label} {float(value):.6g} exceeds {float(threshold):.6g}"
+            )
+    if args.min_diagnostic_cut_context_refresh_skips is not None:
+        value = metrics.get("diagnostic_cut_context_refresh_skip_count")
+        if not isinstance(value, int):
+            errors.append("cut-context refresh skip diagnostic is unavailable")
+        elif value < args.min_diagnostic_cut_context_refresh_skips:
+            errors.append(
+                f"cut-context refresh skips {value} are below "
+                f"{args.min_diagnostic_cut_context_refresh_skips}"
+            )
+    return errors
+
+
+def level_set_advection_velocity_errors(metrics: dict[str, Any],
+                                        args: argparse.Namespace) -> list[str]:
+    errors = []
+    diagnostics = metrics.get("diagnostics", {})
+    records = diagnostics.get("level_set_advection_velocity_updates", [])
+    if args.require_level_set_advection_velocity_diagnostics and not records:
+        errors.append("level-set advection velocity diagnostics were not reported")
+    for arg_name, metric_name, label in (
+            ("expect_level_set_advection_velocity_extension_method",
+             "diagnostic_level_set_advection_velocity_extension_method_counts",
+             "level-set advection velocity extension method"),
+            ("expect_level_set_advection_velocity_interface_sample_source",
+             "diagnostic_level_set_advection_velocity_interface_sample_source_counts",
+             "level-set advection velocity interface sample source")):
+        expected = getattr(args, arg_name)
+        if expected is None:
+            continue
+        counts = metrics.get(metric_name)
+        if not isinstance(counts, dict) or not counts:
+            errors.append(f"diagnostic {label} counts are unavailable")
+        elif expected not in counts:
+            observed = ", ".join(str(key) for key in sorted(counts))
+            errors.append(
+                f"diagnostic {label} {observed or 'unavailable'} does not include {expected}"
+            )
+    if args.min_diagnostic_level_set_advection_interface_samples is not None:
+        value = metrics.get(
+            "diagnostic_level_set_advection_velocity_max_interface_samples")
+        if not isinstance(value, int):
+            errors.append("level-set advection interface-sample diagnostic is unavailable")
+        elif value < args.min_diagnostic_level_set_advection_interface_samples:
+            errors.append(
+                f"level-set advection interface samples {value} are below "
+                f"{args.min_diagnostic_level_set_advection_interface_samples}"
             )
     return errors
 
@@ -2835,6 +3179,15 @@ def curvature_projection_errors(metrics: dict[str, Any],
                 f"curvature projection max abs curvature {value:.6g} is below "
                 f"{args.min_diagnostic_curvature_projection_max_abs_curvature:.6g}"
             )
+    if args.max_diagnostic_curvature_projection_fallback_vertices is not None:
+        value = metrics.get("diagnostic_curvature_projection_max_fallback_vertices")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection fallback diagnostic is unavailable")
+        elif value > args.max_diagnostic_curvature_projection_fallback_vertices:
+            errors.append(
+                f"curvature projection fallback vertices {value} exceed "
+                f"{args.max_diagnostic_curvature_projection_fallback_vertices}"
+            )
     if args.max_diagnostic_curvature_projection_zero_fallback_vertices is not None:
         value = metrics.get(
             "diagnostic_curvature_projection_max_zero_fallback_vertices")
@@ -2865,6 +3218,106 @@ def curvature_projection_errors(metrics: dict[str, Any],
                 f"curvature projection smoothing iterations {value} are below "
                 f"{args.min_diagnostic_curvature_projection_smoothing_iterations}"
             )
+    if args.expect_curvature_projection_smoothing_mode is not None:
+        counts = metrics.get(
+            "diagnostic_curvature_projection_smoothing_mode_counts")
+        expected = args.expect_curvature_projection_smoothing_mode
+        if not isinstance(counts, dict) or not counts:
+            errors.append("curvature projection smoothing-mode diagnostics are unavailable")
+        elif expected not in counts:
+            observed = ", ".join(str(key) for key in sorted(counts))
+            errors.append(
+                "curvature projection smoothing mode "
+                f"{observed or 'unavailable'} does not include {expected}"
+            )
+    if args.min_diagnostic_curvature_projection_operator_edges is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_max_smoothing_operator_edges")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection smoothing-operator edge diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_operator_edges:
+            errors.append(
+                f"curvature projection smoothing operator edges {value} are below "
+                f"{args.min_diagnostic_curvature_projection_operator_edges}"
+            )
+    if args.min_diagnostic_curvature_projection_skipped_count is not None:
+        value = metrics.get("diagnostic_curvature_projection_skipped_count")
+        if not isinstance(value, int):
+            errors.append("curvature projection skipped-count diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_skipped_count:
+            errors.append(
+                f"curvature projection skipped count {value} is below "
+                f"{args.min_diagnostic_curvature_projection_skipped_count}"
+            )
+    if args.min_diagnostic_curvature_projection_cache_hit_count is not None:
+        value = metrics.get("diagnostic_curvature_projection_cache_hit_count")
+        if not isinstance(value, int):
+            errors.append("curvature projection cache-hit diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_cache_hit_count:
+            errors.append(
+                f"curvature projection cache-hit count {value} is below "
+                f"{args.min_diagnostic_curvature_projection_cache_hit_count}"
+            )
+    if args.max_diagnostic_curvature_projection_cache_miss_count is not None:
+        value = metrics.get("diagnostic_curvature_projection_cache_miss_count")
+        if not isinstance(value, int):
+            errors.append("curvature projection cache-miss diagnostic is unavailable")
+        elif value > args.max_diagnostic_curvature_projection_cache_miss_count:
+            errors.append(
+                f"curvature projection cache-miss count {value} exceeds "
+                f"{args.max_diagnostic_curvature_projection_cache_miss_count}"
+            )
+    if args.min_diagnostic_curvature_projection_cut_signature_cache_hit_count is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_cut_signature_cache_hit_count")
+        if not isinstance(value, int):
+            errors.append(
+                "curvature projection cut-signature cache-hit diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_cut_signature_cache_hit_count:
+            errors.append(
+                f"curvature projection cut-signature cache-hit count {value} is below "
+                f"{args.min_diagnostic_curvature_projection_cut_signature_cache_hit_count}"
+            )
+    if args.min_diagnostic_curvature_projection_reused_vertex_adjacency_count is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_reused_vertex_adjacency_count")
+        if not isinstance(value, int):
+            errors.append("curvature projection vertex-adjacency reuse diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_reused_vertex_adjacency_count:
+            errors.append(
+                f"curvature projection vertex-adjacency reuse count {value} is below "
+                f"{args.min_diagnostic_curvature_projection_reused_vertex_adjacency_count}"
+            )
+    if args.min_diagnostic_curvature_projection_reused_sample_adjacency_count is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_reused_sample_adjacency_count")
+        if not isinstance(value, int):
+            errors.append("curvature projection sample-adjacency reuse diagnostic is unavailable")
+        elif value < args.min_diagnostic_curvature_projection_reused_sample_adjacency_count:
+            errors.append(
+                f"curvature projection sample-adjacency reuse count {value} is below "
+                f"{args.min_diagnostic_curvature_projection_reused_sample_adjacency_count}"
+            )
+    if args.max_diagnostic_curvature_projection_vertex_adjacency_builds is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_max_vertex_adjacency_builds")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection vertex-adjacency build diagnostic is unavailable")
+        elif value > args.max_diagnostic_curvature_projection_vertex_adjacency_builds:
+            errors.append(
+                f"curvature projection vertex-adjacency builds {value} exceed "
+                f"{args.max_diagnostic_curvature_projection_vertex_adjacency_builds}"
+            )
+    if args.max_diagnostic_curvature_projection_sample_adjacency_builds is not None:
+        value = metrics.get(
+            "diagnostic_curvature_projection_max_sample_adjacency_builds")
+        if not isinstance(value, (int, float)):
+            errors.append("curvature projection sample-adjacency build diagnostic is unavailable")
+        elif value > args.max_diagnostic_curvature_projection_sample_adjacency_builds:
+            errors.append(
+                f"curvature projection sample-adjacency builds {value} exceed "
+                f"{args.max_diagnostic_curvature_projection_sample_adjacency_builds}"
+            )
     if args.require_curvature_projection_newton_freshness:
         reason_counts = metrics.get("diagnostic_curvature_projection_reason_counts")
         if not isinstance(reason_counts, dict):
@@ -2888,6 +3341,389 @@ def curvature_projection_errors(metrics: dict[str, Any],
                 errors.append(
                     f"curvature projection reason '{reason}' count {count} is below {minimum}"
                 )
+    return errors
+
+
+def capillary_benchmark_errors(metrics: dict[str, Any],
+                               args: argparse.Namespace) -> list[str]:
+    errors = []
+    benchmark = metrics.get("benchmark")
+    if not isinstance(benchmark, dict):
+        benchmark = {}
+
+    radius = benchmark.get("capillary_radius", benchmark.get("capillary_arc_radius"))
+    if args.max_capillary_curvature_relative_error is not None:
+        observed = metrics.get("projected_curvature_near_interface_mean_abs")
+        observed_metric = "projected_curvature_near_interface_mean_abs"
+        if not isinstance(observed, (int, float)):
+            observed = metrics.get("diagnostic_curvature_projection_max_abs_curvature")
+            observed_metric = "diagnostic_curvature_projection_max_abs_curvature"
+        if not isinstance(radius, (int, float)) or float(radius) <= 0.0:
+            errors.append("capillary curvature gate requires benchmark capillary radius")
+        elif not isinstance(observed, (int, float)):
+            errors.append("capillary curvature gate requires projected-curvature diagnostics")
+        else:
+            expected = 1.0 / float(radius)
+            relative_error = abs(float(observed) - expected) / max(abs(expected), 1.0e-300)
+            metrics["capillary_benchmark_radius"] = float(radius)
+            metrics["capillary_expected_curvature"] = expected
+            metrics["capillary_observed_curvature"] = float(observed)
+            metrics["capillary_projected_curvature_max_abs"] = float(observed)
+            metrics["capillary_projected_curvature_observed_metric"] = observed_metric
+            metrics["capillary_curvature_relative_error"] = relative_error
+            if relative_error > args.max_capillary_curvature_relative_error:
+                errors.append(
+                    f"capillary curvature relative error {relative_error:.6g} exceeds "
+                    f"{args.max_capillary_curvature_relative_error:.6g}"
+                )
+
+    if args.max_capillary_pressure_jump_relative_error is not None:
+        surface_tension = metrics.get("surface_tension")
+        observed_jump = benchmark.get("initial_active_pressure")
+        if not isinstance(radius, (int, float)) or float(radius) <= 0.0:
+            errors.append("capillary pressure-jump gate requires benchmark capillary radius")
+        elif not isinstance(surface_tension, (int, float)):
+            errors.append("capillary pressure-jump gate requires surface-tension control")
+        elif not isinstance(observed_jump, (int, float)):
+            errors.append("capillary pressure-jump gate requires benchmark initial_active_pressure")
+        else:
+            expected_jump = -float(surface_tension) / float(radius)
+            relative_error = (
+                abs(float(observed_jump) - expected_jump) /
+                max(abs(expected_jump), 1.0e-300)
+            )
+            metrics["capillary_benchmark_radius"] = float(radius)
+            metrics["capillary_expected_pressure_jump"] = expected_jump
+            metrics["capillary_initial_pressure_jump"] = float(observed_jump)
+            metrics["capillary_pressure_jump_relative_error"] = relative_error
+            if relative_error > args.max_capillary_pressure_jump_relative_error:
+                errors.append(
+                    f"capillary pressure-jump relative error {relative_error:.6g} exceeds "
+                    f"{args.max_capillary_pressure_jump_relative_error:.6g}"
+                )
+    return errors
+
+
+def capillary_wave_expected_omega(wave: dict[str, Any]) -> float | None:
+    surface_tension = wave.get("surface_tension")
+    wavenumber = wave.get("wavenumber")
+    density = wave.get("density")
+    if not all(isinstance(value, (int, float))
+               for value in (surface_tension, wavenumber, density)):
+        return None
+    if float(density) <= 0.0 or float(surface_tension) < 0.0:
+        return None
+    return math.sqrt(float(surface_tension) * float(wavenumber) ** 3 / float(density))
+
+
+def capillary_wave_final_time(metrics: dict[str, Any],
+                              args: argparse.Namespace) -> float | None:
+    time_loop = metrics.get("time_loop")
+    if not isinstance(time_loop, dict):
+        diagnostics = metrics.get("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            time_loop = diagnostics.get("time_loop", {})
+    summary = time_loop.get("summary") if isinstance(time_loop, dict) else None
+    if isinstance(summary, dict):
+        final_time = summary.get("final_accepted_time")
+        if isinstance(final_time, (int, float)):
+            return float(final_time)
+
+    dt = getattr(args, "time_step_size", None)
+    if not isinstance(dt, (int, float)):
+        dt = metrics.get("time_step_size")
+    if isinstance(dt, (int, float)):
+        steps = metrics.get("steps", getattr(args, "steps", None))
+        if isinstance(steps, (int, float)):
+            return float(steps) * float(dt)
+    return None
+
+
+def capillary_wave_benchmark_errors(metrics: dict[str, Any],
+                                    args: argparse.Namespace) -> list[str]:
+    max_frequency_error = getattr(
+        args, "max_capillary_wave_frequency_relative_error", None)
+    max_profile_error = getattr(
+        args, "max_capillary_wave_profile_relative_error", None)
+    max_mean_offset = getattr(args, "max_capillary_wave_mean_offset", None)
+    if (max_frequency_error is None and max_profile_error is None and
+            max_mean_offset is None):
+        return []
+
+    errors = []
+    benchmark = metrics.get("benchmark")
+    wave = benchmark.get("capillary_wave") if isinstance(benchmark, dict) else None
+    if not isinstance(wave, dict):
+        return ["capillary-wave gates require benchmark capillary_wave metadata"]
+
+    expected_omega = capillary_wave_expected_omega(wave)
+    observed_omega = wave.get("omega")
+    if max_frequency_error is not None:
+        if expected_omega is None or not isinstance(observed_omega, (int, float)):
+            errors.append("capillary-wave frequency gate requires omega metadata")
+        else:
+            relative_error = (
+                abs(float(observed_omega) - expected_omega) /
+                max(abs(expected_omega), 1.0e-300)
+            )
+            metrics["capillary_wave_expected_omega"] = expected_omega
+            metrics["capillary_wave_omega_relative_error"] = relative_error
+            if relative_error > max_frequency_error:
+                errors.append(
+                    f"capillary-wave omega relative error {relative_error:.6g} "
+                    f"exceeds {max_frequency_error:.6g}"
+                )
+
+    if max_profile_error is not None:
+        amplitude = wave.get("amplitude")
+        if not isinstance(amplitude, (int, float)) or float(amplitude) <= 0.0:
+            errors.append("capillary-wave profile gate requires positive amplitude")
+        elif expected_omega is None:
+            errors.append("capillary-wave profile gate requires omega metadata")
+        elif not metrics.get("final_capillary_wave_profile_available", False):
+            errors.append("capillary-wave final interface profile fit is unavailable")
+        else:
+            final_time = capillary_wave_final_time(metrics, args)
+            if final_time is None:
+                errors.append("capillary-wave final time is unavailable")
+            else:
+                expected_cosine = (
+                    float(amplitude) * math.cos(expected_omega * final_time)
+                )
+                expected_sine = 0.0
+                observed_cosine = metrics.get("final_capillary_wave_cosine_amplitude")
+                observed_sine = metrics.get("final_capillary_wave_sine_amplitude")
+                if not all(isinstance(value, (int, float))
+                           for value in (observed_cosine, observed_sine)):
+                    errors.append("capillary-wave final profile fit is unavailable")
+                else:
+                    profile_error = math.hypot(
+                        float(observed_cosine) - expected_cosine,
+                        float(observed_sine) - expected_sine,
+                    ) / max(abs(float(amplitude)), 1.0e-300)
+                    metrics["capillary_wave_final_time_s"] = final_time
+                    metrics["capillary_wave_expected_final_cosine_amplitude"] = (
+                        expected_cosine
+                    )
+                    metrics["capillary_wave_expected_final_sine_amplitude"] = (
+                        expected_sine
+                    )
+                    metrics["capillary_wave_profile_relative_error"] = profile_error
+                    if profile_error > max_profile_error:
+                        errors.append(
+                            "capillary-wave profile relative error "
+                            f"{profile_error:.6g} exceeds {max_profile_error:.6g}"
+                        )
+
+    if max_mean_offset is not None:
+        offset = metrics.get("final_capillary_wave_mean_offset")
+        if not isinstance(offset, (int, float)):
+            errors.append("capillary-wave mean-offset diagnostic is unavailable")
+        elif abs(float(offset)) > max_mean_offset:
+            errors.append(
+                f"capillary-wave mean offset {abs(float(offset)):.6g} exceeds "
+                f"{max_mean_offset:.6g}"
+            )
+    return errors
+
+
+def capillary_stability_errors(metrics: dict[str, Any],
+                               args: argparse.Namespace) -> list[str]:
+    gate_names = (
+        "max_capillary_rejected_steps",
+        "max_capillary_dt_updates",
+        "max_capillary_speed_per_surface_tension",
+        "max_capillary_nonlinear_residual",
+        "max_capillary_linear_relative_residual",
+    )
+    if all(getattr(args, name, None) is None for name in gate_names):
+        return []
+
+    time_loop = metrics.get("time_loop")
+    if not isinstance(time_loop, dict):
+        diagnostics = metrics.get("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            time_loop = diagnostics.get("time_loop", {})
+    summary = time_loop.get("summary") if isinstance(time_loop, dict) else None
+    if not isinstance(summary, dict):
+        return ["capillary stability gates require time-loop convergence summary"]
+
+    errors = []
+    max_rejected = getattr(args, "max_capillary_rejected_steps", None)
+    if max_rejected is not None:
+        rejected_steps = summary.get("rejected_steps")
+        if not isinstance(rejected_steps, int):
+            errors.append("capillary rejected-step count was not reported")
+        elif rejected_steps > max_rejected:
+            errors.append(
+                f"capillary rejected steps {rejected_steps} exceed {max_rejected}"
+            )
+
+    max_dt_updates = getattr(args, "max_capillary_dt_updates", None)
+    if max_dt_updates is not None:
+        dt_updates = summary.get("dt_updates")
+        if not isinstance(dt_updates, int):
+            errors.append("capillary dt-update count was not reported")
+        elif dt_updates > max_dt_updates:
+            errors.append(
+                f"capillary dt updates {dt_updates} exceed {max_dt_updates}"
+            )
+
+    max_speed_per_surface_tension = getattr(
+        args, "max_capillary_speed_per_surface_tension", None)
+    if max_speed_per_surface_tension is not None:
+        surface_tension = metrics.get("surface_tension")
+        max_speed = metrics.get("max_speed")
+        if not isinstance(surface_tension, (int, float)):
+            errors.append("surface-tension control is unavailable")
+        elif abs(float(surface_tension)) <= 0.0:
+            errors.append("surface tension is zero; capillary stability cannot be normalized")
+        elif not isinstance(max_speed, (int, float)):
+            errors.append("capillary stability speed diagnostic is unavailable")
+        else:
+            normalized_speed = float(max_speed) / abs(float(surface_tension))
+            metrics["capillary_stability_speed_per_surface_tension"] = (
+                normalized_speed
+            )
+            if normalized_speed > max_speed_per_surface_tension:
+                errors.append(
+                    "capillary speed per surface tension "
+                    f"{normalized_speed:.6g} exceeds "
+                    f"{max_speed_per_surface_tension:.6g}"
+                )
+
+    max_nonlinear_residual = getattr(
+        args, "max_capillary_nonlinear_residual", None)
+    if max_nonlinear_residual is not None:
+        nonlinear_residual = summary.get("nonlinear_residual")
+        residual_max = (
+            nonlinear_residual.get("max")
+            if isinstance(nonlinear_residual, dict)
+            else None
+        )
+        if not isinstance(residual_max, (int, float)):
+            errors.append("capillary nonlinear residual summary was not reported")
+        elif float(residual_max) > max_nonlinear_residual:
+            errors.append(
+                f"capillary nonlinear residual {float(residual_max):.6g} exceeds "
+                f"{max_nonlinear_residual:.6g}"
+            )
+
+    max_linear_residual = getattr(
+        args, "max_capillary_linear_relative_residual", None)
+    if max_linear_residual is not None:
+        linear_residual = summary.get("linear_relative_residual")
+        residual_max = (
+            linear_residual.get("max")
+            if isinstance(linear_residual, dict)
+            else None
+        )
+        if not isinstance(residual_max, (int, float)):
+            errors.append("capillary linear relative residual summary was not reported")
+        elif float(residual_max) > max_linear_residual:
+            errors.append(
+                "capillary linear relative residual "
+                f"{float(residual_max):.6g} exceeds {max_linear_residual:.6g}"
+            )
+
+    return errors
+
+
+def normalized_capillary_convergence_metrics(value: Any) -> list[str]:
+    if value is None:
+        return ["capillary_curvature_relative_error"]
+    raw_values: list[Any]
+    if isinstance(value, (list, tuple)):
+        raw_values = list(value)
+    else:
+        raw_values = [value]
+    metrics: list[str] = []
+    for raw in raw_values:
+        for item in str(raw).split(","):
+            name = item.strip()
+            if name:
+                metrics.append(name)
+    return metrics or ["capillary_curvature_relative_error"]
+
+
+def capillary_convergence_rate_errors(
+        probes: list[dict[str, Any]],
+        args: argparse.Namespace) -> list[str]:
+    min_rate = getattr(args, "min_capillary_convergence_rate", None)
+    if min_rate is None:
+        return []
+    min_points = getattr(args, "min_capillary_convergence_points", None)
+    if min_points is None:
+        min_points = 2
+    resolution_key = (
+        getattr(args, "capillary_convergence_resolution_key", None) or
+        "capillary_convergence_resolution"
+    )
+    metric_names = normalized_capillary_convergence_metrics(
+        getattr(args, "capillary_convergence_metric", None))
+
+    errors = []
+    if min_points < 2:
+        errors.append("capillary convergence requires at least two points")
+        min_points = 2
+
+    for metric_name in metric_names:
+        samples: list[tuple[float, float]] = []
+        for probe in probes:
+            if probe.get("passed") is False:
+                continue
+            resolution = probe.get(resolution_key)
+            metric = probe.get(metric_name)
+            if isinstance(resolution, (int, float)) and isinstance(metric, (int, float)):
+                if float(resolution) > 0.0 and float(metric) > 0.0:
+                    samples.append((float(resolution), float(metric)))
+
+        if len(samples) < min_points:
+            errors.append(
+                f"capillary convergence metric {metric_name} has {len(samples)} "
+                f"usable sample(s), below {min_points}; expected positive numeric "
+                f"{resolution_key} and {metric_name} values"
+            )
+            continue
+
+        samples.sort(key=lambda item: item[0])
+        duplicate_resolutions = [
+            samples[i][0]
+            for i in range(1, len(samples))
+            if samples[i][0] == samples[i - 1][0]
+        ]
+        if duplicate_resolutions:
+            errors.append(
+                f"capillary convergence metric {metric_name} has duplicate "
+                f"{resolution_key} value {duplicate_resolutions[0]:.6g}"
+            )
+            continue
+
+        observed_rates: list[float] = []
+        for (coarse_resolution, coarse_error), (fine_resolution, fine_error) in zip(
+                samples, samples[1:]):
+            if fine_resolution <= coarse_resolution:
+                continue
+            rate = (
+                math.log(coarse_error / fine_error) /
+                math.log(fine_resolution / coarse_resolution)
+            )
+            observed_rates.append(rate)
+
+        if not observed_rates:
+            errors.append(
+                f"capillary convergence metric {metric_name} has no strictly "
+                f"increasing {resolution_key} samples"
+            )
+            continue
+
+        min_observed = min(observed_rates)
+        if min_observed < float(min_rate):
+            errors.append(
+                f"capillary convergence rate for {metric_name} "
+                f"{min_observed:.6g} is below {float(min_rate):.6g}"
+            )
+
     return errors
 
 
@@ -3103,6 +3939,13 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
             nonlinear_refresh_count
         )
         metrics["diagnostic_cut_context_vector_refresh_count"] = vector_refresh_count
+    skip_provenance_counts = cut_context_refresh_skip_provenance_counts(diagnostics)
+    if skip_provenance_counts:
+        skip_count = sum(skip_provenance_counts.values())
+        metrics["diagnostic_cut_context_refresh_skip_count"] = skip_count
+        metrics["diagnostic_cut_context_refresh_skip_provenance_counts"] = (
+            top_counts(skip_provenance_counts)
+        )
     cell_cache_summary = generated_cell_cache_summary(diagnostics)
     if cell_cache_summary:
         metrics["diagnostic_generated_cell_cache_summary"] = cell_cache_summary
@@ -3111,6 +3954,12 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         )
         metrics["diagnostic_generated_cell_cache_total_misses"] = (
             cell_cache_summary["total_misses"]
+        )
+        metrics["diagnostic_generated_cell_cache_unchanged_dof_hits"] = (
+            cell_cache_summary["unchanged_dof_hits"]
+        )
+        metrics["diagnostic_generated_cell_refresh_candidates"] = (
+            cell_cache_summary["refresh_candidates"]
         )
         metrics["diagnostic_generated_domain_cache_hits"] = (
             cell_cache_summary["domain_hits"]
@@ -3122,6 +3971,34 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         maintenance = diagnostics["level_set_maintenance"]
         metrics["diagnostic_level_set_maintenance_count"] = len(maintenance)
         metrics["latest_level_set_maintenance"] = maintenance[-1]
+    if diagnostics.get("level_set_advection_velocity_updates"):
+        records = diagnostics["level_set_advection_velocity_updates"]
+        metrics["diagnostic_level_set_advection_velocity_update_count"] = len(records)
+        metrics["latest_level_set_advection_velocity_update"] = records[-1]
+        for source, target in (
+                ("extension_method",
+                 "diagnostic_level_set_advection_velocity_extension_method_counts"),
+                ("interface_sample_source",
+                 "diagnostic_level_set_advection_velocity_interface_sample_source_counts")):
+            counts: dict[str, int] = {}
+            for record in records:
+                value = record.get(source)
+                if value is not None:
+                    increment_count(counts, str(value))
+            if counts:
+                metrics[target] = top_counts(counts)
+        for source, target in (
+                ("interface_sample_candidates",
+                 "diagnostic_level_set_advection_velocity_max_interface_sample_candidates"),
+                ("interface_samples",
+                 "diagnostic_level_set_advection_velocity_max_interface_samples")):
+            values = [
+                int(record[source])
+                for record in records
+                if isinstance(record.get(source), int)
+            ]
+            if values:
+                metrics[target] = max(values)
     if diagnostics.get("level_set_nonconservative_warnings"):
         warnings = diagnostics["level_set_nonconservative_warnings"]
         metrics["diagnostic_level_set_nonconservative_warning_count"] = len(warnings)
@@ -3361,6 +4238,66 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
         metrics["diagnostic_curvature_projection_reason_counts"] = (
             top_counts(reason_counts)
         )
+        smoothing_mode_counts: dict[str, int] = {}
+        for record in records:
+            increment_count(
+                smoothing_mode_counts,
+                str(record.get("smoothing_mode", "unknown")),
+            )
+        metrics["diagnostic_curvature_projection_smoothing_mode_counts"] = (
+            top_counts(smoothing_mode_counts)
+        )
+        cache_counts: dict[str, int] = {}
+        cut_signature_cache_counts: dict[str, int] = {}
+        skipped_count = 0
+        cache_hit_count = 0
+        cache_miss_count = 0
+        cut_signature_cache_hit_count = 0
+        cut_signature_cache_miss_count = 0
+        reused_vertex_adjacency_count = 0
+        reused_sample_adjacency_count = 0
+        for record in records:
+            cache_state = str(record.get("cache", "unknown"))
+            increment_count(cache_counts, cache_state)
+            cut_signature_cache_state = str(
+                record.get("cut_signature_cache", "unknown"))
+            increment_count(cut_signature_cache_counts,
+                            cut_signature_cache_state)
+            if diagnostic_flag(record, "projection_skipped"):
+                skipped_count += 1
+            if cache_state in ("hit", "fast_hit"):
+                cache_hit_count += 1
+            if cache_state == "miss":
+                cache_miss_count += 1
+            if cut_signature_cache_state == "hit":
+                cut_signature_cache_hit_count += 1
+            if cut_signature_cache_state == "miss":
+                cut_signature_cache_miss_count += 1
+            if diagnostic_flag(record, "reused_vertex_adjacency"):
+                reused_vertex_adjacency_count += 1
+            if diagnostic_flag(record, "reused_sample_adjacency"):
+                reused_sample_adjacency_count += 1
+        metrics["diagnostic_curvature_projection_cache_counts"] = (
+            top_counts(cache_counts)
+        )
+        metrics["diagnostic_curvature_projection_skipped_count"] = skipped_count
+        metrics["diagnostic_curvature_projection_cache_hit_count"] = cache_hit_count
+        metrics["diagnostic_curvature_projection_cache_miss_count"] = cache_miss_count
+        metrics["diagnostic_curvature_projection_cut_signature_cache_counts"] = (
+            top_counts(cut_signature_cache_counts)
+        )
+        metrics["diagnostic_curvature_projection_cut_signature_cache_hit_count"] = (
+            cut_signature_cache_hit_count
+        )
+        metrics["diagnostic_curvature_projection_cut_signature_cache_miss_count"] = (
+            cut_signature_cache_miss_count
+        )
+        metrics["diagnostic_curvature_projection_reused_vertex_adjacency_count"] = (
+            reused_vertex_adjacency_count
+        )
+        metrics["diagnostic_curvature_projection_reused_sample_adjacency_count"] = (
+            reused_sample_adjacency_count
+        )
         for source, target in (
                 ("fitted_vertices",
                  "diagnostic_curvature_projection_max_fitted_vertices"),
@@ -3376,8 +4313,16 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                  "diagnostic_curvature_projection_max_small_gradient_vertices"),
                 ("fit_residual_failure_vertices",
                  "diagnostic_curvature_projection_max_fit_residual_failure_vertices"),
+                ("narrow_band_width",
+                 "diagnostic_curvature_projection_max_narrow_band_width"),
+                ("narrow_band_vertices",
+                 "diagnostic_curvature_projection_max_narrow_band_vertices"),
+                ("skipped_far_vertices",
+                 "diagnostic_curvature_projection_max_skipped_far_vertices"),
                 ("smoothing_iterations",
                  "diagnostic_curvature_projection_max_smoothing_iterations"),
+                ("smoothing_operator_edges",
+                 "diagnostic_curvature_projection_max_smoothing_operator_edges"),
                 ("smoothing_mean_abs_update",
                  "diagnostic_curvature_projection_max_smoothing_mean_abs_update"),
                 ("smoothing_max_abs_update",
@@ -3386,6 +4331,10 @@ def add_diagnostic_metrics(metrics: dict[str, Any],
                  "diagnostic_curvature_projection_max_mean_normalized_fit_residual"),
                 ("max_normalized_fit_residual",
                  "diagnostic_curvature_projection_max_normalized_fit_residual"),
+                ("vertex_adjacency_builds",
+                 "diagnostic_curvature_projection_max_vertex_adjacency_builds"),
+                ("sample_adjacency_builds",
+                 "diagnostic_curvature_projection_max_sample_adjacency_builds"),
                 ("max_abs_curvature",
                  "diagnostic_curvature_projection_max_abs_curvature")):
             values = [
@@ -3750,10 +4699,32 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "interface_quadrature_order",
         "volume_quadrature_order",
         "surface_tension",
+        "wet_extension_advection_velocity_method",
         "projected_curvature_field",
         "curvature_projection_cadence_steps",
+        "curvature_projection_max_normalized_fit_residual",
+        "curvature_projection_max_neighbor_fallback_vertices",
+        "curvature_projection_max_zero_fallback_vertices",
+        "curvature_projection_narrow_band_width",
         "curvature_projection_smoothing_iterations",
         "curvature_projection_smoothing_relaxation",
+        "curvature_projection_smoothing_mode",
+        "expect_curvature_projection_smoothing_mode",
+        "min_diagnostic_curvature_projection_operator_edges",
+        "max_capillary_curvature_relative_error",
+        "max_capillary_pressure_jump_relative_error",
+        "max_capillary_rejected_steps",
+        "max_capillary_dt_updates",
+        "max_capillary_speed_per_surface_tension",
+        "max_capillary_nonlinear_residual",
+        "max_capillary_linear_relative_residual",
+        "max_capillary_wave_frequency_relative_error",
+        "max_capillary_wave_profile_relative_error",
+        "max_capillary_wave_mean_offset",
+        "capillary_convergence_resolution_key",
+        "capillary_convergence_metric",
+        "min_capillary_convergence_rate",
+        "min_capillary_convergence_points",
         "enable_level_set_volume_correction",
         "volume_correction_cadence_steps",
         "volume_correction_use_initial_volume",
@@ -3770,6 +4741,8 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "expect_selected_implicit_cut_quadrature_backend",
         "expect_implicit_cut_backend_qualification",
         "expect_implicit_cut_fallback_policy",
+        "expect_level_set_advection_velocity_extension_method",
+        "expect_level_set_advection_velocity_interface_sample_source",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -3799,6 +4772,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "require_jacobian_component_block_diagnostics",
         "require_eigen_factorization_diagnostics",
         "require_active_pressure_support_diagnostics",
+        "require_level_set_advection_velocity_diagnostics",
         "require_curvature_projection_diagnostics",
         "require_curvature_projection_newton_freshness",
         "require_fsils_matrix_diagnostics",
@@ -3811,11 +4785,14 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "high_order_3d_benchmark_profile_qualification",
         "high_order_curved_3d_simplex_smoke",
         "high_order_mpi_motion_smoke",
+        "high_order_capillary_droplet_equilibrium_smoke",
+        "high_order_capillary_wave_smoke",
         "use_high_order_implicit_cuts",
         "require_reference_profile_comparison",
         "enable_adaptive_time_loop",
         "allow_experimental_profile_linear_solver",
         "allow_failure_diagnostics",
+        "trace_level_set_advection_velocity",
     ):
         if getattr(args, name):
             metrics[name] = True
@@ -3831,6 +4808,7 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_diagnostic_assembly_timings_per_step",
         "max_diagnostic_extra_assembly_timings_per_step",
         "max_diagnostic_cut_context_rebuilds_per_step",
+        "min_diagnostic_cut_context_refresh_skips",
         "max_diagnostic_newton_matrix_assemblies_per_step",
         "max_diagnostic_generated_cell_cache_full_miss_rebuilds",
         "max_diagnostic_process_rss_kb",
@@ -3843,13 +4821,40 @@ def add_solver_control_overrides(metrics: dict[str, Any],
         "max_reference_profile_max_abs_error",
         "max_reference_profile_elevated_front_lag",
         "max_solver_elapsed_wall_seconds",
+        "curvature_projection_max_normalized_fit_residual",
+        "curvature_projection_max_neighbor_fallback_vertices",
+        "curvature_projection_max_zero_fallback_vertices",
         "curvature_projection_smoothing_iterations",
         "curvature_projection_smoothing_relaxation",
+        "expect_curvature_projection_smoothing_mode",
+        "min_diagnostic_curvature_projection_operator_edges",
+        "max_capillary_curvature_relative_error",
+        "max_capillary_pressure_jump_relative_error",
+        "max_capillary_rejected_steps",
+        "max_capillary_dt_updates",
+        "max_capillary_speed_per_surface_tension",
+        "max_capillary_nonlinear_residual",
+        "max_capillary_linear_relative_residual",
+        "max_capillary_wave_frequency_relative_error",
+        "max_capillary_wave_profile_relative_error",
+        "max_capillary_wave_mean_offset",
+        "min_capillary_convergence_rate",
+        "min_capillary_convergence_points",
         "min_diagnostic_curvature_projection_count",
         "min_diagnostic_curvature_projection_max_abs_curvature",
+        "max_diagnostic_curvature_projection_fallback_vertices",
         "max_diagnostic_curvature_projection_zero_fallback_vertices",
         "max_diagnostic_curvature_projection_normalized_fit_residual",
         "min_diagnostic_curvature_projection_smoothing_iterations",
+        "min_diagnostic_curvature_projection_skipped_count",
+        "min_diagnostic_curvature_projection_cache_hit_count",
+        "max_diagnostic_curvature_projection_cache_miss_count",
+        "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
+        "min_diagnostic_curvature_projection_reused_vertex_adjacency_count",
+        "min_diagnostic_curvature_projection_reused_sample_adjacency_count",
+        "max_diagnostic_curvature_projection_vertex_adjacency_builds",
+        "max_diagnostic_curvature_projection_sample_adjacency_builds",
+        "min_diagnostic_level_set_advection_interface_samples",
         "max_solver_elapsed_seconds_per_accepted_step",
         "min_reference_profile_coverage",
         "min_reference_profile_direct_coverage",
@@ -4034,6 +5039,9 @@ def evaluate_timeout_diagnostics(metrics: dict[str, Any],
         errors.extend(cut_context_solution_source_errors(diagnostics))
     errors.extend(cut_context_policy_errors(metrics, args))
     errors.extend(curvature_projection_errors(metrics, args))
+    errors.extend(capillary_benchmark_errors(metrics, args))
+    errors.extend(capillary_wave_benchmark_errors(metrics, args))
+    errors.extend(capillary_stability_errors(metrics, args))
     if (args.require_newton_assembly_diagnostics and
             not diagnostics.get("newton_assemblies")):
         errors.append("Newton assembly diagnostics were not reported")
@@ -4460,6 +5468,113 @@ def add_interface_motion_metrics(metrics: dict[str, Any],
         metrics["interface_slope_abs_change"] = abs(float(final_slope) - float(initial_slope))
 
 
+def add_capillary_wave_profile_fit(metrics: dict[str, Any],
+                                   benchmark: dict[str, Any],
+                                   prefix: str,
+                                   profile: tuple[np.ndarray, np.ndarray] | None
+                                   ) -> None:
+    wave = benchmark.get("capillary_wave")
+    if not isinstance(wave, dict):
+        return
+    if profile is None:
+        metrics[f"{prefix}_capillary_wave_profile_available"] = False
+        return
+    k = wave.get("wavenumber")
+    base_height = wave.get("base_height")
+    if not isinstance(k, (int, float)) or not isinstance(base_height, (int, float)):
+        metrics[f"{prefix}_capillary_wave_profile_available"] = False
+        metrics[f"{prefix}_capillary_wave_profile_error"] = "missing benchmark wave data"
+        return
+
+    x, y = profile
+    if x.size < 3:
+        metrics[f"{prefix}_capillary_wave_profile_available"] = False
+        metrics[f"{prefix}_capillary_wave_profile_error"] = "not enough interface samples"
+        return
+
+    design = np.column_stack((
+        np.cos(float(k) * x),
+        np.sin(float(k) * x),
+        np.ones_like(x),
+    ))
+    coeffs, *_ = np.linalg.lstsq(design, y - float(base_height), rcond=None)
+    cosine, sine, mean_offset = (float(value) for value in coeffs)
+    residual = (design @ coeffs) - (y - float(base_height))
+    metrics[f"{prefix}_capillary_wave_profile_available"] = True
+    metrics[f"{prefix}_capillary_wave_cosine_amplitude"] = cosine
+    metrics[f"{prefix}_capillary_wave_sine_amplitude"] = sine
+    metrics[f"{prefix}_capillary_wave_mean_offset"] = mean_offset
+    metrics[f"{prefix}_capillary_wave_amplitude"] = float(math.hypot(cosine, sine))
+    metrics[f"{prefix}_capillary_wave_fit_rmse"] = float(
+        math.sqrt(float(np.mean(residual * residual)))
+    )
+
+
+def add_capillary_wave_profile_metrics(metrics: dict[str, Any],
+                                       benchmark: dict[str, Any],
+                                       initial: pv.DataSet,
+                                       output: pv.DataSet) -> None:
+    if not isinstance(benchmark.get("capillary_wave"), dict):
+        return
+    add_capillary_wave_profile_fit(
+        metrics, benchmark, "initial", interface_profile_xy(initial))
+    add_capillary_wave_profile_fit(
+        metrics, benchmark, "final", interface_profile_xy(output))
+
+
+def coordinate_min_spacing(points: np.ndarray) -> float | None:
+    spacings = []
+    for axis in range(min(points.shape[1], 3)):
+        unique = np.unique(np.round(points[:, axis], decimals=12))
+        if unique.size < 2:
+            continue
+        diffs = np.diff(np.sort(unique))
+        positive = diffs[diffs > 1.0e-12]
+        if positive.size:
+            spacings.append(float(np.min(positive)))
+    return min(spacings) if spacings else None
+
+
+def add_projected_curvature_field_metrics(metrics: dict[str, Any],
+                                          output: pv.DataSet) -> None:
+    if "phi" not in output.point_data:
+        return
+    curvature_name = None
+    for candidate in ("kappa_projected", "curvature_projected"):
+        if candidate in output.point_data:
+            curvature_name = candidate
+            break
+    if curvature_name is None:
+        return
+
+    phi = np.asarray(output.point_data["phi"], dtype=float).reshape(-1)
+    curvature = np.asarray(output.point_data[curvature_name], dtype=float).reshape(-1)
+    if phi.shape[0] != curvature.shape[0]:
+        return
+
+    points = np.asarray(output.points, dtype=float)
+    spacing = coordinate_min_spacing(points)
+    band_width = 0.15 if spacing is None else max(1.0e-12, 1.5 * spacing)
+    finite = np.isfinite(phi) & np.isfinite(curvature)
+    near_interface = finite & (np.abs(phi) <= band_width)
+    if not np.any(near_interface):
+        near_interface = finite
+    if not np.any(near_interface):
+        return
+
+    near_values = curvature[near_interface]
+    metrics["projected_curvature_field_name"] = curvature_name
+    metrics["projected_curvature_near_interface_band_width"] = float(band_width)
+    metrics["projected_curvature_near_interface_point_count"] = int(
+        np.count_nonzero(near_interface))
+    metrics["projected_curvature_near_interface_mean_abs"] = float(
+        np.mean(np.abs(near_values)))
+    metrics["projected_curvature_near_interface_median_abs"] = float(
+        np.median(np.abs(near_values)))
+    metrics["projected_curvature_near_interface_max_abs"] = float(
+        np.max(np.abs(near_values)))
+
+
 def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, Any]:
     benchmark = load_benchmark(case_dir)
     if benchmark:
@@ -4536,6 +5651,8 @@ def compute_metrics(case_name: str, case_dir: Path, result: Path) -> dict[str, A
         except Exception as exc:
             metrics["interface_extraction_error"] = str(exc)
     add_interface_motion_metrics(metrics, initial, output)
+    add_capillary_wave_profile_metrics(metrics, benchmark, initial, output)
+    add_projected_curvature_field_metrics(metrics, output)
     if "WetVolumeMeasure" in output.cell_data:
         wet_measures = np.asarray(output.cell_data["WetVolumeMeasure"], dtype=float).reshape(-1)
         if wet_measures.shape[0] == output.n_cells:
@@ -4752,6 +5869,10 @@ def evaluate(metrics: dict[str, Any], args: argparse.Namespace) -> list[str]:
         errors.extend(cut_context_solution_source_errors(metrics["diagnostics"]))
     errors.extend(cut_context_policy_errors(metrics, args))
     errors.extend(curvature_projection_errors(metrics, args))
+    errors.extend(capillary_benchmark_errors(metrics, args))
+    errors.extend(capillary_wave_benchmark_errors(metrics, args))
+    errors.extend(capillary_stability_errors(metrics, args))
+    errors.extend(level_set_advection_velocity_errors(metrics, args))
     if (args.require_newton_assembly_diagnostics and
             not metrics["diagnostics"].get("newton_assemblies")):
         errors.append("Newton assembly diagnostics were not reported")
@@ -5127,7 +6248,13 @@ def time_loop_convergence_errors(metrics: dict[str, Any],
     elif expected_steps > 0 and accepted_steps < expected_steps:
         errors.append(
             f"accepted steps {accepted_steps} below requested steps {expected_steps}")
-    if args.enable_adaptive_time_loop:
+    adaptive_enabled = args.enable_adaptive_time_loop
+    if not adaptive_enabled:
+        controls = metrics.get("solver_controls", {})
+        if isinstance(controls, dict):
+            adaptive_enabled = isinstance(controls.get("adaptive_time_loop"), dict)
+
+    if adaptive_enabled:
         final_time = summary.get("final_accepted_time")
         time_step = metrics.get("time_step_size")
         if not isinstance(time_step, (int, float)):
@@ -5148,7 +6275,7 @@ def time_loop_convergence_errors(metrics: dict[str, Any],
                 )
     elif summary.get("all_nonlinear_converged") is not True:
         errors.append("not all nonlinear solves converged")
-    if not args.enable_adaptive_time_loop and summary.get("all_linear_converged") is not True:
+    if not adaptive_enabled and summary.get("all_linear_converged") is not True:
         errors.append("not all linear solves converged")
     if args.max_time_loop_nonlinear_iterations_per_step is not None:
         max_nonlinear = summary.get("nonlinear_iterations_max")
@@ -5330,14 +6457,24 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
         cut_cell_velocity_gradient_penalty=args.cut_cell_velocity_gradient_penalty,
         cut_cell_pressure_gradient_penalty=args.cut_cell_pressure_gradient_penalty,
         surface_tension=args.surface_tension,
+        wet_extension_advection_velocity_method=(
+            args.wet_extension_advection_velocity_method),
         projected_curvature_field=args.projected_curvature_field,
         curvature_projection_cadence_steps=args.curvature_projection_cadence_steps,
         curvature_projection_max_normalized_fit_residual=(
             args.curvature_projection_max_normalized_fit_residual),
+        curvature_projection_max_neighbor_fallback_vertices=(
+            args.curvature_projection_max_neighbor_fallback_vertices),
+        curvature_projection_max_zero_fallback_vertices=(
+            args.curvature_projection_max_zero_fallback_vertices),
+        curvature_projection_narrow_band_width=(
+            args.curvature_projection_narrow_band_width),
         curvature_projection_smoothing_iterations=(
             args.curvature_projection_smoothing_iterations),
         curvature_projection_smoothing_relaxation=(
             args.curvature_projection_smoothing_relaxation),
+        curvature_projection_smoothing_mode=(
+            args.curvature_projection_smoothing_mode),
         enable_volume_correction=args.enable_level_set_volume_correction,
         volume_correction_cadence_steps=args.volume_correction_cadence_steps,
         volume_correction_use_initial_volume=(
@@ -5376,6 +6513,19 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 if args.high_order_capillary_balance_smoke:
                     pressure_jump = -float(args.surface_tension) / CAPILLARY_ARC_RADIUS
                 write_capillary_arc2d_case(run_dir, args.steps, pressure_jump)
+            elif case_name == "droplet2d":
+                pressure_jump = 0.0
+                if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+                    pressure_jump = (
+                        -float(args.surface_tension) / CAPILLARY_DROPLET_RADIUS
+                    )
+                write_capillary_droplet2d_case(run_dir, args.steps, pressure_jump)
+            elif case_name == "capillarywave2d":
+                surface_tension = (
+                    0.5 if args.surface_tension is None else float(args.surface_tension)
+                )
+                write_capillary_wave2d_case(
+                    run_dir, args.steps, surface_tension, args.time_step_size)
             else:
                 write_mini_case(run_dir, args.steps, static=(case_name == "static2d"))
             if args.use_high_order_implicit_cuts:
@@ -5398,6 +6548,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             tail = "\n".join(output.splitlines()[-80:])
             diagnostics = parse_solver_diagnostics(output)
             failure = diagnostic_timeout_metrics(case_name, run_dir, diagnostics)
+            failure["time_series_collation"] = collate_solver_time_series(run_dir, args)
             failure["timeout_seconds"] = getattr(
                 exc, "configured_timeout_seconds", args.timeout_seconds)
             failure["solver_elapsed_wall_seconds"] = exc.timeout
@@ -5435,6 +6586,7 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
                 "solver_elapsed_wall_seconds": solver_elapsed_wall_seconds,
                 "diagnostics": parse_solver_diagnostics(completed.stdout),
                 "stdout_tail": tail,
+                "time_series_collation": collate_solver_time_series(run_dir, args),
             }
             add_diagnostic_metrics(failure, failure["diagnostics"])
             previous = previous_invalid_pressure(load_benchmark(run_dir))
@@ -5482,7 +6634,11 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
             metrics = compute_metrics(case_name, run_dir, result)
             metrics["result_step"] = result_step
             metrics["result_path"] = str(result)
+        benchmark = load_benchmark(run_dir)
+        if benchmark:
+            metrics["benchmark"] = benchmark
         add_diagnostic_metrics(metrics, diagnostics)
+        metrics["time_series_collation"] = collate_solver_time_series(run_dir, args)
         if not args.disable_vtk_output:
             add_reference_profile_metrics(metrics, run_dir, result, args)
         metrics["case"] = case_name
@@ -5519,8 +6675,15 @@ def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str
 
 
 def set_default(args: argparse.Namespace, name: str, value: Any) -> None:
-    if getattr(args, name) is None:
+    if getattr(args, name, None) is None:
         setattr(args, name, value)
+
+
+def curvature_sample_adjacency_build_budget(args: argparse.Namespace) -> int:
+    steps = getattr(args, "steps", None)
+    if isinstance(steps, int) and steps > 0:
+        return steps
+    return 1
 
 
 def remember_explicit_cli_overrides(args: argparse.Namespace) -> None:
@@ -5563,6 +6726,41 @@ def require_profile_production_linear_solver_policy(args: argparse.Namespace) ->
         )
 
 
+def apply_level_set_advection_velocity_diagnostic_gate_defaults(
+        args: argparse.Namespace) -> None:
+    high_order_motion_gate = any(
+        getattr(args, name, False)
+        for name in (
+            "high_order_production_qualification",
+            "high_order_mpi_production_qualification",
+            "high_order_visible_motion_demo",
+            "high_order_mpi_motion_smoke",
+            "high_order_capillary_wave_smoke",
+            "high_order_volume_corrected_motion_smoke",
+        )
+    )
+    if not high_order_motion_gate:
+        return
+
+    args.trace_level_set_advection_velocity = True
+    args.require_level_set_advection_velocity_diagnostics = True
+    expected_method = (
+        args.wet_extension_advection_velocity_method or
+        "nearest_active_vertex"
+    )
+    set_default(
+        args,
+        "expect_level_set_advection_velocity_extension_method",
+        expected_method,
+    )
+    if expected_method == "nearest_active_vertex":
+        set_default(
+            args,
+            "expect_level_set_advection_velocity_interface_sample_source",
+            "all_cells",
+        )
+
+
 def apply_high_order_production_qualification_defaults(
         args: argparse.Namespace) -> None:
     if not args.high_order_production_qualification:
@@ -5577,6 +6775,12 @@ def apply_high_order_production_qualification_defaults(
                 not args.high_order_capillary_projection_smoke and
                 not args.high_order_capillary_response_smoke and
                 not args.high_order_capillary_balance_smoke and
+                not getattr(
+                    args,
+                    "high_order_capillary_droplet_equilibrium_smoke",
+                    False,
+                ) and
+                not getattr(args, "high_order_capillary_wave_smoke", False) and
                 not args.high_order_volume_corrected_motion_smoke):
             args.steps = 1
         return
@@ -5634,6 +6838,7 @@ def apply_high_order_production_qualification_defaults(
     set_default(args, "min_diagnostic_pressure_range", 100.0)
     set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
     set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
     set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
@@ -5724,6 +6929,7 @@ def apply_high_order_mpi_production_qualification_defaults(
     set_default(args, "max_fsils_matrix_missing_diag", 0)
     set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
     set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
     set_default(args, "max_diagnostic_process_rss_kb", 350000.0)
@@ -5824,6 +7030,7 @@ def apply_high_order_visible_motion_demo_defaults(
     set_default(args, "max_fsils_matrix_missing_diag", 0)
     set_default(args, "max_fsils_matrix_nonfinite_entries", 0)
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
     set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
     set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
@@ -6184,6 +7391,7 @@ def apply_high_order_mpi_motion_smoke_defaults(
     set_default(args, "expect_selected_implicit_cut_quadrature_backend",
                 "SayeHyperrectangle")
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 5.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_process_rss_kb", 300000.0)
     set_default(args, "max_diagnostic_process_rss_growth_kb", 150000.0)
     set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
@@ -6220,6 +7428,11 @@ def apply_high_order_capillary_projection_smoke_defaults(
             "--high-order-capillary-projection-smoke cannot be combined with "
             "--high-order-mpi-motion-smoke"
         )
+    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-projection-smoke cannot be combined with "
+            "--high-order-capillary-droplet-equilibrium-smoke"
+        )
 
     if not args.case:
         args.case = list(HIGH_ORDER_CAPILLARY_PROJECTION_CASES)
@@ -6241,8 +7454,15 @@ def apply_high_order_capillary_projection_smoke_defaults(
     set_default(args, "projected_curvature_field", "kappa_projected")
     set_default(args, "curvature_projection_cadence_steps", 1)
     set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
     set_default(args, "curvature_projection_smoothing_iterations", 1)
     set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "expect_curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
+    set_default(args, "max_capillary_rejected_steps", 0)
+    set_default(args, "max_capillary_dt_updates", 0)
+    set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
     args.required_implicit_cut_backend_qualification = "ProductionQualified"
     set_default(args, "linear_algebra_backend", "eigen")
     if args.min_max_speed == 1.0e-2:
@@ -6257,6 +7477,7 @@ def apply_high_order_capillary_projection_smoke_defaults(
     set_default(args, "min_diagnostic_pressure_range", 100.0)
     set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
     set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
     set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
@@ -6278,6 +7499,17 @@ def apply_high_order_capillary_projection_smoke_defaults(
     set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
     set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
     set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
+    set_default(args,
+                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
+                1)
+    set_default(args, "min_diagnostic_curvature_projection_reused_vertex_adjacency_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_reused_sample_adjacency_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
+    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
+                curvature_sample_adjacency_build_budget(args))
 
 
 def apply_high_order_capillary_response_smoke_defaults(
@@ -6309,6 +7541,11 @@ def apply_high_order_capillary_response_smoke_defaults(
             "--high-order-capillary-response-smoke cannot be combined with "
             "--high-order-capillary-projection-smoke"
         )
+    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-response-smoke cannot be combined with "
+            "--high-order-capillary-droplet-equilibrium-smoke"
+        )
 
     if not args.case:
         args.case = list(HIGH_ORDER_CAPILLARY_RESPONSE_CASES)
@@ -6331,8 +7568,16 @@ def apply_high_order_capillary_response_smoke_defaults(
     set_default(args, "projected_curvature_field", "kappa_projected")
     set_default(args, "curvature_projection_cadence_steps", 1)
     set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
     set_default(args, "curvature_projection_smoothing_iterations", 1)
     set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "expect_curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
+    set_default(args, "max_capillary_curvature_relative_error", 0.75)
+    set_default(args, "max_capillary_rejected_steps", 0)
+    set_default(args, "max_capillary_dt_updates", 0)
+    set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
     args.required_implicit_cut_backend_qualification = "ProductionQualified"
     set_default(args, "linear_algebra_backend", "eigen")
     if args.min_max_speed == 1.0e-2:
@@ -6347,6 +7592,7 @@ def apply_high_order_capillary_response_smoke_defaults(
     set_default(args, "min_capillary_response_speed_per_surface_tension", 1.0e-6)
     set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
     set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
     set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
@@ -6365,6 +7611,17 @@ def apply_high_order_capillary_response_smoke_defaults(
     set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
     set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
     set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
+    set_default(args,
+                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
+                1)
+    set_default(args, "min_diagnostic_curvature_projection_reused_vertex_adjacency_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_reused_sample_adjacency_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
+    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
+                curvature_sample_adjacency_build_budget(args))
 
 
 def apply_high_order_capillary_balance_smoke_defaults(
@@ -6401,6 +7658,11 @@ def apply_high_order_capillary_balance_smoke_defaults(
             "--high-order-capillary-balance-smoke cannot be combined with "
             "--high-order-capillary-response-smoke"
         )
+    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-balance-smoke cannot be combined with "
+            "--high-order-capillary-droplet-equilibrium-smoke"
+        )
 
     if not args.case:
         args.case = list(HIGH_ORDER_CAPILLARY_BALANCE_CASES)
@@ -6423,8 +7685,17 @@ def apply_high_order_capillary_balance_smoke_defaults(
     set_default(args, "projected_curvature_field", "kappa_projected")
     set_default(args, "curvature_projection_cadence_steps", 1)
     set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
     set_default(args, "curvature_projection_smoothing_iterations", 1)
     set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "expect_curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
+    set_default(args, "max_capillary_curvature_relative_error", 0.75)
+    set_default(args, "max_capillary_pressure_jump_relative_error", 1.0e-12)
+    set_default(args, "max_capillary_rejected_steps", 0)
+    set_default(args, "max_capillary_dt_updates", 0)
+    set_default(args, "max_capillary_speed_per_surface_tension", 1.0e-6)
     args.required_implicit_cut_backend_qualification = "ProductionQualified"
     set_default(args, "linear_algebra_backend", "eigen")
     if args.min_max_speed == 1.0e-2:
@@ -6439,6 +7710,7 @@ def apply_high_order_capillary_balance_smoke_defaults(
     set_default(args, "min_diagnostic_pressure_range", 0.5)
     set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
     set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
     set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
     set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
     set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
@@ -6457,6 +7729,280 @@ def apply_high_order_capillary_balance_smoke_defaults(
     set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
     set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual", 5.0e-2)
     set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
+    set_default(args,
+                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
+                1)
+    set_default(args, "min_diagnostic_curvature_projection_reused_vertex_adjacency_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_reused_sample_adjacency_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
+    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
+                curvature_sample_adjacency_build_budget(args))
+
+
+def apply_high_order_capillary_droplet_equilibrium_smoke_defaults(
+        args: argparse.Namespace) -> None:
+    if not getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+        return
+    if getattr(args, "high_order_3d_benchmark_qualification", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-3d-benchmark-qualification"
+        )
+    if getattr(args, "high_order_3d_benchmark_profile_qualification", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-3d-benchmark-profile-qualification"
+        )
+    if getattr(args, "high_order_curved_3d_simplex_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-curved-3d-simplex-smoke"
+        )
+    if getattr(args, "high_order_mpi_motion_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-mpi-motion-smoke"
+        )
+    if getattr(args, "high_order_capillary_projection_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-capillary-projection-smoke"
+        )
+    if getattr(args, "high_order_capillary_response_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-capillary-response-smoke"
+        )
+    if getattr(args, "high_order_capillary_balance_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-droplet-equilibrium-smoke cannot be "
+            "combined with --high-order-capillary-balance-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_CAPILLARY_DROPLET_EQUILIBRIUM_CASES)
+    if args.steps is None:
+        args.steps = 3
+    set_default(args, "timeout_seconds", 300.0)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 1.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.require_curvature_projection_diagnostics = True
+    args.require_curvature_projection_newton_freshness = True
+
+    set_default(args, "surface_tension", 0.5)
+    set_default(args, "projected_curvature_field", "kappa_projected")
+    set_default(args, "curvature_projection_cadence_steps", 1)
+    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
+    set_default(args, "curvature_projection_smoothing_iterations", 1)
+    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "expect_curvature_projection_smoothing_mode",
+                "mass_stiffness_operator")
+    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
+    set_default(args, "max_capillary_curvature_relative_error", 0.75)
+    set_default(args, "max_capillary_pressure_jump_relative_error", 1.0e-12)
+    set_default(args, "max_capillary_rejected_steps", 0)
+    set_default(args, "max_capillary_dt_updates", 0)
+    set_default(args, "max_capillary_speed_per_surface_tension", 1.0e-5)
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    set_default(args, "linear_algebra_backend", "eigen")
+    if getattr(args, "min_max_speed", None) == 1.0e-2:
+        args.min_max_speed = 0.0
+    if getattr(args, "min_wet_mean_speed", None) == 2.5e-4:
+        args.min_wet_mean_speed = 0.0
+    if getattr(args, "min_gate_mean_ux", None) == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if getattr(args, "min_front_mean_ux", None) == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "max_capillary_balance_speed_per_surface_tension", 1.0e-5)
+    set_default(args, "min_diagnostic_pressure_range", 0.5)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_diagnostic_curvature_projection_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 1.0)
+    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
+    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual",
+                5.0e-2)
+    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
+    set_default(args,
+                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
+                1)
+    set_default(args,
+                "min_diagnostic_curvature_projection_reused_vertex_adjacency_count",
+                1)
+    set_default(args,
+                "min_diagnostic_curvature_projection_reused_sample_adjacency_count",
+                1)
+    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
+    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
+                curvature_sample_adjacency_build_budget(args))
+
+
+def apply_high_order_capillary_wave_smoke_defaults(args: argparse.Namespace) -> None:
+    if not getattr(args, "high_order_capillary_wave_smoke", False):
+        return
+    if getattr(args, "high_order_3d_benchmark_qualification", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-3d-benchmark-qualification"
+        )
+    if getattr(args, "high_order_3d_benchmark_profile_qualification", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-3d-benchmark-profile-qualification"
+        )
+    if getattr(args, "high_order_curved_3d_simplex_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-curved-3d-simplex-smoke"
+        )
+    if getattr(args, "high_order_mpi_motion_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-mpi-motion-smoke"
+        )
+    if getattr(args, "high_order_capillary_projection_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-capillary-projection-smoke"
+        )
+    if getattr(args, "high_order_capillary_response_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-capillary-response-smoke"
+        )
+    if getattr(args, "high_order_capillary_balance_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-capillary-balance-smoke"
+        )
+    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+        raise ValueError(
+            "--high-order-capillary-wave-smoke cannot be combined with "
+            "--high-order-capillary-droplet-equilibrium-smoke"
+        )
+
+    if not args.case:
+        args.case = list(HIGH_ORDER_CAPILLARY_WAVE_CASES)
+    if args.steps is None:
+        args.steps = 3
+    set_default(args, "time_step_size", 2.0e-3)
+    set_default(args, "timeout_seconds", 600.0)
+    set_default(args, "max_solver_elapsed_seconds_per_accepted_step", 2.0)
+    args.use_high_order_implicit_cuts = True
+    args.disable_cut_stabilization = False
+    args.require_time_loop_convergence = True
+    args.require_process_memory_diagnostics = True
+    args.require_basis_cache_diagnostics = True
+    args.require_high_order_cut_context_diagnostics = True
+    args.require_eigen_factorization_diagnostics = True
+    args.require_active_pressure_support_diagnostics = True
+    args.require_curvature_projection_diagnostics = True
+    args.require_curvature_projection_newton_freshness = True
+    args.require_reference_profile_comparison = True
+
+    set_default(args, "surface_tension", 50.0)
+    set_default(args, "wet_extension_advection_velocity_method",
+                "nearest_active_vertex")
+    set_default(args, "projected_curvature_field", "kappa_projected")
+    set_default(args, "curvature_projection_cadence_steps", 1)
+    set_default(args, "curvature_projection_max_normalized_fit_residual", 5.0e-2)
+    set_default(args, "curvature_projection_max_zero_fallback_vertices", 0)
+    set_default(args, "curvature_projection_smoothing_iterations", 1)
+    set_default(args, "curvature_projection_smoothing_relaxation", 0.25)
+    set_default(args, "curvature_projection_smoothing_mode", "mass_stiffness_operator")
+    set_default(args, "expect_curvature_projection_smoothing_mode",
+                "mass_stiffness_operator")
+    set_default(args, "min_diagnostic_curvature_projection_operator_edges", 1)
+    set_default(args, "max_capillary_rejected_steps", 0)
+    set_default(args, "max_capillary_dt_updates", 0)
+    set_default(args, "max_capillary_speed_per_surface_tension", 10.0)
+    set_default(args, "max_capillary_wave_frequency_relative_error", 1.0e-12)
+    set_default(args, "max_capillary_wave_profile_relative_error", 0.5)
+    set_default(args, "max_capillary_wave_mean_offset", 4.0e-3)
+    args.required_implicit_cut_backend_qualification = "ProductionQualified"
+    set_default(args, "linear_algebra_backend", "eigen")
+    if getattr(args, "min_max_speed", None) == 1.0e-2:
+        args.min_max_speed = 0.0
+    if getattr(args, "min_wet_mean_speed", None) == 2.5e-4:
+        args.min_wet_mean_speed = 0.0
+    if getattr(args, "min_gate_mean_ux", None) == 1.0e-4:
+        args.min_gate_mean_ux = -1.0
+    if getattr(args, "min_front_mean_ux", None) == 1.0e-4:
+        args.min_front_mean_ux = -1.0
+    set_default(args, "reference_profile_sample_radius", 0.02)
+    set_default(args, "min_reference_profile_coverage", 0.75)
+    set_default(args, "min_reference_profile_direct_coverage", 0.20)
+    set_default(args, "max_reference_profile_rmse", 0.01)
+    set_default(args, "max_reference_profile_mae", 0.01)
+    set_default(args, "max_reference_profile_max_abs_error", 0.02)
+    set_default(args, "min_interface_height_change", 1.0e-7)
+    set_default(args, "min_interface_mean_abs_height_change", 1.0e-7)
+    set_default(args, "max_wet_fraction_volume_error", 1.0e-8)
+    set_default(args, "max_diagnostic_cut_context_rebuilds_per_step", 4.0)
+    set_default(args, "min_diagnostic_cut_context_refresh_skips", 1)
+    set_default(args, "max_diagnostic_generated_cell_cache_full_miss_rebuilds", 1)
+    set_default(args, "max_diagnostic_assembly_timings_per_step", 4.0)
+    set_default(args, "max_diagnostic_extra_assembly_timings_per_step", 3.0)
+    set_default(args, "max_diagnostic_process_basis_cache_entries", 8)
+    set_default(args, "max_diagnostic_process_basis_cache_entry_growth", 8)
+    set_default(args, "max_diagnostic_implicit_cut_fallback_cells", 0)
+    set_default(args, "min_diagnostic_achieved_interface_quadrature_order", 2)
+    set_default(args, "min_diagnostic_achieved_volume_quadrature_order", 2)
+    set_default(args, "max_eigen_factorization_pressure_zero_rows", 0)
+    set_default(args, "max_eigen_factorization_pressure_zero_cols", 0)
+    set_default(args, "max_eigen_factorization_nonfinite_entries", 0)
+    set_default(args, "max_time_loop_nonlinear_iterations_per_step", 3)
+    set_default(args, "max_time_loop_linear_iterations_per_step", 10)
+    set_default(args, "min_diagnostic_curvature_projection_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_max_abs_curvature", 0.01)
+    set_default(args, "max_diagnostic_curvature_projection_zero_fallback_vertices", 0)
+    set_default(args, "max_diagnostic_curvature_projection_normalized_fit_residual",
+                5.0e-2)
+    set_default(args, "min_diagnostic_curvature_projection_smoothing_iterations", 1)
+    set_default(args, "min_diagnostic_curvature_projection_skipped_count", 1)
+    set_default(args, "min_diagnostic_curvature_projection_cache_hit_count", 1)
+    set_default(args, "max_diagnostic_curvature_projection_cache_miss_count", 35)
+    set_default(args,
+                "min_diagnostic_curvature_projection_cut_signature_cache_hit_count",
+                1)
+    set_default(args,
+                "min_diagnostic_curvature_projection_reused_vertex_adjacency_count",
+                1)
+    set_default(args,
+                "min_diagnostic_curvature_projection_reused_sample_adjacency_count",
+                1)
+    set_default(args, "max_diagnostic_curvature_projection_vertex_adjacency_builds", 1)
+    set_default(args, "max_diagnostic_curvature_projection_sample_adjacency_builds",
+                curvature_sample_adjacency_build_budget(args))
 
 
 def apply_high_order_volume_corrected_motion_smoke_defaults(
@@ -6497,6 +8043,16 @@ def apply_high_order_volume_corrected_motion_smoke_defaults(
         raise ValueError(
             "--high-order-volume-corrected-motion-smoke cannot be combined with "
             "--high-order-capillary-balance-smoke"
+        )
+    if getattr(args, "high_order_capillary_droplet_equilibrium_smoke", False):
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-capillary-droplet-equilibrium-smoke"
+        )
+    if getattr(args, "high_order_capillary_wave_smoke", False):
+        raise ValueError(
+            "--high-order-volume-corrected-motion-smoke cannot be combined with "
+            "--high-order-capillary-wave-smoke"
         )
 
     if not args.case:
@@ -6681,6 +8237,16 @@ def main() -> int:
                         help=("enable a zero-gravity high-order implicit "
                               "Laplace-style capillary balance smoke with "
                               "projected level-set curvature"))
+    parser.add_argument("--high-order-capillary-droplet-equilibrium-smoke",
+                        action="store_true",
+                        help=("enable a zero-gravity high-order implicit "
+                              "closed-droplet capillary equilibrium smoke "
+                              "with projected level-set curvature"))
+    parser.add_argument("--high-order-capillary-wave-smoke",
+                        action="store_true",
+                        help=("enable a zero-gravity high-order implicit "
+                              "small-amplitude capillary-wave smoke with "
+                              "projected level-set curvature"))
     parser.add_argument("--high-order-volume-corrected-motion-smoke",
                         action="store_true",
                         help=("enable a high-order implicit free-surface "
@@ -6794,14 +8360,42 @@ def main() -> int:
                         action="store_false")
     parser.add_argument("--disable-cut-metadata-scale", action="store_true")
     parser.add_argument("--disable-velocity-extension", action="store_true")
+    parser.add_argument(
+        "--wet-extension-advection-velocity-method",
+        choices=("nearest_active_vertex", "nearest_interface_point"),
+    )
+    parser.add_argument("--trace-level-set-advection-velocity", action="store_true")
     parser.add_argument("--cut-cell-velocity-gradient-penalty", type=float)
     parser.add_argument("--cut-cell-pressure-gradient-penalty", type=float)
     parser.add_argument("--surface-tension", type=float)
     parser.add_argument("--projected-curvature-field")
     parser.add_argument("--curvature-projection-cadence-steps", type=int)
     parser.add_argument("--curvature-projection-max-normalized-fit-residual", type=float)
+    parser.add_argument("--curvature-projection-max-neighbor-fallback-vertices", type=int)
+    parser.add_argument("--curvature-projection-max-zero-fallback-vertices", type=int)
+    parser.add_argument("--curvature-projection-narrow-band-width", type=float)
     parser.add_argument("--curvature-projection-smoothing-iterations", type=int)
     parser.add_argument("--curvature-projection-smoothing-relaxation", type=float)
+    parser.add_argument(
+        "--curvature-projection-smoothing-mode",
+        choices=("local_graph", "mass_stiffness_operator", "mass_stiffness"),
+    )
+    parser.add_argument("--expect-curvature-projection-smoothing-mode")
+    parser.add_argument("--min-diagnostic-curvature-projection-operator-edges", type=int)
+    parser.add_argument("--max-capillary-curvature-relative-error", type=float)
+    parser.add_argument("--max-capillary-pressure-jump-relative-error", type=float)
+    parser.add_argument("--max-capillary-rejected-steps", type=int)
+    parser.add_argument("--max-capillary-dt-updates", type=int)
+    parser.add_argument("--max-capillary-speed-per-surface-tension", type=float)
+    parser.add_argument("--max-capillary-nonlinear-residual", type=float)
+    parser.add_argument("--max-capillary-linear-relative-residual", type=float)
+    parser.add_argument("--max-capillary-wave-frequency-relative-error", type=float)
+    parser.add_argument("--max-capillary-wave-profile-relative-error", type=float)
+    parser.add_argument("--max-capillary-wave-mean-offset", type=float)
+    parser.add_argument("--capillary-convergence-resolution-key")
+    parser.add_argument("--capillary-convergence-metric", action="append")
+    parser.add_argument("--min-capillary-convergence-rate", type=float)
+    parser.add_argument("--min-capillary-convergence-points", type=int)
     parser.add_argument("--enable-level-set-volume-correction",
                         dest="enable_level_set_volume_correction",
                         action="store_true",
@@ -6886,15 +8480,29 @@ def main() -> int:
     parser.add_argument("--require-marked-interior-face-fallback-diagnostics", action="store_true")
     parser.add_argument("--require-assembly-topology-consistency", action="store_true")
     parser.add_argument("--max-diagnostic-generated-cell-cache-full-miss-rebuilds", type=int)
+    parser.add_argument("--min-diagnostic-cut-context-refresh-skips", type=int)
     parser.add_argument("--require-eigen-factorization-diagnostics", action="store_true")
     parser.add_argument("--require-active-pressure-support-diagnostics", action="store_true")
+    parser.add_argument("--require-level-set-advection-velocity-diagnostics", action="store_true")
+    parser.add_argument("--expect-level-set-advection-velocity-extension-method")
+    parser.add_argument("--expect-level-set-advection-velocity-interface-sample-source")
+    parser.add_argument("--min-diagnostic-level-set-advection-interface-samples", type=int)
     parser.add_argument("--require-curvature-projection-diagnostics", action="store_true")
     parser.add_argument("--require-curvature-projection-newton-freshness", action="store_true")
     parser.add_argument("--min-diagnostic-curvature-projection-count", type=int)
     parser.add_argument("--min-diagnostic-curvature-projection-max-abs-curvature", type=float)
+    parser.add_argument("--max-diagnostic-curvature-projection-fallback-vertices", type=int)
     parser.add_argument("--max-diagnostic-curvature-projection-zero-fallback-vertices", type=int)
     parser.add_argument("--max-diagnostic-curvature-projection-normalized-fit-residual", type=float)
     parser.add_argument("--min-diagnostic-curvature-projection-smoothing-iterations", type=int)
+    parser.add_argument("--min-diagnostic-curvature-projection-skipped-count", type=int)
+    parser.add_argument("--min-diagnostic-curvature-projection-cache-hit-count", type=int)
+    parser.add_argument("--max-diagnostic-curvature-projection-cache-miss-count", type=int)
+    parser.add_argument("--min-diagnostic-curvature-projection-cut-signature-cache-hit-count", type=int)
+    parser.add_argument("--min-diagnostic-curvature-projection-reused-vertex-adjacency-count", type=int)
+    parser.add_argument("--min-diagnostic-curvature-projection-reused-sample-adjacency-count", type=int)
+    parser.add_argument("--max-diagnostic-curvature-projection-vertex-adjacency-builds", type=int)
+    parser.add_argument("--max-diagnostic-curvature-projection-sample-adjacency-builds", type=int)
     parser.add_argument("--max-eigen-factorization-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-pressure-zero-rows", type=int)
     parser.add_argument("--max-eigen-factorization-pressure-zero-cols", type=int)
@@ -6922,8 +8530,11 @@ def main() -> int:
     apply_high_order_capillary_projection_smoke_defaults(args)
     apply_high_order_capillary_response_smoke_defaults(args)
     apply_high_order_capillary_balance_smoke_defaults(args)
+    apply_high_order_capillary_droplet_equilibrium_smoke_defaults(args)
+    apply_high_order_capillary_wave_smoke_defaults(args)
     apply_high_order_volume_corrected_motion_smoke_defaults(args)
     apply_high_order_implicit_defaults(args)
+    apply_level_set_advection_velocity_diagnostic_gate_defaults(args)
     require_profile_production_linear_solver_policy(args)
 
     solver = resolve_solver(args.solver)
@@ -6934,6 +8545,17 @@ def main() -> int:
         case_args = case_args_for_run(case_name, args)
         report.append(run_case(case_name, solver, case_args))
         write_qualification_log(args.qualification_log, solver, report, complete=False)
+    convergence_errors = capillary_convergence_rate_errors(report, args)
+    if convergence_errors:
+        failure = {
+            "case": "capillary_convergence",
+            "passed": False,
+            "errors": convergence_errors,
+        }
+        add_solver_control_overrides(failure, args)
+        report.append(failure)
+        write_qualification_log(args.qualification_log, solver, report, complete=False)
+        raise RuntimeError(format_failure_exception(failure, args.qualification_log))
     write_qualification_log(args.qualification_log, solver, report, complete=True)
     print(json.dumps({"solver": str(solver), "probes": report}, indent=2, sort_keys=True))
     return 0

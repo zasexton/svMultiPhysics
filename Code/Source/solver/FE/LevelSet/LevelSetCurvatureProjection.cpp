@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -10,8 +11,69 @@
 #include <queue>
 #include <span>
 #include <stdexcept>
+#include <string>
 
 namespace svmp::FE::level_set {
+namespace {
+
+[[nodiscard]] std::string normalizedSmoothingToken(std::string_view value)
+{
+    std::string token(value);
+    token.erase(token.begin(),
+                std::find_if(token.begin(), token.end(), [](unsigned char c) {
+                    return !std::isspace(c);
+                }));
+    token.erase(std::find_if(token.rbegin(), token.rend(), [](unsigned char c) {
+                    return !std::isspace(c);
+                }).base(),
+                token.end());
+    std::transform(token.begin(), token.end(), token.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::tolower(c));
+                   });
+    token.erase(std::remove_if(token.begin(), token.end(),
+                               [](unsigned char c) {
+                                   return c == '_' || c == '-' ||
+                                          std::isspace(c);
+                               }),
+                token.end());
+    return token;
+}
+
+} // namespace
+
+const char* levelSetCurvatureSmoothingModeName(
+    LevelSetCurvatureSmoothingMode mode) noexcept
+{
+    switch (mode) {
+        case LevelSetCurvatureSmoothingMode::LocalGraph:
+            return "local_graph";
+        case LevelSetCurvatureSmoothingMode::MassStiffnessOperator:
+            return "mass_stiffness_operator";
+    }
+    return "unknown";
+}
+
+LevelSetCurvatureSmoothingMode parseLevelSetCurvatureSmoothingMode(
+    std::string_view value)
+{
+    const auto token = normalizedSmoothingToken(value);
+    if (token.empty() || token == "local" || token == "graph" ||
+        token == "localgraph") {
+        return LevelSetCurvatureSmoothingMode::LocalGraph;
+    }
+    if (token == "global" || token == "operator" ||
+        token == "operatorprojection" || token == "massstiffness" ||
+        token == "massstiffnessoperator" || token == "helmholtz" ||
+        token == "helmholtzprojection" || token == "feprojection") {
+        return LevelSetCurvatureSmoothingMode::MassStiffnessOperator;
+    }
+    throw std::invalid_argument(
+        "level-set curvature projection smoothing mode '" +
+        std::string(value) +
+        "' must be local_graph or mass_stiffness_operator");
+}
+
 namespace {
 
 [[nodiscard]] Real dot(const std::array<Real, 3>& a,
@@ -248,8 +310,10 @@ void mixSignature(std::uint64_t& seed, std::uint64_t value) noexcept
     mixSignature(seed, static_cast<std::uint64_t>(samples.size()));
     for (const auto& sample : samples) {
         mixSignature(seed, static_cast<std::uint64_t>(sample.parent_cell));
-        for (const auto coordinate : sample.coordinate) {
-            mixSignature(seed, realBitsForSignature(coordinate));
+        if (sample.parent_cell < static_cast<MeshIndex>(0)) {
+            for (const auto coordinate : sample.coordinate) {
+                mixSignature(seed, realBitsForSignature(coordinate));
+            }
         }
     }
     return seed;
@@ -483,8 +547,272 @@ cachedSampleAdjacency(
            (g_norm * g_norm * g_norm);
 }
 
+struct WeightedNeighbor {
+    std::size_t vertex{0};
+    Real weight{0.0};
+};
+
+[[nodiscard]] std::array<Real, 3> subtract(const std::array<Real, 3>& a,
+                                           const std::array<Real, 3>& b) noexcept
+{
+    return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
+}
+
+[[nodiscard]] std::array<Real, 3> cross(const std::array<Real, 3>& a,
+                                        const std::array<Real, 3>& b) noexcept
+{
+    return {{a[1] * b[2] - a[2] * b[1],
+             a[2] * b[0] - a[0] * b[2],
+             a[0] * b[1] - a[1] * b[0]}};
+}
+
+[[nodiscard]] Real tripleProduct(const std::array<Real, 3>& a,
+                                 const std::array<Real, 3>& b,
+                                 const std::array<Real, 3>& c) noexcept
+{
+    return dot(a, cross(b, c));
+}
+
+[[nodiscard]] Real triangleMeasure(const std::array<Real, 3>& a,
+                                   const std::array<Real, 3>& b,
+                                   const std::array<Real, 3>& c) noexcept
+{
+    return Real{0.5} * norm(cross(subtract(b, a), subtract(c, a)));
+}
+
+[[nodiscard]] Real tetraMeasure(const std::array<Real, 3>& a,
+                                const std::array<Real, 3>& b,
+                                const std::array<Real, 3>& c,
+                                const std::array<Real, 3>& d) noexcept
+{
+    return std::abs(
+               tripleProduct(subtract(b, a), subtract(c, a), subtract(d, a))) /
+           Real{6.0};
+}
+
+[[nodiscard]] std::size_t primaryVertexCount(ElementType type,
+                                             std::size_t nodes) noexcept
+{
+    switch (type) {
+        case ElementType::Triangle3:
+        case ElementType::Triangle6:
+            return std::min<std::size_t>(3u, nodes);
+        case ElementType::Quad4:
+        case ElementType::Quad8:
+        case ElementType::Quad9:
+            return std::min<std::size_t>(4u, nodes);
+        case ElementType::Tetra4:
+        case ElementType::Tetra10:
+            return std::min<std::size_t>(4u, nodes);
+        case ElementType::Hex8:
+        case ElementType::Hex20:
+        case ElementType::Hex27:
+            return std::min<std::size_t>(8u, nodes);
+        case ElementType::Wedge6:
+        case ElementType::Wedge15:
+        case ElementType::Wedge18:
+            return std::min<std::size_t>(6u, nodes);
+        case ElementType::Pyramid5:
+        case ElementType::Pyramid13:
+        case ElementType::Pyramid14:
+            return std::min<std::size_t>(5u, nodes);
+        default:
+            return nodes;
+    }
+}
+
+[[nodiscard]] Real estimateCellMeasure(
+    const assembly::IMeshAccess& mesh,
+    GlobalIndex cell,
+    std::span<const GlobalIndex> nodes,
+    int dim)
+{
+    const auto primary =
+        primaryVertexCount(mesh.getCellType(cell), nodes.size());
+    if (primary == 0u) {
+        return Real{0.0};
+    }
+
+    std::vector<std::array<Real, 3>> x(primary);
+    for (std::size_t i = 0; i < primary; ++i) {
+        if (nodes[i] < 0) {
+            return Real{0.0};
+        }
+        x[i] = mesh.getNodeCoordinates(nodes[i]);
+    }
+
+    Real measure = Real{0.0};
+    if (dim == 2) {
+        if (primary == 3u) {
+            measure = triangleMeasure(x[0], x[1], x[2]);
+        } else if (primary >= 4u) {
+            for (std::size_t i = 1u; i + 1u < primary; ++i) {
+                measure += triangleMeasure(x[0], x[i], x[i + 1u]);
+            }
+        }
+    } else {
+        if (primary == 4u) {
+            measure = tetraMeasure(x[0], x[1], x[2], x[3]);
+        } else if (primary >= 8u) {
+            measure += tetraMeasure(x[0], x[1], x[3], x[4]);
+            measure += tetraMeasure(x[1], x[2], x[3], x[6]);
+            measure += tetraMeasure(x[1], x[4], x[5], x[6]);
+            measure += tetraMeasure(x[3], x[4], x[6], x[7]);
+            measure += tetraMeasure(x[1], x[3], x[4], x[6]);
+        } else if (primary >= 5u) {
+            for (std::size_t i = 1u; i + 2u < primary; ++i) {
+                measure += tetraMeasure(x[0], x[i], x[i + 1u], x[i + 2u]);
+            }
+        }
+    }
+    return std::isfinite(measure) && measure > Real{0.0}
+        ? measure
+        : Real{0.0};
+}
+
+void assembleLumpedMass(
+    const assembly::IMeshAccess& mesh,
+    std::span<const unsigned char> active_vertices,
+    std::vector<Real>& mass)
+{
+    std::fill(mass.begin(), mass.end(), Real{0.0});
+    std::vector<GlobalIndex> nodes;
+    mesh.forEachCell([&](GlobalIndex cell) {
+        mesh.getCellNodes(cell, nodes);
+        const Real measure =
+            estimateCellMeasure(mesh,
+                                cell,
+                                std::span<const GlobalIndex>(nodes.data(),
+                                                             nodes.size()),
+                                mesh.dimension());
+        if (!(measure > Real{0.0})) {
+            return;
+        }
+
+        std::size_t active_count = 0u;
+        for (const auto node : nodes) {
+            const auto index = static_cast<std::size_t>(node);
+            if (node >= 0 && index < mass.size() &&
+                active_vertices[index] != 0u) {
+                ++active_count;
+            }
+        }
+        if (active_count == 0u) {
+            return;
+        }
+        const Real lump = measure / static_cast<Real>(active_count);
+        for (const auto node : nodes) {
+            const auto index = static_cast<std::size_t>(node);
+            if (node >= 0 && index < mass.size() &&
+                active_vertices[index] != 0u) {
+                mass[index] += lump;
+            }
+        }
+    });
+
+    for (std::size_t vertex = 0; vertex < mass.size(); ++vertex) {
+        if (active_vertices[vertex] != 0u &&
+            (!(mass[vertex] > Real{0.0}) || !std::isfinite(mass[vertex]))) {
+            mass[vertex] = Real{1.0};
+        }
+    }
+}
+
+[[nodiscard]] Real vectorNorm2(std::span<const Real> values) noexcept
+{
+    Real sum = Real{0.0};
+    for (const auto value : values) {
+        sum += value * value;
+    }
+    return sum;
+}
+
+void applyMassStiffnessOperator(
+    std::span<const Real> mass,
+    const std::vector<std::vector<WeightedNeighbor>>& stiffness,
+    std::span<const Real> stiffness_diag,
+    Real strength,
+    std::span<const Real> x,
+    std::vector<Real>& y)
+{
+    y.assign(x.size(), Real{0.0});
+    for (std::size_t row = 0; row < x.size(); ++row) {
+        Real value =
+            mass[row] * x[row] + strength * stiffness_diag[row] * x[row];
+        for (const auto& entry : stiffness[row]) {
+            value -= strength * entry.weight * x[entry.vertex];
+        }
+        y[row] = value;
+    }
+}
+
+[[nodiscard]] bool solveMassStiffnessOperatorCG(
+    std::span<const Real> mass,
+    const std::vector<std::vector<WeightedNeighbor>>& stiffness,
+    std::span<const Real> stiffness_diag,
+    Real strength,
+    std::span<const Real> rhs,
+    std::span<const Real> initial_guess,
+    std::vector<Real>& solution)
+{
+    const auto n = rhs.size();
+    solution.assign(initial_guess.begin(), initial_guess.end());
+    std::vector<Real> applied;
+    std::vector<Real> residual(n, Real{0.0});
+    std::vector<Real> direction(n, Real{0.0});
+    std::vector<Real> next_applied;
+
+    applyMassStiffnessOperator(
+        mass, stiffness, stiffness_diag, strength, solution, applied);
+    for (std::size_t i = 0; i < n; ++i) {
+        residual[i] = rhs[i] - applied[i];
+        direction[i] = residual[i];
+    }
+
+    Real rr = vectorNorm2(residual);
+    const Real rhs_norm = std::sqrt(std::max(vectorNorm2(rhs), Real{0.0}));
+    const Real tolerance =
+        Real{1.0e-12} * std::max(rhs_norm, Real{1.0});
+    if (std::sqrt(std::max(rr, Real{0.0})) <= tolerance) {
+        return true;
+    }
+
+    const std::size_t max_iterations =
+        std::max<std::size_t>(100u, 4u * std::max<std::size_t>(1u, n));
+    for (std::size_t iter = 0; iter < max_iterations; ++iter) {
+        applyMassStiffnessOperator(
+            mass, stiffness, stiffness_diag, strength, direction, next_applied);
+        Real p_ap = Real{0.0};
+        for (std::size_t i = 0; i < n; ++i) {
+            p_ap += direction[i] * next_applied[i];
+        }
+        if (!(p_ap > Real{0.0}) || !std::isfinite(p_ap)) {
+            return false;
+        }
+        const Real alpha = rr / p_ap;
+        for (std::size_t i = 0; i < n; ++i) {
+            solution[i] += alpha * direction[i];
+            residual[i] -= alpha * next_applied[i];
+        }
+        const Real rr_next = vectorNorm2(residual);
+        if (!std::isfinite(rr_next)) {
+            return false;
+        }
+        if (std::sqrt(std::max(rr_next, Real{0.0})) <= tolerance) {
+            return true;
+        }
+        const Real beta = rr_next / rr;
+        for (std::size_t i = 0; i < n; ++i) {
+            direction[i] = residual[i] + beta * direction[i];
+        }
+        rr = rr_next;
+    }
+    return false;
+}
+
 void smoothCurvatureOnVertexGraph(
     const std::vector<std::vector<GlobalIndex>>& adjacency,
+    std::span<const unsigned char> active_vertices,
     int iterations,
     Real relaxation,
     std::vector<Real>& curvature,
@@ -502,6 +830,10 @@ void smoothCurvatureOnVertexGraph(
     for (int iter = 0; iter < iterations; ++iter) {
         Real iteration_max_update = Real{0.0};
         for (std::size_t vertex = 0; vertex < current.size(); ++vertex) {
+            if (!active_vertices.empty() && active_vertices[vertex] == 0u) {
+                next[vertex] = current[vertex];
+                continue;
+            }
             const auto& neighbors = adjacency[vertex];
             if (neighbors.empty()) {
                 next[vertex] = current[vertex];
@@ -512,7 +844,10 @@ void smoothCurvatureOnVertexGraph(
             std::size_t count = 0u;
             for (const auto neighbor : neighbors) {
                 const auto index = static_cast<std::size_t>(neighbor);
-                if (index >= current.size() || !std::isfinite(current[index])) {
+                if (index >= current.size() ||
+                    (!active_vertices.empty() &&
+                     active_vertices[index] == 0u) ||
+                    !std::isfinite(current[index])) {
                     continue;
                 }
                 sum += current[index];
@@ -546,6 +881,161 @@ void smoothCurvatureOnVertexGraph(
             total_abs_update / static_cast<Real>(update_count);
     }
     curvature = std::move(current);
+}
+
+void smoothCurvatureWithMassStiffnessOperator(
+    const assembly::IMeshAccess& mesh,
+    const std::vector<std::vector<GlobalIndex>>& adjacency,
+    std::span<const unsigned char> active_vertices,
+    int iterations,
+    Real relaxation,
+    std::vector<Real>& curvature,
+    LevelSetCurvatureProjectionResult& result)
+{
+    if (iterations <= 0 || !(relaxation > Real{0.0})) {
+        return;
+    }
+
+    const auto n_vertices = curvature.size();
+    std::vector<std::size_t> active;
+    active.reserve(n_vertices);
+    std::vector<std::size_t> local_index(n_vertices,
+                                         std::numeric_limits<std::size_t>::max());
+    for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
+        if ((active_vertices.empty() || active_vertices[vertex] != 0u) &&
+            std::isfinite(curvature[vertex])) {
+            local_index[vertex] = active.size();
+            active.push_back(vertex);
+        }
+    }
+    if (active.size() <= 1u) {
+        return;
+    }
+
+    std::vector<Real> full_mass(n_vertices, Real{0.0});
+    assembleLumpedMass(mesh, active_vertices, full_mass);
+    std::vector<std::size_t> degree(n_vertices, 0u);
+    for (const auto vertex : active) {
+        for (const auto neighbor : adjacency[vertex]) {
+            const auto neighbor_index = static_cast<std::size_t>(neighbor);
+            if (neighbor >= 0 && neighbor_index < n_vertices &&
+                local_index[neighbor_index] !=
+                    std::numeric_limits<std::size_t>::max()) {
+                ++degree[vertex];
+            }
+        }
+    }
+
+    std::vector<Real> mass(active.size(), Real{1.0});
+    for (std::size_t i = 0; i < active.size(); ++i) {
+        mass[i] = full_mass[active[i]];
+    }
+
+    std::vector<std::vector<WeightedNeighbor>> stiffness(active.size());
+    std::vector<Real> stiffness_diag(active.size(), Real{0.0});
+    Real edge_length2_sum = Real{0.0};
+    std::size_t edge_count = 0u;
+    for (const auto vertex : active) {
+        const auto row = local_index[vertex];
+        const auto x = mesh.getNodeCoordinates(static_cast<GlobalIndex>(vertex));
+        for (const auto neighbor : adjacency[vertex]) {
+            if (neighbor < 0) {
+                continue;
+            }
+            const auto neighbor_index = static_cast<std::size_t>(neighbor);
+            if (neighbor_index <= vertex || neighbor_index >= n_vertices) {
+                continue;
+            }
+            const auto col = local_index[neighbor_index];
+            if (col == std::numeric_limits<std::size_t>::max()) {
+                continue;
+            }
+            const auto y =
+                mesh.getNodeCoordinates(static_cast<GlobalIndex>(neighbor_index));
+            const Real edge_length2 = dot(subtract(y, x), subtract(y, x));
+            if (!(edge_length2 > Real{0.0}) ||
+                !std::isfinite(edge_length2)) {
+                continue;
+            }
+            const Real vertex_share =
+                mass[row] / static_cast<Real>(std::max<std::size_t>(
+                                1u, degree[vertex]));
+            const Real neighbor_share =
+                mass[col] / static_cast<Real>(std::max<std::size_t>(
+                                1u, degree[neighbor_index]));
+            const Real weight =
+                Real{0.5} * (vertex_share + neighbor_share) / edge_length2;
+            if (!(weight > Real{0.0}) || !std::isfinite(weight)) {
+                continue;
+            }
+            stiffness[row].push_back(WeightedNeighbor{col, weight});
+            stiffness[col].push_back(WeightedNeighbor{row, weight});
+            stiffness_diag[row] += weight;
+            stiffness_diag[col] += weight;
+            edge_length2_sum += edge_length2;
+            ++edge_count;
+        }
+    }
+    result.smoothing_operator_edges = edge_count;
+    if (edge_count == 0u) {
+        return;
+    }
+
+    const Real mean_edge_length2 =
+        edge_length2_sum / static_cast<Real>(edge_count);
+    const Real strength = relaxation * mean_edge_length2;
+    if (!(strength > Real{0.0}) || !std::isfinite(strength)) {
+        return;
+    }
+
+    std::vector<Real> current(active.size(), Real{0.0});
+    for (std::size_t i = 0; i < active.size(); ++i) {
+        current[i] = curvature[active[i]];
+    }
+
+    std::vector<Real> rhs(active.size(), Real{0.0});
+    std::vector<Real> next(active.size(), Real{0.0});
+    Real total_abs_update = Real{0.0};
+    std::size_t update_count = 0u;
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (std::size_t i = 0; i < active.size(); ++i) {
+            rhs[i] = mass[i] * current[i];
+        }
+        if (!solveMassStiffnessOperatorCG(
+                std::span<const Real>(mass.data(), mass.size()),
+                stiffness,
+                std::span<const Real>(stiffness_diag.data(),
+                                      stiffness_diag.size()),
+                strength,
+                std::span<const Real>(rhs.data(), rhs.size()),
+                std::span<const Real>(current.data(), current.size()),
+                next)) {
+            break;
+        }
+
+        Real iteration_max_update = Real{0.0};
+        for (std::size_t i = 0; i < active.size(); ++i) {
+            if (!std::isfinite(next[i])) {
+                next[i] = current[i];
+            }
+            const Real update = std::abs(next[i] - current[i]);
+            total_abs_update += update;
+            iteration_max_update = std::max(iteration_max_update, update);
+            ++update_count;
+        }
+        current.swap(next);
+        result.smoothing_max_abs_update =
+            std::max(result.smoothing_max_abs_update, iteration_max_update);
+        ++result.smoothing_iterations_applied;
+    }
+
+    if (update_count > 0u) {
+        result.smoothing_mean_abs_update =
+            total_abs_update / static_cast<Real>(update_count);
+    }
+    for (std::size_t i = 0; i < active.size(); ++i) {
+        curvature[active[i]] = current[i];
+    }
 }
 
 } // namespace
@@ -627,17 +1117,30 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         !(options.normal_equation_tolerance > Real{0.0}) ||
         options.max_normalized_fit_residual < Real{0.0} ||
         !std::isfinite(options.max_normalized_fit_residual) ||
+        !(options.supplemental_sample_weight > Real{0.0}) ||
+        !std::isfinite(options.supplemental_sample_weight) ||
+        options.narrow_band_width < Real{0.0} ||
+        !std::isfinite(options.narrow_band_width) ||
         options.smoothing_iterations < 0 ||
         options.smoothing_relaxation < Real{0.0} ||
         options.smoothing_relaxation > Real{1.0} ||
         !std::isfinite(options.smoothing_relaxation)) {
         throw std::invalid_argument(
-            "level-set curvature projection requires positive tolerances, a nonnegative residual limit, nonnegative smoothing iterations, and smoothing relaxation in [0,1]");
+            "level-set curvature projection requires positive tolerances, a nonnegative residual limit, a positive supplemental sample weight, a nonnegative narrow-band width, nonnegative smoothing iterations, and smoothing relaxation in [0,1]");
+    }
+    for (const auto value : level_set_vertex_values) {
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument(
+                "level-set curvature projection received a non-finite level-set value");
+        }
     }
 
     LevelSetCurvatureProjectionResult result;
     result.vertices = n_vertices;
     result.supplemental_samples = supplemental_samples.size();
+    result.supplemental_sample_weight = options.supplemental_sample_weight;
+    result.narrow_band_width = options.narrow_band_width;
+    result.smoothing_mode = options.smoothing_mode;
     curvature_vertex_values.assign(n_vertices, Real{0.0});
     if (n_vertices == 0u) {
         result.diagnostic = "level-set curvature projection received an empty mesh";
@@ -656,9 +1159,31 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
                               local_sample_adjacency);
     const auto n_fit = fitSize(dim);
     const int rings = std::max(1, options.max_neighbor_rings);
+    const bool use_narrow_band = options.narrow_band_width > Real{0.0};
+    std::vector<unsigned char> active_vertices(n_vertices, 1u);
+    if (use_narrow_band) {
+        active_vertices.assign(n_vertices, 0u);
+        for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+            const auto index = static_cast<std::size_t>(vertex);
+            const Real distance_to_interface =
+                std::abs(level_set_vertex_values[index] - options.isovalue);
+            if (distance_to_interface <= options.narrow_band_width ||
+                !sample_adjacency[index].empty()) {
+                active_vertices[index] = 1u;
+            }
+        }
+    }
+    result.narrow_band_vertices =
+        static_cast<std::size_t>(std::count(active_vertices.begin(),
+                                            active_vertices.end(),
+                                            static_cast<unsigned char>(1u)));
+    result.skipped_far_vertices = n_vertices - result.narrow_band_vertices;
     std::vector<unsigned char> fitted(n_vertices, 0u);
 
     for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+        if (active_vertices[static_cast<std::size_t>(vertex)] == 0u) {
+            continue;
+        }
         const auto center = mesh.getNodeCoordinates(vertex);
         const auto neighbors = collectNeighbors(vertex, adjacency, rings);
 
@@ -668,10 +1193,6 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
         std::size_t rows = 0u;
         const auto center_value =
             level_set_vertex_values[static_cast<std::size_t>(vertex)];
-        if (!std::isfinite(center_value)) {
-            throw std::invalid_argument(
-                "level-set curvature projection received a non-finite level-set value");
-        }
         for (const auto neighbor : neighbors) {
             const auto neighbor_index = static_cast<std::size_t>(neighbor);
             const auto x = mesh.getNodeCoordinates(neighbor);
@@ -686,10 +1207,6 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
             }
             const Real rhs = level_set_vertex_values[neighbor_index] -
                              center_value;
-            if (!std::isfinite(rhs)) {
-                throw std::invalid_argument(
-                    "level-set curvature projection received a non-finite level-set value");
-            }
             const Real weight = Real{1.0} / std::max(distance2, Real{1.0e-24});
             const auto row = quadraticRow(dx, dim);
             accumulateSymmetricNormalEquations(
@@ -734,7 +1251,8 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
                 continue;
             }
             const Real rhs = sample.value - center_value;
-            const Real weight = Real{1.0} / std::max(distance2, Real{1.0e-24});
+            const Real weight = options.supplemental_sample_weight /
+                                std::max(distance2, Real{1.0e-24});
             const auto row = quadraticRow(dx, dim);
             accumulateSymmetricNormalEquations(
                 row, n_fit, rhs, weight, ata, atb);
@@ -802,7 +1320,7 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     pending.reserve(n_vertices);
     for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
         const auto index = static_cast<std::size_t>(vertex);
-        if (recovered[index] == 0u) {
+        if (active_vertices[index] != 0u && recovered[index] == 0u) {
             pending.push_back(vertex);
         }
     }
@@ -847,9 +1365,31 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     }
 
     if (result.fitted_vertices == 0u) {
-        result.diagnostic = result.fit_residual_failure_vertices > 0u
+        result.diagnostic = result.narrow_band_vertices == 0u
+            ? "level-set curvature projection found no vertices in the requested narrow band"
+            : result.fit_residual_failure_vertices > 0u
             ? "level-set curvature projection exceeded the normalized fit residual limit"
             : "level-set curvature projection could not fit any vertex stencil";
+        return result;
+    }
+    if (options.max_neighbor_fallback_vertices >= 0 &&
+        result.fallback_vertices >
+            static_cast<std::size_t>(options.max_neighbor_fallback_vertices)) {
+        result.diagnostic =
+            "level-set curvature projection neighbor fallback vertices " +
+            std::to_string(result.fallback_vertices) +
+            " exceed configured limit " +
+            std::to_string(options.max_neighbor_fallback_vertices);
+        return result;
+    }
+    if (options.max_zero_fallback_vertices >= 0 &&
+        result.zero_fallback_vertices >
+            static_cast<std::size_t>(options.max_zero_fallback_vertices)) {
+        result.diagnostic =
+            "level-set curvature projection zero fallback vertices " +
+            std::to_string(result.zero_fallback_vertices) +
+            " exceed configured limit " +
+            std::to_string(options.max_zero_fallback_vertices);
         return result;
     }
 
@@ -857,12 +1397,30 @@ LevelSetCurvatureProjectionResult projectLevelSetMeanCurvatureToVertices(
     result.mean_fit_rms_residual /= fitted_count;
     result.mean_normalized_fit_residual /= fitted_count;
 
-    smoothCurvatureOnVertexGraph(
-        adjacency,
-        options.smoothing_iterations,
-        options.smoothing_relaxation,
-        curvature_vertex_values,
-        result);
+    const auto active_span =
+        std::span<const unsigned char>(active_vertices.data(),
+                                       active_vertices.size());
+    switch (options.smoothing_mode) {
+        case LevelSetCurvatureSmoothingMode::LocalGraph:
+            smoothCurvatureOnVertexGraph(
+                adjacency,
+                active_span,
+                options.smoothing_iterations,
+                options.smoothing_relaxation,
+                curvature_vertex_values,
+                result);
+            break;
+        case LevelSetCurvatureSmoothingMode::MassStiffnessOperator:
+            smoothCurvatureWithMassStiffnessOperator(
+                mesh,
+                adjacency,
+                active_span,
+                options.smoothing_iterations,
+                options.smoothing_relaxation,
+                curvature_vertex_values,
+                result);
+            break;
+    }
 
     result.min_curvature = std::numeric_limits<Real>::infinity();
     result.max_curvature = -std::numeric_limits<Real>::infinity();

@@ -29,6 +29,8 @@
 #include "Forms/Vocabulary.h"
 #include "Forms/WeakForm.h"
 
+#include "Interfaces/LevelSetInterfaceDomain.h"
+
 #include "Quadrature/QuadratureFactory.h"
 
 #include "Spaces/H1Space.h"
@@ -70,6 +72,77 @@ svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
     return topo;
 }
 
+svmp::FE::interfaces::LevelSetInterfaceDomain
+makeFormsInstallerReferencePlaneInterfaceDomain(int marker)
+{
+    namespace geometry = svmp::FE::geometry;
+    namespace interfaces = svmp::FE::interfaces;
+
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(
+        FieldId{1},
+        /*layout_revision=*/0u,
+        /*value_revision=*/1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 0;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 0;
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+    interfaces::CutInterfaceFragment fragment;
+    fragment.interface_marker = marker;
+    fragment.parent_cell = 0;
+    fragment.local_fragment_index = 0;
+    fragment.stable_id = 1;
+    fragment.kind = interfaces::CutInterfaceFragmentKind::Polygon;
+    fragment.measure = std::sqrt(Real{3.0}) / Real{8.0};
+    fragment.normal = {{
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+        Real{1.0} / std::sqrt(Real{3.0}),
+    }};
+    interfaces::CutInterfaceQuadraturePoint qp;
+    qp.point = {{Real{1.0} / Real{6.0},
+                 Real{1.0} / Real{6.0},
+                 Real{1.0} / Real{6.0}}};
+    qp.parent_coordinate = qp.point;
+    qp.normal = fragment.normal;
+    qp.weight = fragment.measure;
+    fragment.quadrature_points.push_back(qp);
+    const auto interface_normal = fragment.normal;
+    domain.addFragment(std::move(fragment));
+
+    interfaces::CutInterfaceVolumeRegion negative_region;
+    negative_region.interface_marker = marker;
+    negative_region.parent_cell = 0;
+    negative_region.local_region_index = 0;
+    negative_region.stable_id = 2;
+    negative_region.side = geometry::CutIntegrationSide::Negative;
+    negative_region.measure = Real{0.05};
+    negative_region.parent_measure = Real{1.0} / Real{6.0};
+    negative_region.volume_fraction =
+        negative_region.measure / negative_region.parent_measure;
+    negative_region.centroid = {{Real{0.1}, Real{0.1}, Real{0.1}}};
+    negative_region.normal = interface_normal;
+    domain.addVolumeRegion(std::move(negative_region));
+
+    interfaces::CutInterfaceVolumeRegion positive_region;
+    positive_region.interface_marker = marker;
+    positive_region.parent_cell = 0;
+    positive_region.local_region_index = 1;
+    positive_region.stable_id = 3;
+    positive_region.side = geometry::CutIntegrationSide::Positive;
+    positive_region.measure = Real{0.10};
+    positive_region.parent_measure = Real{1.0} / Real{6.0};
+    positive_region.volume_fraction =
+        positive_region.measure / positive_region.parent_measure;
+    positive_region.centroid = {{Real{0.3}, Real{0.1}, Real{0.1}}};
+    positive_region.normal = interface_normal;
+    domain.addVolumeRegion(std::move(positive_region));
+
+    return domain;
+}
+
 bool exprContainsType(const svmp::FE::forms::FormExprNode& node,
                       svmp::FE::forms::FormExprType type)
 {
@@ -82,6 +155,20 @@ bool exprContainsType(const svmp::FE::forms::FormExprNode& node,
         }
     }
     return false;
+}
+
+svmp::FE::forms::FormExprNode::SpaceSignature spaceSignatureFor(
+    const svmp::FE::spaces::FunctionSpace& space)
+{
+    svmp::FE::forms::FormExprNode::SpaceSignature sig;
+    sig.space_type = space.space_type();
+    sig.field_type = space.field_type();
+    sig.continuity = space.continuity();
+    sig.value_dimension = space.value_dimension();
+    sig.topological_dimension = space.topological_dimension();
+    sig.polynomial_order = space.polynomial_order();
+    sig.element_type = space.element_type();
+    return sig;
 }
 
 std::optional<std::uint32_t> firstAuxiliaryOutputRefIndex(
@@ -720,6 +807,90 @@ TEST(FormsInstaller, FormsInstaller_CellRestrictionRoutesDxToCutVolumeKernel)
     EXPECT_TRUE(unrestricted.cut_volumes.empty());
 }
 
+TEST(FormsInstaller, FormsInstaller_MultipleCellRestrictionsRouteDxToCutVolumeUnion)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker_a = 191;
+    constexpr int marker_b = 192;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker_a,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .diagnostic = "test_union_restriction_a"},
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker_b,
+            .side = svmp::FE::geometry::CutIntegrationSide::Positive,
+            .diagnostic = "test_union_restriction_b"},
+    });
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {u_field}, (u * v).dx());
+    ASSERT_FALSE(installed.residual.empty());
+    ASSERT_NE(installed.residual[0], nullptr);
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+    ASSERT_EQ(def.cut_volumes.size(), 2u);
+    const auto has_region = [&](int marker,
+                                svmp::FE::geometry::CutIntegrationSide side) {
+        return std::any_of(
+            def.cut_volumes.begin(),
+            def.cut_volumes.end(),
+            [&](const auto& entry) {
+                return entry.marker == marker &&
+                       entry.side == side &&
+                       entry.test_field == u_field &&
+                       entry.trial_field == u_field &&
+                       entry.kernel != nullptr;
+            });
+    };
+    EXPECT_TRUE(has_region(marker_a, svmp::FE::geometry::CutIntegrationSide::Negative));
+    EXPECT_TRUE(has_region(marker_b, svmp::FE::geometry::CutIntegrationSide::Positive));
+}
+
+TEST(FormsInstaller, FormsInstaller_CellRestrictionScopeRestoresAfterException)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    svmp::FE::systems::FESystem sys(mesh);
+
+    constexpr int outer_marker = 301;
+    constexpr int scoped_marker = 302;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = outer_marker,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .diagnostic = "outer_restriction"}});
+
+    try {
+        auto scope = sys.scopedFormInstallCellDomainRestrictions({
+            svmp::FE::systems::FESystem::FormCellDomainRestriction{
+                .interface_marker = scoped_marker,
+                .side = svmp::FE::geometry::CutIntegrationSide::Positive,
+                .diagnostic = "scoped_restriction"}});
+        ASSERT_EQ(sys.formInstallCellDomainRestrictions().size(), 1u);
+        EXPECT_EQ(sys.formInstallCellDomainRestrictions().front().interface_marker,
+                  scoped_marker);
+        throw std::runtime_error("force scope unwind");
+    } catch (const std::runtime_error&) {
+    }
+
+    ASSERT_EQ(sys.formInstallCellDomainRestrictions().size(), 1u);
+    EXPECT_EQ(sys.formInstallCellDomainRestrictions().front().interface_marker,
+              outer_marker);
+    EXPECT_EQ(sys.formInstallCellDomainRestrictions().front().side,
+              svmp::FE::geometry::CutIntegrationSide::Negative);
+}
+
 TEST(FormsInstaller,
      FormsInstaller_CellRestrictionAddsLevelSetShapeTangentInterfaceBlock)
 {
@@ -780,6 +951,156 @@ TEST(FormsInstaller,
     EXPECT_EQ(def.interface_faces.front().trial_field, phi_field);
     EXPECT_EQ(def.interface_faces.front().kernel,
               def.cut_volumes.front().kernel);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_CellRestrictionSkipsShapeTangentForPrescribedLevelSet)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "phi_prescribed",
+            .space = space,
+            .components = 1,
+            .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData});
+    sys.addOperator("op");
+
+    constexpr int marker = 193;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "test_prescribed_level_set_fixed_geometry"}});
+
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    auto installed = svmp::FE::systems::installFormulation(
+        sys, "op", {u_field}, (u * v).dx());
+    ASSERT_EQ(installed.jacobian_blocks.size(), 1u);
+    ASSERT_EQ(installed.jacobian_blocks.front().size(), 1u);
+    ASSERT_NE(installed.jacobian_blocks.front()[0], nullptr);
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+    ASSERT_EQ(def.cut_volumes.size(), 1u);
+    EXPECT_EQ(def.cut_volumes.front().marker, marker);
+    EXPECT_EQ(def.cut_volumes.front().side,
+              svmp::FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(def.cut_volumes.front().test_field, u_field);
+    EXPECT_EQ(def.cut_volumes.front().trial_field, u_field);
+    EXPECT_TRUE(def.interface_faces.empty());
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_ExplicitCutDomainSensitivityRejectsPrescribedLevelSet)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "phi_prescribed",
+            .space = space,
+            .components = 1,
+            .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData});
+    sys.addOperator("op");
+
+    constexpr int marker = 194;
+    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    svmp::FE::forms::BlockLinearForm residual(1);
+    residual.setBlock(
+        0,
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative));
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const FieldId test_fields[] = {u_field};
+    const FieldId trial_fields[] = {u_field, phi_field};
+    try {
+        (void)svmp::FE::systems::installCoupledResidual(
+            sys,
+            "op",
+            std::span<const FieldId>(test_fields, 1u),
+            std::span<const FieldId>(trial_fields, 2u),
+            residual,
+            opts);
+        FAIL() << "Expected prescribed level-set shape sensitivity to be rejected";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("must be an unknown field"), std::string::npos);
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_CutDomainSensitivityRejectsMissingLevelSetTrialField)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 195;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    svmp::FE::forms::BlockLinearForm residual(1);
+    residual.setBlock(
+        0,
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative));
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const FieldId test_fields[] = {u_field};
+    const FieldId trial_fields[] = {u_field};
+    try {
+        (void)svmp::FE::systems::installCoupledResidual(
+            sys,
+            "op",
+            std::span<const FieldId>(test_fields, 1u),
+            std::span<const FieldId>(trial_fields, 1u),
+            residual,
+            opts);
+        FAIL() << "Expected missing level-set trial field to be rejected";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("trial field list"), std::string::npos);
+    }
 }
 
 TEST(FormsInstaller,
@@ -853,6 +1174,295 @@ TEST(FormsInstaller,
 }
 
 TEST(FormsInstaller,
+     FormsInstaller_CutVolumeShapeTangentMergesExistingInterfaceMarkers)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int cut_marker = 96;
+    constexpr int existing_interface_marker = 196;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    svmp::FE::forms::BlockLinearForm residual(1);
+    residual.setBlock(
+        0,
+        (u * v).dCutVolume(cut_marker, svmp::FE::forms::CutVolumeSide::Negative) +
+            (Real{0.25} * u * v).dI(existing_interface_marker));
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = cut_marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const FieldId test_fields[] = {u_field};
+    const FieldId trial_fields[] = {u_field, phi_field};
+    auto installed = svmp::FE::systems::installCoupledResidual(
+        sys,
+        "op",
+        std::span<const FieldId>(test_fields, 1u),
+        std::span<const FieldId>(trial_fields, 2u),
+        residual,
+        opts);
+
+    ASSERT_EQ(installed.jacobian_blocks.size(), 1u);
+    ASSERT_EQ(installed.jacobian_blocks.front().size(), 2u);
+    ASSERT_NE(installed.jacobian_blocks.front()[0], nullptr);
+    ASSERT_NE(installed.jacobian_blocks.front()[1], nullptr);
+    EXPECT_TRUE(installed.jacobian_blocks.front()[0]->hasInterfaceFace());
+    EXPECT_TRUE(installed.jacobian_blocks.front()[1]->hasInterfaceFace());
+
+    const auto& def = sys.operatorDefinition("op");
+    std::vector<int> phi_interface_markers;
+    for (const auto& entry : def.interface_faces) {
+        if (entry.test_field == u_field && entry.trial_field == phi_field) {
+            phi_interface_markers.push_back(entry.marker);
+        }
+    }
+    std::sort(phi_interface_markers.begin(), phi_interface_markers.end());
+
+    EXPECT_EQ(std::count(phi_interface_markers.begin(),
+                         phi_interface_markers.end(),
+                         cut_marker),
+              1);
+    EXPECT_TRUE(std::binary_search(phi_interface_markers.begin(),
+                                   phi_interface_markers.end(),
+                                   existing_interface_marker));
+
+    const auto phi_cut = std::find_if(
+        def.cut_volumes.begin(),
+        def.cut_volumes.end(),
+        [&](const auto& entry) {
+            return entry.marker == cut_marker &&
+                   entry.side ==
+                       svmp::FE::geometry::CutIntegrationSide::Negative &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_cut, def.cut_volumes.end());
+
+    const auto phi_interface = std::find_if(
+        def.interface_faces.begin(),
+        def.interface_faces.end(),
+        [&](const auto& entry) {
+            return entry.marker == cut_marker &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_interface, def.interface_faces.end());
+    EXPECT_EQ(phi_interface->kernel, phi_cut->kernel);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_InstallResidualFormCutDomainSensitivityRejectsMissingLevelSetTrialField)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 197;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto residual =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    try {
+        (void)svmp::FE::systems::installResidualForm(
+            sys, "op", u_field, u_field, residual, opts);
+        FAIL() << "Expected missing level-set trial field to be rejected";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("trial field list"), std::string::npos);
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_InstallResidualFormCutDomainSensitivityRegistersInterfaceDispatch)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 198;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto residual =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const auto installed = svmp::FE::systems::installResidualForm(
+        sys, "op", u_field, phi_field, residual, opts);
+    ASSERT_NE(installed, nullptr);
+    EXPECT_TRUE(installed->hasInterfaceFace());
+
+    const auto& def = sys.operatorDefinition("op");
+    const auto phi_interface = std::find_if(
+        def.interface_faces.begin(),
+        def.interface_faces.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_interface, def.interface_faces.end());
+
+    const auto phi_cut = std::find_if(
+        def.cut_volumes.begin(),
+        def.cut_volumes.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.side ==
+                       svmp::FE::geometry::CutIntegrationSide::Negative &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_cut, def.cut_volumes.end());
+    EXPECT_EQ(phi_interface->kernel, phi_cut->kernel);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_LevelSetCutDomainSensitivityRejectsMismatchedSpaceMetadata)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto residual_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+    auto level_set_space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/2);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "u", .space = residual_space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{
+            .name = "phi", .space = level_set_space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 188;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *residual_space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *residual_space, "v");
+    const auto residual =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative,
+            .level_set_space = spaceSignatureFor(*residual_space)});
+
+    try {
+        (void)svmp::FE::systems::installResidualForm(
+            sys, "op", u_field, phi_field, residual, opts);
+        FAIL() << "Expected mismatched level-set sensitivity space to be rejected";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("sensitivity space"), std::string::npos);
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_MixedCutDomainSensitivityRejectsMissingLevelSetTrialField)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 97;
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto residual =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const FieldId test_fields[] = {u_field};
+    const FieldId trial_fields[] = {u_field};
+    try {
+        (void)svmp::FE::systems::installCoupledResidualMixed(
+            sys,
+            "op",
+            std::span<const FieldId>(test_fields, 1u),
+            std::span<const FieldId>(trial_fields, 1u),
+            residual,
+            opts);
+        FAIL() << "Expected missing level-set trial field to be rejected";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("trial field list"), std::string::npos);
+    }
+}
+
+TEST(FormsInstaller,
      FormsInstaller_MixedCutVolumeResidualAddsLevelSetShapeTangentInterfaceBlock)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
@@ -903,6 +1513,139 @@ TEST(FormsInstaller,
     EXPECT_EQ(def.interface_faces.front().marker, marker);
     EXPECT_EQ(def.interface_faces.front().test_field, u_field);
     EXPECT_EQ(def.interface_faces.front().trial_field, phi_field);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_CellRestrictedCoupledResidualKeepsLevelSetShapeTangentInterfaces)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto w_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "w", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 205;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "test_cell_restricted_shape_tangent"}});
+
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto w =
+        svmp::FE::forms::FormExpr::stateField(w_field, *space, "w");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto q =
+        svmp::FE::forms::FormExpr::testFunction(w_field, *space, "q");
+
+    svmp::FE::forms::BlockLinearForm residual(2);
+    residual.setBlock(0, (u * v).dx());
+    residual.setBlock(1, (w * q).dx());
+
+    const FieldId test_fields[] = {u_field, w_field};
+    const FieldId trial_fields[] = {u_field, w_field, phi_field};
+    auto installed = svmp::FE::systems::installCoupledResidual(
+        sys,
+        "op",
+        std::span<const FieldId>(test_fields, 2u),
+        std::span<const FieldId>(trial_fields, 3u),
+        residual);
+
+    ASSERT_EQ(installed.jacobian_blocks.size(), 2u);
+    ASSERT_EQ(installed.jacobian_blocks[0].size(), 3u);
+    ASSERT_EQ(installed.jacobian_blocks[1].size(), 3u);
+    ASSERT_NE(installed.jacobian_blocks[0][2], nullptr);
+    ASSERT_NE(installed.jacobian_blocks[1][2], nullptr);
+    EXPECT_TRUE(installed.jacobian_blocks[0][2]->hasInterfaceFace());
+    EXPECT_TRUE(installed.jacobian_blocks[1][2]->hasInterfaceFace());
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+
+    int phi_interface_count = 0;
+    for (const auto& entry : def.interface_faces) {
+        if (entry.marker == marker && entry.trial_field == phi_field) {
+            ++phi_interface_count;
+            EXPECT_TRUE(entry.test_field == u_field || entry.test_field == w_field);
+        }
+    }
+    EXPECT_EQ(phi_interface_count, 2);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_CellRestrictedMixedResidualKeepsLevelSetShapeTangentInterfaces)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto w_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "w", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 206;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "test_cell_restricted_mixed_shape_tangent"}});
+
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u");
+    const auto w =
+        svmp::FE::forms::FormExpr::stateField(w_field, *space, "w");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto q =
+        svmp::FE::forms::FormExpr::testFunction(w_field, *space, "q");
+    const auto residual = (u * v).dx() + (w * q).dx();
+
+    const FieldId test_fields[] = {u_field, w_field};
+    const FieldId trial_fields[] = {u_field, w_field, phi_field};
+    auto installed = svmp::FE::systems::installCoupledResidualMixed(
+        sys,
+        "op",
+        std::span<const FieldId>(test_fields, 2u),
+        std::span<const FieldId>(trial_fields, 3u),
+        residual);
+
+    ASSERT_EQ(installed.jacobian_blocks.size(), 2u);
+    ASSERT_EQ(installed.jacobian_blocks[0].size(), 3u);
+    ASSERT_EQ(installed.jacobian_blocks[1].size(), 3u);
+    ASSERT_NE(installed.jacobian_blocks[0][2], nullptr);
+    ASSERT_NE(installed.jacobian_blocks[1][2], nullptr);
+    EXPECT_TRUE(installed.jacobian_blocks[0][2]->hasInterfaceFace());
+    EXPECT_TRUE(installed.jacobian_blocks[1][2]->hasInterfaceFace());
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+
+    int phi_interface_count = 0;
+    for (const auto& entry : def.interface_faces) {
+        if (entry.marker == marker && entry.trial_field == phi_field) {
+            ++phi_interface_count;
+            EXPECT_TRUE(entry.test_field == u_field || entry.test_field == w_field);
+        }
+    }
+    EXPECT_EQ(phi_interface_count, 2);
 }
 
 TEST(FormsInstaller, FormsInstaller_TimeDerivativeFieldsIncludeCutVolumeKernels)
@@ -1086,6 +1829,415 @@ TEST(FormsInstaller, FormsInstaller_AssemblesSameBlockCutVolumeTermsInSinglePass
         EXPECT_NEAR(out.getVectorEntry(i), expected_vector, 1.0e-12);
         for (GlobalIndex j = 0; j < 4; ++j) {
             EXPECT_NEAR(out.getMatrixEntry(i, j), expected_matrix, 1.0e-12);
+        }
+    }
+}
+
+TEST(FormsInstaller, FormsInstaller_AssemblesMixedCutVolumeBlocksInSinglePass)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto p_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 784;
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto p = svmp::FE::forms::FormExpr::trialFunction(*space, "p");
+    const auto q = svmp::FE::forms::FormExpr::testFunction(*space, "q");
+
+    svmp::FE::forms::BlockBilinearForm blocks(/*tests=*/2, /*trials=*/2);
+    blocks.setBlock(
+        0, 0,
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative));
+    blocks.setBlock(
+        1, 1,
+        (svmp::FE::forms::FormExpr::constant(2.0) * p * q)
+            .dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative));
+
+    const std::array<FieldId, 2> fields = {u_field, p_field};
+    const auto kernels =
+        svmp::FE::systems::installResidualBlocks(sys, "op", fields, fields, blocks);
+    ASSERT_EQ(kernels.size(), 2u);
+    ASSERT_EQ(kernels[0].size(), 2u);
+    ASSERT_NE(kernels[0][0], nullptr);
+    ASSERT_EQ(kernels[0][1], nullptr);
+    ASSERT_EQ(kernels[1][0], nullptr);
+    ASSERT_NE(kernels[1][1], nullptr);
+
+    const auto& def = sys.operatorDefinition("op");
+    ASSERT_EQ(def.cut_volumes.size(), 2u);
+
+    auto cut_context = std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    svmp::FE::geometry::CutQuadratureRule rule;
+    rule.kind = svmp::FE::geometry::CutQuadratureKind::Volume;
+    rule.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    rule.parent_measure = Real{1.0} / Real{6.0};
+    rule.measure = Real{1.0} / Real{12.0};
+    rule.volume_fraction = Real{0.5};
+    rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    rule.provenance.marker = marker;
+    rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
+        .point = {{Real{0.25}, Real{0.25}, Real{0.25}}},
+        .weight = rule.measure,
+    });
+
+    svmp::FE::assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
+    metadata.volume_fraction = rule.volume_fraction;
+    cut_context->addGeneratedVolumeRule(marker, metadata, rule);
+    sys.setCutIntegrationContext(cut_context);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 8);
+
+    std::vector<Real> U(static_cast<std::size_t>(n_dofs), Real{0.0});
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+
+    svmp::FE::assembly::DenseMatrixView out(n_dofs);
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, nullptr);
+    ASSERT_TRUE(result.success) << result.error_message;
+    EXPECT_EQ(result.elements_assembled, 1);
+
+    constexpr Real expected_u_block = Real{1.0} / Real{192.0};
+    constexpr Real expected_p_block = Real{1.0} / Real{96.0};
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(out.getMatrixEntry(i, j), expected_u_block, 1.0e-12);
+            EXPECT_NEAR(out.getMatrixEntry(i + 4, j + 4), expected_p_block, 1.0e-12);
+            EXPECT_NEAR(out.getMatrixEntry(i, j + 4), 0.0, 1.0e-12);
+            EXPECT_NEAR(out.getMatrixEntry(i + 4, j), 0.0, 1.0e-12);
+        }
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_AssemblesTwoSidedGeneratedInterfaceTermThroughSystem)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 785;
+    const auto u = svmp::FE::forms::TrialFunction(*space, "u");
+    const auto v = svmp::FE::forms::TestFunction(*space, "v");
+    const auto bilinear =
+        (u.plus() * v.minus() +
+         svmp::FE::forms::FormExpr::constant(2.0) * u.minus() * v.plus())
+            .dI(marker);
+
+    const std::array<FieldId, 1> fields = {u_field};
+    const auto kernels = svmp::FE::systems::installMixedBilinear(
+        sys, "op", fields, fields, bilinear);
+    ASSERT_EQ(kernels.size(), 1u);
+    ASSERT_EQ(kernels.front().size(), 1u);
+    ASSERT_NE(kernels.front().front(), nullptr);
+
+    const auto& def = sys.operatorDefinition("op");
+    ASSERT_EQ(def.interface_faces.size(), 1u);
+    EXPECT_EQ(def.interface_faces.front().marker, marker);
+    ASSERT_TRUE(def.interface_faces.front().kernel);
+    EXPECT_TRUE(def.interface_faces.front().kernel->requiresTwoSidedInterfaceFace());
+
+    auto cut_context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    cut_context->addGeneratedInterfaceDomain(
+        makeFormsInstallerReferencePlaneInterfaceDomain(marker));
+    ASSERT_EQ(cut_context->generatedInterfaceTwoSidedBindingsForMarker(marker)
+                  .size(),
+              1u);
+    ASSERT_TRUE(cut_context->generatedInterfaceTwoSidedBindingsForMarker(marker)
+                    .front()
+                    .complete());
+    sys.setCutIntegrationContext(cut_context);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    std::vector<Real> U(static_cast<std::size_t>(sys.dofHandler().getNumDofs()),
+                        Real{0.0});
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+
+    svmp::FE::assembly::DenseMatrixView out(sys.dofHandler().getNumDofs());
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, nullptr);
+    ASSERT_TRUE(result.success) << result.error_message;
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+
+    const Real interface_measure = std::sqrt(Real{3.0}) / Real{8.0};
+    const std::array<Real, 4> shape = {
+        Real{0.5},
+        Real{1.0} / Real{6.0},
+        Real{1.0} / Real{6.0},
+        Real{1.0} / Real{6.0},
+    };
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            const auto expected =
+                Real{3.0} * interface_measure *
+                shape[static_cast<std::size_t>(i)] *
+                shape[static_cast<std::size_t>(j)];
+            EXPECT_NEAR(out.getMatrixEntry(i, j), expected, 1.0e-12)
+                << "entry (" << i << ", " << j << ")";
+        }
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_OrientsTwoSidedGeneratedInterfaceNormalsThroughSystem)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 786;
+    const auto u = svmp::FE::forms::TrialFunction(*space, "u");
+    const auto v = svmp::FE::forms::TestFunction(*space, "v");
+    const auto n = svmp::FE::forms::FormExpr::normal();
+    const auto bilinear =
+        (n.minus().component(0) * u.minus() * v.minus() +
+         n.plus().component(0) * u.plus() * v.plus())
+            .dI(marker);
+
+    const std::array<FieldId, 1> fields = {u_field};
+    const auto kernels = svmp::FE::systems::installMixedBilinear(
+        sys, "op", fields, fields, bilinear);
+    ASSERT_EQ(kernels.size(), 1u);
+    ASSERT_EQ(kernels.front().size(), 1u);
+    ASSERT_NE(kernels.front().front(), nullptr);
+    ASSERT_TRUE(kernels.front().front()->requiresTwoSidedInterfaceFace());
+
+    auto cut_context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    cut_context->addGeneratedInterfaceDomain(
+        makeFormsInstallerReferencePlaneInterfaceDomain(marker));
+    sys.setCutIntegrationContext(cut_context);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    std::vector<Real> U(static_cast<std::size_t>(sys.dofHandler().getNumDofs()),
+                        Real{0.0});
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+
+    svmp::FE::assembly::DenseMatrixView out(sys.dofHandler().getNumDofs());
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, nullptr);
+    ASSERT_TRUE(result.success) << result.error_message;
+    EXPECT_EQ(result.interface_faces_assembled, 1);
+
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            EXPECT_NEAR(out.getMatrixEntry(i, j), 0.0, 1.0e-12)
+                << "entry (" << i << ", " << j << ")";
+        }
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_ComplementaryActiveInactiveScalarModulesAssembleGeneratedDomains)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto active_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "active_scalar", .space = space, .components = 1});
+    const auto inactive_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "inactive_scalar", .space = space, .components = 1});
+    sys.addOperator("coupled_domains");
+
+    constexpr int marker = 787;
+    {
+        auto scope = sys.scopedFormInstallCellDomainRestrictions({
+            svmp::FE::systems::FESystem::FormCellDomainRestriction{
+                .interface_marker = marker,
+                .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+                .diagnostic = "active_scalar_negative"}});
+        const auto u =
+            svmp::FE::forms::FormExpr::stateField(active_field, *space, "u");
+        const auto v =
+            svmp::FE::forms::FormExpr::testFunction(active_field, *space, "v");
+        (void)svmp::FE::systems::installFormulation(
+            sys, "coupled_domains", {active_field}, (u * v).dx());
+    }
+    {
+        auto scope = sys.scopedFormInstallCellDomainRestrictions({
+            svmp::FE::systems::FESystem::FormCellDomainRestriction{
+                .interface_marker = marker,
+                .side = svmp::FE::geometry::CutIntegrationSide::Positive,
+                .diagnostic = "inactive_scalar_positive"}});
+        const auto w =
+            svmp::FE::forms::FormExpr::stateField(inactive_field, *space, "w");
+        const auto q =
+            svmp::FE::forms::FormExpr::testFunction(inactive_field, *space, "q");
+        (void)svmp::FE::systems::installFormulation(
+            sys, "coupled_domains", {inactive_field}, (w * q).dx());
+    }
+
+    const auto u =
+        svmp::FE::forms::FormExpr::stateField(active_field, *space, "u");
+    const auto w =
+        svmp::FE::forms::FormExpr::stateField(inactive_field, *space, "w");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(active_field, *space, "v");
+    const auto q =
+        svmp::FE::forms::FormExpr::testFunction(inactive_field, *space, "q");
+    svmp::FE::forms::BlockLinearForm interface_coupling(/*tests=*/2);
+    interface_coupling.setBlock(0, (w * v).dI(marker));
+    interface_coupling.setBlock(1, (u * q).dI(marker));
+    const std::array<FieldId, 2> fields = {active_field, inactive_field};
+    (void)svmp::FE::systems::installCoupledResidual(
+        sys, "coupled_domains", fields, fields, interface_coupling);
+
+    const auto& def = sys.operatorDefinition("coupled_domains");
+    ASSERT_EQ(def.cut_volumes.size(), 2u);
+    const auto has_cut_volume =
+        [&](FieldId field, svmp::FE::geometry::CutIntegrationSide side) {
+            return std::any_of(
+                def.cut_volumes.begin(),
+                def.cut_volumes.end(),
+                [&](const auto& entry) {
+                    return entry.marker == marker &&
+                           entry.side == side &&
+                           entry.test_field == field &&
+                           entry.trial_field == field &&
+                           entry.kernel != nullptr;
+                });
+        };
+    EXPECT_TRUE(has_cut_volume(active_field, svmp::FE::geometry::CutIntegrationSide::Negative));
+    EXPECT_TRUE(has_cut_volume(inactive_field, svmp::FE::geometry::CutIntegrationSide::Positive));
+    ASSERT_FALSE(def.interface_faces.empty());
+
+    auto cut_context =
+        std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    cut_context->addGeneratedInterfaceDomain(
+        makeFormsInstallerReferencePlaneInterfaceDomain(marker));
+    sys.setCutIntegrationContext(cut_context);
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n_dofs, 8);
+    std::vector<Real> U(static_cast<std::size_t>(n_dofs), Real{0.0});
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        U[static_cast<std::size_t>(i)] = Real{1.0};
+        U[static_cast<std::size_t>(i + 4)] = Real{2.0};
+    }
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "coupled_domains";
+    req.want_matrix = true;
+    req.want_vector = true;
+
+    svmp::FE::assembly::DenseSystemView out(n_dofs);
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, &out);
+    ASSERT_TRUE(result.success) << result.error_message;
+    EXPECT_EQ(result.elements_assembled, 2);
+    EXPECT_EQ(result.interface_faces_assembled, 2);
+
+    Real active_residual_sum = Real{0.0};
+    Real inactive_residual_sum = Real{0.0};
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        active_residual_sum += out.getVectorEntry(i);
+        inactive_residual_sum += out.getVectorEntry(i + 4);
+    }
+    EXPECT_GT(active_residual_sum, Real{0.05});
+    EXPECT_GT(inactive_residual_sum, Real{0.10});
+
+    bool has_cross_coupling = false;
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 4; j < 8; ++j) {
+            has_cross_coupling =
+                has_cross_coupling ||
+                std::abs(out.getMatrixEntry(i, j)) > Real{1.0e-14} ||
+                std::abs(out.getMatrixEntry(j, i)) > Real{1.0e-14};
+        }
+    }
+    EXPECT_TRUE(has_cross_coupling);
+
+    svmp::FE::systems::AssemblyRequest vector_req;
+    vector_req.op = "coupled_domains";
+    vector_req.want_vector = true;
+    constexpr Real eps = Real{1.0e-6};
+    for (GlobalIndex j = 0; j < n_dofs; ++j) {
+        auto plus = U;
+        auto minus = U;
+        plus[static_cast<std::size_t>(j)] += eps;
+        minus[static_cast<std::size_t>(j)] -= eps;
+
+        svmp::FE::systems::SystemStateView plus_state;
+        plus_state.u = plus;
+        svmp::FE::systems::SystemStateView minus_state;
+        minus_state.u = minus;
+
+        svmp::FE::assembly::DenseSystemView residual_plus(n_dofs);
+        residual_plus.zero();
+        const auto plus_result =
+            sys.assemble(vector_req, plus_state, nullptr, &residual_plus);
+        ASSERT_TRUE(plus_result.success) << plus_result.error_message;
+
+        svmp::FE::assembly::DenseSystemView residual_minus(n_dofs);
+        residual_minus.zero();
+        const auto minus_result =
+            sys.assemble(vector_req, minus_state, nullptr, &residual_minus);
+        ASSERT_TRUE(minus_result.success) << minus_result.error_message;
+
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            const Real finite_difference =
+                (residual_plus.getVectorEntry(i) -
+                 residual_minus.getVectorEntry(i)) /
+                (Real{2.0} * eps);
+            EXPECT_NEAR(out.getMatrixEntry(i, j),
+                        finite_difference,
+                        Real{2.5e-9})
+                << "row=" << i << " col=" << j;
         }
     }
 }
@@ -2008,6 +3160,219 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualBlocks_MultipleBlocksRegister
     EXPECT_EQ(kernels[0][1], nullptr);
     EXPECT_EQ(kernels[1][0], nullptr);
     EXPECT_NE(kernels[1][1], nullptr);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_InstallResidualBlocksAcceptsExplicitCutDomainSensitivityBlock)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto u_state =
+        svmp::FE::forms::FormExpr::stateField(u_field, *space, "u_state");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    constexpr int marker = 199;
+    svmp::FE::forms::BlockBilinearForm blocks(/*tests=*/1, /*trials=*/2);
+    blocks.setBlock(
+        0,
+        0,
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative));
+    blocks.setBlock(
+        0,
+        1,
+        (u_state * v).dCutVolume(marker,
+                                 svmp::FE::forms::CutVolumeSide::Negative));
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const std::array<FieldId, 1> test_fields = {u_field};
+    const std::array<FieldId, 2> trial_fields = {u_field, phi_field};
+    const auto kernels = svmp::FE::systems::installResidualBlocks(
+        sys, "op", test_fields, trial_fields, blocks, opts);
+
+    ASSERT_EQ(kernels.size(), 1u);
+    ASSERT_EQ(kernels.front().size(), 2u);
+    ASSERT_NE(kernels.front()[0], nullptr);
+    ASSERT_NE(kernels.front()[1], nullptr);
+    EXPECT_TRUE(kernels.front()[1]->hasInterfaceFace());
+
+    const auto& def = sys.operatorDefinition("op");
+    const auto phi_cut = std::find_if(
+        def.cut_volumes.begin(),
+        def.cut_volumes.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.side ==
+                       svmp::FE::geometry::CutIntegrationSide::Negative &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_cut, def.cut_volumes.end());
+
+    const auto phi_interface = std::find_if(
+        def.interface_faces.begin(),
+        def.interface_faces.end(),
+        [&](const auto& entry) {
+            return entry.marker == marker &&
+                   entry.test_field == u_field &&
+                   entry.trial_field == phi_field;
+        });
+    ASSERT_NE(phi_interface, def.interface_faces.end());
+    EXPECT_EQ(phi_interface->kernel, phi_cut->kernel);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_InstallMixedBilinearRejectsImplicitCutDomainSensitivity)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+
+    constexpr int marker = 200;
+    const auto bilinear =
+        (u * v).dCutVolume(marker, svmp::FE::forms::CutVolumeSide::Negative);
+
+    svmp::FE::systems::FormInstallOptions opts;
+    opts.compiler_options.geometry_sensitivity.mode =
+        svmp::FE::forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    opts.compiler_options.geometry_sensitivity.level_set_cut_domains.push_back(
+        svmp::FE::forms::LevelSetCutDomainSensitivity{
+            .level_set_field = phi_field,
+            .interface_marker = marker,
+            .side = svmp::FE::forms::CutVolumeSide::Negative});
+
+    const std::array<FieldId, 1> test_fields = {u_field};
+    const std::array<FieldId, 1> trial_fields = {phi_field};
+    try {
+        (void)svmp::FE::systems::installMixedBilinear(
+            sys, "op", test_fields, trial_fields, bilinear, opts);
+        FAIL() << "Expected pre-split mixed bilinear to reject implicit cut-domain sensitivity";
+    } catch (const svmp::FE::InvalidArgumentException& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("pre-split bilinear"), std::string::npos);
+    }
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_InstallMixedBilinearAcceptsExplicitInterfaceShapeBlockWithCellRestriction)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 201;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "test_explicit_interface_shape_block"}});
+
+    const auto dphi = svmp::FE::forms::FormExpr::trialFunction(*space, "dphi");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto bilinear = (dphi * v).dI(marker);
+
+    const std::array<FieldId, 1> test_fields = {u_field};
+    const std::array<FieldId, 1> trial_fields = {phi_field};
+    const auto kernels = svmp::FE::systems::installMixedBilinear(
+        sys, "op", test_fields, trial_fields, bilinear);
+
+    ASSERT_EQ(kernels.size(), 1u);
+    ASSERT_EQ(kernels.front().size(), 1u);
+    ASSERT_NE(kernels.front()[0], nullptr);
+    EXPECT_TRUE(kernels.front()[0]->hasInterfaceFace());
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+    EXPECT_TRUE(def.cut_volumes.empty());
+    ASSERT_EQ(def.interface_faces.size(), 1u);
+    EXPECT_EQ(def.interface_faces.front().marker, marker);
+    EXPECT_EQ(def.interface_faces.front().test_field, u_field);
+    EXPECT_EQ(def.interface_faces.front().trial_field, phi_field);
+}
+
+TEST(FormsInstaller,
+     FormsInstaller_InstallMixedBilinearKeepsCellRestrictionGeometryConstant)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(
+        ElementType::Tetra4, /*order=*/1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto phi_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "phi", .space = space, .components = 1});
+    sys.addOperator("op");
+
+    constexpr int marker = 202;
+    sys.setFormInstallCellDomainRestrictions({
+        svmp::FE::systems::FESystem::FormCellDomainRestriction{
+            .interface_marker = marker,
+            .side = svmp::FE::geometry::CutIntegrationSide::Negative,
+            .level_set_field = phi_field,
+            .enable_level_set_shape_tangent = true,
+            .diagnostic = "test_geometry_constant_cut_volume_block"}});
+
+    const auto du = svmp::FE::forms::FormExpr::trialFunction(*space, "du");
+    const auto v =
+        svmp::FE::forms::FormExpr::testFunction(u_field, *space, "v");
+    const auto bilinear = (du * v).dx();
+
+    const std::array<FieldId, 1> test_fields = {u_field};
+    const std::array<FieldId, 1> trial_fields = {u_field};
+    const auto kernels = svmp::FE::systems::installMixedBilinear(
+        sys, "op", test_fields, trial_fields, bilinear);
+
+    ASSERT_EQ(kernels.size(), 1u);
+    ASSERT_EQ(kernels.front().size(), 1u);
+    ASSERT_NE(kernels.front()[0], nullptr);
+
+    const auto& def = sys.operatorDefinition("op");
+    EXPECT_TRUE(def.cells.empty());
+    ASSERT_EQ(def.cut_volumes.size(), 1u);
+    EXPECT_EQ(def.cut_volumes.front().marker, marker);
+    EXPECT_EQ(def.cut_volumes.front().side,
+              svmp::FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(def.cut_volumes.front().test_field, u_field);
+    EXPECT_EQ(def.cut_volumes.front().trial_field, u_field);
+    EXPECT_TRUE(def.interface_faces.empty());
 }
 
 TEST(FormsInstaller, FormsInstaller_InstallResidualBlocks_EmptyBlocksSkipped)

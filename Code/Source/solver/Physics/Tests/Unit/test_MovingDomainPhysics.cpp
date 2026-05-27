@@ -43,8 +43,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -77,6 +79,33 @@ namespace mm = formulations::mesh_motion;
 namespace ls = FE::level_set;
 namespace ns = formulations::navier_stokes;
 
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* key, std::optional<std::string> value)
+        : key_(key)
+    {
+        if (const char* existing = std::getenv(key_); existing != nullptr) {
+            original_ = std::string(existing);
+        }
+        set(std::move(value));
+    }
+
+    ~ScopedEnvVar() { set(original_); }
+
+private:
+    void set(std::optional<std::string> value)
+    {
+        if (value.has_value()) {
+            setenv(key_, value->c_str(), 1);
+        } else {
+            unsetenv(key_);
+        }
+    }
+
+    const char* key_{nullptr};
+    std::optional<std::string> original_{};
+};
+
 bool containsExprType(const FormExprNode* node, FormExprType target)
 {
     if (node == nullptr) {
@@ -96,6 +125,23 @@ bool containsExprType(const FormExprNode* node, FormExprType target)
 bool containsExprType(const FormExpr& expr, FormExprType target)
 {
     return expr.isValid() && containsExprType(expr.node(), target);
+}
+
+bool containsGradientOfTrialFunction(const FormExprNode* node)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (node->type() == FormExprType::Gradient &&
+        containsExprType(node, FormExprType::TrialFunction)) {
+        return true;
+    }
+    for (const auto* child : node->children()) {
+        if (containsGradientOfTrialFunction(child)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool containsFieldExprType(const FormExprNode* node,
@@ -144,6 +190,36 @@ bool formulationRecordsContainFieldExprType(const FE::systems::FESystem& system,
         for (const auto& [block, expr] : record.block_residual_exprs) {
             (void)block;
             if (containsFieldExprType(expr.get(), target, field)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool interfaceKernelContainsGradientOfTrialFunction(
+    const FE::systems::FESystem& system,
+    int interface_marker,
+    FE::FieldId trial_field)
+{
+    const auto& equations = system.operatorDefinition("equations");
+    for (const auto& term : equations.interface_faces) {
+        if (term.marker != interface_marker ||
+            term.trial_field != trial_field ||
+            !term.kernel) {
+            continue;
+        }
+        const auto form_kernel =
+            std::dynamic_pointer_cast<FE::forms::FormKernel>(term.kernel);
+        if (!form_kernel) {
+            continue;
+        }
+        for (const auto& integral : form_kernel->ir().terms()) {
+            if (integral.domain != FE::forms::IntegralDomain::InterfaceFace ||
+                integral.interface_marker != interface_marker) {
+                continue;
+            }
+            if (containsGradientOfTrialFunction(integral.integrand.node())) {
                 return true;
             }
         }
@@ -249,6 +325,26 @@ bool formulationRecordsContainUnmarkedInteriorFaceIntegral(
         }
     }
     return false;
+}
+
+std::size_t interiorFaceKernelCountForBlock(const FE::systems::FESystem& system,
+                                            FE::FieldId test_field,
+                                            FE::FieldId trial_field,
+                                            int marker)
+{
+    if (!system.hasOperator("equations")) {
+        return 0u;
+    }
+    std::size_t count = 0u;
+    const auto& equations = system.operatorDefinition("equations");
+    for (const auto& term : equations.interior) {
+        if (term.test_field == test_field &&
+            term.trial_field == trial_field &&
+            term.marker == marker) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 std::shared_ptr<SingleTetraMeshAccess> makeMesh()
@@ -671,6 +767,15 @@ std::vector<FE::Real> constantScalarTetraCoefficients(FE::Real value)
     return std::vector<FE::Real>(4u, value);
 }
 
+std::vector<FE::Real> affineZScalarTetraCoefficients(FE::Real offset,
+                                                     FE::Real scale)
+{
+    // Unit tetra nodal z-coordinates are {0, 0, 0, 1}.
+    std::vector<FE::Real> coeffs(4u, offset);
+    coeffs[3] = offset + scale;
+    return coeffs;
+}
+
 std::vector<FE::Real> constantVectorTetraCoefficients(FE::Real x,
                                                       FE::Real y,
                                                       FE::Real z)
@@ -730,6 +835,81 @@ makeSingleTetraCutVolumeContext(
     metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
 
     cut_context->addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+    return cut_context;
+}
+
+std::shared_ptr<FE::assembly::CutIntegrationContext>
+makeSingleTetraFreeSurfaceCutContext(int marker, FE::FieldId level_set_field)
+{
+    namespace interfaces = FE::interfaces;
+
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(
+        level_set_field,
+        /*layout_revision=*/0u,
+        /*value_revision=*/1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 0;
+    request.interface_quadrature_order = 0;
+    request.volume_quadrature_order = 0;
+
+    interfaces::LevelSetInterfaceDomain domain(request);
+
+    interfaces::CutInterfaceFragment fragment;
+    fragment.interface_marker = marker;
+    fragment.parent_cell = 0;
+    fragment.local_fragment_index = 0;
+    fragment.stable_id = 10;
+    fragment.kind = interfaces::CutInterfaceFragmentKind::Polygon;
+    fragment.measure = FE::Real{0.038};
+    fragment.normal = {{0.0, 0.0, 1.0}};
+    fragment.quadrature_points.push_back(interfaces::CutInterfaceQuadraturePoint{
+        .point = {{0.20, 0.25, 0.15}},
+        .parent_coordinate = {{0.20, 0.25, 0.15}},
+        .normal = fragment.normal,
+        .weight = FE::Real{0.020},
+    });
+    fragment.quadrature_points.push_back(interfaces::CutInterfaceQuadraturePoint{
+        .point = {{0.35, 0.18, 0.22}},
+        .parent_coordinate = {{0.35, 0.18, 0.22}},
+        .normal = fragment.normal,
+        .weight = FE::Real{0.018},
+    });
+    domain.addFragment(std::move(fragment));
+
+    interfaces::CutInterfaceVolumeRegion negative_region;
+    negative_region.interface_marker = marker;
+    negative_region.parent_cell = 0;
+    negative_region.local_region_index = 0;
+    negative_region.stable_id = 11;
+    negative_region.side = FE::geometry::CutIntegrationSide::Negative;
+    negative_region.measure = FE::Real{1.0} / FE::Real{12.0};
+    negative_region.parent_measure = FE::Real{1.0} / FE::Real{6.0};
+    negative_region.volume_fraction =
+        negative_region.measure / negative_region.parent_measure;
+    negative_region.centroid = {{0.24, 0.18, 0.20}};
+    negative_region.normal = {{0.0, 0.0, 1.0}};
+    domain.addVolumeRegion(std::move(negative_region));
+
+    interfaces::CutInterfaceVolumeRegion positive_region;
+    positive_region.interface_marker = marker;
+    positive_region.parent_cell = 0;
+    positive_region.local_region_index = 1;
+    positive_region.stable_id = 12;
+    positive_region.side = FE::geometry::CutIntegrationSide::Positive;
+    positive_region.measure = FE::Real{1.0} / FE::Real{12.0};
+    positive_region.parent_measure = FE::Real{1.0} / FE::Real{6.0};
+    positive_region.volume_fraction =
+        positive_region.measure / positive_region.parent_measure;
+    positive_region.centroid = {{0.44, 0.20, 0.18}};
+    positive_region.normal = {{0.0, 0.0, 1.0}};
+    domain.addVolumeRegion(std::move(positive_region));
+
+    auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
+    cut_context->addGeneratedInterfaceDomain(
+        domain,
+        FE::geometry::CutIntegrationSide::Negative);
+
     return cut_context;
 }
 
@@ -805,6 +985,127 @@ std::vector<FE::Real> fittedFreeSurfaceResidualVector(FE::Real external_pressure
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     module.registerOn(system);
     system.setup({}, makeSingleTetraSetupInputs());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        0.0);
+    const std::vector<FE::Real> previous_solution = solution;
+    FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+    return residualVector(system, state, "equations");
+}
+
+std::vector<FE::Real> unfittedFreeSurfaceResidualVector(FE::Real external_pressure,
+                                                        FE::Real surface_tension,
+                                                        FE::Real curvature,
+                                                        ns::FreeSurfaceActiveDomain active_domain =
+                                                            ns::FreeSurfaceActiveDomain::LevelSetNegative)
+{
+    constexpr int interface_marker = 146;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = active_domain,
+        .external_pressure = external_pressure,
+        .surface_tension = surface_tension,
+        .curvature = curvature,
+        .use_level_set_curvature = false,
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setCutIntegrationContext(
+        makeSingleTetraFreeSurfaceCutContext(interface_marker, phi_field));
+    system.setup({}, makeSingleTetraSetupInputs());
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        affineZScalarTetraCoefficients(FE::Real{-0.25}, FE::Real{1.0}));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        0.0);
+    const std::vector<FE::Real> previous_solution = solution;
+    FE::systems::SystemStateView state;
+    state.dt = 1.0;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+    return residualVector(system, state, "equations");
+}
+
+std::vector<FE::Real> unfittedFreeSurfaceCurvatureFieldResidualVector(
+    FE::Real external_pressure,
+    FE::Real surface_tension,
+    FE::Real curvature,
+    ns::FreeSurfaceActiveDomain active_domain =
+        ns::FreeSurfaceActiveDomain::LevelSetNegative)
+{
+    constexpr int interface_marker = 149;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = active_domain,
+        .external_pressure = external_pressure,
+        .surface_tension = surface_tension,
+        .curvature_field_name = "kappa_projected",
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    const auto kappa_field = system.addField(FE::systems::FieldSpec{
+        .name = "kappa_projected",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setCutIntegrationContext(
+        makeSingleTetraFreeSurfaceCutContext(interface_marker, phi_field));
+    system.setup({}, makeSingleTetraSetupInputs());
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        affineZScalarTetraCoefficients(FE::Real{-0.25}, FE::Real{1.0}));
+    system.setPrescribedFieldCoefficients(
+        kappa_field,
+        constantScalarTetraCoefficients(curvature));
 
     std::vector<FE::Real> solution(
         static_cast<std::size_t>(system.dofHandler().getNumDofs()),
@@ -1285,6 +1586,144 @@ TEST(MovingDomainPhysics, SurfaceTensionPressureJumpMatchesLaplaceLaw)
     EXPECT_LT(vectorNorm(sphere_jump), 1.0e-12);
 }
 
+TEST(MovingDomainPhysics, UnfittedSurfaceTensionPressureJumpMatchesInterfaceLaplaceLaw)
+{
+    constexpr FE::Real gamma = 0.072;
+    constexpr FE::Real circle_radius = 0.45;
+    constexpr FE::Real curvature = 1.0 / circle_radius;
+
+    const auto external_pressure =
+        unfittedFreeSurfaceResidualVector(/*external_pressure=*/gamma * curvature,
+                                          /*surface_tension=*/0.0,
+                                          /*curvature=*/0.0);
+    const auto surface_tension =
+        unfittedFreeSurfaceResidualVector(/*external_pressure=*/0.0,
+                                          /*surface_tension=*/gamma,
+                                          /*curvature=*/curvature);
+    const auto laplace_jump =
+        unfittedFreeSurfaceResidualVector(/*external_pressure=*/gamma * curvature,
+                                          /*surface_tension=*/gamma,
+                                          /*curvature=*/curvature);
+
+    ASSERT_EQ(external_pressure.size(), surface_tension.size());
+    EXPECT_GT(vectorNorm(external_pressure), 1.0e-14);
+    for (std::size_t i = 0; i < external_pressure.size(); ++i) {
+        EXPECT_NEAR(external_pressure[i], -surface_tension[i], 1.0e-12);
+    }
+    EXPECT_LT(vectorNorm(laplace_jump), 1.0e-12);
+}
+
+TEST(MovingDomainPhysics,
+     UnfittedSurfaceTensionSuppliedCurvatureIsLevelSetNormalSigned)
+{
+    constexpr FE::Real gamma = 0.072;
+    constexpr FE::Real circle_radius = 0.45;
+    constexpr FE::Real curvature = 1.0 / circle_radius;
+
+    const auto negative_active_capillary =
+        unfittedFreeSurfaceResidualVector(
+            /*external_pressure=*/0.0,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative);
+    const auto positive_active_capillary =
+        unfittedFreeSurfaceResidualVector(
+            /*external_pressure=*/0.0,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetPositive);
+
+    ASSERT_EQ(negative_active_capillary.size(),
+              positive_active_capillary.size());
+    EXPECT_GT(vectorNorm(negative_active_capillary), 1.0e-14);
+    for (std::size_t i = 0; i < negative_active_capillary.size(); ++i) {
+        EXPECT_NEAR(negative_active_capillary[i],
+                    positive_active_capillary[i],
+                    1.0e-12);
+    }
+
+    const auto negative_active_balanced =
+        unfittedFreeSurfaceResidualVector(
+            /*external_pressure=*/gamma * curvature,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative);
+    const auto positive_active_balanced =
+        unfittedFreeSurfaceResidualVector(
+            /*external_pressure=*/-gamma * curvature,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetPositive);
+
+    EXPECT_LT(vectorNorm(negative_active_balanced), 1.0e-12);
+    EXPECT_LT(vectorNorm(positive_active_balanced), 1.0e-12);
+}
+
+TEST(MovingDomainPhysics,
+     UnfittedStaticCapillaryEquilibriumBenchmarkUsesProjectedCurvatureField)
+{
+    constexpr FE::Real gamma = 0.0728;
+    constexpr FE::Real droplet_radius = 0.52;
+    constexpr FE::Real curvature = FE::Real{2.0} / droplet_radius;
+    constexpr FE::Real laplace_pressure = gamma * curvature;
+
+    const auto pressure_only =
+        unfittedFreeSurfaceCurvatureFieldResidualVector(laplace_pressure,
+                                                        /*surface_tension=*/0.0,
+                                                        /*curvature=*/0.0);
+    const auto balanced =
+        unfittedFreeSurfaceCurvatureFieldResidualVector(laplace_pressure,
+                                                        gamma,
+                                                        curvature);
+    const auto pressure_perturbed =
+        unfittedFreeSurfaceCurvatureFieldResidualVector(
+            laplace_pressure * FE::Real{1.05},
+            gamma,
+            curvature);
+
+    EXPECT_GT(vectorNorm(pressure_only), 1.0e-14);
+    EXPECT_LT(vectorNorm(balanced), 1.0e-12);
+    EXPECT_GT(vectorNorm(pressure_perturbed), vectorNorm(balanced) + 1.0e-8);
+}
+
+TEST(MovingDomainPhysics,
+     UnfittedSurfaceTensionCurvatureFieldIsLevelSetNormalSigned)
+{
+    constexpr FE::Real gamma = 0.0728;
+    constexpr FE::Real droplet_radius = 0.52;
+    constexpr FE::Real curvature = FE::Real{2.0} / droplet_radius;
+
+    const auto negative_active_capillary =
+        unfittedFreeSurfaceCurvatureFieldResidualVector(
+            /*external_pressure=*/0.0,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetNegative);
+    const auto positive_active_capillary =
+        unfittedFreeSurfaceCurvatureFieldResidualVector(
+            /*external_pressure=*/0.0,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetPositive);
+
+    ASSERT_EQ(negative_active_capillary.size(),
+              positive_active_capillary.size());
+    EXPECT_GT(vectorNorm(negative_active_capillary), 1.0e-14);
+    for (std::size_t i = 0; i < negative_active_capillary.size(); ++i) {
+        EXPECT_NEAR(negative_active_capillary[i],
+                    positive_active_capillary[i],
+                    1.0e-12);
+    }
+
+    const auto positive_active_balanced =
+        unfittedFreeSurfaceCurvatureFieldResidualVector(
+            /*external_pressure=*/-gamma * curvature,
+            /*surface_tension=*/gamma,
+            /*curvature=*/curvature,
+            ns::FreeSurfaceActiveDomain::LevelSetPositive);
+    EXPECT_LT(vectorNorm(positive_active_balanced), 1.0e-12);
+}
+
 TEST(MovingDomainPhysics, StaticFlatWaterSurfaceWithGravityRemainsAtRest)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -1388,6 +1827,10 @@ TEST(MovingDomainPhysics, FittedAndUnfittedFlatStaticFreeSurfaceAgree)
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
+    ScopedEnvVar enable_shape_tangents(
+        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+        std::string("1"));
+
     constexpr int left_marker = 111;
     constexpr int right_marker = 112;
     constexpr int bottom_marker = 113;
@@ -2170,12 +2613,16 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesLevelSetInterfaceGe
     });
 
     FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
+    const auto phi = system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::PrescribedData,
     });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     testing::internal::CaptureStdout();
@@ -2207,12 +2654,16 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsNitscheKinematic
     });
 
     FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
+    const auto phi = system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::PrescribedData,
     });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
@@ -2235,24 +2686,98 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionRejectsRawLevelSetCu
     });
 
     FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
+    const auto phi = system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::PrescribedData,
     });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
 }
 
+TEST(MovingDomainPhysics, NavierStokesUnfittedLevelSetShapeTangentsDisabledByDefault)
+{
+    ScopedEnvVar enable_shape_tangents(
+        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+        std::nullopt);
+    ScopedEnvVar disable_shape_tangents(
+        "SVMP_DISABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+        std::nullopt);
+
+    constexpr int interface_marker = 143;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.jit_policy.enable = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 7.5,
+        .surface_tension = 0.0,
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto& equations = system.operatorDefinition("equations");
+    const auto has_phi_shape_tangent =
+        std::any_of(equations.interface_faces.begin(),
+                    equations.interface_faces.end(),
+                    [&](const auto& term) {
+                        return term.marker == interface_marker &&
+                               term.trial_field == phi_field;
+                    });
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InterfaceIntegral));
+    EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, interface_marker));
+    EXPECT_FALSE(has_phi_shape_tangent);
+    EXPECT_EQ(log_output.find(
+                  "diagnostic=unfitted_free_surface_interface_measure_shape_tangent"),
+              std::string::npos);
+    EXPECT_EQ(log_output.find(
+                  "diagnostic=unfitted_free_surface_interface_point_location_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("cut_volume_phi_shape_tangent=disabled_by_default"),
+              std::string::npos);
+    EXPECT_EQ(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
+              std::string::npos);
+    EXPECT_EQ(log_output.find("qualification=Experimental"), std::string::npos);
+}
+
 TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionUsesSuppliedCurvatureField)
 {
+    ScopedEnvVar enable_shape_tangents(
+        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+        std::string("1"));
+
     constexpr int interface_marker = 44;
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
+    opts.jit_policy.enable = false;
 
     opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
         .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
@@ -2264,11 +2789,10 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionUsesSuppliedCurvatur
     });
 
     FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
-        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
     });
     const auto kappa_field = system.addField(FE::systems::FieldSpec{
         .name = "kappa_projected",
@@ -2288,8 +2812,176 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionUsesSuppliedCurvatur
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
     EXPECT_TRUE(formulationRecordsContainFieldExprType(
         system, FormExprType::DiscreteField, kappa_field));
+    const auto& equations = system.operatorDefinition("equations");
+    const auto has_phi_shape_tangent =
+        std::any_of(equations.interface_faces.begin(),
+                    equations.interface_faces.end(),
+                    [&](const auto& term) {
+                        return term.marker == interface_marker &&
+                               term.trial_field == phi_field;
+                    });
+    EXPECT_TRUE(has_phi_shape_tangent);
+    EXPECT_TRUE(interfaceKernelContainsGradientOfTrialFunction(
+        system, interface_marker, phi_field));
+    EXPECT_NE(log_output.find(
+                  "diagnostic=unfitted_free_surface_interface_point_location_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("qualification=Experimental"), std::string::npos);
     EXPECT_EQ(log_output.find("diagnostic=unfitted_level_set_raw_curvature"),
               std::string::npos);
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedSurfaceTensionCouplesUnknownCurvatureField)
+{
+    constexpr int interface_marker = 144;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .surface_tension = 0.0728,
+        .curvature_field_name = "kappa_unknown",
+    });
+
+    FE::systems::FESystem system(mesh);
+    (void)system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+    });
+    const auto kappa_field = system.addField(FE::systems::FieldSpec{
+        .name = "kappa_unknown",
+        .space = p_space,
+        .components = 1,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto u = system.findFieldByName(opts.velocity_field_name);
+    const auto p = system.findFieldByName(opts.pressure_field_name);
+    ASSERT_NE(u, FE::INVALID_FIELD_ID);
+    ASSERT_NE(p, FE::INVALID_FIELD_ID);
+    EXPECT_TRUE(formulationRecordsContainFieldExprType(
+        system, FormExprType::StateField, kappa_field));
+
+    const auto& equations = system.operatorDefinition("equations");
+    const auto has_kappa_tangent =
+        std::any_of(equations.interface_faces.begin(),
+                    equations.interface_faces.end(),
+                    [&](const auto& term) {
+                        return term.marker == interface_marker &&
+                               term.trial_field == kappa_field &&
+                               (term.test_field == u || term.test_field == p);
+                    });
+    EXPECT_TRUE(has_kappa_tangent);
+    EXPECT_NE(log_output.find(
+                  "diagnostic=unfitted_free_surface_curvature_trial_field"),
+              std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedSurfaceTensionUnknownCurvatureJacobianMatchesFiniteDifference)
+{
+    constexpr int interface_marker = 145;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .surface_tension = 0.0728,
+        .curvature_field_name = "kappa_unknown",
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    const auto kappa_field = system.addField(FE::systems::FieldSpec{
+        .name = "kappa_unknown",
+        .space = p_space,
+        .components = 1,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setCutIntegrationContext(
+        makeSingleTetraFreeSurfaceCutContext(interface_marker, phi_field));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        affineZScalarTetraCoefficients(FE::Real{-0.25}, FE::Real{1.0}));
+
+    const auto velocity = system.findFieldByName(opts.velocity_field_name);
+    const auto pressure = system.findFieldByName(opts.pressure_field_name);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    ASSERT_NE(pressure, FE::INVALID_FIELD_ID);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, velocity, vertex, 0,
+                               FE::Real{0.04} + FE::Real{0.02} * x[0]);
+        setFieldComponentValue(solution, system, velocity, vertex, 1,
+                               FE::Real{-0.03} + FE::Real{0.01} * x[1]);
+        setFieldComponentValue(solution, system, velocity, vertex, 2,
+                               FE::Real{0.02} - FE::Real{0.015} * x[2]);
+        setFieldComponentValue(solution, system, pressure, vertex, 0,
+                               FE::Real{0.10} + FE::Real{0.03} * x[0] -
+                                   FE::Real{0.02} * x[1]);
+        setFieldComponentValue(solution, system, kappa_field, vertex, 0,
+                               FE::Real{1.20} + FE::Real{0.10} * x[0] +
+                                   FE::Real{0.07} * x[2]);
+    }
+    previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        setFieldComponentValue(previous_solution, system, velocity, vertex, 0,
+                               FE::Real{0.01});
+        setFieldComponentValue(previous_solution, system, velocity, vertex, 1,
+                               FE::Real{-0.02});
+        setFieldComponentValue(previous_solution, system, velocity, vertex, 2,
+                               FE::Real{0.015});
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.2;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        "equations",
+        /*eps=*/1.0e-6,
+        /*rtol=*/2.0e-5,
+        /*atol=*/2.0e-8);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesGeneratedInterfaceMarker)
@@ -2423,6 +3115,51 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceUsesCutMetadataScale)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
     EXPECT_NE(log_output.find("cut-cell stabilization"), std::string::npos);
     EXPECT_NE(log_output.find("use_cut_metadata_scale=true"), std::string::npos);
+    EXPECT_NE(log_output.find("cut_metadata_scale_cap=unbounded"), std::string::npos);
+}
+
+TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceCapsCutMetadataScale)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 1.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+            .use_cut_metadata_scale = true,
+            .cut_metadata_scale_cap = 3.0,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::ParameterRef));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Minimum));
+    EXPECT_NE(log_output.find("use_cut_metadata_scale=true"), std::string::npos);
+    EXPECT_NE(log_output.find("cut_metadata_scale_cap=3"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics,
@@ -2449,12 +3186,16 @@ TEST(MovingDomainPhysics,
     });
 
     FE::systems::FESystem system(mesh);
-    system.addField(FE::systems::FieldSpec{
+    const auto phi = system.addField(FE::systems::FieldSpec{
         .name = "phi",
         .space = p_space,
         .components = 1,
         .source_kind = FE::systems::FieldSourceKind::PrescribedData,
     });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
     testing::internal::CaptureStdout();
@@ -2466,6 +3207,9 @@ TEST(MovingDomainPhysics,
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Hessian));
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    EXPECT_GT(interiorFaceKernelCountForBlock(system, p_id, p_id, expected_marker), 0u);
     EXPECT_NE(log_output.find("velocity_polynomial_order=2"), std::string::npos);
     EXPECT_NE(log_output.find("pressure_polynomial_order=2"), std::string::npos);
     EXPECT_NE(log_output.find("derivative_orders=1,2"), std::string::npos);
@@ -2474,6 +3218,140 @@ TEST(MovingDomainPhysics,
     EXPECT_NE(log_output.find("velocity_scaling=h,h^3"), std::string::npos);
     EXPECT_NE(log_output.find("pressure_scaling=h^3/mu,h^5/mu"), std::string::npos);
     EXPECT_EQ(log_output.find("first-gradient ghost penalties only"), std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedHighOrderPressurePolicyDisablesRefreshedFrozenPressureTerms)
+{
+    const auto mesh = makeMesh();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/3);
+    auto p_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .generated_interface_geometry = "HighOrderImplicit",
+        .geometry_tangent_policy = "RefreshedFrozenQuadrature",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 1.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+            .pressure_policy =
+                ns::FreeSurfacePressureStabilizationPolicy::
+                    DisabledForRefreshedFrozenHighOrder,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto u_id = system.findFieldByName("u");
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(u_id, FE::INVALID_FIELD_ID);
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    EXPECT_GT(interiorFaceKernelCountForBlock(system, u_id, u_id, expected_marker), 0u);
+    EXPECT_EQ(interiorFaceKernelCountForBlock(system, p_id, p_id, expected_marker), 0u);
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Hessian));
+    EXPECT_NE(log_output.find(
+                  "pressure_stabilization_policy=DisabledForRefreshedFrozenHighOrder"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_stabilization=disabled"), std::string::npos);
+    EXPECT_NE(log_output.find(
+                  "pressure_disabled_reason=refreshed_frozen_high_order_policy"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_derivative_orders=disabled"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_scaling=disabled"), std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesUnfittedHighOrderVelocityPolicyLimitsToFirstDerivative)
+{
+    const auto mesh = makeMesh();
+    auto u_space = FE::spaces::VectorSpace(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/3);
+    auto p_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .generated_interface_geometry = "HighOrderImplicit",
+        .geometry_tangent_policy = "RefreshedFrozenQuadrature",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 1.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+            .pressure_policy =
+                ns::FreeSurfacePressureStabilizationPolicy::
+                    DisabledForRefreshedFrozenHighOrder,
+            .use_cut_metadata_scale = false,
+            .velocity_max_derivative_order = 1,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto u_id = system.findFieldByName("u");
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(u_id, FE::INVALID_FIELD_ID);
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    EXPECT_GT(interiorFaceKernelCountForBlock(system, u_id, u_id, expected_marker), 0u);
+    EXPECT_EQ(interiorFaceKernelCountForBlock(system, p_id, p_id, expected_marker), 0u);
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Jump));
+    EXPECT_FALSE(formulationRecordsContain(system, FormExprType::Hessian));
+    EXPECT_NE(log_output.find("velocity_max_derivative_order=1"), std::string::npos);
+    EXPECT_NE(log_output.find("velocity_derivative_orders=1"), std::string::npos);
+    EXPECT_NE(log_output.find("velocity_scaling=h"), std::string::npos);
+    EXPECT_NE(log_output.find("pressure_derivative_orders=disabled"),
+              std::string::npos);
+    EXPECT_EQ(log_output.find("velocity_derivative_orders=1,2"), std::string::npos);
+    EXPECT_EQ(log_output.find("velocity_scaling=h,h^3"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesUnfittedZeroTractionFreeSurfaceAvoidsInterfaceIntegral)
@@ -2547,6 +3425,10 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainZeroTractionFreeSurfaceAvoidsI
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainUnknownLevelSetAddsMatrixOnlyShapeTangent)
 {
+    ScopedEnvVar enable_shape_tangents(
+        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+        std::string("1"));
+
     constexpr int interface_marker = 146;
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
@@ -2597,6 +3479,9 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainUnknownLevelSetAddsMatrixOnlyS
     EXPECT_TRUE(has_phi_shape_tangent);
     EXPECT_NE(log_output.find("cut_volume_phi_shape_tangent=matrix_only_hadamard"),
               std::string::npos);
+    EXPECT_NE(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("qualification=Experimental"), std::string::npos);
     EXPECT_EQ(log_output.find(
                   "no_explicit_level_set_dependence_under_frozen_cut_geometry"),
               std::string::npos);
@@ -2636,8 +3521,73 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainExternalPressureInstallsInterf
     EXPECT_TRUE(formulationRecordsContainInterfaceMarker(system, interface_marker));
 }
 
+TEST(MovingDomainPhysics,
+     NavierStokesActiveDomainExternalPressureTractionJacobianMatchesFiniteDifference)
+{
+    constexpr int interface_marker = 54;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.viscosity = 0.037;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 12.0,
+        .surface_tension = 0.0,
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setCutIntegrationContext(
+        makeSingleTetraFreeSurfaceCutContext(interface_marker, phi_field));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        affineZScalarTetraCoefficients(FE::Real{-0.25}, FE::Real{1.0}));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution(solution.size(), 0.0);
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.25;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    EXPECT_GT(residualNorm(system, state, "equations"), 1.0e-8);
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        "equations",
+        /*eps=*/1.0e-6,
+        /*rtol=*/2.0e-5,
+        /*atol=*/2.0e-8);
+}
+
 TEST(MovingDomainPhysics, NavierStokesUnfittedInterfaceMeasureAddsLevelSetShapeTangent)
 {
+    ScopedEnvVar enable_shape_tangents(
+        "SVMP_ENABLE_UNFITTED_LEVEL_SET_SHAPE_TANGENTS",
+        std::string("1"));
+
     constexpr int interface_marker = 148;
     const auto mesh = makeMesh();
     auto u_space = makeVelocitySpace(mesh);
@@ -2662,7 +3612,11 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedInterfaceMeasureAddsLevelSetShapeT
     });
 
     ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
     module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
 
     const auto u = system.findFieldByName(opts.velocity_field_name);
     const auto p = system.findFieldByName(opts.pressure_field_name);
@@ -2683,6 +3637,15 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedInterfaceMeasureAddsLevelSetShapeT
                                (term.test_field == u || term.test_field == p);
                     });
     EXPECT_TRUE(has_phi_shape_tangent);
+    EXPECT_NE(log_output.find(
+                  "diagnostic=unfitted_free_surface_interface_measure_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find(
+                  "diagnostic=unfitted_free_surface_interface_point_location_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("experimental_path=unfitted_level_set_shape_tangent"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("qualification=Experimental"), std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainSurfaceTensionInstallsInterfaceTraction)
@@ -2889,6 +3852,102 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainCutVolumeSamplesNonconstantVel
     }
 
     EXPECT_GT(vectorNorm(residual_delta), 1.0e-5);
+}
+
+TEST(MovingDomainPhysics,
+     NavierStokesActiveDomainCutVolumeResidualJacobianMatchesFiniteDifference)
+{
+    constexpr int interface_marker = 53;
+    constexpr FE::Real measure = FE::Real{1.0} / FE::Real{12.0};
+    auto cut_context = makeSingleTetraCutVolumeContext(
+        interface_marker,
+        {
+            FE::geometry::CutQuadraturePoint{
+                .point = {{0.12, 0.22, 0.18}},
+                .weight = measure / FE::Real{2.0},
+            },
+            FE::geometry::CutQuadraturePoint{
+                .point = {{0.36, 0.19, 0.28}},
+                .weight = measure / FE::Real{2.0},
+            },
+        });
+
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.viscosity = 0.037;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 0.0,
+        .surface_tension = 0.0,
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi_field = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+    system.setCutIntegrationContext(std::move(cut_context));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    system.setPrescribedFieldCoefficients(
+        phi_field,
+        constantScalarTetraCoefficients(FE::Real{-0.10}));
+
+    const auto velocity = system.findFieldByName(opts.velocity_field_name);
+    const auto pressure = system.findFieldByName(opts.pressure_field_name);
+    ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
+    ASSERT_NE(pressure, FE::INVALID_FIELD_ID);
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    std::vector<FE::Real> previous_solution = solution;
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        setFieldComponentValue(solution, system, velocity, vertex, 0,
+                               FE::Real{0.05} + FE::Real{0.03} * x[0]);
+        setFieldComponentValue(solution, system, velocity, vertex, 1,
+                               FE::Real{-0.02} + FE::Real{0.04} * x[1]);
+        setFieldComponentValue(solution, system, velocity, vertex, 2,
+                               FE::Real{0.01} - FE::Real{0.02} * x[2]);
+        setFieldComponentValue(solution, system, pressure, vertex, 0,
+                               FE::Real{0.14} + FE::Real{0.05} * x[0] -
+                                   FE::Real{0.03} * x[2]);
+        setFieldComponentValue(previous_solution, system, velocity, vertex, 0,
+                               FE::Real{0.01});
+        setFieldComponentValue(previous_solution, system, velocity, vertex, 1,
+                               FE::Real{-0.015});
+        setFieldComponentValue(previous_solution, system, velocity, vertex, 2,
+                               FE::Real{0.02});
+    }
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.25;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    expectOperatorJacobianMatchesCentralFD(
+        system,
+        state,
+        "equations",
+        /*eps=*/1.0e-6,
+        /*rtol=*/2.0e-5,
+        /*atol=*/2.0e-8);
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainResidualFollowsNewtonLevelSetSignChange)

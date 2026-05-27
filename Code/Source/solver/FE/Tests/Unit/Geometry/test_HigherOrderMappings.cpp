@@ -267,15 +267,15 @@ TEST(HigherOrderMapping, Hex20SerendipityAffineDistortion) {
 }
 
 TEST(HigherOrderMapping, Hex20SerendipityNodalIdentityNoGeometryMode) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     auto basis = std::make_shared<basis::SerendipityBasis>(ElementType::Hex20, 2, false);
 
     std::vector<math::Vector<Real,3>> nodes;
-    const std::size_t nn = NodeOrdering::num_nodes(ElementType::Hex20);
+    const std::size_t nn = ReferenceNodeLayout::num_nodes(ElementType::Hex20);
     nodes.reserve(nn);
     for (std::size_t i = 0; i < nn; ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Hex20, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Hex20, i));
     }
 
     IsoparametricMapping map(basis, nodes);

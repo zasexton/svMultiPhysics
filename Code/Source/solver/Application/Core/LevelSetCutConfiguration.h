@@ -23,6 +23,11 @@ enum class ActiveCutVolumeRequestOrigin {
   FreeSurfaceBoundary,
 };
 
+enum class ActiveCutVolumeRetention {
+  ActiveOnly,
+  ActiveAndInactive,
+};
+
 struct ActiveCutVolumeRequest {
   std::string level_set_field_name{"level_set"};
   std::string domain_id{"free_surface"};
@@ -45,7 +50,10 @@ struct ActiveCutVolumeRequest {
   double implicit_cut_root_coordinate_tolerance{1.0e-12};
   int implicit_cut_root_max_iterations{48};
   int implicit_cut_max_subdivision_depth{16};
+  int affected_cell_neighborhood_layers{0};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
+  ActiveCutVolumeRetention volume_retention{
+      ActiveCutVolumeRetention::ActiveOnly};
   bool allow_corner_linearized_geometry{false};
   bool require_production_qualified_implicit_cut_backend{false};
 };
@@ -73,6 +81,19 @@ activeCutVolumeRequests(const EquationParameters& equation);
 
 [[nodiscard]] std::uint64_t activeCutVolumeRequestPolicyKey(
     const std::vector<ActiveCutVolumeRequest>& requests) noexcept;
+
+[[nodiscard]] std::optional<int> resolvedActiveCutVolumeInterfaceMarker(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutVolumeRequest& request);
+
+[[nodiscard]] int requireResolvedActiveCutVolumeInterfaceMarker(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutVolumeRequest& request);
+
+void validateEquationLevelCutVolumeConsumer(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutVolumeRequest& request,
+    int resolved_marker);
 
 } // namespace core
 } // namespace application

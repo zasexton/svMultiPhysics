@@ -14,9 +14,21 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp::FE::level_set {
+
+enum class LevelSetCurvatureSmoothingMode : std::uint8_t {
+    LocalGraph = 0,
+    MassStiffnessOperator = 1,
+};
+
+[[nodiscard]] const char* levelSetCurvatureSmoothingModeName(
+    LevelSetCurvatureSmoothingMode mode) noexcept;
+
+[[nodiscard]] LevelSetCurvatureSmoothingMode
+parseLevelSetCurvatureSmoothingMode(std::string_view value);
 
 struct LevelSetCurvatureProjectionOptions {
     Real isovalue{0.0};
@@ -24,8 +36,14 @@ struct LevelSetCurvatureProjectionOptions {
     Real normal_equation_tolerance{1.0e-12};
     Real max_normalized_fit_residual{0.0};
     int max_neighbor_rings{2};
+    int max_neighbor_fallback_vertices{-1};
+    int max_zero_fallback_vertices{-1};
+    Real supplemental_sample_weight{1.0};
+    Real narrow_band_width{0.0};
     int smoothing_iterations{0};
     Real smoothing_relaxation{0.25};
+    LevelSetCurvatureSmoothingMode smoothing_mode{
+        LevelSetCurvatureSmoothingMode::LocalGraph};
 };
 
 struct LevelSetCurvatureProjectionSample {
@@ -40,6 +58,10 @@ struct LevelSetCurvatureProjectionResult {
     std::size_t supplemental_samples{0};
     std::size_t supplemental_sample_rows{0};
     std::size_t vertices_with_supplemental_samples{0};
+    Real supplemental_sample_weight{1.0};
+    Real narrow_band_width{0.0};
+    std::size_t narrow_band_vertices{0};
+    std::size_t skipped_far_vertices{0};
     std::size_t fitted_vertices{0};
     std::size_t fallback_vertices{0};
     std::size_t zero_fallback_vertices{0};
@@ -47,7 +69,10 @@ struct LevelSetCurvatureProjectionResult {
     std::size_t singular_stencil_vertices{0};
     std::size_t small_gradient_vertices{0};
     std::size_t fit_residual_failure_vertices{0};
+    LevelSetCurvatureSmoothingMode smoothing_mode{
+        LevelSetCurvatureSmoothingMode::LocalGraph};
     std::size_t smoothing_iterations_applied{0};
+    std::size_t smoothing_operator_edges{0};
     Real min_curvature{0.0};
     Real max_curvature{0.0};
     Real max_abs_curvature{0.0};
@@ -112,7 +137,9 @@ struct LevelSetCurvatureProjectionWorkspace {
  * This is a stabilized data-recovery utility for supplied-curvature
  * free-surface forcing.  It does not differentiate generated cut geometry and
  * it does not replace conservative level-set transport or signed-distance
- * reinitialization.
+ * reinitialization.  A positive narrow_band_width restricts recovery,
+ * fallback, and smoothing to vertices within |phi-isovalue| <= width plus
+ * vertices touched by supplemental interface samples.
  */
 [[nodiscard]] LevelSetCurvatureProjectionResult
 projectLevelSetMeanCurvatureToVertices(

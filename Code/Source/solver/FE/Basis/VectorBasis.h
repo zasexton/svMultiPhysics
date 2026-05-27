@@ -14,7 +14,10 @@
  */
 
 #include "BasisFunction.h"
+#include "VectorBasisModalPolynomial.h"
 #include <array>
+#include <cstddef>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -39,14 +42,31 @@ struct DofAssociation {
     int moment_index{0};    ///< Index within the entity's moment space
 };
 
+struct SparseModalCoefficientMatrix {
+    std::size_t rows{0};
+    std::size_t cols{0};
+    std::vector<std::size_t> row_offsets;
+    std::vector<std::size_t> dofs;
+    std::vector<Real> coefficients;
+};
+
 class VectorBasisFunction : public BasisFunction {
 public:
     bool is_vector_valued() const noexcept override { return true; }
+    bool supports_vector_jacobians() const noexcept override { return true; }
     void evaluate_values(const math::Vector<Real, 3>&,
                          std::vector<Real>&) const override {
         throw BasisEvaluationException("Vector basis uses evaluate_vector_values",
                                        __FILE__, __LINE__, __func__);
     }
+
+    void evaluate_vector_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const override;
 
     /**
      * @brief Get DOF association metadata for all basis functions
@@ -80,6 +100,7 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return size_; }
+    bool cache_identity_is_structural() const noexcept override { return true; }
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
@@ -87,23 +108,24 @@ public:
                                    std::vector<VectorJacobian>& jacobians) const override;
     void evaluate_divergence(const math::Vector<Real, 3>& xi,
                              std::vector<Real>& divergence) const override;
+    bool supports_divergence() const noexcept override { return true; }
+    void evaluate_vector_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const override;
 
     /// Get DOF associations (face/edge DOFs for 2D, face DOFs for 3D H(div))
     std::vector<DofAssociation> dof_associations() const override;
 
 private:
-    struct ModalTerm {
-        int component{0}; // 0=x, 1=y, 2=z
-        int px{0};
-        int py{0};
-        int pz{0};
-        Real coefficient{Real(1)};
-    };
-
-    struct ModalPolynomial {
-        std::array<ModalTerm, 4> terms{};
-        int num_terms{0};
-    };
+    using ModalTerm = VectorBasisModalTerm;
+    using ModalPolynomial = VectorBasisModalPolynomial;
+    using SeedJacobianEvaluator = void (*)(
+        const math::Vector<Real, 3>&,
+        std::vector<VectorJacobian>&);
 
     ElementType element_type_;
     int dimension_;
@@ -111,15 +133,18 @@ private:
     std::size_t size_{0};
 
     bool nodal_generated_{false};
-    bool use_direct_construction_{false};  ///< True for wedge/pyramid RT(k>=2) direct formulas
     bool use_transformed_direct_seed_{false};  ///< True for wedge/pyramid RT(k=1,2) transformed from direct seed functions
     std::vector<int> transformed_seed_indices_;
     std::vector<std::array<int, 4>> transformed_monomial_candidates_; ///< {component, px, py, pz}
     std::vector<ModalPolynomial> monomials_;
-    // Coefficients for nodal basis in modal monomial basis:
-    //   phi_j = sum_p coeffs_[p * size_ + j] * modal_p
-    // where p indexes monomials_ (modal basis) and j indexes nodal basis functions/DOFs.
-    std::vector<Real> coeffs_;
+    std::array<int, 3> modal_power_limits_{{0, 0, 0}};
+    std::array<int, 3> transformed_power_limits_{{0, 0, 0}};
+    SeedJacobianEvaluator transformed_seed_jacobian_evaluator_{nullptr};
+    // Sparse coefficients for nodal basis in modal monomial basis:
+    //   phi_j = sum_p c(p,j) * modal_p.
+    // Rows index modal functions; entries target nodal DOFs.
+    SparseModalCoefficientMatrix modal_sparse_coeffs_;
+    SparseModalCoefficientMatrix transformed_sparse_coeffs_;
 };
 
 /**
@@ -134,6 +159,7 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return size_; }
+    bool cache_identity_is_structural() const noexcept override { return true; }
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
@@ -141,23 +167,24 @@ public:
                                    std::vector<VectorJacobian>& jacobians) const override;
     void evaluate_curl(const math::Vector<Real, 3>& xi,
                        std::vector<math::Vector<Real, 3>>& curl) const override;
+    bool supports_curl() const noexcept override { return true; }
+    void evaluate_vector_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const override;
 
     /// Get DOF associations (edge DOFs for H(curl), face DOFs for 3D interior)
     std::vector<DofAssociation> dof_associations() const override;
 
 private:
-    struct ModalTerm {
-        int component{0}; // 0=x, 1=y, 2=z
-        int px{0};
-        int py{0};
-        int pz{0};
-        Real coefficient{Real(1)};
-    };
-
-    struct ModalPolynomial {
-        std::array<ModalTerm, 4> terms{};
-        int num_terms{0};
-    };
+    using ModalTerm = VectorBasisModalTerm;
+    using ModalPolynomial = VectorBasisModalPolynomial;
+    using SeedJacobianEvaluator = void (*)(
+        const math::Vector<Real, 3>&,
+        std::vector<VectorJacobian>&);
 
     ElementType element_type_;
     int dimension_;
@@ -166,10 +193,13 @@ private:
 
     bool nodal_generated_{false};
     bool use_transformed_direct_seed_{false};  ///< True for wedge/pyramid ND(k=1,2) transformed from direct seed/candidate functions
-    bool use_direct_construction_{false};  ///< True for wedge/pyramid k>=1 (uses explicit formulas)
     std::vector<std::array<int, 4>> transformed_monomial_candidates_; ///< {component, px, py, pz}
     std::vector<ModalPolynomial> monomials_;
-    std::vector<Real> coeffs_;
+    SparseModalCoefficientMatrix modal_sparse_coeffs_;
+    SparseModalCoefficientMatrix transformed_sparse_coeffs_;
+    std::array<int, 3> modal_power_limits_{{0, 0, 0}};
+    std::array<int, 3> transformed_power_limits_{{0, 0, 0}};
+    SeedJacobianEvaluator transformed_seed_jacobian_evaluator_{nullptr};
 };
 
 /**
@@ -184,6 +214,7 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return size_; }
+    bool cache_identity_is_structural() const noexcept override { return true; }
 
     void evaluate_vector_values(const math::Vector<Real, 3>& xi,
                                 std::vector<math::Vector<Real, 3>>& values) const override;
@@ -191,23 +222,21 @@ public:
                                    std::vector<VectorJacobian>& jacobians) const override;
     void evaluate_divergence(const math::Vector<Real, 3>& xi,
                              std::vector<Real>& divergence) const override;
+    bool supports_divergence() const noexcept override { return true; }
+    void evaluate_vector_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const override;
 
     /// Get DOF associations (face/edge DOFs for H(div))
     std::vector<DofAssociation> dof_associations() const override;
 
 private:
-    struct ModalTerm {
-        int component{0}; // 0=x, 1=y, 2=z
-        int px{0};
-        int py{0};
-        int pz{0};
-        Real coefficient{Real(1)};
-    };
-
-    struct ModalPolynomial {
-        std::array<ModalTerm, 4> terms{};
-        int num_terms{0};
-    };
+    using ModalTerm = VectorBasisModalTerm;
+    using ModalPolynomial = VectorBasisModalPolynomial;
 
     ElementType element_type_;
     int dimension_;
@@ -215,7 +244,8 @@ private:
     std::size_t size_{0};
     bool nodal_generated_{false};
     std::vector<ModalPolynomial> monomials_;
-    std::vector<Real> coeffs_;
+    SparseModalCoefficientMatrix modal_sparse_coeffs_;
+    std::array<int, 3> modal_power_limits_{{0, 0, 0}};
 };
 
 } // namespace basis

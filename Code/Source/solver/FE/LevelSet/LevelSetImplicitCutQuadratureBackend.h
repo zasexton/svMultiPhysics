@@ -13,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace svmp::FE::level_set {
 
@@ -82,6 +83,7 @@ struct ImplicitCutQuadratureBackendCellInput {
     Real isovalue{0.0};
     std::array<Real, 3> reference_min{{0.0, 0.0, 0.0}};
     std::array<Real, 3> reference_max{{1.0, 1.0, 1.0}};
+    std::vector<std::array<Real, 3>> high_order_sample_points{};
 };
 
 struct ImplicitCutQuadratureBackendCapability {
@@ -91,6 +93,8 @@ struct ImplicitCutQuadratureBackendCapability {
     bool implemented{false};
     bool supports_element_type{false};
     bool supports_high_order_geometry{false};
+    bool supports_refreshed_frozen_quadrature{false};
+    bool supports_differentiated_quadrature{false};
     ImplicitCutQuadratureBackendQualification qualification{
         ImplicitCutQuadratureBackendQualification::Unavailable};
     std::string qualification_diagnostic{};

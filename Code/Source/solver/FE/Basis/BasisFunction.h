@@ -21,7 +21,10 @@
 #include "BasisExceptions.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
+#include <algorithm>
+#include <cstdint>
 #include <functional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -32,6 +35,105 @@ namespace basis {
 using Gradient = math::Vector<Real, 3>;
 using Hessian  = math::Matrix<Real, 3, 3>;
 using VectorJacobian = math::Matrix<Real, 3, 3>;
+
+struct BasisIdentityFingerprint {
+    std::uint64_t hash_a{0};
+    std::uint64_t hash_b{0};
+};
+
+[[nodiscard]] BasisIdentityFingerprint
+compute_basis_identity_fingerprint(std::span<const std::uint64_t> words) noexcept;
+
+[[nodiscard]] inline Hessian make_symmetric_hessian(Real xx,
+                                                    Real yy,
+                                                    Real zz,
+                                                    Real xy,
+                                                    Real xz,
+                                                    Real yz) {
+    Hessian hessian{};
+    hessian(0, 0) = xx;
+    hessian(1, 1) = yy;
+    hessian(2, 2) = zz;
+    hessian(0, 1) = xy;
+    hessian(1, 0) = xy;
+    hessian(0, 2) = xz;
+    hessian(2, 0) = xz;
+    hessian(1, 2) = yz;
+    hessian(2, 1) = yz;
+    return hessian;
+}
+
+// Raw Hessian buffers use row-major 3x3 blocks:
+// dst[row * 3 + col] = H(row, col).
+inline void store_hessian(const Hessian& hessian, Real* dst) noexcept {
+    dst[0u] = hessian(0u, 0u);
+    dst[1u] = hessian(0u, 1u);
+    dst[2u] = hessian(0u, 2u);
+    dst[3u] = hessian(1u, 0u);
+    dst[4u] = hessian(1u, 1u);
+    dst[5u] = hessian(1u, 2u);
+    dst[6u] = hessian(2u, 0u);
+    dst[7u] = hessian(2u, 1u);
+    dst[8u] = hessian(2u, 2u);
+}
+
+inline void store_hessian_strided(const Hessian& hessian,
+                                  Real* dst,
+                                  std::size_t stride,
+                                  std::size_t offset) noexcept {
+    dst[0u * stride + offset] = hessian(0u, 0u);
+    dst[1u * stride + offset] = hessian(0u, 1u);
+    dst[2u * stride + offset] = hessian(0u, 2u);
+    dst[3u * stride + offset] = hessian(1u, 0u);
+    dst[4u * stride + offset] = hessian(1u, 1u);
+    dst[5u * stride + offset] = hessian(1u, 2u);
+    dst[6u * stride + offset] = hessian(2u, 0u);
+    dst[7u * stride + offset] = hessian(2u, 1u);
+    dst[8u * stride + offset] = hessian(2u, 2u);
+}
+
+inline void scatter_hessian_components_strided(const Real* src,
+                                               Real* dst,
+                                               std::size_t stride,
+                                               std::size_t offset) noexcept {
+    dst[0u * stride + offset] = src[0u];
+    dst[1u * stride + offset] = src[1u];
+    dst[2u * stride + offset] = src[2u];
+    dst[3u * stride + offset] = src[3u];
+    dst[4u * stride + offset] = src[4u];
+    dst[5u * stride + offset] = src[5u];
+    dst[6u * stride + offset] = src[6u];
+    dst[7u * stride + offset] = src[7u];
+    dst[8u * stride + offset] = src[8u];
+}
+
+[[nodiscard]] inline Hessian load_hessian(const Real* src) noexcept {
+    Hessian hessian{};
+    hessian(0u, 0u) = src[0u];
+    hessian(0u, 1u) = src[1u];
+    hessian(0u, 2u) = src[2u];
+    hessian(1u, 0u) = src[3u];
+    hessian(1u, 1u) = src[4u];
+    hessian(1u, 2u) = src[5u];
+    hessian(2u, 0u) = src[6u];
+    hessian(2u, 1u) = src[7u];
+    hessian(2u, 2u) = src[8u];
+    return hessian;
+}
+
+inline void add_scaled_hessian(Hessian& target,
+                               const Hessian& source,
+                               Real scale) noexcept {
+    target(0u, 0u) += scale * source(0u, 0u);
+    target(0u, 1u) += scale * source(0u, 1u);
+    target(0u, 2u) += scale * source(0u, 2u);
+    target(1u, 0u) += scale * source(1u, 0u);
+    target(1u, 1u) += scale * source(1u, 1u);
+    target(1u, 2u) += scale * source(1u, 2u);
+    target(2u, 0u) += scale * source(2u, 0u);
+    target(2u, 1u) += scale * source(2u, 1u);
+    target(2u, 2u) += scale * source(2u, 2u);
+}
 
 /**
  * @brief Base interface for scalar and vector-valued basis families
@@ -59,8 +161,27 @@ public:
     /// Number of basis functions (scalar or vector-valued)
     virtual std::size_t size() const noexcept = 0;
 
+    /**
+     * @brief Whether BasisCache can key this basis from common structural fields.
+     *
+     * Return true only when basis_type/element_type/dimension/order/size and
+     * vector-valued status fully determine evaluation behavior. Parameterized
+     * bases such as splines and custom user bases should keep the default false
+     * so BasisCache includes cache_identity() in the key.
+     */
+    virtual bool cache_identity_is_structural() const noexcept { return false; }
+
     /// Whether the basis is vector-valued (H(div)/H(curl))
     virtual bool is_vector_valued() const noexcept { return false; }
+
+    /// Whether vector-valued basis Jacobians are available.
+    virtual bool supports_vector_jacobians() const noexcept { return false; }
+
+    /// Whether vector-valued basis curls are available.
+    virtual bool supports_curl() const noexcept { return false; }
+
+    /// Whether vector-valued basis divergences are available.
+    virtual bool supports_divergence() const noexcept { return false; }
 
     /**
      * @brief Stable semantic identity used by BasisCache
@@ -69,6 +190,26 @@ public:
      * additional state beyond basis family / element / order metadata.
      */
     virtual std::string cache_identity() const;
+
+    /**
+     * @brief Optional exact structured identity payload for BasisCache keys.
+     *
+     * Parameterized bases may append stable integer/bit-pattern words and
+     * return true to let BasisCache avoid using cache_identity() as the exact
+     * key payload. The human-readable cache_identity() remains available for
+     * diagnostics and for custom bases that do not implement this path.
+     */
+    virtual bool cache_identity_words(std::vector<std::uint64_t>& words) const;
+
+    /**
+     * @brief Optional cached fingerprint for structured identity words.
+     *
+     * Implementations that precompute cache_identity_words() may also cache the
+     * corresponding fingerprint. BasisCache still retains exact identity words
+     * for equality after hash matches.
+     */
+    virtual bool cache_identity_fingerprint(std::uint64_t& hash_a,
+                                            std::uint64_t& hash_b) const;
 
     /**
      * @brief Evaluate scalar basis values at a reference point
@@ -81,8 +222,9 @@ public:
     /**
      * @brief Evaluate gradients of scalar basis functions
      *
-     * Default implementation uses central finite differences on
-     * evaluate_values; override for analytic derivatives.
+     * Production bases must override this with analytic derivatives.
+     * Use numerical_gradient explicitly in tests or diagnostics when a finite
+     * difference approximation is intended.
      */
     virtual void evaluate_gradients(const math::Vector<Real, 3>& xi,
                                     std::vector<Gradient>& gradients) const;
@@ -90,8 +232,9 @@ public:
     /**
      * @brief Evaluate Hessians of scalar basis functions
      *
-     * Default implementation differentiates evaluate_gradients using
-     * finite differences. Override for analytic second derivatives.
+     * Production bases must override this with analytic second derivatives.
+     * Use numerical_hessian explicitly in tests or diagnostics when a finite
+     * difference approximation is intended.
      */
     virtual void evaluate_hessians(const math::Vector<Real, 3>& xi,
                                    std::vector<Hessian>& hessians) const;
@@ -120,19 +263,95 @@ public:
      *   gradients_out: size num_dofs * 3 * num_qpts; element [(d*3 + c) * num_qpts + q]
      *   hessians_out:  size num_dofs * 9 * num_qpts; element [(d*9 + r*3 + c) * num_qpts + q]
      *
+     * Non-null output ranges must not overlap each other. Implementations may
+     * fill requested quantities in any order that is efficient for the basis.
+     *
      * Default implementation calls evaluate_all (or evaluate_values/gradients/
      * hessians as appropriate) per QP, materializing into temp buffers then
-     * scatter-writing to the output. Bases that can amortize per-QP setup
-     * across the quadrature rule should override.
+     * scatter-writing to the output. Performance-sensitive bases must override
+     * this path so batched assembly does not fall back to Q virtual point
+     * evaluations. Unit coverage keeps an explicit list of hot bases that are
+     * expected to provide a direct strided implementation.
      */
     virtual void evaluate_at_quadrature_points(
         const std::vector<math::Vector<Real, 3>>& points,
-        Real* values_out,
-        Real* gradients_out,
-        Real* hessians_out) const;
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const;
 
     /**
-     * @brief Evaluate scalar basis values into a caller-provided raw buffer (D3)
+     * @brief Fill strided SoA buffers with basis evaluations at quadrature points
+     *
+     * Same component layout as evaluate_at_quadrature_points, but each
+     * dof/component row advances by `output_stride` rather than `points.size()`.
+     * This lets padded SIMD cache storage be filled directly. Non-null output
+     * ranges have the same non-overlap requirement.
+     */
+    virtual void evaluate_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const;
+
+    /**
+     * @brief Fill zero-initialized scalar cache storage.
+     *
+     * BasisCache allocates and zero-initializes its scalar SoA buffers before
+     * calling this hook. The default implementation overwrites all requested
+     * entries through the public strided evaluator. Sparse-support bases may
+     * override this and write only active entries, relying on the caller's
+     * zero-initialization for inactive DOFs and unused derivative components.
+     */
+    virtual void fill_scalar_cache_entry(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const;
+
+    /**
+     * @brief Fill SoA buffers with vector-basis evaluations at all quadrature points
+     *
+     * Outputs are written in DOF-major SoA layout. Pass `nullptr` for any
+     * quantity that is not needed.
+     *
+     *   values_out:     size num_dofs * 3 * num_qpts; element [(d*3 + c) * num_qpts + q]
+     *   jacobians_out:  size num_dofs * 9 * num_qpts; element [(d*9 + c*3 + r) * num_qpts + q]
+     *   curls_out:      size num_dofs * 3 * num_qpts; element [(d*3 + c) * num_qpts + q]
+     *   divergence_out: size num_dofs * num_qpts; element [d * num_qpts + q]
+     *
+     * Non-null output ranges must not overlap each other. Implementations may
+     * fill requested quantities in any order that is efficient for the basis.
+     */
+    virtual void evaluate_vector_at_quadrature_points(
+        const std::vector<math::Vector<Real, 3>>& points,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const;
+
+    /**
+     * @brief Fill strided SoA buffers with vector-basis evaluations
+     *
+     * Same component layout as evaluate_vector_at_quadrature_points, but each
+     * dof/component row advances by `output_stride` rather than `points.size()`.
+     * Non-null output ranges have the same non-overlap requirement.
+     *
+     * The base fallback loops over quadrature points through virtual point
+     * evaluation. H(div)/H(curl) bases used in assembly should override this
+     * method directly, and tests track the current hot vector families.
+     */
+    virtual void evaluate_vector_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT jacobians_out,
+        Real* SVMP_RESTRICT curls_out,
+        Real* SVMP_RESTRICT divergence_out) const;
+
+    /**
+     * @brief Evaluate scalar basis values into a caller-provided raw buffer
      *
      * Caller is responsible for providing a buffer of at least size() Real
      * entries. This avoids the per-call std::vector::resize() cost of the
@@ -140,24 +359,24 @@ public:
      * vector; bases should override for direct write.
      */
     virtual void evaluate_values_to(const math::Vector<Real, 3>& xi,
-                                    Real* values_out) const;
+                                    Real* SVMP_RESTRICT values_out) const;
 
     /**
-     * @brief Evaluate gradients into a flat caller-provided buffer (D3)
+     * @brief Evaluate gradients into a flat caller-provided buffer
      *
      * Layout: gradients_out[i * 3 + c] = component c of gradient of basis i.
      * Caller provides a buffer of size() * 3 Real entries.
      */
     virtual void evaluate_gradients_to(const math::Vector<Real, 3>& xi,
-                                       Real* gradients_out) const;
+                                       Real* SVMP_RESTRICT gradients_out) const;
 
     /**
-     * @brief Evaluate Hessians into a flat caller-provided buffer (D3)
+     * @brief Evaluate Hessians into a flat caller-provided buffer
      *
      * Layout: hessians_out[i * 9 + r * 3 + c] = H_i(r, c).
      */
     virtual void evaluate_hessians_to(const math::Vector<Real, 3>& xi,
-                                      Real* hessians_out) const;
+                                      Real* SVMP_RESTRICT hessians_out) const;
 
     /**
      * @brief Evaluate vector-valued basis functions (H(div)/H(curl))
@@ -196,134 +415,6 @@ protected:
                            std::vector<Hessian>& hessians,
                            Real eps = Real(1e-5)) const;
 };
-
-// -----------------------------------------------------------------------------
-// Inline implementations
-// -----------------------------------------------------------------------------
-
-inline void BasisFunction::evaluate_gradients(const math::Vector<Real, 3>& xi,
-                                              std::vector<Gradient>& gradients) const {
-    numerical_gradient(xi, gradients);
-}
-
-inline void BasisFunction::evaluate_hessians(const math::Vector<Real, 3>& xi,
-                                             std::vector<Hessian>& hessians) const {
-    numerical_hessian(xi, hessians);
-}
-
-inline void BasisFunction::evaluate_all(const math::Vector<Real, 3>& xi,
-                                        std::vector<Real>& values,
-                                        std::vector<Gradient>& gradients,
-                                        std::vector<Hessian>& hessians) const {
-    evaluate_values(xi, values);
-    evaluate_gradients(xi, gradients);
-    evaluate_hessians(xi, hessians);
-}
-
-inline void BasisFunction::evaluate_values_to(const math::Vector<Real, 3>& xi,
-                                              Real* values_out) const {
-    std::vector<Real> tmp(size());
-    evaluate_values(xi, tmp);
-    for (std::size_t i = 0; i < tmp.size(); ++i) values_out[i] = tmp[i];
-}
-
-inline void BasisFunction::evaluate_gradients_to(const math::Vector<Real, 3>& xi,
-                                                 Real* gradients_out) const {
-    std::vector<Gradient> tmp(size());
-    evaluate_gradients(xi, tmp);
-    for (std::size_t i = 0; i < tmp.size(); ++i) {
-        gradients_out[i * 3 + 0] = tmp[i][0];
-        gradients_out[i * 3 + 1] = tmp[i][1];
-        gradients_out[i * 3 + 2] = tmp[i][2];
-    }
-}
-
-inline void BasisFunction::evaluate_hessians_to(const math::Vector<Real, 3>& xi,
-                                                Real* hessians_out) const {
-    std::vector<Hessian> tmp(size());
-    evaluate_hessians(xi, tmp);
-    for (std::size_t i = 0; i < tmp.size(); ++i) {
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                hessians_out[i * 9 + static_cast<std::size_t>(r * 3 + c)] =
-                    tmp[i](static_cast<std::size_t>(r), static_cast<std::size_t>(c));
-            }
-        }
-    }
-}
-
-inline void BasisFunction::evaluate_at_quadrature_points(
-    const std::vector<math::Vector<Real, 3>>& points,
-    Real* values_out,
-    Real* gradients_out,
-    Real* hessians_out) const {
-    const std::size_t num_qpts = points.size();
-    const std::size_t num_dofs = size();
-
-    std::vector<Real> v_tmp;
-    std::vector<Gradient> g_tmp;
-    std::vector<Hessian> h_tmp;
-    if (values_out)    v_tmp.resize(num_dofs);
-    if (gradients_out) g_tmp.resize(num_dofs);
-    if (hessians_out)  h_tmp.resize(num_dofs);
-
-    for (std::size_t q = 0; q < num_qpts; ++q) {
-        if (values_out && gradients_out && hessians_out) {
-            evaluate_all(points[q], v_tmp, g_tmp, h_tmp);
-        } else {
-            if (values_out)    evaluate_values(points[q], v_tmp);
-            if (gradients_out) evaluate_gradients(points[q], g_tmp);
-            if (hessians_out)  evaluate_hessians(points[q], h_tmp);
-        }
-
-        if (values_out) {
-            for (std::size_t d = 0; d < num_dofs; ++d) {
-                values_out[d * num_qpts + q] = v_tmp[d];
-            }
-        }
-        if (gradients_out) {
-            for (std::size_t d = 0; d < num_dofs; ++d) {
-                for (int c = 0; c < 3; ++c) {
-                    gradients_out[(d * 3 + static_cast<std::size_t>(c)) * num_qpts + q] = g_tmp[d][static_cast<std::size_t>(c)];
-                }
-            }
-        }
-        if (hessians_out) {
-            for (std::size_t d = 0; d < num_dofs; ++d) {
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        hessians_out[(d * 9 + static_cast<std::size_t>(r * 3 + c)) * num_qpts + q] =
-                            h_tmp[d](static_cast<std::size_t>(r), static_cast<std::size_t>(c));
-                    }
-                }
-            }
-        }
-    }
-}
-
-inline void BasisFunction::evaluate_vector_values(const math::Vector<Real, 3>&,
-                                                  std::vector<math::Vector<Real, 3>>&) const {
-    throw BasisEvaluationException("Vector-valued evaluation requested on scalar basis",
-                                   __FILE__, __LINE__, __func__);
-}
-
-inline void BasisFunction::evaluate_vector_jacobians(const math::Vector<Real, 3>&,
-                                                     std::vector<VectorJacobian>&) const {
-    throw BasisEvaluationException("Vector-basis Jacobian evaluation requested on scalar basis",
-                                   __FILE__, __LINE__, __func__);
-}
-
-inline void BasisFunction::evaluate_divergence(const math::Vector<Real, 3>&,
-                                               std::vector<Real>&) const {
-    throw BasisEvaluationException("Divergence requested on scalar basis",
-                                   __FILE__, __LINE__, __func__);
-}
-
-inline void BasisFunction::evaluate_curl(const math::Vector<Real, 3>&,
-                                         std::vector<math::Vector<Real, 3>>&) const {
-    throw BasisEvaluationException("Curl requested on scalar basis",
-                                   __FILE__, __LINE__, __func__);
-}
 
 } // namespace basis
 } // namespace FE

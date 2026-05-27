@@ -206,6 +206,9 @@ installMixedFormIR(
  * via FormCompiler::compileMixed(), and installs via installMixedFormIR().
  *
  * This is the bilinear analog of installFormulation() for mixed expressions.
+ * Because the residual is already split, equation-level level-set cut-domain
+ * shape sensitivity is not inferred here; pass any differentiated phi blocks
+ * explicitly and keep geometry sensitivity constant for this installer.
  *
  * @param system       FESystem to install kernels into
  * @param op           Operator tag

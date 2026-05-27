@@ -6,8 +6,10 @@
  */
 
 #include "HierarchicalBasis.h"
-#include "detail/ReferenceDerivativeJet.h"
+#include "BasisTraits.h"
+#include "BasisTolerance.h"
 #include <cmath>
+#include <span>
 
 namespace svmp {
 namespace FE {
@@ -15,39 +17,63 @@ namespace basis {
 
 namespace {
 
-bool is_line(ElementType type) {
-    return type == ElementType::Line2 || type == ElementType::Line3;
+struct LegendreFirstSequence {
+    std::span<Real> values;
+    std::span<Real> derivatives;
+};
+
+struct LegendreSecondSequence {
+    std::span<Real> values;
+    std::span<Real> derivatives;
+    std::span<Real> second_derivatives;
+};
+
+struct LegendreScratch {
+    std::array<std::vector<Real>, 3> values;
+    std::array<std::vector<Real>, 3> derivatives;
+    std::array<std::vector<Real>, 3> second_derivatives;
+};
+
+LegendreScratch& legendre_scratch() {
+    thread_local LegendreScratch scratch;
+    return scratch;
 }
 
-bool is_triangle(ElementType type) {
-    return type == ElementType::Triangle3 || type == ElementType::Triangle6;
+std::span<Real> resize_sequence(std::vector<Real>& storage, int order) {
+    const auto count = static_cast<std::size_t>(order + 1);
+    storage.resize(count);
+    return std::span<Real>(storage.data(), count);
 }
 
-bool is_quadrilateral(ElementType type) {
-    return type == ElementType::Quad4 || type == ElementType::Quad8 || type == ElementType::Quad9;
+std::span<Real> fill_legendre_values(LegendreScratch& scratch,
+                                     std::size_t slot,
+                                     int order,
+                                     Real x) {
+    auto values = resize_sequence(scratch.values[slot], order);
+    orthopoly::legendre_sequence_to(order, x, values);
+    return values;
 }
 
-bool is_tetrahedron(ElementType type) {
-    return type == ElementType::Tetra4 || type == ElementType::Tetra10;
+LegendreFirstSequence fill_legendre_first(LegendreScratch& scratch,
+                                          std::size_t slot,
+                                          int order,
+                                          Real x) {
+    auto values = resize_sequence(scratch.values[slot], order);
+    auto derivatives = resize_sequence(scratch.derivatives[slot], order);
+    orthopoly::legendre_sequence_with_derivatives_to(order, x, values, derivatives);
+    return {values, derivatives};
 }
 
-bool is_hexahedron(ElementType type) {
-    return type == ElementType::Hex8 || type == ElementType::Hex20 || type == ElementType::Hex27;
-}
-
-bool is_wedge(ElementType type) {
-    return type == ElementType::Wedge6 || type == ElementType::Wedge15 || type == ElementType::Wedge18;
-}
-
-bool is_pyramid(ElementType type) {
-    return type == ElementType::Pyramid5 || type == ElementType::Pyramid13 || type == ElementType::Pyramid14;
-}
-
-detail::Jet3 lift_legendre_jet(int order, const detail::Jet3& arg) {
-    return detail::compose_univariate(arg,
-                                      orthopoly::legendre(order, arg.value),
-                                      orthopoly::legendre_with_derivative(order, arg.value).second,
-                                      orthopoly::jacobi_second_derivative(order, Real(0), Real(0), arg.value));
+LegendreSecondSequence fill_legendre_second(LegendreScratch& scratch,
+                                            std::size_t slot,
+                                            int order,
+                                            Real x) {
+    auto values = resize_sequence(scratch.values[slot], order);
+    auto derivatives = resize_sequence(scratch.derivatives[slot], order);
+    auto second_derivatives = resize_sequence(scratch.second_derivatives[slot], order);
+    orthopoly::legendre_sequence_with_second_derivatives_to(
+        order, x, values, derivatives, second_derivatives);
+    return {values, derivatives, second_derivatives};
 }
 
 } // namespace
@@ -126,15 +152,17 @@ HierarchicalBasis::HierarchicalBasis(ElementType type, int order)
 
 void HierarchicalBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                         std::vector<Real>& values) const {
-    values.assign(size_, Real(0));
+    values.resize(size_);
 
     if (element_type_ == ElementType::Point1) {
         values[0] = Real(1);
         return;
     }
 
+    auto& scratch = legendre_scratch();
+
     if (is_line(element_type_)) {
-        auto seq = orthopoly::legendre_sequence(order_, xi[0]);
+        const auto seq = fill_legendre_values(scratch, 0, order_, xi[0]);
         for (std::size_t i = 0; i < seq.size(); ++i) {
             values[i] = seq[i];
         }
@@ -142,8 +170,8 @@ void HierarchicalBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     }
 
     if (is_quadrilateral(element_type_)) {
-        auto seq_x = orthopoly::legendre_sequence(order_, xi[0]);
-        auto seq_y = orthopoly::legendre_sequence(order_, xi[1]);
+        const auto seq_x = fill_legendre_values(scratch, 0, order_, xi[0]);
+        const auto seq_y = fill_legendre_values(scratch, 1, order_, xi[1]);
         std::size_t idx = 0;
         for (int j = 0; j <= order_; ++j) {
             for (int i = 0; i <= order_; ++i) {
@@ -155,9 +183,9 @@ void HierarchicalBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     }
 
     if (is_hexahedron(element_type_)) {
-        auto seq_x = orthopoly::legendre_sequence(order_, xi[0]);
-        auto seq_y = orthopoly::legendre_sequence(order_, xi[1]);
-        auto seq_z = orthopoly::legendre_sequence(order_, xi[2]);
+        const auto seq_x = fill_legendre_values(scratch, 0, order_, xi[0]);
+        const auto seq_y = fill_legendre_values(scratch, 1, order_, xi[1]);
+        const auto seq_z = fill_legendre_values(scratch, 2, order_, xi[2]);
         std::size_t idx = 0;
         for (int k = 0; k <= order_; ++k) {
             for (int j = 0; j <= order_; ++j) {
@@ -173,7 +201,7 @@ void HierarchicalBasis::evaluate_values(const math::Vector<Real, 3>& xi,
 
     if (is_wedge(element_type_)) {
         // Tensor-product modal basis on wedge: Dubiner (triangle) x Legendre (line)
-        auto seq_z = orthopoly::legendre_sequence(order_, xi[2]);
+        const auto seq_z = fill_legendre_values(scratch, 0, order_, xi[2]);
         std::size_t idx = 0;
         for (const auto& pq : simplex_indices_) {
             int p = pq[0];
@@ -201,14 +229,14 @@ void HierarchicalBasis::evaluate_values(const math::Vector<Real, 3>& xi,
         const Real z = xi[2];
         Real u = Real(0);
         Real v = Real(0);
-        if (std::abs(Real(1) - z) > Real(1e-12)) {
+        if (!detail::basis_near_zero(Real(1) - z)) {
             const Real scale = Real(1) / (Real(1) - z);
             u = xi[0] * scale;
             v = xi[1] * scale;
         }
-        auto seq_u = orthopoly::legendre_sequence(order_, u);
-        auto seq_v = orthopoly::legendre_sequence(order_, v);
-        auto seq_w = orthopoly::legendre_sequence(order_, z);
+        const auto seq_u = fill_legendre_values(scratch, 0, order_, u);
+        const auto seq_v = fill_legendre_values(scratch, 1, order_, v);
+        const auto seq_w = fill_legendre_values(scratch, 2, order_, z);
         std::size_t idx = 0;
         for (int k = 0; k <= order_; ++k) {
             for (int j = 0; j <= order_; ++j) {
@@ -239,18 +267,21 @@ void HierarchicalBasis::evaluate_values(const math::Vector<Real, 3>& xi,
 
 void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                                            std::vector<Gradient>& gradients) const {
-    gradients.assign(size_, Gradient{});
+    gradients.resize(size_);
 
     if (element_type_ == ElementType::Point1) {
         // Point has no spatial gradient
+        gradients[0] = Gradient{};
         return;
     }
 
+    auto& scratch = legendre_scratch();
+
     if (is_line(element_type_)) {
         // 1D Legendre polynomials: gradient is just the derivative in x
-        auto [vals, derivs] = orthopoly::legendre_sequence_with_derivatives(order_, xi[0]);
+        const auto seq = fill_legendre_first(scratch, 0, order_, xi[0]);
         for (std::size_t i = 0; i < size_; ++i) {
-            gradients[i][0] = derivs[i];
+            gradients[i][0] = seq.derivatives[i];
             gradients[i][1] = Real(0);
             gradients[i][2] = Real(0);
         }
@@ -261,16 +292,16 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         // Tensor product: P_i(x) * P_j(y)
         // d/dx = P'_i(x) * P_j(y)
         // d/dy = P_i(x) * P'_j(y)
-        auto [vals_x, derivs_x] = orthopoly::legendre_sequence_with_derivatives(order_, xi[0]);
-        auto [vals_y, derivs_y] = orthopoly::legendre_sequence_with_derivatives(order_, xi[1]);
+        const auto seq_x = fill_legendre_first(scratch, 0, order_, xi[0]);
+        const auto seq_y = fill_legendre_first(scratch, 1, order_, xi[1]);
 
         std::size_t idx = 0;
         for (int j = 0; j <= order_; ++j) {
             for (int i = 0; i <= order_; ++i) {
-                gradients[idx][0] = derivs_x[static_cast<std::size_t>(i)] *
-                                    vals_y[static_cast<std::size_t>(j)];
-                gradients[idx][1] = vals_x[static_cast<std::size_t>(i)] *
-                                    derivs_y[static_cast<std::size_t>(j)];
+                gradients[idx][0] = seq_x.derivatives[static_cast<std::size_t>(i)] *
+                                    seq_y.values[static_cast<std::size_t>(j)];
+                gradients[idx][1] = seq_x.values[static_cast<std::size_t>(i)] *
+                                    seq_y.derivatives[static_cast<std::size_t>(j)];
                 gradients[idx][2] = Real(0);
                 ++idx;
             }
@@ -280,20 +311,20 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
 
     if (is_hexahedron(element_type_)) {
         // Tensor product: P_i(x) * P_j(y) * P_k(z)
-        auto [vals_x, derivs_x] = orthopoly::legendre_sequence_with_derivatives(order_, xi[0]);
-        auto [vals_y, derivs_y] = orthopoly::legendre_sequence_with_derivatives(order_, xi[1]);
-        auto [vals_z, derivs_z] = orthopoly::legendre_sequence_with_derivatives(order_, xi[2]);
+        const auto seq_x = fill_legendre_first(scratch, 0, order_, xi[0]);
+        const auto seq_y = fill_legendre_first(scratch, 1, order_, xi[1]);
+        const auto seq_z = fill_legendre_first(scratch, 2, order_, xi[2]);
 
         std::size_t idx = 0;
         for (int k = 0; k <= order_; ++k) {
             for (int j = 0; j <= order_; ++j) {
                 for (int i = 0; i <= order_; ++i) {
-                    Real Px = vals_x[static_cast<std::size_t>(i)];
-                    Real Py = vals_y[static_cast<std::size_t>(j)];
-                    Real Pz = vals_z[static_cast<std::size_t>(k)];
-                    Real dPx = derivs_x[static_cast<std::size_t>(i)];
-                    Real dPy = derivs_y[static_cast<std::size_t>(j)];
-                    Real dPz = derivs_z[static_cast<std::size_t>(k)];
+                    Real Px = seq_x.values[static_cast<std::size_t>(i)];
+                    Real Py = seq_y.values[static_cast<std::size_t>(j)];
+                    Real Pz = seq_z.values[static_cast<std::size_t>(k)];
+                    Real dPx = seq_x.derivatives[static_cast<std::size_t>(i)];
+                    Real dPy = seq_y.derivatives[static_cast<std::size_t>(j)];
+                    Real dPz = seq_z.derivatives[static_cast<std::size_t>(k)];
 
                     gradients[idx][0] = dPx * Py * Pz;
                     gradients[idx][1] = Px * dPy * Pz;
@@ -311,9 +342,9 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         for (const auto& pq : simplex_indices_) {
             int p = pq[0];
             int q = pq[1];
-            auto [val, dxi, deta] = orthopoly::dubiner_with_derivatives(p, q, xi[0], xi[1]);
-            gradients[idx][0] = dxi;
-            gradients[idx][1] = deta;
+            const auto tri = orthopoly::dubiner_derivatives(p, q, xi[0], xi[1]);
+            gradients[idx][0] = tri.dxi;
+            gradients[idx][1] = tri.deta;
             gradients[idx][2] = Real(0);
             ++idx;
         }
@@ -322,22 +353,21 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
 
     if (is_wedge(element_type_)) {
         // Wedge = Dubiner (triangle) x Legendre (line in z)
-        auto [vals_z, derivs_z] = orthopoly::legendre_sequence_with_derivatives(order_, xi[2]);
+        const auto seq_z = fill_legendre_first(scratch, 0, order_, xi[2]);
 
         std::size_t idx = 0;
         for (const auto& pq : simplex_indices_) {
             int p = pq[0];
             int q = pq[1];
-            auto [tri_val, dtri_dxi, dtri_deta] =
-                orthopoly::dubiner_with_derivatives(p, q, xi[0], xi[1]);
+            const auto tri = orthopoly::dubiner_derivatives(p, q, xi[0], xi[1]);
 
             for (int k = 0; k <= order_; ++k) {
-                Real Pz = vals_z[static_cast<std::size_t>(k)];
-                Real dPz = derivs_z[static_cast<std::size_t>(k)];
+                Real Pz = seq_z.values[static_cast<std::size_t>(k)];
+                Real dPz = seq_z.derivatives[static_cast<std::size_t>(k)];
 
-                gradients[idx][0] = dtri_dxi * Pz;
-                gradients[idx][1] = dtri_deta * Pz;
-                gradients[idx][2] = tri_val * dPz;
+                gradients[idx][0] = tri.dxi * Pz;
+                gradients[idx][1] = tri.deta * Pz;
+                gradients[idx][2] = tri.value * dPz;
                 ++idx;
             }
         }
@@ -351,11 +381,8 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             int p = pqr[0];
             int q = pqr[1];
             int r = pqr[2];
-            auto [val, dxi, deta, dzeta] =
-                orthopoly::proriol_with_derivatives(p, q, r, xi[0], xi[1], xi[2]);
-            gradients[idx][0] = dxi;
-            gradients[idx][1] = deta;
-            gradients[idx][2] = dzeta;
+            const auto tet = orthopoly::proriol_derivatives(p, q, r, xi[0], xi[1], xi[2]);
+            gradients[idx] = tet.gradient;
             ++idx;
         }
         return;
@@ -365,13 +392,12 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         // Pyramid via collapsed coordinates: u = x/(1-z), v = y/(1-z), w = z
         // Need chain rule for the coordinate transformation
         const Real z = xi[2];
-        const Real eps = Real(1e-12);
         const Real one_minus_z = Real(1) - z;
 
         Real u, v;
         Real du_dx, du_dz, dv_dy, dv_dz;
 
-        if (std::abs(one_minus_z) > eps) {
+        if (!detail::basis_near_zero(one_minus_z)) {
             const Real scale = Real(1) / one_minus_z;
             u = xi[0] * scale;
             v = xi[1] * scale;
@@ -388,20 +414,20 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
             dv_dz = Real(0);
         }
 
-        auto [vals_u, derivs_u] = orthopoly::legendre_sequence_with_derivatives(order_, u);
-        auto [vals_v, derivs_v] = orthopoly::legendre_sequence_with_derivatives(order_, v);
-        auto [vals_w, derivs_w] = orthopoly::legendre_sequence_with_derivatives(order_, z);
+        const auto seq_u = fill_legendre_first(scratch, 0, order_, u);
+        const auto seq_v = fill_legendre_first(scratch, 1, order_, v);
+        const auto seq_w = fill_legendre_first(scratch, 2, order_, z);
 
         std::size_t idx = 0;
         for (int k = 0; k <= order_; ++k) {
             for (int j = 0; j <= order_; ++j) {
                 for (int i = 0; i <= order_; ++i) {
-                    Real Pu = vals_u[static_cast<std::size_t>(i)];
-                    Real Pv = vals_v[static_cast<std::size_t>(j)];
-                    Real Pw = vals_w[static_cast<std::size_t>(k)];
-                    Real dPu = derivs_u[static_cast<std::size_t>(i)];
-                    Real dPv = derivs_v[static_cast<std::size_t>(j)];
-                    Real dPw = derivs_w[static_cast<std::size_t>(k)];
+                    Real Pu = seq_u.values[static_cast<std::size_t>(i)];
+                    Real Pv = seq_v.values[static_cast<std::size_t>(j)];
+                    Real Pw = seq_w.values[static_cast<std::size_t>(k)];
+                    Real dPu = seq_u.derivatives[static_cast<std::size_t>(i)];
+                    Real dPv = seq_v.derivatives[static_cast<std::size_t>(j)];
+                    Real dPw = seq_w.derivatives[static_cast<std::size_t>(k)];
 
                     // N = Pu(u(x,z)) * Pv(v(y,z)) * Pw(z)
                     // dN/dx = dPu/du * du/dx * Pv * Pw
@@ -426,76 +452,72 @@ void HierarchicalBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
 
 void HierarchicalBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
                                           std::vector<Hessian>& hessians) const {
-    hessians.assign(size_, Hessian{});
+    hessians.resize(size_);
 
     if (element_type_ == ElementType::Point1) {
+        hessians[0] = Hessian{};
         return;
     }
 
+    auto& scratch = legendre_scratch();
+
     if (is_line(element_type_)) {
-        const auto [vals, derivs, second] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[0]);
-        (void)vals;
+        const auto seq = fill_legendre_second(scratch, 0, order_, xi[0]);
         for (std::size_t i = 0; i < size_; ++i) {
-            (void)derivs;
-            hessians[i](0, 0) = second[i];
+            hessians[i] = Hessian{};
+            hessians[i](0, 0) = seq.second_derivatives[i];
         }
         return;
     }
 
     if (is_quadrilateral(element_type_)) {
-        const auto [vals_x, derivs_x, second_x] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[0]);
-        const auto [vals_y, derivs_y, second_y] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[1]);
+        const auto seq_x = fill_legendre_second(scratch, 0, order_, xi[0]);
+        const auto seq_y = fill_legendre_second(scratch, 1, order_, xi[1]);
         std::size_t idx = 0;
         for (int j = 0; j <= order_; ++j) {
             for (int i = 0; i <= order_; ++i) {
-                Hessian H{};
-                H(0, 0) = second_x[static_cast<std::size_t>(i)] * vals_y[static_cast<std::size_t>(j)];
-                H(1, 1) = vals_x[static_cast<std::size_t>(i)] * second_y[static_cast<std::size_t>(j)];
-                H(0, 1) = derivs_x[static_cast<std::size_t>(i)] * derivs_y[static_cast<std::size_t>(j)];
-                H(1, 0) = H(0, 1);
-                hessians[idx++] = H;
+                hessians[idx++] = make_symmetric_hessian(
+                    seq_x.second_derivatives[static_cast<std::size_t>(i)] *
+                        seq_y.values[static_cast<std::size_t>(j)],
+                    seq_x.values[static_cast<std::size_t>(i)] *
+                        seq_y.second_derivatives[static_cast<std::size_t>(j)],
+                    Real(0),
+                    seq_x.derivatives[static_cast<std::size_t>(i)] *
+                        seq_y.derivatives[static_cast<std::size_t>(j)],
+                    Real(0),
+                    Real(0));
             }
         }
         return;
     }
 
     if (is_hexahedron(element_type_)) {
-        const auto [vals_x, derivs_x, second_x] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[0]);
-        const auto [vals_y, derivs_y, second_y] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[1]);
-        const auto [vals_z, derivs_z, second_z] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[2]);
+        const auto seq_x = fill_legendre_second(scratch, 0, order_, xi[0]);
+        const auto seq_y = fill_legendre_second(scratch, 1, order_, xi[1]);
+        const auto seq_z = fill_legendre_second(scratch, 2, order_, xi[2]);
         std::size_t idx = 0;
         for (int k = 0; k <= order_; ++k) {
             for (int j = 0; j <= order_; ++j) {
                 for (int i = 0; i <= order_; ++i) {
-                    Hessian H{};
-                    H(0, 0) = second_x[static_cast<std::size_t>(i)] *
-                              vals_y[static_cast<std::size_t>(j)] *
-                              vals_z[static_cast<std::size_t>(k)];
-                    H(1, 1) = vals_x[static_cast<std::size_t>(i)] *
-                              second_y[static_cast<std::size_t>(j)] *
-                              vals_z[static_cast<std::size_t>(k)];
-                    H(2, 2) = vals_x[static_cast<std::size_t>(i)] *
-                              vals_y[static_cast<std::size_t>(j)] *
-                              second_z[static_cast<std::size_t>(k)];
-                    H(0, 1) = derivs_x[static_cast<std::size_t>(i)] *
-                              derivs_y[static_cast<std::size_t>(j)] *
-                              vals_z[static_cast<std::size_t>(k)];
-                    H(1, 0) = H(0, 1);
-                    H(0, 2) = derivs_x[static_cast<std::size_t>(i)] *
-                              vals_y[static_cast<std::size_t>(j)] *
-                              derivs_z[static_cast<std::size_t>(k)];
-                    H(2, 0) = H(0, 2);
-                    H(1, 2) = vals_x[static_cast<std::size_t>(i)] *
-                              derivs_y[static_cast<std::size_t>(j)] *
-                              derivs_z[static_cast<std::size_t>(k)];
-                    H(2, 1) = H(1, 2);
-                    hessians[idx++] = H;
+                    hessians[idx++] = make_symmetric_hessian(
+                        seq_x.second_derivatives[static_cast<std::size_t>(i)] *
+                            seq_y.values[static_cast<std::size_t>(j)] *
+                            seq_z.values[static_cast<std::size_t>(k)],
+                        seq_x.values[static_cast<std::size_t>(i)] *
+                            seq_y.second_derivatives[static_cast<std::size_t>(j)] *
+                            seq_z.values[static_cast<std::size_t>(k)],
+                        seq_x.values[static_cast<std::size_t>(i)] *
+                            seq_y.values[static_cast<std::size_t>(j)] *
+                            seq_z.second_derivatives[static_cast<std::size_t>(k)],
+                        seq_x.derivatives[static_cast<std::size_t>(i)] *
+                            seq_y.derivatives[static_cast<std::size_t>(j)] *
+                            seq_z.values[static_cast<std::size_t>(k)],
+                        seq_x.derivatives[static_cast<std::size_t>(i)] *
+                            seq_y.values[static_cast<std::size_t>(j)] *
+                            seq_z.derivatives[static_cast<std::size_t>(k)],
+                        seq_x.values[static_cast<std::size_t>(i)] *
+                            seq_y.derivatives[static_cast<std::size_t>(j)] *
+                            seq_z.derivatives[static_cast<std::size_t>(k)]);
                 }
             }
         }
@@ -506,37 +528,27 @@ void HierarchicalBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         std::size_t idx = 0;
         for (const auto& pq : simplex_indices_) {
             const auto jet = orthopoly::dubiner_with_second_derivatives(pq[0], pq[1], xi[0], xi[1]);
-            Hessian H{};
-            H(0, 0) = jet.dxx;
-            H(0, 1) = jet.dxy;
-            H(1, 0) = jet.dxy;
-            H(1, 1) = jet.dyy;
-            hessians[idx++] = H;
+            hessians[idx++] = make_symmetric_hessian(
+                jet.dxx, jet.dyy, Real(0), jet.dxy, Real(0), Real(0));
         }
         return;
     }
 
     if (is_wedge(element_type_)) {
-        const auto [vals_z, derivs_z, second_z] =
-            orthopoly::legendre_sequence_with_second_derivatives(order_, xi[2]);
+        const auto seq_z = fill_legendre_second(scratch, 0, order_, xi[2]);
         std::size_t idx = 0;
         for (const auto& pq : simplex_indices_) {
             const auto tri = orthopoly::dubiner_with_second_derivatives(pq[0], pq[1], xi[0], xi[1]);
             for (int k = 0; k <= order_; ++k) {
-                Hessian H{};
-                const Real vz = vals_z[static_cast<std::size_t>(k)];
-                const Real dz = derivs_z[static_cast<std::size_t>(k)];
-                const Real d2z = second_z[static_cast<std::size_t>(k)];
-                H(0, 0) = tri.dxx * vz;
-                H(1, 1) = tri.dyy * vz;
-                H(0, 1) = tri.dxy * vz;
-                H(1, 0) = H(0, 1);
-                H(0, 2) = tri.dxi * dz;
-                H(2, 0) = H(0, 2);
-                H(1, 2) = tri.deta * dz;
-                H(2, 1) = H(1, 2);
-                H(2, 2) = tri.value * d2z;
-                hessians[idx++] = H;
+                const Real vz = seq_z.values[static_cast<std::size_t>(k)];
+                const Real dz = seq_z.derivatives[static_cast<std::size_t>(k)];
+                const Real d2z = seq_z.second_derivatives[static_cast<std::size_t>(k)];
+                hessians[idx++] = make_symmetric_hessian(tri.dxx * vz,
+                                                         tri.dyy * vz,
+                                                         tri.value * d2z,
+                                                         tri.dxy * vz,
+                                                         tri.dxi * dz,
+                                                         tri.deta * dz);
             }
         }
         return;
@@ -553,23 +565,83 @@ void HierarchicalBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
     }
 
     if (is_pyramid(element_type_)) {
-        const detail::Jet3 zeta = detail::variable_jet(2, xi[2]);
-        const detail::Jet3 one_minus_z = detail::constant_jet(Real(1)) - zeta;
-        detail::Jet3 u = detail::constant_jet(Real(0));
-        detail::Jet3 v = detail::constant_jet(Real(0));
-        if (std::abs(Real(1) - xi[2]) > Real(1e-12)) {
-            u = detail::variable_jet(0, xi[0]) / one_minus_z;
-            v = detail::variable_jet(1, xi[1]) / one_minus_z;
+        const Real z = xi[2];
+        const Real one_minus_z = Real(1) - z;
+
+        Real u = Real(0);
+        Real v = Real(0);
+        Real u_x = Real(0);
+        Real u_z = Real(0);
+        Real u_xz = Real(0);
+        Real u_zz = Real(0);
+        Real v_y = Real(0);
+        Real v_z = Real(0);
+        Real v_yz = Real(0);
+        Real v_zz = Real(0);
+
+        if (!detail::basis_near_zero(one_minus_z)) {
+            const Real inv = Real(1) / one_minus_z;
+            const Real inv2 = inv * inv;
+            const Real inv3 = inv2 * inv;
+            u = xi[0] * inv;
+            v = xi[1] * inv;
+            u_x = inv;
+            u_z = xi[0] * inv2;
+            u_xz = inv2;
+            u_zz = Real(2) * xi[0] * inv3;
+            v_y = inv;
+            v_z = xi[1] * inv2;
+            v_yz = inv2;
+            v_zz = Real(2) * xi[1] * inv3;
         }
+
+        const auto seq_u = fill_legendre_second(scratch, 0, order_, u);
+        const auto seq_v = fill_legendre_second(scratch, 1, order_, v);
+        const auto seq_w = fill_legendre_second(scratch, 2, order_, z);
 
         std::size_t idx = 0;
         for (int k = 0; k <= order_; ++k) {
-            const auto pw = lift_legendre_jet(k, zeta);
+            const std::size_t kk = static_cast<std::size_t>(k);
+            const Real W = seq_w.values[kk];
+            const Real dW = seq_w.derivatives[kk];
+            const Real d2W = seq_w.second_derivatives[kk];
             for (int j = 0; j <= order_; ++j) {
-                const auto pv = lift_legendre_jet(j, v);
+                const std::size_t jj = static_cast<std::size_t>(j);
+                const Real V = seq_v.values[jj];
+                const Real dV = seq_v.derivatives[jj];
+                const Real d2V = seq_v.second_derivatives[jj];
                 for (int i = 0; i <= order_; ++i) {
-                    const auto pu = lift_legendre_jet(i, u);
-                    hessians[idx++] = (pu * pv * pw).hessian;
+                    const std::size_t ii = static_cast<std::size_t>(i);
+                    const Real U = seq_u.values[ii];
+                    const Real dU = seq_u.derivatives[ii];
+                    const Real d2U = seq_u.second_derivatives[ii];
+
+                    Hessian H{};
+                    H(0, 0) = d2U * u_x * u_x * V * W;
+                    H(1, 1) = U * d2V * v_y * v_y * W;
+                    H(0, 1) = dU * u_x * dV * v_y * W;
+                    H(1, 0) = H(0, 1);
+
+                    H(0, 2) =
+                        (d2U * u_x * u_z + dU * u_xz) * V * W +
+                        dU * u_x * dV * v_z * W +
+                        dU * u_x * V * dW;
+                    H(2, 0) = H(0, 2);
+
+                    H(1, 2) =
+                        dU * u_z * dV * v_y * W +
+                        U * (d2V * v_y * v_z + dV * v_yz) * W +
+                        U * dV * v_y * dW;
+                    H(2, 1) = H(1, 2);
+
+                    H(2, 2) =
+                        (d2U * u_z * u_z + dU * u_zz) * V * W +
+                        U * (d2V * v_z * v_z + dV * v_zz) * W +
+                        U * V * d2W +
+                        Real(2) * dU * u_z * dV * v_z * W +
+                        Real(2) * dU * u_z * V * dW +
+                        Real(2) * U * dV * v_z * dW;
+                    hessians[idx++] = H;
                 }
             }
         }

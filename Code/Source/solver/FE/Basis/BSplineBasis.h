@@ -26,6 +26,7 @@
 
 #include "Basis/BasisFunction.h"
 
+#include <string>
 #include <vector>
 
 namespace svmp {
@@ -37,6 +38,11 @@ namespace basis {
  */
 class BSplineBasis : public BasisFunction {
 public:
+    struct ActiveSupportRange {
+        std::size_t first_index{0};
+        std::size_t count{0};
+    };
+
     /**
      * @brief Construct a B-spline basis of degree @p degree with knot vector @p knots
      *
@@ -61,6 +67,9 @@ public:
     std::size_t size() const noexcept override { return num_basis_; }
 
     std::string cache_identity() const override;
+    bool cache_identity_words(std::vector<std::uint64_t>& words) const override;
+    bool cache_identity_fingerprint(std::uint64_t& hash_a,
+                                    std::uint64_t& hash_b) const override;
 
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
@@ -68,8 +77,44 @@ public:
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override;
 
+    void evaluate_values_and_gradients(const math::Vector<Real, 3>& xi,
+                                       std::vector<Real>& values,
+                                       std::vector<Gradient>& gradients) const;
+    ActiveSupportRange evaluate_active_support(
+        const math::Vector<Real, 3>& xi,
+        std::vector<Real>& values,
+        std::vector<Real>* first_derivatives = nullptr,
+        std::vector<Real>* second_derivatives = nullptr) const;
+
     void evaluate_hessians(const math::Vector<Real, 3>& xi,
                            std::vector<Hessian>& hessians) const override;
+    void evaluate_all(const math::Vector<Real, 3>& xi,
+                      std::vector<Real>& values,
+                      std::vector<Gradient>& gradients,
+                      std::vector<Hessian>& hessians) const override;
+    void evaluate_values_to(const math::Vector<Real, 3>& xi,
+                            Real* SVMP_RESTRICT values_out) const override;
+    void evaluate_gradients_to(const math::Vector<Real, 3>& xi,
+                               Real* SVMP_RESTRICT gradients_out) const override;
+    void evaluate_hessians_to(const math::Vector<Real, 3>& xi,
+                              Real* SVMP_RESTRICT hessians_out) const override;
+    void evaluate_at_quadrature_points(
+        const std::vector<math::Vector<Real, 3>>& points,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const override;
+    void evaluate_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const override;
+    void fill_scalar_cache_entry(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const override;
 
     const std::vector<Real>& knots() const noexcept { return knots_; }
     const std::vector<Real>& weights() const noexcept { return weights_; }
@@ -78,6 +123,11 @@ public:
     bool is_rational() const noexcept { return !weights_.empty(); }
 
 private:
+    enum class OutputInitialization {
+        ClearAllRequestedRows,
+        CallerPrecleared
+    };
+
     BasisType semantic_type_{BasisType::BSpline};
     int degree_{0};
     std::vector<Real> knots_;
@@ -85,6 +135,20 @@ private:
     Real u_min_{Real(0)};
     Real u_max_{Real(1)};
     std::vector<Real> weights_;
+    std::string cache_identity_;
+    std::vector<std::uint64_t> cache_identity_words_;
+    std::uint64_t cache_identity_hash_a_{0};
+    std::uint64_t cache_identity_hash_b_{0};
+
+    void rebuild_cache_identity();
+    void evaluate_point_strided(const math::Vector<Real, 3>& xi,
+                                std::size_t output_stride,
+                                std::size_t q,
+                                Real* SVMP_RESTRICT values_out,
+                                Real* SVMP_RESTRICT gradients_out,
+                                Real* SVMP_RESTRICT hessians_out,
+                                OutputInitialization initialization =
+                                    OutputInitialization::ClearAllRequestedRows) const;
 };
 
 } // namespace basis

@@ -64,6 +64,7 @@ enum class StateStorageDomain : std::uint8_t {
     MaterialCellQuadrature,
     MaterialBoundaryFaceQuadrature,
     MaterialInteriorFaceQuadrature,
+    MaterialGeneratedInterfaceQuadrature,
     AuxiliaryBlock
 };
 

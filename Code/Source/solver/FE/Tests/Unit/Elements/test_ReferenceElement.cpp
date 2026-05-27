@@ -21,7 +21,7 @@ void check_consistency(ElementType type) {
     EXPECT_EQ(ref.dimension(), element_dimension(type));
 
     // Node count should match NodeOrderingConventions
-    const std::size_t nn = basis::NodeOrdering::num_nodes(type);
+    const std::size_t nn = basis::ReferenceNodeLayout::num_nodes(type);
     EXPECT_EQ(ref.num_nodes(), nn);
 
     // Reference measure should agree with QuadratureFactory

@@ -72,6 +72,7 @@ struct EmbeddedBoundaryKinematicData {
 
 struct CutGeometrySensitivitySampleMetadata {
     std::array<Real, 3> parent_parametric_coordinate{{0.0, 0.0, 0.0}};
+    std::vector<MeshIndex> influencing_parent_geometry_dofs{};
     std::vector<Real> shape_values{};
     std::vector<std::array<Real, 3>> shape_gradients{};
 };
@@ -325,6 +326,10 @@ public:
                rule.volume_fraction < minGeneratedCutVolumeFraction();
     }
 
+    [[nodiscard]] std::uint64_t contentRevision() const noexcept {
+        return content_revision_;
+    }
+
     void clear() {
         metadata_.clear();
         volume_rules_.clear();
@@ -333,6 +338,7 @@ public:
         generated_volume_rule_indices_by_marker_.clear();
         generated_volume_markers_.clear();
         generated_interface_rule_indices_by_marker_.clear();
+        generated_interface_two_sided_bindings_by_marker_.clear();
         generated_interface_markers_.clear();
         facet_set_rule_indices_by_marker_.clear();
         facet_set_markers_.clear();
@@ -346,16 +352,19 @@ public:
         sensitivity_metadata_.clear();
         generated_pruned_volume_rule_count_ = 0u;
         generated_pruned_volume_measure_ = Real{0.0};
+        markModified();
     }
 
     void addVolumeRule(CutCellAssemblyMetadata metadata,
                        geometry::CutQuadratureRule rule) {
         metadata_.push_back(std::move(metadata));
         volume_rules_.push_back(std::move(rule));
+        markModified();
     }
 
     void addInterfaceRule(geometry::CutQuadratureRule rule) {
         interface_rules_.push_back(std::move(rule));
+        markModified();
     }
 
     void addFacetSetRule(int marker, geometry::CutQuadratureRule rule) {
@@ -365,6 +374,7 @@ public:
         }
         indices.push_back(facet_set_rules_.size());
         facet_set_rules_.push_back(std::move(rule));
+        markModified();
     }
 
     const CutFacetSetHandle& addFacetSetHandle(CutFacetSetHandle handle) {
@@ -383,6 +393,7 @@ public:
         const auto index = facet_set_handles_.size();
         facet_set_handle_indices_by_marker_[handle.marker] = index;
         facet_set_handles_.push_back(std::move(handle));
+        markModified();
         return facet_set_handles_.back();
     }
 
@@ -415,6 +426,7 @@ public:
             if (std::isfinite(rule.measure) && rule.measure > Real{0.0}) {
                 generated_pruned_volume_measure_ += rule.measure;
             }
+            markModified();
             return;
         }
 
@@ -455,6 +467,7 @@ public:
                 CutIntegrationAssemblyPath::JIT};
             bindings_.push_back(std::move(binding));
         }
+        markModified();
     }
 
     void addGeneratedInterfaceDomain(
@@ -471,6 +484,60 @@ public:
         }
         setExpectedGeneratedSourceValueRevision(marker,
                                                 domain.request().source.value_revision);
+        const auto make_sensitivity_metadata =
+            [&](const interfaces::GeneratedInterfaceSensitivityRecord& record) {
+                CutGeometrySensitivityMetadata metadata;
+                metadata.parent_entity = record.parent_cell;
+                metadata.target_kind = record.target_kind;
+                metadata.construction_policy = record.construction_policy;
+                metadata.provenance_id = record.provenance_id;
+                metadata.source_stable_id = record.source_stable_id;
+                metadata.cut_topology_revision = record.cut_topology_revision;
+                metadata.quadrature_policy_key = record.quadrature_policy_key;
+                metadata.ad_compatible = record.ad_compatible;
+                metadata.location_sensitivity_available =
+                    record.location_sensitivity_available;
+                metadata.jacobian_sensitivity_available =
+                    record.jacobian_sensitivity_available;
+                metadata.measure_sensitivity_available =
+                    record.measure_sensitivity_available;
+                metadata.normal_sensitivity_available =
+                    record.normal_sensitivity_available;
+                metadata.quadrature_weight_sensitivity_available =
+                    record.quadrature_weight_sensitivity_available;
+                metadata.parent_geometry_dofs =
+                    record.parent_geometry_dofs;
+                metadata.samples.reserve(record.samples.size());
+                for (const auto& sample : record.samples) {
+                    CutGeometrySensitivitySampleMetadata sample_metadata;
+                    sample_metadata.parent_parametric_coordinate =
+                        sample.parent_parametric_coordinate;
+                    sample_metadata.influencing_parent_geometry_dofs =
+                        sample.influencing_parent_geometry_dofs.empty()
+                            ? record.parent_geometry_dofs
+                            : sample.influencing_parent_geometry_dofs;
+                    sample_metadata.shape_values = sample.shape_values;
+                    sample_metadata.shape_gradients = sample.shape_gradients;
+                    metadata.samples.push_back(std::move(sample_metadata));
+                }
+                metadata.visible_to_paths = {
+                    CutIntegrationAssemblyPath::Standard,
+                    CutIntegrationAssemblyPath::MatrixFree,
+                    CutIntegrationAssemblyPath::Interpreter,
+                    CutIntegrationAssemblyPath::AD,
+                    CutIntegrationAssemblyPath::SymbolicTangent,
+                    CutIntegrationAssemblyPath::JIT};
+                return metadata;
+            };
+        const bool publish_generated_sensitivity =
+            domain.request().geometry_tangent_policy == "DifferentiatedQuadrature" &&
+            domain.request().implicit_geometry_mode == "LinearCorner" &&
+            domain.request().implicit_quadrature_backend == "LinearCorner";
+        if (publish_generated_sensitivity) {
+            for (const auto& record : domain.sensitivityRecords()) {
+                addSensitivityMetadata(make_sensitivity_metadata(record));
+            }
+        }
         auto volume_rules = domain.volumeQuadratureRules();
         for (auto& rule : volume_rules) {
             if (volume_side_filter.has_value() &&
@@ -502,24 +569,56 @@ public:
             for (auto& rule : rules) {
                 indices.push_back(interface_rules_.size());
                 interface_rules_.push_back(std::move(rule));
+                markModified();
             }
+        }
+        auto two_sided_bindings = domain.twoSidedParentCellBindings();
+        if (!two_sided_bindings.empty()) {
+            auto& stored_bindings =
+                generated_interface_two_sided_bindings_by_marker_[marker];
+            stored_bindings.insert(stored_bindings.end(),
+                                   two_sided_bindings.begin(),
+                                   two_sided_bindings.end());
+            std::sort(stored_bindings.begin(), stored_bindings.end(),
+                      [](const auto& a, const auto& b) noexcept {
+                          if (a.parent_cell != b.parent_cell) {
+                              return a.parent_cell < b.parent_cell;
+                          }
+                          if (a.interface_marker != b.interface_marker) {
+                              return a.interface_marker < b.interface_marker;
+                          }
+                          return a.interface_stable_id < b.interface_stable_id;
+                      });
+            stored_bindings.erase(
+                std::unique(stored_bindings.begin(), stored_bindings.end(),
+                            [](const auto& a, const auto& b) noexcept {
+                                return a.parent_cell == b.parent_cell &&
+                                       a.interface_marker == b.interface_marker &&
+                                       a.interface_stable_id == b.interface_stable_id;
+                            }),
+                stored_bindings.end());
+            markModified();
         }
     }
 
     void addKinematicData(EmbeddedBoundaryKinematicData data) {
         kinematic_data_.push_back(std::move(data));
+        markModified();
     }
 
     void addStabilizationHook(CutStabilizationHook hook) {
         stabilization_hooks_.push_back(std::move(hook));
+        markModified();
     }
 
     void addBinding(CutIntegrationBinding binding) {
         bindings_.push_back(std::move(binding));
+        markModified();
     }
 
     void addSensitivityMetadata(CutGeometrySensitivityMetadata metadata) {
         sensitivity_metadata_.push_back(std::move(metadata));
+        markModified();
     }
 
     void setExpectedGeneratedSourceValueRevision(int marker,
@@ -528,7 +627,11 @@ public:
             throw std::invalid_argument(
                 "generated cut-volume source revision requires a nonnegative marker");
         }
-        expected_source_value_revision_by_marker_[marker] = revision;
+        auto& stored_revision = expected_source_value_revision_by_marker_[marker];
+        if (stored_revision != revision) {
+            stored_revision = revision;
+            markModified();
+        }
     }
 
     [[nodiscard]] bool hasExpectedGeneratedSourceValueRevision(int marker) const {
@@ -608,6 +711,31 @@ public:
 
     [[nodiscard]] const std::vector<geometry::CutQuadratureRule>& interfaceRules() const noexcept {
         return interface_rules_;
+    }
+
+    [[nodiscard]] const std::vector<interfaces::GeneratedInterfaceTwoSidedBinding>&
+    generatedInterfaceTwoSidedBindingsForMarker(int marker) const noexcept {
+        static const std::vector<interfaces::GeneratedInterfaceTwoSidedBinding> empty{};
+        const auto it = generated_interface_two_sided_bindings_by_marker_.find(marker);
+        return it == generated_interface_two_sided_bindings_by_marker_.end()
+                   ? empty
+                   : it->second;
+    }
+
+    [[nodiscard]] const interfaces::GeneratedInterfaceTwoSidedBinding*
+    twoSidedBindingForInterfaceRule(const geometry::CutQuadratureRule& rule) const noexcept {
+        const int marker = rule.provenance.marker;
+        const auto it = generated_interface_two_sided_bindings_by_marker_.find(marker);
+        if (it == generated_interface_two_sided_bindings_by_marker_.end()) {
+            return nullptr;
+        }
+        for (const auto& binding : it->second) {
+            if (binding.parent_cell == rule.provenance.parent_entity &&
+                binding.interface_stable_id == rule.provenance.cut_topology_revision) {
+                return &binding;
+            }
+        }
+        return nullptr;
     }
 
     [[nodiscard]] const std::vector<geometry::CutQuadratureRule>& facetSetRules() const noexcept {
@@ -1257,6 +1385,8 @@ public:
                     static_cast<Real>(sample.parent_parametric_coordinate[0]),
                     static_cast<Real>(sample.parent_parametric_coordinate[1]),
                     static_cast<Real>(sample.parent_parametric_coordinate[2])}};
+                sample_metadata.influencing_parent_geometry_dofs =
+                    metadata.parent_geometry_dofs;
                 sample_metadata.shape_values.reserve(sample.shape_values.size());
                 for (const auto value : sample.shape_values) {
                     sample_metadata.shape_values.push_back(static_cast<Real>(value));
@@ -1457,6 +1587,13 @@ private:
 
     using VolumeRuleSideIndex = std::array<VolumeRuleSideBucket, 2>;
 
+    void markModified() noexcept {
+        ++content_revision_;
+        if (content_revision_ == 0u) {
+            ++content_revision_;
+        }
+    }
+
     std::vector<CutCellAssemblyMetadata> metadata_{};
     std::vector<geometry::CutQuadratureRule> volume_rules_{};
     std::vector<geometry::CutQuadratureRule> interface_rules_{};
@@ -1468,6 +1605,8 @@ private:
     std::vector<int> generated_volume_markers_{};
     std::unordered_map<int, std::vector<std::size_t>>
         generated_interface_rule_indices_by_marker_{};
+    std::unordered_map<int, std::vector<interfaces::GeneratedInterfaceTwoSidedBinding>>
+        generated_interface_two_sided_bindings_by_marker_{};
     std::vector<int> generated_interface_markers_{};
     std::unordered_map<int, std::vector<std::size_t>> facet_set_rule_indices_by_marker_{};
     std::vector<int> facet_set_markers_{};
@@ -1480,6 +1619,7 @@ private:
     std::vector<CutGeometrySensitivityMetadata> sensitivity_metadata_{};
     std::size_t generated_pruned_volume_rule_count_{0u};
     Real generated_pruned_volume_measure_{0.0};
+    std::uint64_t content_revision_{0u};
 };
 
 } // namespace assembly

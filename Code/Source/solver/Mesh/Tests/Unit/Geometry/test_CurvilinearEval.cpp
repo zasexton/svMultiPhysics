@@ -627,17 +627,24 @@ TEST(CurvilinearEvalTest, HighOrderGeometryDofDescriptorAndSubentityViews) {
 }
 
 TEST(CurvilinearEvalTest, QuadraticPolygonEdgeGeometryDofsUseTopologyEdges) {
-  MeshBase mesh;
-  mesh.set_dimension(2);
+  std::vector<real_t> x_ref;
+  x_ref.reserve(16);
   for (int i = 0; i < 8; ++i) {
-    mesh.add_vertex(static_cast<double>(i), 0.0, 0.0);
+    x_ref.push_back(static_cast<real_t>(i));
+    x_ref.push_back(0.0);
   }
 
   CellShape shape;
   shape.family = CellFamily::Polygon;
   shape.order = 2;
   shape.num_corners = 4;
-  mesh.add_cell(0, shape, {0, 1, 2, 3, 4, 5, 6, 7});
+  MeshBase mesh;
+  mesh.build_from_arrays(
+      2,
+      x_ref,
+      std::vector<offset_t>{0, 8},
+      std::vector<index_t>{0, 1, 2, 3, 4, 5, 6, 7},
+      std::vector<CellShape>{shape});
 
   EXPECT_EQ(mesh.geometry_order(0), 2);
   EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 0)),
@@ -648,6 +655,57 @@ TEST(CurvilinearEvalTest, QuadraticPolygonEdgeGeometryDofsUseTopologyEdges) {
             (std::vector<index_t>{2, 6, 3}));
   EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 3)),
             (std::vector<index_t>{3, 7, 0}));
+}
+
+TEST(CurvilinearEvalTest, HighOrderQuadEdgeGeometryDofsUseTopologyEdges) {
+  {
+    const int p = 2;
+    const CellShape shape = make_shape(CellFamily::Quad, p);
+    const auto nodes = vtk_serendipity_nodes_quadratic(CellFamily::Quad);
+    const MeshBase mesh = make_identity_mesh(shape, nodes);
+
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 0)),
+              (std::vector<index_t>{0, 4, 1}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 1)),
+              (std::vector<index_t>{1, 5, 2}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 2)),
+              (std::vector<index_t>{2, 6, 3}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 3)),
+              (std::vector<index_t>{3, 7, 0}));
+  }
+
+  {
+    const int p = 2;
+    const CellShape shape = make_shape(CellFamily::Quad, p);
+    auto nodes = vtk_serendipity_nodes_quadratic(CellFamily::Quad);
+    nodes.push_back({0.0, 0.0, 0.0});
+    const MeshBase mesh = make_identity_mesh(shape, nodes);
+
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 0)),
+              (std::vector<index_t>{0, 4, 1}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 1)),
+              (std::vector<index_t>{1, 5, 2}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 2)),
+              (std::vector<index_t>{2, 6, 3}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 3)),
+              (std::vector<index_t>{3, 7, 0}));
+  }
+
+  {
+    const int p = 3;
+    const CellShape shape = make_shape(CellFamily::Quad, p);
+    const auto nodes = vtk_lagrange_nodes(CellFamily::Quad, p);
+    const MeshBase mesh = make_identity_mesh(shape, nodes);
+
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 0)),
+              (std::vector<index_t>{0, 4, 5, 1}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 1)),
+              (std::vector<index_t>{1, 6, 7, 2}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 2)),
+              (std::vector<index_t>{2, 8, 9, 3}));
+    EXPECT_EQ((mesh.cell_edge_geometry_dofs(0, 3)),
+              (std::vector<index_t>{3, 10, 11, 0}));
+  }
 }
 
 TEST(CurvilinearEvalTest, HighOrderCurrentReferenceDofMutationMovesCurvedGeometryAndBumpsRevisions) {

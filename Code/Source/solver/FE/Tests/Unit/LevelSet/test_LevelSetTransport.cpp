@@ -8,6 +8,10 @@
 #include "Systems/SystemSetup.h"
 #include "Systems/TimeIntegrator.h"
 
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -29,6 +33,40 @@ namespace level_set = svmp::FE::level_set;
 using FE::forms::FormExpr;
 using FE::forms::FormExprNode;
 using FE::forms::FormExprType;
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+[[nodiscard]] std::shared_ptr<svmp::Mesh> buildNativeQuad9Mesh()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+        0.5, 0.0,
+        1.0, 0.5,
+        0.5, 1.0,
+        0.0, 0.5,
+        0.5, 0.5,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    base->build_from_arrays(/*spatial_dim=*/2,
+                            x_ref,
+                            cell2vertex_offsets,
+                            cell2vertex,
+                            {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+#endif
 
 class SingleTetraMeshAccess final : public FE::assembly::IMeshAccess {
 public:
@@ -119,10 +157,234 @@ private:
     std::array<FE::GlobalIndex, 4> cell_{};
 };
 
+class SingleQuad9MeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    SingleQuad9MeshAccess()
+    {
+        nodes_ = {
+            std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{1.0, 0.0, 0.0},
+            std::array<FE::Real, 3>{1.0, 1.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 1.0, 0.0},
+            std::array<FE::Real, 3>{0.5, 0.0, 0.0},
+            std::array<FE::Real, 3>{1.0, 0.5, 0.0},
+            std::array<FE::Real, 3>{0.5, 1.0, 0.0},
+            std::array<FE::Real, 3>{0.0, 0.5, 0.0},
+            std::array<FE::Real, 3>{0.5, 0.5, 0.0},
+        };
+        cell_ = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex /*cell_id*/) const override
+    {
+        return FE::ElementType::Quad9;
+    }
+
+    void getCellNodes(FE::GlobalIndex /*cell_id*/,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        nodes.assign(cell_.begin(), cell_.end());
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex /*cell_id*/,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        coords = nodes_;
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face_id*/,
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<FE::Real, 3>> nodes_{};
+    std::array<FE::GlobalIndex, 9> cell_{};
+};
+
+class Quad9Patch2x2MeshAccess final : public FE::assembly::IMeshAccess {
+public:
+    Quad9Patch2x2MeshAccess()
+    {
+        nodes_.reserve(25u);
+        for (int j = 0; j < 5; ++j) {
+            for (int i = 0; i < 5; ++i) {
+                nodes_.push_back(std::array<FE::Real, 3>{
+                    FE::Real{0.25} * static_cast<FE::Real>(i),
+                    FE::Real{0.25} * static_cast<FE::Real>(j),
+                    0.0});
+            }
+        }
+
+        for (int cy = 0; cy < 2; ++cy) {
+            for (int cx = 0; cx < 2; ++cx) {
+                const auto node = [](int ix, int iy) -> FE::GlobalIndex {
+                    return static_cast<FE::GlobalIndex>(5 * iy + ix);
+                };
+                const int i = 2 * cx;
+                const int j = 2 * cy;
+                cells_.push_back(std::array<FE::GlobalIndex, 9>{
+                    node(i, j),
+                    node(i + 2, j),
+                    node(i + 2, j + 2),
+                    node(i, j + 2),
+                    node(i + 1, j),
+                    node(i + 2, j + 1),
+                    node(i + 1, j + 2),
+                    node(i, j + 1),
+                    node(i + 1, j + 1)});
+            }
+        }
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override
+    {
+        return static_cast<FE::GlobalIndex>(cells_.size());
+    }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override { return numCells(); }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override { return true; }
+
+    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex /*cell_id*/) const override
+    {
+        return FE::ElementType::Quad9;
+    }
+
+    void getCellNodes(FE::GlobalIndex cell_id,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(cell.begin(), cell.end());
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex cell_id,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        std::vector<FE::GlobalIndex> nodes;
+        getCellNodes(cell_id, nodes);
+        coords.clear();
+        coords.reserve(nodes.size());
+        for (const auto node : nodes) {
+            coords.push_back(getNodeCoordinates(node));
+        }
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face_id*/,
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        for (FE::GlobalIndex cell = 0; cell < numCells(); ++cell) {
+            callback(cell);
+        }
+    }
+
+    void forEachOwnedCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        forEachCell(std::move(callback));
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<FE::Real, 3>> nodes_{};
+    std::vector<std::array<FE::GlobalIndex, 9>> cells_{};
+};
+
 [[nodiscard]] std::shared_ptr<FE::spaces::FunctionSpace> scalarSpace(
     const std::shared_ptr<const FE::assembly::IMeshAccess>& mesh)
 {
     return FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+}
+
+[[nodiscard]] std::shared_ptr<FE::spaces::FunctionSpace> scalarSpace(
+    const std::shared_ptr<const FE::assembly::IMeshAccess>& mesh,
+    int order)
+{
+    return FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, order, /*components=*/1);
 }
 
 [[nodiscard]] std::shared_ptr<FE::spaces::FunctionSpace> vectorSpace(
@@ -203,6 +465,61 @@ void addScalarAndVelocityFields(FE::systems::FESystem& system,
     return inputs;
 }
 
+[[nodiscard]] FE::systems::SetupInputs makeSingleQuad9SetupInputs()
+{
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = 9;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets = {0, 9};
+    topo.cell2vertex_data = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    topo.vertex_gids = {0, 1, 2, 3, 4, 5, 6, 7, 8};
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+[[nodiscard]] FE::systems::SetupInputs makeQuad9Patch2x2SetupInputs()
+{
+    const Quad9Patch2x2MeshAccess mesh;
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 4;
+    topo.n_vertices = 25;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 2;
+
+    topo.cell2vertex_offsets.reserve(5u);
+    topo.cell2vertex_offsets.push_back(0);
+    for (FE::GlobalIndex cell = 0; cell < 4; ++cell) {
+        std::vector<FE::GlobalIndex> nodes;
+        mesh.getCellNodes(cell, nodes);
+        topo.cell2vertex_data.insert(
+            topo.cell2vertex_data.end(),
+            nodes.begin(),
+            nodes.end());
+        topo.cell2vertex_offsets.push_back(
+            static_cast<FE::GlobalIndex>(topo.cell2vertex_data.size()));
+    }
+    for (FE::GlobalIndex vertex = 0; vertex < 25; ++vertex) {
+        topo.vertex_gids.push_back(vertex);
+    }
+    for (FE::GlobalIndex cell = 0; cell < 4; ++cell) {
+        topo.cell_gids.push_back(cell);
+        topo.cell_owner_ranks.push_back(0);
+    }
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
 std::vector<FE::Real> constantVectorTetraCoefficients(FE::Real x,
                                                       FE::Real y,
                                                       FE::Real z)
@@ -239,6 +556,59 @@ void setFieldComponentValue(std::vector<FE::Real>& solution,
         throw std::runtime_error("setFieldComponentValue: DOF index is out of range");
     }
     solution[index] = value;
+}
+
+void setScalarVertexValue(std::vector<FE::Real>& solution,
+                          const FE::systems::FESystem& system,
+                          FE::FieldId field,
+                          FE::GlobalIndex vertex,
+                          FE::Real value)
+{
+    const auto& handler = system.fieldDofHandler(field);
+    const auto offset = system.fieldDofOffset(field);
+    const auto* entity_map = handler.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::runtime_error("setScalarVertexValue: field has no entity DOF map");
+    }
+    const auto dofs = entity_map->getVertexDofs(vertex);
+    if (dofs.size() != 1u) {
+        throw std::runtime_error("setScalarVertexValue: expected one scalar vertex DOF");
+    }
+    const auto index = static_cast<std::size_t>(dofs.front() + offset);
+    if (index >= solution.size()) {
+        throw std::runtime_error("setScalarVertexValue: DOF index is out of range");
+    }
+    solution[index] = value;
+}
+
+[[nodiscard]] std::vector<FE::Real> assembleLevelSetResidual(
+    FE::systems::FESystem& system,
+    const FE::systems::SystemStateView& state)
+{
+    const auto n = system.dofHandler().getNumDofs();
+    FE::assembly::DenseVectorView residual(n);
+    residual.zero();
+
+    FE::systems::AssemblyRequest request;
+    request.op = "level_set";
+    request.want_vector = true;
+    const auto result = system.assemble(request, state, nullptr, &residual);
+    EXPECT_TRUE(result.success) << result.error_message;
+
+    std::vector<FE::Real> out(static_cast<std::size_t>(n), 0.0);
+    for (FE::GlobalIndex i = 0; i < n; ++i) {
+        out[static_cast<std::size_t>(i)] = residual.getVectorEntry(i);
+    }
+    return out;
+}
+
+[[nodiscard]] FE::Real l2Norm(std::span<const FE::Real> values)
+{
+    FE::Real sum = 0.0;
+    for (const auto value : values) {
+        sum += value * value;
+    }
+    return std::sqrt(sum);
 }
 
 void expectOperatorJacobianMatchesCentralFD(FE::systems::FESystem& system,
@@ -499,6 +869,142 @@ TEST(LevelSetTransport, SUPGAddsCellDiameterStabilization)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
 }
+
+TEST(LevelSetTransport, Quad9FlatHorizontalNullModeHasZeroSpatialResidual)
+{
+    const auto run_case =
+        [](const std::shared_ptr<FE::assembly::IMeshAccess>& mesh,
+           const FE::systems::SetupInputs& setup) {
+            auto phi_space = scalarSpace(mesh, /*order=*/2);
+
+            FE::systems::FESystem system(mesh);
+            const auto phi = system.addField(FE::systems::FieldSpec{
+                .name = "phi",
+                .space = phi_space,
+                .components = 1,
+            });
+
+            level_set::LevelSetTransportOptions options{};
+            options.level_set.field_name = "phi";
+            options.level_set.auto_register_field = false;
+            options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
+            options.velocity.constant_value = {0.1, 0.0, 0.0};
+            options.supg.enabled = false;
+
+            (void)level_set::installLevelSetTransport(system, phi_space, options);
+            ASSERT_NO_THROW(system.setup({}, setup));
+
+            std::vector<FE::Real> solution(
+                static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+            const auto& phi_dofs = system.fieldDofHandler(phi);
+            const auto offset = system.fieldDofOffset(phi);
+            for (FE::GlobalIndex cell = 0; cell < mesh->numCells(); ++cell) {
+                std::vector<FE::GlobalIndex> nodes;
+                mesh->getCellNodes(cell, nodes);
+                const auto dofs = phi_dofs.getCellDofs(cell);
+                ASSERT_EQ(dofs.size(), nodes.size());
+                for (std::size_t local = 0; local < nodes.size(); ++local) {
+                    const auto x = mesh->getNodeCoordinates(nodes[local]);
+                    const auto index = static_cast<std::size_t>(dofs[local] + offset);
+                    ASSERT_LT(index, solution.size());
+                    solution[index] = x[1] - FE::Real{0.375};
+                }
+            }
+            const auto previous_solution = solution;
+
+            FE::systems::SystemStateView state;
+            state.dt = 0.1;
+            state.u = std::span<const FE::Real>(solution);
+            state.u_prev = std::span<const FE::Real>(previous_solution);
+            const FE::systems::BackwardDifferenceIntegrator integrator;
+            const auto time_context =
+                integrator.buildContext(/*max_time_derivative_order=*/1, state);
+            state.time_integration = &time_context;
+
+            const auto residual = assembleLevelSetResidual(system, state);
+            EXPECT_LT(l2Norm(std::span<const FE::Real>(residual)), 1.0e-12);
+        };
+
+    run_case(
+        std::make_shared<SingleQuad9MeshAccess>(),
+        makeSingleQuad9SetupInputs());
+    run_case(
+        std::make_shared<Quad9Patch2x2MeshAccess>(),
+        makeQuad9Patch2x2SetupInputs());
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(LevelSetTransport,
+     NativeQuad9ProjectedFlatHorizontalNullModeHasZeroSpatialResidual)
+{
+    auto mesh = buildNativeQuad9Mesh();
+    auto phi_space = std::make_shared<FE::spaces::H1Space>(
+        FE::ElementType::Quad4,
+        /*order=*/2);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = phi_space,
+        .components = 1,
+    });
+
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.level_set.auto_register_field = false;
+    options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
+    options.velocity.constant_value = {0.1, 0.0, 0.0};
+    options.supg.enabled = false;
+
+    (void)level_set::installLevelSetTransport(system, phi_space, options);
+    ASSERT_NO_THROW(system.setup());
+
+    std::vector<FE::Real> mesh_values(mesh->n_vertices(), FE::Real{0});
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        const auto point =
+            mesh->get_vertex_coords(static_cast<svmp::index_t>(vertex));
+        mesh_values[vertex] = point[1] - FE::Real{0.375};
+    }
+
+    std::vector<FE::Real> phi_coefficients(
+        static_cast<std::size_t>(system.fieldDofHandler(phi).getNumDofs()),
+        FE::Real{0});
+    std::vector<std::uint8_t> assigned(phi_coefficients.size(), 0u);
+    const auto projection = system.projectMeshVertexValuesToFieldCoefficients(
+        phi,
+        std::span<const FE::Real>(mesh_values.data(), mesh_values.size()),
+        /*mesh_components=*/1,
+        std::span<FE::Real>(phi_coefficients.data(), phi_coefficients.size()),
+        std::span<std::uint8_t>(assigned.data(), assigned.size()),
+        "LevelSetTransport native Quad9 projection invariant");
+    ASSERT_EQ(projection.unassigned_dofs, 0u);
+    ASSERT_EQ(projection.values_written, phi_coefficients.size());
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+        FE::Real{0});
+    const auto offset = system.fieldDofOffset(phi);
+    ASSERT_GE(offset, 0);
+    ASSERT_LE(static_cast<std::size_t>(offset) + phi_coefficients.size(),
+              solution.size());
+    std::copy(phi_coefficients.begin(),
+              phi_coefficients.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(offset));
+    const auto previous_solution = solution;
+
+    FE::systems::SystemStateView state;
+    state.dt = 0.1;
+    state.u = std::span<const FE::Real>(solution);
+    state.u_prev = std::span<const FE::Real>(previous_solution);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto time_context =
+        integrator.buildContext(/*max_time_derivative_order=*/1, state);
+    state.time_integration = &time_context;
+
+    const auto residual = assembleLevelSetResidual(system, state);
+    EXPECT_LT(l2Norm(std::span<const FE::Real>(residual)), 1.0e-12);
+}
+#endif
 
 TEST(LevelSetTransport, InterfaceKinematicAddsInterfaceResidual)
 {

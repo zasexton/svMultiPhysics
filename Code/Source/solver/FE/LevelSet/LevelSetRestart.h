@@ -52,6 +52,7 @@ struct LevelSetGeneratedInterfaceRestartRecord {
     Real implicit_cut_root_coordinate_tolerance{1.0e-12};
     int implicit_cut_root_max_iterations{48};
     int implicit_cut_max_subdivision_depth{16};
+    int affected_cell_neighborhood_layers{0};
     bool keep_degenerate_fragments{false};
     std::uint64_t value_revision{0};
     std::uint64_t mesh_geometry_revision{0};

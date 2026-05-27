@@ -581,14 +581,17 @@ public:
 ```cpp
 namespace svmp::FE::basis {
 
-class BasisFactory {
-public:
-    static std::shared_ptr<BasisFunction> create(BasisType type,
-                                                  ElementType element,
-                                                  int order);
-    static std::shared_ptr<BasisFunction> createLagrange(ElementType element, int order);
-    static std::shared_ptr<BasisFunction> createSpectral(ElementType element, int order);
+struct BasisRequest {
+    ElementType element_type;
+    BasisType basis_type;
+    std::optional<int> order;
+    Continuity continuity;
+    FieldType field_type;
 };
+
+namespace basis_factory {
+[[nodiscard]] std::shared_ptr<BasisFunction> create(const BasisRequest& req);
+}
 }
 ```
 

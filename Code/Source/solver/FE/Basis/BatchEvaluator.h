@@ -20,43 +20,83 @@
 
 #include "BasisFunction.h"
 #include "Quadrature/QuadratureRule.h"
-#include "Math/SIMD.h"
+#include "Math/AlignedAllocator.h"
 #include <memory>
+#include <new>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace basis {
 
+namespace detail {
+
+template<typename T, std::size_t Alignment = 64>
+class AlignedNoInitAllocator : public math::simd::AlignedAllocator<T, Alignment> {
+public:
+    using value_type = T;
+
+    AlignedNoInitAllocator() noexcept = default;
+
+    template<class U>
+    AlignedNoInitAllocator(const AlignedNoInitAllocator<U, Alignment>&) noexcept {}
+
+    template<class U>
+    struct rebind { using other = AlignedNoInitAllocator<U, Alignment>; };
+
+    template<class U>
+    void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) {
+        if constexpr (std::is_trivially_default_constructible_v<U>) {
+            ::new (static_cast<void*>(p)) U;
+        } else {
+            ::new (static_cast<void*>(p)) U();
+        }
+    }
+
+    template<class U, class... Args>
+    void construct(U* p, Args&&... args) {
+        ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+    }
+};
+
+} // namespace detail
+
+using AlignedRealVector = std::vector<Real, detail::AlignedNoInitAllocator<Real>>;
+
 /**
  * @brief Storage layout for batched basis evaluation results
  *
  * Data is stored in Structure-of-Arrays (SoA) format for optimal
- * SIMD memory access patterns. For N basis functions evaluated at
- * Q quadrature points:
+ * SIMD memory access patterns. Rows are padded to quad_stride for aligned
+ * SIMD loads; accessors expose the logical num_quad_points range.
  *
- * values: [N_0(q_0), N_0(q_1), ..., N_0(q_{Q-1}), N_1(q_0), ...]
+ * values: [N_0(q_0), ..., N_0(q_{stride-1}), N_1(q_0), ...]
  *
  * This layout enables vectorization across quadrature points.
  */
 struct BatchedBasisData {
     /// Basis function values at all quadrature points
-    /// Layout: [num_basis][num_quad_points]
-    std::vector<Real> values;
+    /// Layout: [num_basis][quad_stride]
+    AlignedRealVector values;
 
     /// Gradients at all quadrature points
-    /// Layout: [num_basis][3][num_quad_points] (interleaved by dimension)
-    std::vector<Real> gradients;
+    /// Layout: [num_basis][3][quad_stride] (interleaved by dimension)
+    AlignedRealVector gradients;
 
     /// Hessians at all quadrature points (optional)
-    /// Layout: [num_basis][9][num_quad_points]
-    std::vector<Real> hessians;
+    /// Layout: [num_basis][9][quad_stride]
+    AlignedRealVector hessians;
 
     /// Number of basis functions
     std::size_t num_basis = 0;
 
     /// Number of quadrature points
     std::size_t num_quad_points = 0;
+
+    /// Padded per-basis row length used by values/gradients/Hessians
+    std::size_t quad_stride = 0;
 
     /// Whether gradients are populated
     bool has_gradients = false;
@@ -67,8 +107,8 @@ struct BatchedBasisData {
     /**
      * @brief Access value N_i(q_j)
      */
-    Real value(std::size_t i, std::size_t j) const {
-        return values[i * num_quad_points + j];
+    [[nodiscard]] Real value(std::size_t i, std::size_t j) const noexcept {
+        return values[i * quad_stride + j];
     }
 
     /**
@@ -77,8 +117,8 @@ struct BatchedBasisData {
      * @param d Dimension (0, 1, or 2)
      * @param j Quadrature point index
      */
-    Real gradient(std::size_t i, std::size_t d, std::size_t j) const {
-        return gradients[(i * 3 + d) * num_quad_points + j];
+    [[nodiscard]] Real gradient(std::size_t i, std::size_t d, std::size_t j) const noexcept {
+        return gradients[(i * 3 + d) * quad_stride + j];
     }
 
     /**
@@ -88,22 +128,25 @@ struct BatchedBasisData {
      * @param d2 Second dimension
      * @param j Quadrature point index
      */
-    Real hessian(std::size_t i, std::size_t d1, std::size_t d2, std::size_t j) const {
-        return hessians[(i * 9 + d1 * 3 + d2) * num_quad_points + j];
+    [[nodiscard]] Real hessian(std::size_t i,
+                               std::size_t d1,
+                               std::size_t d2,
+                               std::size_t j) const noexcept {
+        return hessians[(i * 9 + d1 * 3 + d2) * quad_stride + j];
     }
 
     /**
      * @brief Get pointer to contiguous values for basis function i
      */
-    const Real* values_for_basis(std::size_t i) const {
-        return values.data() + i * num_quad_points;
+    [[nodiscard]] const Real* values_for_basis(std::size_t i) const noexcept {
+        return values.data() + i * quad_stride;
     }
 
     /**
      * @brief Get pointer to contiguous gradient component for basis function i
      */
-    const Real* gradients_for_basis(std::size_t i, std::size_t d) const {
-        return gradients.data() + (i * 3 + d) * num_quad_points;
+    [[nodiscard]] const Real* gradients_for_basis(std::size_t i, std::size_t d) const noexcept {
+        return gradients.data() + (i * 3 + d) * quad_stride;
     }
 };
 
@@ -114,6 +157,10 @@ struct BatchedBasisData {
  * call, utilizing SIMD vectorization for improved throughput. The
  * results are stored in SoA format for optimal cache utilization
  * during subsequent computations (e.g., stiffness matrix assembly).
+ *
+ * This evaluator is intentionally scalar-basis only. Vector-valued bases use
+ * BasisCacheEntry SoA accessors until an assembly caller needs a padded vector
+ * batch view with a separate layout contract.
  */
 class BatchEvaluator {
 public:
@@ -132,69 +179,26 @@ public:
     /**
      * @brief Get the precomputed batched data
      */
-    const BatchedBasisData& data() const { return data_; }
+    [[nodiscard]] const BatchedBasisData& data() const noexcept { return data_; }
 
     /**
      * @brief Number of basis functions
      */
-    std::size_t num_basis() const { return data_.num_basis; }
+    [[nodiscard]] std::size_t num_basis() const noexcept { return data_.num_basis; }
 
     /**
      * @brief Number of quadrature points
      */
-    std::size_t num_quad_points() const { return data_.num_quad_points; }
+    [[nodiscard]] std::size_t num_quad_points() const noexcept { return data_.num_quad_points; }
 
     /**
-     * @brief Compute weighted sum of basis values at all quad points
-     *
-     * result[j] = sum_i coeffs[i] * N_i(q_j) * weights[j]
-     *
-     * This is a common operation in FE assembly. Uses SIMD when available.
-     *
-     * @param coeffs Coefficients for each basis function (size = num_basis)
-     * @param weights Quadrature weights (size = num_quad_points)
-     * @param result Output array (size = num_quad_points)
+     * @brief Reference dimension of the evaluated scalar basis
      */
-    void weighted_sum(const Real* coeffs,
-                      const Real* weights,
-                      Real* result) const;
-
-    /**
-     * @brief Compute weighted sum of gradients at all quad points
-     *
-     * result[d][j] = sum_i coeffs[i] * dN_i/d(xi_d)(q_j) * weights[j]
-     *
-     * @param coeffs Coefficients for each basis function
-     * @param weights Quadrature weights
-     * @param result Output array [3][num_quad_points]
-     */
-    void weighted_gradient_sum(const Real* coeffs,
-                               const Real* weights,
-                               Real* result) const;
-
-    /**
-     * @brief Perform batched matrix-vector product for element stiffness
-     *
-     * For each quadrature point, computes:
-     *   K_ij += w_q * dN_i . (D . dN_j)
-     *
-     * where D is a material tensor. Optimized for small dense matrices.
-     *
-     * @param D Material matrix (dimension x dimension)
-     * @param weights Quadrature weights scaled by Jacobian determinant
-     * @param K Output stiffness matrix (num_basis x num_basis)
-     */
-    void assemble_stiffness_contribution(const Real* D,
-                                         const Real* weights,
-                                         Real* K) const;
+    [[nodiscard]] int dimension() const noexcept { return dimension_; }
 
 private:
     BatchedBasisData data_;
     int dimension_;
-
-    // Precomputed SIMD-aligned copies for hot loops
-    std::vector<Real, math::simd::AlignedAllocator<Real>> aligned_values_;
-    std::vector<Real, math::simd::AlignedAllocator<Real>> aligned_gradients_;
 };
 
 } // namespace basis

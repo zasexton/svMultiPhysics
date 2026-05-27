@@ -53,6 +53,8 @@
 namespace svmp {
 // Minimal fallback when the Mesh library is not available.
 // Keeps FE compilation self-contained while preserving the same namespace.
+#ifndef SVMP_CELL_FAMILY_DEFINED
+#define SVMP_CELL_FAMILY_DEFINED 1
 enum class CellFamily {
     Point,
     Line,
@@ -65,6 +67,7 @@ enum class CellFamily {
     Polygon,
     Polyhedron
 };
+#endif
 } // namespace svmp
 #endif
 #include <cstdint>
@@ -72,6 +75,14 @@ enum class CellFamily {
 #include <string>
 #include <type_traits>
 #include <limits>
+
+#if defined(_MSC_VER)
+#  define SVMP_RESTRICT __restrict
+#elif defined(__clang__) || defined(__GNUC__)
+#  define SVMP_RESTRICT __restrict__
+#else
+#  define SVMP_RESTRICT
+#endif
 
 namespace svmp {
 namespace FE {

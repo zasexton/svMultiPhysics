@@ -17,6 +17,7 @@
 #include "Assembly/MeshAccess.h"
 #include "Assembly/StandardAssembler.h"
 
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 
 #include "Spaces/H1Space.h"
@@ -30,8 +31,11 @@
 #include "Mesh/Topology/CellShape.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <numeric>
+#include <span>
+#include <string>
 #include <vector>
 
 using svmp::CellFamily;
@@ -39,6 +43,7 @@ using svmp::CellShape;
 using svmp::Mesh;
 using svmp::MeshBase;
 
+using svmp::FE::BasisType;
 using svmp::FE::ElementType;
 using svmp::FE::GlobalIndex;
 using svmp::FE::Real;
@@ -118,6 +123,104 @@ std::shared_ptr<Mesh> build_single_biquadratic_quad_mesh()
     shape.order = 2;
     base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
     base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<Mesh> build_single_cubic_quad_mesh()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        1.0, 0.0,
+        1.0, 1.0,
+        0.0, 1.0,
+        1.0 / 3.0, 0.0,
+        2.0 / 3.0, 0.0,
+        1.0, 1.0 / 3.0,
+        1.0, 2.0 / 3.0,
+        2.0 / 3.0, 1.0,
+        1.0 / 3.0, 1.0,
+        0.0, 2.0 / 3.0,
+        0.0, 1.0 / 3.0,
+        1.0 / 3.0, 1.0 / 3.0,
+        2.0 / 3.0, 1.0 / 3.0,
+        2.0 / 3.0, 2.0 / 3.0,
+        1.0 / 3.0, 2.0 / 3.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 16};
+    const std::vector<svmp::index_t> cell2vertex = {
+        0, 1, 2, 3,
+        4, 5, 6, 7,
+        8, 9, 10, 11,
+        12, 13, 14, 15
+    };
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 3;
+    base->build_from_arrays(/*spatial_dim=*/2,
+                            X_ref,
+                            cell2vertex_offsets,
+                            cell2vertex,
+                            {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
+std::shared_ptr<Mesh> build_two_biquadratic_quad_mesh_with_reordered_edge_storage()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0,
+        0.5, 0.0,
+        1.0, 0.0,
+        1.5, 0.0,
+        2.0, 0.0,
+        0.0, 0.5,
+        0.5, 0.5,
+        1.0, 0.5,
+        1.5, 0.5,
+        2.0, 0.5,
+        0.0, 1.0,
+        0.5, 1.0,
+        1.0, 1.0,
+        1.5, 1.0,
+        2.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9, 18};
+    const std::vector<svmp::index_t> cell2vertex = {
+        0, 2, 12, 10, 1, 7, 11, 5, 6,
+        2, 4, 14, 12, 3, 9, 13, 7, 8,
+    };
+
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    base->build_from_arrays(/*spatial_dim=*/2,
+                            X_ref,
+                            cell2vertex_offsets,
+                            cell2vertex,
+                            {shape, shape});
+    base->finalize();
+
+    std::vector<std::array<svmp::index_t, 2>> reordered_edges;
+    reordered_edges.reserve(base->n_faces());
+    for (std::size_t reverse_index = 0; reverse_index < base->n_faces(); ++reverse_index) {
+        const auto face =
+            static_cast<svmp::index_t>(base->n_faces() - 1u - reverse_index);
+        auto [face_vertices, n_face_vertices] = base->face_vertices_span(face);
+        EXPECT_NE(face_vertices, nullptr);
+        EXPECT_GE(n_face_vertices, 2u);
+        reordered_edges.push_back(
+            {face_vertices[0], face_vertices[n_face_vertices - 1u]});
+    }
+    base->set_edges_from_arrays(std::move(reordered_edges));
 
     return svmp::create_mesh(std::move(base));
 }
@@ -658,6 +761,41 @@ TEST(FESystem, PrescribedMeshMotionFieldIsExcludedFromUnknownLayout)
     EXPECT_EQ(sys.blockMap()->numBlocks(), 2u);
 }
 
+TEST(FESystem, UnknownFieldIdsInDofMapOrderSkipsPrescribedFieldIdGaps)
+{
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto u = sys.addField(
+        FieldSpec{.name = "u", .space = scalar_space, .components = 1});
+    const auto prescribed_velocity =
+        sys.addMeshMotionDataField("mesh_velocity", vector_space);
+    const auto p = sys.addField(
+        FieldSpec{.name = "p", .space = scalar_space, .components = 1});
+    sys.bindMeshMotionField(MeshMotionFieldRole::Velocity, prescribed_velocity);
+
+    ASSERT_EQ(u, 0);
+    ASSERT_EQ(prescribed_velocity, 1);
+    ASSERT_EQ(p, 2);
+    EXPECT_TRUE(sys.fieldParticipatesInUnknownVector(u));
+    EXPECT_FALSE(sys.fieldParticipatesInUnknownVector(prescribed_velocity));
+    EXPECT_TRUE(sys.fieldParticipatesInUnknownVector(p));
+
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+    sys.addCellKernel("mass", p, std::make_shared<MassKernel>(1.0));
+    sys.setup();
+
+    const auto unknown_fields = sys.unknownFieldIdsInDofMapOrder();
+    ASSERT_EQ(unknown_fields.size(), 2u);
+    EXPECT_EQ(unknown_fields[0], u);
+    EXPECT_EQ(unknown_fields[1], p);
+    EXPECT_EQ(sys.fieldMap().getField(0).name, "u");
+    EXPECT_EQ(sys.fieldMap().getField(1).name, "p");
+}
+
 TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)
 {
     auto mesh = build_single_quad_mesh();
@@ -1018,6 +1156,248 @@ TEST(FESystem, PrescribedVertexFieldSyncsHighOrderMeshPointData)
     }
 }
 
+TEST(FESystem, MeshVertexProjectionUsesFaceBacked2DEdgeDofs)
+{
+    auto mesh = build_two_biquadratic_quad_mesh_with_reordered_edge_storage();
+    ASSERT_EQ(mesh->local_mesh().codim1_storage_mode(), svmp::MeshCodim1StorageMode::Full);
+    ASSERT_EQ(mesh->local_mesh().n_faces(), mesh->local_mesh().n_edges());
+    ASSERT_GT(mesh->local_mesh().n_faces(), 0u);
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/2);
+
+    FESystem sys(mesh);
+    const auto source = sys.addField(FieldSpec{
+        .name = "ProjectedScalar",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FieldSourceKind::Unknown});
+    ASSERT_NO_THROW(sys.setup());
+
+    std::vector<Real> mesh_values(mesh->n_vertices(), Real{0});
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        mesh_values[vertex] = Real{10} + Real{0.25} * static_cast<Real>(vertex);
+    }
+
+    std::vector<Real> coefficients(
+        static_cast<std::size_t>(sys.fieldDofHandler(source).getNumDofs()),
+        Real{0});
+    std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+
+    const auto projection = sys.projectMeshVertexValuesToFieldCoefficients(
+        source,
+        std::span<const Real>(mesh_values.data(), mesh_values.size()),
+        /*mesh_components=*/1,
+        std::span<Real>(coefficients.data(), coefficients.size()),
+        std::span<std::uint8_t>(assigned.data(), assigned.size()),
+        "FESystem 2D face-backed edge projection test");
+
+    EXPECT_EQ(projection.unassigned_dofs, 0u);
+    EXPECT_EQ(std::count(assigned.begin(), assigned.end(), std::uint8_t{1}),
+              static_cast<std::ptrdiff_t>(coefficients.size()));
+
+    for (GlobalIndex cell = 0; cell < static_cast<GlobalIndex>(mesh->n_cells()); ++cell) {
+        auto [cell_vertices, n_cell_vertices] =
+            mesh->local_mesh().cell_vertices_span(static_cast<svmp::index_t>(cell));
+        ASSERT_NE(cell_vertices, nullptr);
+        const auto cell_dofs = sys.fieldDofHandler(source).getCellDofs(cell);
+        ASSERT_EQ(cell_dofs.size(), n_cell_vertices);
+        for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
+            const auto vertex = static_cast<std::size_t>(cell_vertices[local_node]);
+            const auto dof = static_cast<std::size_t>(cell_dofs[local_node]);
+            EXPECT_DOUBLE_EQ(coefficients[dof], mesh_values[vertex])
+                << "cell=" << cell << " local_node=" << local_node
+                << " vertex=" << vertex << " dof=" << dof;
+        }
+    }
+}
+
+TEST(FESystem, PrescribedVertexFieldSyncsCubicMeshPointData)
+{
+    auto mesh = build_single_cubic_quad_mesh();
+    const auto handle = svmp::MeshFields::attach_field(
+        mesh->local_mesh(),
+        svmp::EntityKind::Vertex,
+        "CubicManufacturedSource",
+        svmp::FieldScalarType::Float64,
+        2);
+    auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handle);
+    ASSERT_NE(values, nullptr);
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        values[2u * vertex] = static_cast<svmp::real_t>(100.0 + vertex);
+        values[2u * vertex + 1u] = static_cast<svmp::real_t>(200.0 + 3.0 * vertex);
+    }
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/3);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    const auto source = sys.addField(FieldSpec{
+        .name = "CubicManufacturedSource",
+        .space = vector_space,
+        .components = 2,
+        .source_kind = FieldSourceKind::PrescribedData});
+    ASSERT_NO_THROW(sys.setup());
+
+    EXPECT_EQ(sys.syncPrescribedVertexFieldsFromMeshFields(), 32u);
+
+    std::vector<double> vertex_values(mesh->n_vertices() * 2u, -1.0);
+    EXPECT_TRUE(sys.evaluateFieldAtVertices(
+        source,
+        SystemStateView{},
+        static_cast<GlobalIndex>(mesh->n_vertices()),
+        std::span<double>(vertex_values.data(), vertex_values.size())));
+
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        EXPECT_DOUBLE_EQ(vertex_values[2u * vertex], 100.0 + vertex);
+        EXPECT_DOUBLE_EQ(vertex_values[2u * vertex + 1u], 200.0 + 3.0 * vertex);
+    }
+}
+
+TEST(FESystem, PrescribedVertexFieldRejectsFieldOrderBeyondMeshPointData)
+{
+    auto mesh = build_single_biquadratic_quad_mesh();
+    const auto handle = svmp::MeshFields::attach_field(
+        mesh->local_mesh(),
+        svmp::EntityKind::Vertex,
+        "CubicSource",
+        svmp::FieldScalarType::Float64,
+        1);
+    auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handle);
+    ASSERT_NE(values, nullptr);
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        values[vertex] = static_cast<svmp::real_t>(1.0 + vertex);
+    }
+
+    auto cubic_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/3);
+
+    FESystem sys(mesh);
+    (void)sys.addField(FieldSpec{
+        .name = "CubicSource",
+        .space = cubic_space,
+        .components = 1,
+        .source_kind = FieldSourceKind::PrescribedData});
+    ASSERT_NO_THROW(sys.setup());
+
+    EXPECT_THROW((void)sys.syncPrescribedVertexFieldsFromMeshFields(),
+                 std::exception);
+}
+
+TEST(FESystem, MeshVertexProjectionInterpolatesHierarchicalBasis)
+{
+    auto mesh = build_single_biquadratic_quad_mesh();
+    auto hierarchical_space =
+        std::make_shared<H1Space>(ElementType::Quad4,
+                                  /*order=*/2,
+                                  BasisType::Hierarchical);
+
+    FESystem sys(mesh);
+    const auto source = sys.addField(FieldSpec{
+        .name = "HierarchicalSource",
+        .space = hierarchical_space,
+        .components = 1,
+        .source_kind = FieldSourceKind::PrescribedData});
+    ASSERT_NO_THROW(sys.setup());
+
+    std::vector<Real> mesh_values(mesh->n_vertices(), Real{0});
+    const auto& coords = mesh->X_ref();
+    const int dim = mesh->dim();
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        const Real x =
+            static_cast<Real>(coords[vertex * static_cast<std::size_t>(dim)]);
+        const Real y =
+            static_cast<Real>(coords[vertex * static_cast<std::size_t>(dim) + 1u]);
+        mesh_values[vertex] = Real{2} + Real{3} * x - y + Real{0.5} * x * y;
+    }
+    std::vector<Real> coefficients(
+        static_cast<std::size_t>(sys.fieldDofHandler(source).getNumDofs()),
+        Real{0});
+    std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+
+    const auto projection = sys.projectMeshVertexValuesToFieldCoefficients(
+        source,
+        std::span<const Real>(mesh_values.data(), mesh_values.size()),
+        /*mesh_components=*/1,
+        std::span<Real>(coefficients.data(), coefficients.size()),
+        std::span<std::uint8_t>(assigned.data(), assigned.size()),
+        "FESystem hierarchical projection test");
+
+    EXPECT_EQ(projection.unassigned_dofs, 0u);
+    EXPECT_EQ(projection.values_written, coefficients.size());
+    EXPECT_EQ(std::count(assigned.begin(), assigned.end(), std::uint8_t{1}),
+              static_cast<std::ptrdiff_t>(coefficients.size()));
+
+    const auto cell_dofs = sys.fieldDofHandler(source).getCellDofs(0);
+    ASSERT_EQ(cell_dofs.size(), coefficients.size());
+    std::vector<Real> local_coefficients(cell_dofs.size(), Real{0});
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+        ASSERT_GE(cell_dofs[i], 0);
+        local_coefficients[i] =
+            coefficients[static_cast<std::size_t>(cell_dofs[i])];
+    }
+
+    auto [cell_vertices, n_cell_vertices] =
+        mesh->local_mesh().cell_vertices_span(0);
+    ASSERT_NE(cell_vertices, nullptr);
+    ASSERT_EQ(n_cell_vertices, cell_dofs.size());
+    const auto reference_nodes =
+        svmp::FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            ElementType::Quad4,
+            /*order=*/2);
+    ASSERT_EQ(reference_nodes.size(), cell_dofs.size());
+    for (std::size_t i = 0; i < reference_nodes.size(); ++i) {
+        const auto vertex = static_cast<std::size_t>(cell_vertices[i]);
+        const auto value =
+            hierarchical_space->evaluate_scalar(
+                reference_nodes[i], local_coefficients);
+        EXPECT_NEAR(value, mesh_values[vertex], 1.0e-10);
+    }
+}
+
+TEST(FESystem, HierarchicalVertexOutputUsesPointEvaluationFallback)
+{
+    auto mesh = build_single_biquadratic_quad_mesh();
+    auto hierarchical_space =
+        std::make_shared<H1Space>(ElementType::Quad4,
+                                  /*order=*/2,
+                                  BasisType::Hierarchical);
+
+    FESystem sys(mesh);
+    const auto field = sys.addField(FieldSpec{
+        .name = "HierarchicalState",
+        .space = hierarchical_space,
+        .components = 1});
+    ASSERT_NO_THROW(sys.setup());
+
+    std::vector<Real> state(
+        static_cast<std::size_t>(sys.dofHandler().getNumDofs()), Real{0});
+    SystemStateView view;
+    view.u = std::span<const Real>(state.data(), state.size());
+
+    std::vector<double> fast_values(mesh->n_vertices(), -1.0);
+    EXPECT_FALSE(sys.evaluateFieldAtVertices(
+        field,
+        view,
+        static_cast<GlobalIndex>(mesh->n_vertices()),
+        std::span<double>(fast_values.data(), fast_values.size())));
+
+    const auto& coords = mesh->X_ref();
+    const int dim = mesh->dim();
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        std::array<Real, 3> point{{Real{0}, Real{0}, Real{0}}};
+        for (int d = 0; d < dim; ++d) {
+            point[static_cast<std::size_t>(d)] =
+                static_cast<Real>(
+                    coords[vertex * static_cast<std::size_t>(dim) +
+                           static_cast<std::size_t>(d)]);
+        }
+        const auto value = sys.evaluateFieldAtPoint(field, view, point);
+        ASSERT_TRUE(value.has_value());
+        EXPECT_NEAR((*value)[0], 0.0, 1.0e-12);
+    }
+}
+
 TEST(FESystem, StandardMeshMotionFieldsSyncFromMeshStorageToFEState)
 {
     auto mesh = build_single_quad_mesh();
@@ -1258,6 +1638,34 @@ TEST(FESystem, ConstraintRefreshTracksDeclaredGeometryDependencies)
     EXPECT_FALSE(refreshed.structural_rebuild);
     EXPECT_EQ(*updates, 1);
 
+    auto c = sys.constraints().getConstraint(0);
+    ASSERT_TRUE(c.has_value());
+    EXPECT_DOUBLE_EQ(c->inhomogeneity, 2.0);
+    EXPECT_FALSE(sys.constraintStateStaleForCurrentRevisions());
+}
+
+TEST(FESystem, UpdateConstraintsRefreshesDeclaredRevisionDependencies)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+
+    auto updates = std::make_shared<int>(0);
+    sys.addConstraint(std::make_unique<GeometryValueConstraint>(updates));
+    sys.setup();
+
+    auto cur = mesh->local_mesh().X_ref();
+    cur[0] += 0.25;
+    mesh->local_mesh().set_current_coords(cur);
+
+    ASSERT_TRUE(sys.constraintStateStaleForCurrentRevisions());
+    sys.updateConstraints(/*time=*/0.0, /*dt=*/0.0);
+
+    EXPECT_EQ(*updates, 1);
     auto c = sys.constraints().getConstraint(0);
     ASSERT_TRUE(c.has_value());
     EXPECT_DOUBLE_EQ(c->inhomogeneity, 2.0);

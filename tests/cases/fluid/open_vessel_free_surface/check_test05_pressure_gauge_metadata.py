@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent
@@ -20,6 +21,18 @@ PREVIOUS_INVALID_D18_GAUGE = {
     "hydrostatic_error_range": [-17.6869, 0.0],
 }
 TOL = 1.0e-9
+EXPECTED_FLUID_NONLINEAR_TOLERANCE = 2.0e-2
+EXPECTED_FLUID_NONLINEAR_MAX_ITERATIONS = 12
+EXPECTED_ADAPTIVE_TIME_LOOP = {
+    "Enable_adaptive_time_loop": "true",
+    "Adaptive_time_loop_min_dt": "1.5625e-5",
+    "Adaptive_time_loop_max_dt": "5.0e-4",
+    "Adaptive_time_loop_max_retries": "8",
+    "Adaptive_time_loop_decrease_factor": "0.5",
+    "Adaptive_time_loop_increase_factor": "1.5",
+    "Adaptive_time_loop_target_newton_iterations": "6",
+    "Adaptive_time_loop_max_steps_multiplier": "64",
+}
 
 
 def _load_pressure_gauge(path: Path) -> tuple[int, float]:
@@ -57,9 +70,16 @@ def _nearly_equal(left: object, right: object) -> bool:
     return left == right
 
 
+def _require_text(parent: ET.Element, path: str, expected: str, source: Path) -> None:
+    value = parent.findtext(path, "").strip()
+    if value != expected:
+        raise ValueError(f"{source} {path} is {value!r}, expected {expected!r}")
+
+
 def check_case(case_dir: Path) -> dict[str, object]:
     metadata_path = case_dir / "benchmark.json"
     gauge_path = case_dir / "pressure_gauge.csv"
+    solver_path = case_dir / "solver.xml"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     gauge = metadata["pressure_gauge"]
     verification = metadata.get("pressure_gauge_verification")
@@ -90,6 +110,101 @@ def check_case(case_dir: Path) -> dict[str, object]:
     if verification["current_pressure_matches_previous_invalid_error_range"]:
         raise ValueError(f"{metadata_path} still lies in the previous invalid D18 error range")
 
+    root = ET.parse(solver_path).getroot()
+    general = root.find("GeneralSimulationParameters")
+    if general is None:
+        raise ValueError(f"{solver_path} is missing GeneralSimulationParameters")
+    for tag, expected_value in EXPECTED_ADAPTIVE_TIME_LOOP.items():
+        _require_text(general, tag, expected_value, solver_path)
+    combine_time_series = general.findtext("Combine_time_series", "").strip()
+    if combine_time_series.lower() != "true":
+        raise ValueError(f"{solver_path} does not request Combine_time_series=true")
+
+    level_set = next(
+        (
+            equation
+            for equation in root.findall("Add_equation")
+            if equation.attrib.get("type") == "level_set"
+        ),
+        None,
+    )
+    if level_set is None:
+        raise ValueError(f"{solver_path} is missing a level_set equation")
+    _require_text(level_set, "Velocity_source", "prescribed_data", solver_path)
+    _require_text(level_set, "Velocity_field_name", "LevelSetAdvectionVelocity", solver_path)
+    _require_text(level_set, "Auto_register_velocity_field", "true", solver_path)
+    _require_text(level_set, "Use_wet_extension_advection_velocity", "true", solver_path)
+    _require_text(level_set, "Source_velocity_field_name", "Velocity", solver_path)
+    _require_text(
+        level_set,
+        "Wet_extension_advection_velocity_method",
+        "nearest_interface_point",
+        solver_path,
+    )
+
+    fluid = next(
+        (
+            equation
+            for equation in root.findall("Add_equation")
+            if equation.attrib.get("type") == "fluid"
+        ),
+        None,
+    )
+    if fluid is None:
+        raise ValueError(f"{solver_path} is missing a fluid equation")
+    fluid_tolerance = float(fluid.findtext("Tolerance", "nan"))
+    if abs(fluid_tolerance - EXPECTED_FLUID_NONLINEAR_TOLERANCE) > TOL:
+        raise ValueError(
+            f"{solver_path} fluid nonlinear tolerance is {fluid_tolerance}, "
+            f"expected {EXPECTED_FLUID_NONLINEAR_TOLERANCE}"
+        )
+    fluid_max_iterations = int(fluid.findtext("Max_iterations", "-1"))
+    if fluid_max_iterations != EXPECTED_FLUID_NONLINEAR_MAX_ITERATIONS:
+        raise ValueError(
+            f"{solver_path} fluid nonlinear Max_iterations is {fluid_max_iterations}, "
+            f"expected {EXPECTED_FLUID_NONLINEAR_MAX_ITERATIONS}"
+        )
+    constraints = fluid.find("Node_pressure_constraints")
+    if constraints is None:
+        raise ValueError(f"{solver_path} does not activate Node_pressure_constraints")
+    values_path = constraints.findtext("Values_file_path", "").strip()
+    if values_path != "pressure_gauge.csv":
+        raise ValueError(
+            f"{solver_path} uses Node_pressure_constraints file {values_path!r}, "
+            "expected 'pressure_gauge.csv'"
+        )
+    fluid_ls = fluid.find("LS")
+    if fluid_ls is None or fluid_ls.attrib.get("type", "").strip().lower() != "direct":
+        actual = None if fluid_ls is None else fluid_ls.attrib.get("type", "")
+        raise ValueError(
+            f"{solver_path} fluid LS type is {actual!r}, expected 'Direct' "
+            "for the wet-bed serial validation setting"
+        )
+    linear_algebra = fluid_ls.find("Linear_algebra")
+    if linear_algebra is None or linear_algebra.attrib.get("type", "").strip().lower() != "eigen":
+        actual = None if linear_algebra is None else linear_algebra.attrib.get("type", "")
+        raise ValueError(
+            f"{solver_path} fluid linear algebra backend is {actual!r}, expected 'eigen'"
+        )
+    preconditioner = linear_algebra.findtext("Preconditioner", "").strip().lower()
+    if preconditioner != "none":
+        raise ValueError(
+            f"{solver_path} fluid direct solver preconditioner is {preconditioner!r}, "
+            "expected 'none'"
+        )
+    free_surface = next(
+        (
+            bc
+            for bc in fluid.findall("Add_BC")
+            if bc.findtext("Type", "").strip() == "Free_surface"
+        ),
+        None,
+    )
+    if free_surface is None:
+        raise ValueError(f"{solver_path} fluid equation is missing the free-surface BC")
+    _require_text(free_surface, "Implementation", "UnfittedLevelSet", solver_path)
+    _require_text(free_surface, "Enable_cut_cell_stabilization", "true", solver_path)
+    _require_text(free_surface, "Use_cut_metadata_scale", "false", solver_path)
     return {
         "case": case_dir.name,
         "node_id": csv_node,

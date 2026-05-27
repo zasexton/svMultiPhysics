@@ -372,26 +372,32 @@ systems::CoupledResidualKernels installLevelSetTransport(
                              options.velocity.field_name);
     }
 
-    const auto advective_residual = dt(phi) + dot(velocity, grad(phi));
-    const auto conservative_residual = dt(phi) + div(phi * velocity);
-    const auto strong_residual =
+    const auto time_residual = dt(phi);
+    const auto advective_spatial_residual = dot(velocity, grad(phi));
+    const auto conservative_spatial_residual = div(phi * velocity);
+    const auto spatial_residual =
         options.transport_form == LevelSetTransportForm::ConservativeDivergence
-            ? conservative_residual
-            : advective_residual;
-    auto residual = (strong_residual * eta).dx();
+            ? conservative_spatial_residual
+            : advective_spatial_residual;
+    auto residual = (time_residual * eta).dx() + (spatial_residual * eta).dx();
     if (options.supg.enabled) {
         const auto velocity_norm = sqrt(
             dot(velocity, velocity) +
             FormExpr::constant(options.supg.velocity_epsilon));
         const auto tau =
             FormExpr::constant(options.supg.tau_scale) * h() / velocity_norm;
+        const auto streamline_test = tau * dot(velocity, grad(eta));
         residual = residual +
-                   (tau * dot(velocity, grad(eta)) * strong_residual).dx();
+                   (streamline_test * time_residual).dx() +
+                   (streamline_test * spatial_residual).dx();
     }
     if (options.interface_kinematic.enabled) {
         residual = residual +
                    (FormExpr::constant(options.interface_kinematic.weight_scale) *
-                    h() * strong_residual * eta)
+                    h() * time_residual * eta)
+                       .dI(options.interface_kinematic.interface_marker) +
+                   (FormExpr::constant(options.interface_kinematic.weight_scale) *
+                    h() * spatial_residual * eta)
                        .dI(options.interface_kinematic.interface_marker);
     }
 

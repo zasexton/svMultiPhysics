@@ -14,7 +14,12 @@
 #include "Physics/Core/EquationModuleInput.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstdint>
+#include <fstream>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -296,6 +301,55 @@ TEST(LevelSetEquationTranslator, TranslatesFieldsAndBoundaries)
 #endif
 }
 
+TEST(LevelSetEquationTranslator, TranslatesTemporalSpatialInflowBoundary)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  const std::string file_path = "level_set_inflow_temporal_spatial_test.dat";
+  {
+    std::ofstream out(file_path);
+    out << "1 2 4\n";
+    out << "0.0\n";
+    out << "1.0\n";
+    for (int node = 1; node <= 4; ++node) {
+      out << node << "\n";
+      out << static_cast<double>(node) << "\n";
+      out << static_cast<double>(node) + 0.5 << "\n";
+    }
+  }
+
+  auto mesh = makeRegistryQuadMesh();
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "1.0 0.0 0.0"};
+
+  svmp::Physics::BoundaryConditionInput inflow{};
+  inflow.name = "inlet";
+  inflow.boundary_marker = 4;
+  inflow.params["Type"] = svmp::Physics::ParameterValue{true, "LevelSetInflow"};
+  inflow.params["Temporal_and_spatial_values_file_path"] =
+      svmp::Physics::ParameterValue{true, file_path};
+  input.boundary_conditions.push_back(std::move(inflow));
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+  std::remove(file_path.c_str());
+
+  ASSERT_TRUE(module);
+  EXPECT_TRUE(system.hasOperator("level_set"));
+  EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
+  EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Coefficient));
+#endif
+}
+
 TEST(LevelSetEquationTranslator, InitializesPrescribedLevelSetFromMeshVertexField)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -416,20 +470,33 @@ TEST(LevelSetEquationTranslator, InitializesPrescribedHighOrderLevelSetFromMeshP
     EXPECT_TRUE(entity_map->getVertexDofs(vertex).empty());
   }
 
-  auto [cell_vertices, n_cell_vertices] = local_mesh.cell_vertices_span(0);
-  ASSERT_NE(cell_vertices, nullptr);
-  ASSERT_EQ(n_cell_vertices, 9u);
-  const auto cell_dofs = system.fieldDofHandler(phi).getCellDofs(0);
-  ASSERT_EQ(cell_dofs.size(), n_cell_vertices);
+  const auto n_field_dofs =
+      static_cast<std::size_t>(system.fieldDofHandler(phi).getNumDofs());
+  std::vector<svmp::FE::Real> expected_coefficients(n_field_dofs, 0.0);
+  std::vector<std::uint8_t> assigned(n_field_dofs, 0u);
+  const auto projection =
+      system.projectMeshVertexValuesToFieldCoefficients(
+          phi,
+          std::span<const svmp::FE::Real>(
+              phi_values,
+              static_cast<std::size_t>(local_mesh.n_vertices())),
+          1u,
+          std::span<svmp::FE::Real>(expected_coefficients.data(),
+                                    expected_coefficients.size()),
+          std::span<std::uint8_t>(assigned.data(), assigned.size()),
+          "LevelSetEquationTranslator test");
+  ASSERT_EQ(projection.unassigned_dofs, 0u);
+  ASSERT_EQ(projection.values_written, n_field_dofs);
   const auto offset = system.fieldDofOffset(phi);
 
-  for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
-    const auto vertex = cell_vertices[local_node];
-    const auto dof = offset + cell_dofs[local_node];
+  for (std::size_t local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
+    ASSERT_NE(assigned[local_dof], 0u);
+    const auto dof =
+        offset + static_cast<svmp::FE::GlobalIndex>(local_dof);
     ASSERT_GE(dof, 0);
     ASSERT_LT(static_cast<std::size_t>(dof), values.size());
     EXPECT_DOUBLE_EQ(values[static_cast<std::size_t>(dof)],
-                     phi_values[static_cast<std::size_t>(vertex)]);
+                     expected_coefficients[local_dof]);
   }
 
   svmp::FE::systems::SystemStateView state_view{};
@@ -444,6 +511,87 @@ TEST(LevelSetEquationTranslator, InitializesPrescribedHighOrderLevelSetFromMeshP
   for (svmp::index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
     EXPECT_DOUBLE_EQ(sampled[static_cast<std::size_t>(vertex)],
                      phi_values[static_cast<std::size_t>(vertex)]);
+  }
+#endif
+}
+
+TEST(LevelSetEquationTranslator,
+     InitializesPrescribedHierarchicalLevelSetFromMeshPointField)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeRegistryBiquadraticQuadMesh();
+  auto& local_mesh = mesh->local_mesh();
+  const auto field = svmp::MeshFields::attach_field(
+      local_mesh,
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  auto* phi_values =
+      svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, field);
+  ASSERT_NE(phi_values, nullptr);
+  for (svmp::index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+    const auto x = local_mesh.get_vertex_coords(vertex);
+    phi_values[vertex] =
+        1.5 + 0.25 * x[0] - 0.75 * x[1] + 0.5 * x[0] * x[1];
+  }
+
+  svmp::Physics::EquationModuleInput input{};
+  input.equation_type = "level_set";
+  input.mesh_name = "quad9";
+  input.mesh = mesh->local_mesh_ptr();
+  input.equation_params["Level_set_field_name"] =
+      svmp::Physics::ParameterValue{true, "phi"};
+  input.equation_params["Level_set_source"] =
+      svmp::Physics::ParameterValue{true, "prescribed_data"};
+  input.equation_params["Velocity_source"] =
+      svmp::Physics::ParameterValue{true, "constant"};
+  input.equation_params["Constant_velocity"] =
+      svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
+  input.equation_params["Basis_type"] =
+      svmp::Physics::ParameterValue{true, "hierarchical"};
+
+  svmp::FE::systems::FESystem system(mesh);
+  auto module = application::translators::level_set::createModule(input, system);
+  ASSERT_TRUE(module);
+  ASSERT_NO_THROW(system.setup({}));
+
+  auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS);
+  auto state = factory->createVector(system.dofHandler().getNumDofs());
+  state->zero();
+
+  module->applyInitialConditions(system, *state);
+  const auto values = state->localSpan();
+
+  const auto phi = system.findFieldByName("phi");
+  ASSERT_NE(phi, svmp::FE::INVALID_FIELD_ID);
+  ASSERT_EQ(system.fieldRecord(phi).space->element().basis().basis_type(),
+            svmp::FE::BasisType::Hierarchical);
+
+  svmp::FE::systems::SystemStateView state_view{};
+  state_view.u = values;
+  state_view.u_vector = state.get();
+  std::vector<double> fast_values(local_mesh.n_vertices(), -1.0);
+  EXPECT_FALSE(system.evaluateFieldAtVertices(
+      phi,
+      state_view,
+      static_cast<svmp::FE::GlobalIndex>(local_mesh.n_vertices()),
+      fast_values));
+
+  for (svmp::index_t vertex = 0; vertex < local_mesh.n_vertices(); ++vertex) {
+    const auto x = local_mesh.get_vertex_coords(vertex);
+    const std::array<svmp::FE::Real, 3> point{
+        static_cast<svmp::FE::Real>(x[0]),
+        static_cast<svmp::FE::Real>(x[1]),
+        0.0};
+    const auto value = system.evaluateFieldAtPoint(phi, state_view, point);
+    ASSERT_TRUE(value.has_value()) << "vertex " << vertex;
+    EXPECT_NEAR((*value)[0],
+                phi_values[static_cast<std::size_t>(vertex)],
+                1.0e-10);
   }
 #endif
 }

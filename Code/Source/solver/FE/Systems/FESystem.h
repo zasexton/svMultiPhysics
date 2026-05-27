@@ -274,6 +274,28 @@ public:
         std::string diagnostic{};
     };
 
+    class FormCellDomainRestrictionScope {
+    public:
+        FormCellDomainRestrictionScope() noexcept = default;
+        FormCellDomainRestrictionScope(
+            FESystem& system,
+            std::vector<FormCellDomainRestriction> restrictions);
+        ~FormCellDomainRestrictionScope();
+
+        FormCellDomainRestrictionScope(const FormCellDomainRestrictionScope&) = delete;
+        FormCellDomainRestrictionScope& operator=(const FormCellDomainRestrictionScope&) = delete;
+
+        FormCellDomainRestrictionScope(FormCellDomainRestrictionScope&& other) noexcept;
+        FormCellDomainRestrictionScope& operator=(FormCellDomainRestrictionScope&& other) noexcept;
+
+        void restore() noexcept;
+        [[nodiscard]] bool active() const noexcept { return system_ != nullptr; }
+
+    private:
+        FESystem* system_{nullptr};
+        std::vector<FormCellDomainRestriction> previous_{};
+    };
+
     explicit FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access);
     FESystem(std::shared_ptr<const assembly::IMeshAccess> mesh_access,
              std::vector<MeshParticipantInfo> participants);
@@ -307,6 +329,7 @@ public:
     [[nodiscard]] FieldId findFieldByName(std::string_view name) const noexcept;
     [[nodiscard]] bool hasField(std::string_view name) const noexcept;
     [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const;
+    [[nodiscard]] std::vector<FieldId> unknownFieldIdsInDofMapOrder() const;
     void setPrescribedFieldCoefficients(FieldId field, std::span<const Real> coefficients);
     void clearPrescribedFieldCoefficients(FieldId field);
     [[nodiscard]] std::span<const Real> prescribedFieldCoefficients(FieldId field) const;
@@ -337,6 +360,9 @@ public:
         std::vector<FormCellDomainRestriction> restrictions);
     [[nodiscard]] const std::vector<FormCellDomainRestriction>&
     formInstallCellDomainRestrictions() const noexcept;
+    [[nodiscard]] FormCellDomainRestrictionScope
+    scopedFormInstallCellDomainRestrictions(
+        std::vector<FormCellDomainRestriction> restrictions);
 
     /// @name Kernel registration (internal — do not use in physics modules)
     ///
@@ -1204,6 +1230,30 @@ public:
 	                                               const SystemStateView& state,
 	                                               GlobalIndex n_vertices,
 	                                               std::span<double> out) const;
+
+	    struct MeshVertexFieldProjectionResult {
+	        std::size_t values_written{0};
+	        std::size_t unassigned_dofs{0};
+	    };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+	    /**
+	     * @brief Project mesh vertex field values into nodal FE coefficients.
+	     *
+	     * The projection uses EntityDofMap vertex, edge, and cell-interior
+	     * associations. It fails closed for non-nodal spaces or unsupported
+	     * high-order entity layouts instead of relying on cell-local DOF order.
+	     */
+	    [[nodiscard]] MeshVertexFieldProjectionResult
+	    projectMeshVertexValuesToFieldCoefficients(
+	        FieldId field,
+	        std::span<const Real> mesh_values,
+	        std::size_t mesh_components,
+	        std::span<Real> coefficients,
+	        std::span<std::uint8_t> assigned = {},
+	        std::string_view context =
+	            "FESystem::projectMeshVertexValuesToFieldCoefficients") const;
+#endif
 
 	    // ---- Global-kernel persistent state (optional) ----
 	    [[nodiscard]] assembly::MaterialStateView globalKernelCellState(const GlobalKernel& kernel,

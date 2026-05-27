@@ -122,7 +122,7 @@ std::shared_ptr<Element> create_generic_scalar_element(const ElementRequest& req
     basis_req.tensor_extents = req.tensor_extents;
     basis_req.custom_id = req.custom_id;
 
-    auto basis = basis::BasisFactory::create(basis_req);
+    auto basis = basis::basis_factory::create(basis_req);
     if (!basis || basis->is_vector_valued()) {
         throw FEException("ElementFactory: BasisFactory did not return a scalar basis",
                           __FILE__, __LINE__, __func__, FEStatus::AssemblyError);
@@ -157,7 +157,7 @@ std::shared_ptr<Element> create_generic_vector_element(const ElementRequest& req
     basis_req.tensor_extents = req.tensor_extents;
     basis_req.custom_id = req.custom_id;
 
-    auto basis = basis::BasisFactory::create(basis_req);
+    auto basis = basis::basis_factory::create(basis_req);
     if (!basis || !basis->is_vector_valued()) {
         throw FEException("ElementFactory: BasisFactory did not return a vector basis",
                           __FILE__, __LINE__, __func__, FEStatus::AssemblyError);

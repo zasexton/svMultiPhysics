@@ -14,6 +14,103 @@ using namespace svmp::FE;
 using namespace svmp::FE::basis;
 using namespace svmp::FE::quadrature;
 
+namespace {
+
+void expect_hermite_raw_and_strided_match(
+    ElementType type,
+    const std::vector<math::Vector<Real, 3>>& points) {
+    HermiteBasis basis(type, 3);
+    const std::size_t n = basis.size();
+
+    for (const auto& xi : points) {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        basis.evaluate_all(xi, values, gradients, hessians);
+        ASSERT_EQ(values.size(), n);
+        ASSERT_EQ(gradients.size(), n);
+        ASSERT_EQ(hessians.size(), n);
+
+        std::vector<Real> raw_values(n, Real(0));
+        std::vector<Real> raw_gradients(n * 3u, Real(0));
+        std::vector<Real> raw_hessians(n * 9u, Real(0));
+        basis.evaluate_all_to(
+            xi, raw_values.data(), raw_gradients.data(), raw_hessians.data());
+
+        std::vector<Real> separate_values(n, Real(0));
+        std::vector<Real> separate_gradients(n * 3u, Real(0));
+        std::vector<Real> separate_hessians(n * 9u, Real(0));
+        basis.evaluate_values_to(xi, separate_values.data());
+        basis.evaluate_gradients_to(xi, separate_gradients.data());
+        basis.evaluate_hessians_to(xi, separate_hessians.data());
+
+        for (std::size_t dof = 0; dof < n; ++dof) {
+            EXPECT_NEAR(raw_values[dof], values[dof], 1e-14);
+            EXPECT_NEAR(separate_values[dof], values[dof], 1e-14);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                const std::size_t idx = dof * 3u + component;
+                EXPECT_NEAR(raw_gradients[idx], gradients[dof][component], 1e-14);
+                EXPECT_NEAR(separate_gradients[idx], gradients[dof][component], 1e-14);
+            }
+            for (std::size_t row = 0; row < 3u; ++row) {
+                for (std::size_t col = 0; col < 3u; ++col) {
+                    const std::size_t idx = dof * 9u + row * 3u + col;
+                    EXPECT_NEAR(raw_hessians[idx], hessians[dof](row, col), 1e-14);
+                    EXPECT_NEAR(separate_hessians[idx], hessians[dof](row, col), 1e-14);
+                }
+            }
+        }
+    }
+
+    const std::size_t stride = points.size() + 2u;
+    const Real sentinel = Real(-9876.5);
+    std::vector<Real> strided_values(n * stride, sentinel);
+    std::vector<Real> strided_gradients(n * 3u * stride, sentinel);
+    std::vector<Real> strided_hessians(n * 9u * stride, sentinel);
+    basis.evaluate_at_quadrature_points_strided(points,
+                                                stride,
+                                                strided_values.data(),
+                                                strided_gradients.data(),
+                                                strided_hessians.data());
+
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        basis.evaluate_all(points[q], values, gradients, hessians);
+
+        for (std::size_t dof = 0; dof < n; ++dof) {
+            EXPECT_NEAR(strided_values[dof * stride + q], values[dof], 1e-14);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                const std::size_t row = dof * 3u + component;
+                EXPECT_NEAR(strided_gradients[row * stride + q],
+                            gradients[dof][component],
+                            1e-14);
+            }
+            for (std::size_t row = 0; row < 3u; ++row) {
+                for (std::size_t col = 0; col < 3u; ++col) {
+                    const std::size_t hrow = dof * 9u + row * 3u + col;
+                    EXPECT_NEAR(strided_hessians[hrow * stride + q],
+                                hessians[dof](row, col),
+                                1e-14);
+                }
+            }
+        }
+    }
+
+    for (std::size_t row = 0; row < n; ++row) {
+        EXPECT_EQ(strided_values[row * stride + points.size()], sentinel);
+    }
+    for (std::size_t row = 0; row < n * 3u; ++row) {
+        EXPECT_EQ(strided_gradients[row * stride + points.size()], sentinel);
+    }
+    for (std::size_t row = 0; row < n * 9u; ++row) {
+        EXPECT_EQ(strided_hessians[row * stride + points.size()], sentinel);
+    }
+}
+
+} // namespace
+
 TEST(C1Basis, LineMetadataAndSize) {
     HermiteBasis basis(ElementType::Line2, 3);
 
@@ -98,7 +195,7 @@ TEST(C1Basis, BasisFactoryCreatesHermiteForC1Line2) {
         FieldType::Scalar
     };
 
-    auto basis_ptr = BasisFactory::create(req);
+    auto basis_ptr = basis_factory::create(req);
     ASSERT_TRUE(basis_ptr);
     EXPECT_EQ(basis_ptr->element_type(), ElementType::Line2);
     EXPECT_EQ(basis_ptr->dimension(), 1);
@@ -120,7 +217,7 @@ TEST(C1Basis, BasisFactoryCreatesHermiteForC1Quad4) {
         FieldType::Scalar
     };
 
-    auto basis_ptr = BasisFactory::create(req);
+    auto basis_ptr = basis_factory::create(req);
     ASSERT_TRUE(basis_ptr);
     EXPECT_EQ(basis_ptr->element_type(), ElementType::Quad4);
     EXPECT_EQ(basis_ptr->dimension(), 2);
@@ -143,7 +240,7 @@ TEST(C1Basis, QuadValueModesKroneckerAtCorners) {
     HermiteBasis basis(ElementType::Quad4, 3);
 
     for (std::size_t c = 0; c < 4; ++c) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Quad4, c);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Quad4, c);
         math::Vector<Real, 3> pt;
         pt[0] = xi[0];
         pt[1] = xi[1];
@@ -229,7 +326,7 @@ TEST(C1Basis, QuadInterpolatesBicubicPolynomial) {
     // Build DOFs from corner values and derivatives
     std::vector<Real> dofs(16, Real(0));
     for (std::size_t c = 0; c < 4; ++c) {
-        auto node = NodeOrdering::get_node_coords(ElementType::Quad4, c);
+        auto node = ReferenceNodeLayout::get_node_coords(ElementType::Quad4, c);
         const Real x = node[0];
         const Real y = node[1];
 
@@ -271,7 +368,7 @@ TEST(C1Basis, BasisFactoryCreatesHermiteForC1Hex8) {
         FieldType::Scalar
     };
 
-    auto basis_ptr = BasisFactory::create(req);
+    auto basis_ptr = basis_factory::create(req);
     ASSERT_TRUE(basis_ptr);
     EXPECT_EQ(basis_ptr->element_type(), ElementType::Hex8);
     EXPECT_EQ(basis_ptr->dimension(), 3);
@@ -297,7 +394,7 @@ TEST(C1Basis, HexValueModesKroneckerAtCorners) {
     HermiteBasis basis(ElementType::Hex8, 3);
 
     for (std::size_t c = 0; c < 8; ++c) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Hex8, c);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Hex8, c);
         std::vector<Real> vals;
         basis.evaluate_values(xi, vals);
         ASSERT_EQ(vals.size(), 64u);
@@ -367,4 +464,17 @@ TEST(C1Basis, HexGradientMatchesFiniteDifference) {
                 << "DOF " << i << ", dim " << d;
         }
     }
+}
+
+TEST(C1Basis, HermiteRawAndStridedOutputsMatchVectorEvaluation) {
+    expect_hermite_raw_and_strided_match(
+        ElementType::Line2,
+        {{Real(-0.4), Real(0), Real(0)}, {Real(0.35), Real(0), Real(0)}});
+    expect_hermite_raw_and_strided_match(
+        ElementType::Quad4,
+        {{Real(-0.2), Real(0.3), Real(0)}, {Real(0.45), Real(-0.55), Real(0)}});
+    expect_hermite_raw_and_strided_match(
+        ElementType::Hex8,
+        {{Real(-0.2), Real(0.3), Real(-0.4)},
+         {Real(0.45), Real(-0.55), Real(0.25)}});
 }

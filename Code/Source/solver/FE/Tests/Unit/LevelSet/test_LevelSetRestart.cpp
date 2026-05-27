@@ -260,12 +260,23 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
         system, mismatch, &diagnostic));
     EXPECT_NE(diagnostic.find("geometry revision"), std::string::npos);
 
-    auto unsupported_tangent = interface_record;
+    auto linear_differentiated_tangent = interface_record;
+    linear_differentiated_tangent.geometry_tangent_policy =
+        level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+    EXPECT_TRUE(level_set::levelSetGeneratedInterfaceRestartRecordMatches(
+        system, linear_differentiated_tangent, &diagnostic)) << diagnostic;
+
+    auto unsupported_tangent = linear_differentiated_tangent;
+    unsupported_tangent.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    unsupported_tangent.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::HighOrderSubcell;
     unsupported_tangent.geometry_tangent_policy =
         level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
     EXPECT_FALSE(level_set::levelSetGeneratedInterfaceRestartRecordMatches(
         system, unsupported_tangent, &diagnostic));
-    EXPECT_NE(diagnostic.find("tangent policy"), std::string::npos);
+    EXPECT_NE(diagnostic.find("differentiated geometry tangent policy"),
+              std::string::npos);
 
     const auto restored_options =
         level_set::optionsFromLevelSetGeneratedInterfaceRestartRecord(interface_record);

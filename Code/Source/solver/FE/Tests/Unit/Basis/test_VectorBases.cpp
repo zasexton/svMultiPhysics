@@ -8,16 +8,19 @@
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Basis/VectorBasis.h"
+#include "FE/Basis/VectorBasisEvaluationHelpers.h"
 #include "FE/Core/FEException.h"
 #include "FE/Elements/ReferenceElement.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureFactory.h"
+#include "FE/Quadrature/ReferenceMonomialIntegrals.h"
 #include "FE/Quadrature/TriangleQuadrature.h"
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
@@ -122,10 +125,6 @@ static double integrate_tetra_bdm_interior_moment(const BDMBasis& basis,
                                                   int order,
                                                   int quad_order = 8);
 
-static double integrate_tetra_bdm_divergence(const BDMBasis& basis,
-                                             int func_id,
-                                             int quad_order = 8);
-
 static double integrate_tetra_edge_tangential_moment(const NedelecBasis& basis,
                                                      int edge_id,
                                                      int mode_id,
@@ -140,6 +139,366 @@ static double integrate_tetra_face_tangential_moment(const NedelecBasis& basis,
                                                      int func_id,
                                                      int order,
                                                      int quad_order = 8);
+
+using Vec3 = svmp::FE::math::Vector<Real, 3>;
+
+static Vec3 curl_from_jacobian(const VectorJacobian& J) {
+    return Vec3{J(2u, 1u) - J(1u, 2u),
+                J(0u, 2u) - J(2u, 0u),
+                J(1u, 0u) - J(0u, 1u)};
+}
+
+static Real divergence_from_jacobian(const VectorJacobian& J) {
+    return J(0u, 0u) + J(1u, 1u) + J(2u, 2u);
+}
+
+class FallbackPlanarVectorBasis final : public VectorBasisFunction {
+public:
+    BasisType basis_type() const noexcept override { return BasisType::Custom; }
+    ElementType element_type() const noexcept override { return ElementType::Quad4; }
+    int dimension() const noexcept override { return 2; }
+    int order() const noexcept override { return 1; }
+    std::size_t size() const noexcept override { return 2u; }
+
+    void evaluate_vector_values(const Vec3& xi,
+                                std::vector<Vec3>& values) const override {
+        values = {
+            Vec3{xi[0] + Real(2) * xi[1], Real(3) * xi[0] - xi[1], Real(0)},
+            Vec3{-Real(2) * xi[0], xi[1] * xi[1], Real(0)}
+        };
+    }
+
+    void evaluate_vector_jacobians(const Vec3& xi,
+                                   std::vector<VectorJacobian>& jacobians) const override {
+        jacobians.assign(size(), VectorJacobian{});
+        jacobians[0](0u, 0u) = Real(1);
+        jacobians[0](0u, 1u) = Real(2);
+        jacobians[0](1u, 0u) = Real(3);
+        jacobians[0](1u, 1u) = Real(-1);
+        jacobians[1](0u, 0u) = Real(-2);
+        jacobians[1](1u, 1u) = Real(2) * xi[1];
+    }
+};
+
+template <typename BasisT>
+static void expect_vector_strided_all_outputs_match_pointwise(const BasisT& basis,
+                                                              const std::vector<Vec3>& points) {
+    const std::size_t stride = points.size() + 3u;
+    const Real sentinel = Real(-123);
+    std::vector<Real> values(basis.size() * 3u * stride, sentinel);
+    std::vector<Real> jacobians(basis.size() * 9u * stride, sentinel);
+    std::vector<Real> curls(basis.size() * 3u * stride, sentinel);
+    std::vector<Real> divergence(basis.size() * stride, sentinel);
+
+    basis.evaluate_vector_at_quadrature_points_strided(points,
+                                                       stride,
+                                                       values.data(),
+                                                       jacobians.data(),
+                                                       curls.data(),
+                                                       divergence.data());
+
+    std::vector<Vec3> expected_values;
+    std::vector<VectorJacobian> expected_jacobians;
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        basis.evaluate_vector_values(points[q], expected_values);
+        basis.evaluate_vector_jacobians(points[q], expected_jacobians);
+        ASSERT_EQ(expected_values.size(), basis.size());
+        ASSERT_EQ(expected_jacobians.size(), basis.size());
+
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            const Vec3 expected_curl = curl_from_jacobian(expected_jacobians[dof]);
+            const Real expected_divergence = divergence_from_jacobian(expected_jacobians[dof]);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(values[(dof * 3u + component) * stride + q],
+                            expected_values[dof][component],
+                            1e-12);
+                EXPECT_NEAR(curls[(dof * 3u + component) * stride + q],
+                            expected_curl[component],
+                            1e-12);
+                for (std::size_t derivative = 0; derivative < 3u; ++derivative) {
+                    EXPECT_NEAR(jacobians[(dof * 9u + component * 3u + derivative) *
+                                          stride + q],
+                                expected_jacobians[dof](component, derivative),
+                                1e-12);
+                }
+            }
+            EXPECT_NEAR(divergence[dof * stride + q], expected_divergence, 1e-12);
+        }
+    }
+
+    for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+        for (std::size_t pad = points.size(); pad < stride; ++pad) {
+            EXPECT_DOUBLE_EQ(divergence[dof * stride + pad], sentinel);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_DOUBLE_EQ(values[(dof * 3u + component) * stride + pad], sentinel);
+                EXPECT_DOUBLE_EQ(curls[(dof * 3u + component) * stride + pad], sentinel);
+            }
+            for (std::size_t component = 0; component < 9u; ++component) {
+                EXPECT_DOUBLE_EQ(jacobians[(dof * 9u + component) * stride + pad], sentinel);
+            }
+        }
+    }
+}
+
+template <typename BasisT>
+static void expect_vector_strided_values_only_match_pointwise(const BasisT& basis,
+                                                              const std::vector<Vec3>& points) {
+    const std::size_t stride = points.size() + 1u;
+    const Real sentinel = Real(-77);
+    std::vector<Real> values(basis.size() * 3u * stride, sentinel);
+    basis.evaluate_vector_at_quadrature_points_strided(
+        points, stride, values.data(), nullptr, nullptr, nullptr);
+
+    std::vector<Vec3> expected_values;
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        basis.evaluate_vector_values(points[q], expected_values);
+        ASSERT_EQ(expected_values.size(), basis.size());
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(values[(dof * 3u + component) * stride + q],
+                            expected_values[dof][component],
+                            1e-12);
+                EXPECT_DOUBLE_EQ(values[(dof * 3u + component) * stride + points.size()],
+                                 sentinel);
+            }
+        }
+    }
+}
+
+template <typename BasisT>
+static void expect_vector_strided_divergence_only_match_pointwise(
+    const BasisT& basis,
+    const std::vector<Vec3>& points) {
+    const std::size_t stride = points.size() + 2u;
+    const Real sentinel = Real(-55);
+    std::vector<Real> divergence(basis.size() * stride, sentinel);
+    basis.evaluate_vector_at_quadrature_points_strided(
+        points, stride, nullptr, nullptr, nullptr, divergence.data());
+
+    std::vector<Real> expected_divergence;
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        basis.evaluate_divergence(points[q], expected_divergence);
+        ASSERT_EQ(expected_divergence.size(), basis.size());
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            EXPECT_NEAR(divergence[dof * stride + q], expected_divergence[dof], 1e-12);
+            for (std::size_t pad = points.size(); pad < stride; ++pad) {
+                EXPECT_DOUBLE_EQ(divergence[dof * stride + pad], sentinel);
+            }
+        }
+    }
+}
+
+template <typename BasisT>
+static void expect_vector_strided_curl_only_match_pointwise(const BasisT& basis,
+                                                           const std::vector<Vec3>& points) {
+    const std::size_t stride = points.size() + 2u;
+    const Real sentinel = Real(-44);
+    std::vector<Real> curls(basis.size() * 3u * stride, sentinel);
+    basis.evaluate_vector_at_quadrature_points_strided(
+        points, stride, nullptr, nullptr, curls.data(), nullptr);
+
+    std::vector<Vec3> expected_curl;
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        basis.evaluate_curl(points[q], expected_curl);
+        ASSERT_EQ(expected_curl.size(), basis.size());
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(curls[(dof * 3u + component) * stride + q],
+                            expected_curl[dof][component],
+                            1e-12);
+                for (std::size_t pad = points.size(); pad < stride; ++pad) {
+                    EXPECT_DOUBLE_EQ(curls[(dof * 3u + component) * stride + pad],
+                                     sentinel);
+                }
+            }
+        }
+    }
+}
+
+TEST(VectorBasisStrided, RaviartThomasOverrideMatchesPointwise) {
+    const RaviartThomasBasis basis(ElementType::Triangle3, 1);
+    const std::vector<Vec3> points = {
+        {Real(0.15), Real(0.2), Real(0)},
+        {Real(0.45), Real(0.1), Real(0)}
+    };
+
+    expect_vector_strided_all_outputs_match_pointwise(basis, points);
+    expect_vector_strided_values_only_match_pointwise(basis, points);
+    expect_vector_strided_divergence_only_match_pointwise(basis, points);
+}
+
+TEST(VectorBasisStrided, NedelecOverrideMatchesPointwise) {
+    const NedelecBasis basis(ElementType::Triangle3, 1);
+    const std::vector<Vec3> points = {
+        {Real(0.2), Real(0.25), Real(0)},
+        {Real(0.55), Real(0.15), Real(0)}
+    };
+
+    expect_vector_strided_all_outputs_match_pointwise(basis, points);
+    expect_vector_strided_values_only_match_pointwise(basis, points);
+    expect_vector_strided_curl_only_match_pointwise(basis, points);
+}
+
+TEST(VectorBasisStrided, BDMOverrideMatchesPointwise) {
+    const BDMBasis basis(ElementType::Triangle3, 2);
+    const std::vector<Vec3> points = {
+        {Real(0.1), Real(0.35), Real(0)},
+        {Real(0.5), Real(0.2), Real(0)}
+    };
+
+    expect_vector_strided_all_outputs_match_pointwise(basis, points);
+    expect_vector_strided_values_only_match_pointwise(basis, points);
+    expect_vector_strided_divergence_only_match_pointwise(basis, points);
+}
+
+TEST(VectorBasisStrided, TransformedSeedOverridesMatchPointwise) {
+    const std::vector<Vec3> wedge_points = {
+        {Real(0.2), Real(0.2), Real(-0.3)},
+        {Real(0.5), Real(0.1), Real(0.4)}
+    };
+
+    const RaviartThomasBasis rt_wedge(ElementType::Wedge6, 1);
+    expect_vector_strided_all_outputs_match_pointwise(rt_wedge, wedge_points);
+    expect_vector_strided_divergence_only_match_pointwise(rt_wedge, wedge_points);
+
+    const NedelecBasis nd_wedge(ElementType::Wedge6, 1);
+    expect_vector_strided_all_outputs_match_pointwise(nd_wedge, wedge_points);
+    expect_vector_strided_curl_only_match_pointwise(nd_wedge, wedge_points);
+}
+
+TEST(VectorBasisStrided, BaseFallbackOverwritesPlanarComponents) {
+    const FallbackPlanarVectorBasis concrete_basis;
+    const VectorBasisFunction& basis = concrete_basis;
+    const std::vector<Vec3> points = {
+        {Real(0.25), Real(-0.5), Real(0)},
+        {Real(-0.3), Real(0.4), Real(0)}
+    };
+    const std::size_t stride = points.size() + 2u;
+    const Real sentinel = Real(37);
+    std::vector<Real> values(basis.size() * 3u * stride, sentinel);
+    std::vector<Real> jacobians(basis.size() * 9u * stride, sentinel);
+    std::vector<Real> curls(basis.size() * 3u * stride, sentinel);
+    std::vector<Real> divergence(basis.size() * stride, sentinel);
+
+    basis.evaluate_vector_at_quadrature_points_strided(points,
+                                                       stride,
+                                                       values.data(),
+                                                       jacobians.data(),
+                                                       curls.data(),
+                                                       divergence.data());
+
+    std::vector<Vec3> expected_values;
+    std::vector<VectorJacobian> expected_jacobians;
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        basis.evaluate_vector_values(points[q], expected_values);
+        basis.evaluate_vector_jacobians(points[q], expected_jacobians);
+        for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+            const Vec3 expected_curl = curl_from_jacobian(expected_jacobians[dof]);
+            const Real expected_divergence = divergence_from_jacobian(expected_jacobians[dof]);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(values[(dof * 3u + component) * stride + q],
+                            expected_values[dof][component],
+                            1e-14);
+                EXPECT_NEAR(curls[(dof * 3u + component) * stride + q],
+                            expected_curl[component],
+                            1e-14);
+            }
+            for (std::size_t component = 0; component < 9u; ++component) {
+                const std::size_t row = component / 3u;
+                const std::size_t col = component % 3u;
+                EXPECT_NEAR(jacobians[(dof * 9u + component) * stride + q],
+                            expected_jacobians[dof](row, col),
+                            1e-14);
+            }
+            EXPECT_NEAR(divergence[dof * stride + q], expected_divergence, 1e-14);
+            EXPECT_DOUBLE_EQ(values[(dof * 3u + 2u) * stride + q], Real(0));
+            EXPECT_DOUBLE_EQ(curls[(dof * 3u + 0u) * stride + q], Real(0));
+            EXPECT_DOUBLE_EQ(curls[(dof * 3u + 1u) * stride + q], Real(0));
+        }
+    }
+
+    for (std::size_t dof = 0; dof < basis.size(); ++dof) {
+        for (std::size_t pad = points.size(); pad < stride; ++pad) {
+            EXPECT_DOUBLE_EQ(divergence[dof * stride + pad], sentinel);
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_DOUBLE_EQ(values[(dof * 3u + component) * stride + pad], sentinel);
+                EXPECT_DOUBLE_EQ(curls[(dof * 3u + component) * stride + pad], sentinel);
+            }
+            for (std::size_t component = 0; component < 9u; ++component) {
+                EXPECT_DOUBLE_EQ(jacobians[(dof * 9u + component) * stride + pad], sentinel);
+            }
+        }
+    }
+}
+
+TEST(ReferenceMonomialIntegrals, KnownLowOrderValuesAndProductDomains) {
+    using namespace svmp::FE::quadrature::reference_integrals;
+
+    EXPECT_NEAR(integral_monomial_1d(0), Real(2), 1e-15);
+    EXPECT_NEAR(integral_monomial_1d(1), Real(0), 1e-15);
+    EXPECT_NEAR(integral_monomial_1d(2), Real(2) / Real(3), 1e-15);
+
+    EXPECT_NEAR(integral_triangle_monomial(0, 0), Real(0.5), 1e-15);
+    EXPECT_NEAR(integral_triangle_monomial(1, 0), Real(1) / Real(6), 1e-15);
+    EXPECT_NEAR(integral_triangle_monomial(1, 1), Real(1) / Real(24), 1e-15);
+
+    EXPECT_NEAR(integral_tetra_monomial(0, 0, 0), Real(1) / Real(6), 1e-15);
+    EXPECT_NEAR(integral_tetra_monomial(1, 0, 0), Real(1) / Real(24), 1e-15);
+    EXPECT_NEAR(integral_tetra_monomial(1, 1, 0), Real(1) / Real(120), 1e-15);
+
+    EXPECT_NEAR(integral_pyramid_z(2), Real(1) / Real(3), 1e-15);
+    EXPECT_NEAR(integral_wedge_monomial(1, 1, 2),
+                integral_triangle_monomial(1, 1) * integral_monomial_1d(2),
+                1e-15);
+
+    EXPECT_THROW((void)integral_triangle_monomial(-1, 0), FEException);
+    EXPECT_THROW((void)integral_tetra_monomial(0, -1, 0), FEException);
+    EXPECT_THROW((void)integral_wedge_monomial(0, 0, -1), FEException);
+}
+
+TEST(VectorBasisModalPolynomial, AppendUniqueSkipsExactDuplicates) {
+    std::vector<VectorBasisModalPolynomial> polynomials;
+
+    VectorBasisModalPolynomial x{};
+    x.num_terms = 1;
+    x.terms[0] = VectorBasisModalTerm{0, 1, 0, 0, Real(1)};
+
+    VectorBasisModalPolynomial y = x;
+    y.terms[0].component = 1;
+
+    EXPECT_TRUE(append_unique_modal_polynomial(polynomials, x));
+    EXPECT_FALSE(append_unique_modal_polynomial(polynomials, x));
+    EXPECT_TRUE(append_unique_modal_polynomial(polynomials, y));
+    EXPECT_EQ(polynomials.size(), 2u);
+}
+
+TEST(VectorBasisSparseCoefficients, PrunesRelativeRoundoffNoise) {
+    using svmp::FE::basis::detail::vector_common::build_sparse_modal_coefficients;
+
+    constexpr Real max_abs = Real(2);
+    const Real below_threshold =
+        std::numeric_limits<Real>::epsilon() * Real(16) * max_abs;
+    const Real above_threshold =
+        std::numeric_limits<Real>::epsilon() * Real(1024) * max_abs;
+
+    const std::vector<Real> dense = {
+        Real(1), below_threshold, -above_threshold, Real(0),
+        -below_threshold, -max_abs, Real(0), Real(0.5)
+    };
+
+    const auto sparse = build_sparse_modal_coefficients(dense, 2u, 4u);
+
+    EXPECT_EQ(sparse.rows, 2u);
+    EXPECT_EQ(sparse.cols, 4u);
+    EXPECT_EQ(sparse.row_offsets, (std::vector<std::size_t>{0u, 2u, 4u}));
+    EXPECT_EQ(sparse.dofs, (std::vector<std::size_t>{0u, 2u, 1u, 3u}));
+
+    ASSERT_EQ(sparse.coefficients.size(), 4u);
+    EXPECT_EQ(sparse.coefficients[0], Real(1));
+    EXPECT_EQ(sparse.coefficients[1], -above_threshold);
+    EXPECT_EQ(sparse.coefficients[2], -max_abs);
+    EXPECT_EQ(sparse.coefficients[3], Real(0.5));
+}
 
 TEST(RaviartThomasBasis, DivergenceConstants) {
     RaviartThomasBasis basis(ElementType::Quad4, 0);
@@ -358,6 +717,79 @@ TEST(VectorBasisJacobians, CompatibleTensorJacobiansMatchComponentGradientsAndOp
     ASSERT_EQ(curl.size(), jacobians.size());
     for (std::size_t i = 0; i < jacobians.size(); ++i) {
         EXPECT_NEAR(jacobians[i](1, 0) - jacobians[i](0, 1), curl[i][2], 1e-14);
+    }
+
+    const std::vector<svmp::FE::math::Vector<Real, 3>> points = {
+        {Real(0.2), Real(-0.3), Real(0)},
+        {Real(-0.4), Real(0.1), Real(0)}
+    };
+    const std::size_t stride = points.size() + 2u;
+
+    std::vector<Real> values(hdiv.size() * 3u * stride, Real(-17));
+    std::vector<Real> jacs(hdiv.size() * 9u * stride, Real(-17));
+    std::vector<Real> divs(hdiv.size() * stride, Real(-17));
+    hdiv.evaluate_vector_at_quadrature_points_strided(points,
+                                                      stride,
+                                                      values.data(),
+                                                      jacs.data(),
+                                                      nullptr,
+                                                      divs.data());
+
+    std::vector<svmp::FE::math::Vector<Real, 3>> expected_values;
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        hdiv.evaluate_vector_values(points[q], expected_values);
+        hdiv.evaluate_vector_jacobians(points[q], jacobians);
+        hdiv.evaluate_divergence(points[q], divergence);
+        for (std::size_t i = 0; i < hdiv.size(); ++i) {
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(values[(i * 3u + component) * stride + q],
+                            expected_values[i][component],
+                            1e-14);
+                for (std::size_t derivative = 0; derivative < 3u; ++derivative) {
+                    EXPECT_NEAR(jacs[(i * 9u + component * 3u + derivative) * stride + q],
+                                jacobians[i](component, derivative),
+                                1e-14);
+                }
+            }
+            EXPECT_NEAR(divs[i * stride + q], divergence[i], 1e-14);
+        }
+    }
+
+    std::vector<Real> curl_values(hcurl.size() * 3u * stride, Real(-19));
+    std::vector<Real> curl_jacs(hcurl.size() * 9u * stride, Real(-19));
+    std::vector<Real> curls(hcurl.size() * 3u * stride, Real(-19));
+    hcurl.evaluate_vector_at_quadrature_points_strided(points,
+                                                       stride,
+                                                       curl_values.data(),
+                                                       curl_jacs.data(),
+                                                       curls.data(),
+                                                       nullptr);
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        hcurl.evaluate_vector_values(points[q], expected_values);
+        hcurl.evaluate_vector_jacobians(points[q], jacobians);
+        hcurl.evaluate_curl(points[q], curl);
+        for (std::size_t i = 0; i < hcurl.size(); ++i) {
+            for (std::size_t component = 0; component < 3u; ++component) {
+                EXPECT_NEAR(curl_values[(i * 3u + component) * stride + q],
+                            expected_values[i][component],
+                            1e-14);
+                EXPECT_NEAR(curls[(i * 3u + component) * stride + q],
+                            curl[i][component],
+                            1e-14);
+                for (std::size_t derivative = 0; derivative < 3u; ++derivative) {
+                    EXPECT_NEAR(curl_jacs[(i * 9u + component * 3u + derivative) * stride + q],
+                                jacobians[i](component, derivative),
+                                1e-14);
+                }
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < hdiv.size(); ++i) {
+        for (std::size_t pad = points.size(); pad < stride; ++pad) {
+            EXPECT_DOUBLE_EQ(values[(i * 3u) * stride + pad], Real(-17));
+            EXPECT_DOUBLE_EQ(divs[i * stride + pad], Real(-17));
+        }
     }
 }
 
@@ -582,6 +1014,47 @@ TEST(BDMBasis, TetraHigherOrderFaceAndInteriorMomentsAreKronecker) {
     }
 }
 
+TEST(BDMBasis, RepeatedHigherOrderConstructionIsNumericallyStable) {
+    const struct Case {
+        ElementType type;
+        int order;
+        math::Vector<Real, 3> point;
+        Real tolerance;
+    } cases[] = {
+        {ElementType::Triangle3, 3, {Real(0.21), Real(0.27), Real(0)}, Real(1e-12)},
+        {ElementType::Tetra4, 3, {Real(0.16), Real(0.19), Real(0.23)}, Real(1e-11)},
+    };
+
+    for (const auto& c : cases) {
+        BDMBasis first(c.type, c.order);
+        BDMBasis second(c.type, c.order);
+        ASSERT_EQ(first.size(), second.size());
+
+        std::vector<math::Vector<Real, 3>> first_values;
+        std::vector<math::Vector<Real, 3>> second_values;
+        first.evaluate_vector_values(c.point, first_values);
+        second.evaluate_vector_values(c.point, second_values);
+        ASSERT_EQ(first_values.size(), second_values.size());
+
+        for (std::size_t i = 0; i < first_values.size(); ++i) {
+            for (std::size_t d = 0; d < 3u; ++d) {
+                EXPECT_NEAR(first_values[i][d], second_values[i][d], c.tolerance)
+                    << "basis=" << i << ", dim=" << d;
+            }
+        }
+
+        std::vector<Real> first_divergence;
+        std::vector<Real> second_divergence;
+        first.evaluate_divergence(c.point, first_divergence);
+        second.evaluate_divergence(c.point, second_divergence);
+        ASSERT_EQ(first_divergence.size(), second_divergence.size());
+        for (std::size_t i = 0; i < first_divergence.size(); ++i) {
+            EXPECT_NEAR(first_divergence[i], second_divergence[i], c.tolerance)
+                << "divergence basis=" << i;
+        }
+    }
+}
+
 TEST(BDMBasis, TriangleDivergenceLiesInPkMinusOne) {
     using svmp::FE::math::Vector;
 
@@ -609,7 +1082,7 @@ TEST(BDMBasis, TriangleDivergenceLiesInPkMinusOne) {
         }
 
         LagrangeBasis scalar_basis(ElementType::Triangle3, order - 1);
-        const auto nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Triangle3, order - 1);
+        const auto nodes = ReferenceNodeLayout::get_lagrange_node_coords(ElementType::Triangle3, order - 1);
         ASSERT_EQ(nodes.size(), scalar_basis.size());
 
         for (std::size_t func = 0; func < basis.size(); ++func) {
@@ -665,7 +1138,7 @@ TEST(BDMBasis, TetraDivergenceLiesInPkMinusOne) {
         }
 
         LagrangeBasis scalar_basis(ElementType::Tetra4, order - 1);
-        const auto nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Tetra4, order - 1);
+        const auto nodes = ReferenceNodeLayout::get_lagrange_node_coords(ElementType::Tetra4, order - 1);
         ASSERT_EQ(nodes.size(), scalar_basis.size());
 
         for (std::size_t func = 0; func < basis.size(); ++func) {
@@ -735,7 +1208,7 @@ TEST(BDMBasis, TetraFaceMomentOrderingIsInvariantUnderCyclicFaceParameterization
 
     const int order = 2;
     const std::array<int, 3> cyclic_perm = {1, 2, 0};
-    const auto face_nodes = NodeOrdering::get_lagrange_node_coords(ElementType::Triangle3, order);
+    const auto face_nodes = ReferenceNodeLayout::get_lagrange_node_coords(ElementType::Triangle3, order);
     BDMBasis basis(ElementType::Tetra4, order);
 
     auto map_mode_under_permutation = [&](std::size_t mode) -> std::size_t {
@@ -1132,8 +1605,8 @@ static double integrate_edge_normal_flux_quad4(const RaviartThomasBasis& basis,
     const ReferenceElement ref = ReferenceElement::create(ElementType::Quad4);
     const auto& en = ref.edge_nodes(static_cast<std::size_t>(edge_id));
     EXPECT_EQ(en.size(), 2u);
-    const Vector<Real, 3> p0 = NodeOrdering::get_node_coords(ElementType::Quad4, static_cast<std::size_t>(en[0]));
-    const Vector<Real, 3> p1 = NodeOrdering::get_node_coords(ElementType::Quad4, static_cast<std::size_t>(en[1]));
+    const Vector<Real, 3> p0 = ReferenceNodeLayout::get_node_coords(ElementType::Quad4, static_cast<std::size_t>(en[0]));
+    const Vector<Real, 3> p1 = ReferenceNodeLayout::get_node_coords(ElementType::Quad4, static_cast<std::size_t>(en[1]));
 
     const Vector<Real, 3> tvec = p1 - p0;
     const Real len = tvec.norm();
@@ -1364,8 +1837,8 @@ static double integrate_triangle_bdm_edge_moment_exact(const BDMBasis& basis,
 
     const ReferenceElement ref = ReferenceElement::create(ElementType::Triangle3);
     const auto& edge_nodes = ref.edge_nodes(static_cast<std::size_t>(edge_id));
-    const Vector<Real, 3> a = NodeOrdering::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(edge_nodes[0]));
-    const Vector<Real, 3> b = NodeOrdering::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(edge_nodes[1]));
+    const Vector<Real, 3> a = ReferenceNodeLayout::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(edge_nodes[0]));
+    const Vector<Real, 3> b = ReferenceNodeLayout::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(edge_nodes[1]));
 
     const Vector<Real, 3> tvec = b - a;
     const Real len = tvec.norm();
@@ -1441,9 +1914,9 @@ static double integrate_tetra_bdm_face_moment(const BDMBasis& basis,
 
     const ReferenceElement ref = ReferenceElement::create(ElementType::Tetra4);
     const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
-    const Vector<Real, 3> a = NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[0]));
-    const Vector<Real, 3> b = NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[1]));
-    const Vector<Real, 3> c = NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[2]));
+    const Vector<Real, 3> a = ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[0]));
+    const Vector<Real, 3> b = ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[1]));
+    const Vector<Real, 3> c = ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(face_nodes[2]));
 
     const Vector<Real, 3> e01 = b - a;
     const Vector<Real, 3> e02 = c - a;
@@ -1492,11 +1965,11 @@ static double integrate_tetra_bdm_face_moment_with_vertex_permutation(
 
     const ReferenceElement ref = ReferenceElement::create(ElementType::Tetra4);
     const auto& face_nodes = ref.face_nodes(static_cast<std::size_t>(face_id));
-    const Vector<Real, 3> a = NodeOrdering::get_node_coords(
+    const Vector<Real, 3> a = ReferenceNodeLayout::get_node_coords(
         ElementType::Tetra4, static_cast<std::size_t>(face_nodes[static_cast<std::size_t>(vertex_permutation[0])]));
-    const Vector<Real, 3> b = NodeOrdering::get_node_coords(
+    const Vector<Real, 3> b = ReferenceNodeLayout::get_node_coords(
         ElementType::Tetra4, static_cast<std::size_t>(face_nodes[static_cast<std::size_t>(vertex_permutation[1])]));
-    const Vector<Real, 3> c = NodeOrdering::get_node_coords(
+    const Vector<Real, 3> c = ReferenceNodeLayout::get_node_coords(
         ElementType::Tetra4, static_cast<std::size_t>(face_nodes[static_cast<std::size_t>(vertex_permutation[2])]));
 
     const Vector<Real, 3> e01 = b - a;
@@ -1559,23 +2032,6 @@ static double integrate_tetra_bdm_interior_moment(const BDMBasis& basis,
                                           test_values[static_cast<std::size_t>(mode_id)]));
     }
     return moment;
-}
-
-static double integrate_tetra_bdm_divergence(const BDMBasis& basis,
-                                             int func_id,
-                                             int quad_order) {
-    using svmp::FE::quadrature::QuadratureFactory;
-
-    const auto quad = QuadratureFactory::create(
-        ElementType::Tetra4, quad_order, QuadratureType::GaussLegendre, /*use_cache=*/false);
-
-    double volume = 0.0;
-    for (std::size_t q = 0; q < quad->num_points(); ++q) {
-        std::vector<Real> divergence;
-        basis.evaluate_divergence(quad->point(q), divergence);
-        volume += static_cast<double>(quad->weight(q) * divergence[static_cast<std::size_t>(func_id)]);
-    }
-    return volume;
 }
 
 TEST(RaviartThomasBasis, QuadEdgeFluxes) {

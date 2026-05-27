@@ -14,10 +14,10 @@ namespace svmp {
 namespace FE {
 namespace elements {
 
-using svmp::FE::basis::BasisFactory;
 using svmp::FE::basis::BasisRequest;
 using svmp::FE::quadrature::QuadratureFactory;
 using svmp::FE::QuadratureType;
+namespace basis_factory = svmp::FE::basis::basis_factory;
 
 SpectralElement::SpectralElement(ElementType element_type,
                                  int order,
@@ -56,7 +56,7 @@ SpectralElement::SpectralElement(ElementType element_type,
     req.continuity   = continuity;
     req.field_type   = FieldType::Scalar;
 
-    basis_ = BasisFactory::create(req);
+    basis_ = basis_factory::create(req);
     if (!basis_) {
         throw FEException("SpectralElement: BasisFactory returned null basis",
                           __FILE__, __LINE__, __func__, FEStatus::AssemblyError);

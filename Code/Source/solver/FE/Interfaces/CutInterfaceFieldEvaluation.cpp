@@ -90,6 +90,98 @@ using Matrix3 = std::array<std::array<Real, 3>, 3>;
     throw std::invalid_argument("H1 cut-interface gradient evaluation requires a two- or three-dimensional element");
 }
 
+void validateTwoSidedBinding(const GeneratedInterfaceTwoSidedBinding& binding)
+{
+    if (!binding.complete()) {
+        throw std::invalid_argument(
+            "two-sided H1 cut-interface field evaluation requires a complete generated-interface binding");
+    }
+    if (binding.minus_side != CutInterfaceSideTag::Negative ||
+        binding.plus_side != CutInterfaceSideTag::Positive) {
+        throw std::invalid_argument(
+            "two-sided H1 cut-interface field evaluation requires negative minus-side and positive plus-side tags");
+    }
+}
+
+void validateFragmentMatchesBinding(
+    const GeneratedInterfaceTwoSidedBinding& binding,
+    const CutInterfaceFragment& fragment)
+{
+    validateTwoSidedBinding(binding);
+    if (!fragment.active() ||
+        fragment.interface_marker != binding.interface_marker ||
+        fragment.parent_cell != binding.parent_cell ||
+        fragment.stable_id != binding.interface_stable_id) {
+        throw std::invalid_argument(
+            "two-sided H1 cut-interface field evaluation received a fragment that does not match the generated-interface binding");
+    }
+}
+
+[[nodiscard]] CutInterfaceFieldValue combineFieldValues(
+    const CutInterfaceFieldValue& a,
+    Real a_scale,
+    const CutInterfaceFieldValue& b,
+    Real b_scale,
+    const char* context)
+{
+    if (a.components.size() != b.components.size()) {
+        throw std::invalid_argument(context);
+    }
+    CutInterfaceFieldValue result;
+    result.components.resize(a.components.size());
+    for (std::size_t component = 0; component < result.components.size();
+         ++component) {
+        result.components[component] =
+            a_scale * a.components[component] + b_scale * b.components[component];
+    }
+    return result;
+}
+
+[[nodiscard]] CutInterfaceFieldGradient combineFieldGradients(
+    const CutInterfaceFieldGradient& a,
+    Real a_scale,
+    const CutInterfaceFieldGradient& b,
+    Real b_scale,
+    const char* context)
+{
+    if (a.components.size() != b.components.size()) {
+        throw std::invalid_argument(context);
+    }
+    CutInterfaceFieldGradient result;
+    result.components.resize(a.components.size());
+    for (std::size_t component = 0; component < result.components.size();
+         ++component) {
+        for (std::size_t d = 0; d < result.components[component].size(); ++d) {
+            result.components[component][d] =
+                a_scale * a.components[component][d] +
+                b_scale * b.components[component][d];
+        }
+    }
+    return result;
+}
+
+void stampTwoSidedValueMetadata(
+    CutInterfaceTwoSidedFieldValue& value,
+    const GeneratedInterfaceTwoSidedBinding& binding)
+{
+    value.interface_marker = binding.interface_marker;
+    value.parent_cell = binding.parent_cell;
+    value.interface_stable_id = binding.interface_stable_id;
+    value.minus_side = binding.minus_side;
+    value.plus_side = binding.plus_side;
+}
+
+void stampTwoSidedGradientMetadata(
+    CutInterfaceTwoSidedFieldGradient& gradient,
+    const GeneratedInterfaceTwoSidedBinding& binding)
+{
+    gradient.interface_marker = binding.interface_marker;
+    gradient.parent_cell = binding.parent_cell;
+    gradient.interface_stable_id = binding.interface_stable_id;
+    gradient.minus_side = binding.minus_side;
+    gradient.plus_side = binding.plus_side;
+}
+
 } // namespace
 
 std::vector<Real> linearH1ShapeValues(ElementType element_type,
@@ -228,6 +320,96 @@ std::vector<CutInterfaceFieldGradient> evaluateH1FieldGradientsOnFragment(
     gradients.reserve(fragment.quadrature_points.size());
     for (const auto& point : fragment.quadrature_points) {
         gradients.push_back(evaluateH1FieldGradientAtPoint(field, point.parent_coordinate));
+    }
+    return gradients;
+}
+
+CutInterfaceTwoSidedFieldValue evaluateH1TwoSidedFieldValueAtPoint(
+    const H1NodalFieldData& negative_side_field,
+    const H1NodalFieldData& positive_side_field,
+    const GeneratedInterfaceTwoSidedBinding& binding,
+    const std::array<Real, 3>& parent_coordinate)
+{
+    validateTwoSidedBinding(binding);
+    CutInterfaceTwoSidedFieldValue value;
+    stampTwoSidedValueMetadata(value, binding);
+    value.minus =
+        evaluateH1FieldValueAtPoint(negative_side_field, parent_coordinate);
+    value.plus =
+        evaluateH1FieldValueAtPoint(positive_side_field, parent_coordinate);
+    value.jump = combineFieldValues(
+        value.plus,
+        Real{1.0},
+        value.minus,
+        Real{-1.0},
+        "two-sided H1 cut-interface value evaluation requires matching component counts");
+    value.average = combineFieldValues(
+        value.plus,
+        Real{0.5},
+        value.minus,
+        Real{0.5},
+        "two-sided H1 cut-interface value evaluation requires matching component counts");
+    return value;
+}
+
+std::vector<CutInterfaceTwoSidedFieldValue>
+evaluateH1TwoSidedFieldValuesOnFragment(
+    const H1NodalFieldData& negative_side_field,
+    const H1NodalFieldData& positive_side_field,
+    const GeneratedInterfaceTwoSidedBinding& binding,
+    const CutInterfaceFragment& fragment)
+{
+    validateFragmentMatchesBinding(binding, fragment);
+    std::vector<CutInterfaceTwoSidedFieldValue> values;
+    values.reserve(fragment.quadrature_points.size());
+    for (const auto& point : fragment.quadrature_points) {
+        values.push_back(evaluateH1TwoSidedFieldValueAtPoint(
+            negative_side_field, positive_side_field, binding, point.parent_coordinate));
+    }
+    return values;
+}
+
+CutInterfaceTwoSidedFieldGradient evaluateH1TwoSidedFieldGradientAtPoint(
+    const H1NodalFieldData& negative_side_field,
+    const H1NodalFieldData& positive_side_field,
+    const GeneratedInterfaceTwoSidedBinding& binding,
+    const std::array<Real, 3>& parent_coordinate)
+{
+    validateTwoSidedBinding(binding);
+    CutInterfaceTwoSidedFieldGradient gradient;
+    stampTwoSidedGradientMetadata(gradient, binding);
+    gradient.minus =
+        evaluateH1FieldGradientAtPoint(negative_side_field, parent_coordinate);
+    gradient.plus =
+        evaluateH1FieldGradientAtPoint(positive_side_field, parent_coordinate);
+    gradient.jump = combineFieldGradients(
+        gradient.plus,
+        Real{1.0},
+        gradient.minus,
+        Real{-1.0},
+        "two-sided H1 cut-interface gradient evaluation requires matching component counts");
+    gradient.average = combineFieldGradients(
+        gradient.plus,
+        Real{0.5},
+        gradient.minus,
+        Real{0.5},
+        "two-sided H1 cut-interface gradient evaluation requires matching component counts");
+    return gradient;
+}
+
+std::vector<CutInterfaceTwoSidedFieldGradient>
+evaluateH1TwoSidedFieldGradientsOnFragment(
+    const H1NodalFieldData& negative_side_field,
+    const H1NodalFieldData& positive_side_field,
+    const GeneratedInterfaceTwoSidedBinding& binding,
+    const CutInterfaceFragment& fragment)
+{
+    validateFragmentMatchesBinding(binding, fragment);
+    std::vector<CutInterfaceTwoSidedFieldGradient> gradients;
+    gradients.reserve(fragment.quadrature_points.size());
+    for (const auto& point : fragment.quadrature_points) {
+        gradients.push_back(evaluateH1TwoSidedFieldGradientAtPoint(
+            negative_side_field, positive_side_field, binding, point.parent_coordinate));
     }
     return gradients;
 }

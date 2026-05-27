@@ -283,6 +283,136 @@ private:
     }};
 };
 
+class SharedUnsupportedMixedCellMeshAccess final
+    : public FE::assembly::IMeshAccess {
+public:
+    SharedUnsupportedMixedCellMeshAccess(int rank, FE::ElementType type)
+        : rank_(rank)
+        , type_(type)
+    {
+        if (type_ == FE::ElementType::Wedge6) {
+            nodes_ = {
+                std::array<FE::Real, 3>{0.0, 0.0, 0.0},
+                std::array<FE::Real, 3>{1.0, 0.0, 0.0},
+                std::array<FE::Real, 3>{0.0, 1.0, 0.0},
+                std::array<FE::Real, 3>{0.0, 0.0, 1.0},
+                std::array<FE::Real, 3>{1.0, 0.0, 1.0},
+                std::array<FE::Real, 3>{0.0, 1.0, 1.0},
+            };
+        } else {
+            nodes_ = {
+                std::array<FE::Real, 3>{-1.0, -1.0, 0.0},
+                std::array<FE::Real, 3>{1.0, -1.0, 0.0},
+                std::array<FE::Real, 3>{1.0, 1.0, 0.0},
+                std::array<FE::Real, 3>{-1.0, 1.0, 0.0},
+                std::array<FE::Real, 3>{0.0, 0.0, 1.0},
+            };
+        }
+    }
+
+    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
+    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override
+    {
+        return rank_ == 0 ? 1 : 0;
+    }
+    [[nodiscard]] FE::GlobalIndex numVertices() const override
+    {
+        return static_cast<FE::GlobalIndex>(nodes_.size());
+    }
+    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 3; }
+    [[nodiscard]] bool revisionTrackingAvailable() const override { return true; }
+    [[nodiscard]] std::uint64_t geometryRevision() const override { return 53; }
+    [[nodiscard]] std::uint64_t topologyRevision() const override { return 59; }
+    [[nodiscard]] std::uint64_t ownershipRevision() const override
+    {
+        return static_cast<std::uint64_t>(61 + rank_);
+    }
+    [[nodiscard]] std::uint64_t fieldLayoutRevision() const override { return 67; }
+    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex /*cell_id*/) const override
+    {
+        return rank_ == 0;
+    }
+
+    [[nodiscard]] FE::ElementType getCellType(
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return type_;
+    }
+
+    void getCellNodes(FE::GlobalIndex /*cell_id*/,
+                      std::vector<FE::GlobalIndex>& nodes) const override
+    {
+        nodes.resize(nodes_.size());
+        for (std::size_t i = 0; i < nodes_.size(); ++i) {
+            nodes[i] = static_cast<FE::GlobalIndex>(i);
+        }
+    }
+
+    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
+        FE::GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(
+        FE::GlobalIndex /*cell_id*/,
+        std::vector<std::array<FE::Real, 3>>& coords) const override
+    {
+        coords = nodes_;
+    }
+
+    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
+        FE::GlobalIndex /*face_id*/,
+        FE::GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+
+    [[nodiscard]] int getBoundaryFaceMarker(
+        FE::GlobalIndex /*face_id*/) const override
+    {
+        return -1;
+    }
+
+    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
+    getInteriorFaceCells(FE::GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+
+    void forEachCell(std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        callback(0);
+    }
+
+    void forEachOwnedCell(
+        std::function<void(FE::GlobalIndex)> callback) const override
+    {
+        if (rank_ == 0) {
+            callback(0);
+        }
+    }
+
+    void forEachBoundaryFace(
+        int /*marker*/,
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+    void forEachInteriorFace(
+        std::function<void(FE::GlobalIndex, FE::GlobalIndex, FE::GlobalIndex)>
+            /*callback*/) const override
+    {
+    }
+
+private:
+    int rank_{0};
+    FE::ElementType type_{FE::ElementType::Wedge6};
+    std::vector<std::array<FE::Real, 3>> nodes_{};
+};
+
 class MixedQuadTriangleLinearH1Space final
     : public FE::spaces::FunctionSpace {
 public:
@@ -450,6 +580,34 @@ private:
     topo.cell_owner_ranks =
         distributed_ownership ? std::vector<int>{0, 1}
                               : std::vector<int>{0, 0};
+
+    FE::systems::SetupInputs inputs;
+    inputs.topology_override = std::move(topo);
+    return inputs;
+}
+
+[[nodiscard]] FE::systems::SetupInputs sharedUnsupportedMixedCellSetupInputs(
+    FE::ElementType type)
+{
+    const FE::GlobalIndex vertex_count =
+        type == FE::ElementType::Wedge6 ? 6 : 5;
+
+    FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 1;
+    topo.n_vertices = vertex_count;
+    topo.n_edges = 0;
+    topo.n_faces = 0;
+    topo.dim = 3;
+
+    topo.cell2vertex_offsets = {0, vertex_count};
+    topo.cell2vertex_data.reserve(static_cast<std::size_t>(vertex_count));
+    topo.vertex_gids.reserve(static_cast<std::size_t>(vertex_count));
+    for (FE::GlobalIndex vertex = 0; vertex < vertex_count; ++vertex) {
+        topo.cell2vertex_data.push_back(vertex);
+        topo.vertex_gids.push_back(vertex);
+    }
+    topo.cell_gids = {0};
+    topo.cell_owner_ranks = {0};
 
     FE::systems::SetupInputs inputs;
     inputs.topology_override = std::move(topo);
@@ -950,4 +1108,200 @@ TEST(LevelSetCellEvaluatorMPI,
               allreduceMaxUnsigned(mpi_interface_hash, comm));
     EXPECT_EQ(allreduceMinUnsigned(mpi_volume_hash, comm),
               allreduceMaxUnsigned(mpi_volume_hash, comm));
+}
+
+TEST(LevelSetCellEvaluatorMPI,
+     AutoBackendUnsupportedWedgeAndPyramidFailClosedRankConsistently)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly 2 MPI ranks";
+    }
+
+    for (const auto type : {FE::ElementType::Wedge6,
+                            FE::ElementType::Pyramid5}) {
+        const auto mesh =
+            std::make_shared<SharedUnsupportedMixedCellMeshAccess>(rank, type);
+        auto scalar_space =
+            FE::spaces::Space(FE::spaces::SpaceType::H1,
+                              mesh,
+                              /*order=*/1,
+                              /*components=*/1);
+
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = scalar_space,
+            .components = 1,
+        });
+        ASSERT_NO_THROW(
+            system.setup(mpiSetupOptions(comm, rank, world_size),
+                         sharedUnsupportedMixedCellSetupInputs(type)));
+
+        std::vector<FE::Real> solution(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+            const auto x = mesh->getNodeCoordinates(vertex);
+            setFieldComponentValue(solution, system, phi, vertex, x[0]);
+        }
+
+        level_set::LevelSetGeneratedInterfaceOptions options{};
+        options.level_set_field_name = "phi";
+        options.requested_interface_marker = 946;
+        options.domain_id = "water-air-unsupported-auto";
+        options.geometry_mode =
+            level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+        options.implicit_cut_quadrature_backend =
+            level_set::ImplicitCutQuadratureBackend::Auto;
+        options.interface_quadrature_order = 1;
+        options.volume_quadrature_order = 1;
+
+        bool threw = false;
+        bool backend_diagnostic = false;
+        bool element_diagnostic = false;
+        bool order_diagnostic = false;
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        try {
+            (void)lifecycle.build(system, options, solution);
+        } catch (const std::invalid_argument& ex) {
+            threw = true;
+            const std::string message = ex.what();
+            backend_diagnostic =
+                message.find("backend=Auto") != std::string::npos &&
+                message.find("cannot select") != std::string::npos;
+            element_diagnostic =
+                message.find(type == FE::ElementType::Wedge6
+                                 ? "element_type=Wedge6"
+                                 : "element_type=Pyramid5") != std::string::npos;
+            order_diagnostic =
+                message.find("possible_interface_order=-1") != std::string::npos &&
+                message.find("possible_volume_order=-1") != std::string::npos;
+        }
+
+        const auto local_threw = static_cast<unsigned long long>(threw ? 1 : 0);
+        EXPECT_EQ(allreduceMinUnsigned(local_threw, comm), 1ull);
+        EXPECT_EQ(allreduceMaxUnsigned(local_threw, comm), 1ull);
+        const auto local_backend =
+            static_cast<unsigned long long>(backend_diagnostic ? 1 : 0);
+        EXPECT_EQ(allreduceMinUnsigned(local_backend, comm), 1ull);
+        EXPECT_EQ(allreduceMaxUnsigned(local_backend, comm), 1ull);
+        const auto local_element =
+            static_cast<unsigned long long>(element_diagnostic ? 1 : 0);
+        EXPECT_EQ(allreduceMinUnsigned(local_element, comm), 1ull);
+        EXPECT_EQ(allreduceMaxUnsigned(local_element, comm), 1ull);
+        const auto local_order =
+            static_cast<unsigned long long>(order_diagnostic ? 1 : 0);
+        EXPECT_EQ(allreduceMinUnsigned(local_order, comm), 1ull);
+        EXPECT_EQ(allreduceMaxUnsigned(local_order, comm), 1ull);
+    }
+}
+
+TEST(LevelSetCellEvaluatorMPI,
+     PartialGeneratedInterfaceRefreshIsRankConsistent)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly 2 MPI ranks";
+    }
+
+    const auto mesh =
+        std::make_shared<SharedMixedQuadTriangleMeshAccess>(rank);
+    auto scalar_space = std::make_shared<MixedQuadTriangleLinearH1Space>();
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(
+        system.setup(mpiSetupOptions(comm, rank, world_size),
+                     sharedMixedQuadTriangleSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    for (FE::GlobalIndex vertex = 0; vertex < mesh->numVertices(); ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        const FE::Real value =
+            vertex < 4 ? x[0] : x[0] - FE::Real{2.5};
+        setFieldComponentValue(solution, system, phi, vertex, value);
+    }
+
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = 932;
+    options.domain_id = "water-air-partial-refresh";
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::Auto;
+    options.interface_quadrature_order = 1;
+    options.volume_quadrature_order = 1;
+
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto initial = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(initial.success) << initial.diagnostic;
+    EXPECT_EQ(initial.cell_cache_hits, 0u);
+    EXPECT_EQ(initial.cell_cache_misses, 2u);
+
+    setFieldComponentValue(solution, system, phi, 0, FE::Real{-0.75});
+    const auto updated = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(updated.success) << updated.diagnostic;
+    EXPECT_EQ(updated.value_revision, initial.value_revision + 1u);
+    EXPECT_EQ(updated.cell_cache_hits, 1u);
+    EXPECT_EQ(updated.cell_cache_misses, 1u);
+    EXPECT_EQ(updated.cell_cache_unchanged_dof_hits, 1u);
+    EXPECT_EQ(updated.cell_refresh_candidate_count, 1u);
+    EXPECT_EQ(updated.directly_affected_cell_count, 1u);
+    EXPECT_EQ(updated.affected_cell_neighborhood_count, 1u);
+    EXPECT_EQ(updated.domain_cache_hits, 0u);
+
+    level_set::LevelSetGeneratedInterfaceLifecycle fresh_lifecycle;
+    const auto fresh_updated = fresh_lifecycle.build(system, options, solution);
+    ASSERT_TRUE(fresh_updated.success) << fresh_updated.diagnostic;
+    EXPECT_NEAR(updated.summary.negative_volume_measure,
+                fresh_updated.summary.negative_volume_measure,
+                1.0e-14);
+    EXPECT_EQ(updated.domain.fragments().size(),
+              fresh_updated.domain.fragments().size());
+    EXPECT_EQ(updated.domain.volumeRegions().size(),
+              fresh_updated.domain.volumeRegions().size());
+
+    const auto interface_rules = updated.domain.interfaceQuadratureRules();
+    const auto volume_rules = updated.domain.volumeQuadratureRules();
+    const auto interface_hash =
+        static_cast<unsigned long long>(ruleSignatureHash(interface_rules));
+    const auto volume_hash =
+        static_cast<unsigned long long>(ruleSignatureHash(volume_rules));
+    EXPECT_EQ(allreduceMinUnsigned(interface_hash, comm),
+              allreduceMaxUnsigned(interface_hash, comm));
+    EXPECT_EQ(allreduceMinUnsigned(volume_hash, comm),
+              allreduceMaxUnsigned(volume_hash, comm));
+    EXPECT_NEAR(allreduceMin(updated.summary.negative_volume_measure, comm),
+                allreduceMax(updated.summary.negative_volume_measure, comm),
+                1.0e-14);
+    EXPECT_NEAR(allreduceMin(updated.summary.positive_volume_measure, comm),
+                allreduceMax(updated.summary.positive_volume_measure, comm),
+                1.0e-14);
+
+    const auto cache_hits =
+        static_cast<unsigned long long>(updated.cell_cache_hits);
+    const auto cache_misses =
+        static_cast<unsigned long long>(updated.cell_cache_misses);
+    const auto refresh_candidates =
+        static_cast<unsigned long long>(updated.cell_refresh_candidate_count);
+    EXPECT_EQ(allreduceMinUnsigned(cache_hits, comm),
+              allreduceMaxUnsigned(cache_hits, comm));
+    EXPECT_EQ(allreduceMinUnsigned(cache_misses, comm),
+              allreduceMaxUnsigned(cache_misses, comm));
+    EXPECT_EQ(allreduceMinUnsigned(refresh_candidates, comm),
+              allreduceMaxUnsigned(refresh_candidates, comm));
 }

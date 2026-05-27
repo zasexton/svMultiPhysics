@@ -111,6 +111,7 @@ struct LevelSetGeneratedInterfaceOptions {
     bool keep_degenerate_fragments{false};
     bool allow_corner_linearized_geometry{false};
     bool require_production_qualified_implicit_cut_backend{false};
+    int affected_cell_neighborhood_layers{0};
     GeometryTangentPolicy geometry_tangent_policy{
         GeometryTangentPolicy::RefreshedFrozenQuadrature};
 };
@@ -137,6 +138,11 @@ struct LevelSetGeneratedInterfaceResult {
     double backend_elapsed_seconds{0.0};
     std::size_t cell_cache_hits{0};
     std::size_t cell_cache_misses{0};
+    std::size_t cell_cache_unchanged_dof_hits{0};
+    std::size_t cell_refresh_candidate_count{0};
+    int affected_cell_neighborhood_layers{0};
+    std::size_t directly_affected_cell_count{0};
+    std::size_t affected_cell_neighborhood_count{0};
     std::size_t domain_cache_hits{0};
     std::size_t linear_full_cell_fast_path_count{0};
     GeometryTangentPolicy geometry_tangent_policy{

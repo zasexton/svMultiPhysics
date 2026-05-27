@@ -143,6 +143,29 @@ TEST(EquationTranslatorNodePressureConstraints, BuildInputLeavesAbsentBlockUnset
   EXPECT_FALSE(input.node_pressure_constraints.has_value());
 }
 
+TEST(EquationTranslatorLevelSet, BuildInputKeepsTransportControlsFromXml)
+{
+  auto mesh = buildTranslatorMesh();
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="level_set">
+  <Level_set_field_name>phi</Level_set_field_name>
+  <Transport_form>conservative_divergence</Transport_form>
+  <Enable_SUPG>false</Enable_SUPG>
+  <SUPG_tau_scale>0.25</SUPG_tau_scale>
+</Add_equation>
+)xml");
+
+  const auto input =
+      application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  EXPECT_EQ(input.equation_type, "level_set");
+  EXPECT_EQ(input.equation_params.at("Level_set_field_name").value, "phi");
+  EXPECT_EQ(input.equation_params.at("Transport_form").value,
+            "conservative_divergence");
+  EXPECT_EQ(input.equation_params.at("Enable_SUPG").value, "false");
+  EXPECT_EQ(input.equation_params.at("SUPG_tau_scale").value, "0.25");
+}
+
 TEST(EquationTranslatorNodePressureConstraints, BuildInputPopulatesNodePressureConstraints)
 {
   auto mesh = buildTranslatorMesh();

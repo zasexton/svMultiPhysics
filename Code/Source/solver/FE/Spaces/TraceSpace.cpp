@@ -257,9 +257,9 @@ Vec3 reference_edge_tangent(ElementType volume_element_type,
                  "TraceSpace: reference edge tangent requires an edge face");
 
     const Vec3 x0 =
-        basis::NodeOrdering::get_node_coords(volume_element_type, static_cast<std::size_t>(face_vertices[0]));
+        basis::ReferenceNodeLayout::get_node_coords(volume_element_type, static_cast<std::size_t>(face_vertices[0]));
     const Vec3 x1 =
-        basis::NodeOrdering::get_node_coords(volume_element_type, static_cast<std::size_t>(face_vertices[1]));
+        basis::ReferenceNodeLayout::get_node_coords(volume_element_type, static_cast<std::size_t>(face_vertices[1]));
     return normalized_or_throw(x1 - x0,
                                "TraceSpace: reference edge tangent is degenerate");
 }
@@ -418,7 +418,7 @@ TensorFaceSlice infer_tensor_face_slice(ElementType volume_element_type,
     coords.reserve(face_vertices.size());
     for (int v : face_vertices) {
         coords.push_back(
-            basis::NodeOrdering::get_node_coords(volume_element_type, static_cast<std::size_t>(v)));
+            basis::ReferenceNodeLayout::get_node_coords(volume_element_type, static_cast<std::size_t>(v)));
     }
 
     TensorFaceSlice slice;
@@ -887,7 +887,7 @@ TraceSpace::TraceSpace(std::shared_ptr<FunctionSpace> volume_space,
     embed_nodes.reserve(fverts.size());
     for (int v : fverts) {
         embed_nodes.push_back(
-            basis::NodeOrdering::get_node_coords(volume_space_->element_type(),
+            basis::ReferenceNodeLayout::get_node_coords(volume_space_->element_type(),
                                                  static_cast<std::size_t>(v)));
     }
     face_embedding_ = std::make_shared<geometry::IsoparametricMapping>(std::move(embed_basis),

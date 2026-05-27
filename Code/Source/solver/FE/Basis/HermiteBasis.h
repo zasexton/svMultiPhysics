@@ -57,6 +57,7 @@ public:
     int dimension() const noexcept override { return dimension_; }
     int order() const noexcept override { return order_; }
     std::size_t size() const noexcept override { return size_; }
+    bool cache_identity_is_structural() const noexcept override { return true; }
 
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
@@ -66,6 +67,27 @@ public:
 
     void evaluate_hessians(const math::Vector<Real, 3>& xi,
                            std::vector<Hessian>& hessians) const override;
+    void evaluate_all(const math::Vector<Real, 3>& xi,
+                      std::vector<Real>& values,
+                      std::vector<Gradient>& gradients,
+                      std::vector<Hessian>& hessians) const override;
+
+    void evaluate_values_to(const math::Vector<Real, 3>& xi,
+                            Real* SVMP_RESTRICT values_out) const override;
+    void evaluate_gradients_to(const math::Vector<Real, 3>& xi,
+                               Real* SVMP_RESTRICT gradients_out) const override;
+    void evaluate_hessians_to(const math::Vector<Real, 3>& xi,
+                              Real* SVMP_RESTRICT hessians_out) const override;
+    void evaluate_all_to(const math::Vector<Real, 3>& xi,
+                         Real* SVMP_RESTRICT values_out,
+                         Real* SVMP_RESTRICT gradients_out,
+                         Real* SVMP_RESTRICT hessians_out) const;
+    void evaluate_at_quadrature_points_strided(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const override;
 
 private:
     ElementType element_type_{ElementType::Unknown};

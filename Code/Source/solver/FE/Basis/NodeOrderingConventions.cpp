@@ -7,10 +7,9 @@
 
 #include "NodeOrderingConventions.h"
 #include "Basis/BasisExceptions.h"
+#include "Basis/BasisTraits.h"
 
-#include <algorithm>
 #include <array>
-#include <cmath>
 
 namespace svmp {
 namespace FE {
@@ -19,55 +18,315 @@ namespace basis {
 namespace {
 
 using Point = math::Vector<Real, 3>;
+using RawPoint = std::array<Real, 3>;
 
-ElementType canonical_lagrange_type(ElementType elem_type) {
+template<std::size_t N>
+using NodeTable = std::array<RawPoint, N>;
+
+struct NodeTableView {
+    const RawPoint* data{nullptr};
+    std::size_t size{0};
+};
+
+inline constexpr NodeTable<2> kLine2Nodes = {{
+    {Real(-1), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+}};
+
+inline constexpr NodeTable<3> kLine3Nodes = {{
+    {Real(-1), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(0), Real(0)},
+}};
+
+inline constexpr NodeTable<3> kTriangle3Nodes = {{
+    {Real(0), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+}};
+
+inline constexpr NodeTable<6> kTriangle6Nodes = {{
+    {Real(0), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(0.5), Real(0), Real(0)},
+    {Real(0.5), Real(0.5), Real(0)},
+    {Real(0), Real(0.5), Real(0)},
+}};
+
+inline constexpr NodeTable<4> kQuad4Nodes = {{
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+}};
+
+inline constexpr NodeTable<9> kQuad9Nodes = {{
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+    {Real(0), Real(-1), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(-1), Real(0), Real(0)},
+    {Real(0), Real(0), Real(0)},
+}};
+
+inline constexpr NodeTable<8> kQuad8Nodes = {{
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+    {Real(0), Real(-1), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(-1), Real(0), Real(0)},
+}};
+
+inline constexpr NodeTable<4> kTetra4Nodes = {{
+    {Real(0), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(0), Real(0), Real(1)},
+}};
+
+inline constexpr NodeTable<10> kTetra10Nodes = {{
+    {Real(0), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(0), Real(0), Real(1)},
+    {Real(0.5), Real(0), Real(0)},
+    {Real(0.5), Real(0.5), Real(0)},
+    {Real(0), Real(0.5), Real(0)},
+    {Real(0), Real(0), Real(0.5)},
+    {Real(0.5), Real(0), Real(0.5)},
+    {Real(0), Real(0.5), Real(0.5)},
+}};
+
+inline constexpr NodeTable<8> kHex8Nodes = {{
+    {Real(-1), Real(-1), Real(-1)},
+    {Real(1), Real(-1), Real(-1)},
+    {Real(1), Real(1), Real(-1)},
+    {Real(-1), Real(1), Real(-1)},
+    {Real(-1), Real(-1), Real(1)},
+    {Real(1), Real(-1), Real(1)},
+    {Real(1), Real(1), Real(1)},
+    {Real(-1), Real(1), Real(1)},
+}};
+
+inline constexpr NodeTable<27> kHex27Nodes = {{
+    {Real(-1), Real(-1), Real(-1)},
+    {Real(1), Real(-1), Real(-1)},
+    {Real(1), Real(1), Real(-1)},
+    {Real(-1), Real(1), Real(-1)},
+    {Real(-1), Real(-1), Real(1)},
+    {Real(1), Real(-1), Real(1)},
+    {Real(1), Real(1), Real(1)},
+    {Real(-1), Real(1), Real(1)},
+    {Real(0), Real(-1), Real(-1)},
+    {Real(1), Real(0), Real(-1)},
+    {Real(0), Real(1), Real(-1)},
+    {Real(-1), Real(0), Real(-1)},
+    {Real(0), Real(-1), Real(1)},
+    {Real(1), Real(0), Real(1)},
+    {Real(0), Real(1), Real(1)},
+    {Real(-1), Real(0), Real(1)},
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+    {Real(0), Real(0), Real(-1)},
+    {Real(0), Real(0), Real(1)},
+    {Real(0), Real(-1), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(-1), Real(0), Real(0)},
+    {Real(0), Real(0), Real(0)},
+}};
+
+inline constexpr NodeTable<20> kHex20Nodes = {{
+    {Real(-1), Real(-1), Real(-1)},
+    {Real(1), Real(-1), Real(-1)},
+    {Real(1), Real(1), Real(-1)},
+    {Real(-1), Real(1), Real(-1)},
+    {Real(-1), Real(-1), Real(1)},
+    {Real(1), Real(-1), Real(1)},
+    {Real(1), Real(1), Real(1)},
+    {Real(-1), Real(1), Real(1)},
+    {Real(0), Real(-1), Real(-1)},
+    {Real(1), Real(0), Real(-1)},
+    {Real(0), Real(1), Real(-1)},
+    {Real(-1), Real(0), Real(-1)},
+    {Real(0), Real(-1), Real(1)},
+    {Real(1), Real(0), Real(1)},
+    {Real(0), Real(1), Real(1)},
+    {Real(-1), Real(0), Real(1)},
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+}};
+
+// Mesh uses conventional Hex20 ordering: corners first, then edge midpoints in
+// {bottom, top, vertical} groups. The quadratic Hex20 serendipity polynomial
+// table uses an axis-grouped edge order. This maps public mesh/reference index
+// to the internal polynomial-table index.
+constexpr std::array<std::size_t, 20> kHex20MeshToBasisOrder = {
+    0, 1, 2, 3, 4, 5, 6, 7,
+    8, 13, 10, 12,
+    9, 15, 11, 14,
+    16, 17, 19, 18
+};
+
+inline constexpr NodeTable<6> kWedge6Nodes = {{
+    {Real(0), Real(0), Real(-1)},
+    {Real(1), Real(0), Real(-1)},
+    {Real(0), Real(1), Real(-1)},
+    {Real(0), Real(0), Real(1)},
+    {Real(1), Real(0), Real(1)},
+    {Real(0), Real(1), Real(1)},
+}};
+
+inline constexpr NodeTable<18> kWedge18Nodes = {{
+    {Real(0), Real(0), Real(-1)},
+    {Real(1), Real(0), Real(-1)},
+    {Real(0), Real(1), Real(-1)},
+    {Real(0), Real(0), Real(1)},
+    {Real(1), Real(0), Real(1)},
+    {Real(0), Real(1), Real(1)},
+    {Real(0.5), Real(0), Real(-1)},
+    {Real(0.5), Real(0.5), Real(-1)},
+    {Real(0), Real(0.5), Real(-1)},
+    {Real(0.5), Real(0), Real(1)},
+    {Real(0.5), Real(0.5), Real(1)},
+    {Real(0), Real(0.5), Real(1)},
+    {Real(0), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(0.5), Real(0), Real(0)},
+    {Real(0.5), Real(0.5), Real(0)},
+    {Real(0), Real(0.5), Real(0)},
+}};
+
+inline constexpr NodeTable<15> kWedge15Nodes = {{
+    {Real(0), Real(0), Real(-1)},
+    {Real(1), Real(0), Real(-1)},
+    {Real(0), Real(1), Real(-1)},
+    {Real(0), Real(0), Real(1)},
+    {Real(1), Real(0), Real(1)},
+    {Real(0), Real(1), Real(1)},
+    {Real(0.5), Real(0), Real(-1)},
+    {Real(0.5), Real(0.5), Real(-1)},
+    {Real(0), Real(0.5), Real(-1)},
+    {Real(0.5), Real(0), Real(1)},
+    {Real(0.5), Real(0.5), Real(1)},
+    {Real(0), Real(0.5), Real(1)},
+    {Real(0), Real(0), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+}};
+
+inline constexpr NodeTable<5> kPyramid5Nodes = {{
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+    {Real(0), Real(0), Real(1)},
+}};
+
+inline constexpr NodeTable<14> kPyramid14Nodes = {{
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+    {Real(0), Real(0), Real(1)},
+    {Real(0), Real(-1), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(-1), Real(0), Real(0)},
+    {Real(-0.5), Real(-0.5), Real(0.5)},
+    {Real(0.5), Real(-0.5), Real(0.5)},
+    {Real(0.5), Real(0.5), Real(0.5)},
+    {Real(-0.5), Real(0.5), Real(0.5)},
+    {Real(0), Real(0), Real(0)},
+}};
+
+inline constexpr NodeTable<13> kPyramid13Nodes = {{
+    {Real(-1), Real(-1), Real(0)},
+    {Real(1), Real(-1), Real(0)},
+    {Real(1), Real(1), Real(0)},
+    {Real(-1), Real(1), Real(0)},
+    {Real(0), Real(0), Real(1)},
+    {Real(0), Real(-1), Real(0)},
+    {Real(1), Real(0), Real(0)},
+    {Real(0), Real(1), Real(0)},
+    {Real(-1), Real(0), Real(0)},
+    {Real(-0.5), Real(-0.5), Real(0.5)},
+    {Real(0.5), Real(-0.5), Real(0.5)},
+    {Real(0.5), Real(0.5), Real(0.5)},
+    {Real(-0.5), Real(0.5), Real(0.5)},
+}};
+
+template<std::size_t N>
+constexpr NodeTableView view(const NodeTable<N>& table) noexcept {
+    return NodeTableView{table.data(), table.size()};
+}
+
+Point to_point(const RawPoint& raw) {
+    return Point{raw[0], raw[1], raw[2]};
+}
+
+constexpr NodeTableView fixed_node_table(ElementType elem_type) noexcept {
     switch (elem_type) {
-        case ElementType::Line2:
-        case ElementType::Line3:
-            return ElementType::Line2;
-        case ElementType::Triangle3:
-        case ElementType::Triangle6:
-            return ElementType::Triangle3;
-        case ElementType::Quad4:
-        case ElementType::Quad9:
-            return ElementType::Quad4;
-        case ElementType::Tetra4:
-        case ElementType::Tetra10:
-            return ElementType::Tetra4;
-        case ElementType::Hex8:
-        case ElementType::Hex27:
-            return ElementType::Hex8;
-        case ElementType::Wedge6:
-        case ElementType::Wedge18:
-            return ElementType::Wedge6;
-        case ElementType::Pyramid5:
-        case ElementType::Pyramid14:
-            return ElementType::Pyramid5;
-        default:
-            return elem_type;
+        case ElementType::Line2:     return view(kLine2Nodes);
+        case ElementType::Line3:     return view(kLine3Nodes);
+        case ElementType::Triangle3: return view(kTriangle3Nodes);
+        case ElementType::Triangle6: return view(kTriangle6Nodes);
+        case ElementType::Quad4:     return view(kQuad4Nodes);
+        case ElementType::Quad8:     return view(kQuad8Nodes);
+        case ElementType::Quad9:     return view(kQuad9Nodes);
+        case ElementType::Tetra4:    return view(kTetra4Nodes);
+        case ElementType::Tetra10:   return view(kTetra10Nodes);
+        case ElementType::Hex8:      return view(kHex8Nodes);
+        case ElementType::Hex20:     return view(kHex20Nodes);
+        case ElementType::Hex27:     return view(kHex27Nodes);
+        case ElementType::Wedge6:    return view(kWedge6Nodes);
+        case ElementType::Wedge15:   return view(kWedge15Nodes);
+        case ElementType::Wedge18:   return view(kWedge18Nodes);
+        case ElementType::Pyramid5:  return view(kPyramid5Nodes);
+        case ElementType::Pyramid13: return view(kPyramid13Nodes);
+        case ElementType::Pyramid14: return view(kPyramid14Nodes);
+        default:                     return {};
     }
 }
 
-int complete_lagrange_alias_order(ElementType elem_type) {
-    switch (elem_type) {
+constexpr NodeTableView fixed_complete_lagrange_table(ElementType canonical_type,
+                                                      int order) noexcept {
+    switch (canonical_type) {
         case ElementType::Line2:
+            return order == 1 ? view(kLine2Nodes) :
+                   order == 2 ? view(kLine3Nodes) : NodeTableView{};
         case ElementType::Triangle3:
+            return order == 1 ? view(kTriangle3Nodes) :
+                   order == 2 ? view(kTriangle6Nodes) : NodeTableView{};
         case ElementType::Quad4:
+            return order == 1 ? view(kQuad4Nodes) :
+                   order == 2 ? view(kQuad9Nodes) : NodeTableView{};
         case ElementType::Tetra4:
+            return order == 1 ? view(kTetra4Nodes) :
+                   order == 2 ? view(kTetra10Nodes) : NodeTableView{};
         case ElementType::Hex8:
+            return order == 1 ? view(kHex8Nodes) :
+                   order == 2 ? view(kHex27Nodes) : NodeTableView{};
         case ElementType::Wedge6:
+            return order == 1 ? view(kWedge6Nodes) :
+                   order == 2 ? view(kWedge18Nodes) : NodeTableView{};
         case ElementType::Pyramid5:
-            return 1;
-        case ElementType::Line3:
-        case ElementType::Triangle6:
-        case ElementType::Quad9:
-        case ElementType::Tetra10:
-        case ElementType::Hex27:
-        case ElementType::Wedge18:
-        case ElementType::Pyramid14:
-            return 2;
+            return order == 1 ? view(kPyramid5Nodes) :
+                   order == 2 ? view(kPyramid14Nodes) : NodeTableView{};
         default:
-            return -1;
+            return {};
     }
 }
 
@@ -230,7 +489,6 @@ std::vector<Point> generate_tetra_nodes(int order) {
     for (int l = 1; l <= order - 3; ++l) {
         for (int k = 1; k <= order - l - 2; ++k) {
             for (int j = 1; j <= order - l - k - 1; ++j) {
-                const int i = order - j - k - l;
                 const Real x = static_cast<Real>(j) / static_cast<Real>(order);
                 const Real y = static_cast<Real>(k) / static_cast<Real>(order);
                 const Real z = static_cast<Real>(l) / static_cast<Real>(order);
@@ -468,209 +726,48 @@ std::vector<Point> generate_pyramid_nodes(int order) {
     return nodes;
 }
 
-const std::vector<Point>& complete_lagrange_alias_coords(ElementType elem_type) {
-    switch (elem_type) {
-        case ElementType::Line2: {
-            static const auto nodes = generate_line_nodes(1);
-            return nodes;
-        }
-        case ElementType::Line3: {
-            static const auto nodes = generate_line_nodes(2);
-            return nodes;
-        }
-        case ElementType::Triangle3: {
-            static const auto nodes = generate_triangle_nodes(1);
-            return nodes;
-        }
-        case ElementType::Triangle6: {
-            static const auto nodes = generate_triangle_nodes(2);
-            return nodes;
-        }
-        case ElementType::Quad4: {
-            static const auto nodes = generate_quad_nodes(1);
-            return nodes;
-        }
-        case ElementType::Quad9: {
-            static const auto nodes = generate_quad_nodes(2);
-            return nodes;
-        }
-        case ElementType::Tetra4: {
-            static const auto nodes = generate_tetra_nodes(1);
-            return nodes;
-        }
-        case ElementType::Tetra10: {
-            static const auto nodes = generate_tetra_nodes(2);
-            return nodes;
-        }
-        case ElementType::Hex8: {
-            static const auto nodes = generate_hex_nodes(1);
-            return nodes;
-        }
-        case ElementType::Hex27: {
-            static const auto nodes = generate_hex_nodes(2);
-            return nodes;
-        }
-        case ElementType::Wedge6: {
-            static const auto nodes = generate_wedge_nodes(1);
-            return nodes;
-        }
-        case ElementType::Wedge18: {
-            static const auto nodes = generate_wedge_nodes(2);
-            return nodes;
-        }
-        case ElementType::Pyramid5: {
-            static const auto nodes = generate_pyramid_nodes(1);
-            return nodes;
-        }
-        case ElementType::Pyramid14: {
-            static const auto nodes = generate_pyramid_nodes(2);
-            return nodes;
-        }
-        default:
-            throw BasisNodeOrderingException("NodeOrdering complete-family alias query only supports generated Lagrange aliases",
-                                             __FILE__, __LINE__, __func__);
-    }
-}
-
 } // namespace
 
-math::Vector<Real, 3> NodeOrdering::get_node_coords(ElementType elem_type, std::size_t local_node) {
-    if (complete_lagrange_alias_order(elem_type) >= 0) {
-        const auto& nodes = complete_lagrange_alias_coords(elem_type);
-        if (local_node < nodes.size()) {
-            return nodes[local_node];
-        }
-
-        throw BasisNodeOrderingException("Invalid element type or node index in NodeOrdering::get_node_coords",
-                                         __FILE__, __LINE__, __func__);
+math::Vector<Real, 3> ReferenceNodeLayout::get_node_coords(ElementType elem_type,
+                                                     std::size_t local_node) {
+    const auto table = fixed_node_table(elem_type);
+    if (table.data != nullptr && local_node < table.size) {
+        return to_point(table.data[local_node]);
     }
 
-    switch (elem_type) {
-        // 2D Quad Elements
-        case ElementType::Quad8:
-            switch (local_node) {
-                case 0: return {Real(-1), Real(-1), Real(0)};
-                case 1: return {Real(+1), Real(-1), Real(0)};
-                case 2: return {Real(+1), Real(+1), Real(0)};
-                case 3: return {Real(-1), Real(+1), Real(0)};
-                case 4: return {Real(0), Real(-1), Real(0)};
-                case 5: return {Real(+1), Real(0), Real(0)};
-                case 6: return {Real(0), Real(+1), Real(0)};
-                case 7: return {Real(-1), Real(0), Real(0)};
-                default: break;
-            }
-            break;
-
-        case ElementType::Hex20:
-            switch (local_node) {
-                // Corners
-                case 0: return {Real(-1), Real(-1), Real(-1)};
-                case 1: return {Real(+1), Real(-1), Real(-1)};
-                case 2: return {Real(+1), Real(+1), Real(-1)};
-                case 3: return {Real(-1), Real(+1), Real(-1)};
-                case 4: return {Real(-1), Real(-1), Real(+1)};
-                case 5: return {Real(+1), Real(-1), Real(+1)};
-                case 6: return {Real(+1), Real(+1), Real(+1)};
-                case 7: return {Real(-1), Real(+1), Real(+1)};
-                // Mid-edge on bottom
-                case 8:  return {Real(0), Real(-1), Real(-1)};
-                case 9:  return {Real(+1), Real(0), Real(-1)};
-                case 10: return {Real(0), Real(+1), Real(-1)};
-                case 11: return {Real(-1), Real(0), Real(-1)};
-                // Mid-edge on top
-                case 12: return {Real(0), Real(-1), Real(+1)};
-                case 13: return {Real(+1), Real(0), Real(+1)};
-                case 14: return {Real(0), Real(+1), Real(+1)};
-                case 15: return {Real(-1), Real(0), Real(+1)};
-                // Vertical mid-edges
-                case 16: return {Real(-1), Real(-1), Real(0)};
-                case 17: return {Real(+1), Real(-1), Real(0)};
-                case 18: return {Real(+1), Real(+1), Real(0)};
-                case 19: return {Real(-1), Real(+1), Real(0)};
-                default: break;
-            }
-            break;
-
-        case ElementType::Wedge15:
-            switch (local_node) {
-                // Corners
-                case 0: return {Real(0), Real(0), Real(-1)};
-                case 1: return {Real(1), Real(0), Real(-1)};
-                case 2: return {Real(0), Real(1), Real(-1)};
-                case 3: return {Real(0), Real(0), Real(+1)};
-                case 4: return {Real(1), Real(0), Real(+1)};
-                case 5: return {Real(0), Real(1), Real(+1)};
-                // Bottom mid-edges
-                case 6: return {Real(0.5), Real(0), Real(-1)};
-                case 7: return {Real(0.5), Real(0.5), Real(-1)};
-                case 8: return {Real(0), Real(0.5), Real(-1)};
-                // Top mid-edges
-                case 9:  return {Real(0.5), Real(0), Real(+1)};
-                case 10: return {Real(0.5), Real(0.5), Real(+1)};
-                case 11: return {Real(0), Real(0.5), Real(+1)};
-                // Vertical mid-edges
-                case 12: return {Real(0), Real(0), Real(0)};
-                case 13: return {Real(1), Real(0), Real(0)};
-                case 14: return {Real(0), Real(1), Real(0)};
-                default: break;
-            }
-            break;
-
-        case ElementType::Pyramid13:
-            switch (local_node) {
-                // Base corners
-                case 0: return {Real(-1), Real(-1), Real(0)};
-                case 1: return {Real(+1), Real(-1), Real(0)};
-                case 2: return {Real(+1), Real(+1), Real(0)};
-                case 3: return {Real(-1), Real(+1), Real(0)};
-                // Apex
-                case 4: return {Real(0), Real(0), Real(1)};
-                // Base mid-edges
-                case 5: return {Real(0), Real(-1), Real(0)};
-                case 6: return {Real(+1), Real(0), Real(0)};
-                case 7: return {Real(0), Real(+1), Real(0)};
-                case 8: return {Real(-1), Real(0), Real(0)};
-                // Mid-edges to apex
-                case 9:  return {Real(-0.5), Real(-0.5), Real(0.5)};
-                case 10: return {Real(+0.5), Real(-0.5), Real(0.5)};
-                case 11: return {Real(+0.5), Real(+0.5), Real(0.5)};
-                case 12: return {Real(-0.5), Real(+0.5), Real(0.5)};
-                default: break;
-            }
-            break;
-
-        default:
-            break;
-    }
-
-    throw BasisNodeOrderingException("Invalid element type or node index in NodeOrdering::get_node_coords",
+    throw BasisNodeOrderingException("Invalid element type or node index in ReferenceNodeLayout::get_node_coords",
                                      __FILE__, __LINE__, __func__);
 }
 
-std::size_t NodeOrdering::num_nodes(ElementType elem_type) {
-    if (complete_lagrange_alias_order(elem_type) >= 0) {
-        return complete_lagrange_alias_coords(elem_type).size();
+std::size_t ReferenceNodeLayout::num_nodes(ElementType elem_type) {
+    const auto table = fixed_node_table(elem_type);
+    if (table.data != nullptr) {
+        return table.size;
     }
 
-    switch (elem_type) {
-        case ElementType::Quad8:      return 8;
-        case ElementType::Hex20:      return 20;
-        case ElementType::Wedge15:    return 15;
-        case ElementType::Pyramid13:  return 13;
-        default:
-            throw BasisNodeOrderingException("Unknown element type in NodeOrdering::num_nodes",
-                                             __FILE__, __LINE__, __func__);
-    }
+    throw BasisNodeOrderingException("Unknown element type in ReferenceNodeLayout::num_nodes",
+                                     __FILE__, __LINE__, __func__);
 }
 
 std::vector<math::Vector<Real, 3>>
-NodeOrdering::get_lagrange_node_coords(ElementType canonical_type, int order) {
+ReferenceNodeLayout::get_lagrange_node_coords(ElementType canonical_type, int order) {
     if (order < 0) {
-        throw BasisNodeOrderingException("NodeOrdering::get_lagrange_node_coords requires non-negative order",
+        throw BasisNodeOrderingException("ReferenceNodeLayout::get_lagrange_node_coords requires non-negative order",
                                          __FILE__, __LINE__, __func__);
     }
 
-    switch (canonical_lagrange_type(canonical_type)) {
+    const ElementType type = canonical_lagrange_type(canonical_type);
+    const auto fixed_table = fixed_complete_lagrange_table(type, order);
+    if (fixed_table.data != nullptr) {
+        std::vector<Point> nodes;
+        nodes.reserve(fixed_table.size);
+        for (std::size_t i = 0; i < fixed_table.size; ++i) {
+            nodes.push_back(to_point(fixed_table.data[i]));
+        }
+        return nodes;
+    }
+
+    switch (type) {
         case ElementType::Point1:
             return {Point{Real(0), Real(0), Real(0)}};
         case ElementType::Line2:
@@ -691,40 +788,29 @@ NodeOrdering::get_lagrange_node_coords(ElementType canonical_type, int order) {
         case ElementType::Hex20:
         case ElementType::Wedge15:
         case ElementType::Pyramid13:
-            throw BasisNodeOrderingException("NodeOrdering::get_lagrange_node_coords does not support serendipity topologies",
+            throw BasisNodeOrderingException("ReferenceNodeLayout::get_lagrange_node_coords does not support serendipity topologies",
                                              __FILE__, __LINE__, __func__);
         default:
-            throw BasisNodeOrderingException("NodeOrdering::get_lagrange_node_coords: unsupported topology",
+            throw BasisNodeOrderingException("ReferenceNodeLayout::get_lagrange_node_coords: unsupported topology",
                                              __FILE__, __LINE__, __func__);
     }
 }
 
-bool NodeOrdering::is_simplex(ElementType elem_type) {
-    switch (elem_type) {
-        case ElementType::Triangle3:
-        case ElementType::Triangle6:
-        case ElementType::Tetra4:
-        case ElementType::Tetra10:
-            return true;
-        default:
-            return false;
+std::span<const std::size_t> ReferenceNodeLayout::mesh_to_basis_ordering(ElementType elem_type) {
+    if (elem_type == ElementType::Hex20) {
+        return std::span<const std::size_t>(
+            kHex20MeshToBasisOrder.data(),
+            kHex20MeshToBasisOrder.size());
     }
+    return {};
 }
 
-bool NodeOrdering::is_tensor_product(ElementType elem_type) {
-    switch (elem_type) {
-        case ElementType::Line2:
-        case ElementType::Line3:
-        case ElementType::Quad4:
-        case ElementType::Quad8:
-        case ElementType::Quad9:
-        case ElementType::Hex8:
-        case ElementType::Hex20:
-        case ElementType::Hex27:
-            return true;
-        default:
-            return false;
-    }
+bool ReferenceNodeLayout::is_simplex(ElementType elem_type) {
+    return svmp::FE::basis::is_simplex(elem_type);
+}
+
+bool ReferenceNodeLayout::is_tensor_product(ElementType elem_type) {
+    return svmp::FE::basis::is_tensor_product(elem_type);
 }
 
 } // namespace basis

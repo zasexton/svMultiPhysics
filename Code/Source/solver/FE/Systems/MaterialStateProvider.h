@@ -28,7 +28,8 @@ class MaterialStateProvider final : public assembly::IMaterialStateProvider {
 public:
     explicit MaterialStateProvider(GlobalIndex num_cells,
                                    std::vector<GlobalIndex> boundary_face_ids = {},
-                                   std::vector<GlobalIndex> interior_face_ids = {});
+                                   std::vector<GlobalIndex> interior_face_ids = {},
+                                   std::vector<std::uint64_t> generated_interface_ids = {});
     ~MaterialStateProvider() override;
 
     MaterialStateProvider(MaterialStateProvider&&) noexcept;
@@ -41,7 +42,8 @@ public:
                    assembly::MaterialStateSpec spec,
                    LocalIndex max_cell_qpts,
                    LocalIndex max_boundary_face_qpts = 0,
-                   LocalIndex max_interior_face_qpts = 0);
+                   LocalIndex max_interior_face_qpts = 0,
+                   LocalIndex max_generated_interface_qpts = 0);
 
     [[nodiscard]] assembly::MaterialStateView getCellState(const assembly::AssemblyKernel& kernel,
                                                            GlobalIndex cell_id,
@@ -54,6 +56,13 @@ public:
     [[nodiscard]] assembly::MaterialStateView getInteriorFaceState(const assembly::AssemblyKernel& kernel,
                                                                    GlobalIndex face_id,
                                                                    LocalIndex num_qpts) override;
+
+    [[nodiscard]] assembly::MaterialStateView getGeneratedInterfaceState(
+        const assembly::AssemblyKernel& kernel,
+        GlobalIndex parent_cell_id,
+        int interface_marker,
+        std::uint64_t cut_topology_revision,
+        LocalIndex num_qpts) override;
 
     void beginTimeStep() override;
     void commitTimeStep() override;
@@ -104,6 +113,11 @@ private:
         std::size_t interior_face_stride_bytes{0};
         AlignedBuffer interior_old{};
         AlignedBuffer interior_work{};
+
+        LocalIndex max_generated_interface_qpts{0};
+        std::size_t generated_interface_stride_bytes{0};
+        AlignedBuffer generated_interface_old{};
+        AlignedBuffer generated_interface_work{};
         std::vector<state::StateVariableMetadata> variables{};
         state::StateFrameTransformHook frame_transform_hook{};
     };
@@ -111,8 +125,10 @@ private:
     GlobalIndex num_cells_{0};
     std::vector<GlobalIndex> boundary_face_ids_{};
     std::vector<GlobalIndex> interior_face_ids_{};
+    std::vector<std::uint64_t> generated_interface_ids_{};
     std::unordered_map<GlobalIndex, std::size_t> boundary_face_index_{};
     std::unordered_map<GlobalIndex, std::size_t> interior_face_index_{};
+    std::unordered_map<std::uint64_t, std::size_t> generated_interface_index_{};
     std::unordered_map<const assembly::AssemblyKernel*, KernelState> states_{};
     state::StateVariableLifecycle work_lifecycle_{state::StateVariableLifecycle::TrialWork};
 };

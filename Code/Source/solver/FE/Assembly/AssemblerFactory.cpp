@@ -104,6 +104,47 @@ AssemblyResult Assembler::assembleCellsFused(
     return total;
 }
 
+AssemblyResult Assembler::assembleCutVolumesFused(
+    const IMeshAccess& mesh,
+    const CutIntegrationContext& cut_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    std::span<const FusedCellTerm> terms)
+{
+    AssemblyResult total;
+    for (const auto& t : terms) {
+        if (!t.assemble_matrix && !t.assemble_vector) {
+            continue;
+        }
+
+        setRowDofMap(*t.row_dof_map, t.row_dof_offset);
+        setColDofMap(*t.col_dof_map, t.col_dof_offset);
+
+        auto r = assembleCutVolumes(
+            mesh,
+            cut_context,
+            interface_marker,
+            side,
+            *t.test_space,
+            *t.trial_space,
+            *t.kernel,
+            t.assemble_matrix ? t.matrix_view : nullptr,
+            t.assemble_vector ? t.vector_view : nullptr,
+            t.assemble_matrix,
+            t.assemble_vector);
+
+        total.elements_assembled += r.elements_assembled;
+        total.matrix_entries_inserted += r.matrix_entries_inserted;
+        total.vector_entries_inserted += r.vector_entries_inserted;
+        total.elapsed_time_seconds += r.elapsed_time_seconds;
+        if (!r.success) {
+            total.success = false;
+            total.error_message = r.error_message;
+        }
+    }
+    return total;
+}
+
 // ============================================================================
 // Assembler Factory
 // ============================================================================

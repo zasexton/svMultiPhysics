@@ -19,14 +19,21 @@
 #include "Core/Types.h"
 #include "Math/Matrix.h"
 #include "Math/Vector.h"
-#include <tuple>
-#include <utility>
+#include <span>
 #include <vector>
 
 namespace svmp {
 namespace FE {
 namespace basis {
 namespace orthopoly {
+
+/// Accuracy envelope covered by regression tests for the forward Jacobi
+/// recurrence used by Dubiner/Proriol modal bases. These are validation limits,
+/// not runtime guards; inputs outside this envelope are accepted but do not carry
+/// the same documented accuracy contract.
+inline constexpr int kMaxValidatedJacobiRecurrenceOrder = 12;
+inline constexpr int kMaxValidatedJacobiAlphaBetaSum = 40;
+inline constexpr int kMaxValidatedSimplexModalTotalOrder = 12;
 
 struct BivariateDerivatives {
     Real value{Real(0)};
@@ -37,6 +44,39 @@ struct BivariateDerivatives {
     Real dyy{Real(0)};
 };
 
+struct UnivariateDerivatives {
+    Real value{Real(0)};
+    Real derivative{Real(0)};
+    Real second_derivative{Real(0)};
+};
+
+struct UnivariateFirstDerivative {
+    Real value{Real(0)};
+    Real derivative{Real(0)};
+};
+
+struct PolynomialSequenceDerivatives {
+    std::vector<Real> values;
+    std::vector<Real> derivatives;
+};
+
+struct PolynomialSequenceSecondDerivatives {
+    std::vector<Real> values;
+    std::vector<Real> derivatives;
+    std::vector<Real> second_derivatives;
+};
+
+struct BivariateFirstDerivatives {
+    Real value{Real(0)};
+    Real dxi{Real(0)};
+    Real deta{Real(0)};
+};
+
+struct TrivariateFirstDerivatives {
+    Real value{Real(0)};
+    math::Vector<Real, 3> gradient{};
+};
+
 struct TrivariateDerivatives {
     Real value{Real(0)};
     math::Vector<Real, 3> gradient{};
@@ -44,54 +84,84 @@ struct TrivariateDerivatives {
 };
 
 /// Evaluate Legendre polynomial P_n(x)
-Real legendre(int n, Real x);
+[[nodiscard]] Real legendre(int n, Real x);
 
-/// Evaluate Legendre polynomial and its derivative (P_n, P'_n)
-std::pair<Real, Real> legendre_with_derivative(int n, Real x);
+/// Evaluate Legendre polynomial and its derivative with named fields
+[[nodiscard]] UnivariateFirstDerivative legendre_derivative(int n, Real x);
 
 /// Integral of Legendre polynomial from -1 to x (used for hierarchical bases)
-Real integrated_legendre(int n, Real x);
+[[nodiscard]] Real integrated_legendre(int n, Real x);
 
 /// Evaluate Jacobi polynomial P_n^{(alpha,beta)}(x)
-Real jacobi(int n, Real alpha, Real beta, Real x);
+[[nodiscard]] Real jacobi(int n, Real alpha, Real beta, Real x);
 
 /// Evaluate derivative of Jacobi polynomial
-Real jacobi_derivative(int n, Real alpha, Real beta, Real x);
+[[nodiscard]] Real jacobi_derivative(int n, Real alpha, Real beta, Real x);
 
 /// Evaluate second derivative of Jacobi polynomial
-Real jacobi_second_derivative(int n, Real alpha, Real beta, Real x);
+[[nodiscard]] Real jacobi_second_derivative(int n, Real alpha, Real beta, Real x);
+
+/// Evaluate Jacobi polynomial and its first two derivatives in one recurrence
+[[nodiscard]] UnivariateDerivatives jacobi_with_second_derivative(int n, Real alpha, Real beta, Real x);
+
+/// Compute Jacobi sequence P_0...P_n and first/second derivatives into caller-owned storage
+void jacobi_sequence_with_second_derivatives_to(int n,
+                                                Real alpha,
+                                                Real beta,
+                                                Real x,
+                                                std::span<Real> values,
+                                                std::span<Real> derivatives,
+                                                std::span<Real> second_derivatives);
 
 /// Dubiner basis function on the reference triangle
-Real dubiner(int p, int q, Real xi, Real eta);
+[[nodiscard]] Real dubiner(int p, int q, Real xi, Real eta);
 
 /// Proriol polynomial on the reference tetrahedron
-Real proriol(int p, int q, int r, Real xi, Real eta, Real zeta);
+[[nodiscard]] Real proriol(int p, int q, int r, Real xi, Real eta, Real zeta);
 
 /// Convenience: compute sequence P_0 ... P_n at x
-std::vector<Real> legendre_sequence(int n, Real x);
+[[nodiscard]] std::vector<Real> legendre_sequence(int n, Real x);
+
+/// Compute sequence P_0 ... P_n at x into caller-owned storage
+void legendre_sequence_to(int n, Real x, std::span<Real> values);
 
 /// Compute sequence P_0...P_n and their derivatives at x
-/// Returns pair of vectors: (values, derivatives)
-std::pair<std::vector<Real>, std::vector<Real>> legendre_sequence_with_derivatives(int n, Real x);
+[[nodiscard]] PolynomialSequenceDerivatives legendre_sequence_derivatives(int n, Real x);
+
+/// Compute sequence P_0...P_n and their derivatives into caller-owned storage
+void legendre_sequence_with_derivatives_to(int n,
+                                           Real x,
+                                           std::span<Real> values,
+                                           std::span<Real> derivatives);
 
 /// Compute sequence P_0...P_n and their first/second derivatives at x
-std::tuple<std::vector<Real>, std::vector<Real>, std::vector<Real>>
-legendre_sequence_with_second_derivatives(int n, Real x);
+[[nodiscard]] PolynomialSequenceSecondDerivatives legendre_sequence_second_derivatives(int n, Real x);
+
+/// Compute sequence P_0...P_n and their first/second derivatives into caller-owned storage
+void legendre_sequence_with_second_derivatives_to(int n,
+                                                  Real x,
+                                                  std::span<Real> values,
+                                                  std::span<Real> derivatives,
+                                                  std::span<Real> second_derivatives);
+
+/// Generate Gauss-Lobatto-Legendre nodes on [-1, 1].
+[[nodiscard]] std::vector<Real> gll_nodes(int num_points);
 
 /// Dubiner basis function with derivatives on the reference triangle
-/// Returns (value, dxi, deta)
-std::tuple<Real, Real, Real> dubiner_with_derivatives(int p, int q, Real xi, Real eta);
+/// Returns named value and first derivatives
+[[nodiscard]] BivariateFirstDerivatives dubiner_derivatives(int p, int q, Real xi, Real eta);
 
 /// Dubiner basis function with first and second derivatives on the reference triangle
-BivariateDerivatives dubiner_with_second_derivatives(int p, int q, Real xi, Real eta);
+[[nodiscard]] BivariateDerivatives dubiner_with_second_derivatives(int p, int q, Real xi, Real eta);
 
 /// Proriol polynomial with derivatives on the reference tetrahedron
-/// Returns (value, dxi, deta, dzeta)
-std::tuple<Real, Real, Real, Real> proriol_with_derivatives(int p, int q, int r, Real xi, Real eta, Real zeta);
+/// Returns named value and first derivatives
+[[nodiscard]] TrivariateFirstDerivatives proriol_derivatives(int p, int q, int r,
+                                                             Real xi, Real eta, Real zeta);
 
 /// Proriol polynomial with first and second derivatives on the reference tetrahedron
-TrivariateDerivatives proriol_with_second_derivatives(int p, int q, int r,
-                                                      Real xi, Real eta, Real zeta);
+[[nodiscard]] TrivariateDerivatives proriol_with_second_derivatives(int p, int q, int r,
+                                                                    Real xi, Real eta, Real zeta);
 
 } // namespace orthopoly
 } // namespace basis

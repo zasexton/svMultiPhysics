@@ -9,6 +9,8 @@
 #include "FE/Basis/BasisFactory.h"
 #include "FE/Basis/NodeOrderingConventions.h"
 
+#include <array>
+
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
 
@@ -159,7 +161,7 @@ TEST(BubbleBasis, TriangleZeroOnEdgesPositiveInside) {
 
     // Vertices: bubble = 0
     for (std::size_t i = 0; i < 3; ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Triangle3, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Triangle3, i);
         basis.evaluate_values(xi, vals);
         EXPECT_NEAR(vals[0], 0.0, 1e-14) << "Vertex " << i;
     }
@@ -187,7 +189,7 @@ TEST(BubbleBasis, TetraZeroOnFacesPositiveInside) {
 
     // All 4 vertices: bubble = 0
     for (std::size_t i = 0; i < 4; ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Tetra4, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, i);
         basis.evaluate_values(xi, vals);
         EXPECT_NEAR(vals[0], 0.0, 1e-14) << "Vertex " << i;
     }
@@ -204,7 +206,7 @@ TEST(BubbleBasis, QuadZeroOnEdgesPositiveInside) {
 
     // All 4 vertices: bubble = 0
     for (std::size_t i = 0; i < 4; ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Quad4, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Quad4, i);
         basis.evaluate_values(xi, vals);
         EXPECT_NEAR(vals[0], 0.0, 1e-14) << "Vertex " << i;
     }
@@ -232,7 +234,7 @@ TEST(BubbleBasis, HexZeroOnFacesPositiveInside) {
     std::vector<Real> vals;
 
     for (std::size_t i = 0; i < 8; ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Hex8, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Hex8, i);
         basis.evaluate_values(xi, vals);
         EXPECT_NEAR(vals[0], 0.0, 1e-14) << "Vertex " << i;
     }
@@ -247,7 +249,7 @@ TEST(BubbleBasis, WedgeZeroOnBoundaryPositiveInside) {
     std::vector<Real> vals;
 
     for (std::size_t i = 0; i < 6; ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Wedge6, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Wedge6, i);
         basis.evaluate_values(xi, vals);
         EXPECT_NEAR(vals[0], 0.0, 1e-14) << "Vertex " << i;
     }
@@ -272,7 +274,7 @@ TEST(BubbleBasis, PyramidZeroOnBoundaryPositiveInside) {
     std::vector<Real> vals;
 
     for (std::size_t i = 0; i < 5; ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Pyramid5, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Pyramid5, i);
         basis.evaluate_values(xi, vals);
         EXPECT_NEAR(vals[0], 0.0, 1e-14) << "Vertex " << i;
     }
@@ -322,6 +324,47 @@ TEST(BubbleBasis, GradientMatchesFiniteDifference) {
             const Real fd = (vp[0] - vm[0]) / (Real(2) * eps);
             EXPECT_NEAR(grads[0][static_cast<std::size_t>(d)], fd, 1e-5)
                 << "Element " << static_cast<int>(c.type) << ", dim " << d;
+        }
+    }
+}
+
+TEST(BubbleBasis, PyramidHessianMatchesGradientFiniteDifferenceAtNonSymmetricPoints) {
+    BubbleBasis basis(ElementType::Pyramid5);
+    const std::array<math::Vector<Real, 3>, 3> points = {{
+        {Real(0.11), Real(-0.07), Real(0.24)},
+        {Real(-0.19), Real(0.08), Real(0.42)},
+        {Real(0.05), Real(0.21), Real(0.31)}
+    }};
+
+    const Real eps = Real(1e-6);
+    for (const auto& xi : points) {
+        std::vector<Hessian> hessians;
+        basis.evaluate_hessians(xi, hessians);
+        ASSERT_EQ(hessians.size(), 1u);
+
+        for (int col = 0; col < 3; ++col) {
+            auto xi_p = xi;
+            auto xi_m = xi;
+            xi_p[static_cast<std::size_t>(col)] += eps;
+            xi_m[static_cast<std::size_t>(col)] -= eps;
+
+            std::vector<Gradient> grad_p;
+            std::vector<Gradient> grad_m;
+            basis.evaluate_gradients(xi_p, grad_p);
+            basis.evaluate_gradients(xi_m, grad_m);
+            ASSERT_EQ(grad_p.size(), 1u);
+            ASSERT_EQ(grad_m.size(), 1u);
+
+            for (int row = 0; row < 3; ++row) {
+                const auto row_index = static_cast<std::size_t>(row);
+                const auto col_index = static_cast<std::size_t>(col);
+                const Real fd = (grad_p[0][static_cast<std::size_t>(row)] -
+                                 grad_m[0][static_cast<std::size_t>(row)]) /
+                                (Real(2) * eps);
+                EXPECT_NEAR(hessians[0](row_index, col_index), fd, Real(2e-5))
+                    << "xi=(" << xi[0] << ", " << xi[1] << ", " << xi[2]
+                    << "), row=" << row << ", col=" << col;
+            }
         }
     }
 }
@@ -379,7 +422,7 @@ TEST(BubbleBasis, FactoryCreatesBubble) {
     req.basis_type = BasisType::Bubble;
     req.continuity = Continuity::C0;
     req.field_type = FieldType::Scalar;
-    auto basis = BasisFactory::create(req);
+    auto basis = basis_factory::create(req);
     EXPECT_EQ(basis->basis_type(), BasisType::Bubble);
     EXPECT_EQ(basis->size(), 1u);
 }
@@ -392,5 +435,5 @@ TEST(BubbleBasis, FactoryRejectsExplicitOrder) {
     req.field_type = FieldType::Scalar;
     req.order = 3;
 
-    EXPECT_THROW((void)BasisFactory::create(req), BasisConfigurationException);
+    EXPECT_THROW((void)basis_factory::create(req), BasisConfigurationException);
 }

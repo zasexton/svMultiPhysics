@@ -6,57 +6,26 @@
  */
 
 #include "BubbleBasis.h"
+#include "BasisTraits.h"
 
 namespace svmp {
 namespace FE {
 namespace basis {
 
-namespace {
-
-bool is_line(ElementType t) {
-    return t == ElementType::Line2 || t == ElementType::Line3;
-}
-
-bool is_tri(ElementType t) {
-    return t == ElementType::Triangle3 || t == ElementType::Triangle6;
-}
-
-bool is_tet(ElementType t) {
-    return t == ElementType::Tetra4 || t == ElementType::Tetra10;
-}
-
-bool is_quad(ElementType t) {
-    return t == ElementType::Quad4 || t == ElementType::Quad8 || t == ElementType::Quad9;
-}
-
-bool is_hex(ElementType t) {
-    return t == ElementType::Hex8 || t == ElementType::Hex20 || t == ElementType::Hex27;
-}
-
-bool is_wedge(ElementType t) {
-    return t == ElementType::Wedge6 || t == ElementType::Wedge15 || t == ElementType::Wedge18;
-}
-
-bool is_pyramid(ElementType t) {
-    return t == ElementType::Pyramid5 || t == ElementType::Pyramid13 || t == ElementType::Pyramid14;
-}
-
-} // namespace
-
 BubbleBasis::BubbleBasis(ElementType type) : element_type_(type) {
     if (is_line(type)) {
         dimension_ = 1;
         order_ = 2;
-    } else if (is_tri(type)) {
+    } else if (is_triangle(type)) {
         dimension_ = 2;
         order_ = 3;
-    } else if (is_tet(type)) {
+    } else if (is_tetrahedron(type)) {
         dimension_ = 3;
         order_ = 4;
-    } else if (is_quad(type)) {
+    } else if (is_quadrilateral(type)) {
         dimension_ = 2;
         order_ = 2;
-    } else if (is_hex(type)) {
+    } else if (is_hexahedron(type)) {
         dimension_ = 3;
         order_ = 2;
     } else if (is_wedge(type)) {
@@ -78,19 +47,19 @@ void BubbleBasis::evaluate_values(const math::Vector<Real, 3>& xi,
     if (is_line(element_type_)) {
         const Real x = xi[0];
         values[0] = Real(1) - x * x;
-    } else if (is_tri(element_type_)) {
+    } else if (is_triangle(element_type_)) {
         // Barycentric: L0 = 1 - xi - eta, L1 = xi, L2 = eta
         const Real L0 = Real(1) - xi[0] - xi[1];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
         values[0] = Real(27) * L0 * L1 * L2;
-    } else if (is_tet(element_type_)) {
+    } else if (is_tetrahedron(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1] - xi[2];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
         const Real L3 = xi[2];
         values[0] = Real(256) * L0 * L1 * L2 * L3;
-    } else if (is_quad(element_type_)) {
+    } else if (is_quadrilateral(element_type_)) {
         values[0] = (Real(1) - xi[0] * xi[0]) * (Real(1) - xi[1] * xi[1]);
     } else if (is_wedge(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1];
@@ -121,7 +90,7 @@ void BubbleBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
 
     if (is_line(element_type_)) {
         g[0] = -Real(2) * xi[0];
-    } else if (is_tri(element_type_)) {
+    } else if (is_triangle(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
@@ -130,7 +99,7 @@ void BubbleBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         g[0] = Real(27) * (-L1 * L2 + L0 * L2);
         // dL0/deta = -1, dL1/deta = 0, dL2/deta = 1
         g[1] = Real(27) * (-L1 * L2 + L0 * L1);
-    } else if (is_tet(element_type_)) {
+    } else if (is_tetrahedron(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1] - xi[2];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
@@ -139,7 +108,7 @@ void BubbleBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
         g[0] = Real(256) * (-L1 * L2 * L3 + L0 * L2 * L3);
         g[1] = Real(256) * (-L1 * L2 * L3 + L0 * L1 * L3);
         g[2] = Real(256) * (-L1 * L2 * L3 + L0 * L1 * L2);
-    } else if (is_quad(element_type_)) {
+    } else if (is_quadrilateral(element_type_)) {
         const Real x = xi[0], y = xi[1];
         g[0] = -Real(2) * x * (Real(1) - y * y);
         g[1] = (Real(1) - x * x) * (-Real(2) * y);
@@ -190,37 +159,39 @@ void BubbleBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
 
     if (is_line(element_type_)) {
         H(0, 0) = -Real(2);
-    } else if (is_tri(element_type_)) {
+    } else if (is_triangle(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
         (void)L0;
-        H(0, 0) = Real(-54) * L2;
-        H(1, 1) = Real(-54) * L1;
-        H(0, 1) = Real(27) * (Real(1) - Real(2) * L1 - Real(2) * L2);
-        H(1, 0) = H(0, 1);
-    } else if (is_tet(element_type_)) {
+        H = make_symmetric_hessian(Real(-54) * L2,
+                                   Real(-54) * L1,
+                                   Real(0),
+                                   Real(27) * (Real(1) - Real(2) * L1 - Real(2) * L2),
+                                   Real(0),
+                                   Real(0));
+    } else if (is_tetrahedron(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1] - xi[2];
         const Real L1 = xi[0];
         const Real L2 = xi[1];
         const Real L3 = xi[2];
         (void)L0;
-        H(0, 0) = Real(-512) * L2 * L3;
-        H(1, 1) = Real(-512) * L1 * L3;
-        H(2, 2) = Real(-512) * L1 * L2;
-        H(0, 1) = Real(256) * L3 * (Real(1) - Real(2) * L1 - Real(2) * L2 - L3);
-        H(1, 0) = H(0, 1);
-        H(0, 2) = Real(256) * L2 * (Real(1) - Real(2) * L1 - L2 - Real(2) * L3);
-        H(2, 0) = H(0, 2);
-        H(1, 2) = Real(256) * L1 * (Real(1) - L1 - Real(2) * L2 - Real(2) * L3);
-        H(2, 1) = H(1, 2);
-    } else if (is_quad(element_type_)) {
+        H = make_symmetric_hessian(
+            Real(-512) * L2 * L3,
+            Real(-512) * L1 * L3,
+            Real(-512) * L1 * L2,
+            Real(256) * L3 * (Real(1) - Real(2) * L1 - Real(2) * L2 - L3),
+            Real(256) * L2 * (Real(1) - Real(2) * L1 - L2 - Real(2) * L3),
+            Real(256) * L1 * (Real(1) - L1 - Real(2) * L2 - Real(2) * L3));
+    } else if (is_quadrilateral(element_type_)) {
         const Real x = xi[0];
         const Real y = xi[1];
-        H(0, 0) = -Real(2) * (Real(1) - y * y);
-        H(1, 1) = -Real(2) * (Real(1) - x * x);
-        H(0, 1) = Real(4) * x * y;
-        H(1, 0) = H(0, 1);
+        H = make_symmetric_hessian(-Real(2) * (Real(1) - y * y),
+                                   -Real(2) * (Real(1) - x * x),
+                                   Real(0),
+                                   Real(4) * x * y,
+                                   Real(0),
+                                   Real(0));
     } else if (is_wedge(element_type_)) {
         const Real L0 = Real(1) - xi[0] - xi[1];
         const Real L1 = xi[0];
@@ -234,15 +205,12 @@ void BubbleBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         const Real ddtri_dyy = Real(-54) * L1;
         const Real ddtri_dxy = Real(27) * (Real(1) - Real(2) * L1 - Real(2) * L2);
 
-        H(0, 0) = ddtri_dxx * z_factor;
-        H(1, 1) = ddtri_dyy * z_factor;
-        H(0, 1) = ddtri_dxy * z_factor;
-        H(1, 0) = H(0, 1);
-        H(0, 2) = dtri_dxi * (Real(-2) * z);
-        H(2, 0) = H(0, 2);
-        H(1, 2) = dtri_deta * (Real(-2) * z);
-        H(2, 1) = H(1, 2);
-        H(2, 2) = tri * Real(-2);
+        H = make_symmetric_hessian(ddtri_dxx * z_factor,
+                                   ddtri_dyy * z_factor,
+                                   tri * Real(-2),
+                                   ddtri_dxy * z_factor,
+                                   dtri_dxi * (Real(-2) * z),
+                                   dtri_deta * (Real(-2) * z));
     } else if (is_pyramid(element_type_)) {
         const Real x = xi[0];
         const Real y = xi[1];
@@ -252,15 +220,13 @@ void BubbleBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         const Real ay = s * s - y * y;
         const Real scale = Real(3125) / Real(256);
 
-        H(0, 0) = scale * z * Real(-2) * ay;
-        H(1, 1) = scale * z * ax * Real(-2);
-        H(0, 1) = scale * z * Real(4) * x * y;
-        H(1, 0) = H(0, 1);
-        H(0, 2) = scale * Real(-2) * x * (ay - Real(2) * z * s);
-        H(2, 0) = H(0, 2);
-        H(1, 2) = scale * Real(-2) * y * (ax - Real(2) * z * s);
-        H(2, 1) = H(1, 2);
-        H(2, 2) = scale * Real(2) * ((Real(2) * z - Real(2)) * (ax + ay) + Real(4) * z * s * s);
+        H = make_symmetric_hessian(
+            scale * z * Real(-2) * ay,
+            scale * z * ax * Real(-2),
+            scale * ((Real(6) * z - Real(4)) * (ax + ay) + Real(8) * z * s * s),
+            scale * z * Real(4) * x * y,
+            scale * Real(-2) * x * (ay - Real(2) * z * s),
+            scale * Real(-2) * y * (ax - Real(2) * z * s));
     } else {
         const Real x = xi[0];
         const Real y = xi[1];
@@ -268,15 +234,12 @@ void BubbleBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         const Real mx = Real(1) - x * x;
         const Real my = Real(1) - y * y;
         const Real mz = Real(1) - z * z;
-        H(0, 0) = -Real(2) * my * mz;
-        H(1, 1) = -Real(2) * mx * mz;
-        H(2, 2) = -Real(2) * mx * my;
-        H(0, 1) = Real(4) * x * y * mz;
-        H(1, 0) = H(0, 1);
-        H(0, 2) = Real(4) * x * z * my;
-        H(2, 0) = H(0, 2);
-        H(1, 2) = Real(4) * y * z * mx;
-        H(2, 1) = H(1, 2);
+        H = make_symmetric_hessian(-Real(2) * my * mz,
+                                   -Real(2) * mx * mz,
+                                   -Real(2) * mx * my,
+                                   Real(4) * x * y * mz,
+                                   Real(4) * x * z * my,
+                                   Real(4) * y * z * mx);
     }
 
     hessians[0] = H;

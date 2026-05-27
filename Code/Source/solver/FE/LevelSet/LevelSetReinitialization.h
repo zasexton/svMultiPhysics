@@ -34,8 +34,11 @@ struct LevelSetSignedDistanceRepairResult {
 };
 
 /**
- * Repair nodal level-set coefficients by projecting mesh vertices to generated
+ * Repair nodal level-set coefficients by projecting mesh nodes to generated
  * linear interface primitives and preserving the original coefficient signs.
+ * For scalar H1 nodal fields, cell-local DOFs are repaired when their local
+ * ordering can be paired one-to-one with the mesh cell node ordering; remaining
+ * vertex DOFs are repaired as a fallback.
  *
  * Supported cuts are linear Line2/Line3, Triangle3/Triangle6, Quad4/Quad8/Quad9,
  * and Tetra4/Tetra10 corner cuts. Other element types are skipped. This utility

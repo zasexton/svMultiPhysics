@@ -304,10 +304,10 @@ ElementTransform::facet_vertices(ElementType element_type, int facet_id) {
     }
 
     // Get reference coordinates for each vertex
-    const std::size_t num_nodes = basis::NodeOrdering::num_nodes(element_type);
+    const std::size_t num_nodes = basis::ReferenceNodeLayout::num_nodes(element_type);
     for (LocalIndex vi : vertex_indices) {
         if (vi < num_nodes) {
-            coords.push_back(basis::NodeOrdering::get_node_coords(element_type, vi));
+            coords.push_back(basis::ReferenceNodeLayout::get_node_coords(element_type, vi));
         }
     }
 

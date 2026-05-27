@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include "FE/Math/MathUtils.h"
 #include "FE/Math/MathConstants.h"
+#include "FE/Math/PyramidTensorCoordinates.h"
 #include <limits>
 #include <cmath>
 #include <chrono>
@@ -59,6 +60,27 @@ TEST_F(MathUtilsTest, SignWithDifferentTypes) {
     EXPECT_EQ(sign(-5), -1);
     EXPECT_EQ(sign(5.0f), 1);
     EXPECT_EQ(sign(-5.0f), -1);
+}
+
+TEST_F(MathUtilsTest, PyramidTensorCoordinatesIncludeDerivatives) {
+    const Vector<double, 3> xi{0.2, -0.1, 0.25};
+    const auto coordinates = pyramid_tensor_coordinates(xi);
+
+    const double inv = 1.0 / (1.0 - xi[2]);
+    EXPECT_NEAR(coordinates[0].value, 0.5 * (xi[0] * inv + 1.0), tolerance);
+    EXPECT_NEAR(coordinates[1].value, 0.5 * (xi[1] * inv + 1.0), tolerance);
+    EXPECT_NEAR(coordinates[2].value, 0.5 * (xi[2] + 1.0), tolerance);
+
+    EXPECT_NEAR(coordinates[0].first[0], 0.5 * inv, tolerance);
+    EXPECT_NEAR(coordinates[0].first[2], 0.5 * xi[0] * inv * inv, tolerance);
+    EXPECT_NEAR(coordinates[1].first[1], 0.5 * inv, tolerance);
+    EXPECT_NEAR(coordinates[1].first[2], 0.5 * xi[1] * inv * inv, tolerance);
+    EXPECT_NEAR(coordinates[2].first[2], 0.5, tolerance);
+
+    EXPECT_NEAR(coordinates[0].second(0, 2), 0.5 * inv * inv, tolerance);
+    EXPECT_NEAR(coordinates[0].second(2, 0), coordinates[0].second(0, 2), tolerance);
+    EXPECT_NEAR(coordinates[1].second(1, 2), 0.5 * inv * inv, tolerance);
+    EXPECT_NEAR(coordinates[1].second(2, 1), coordinates[1].second(1, 2), tolerance);
 }
 
 // =============================================================================

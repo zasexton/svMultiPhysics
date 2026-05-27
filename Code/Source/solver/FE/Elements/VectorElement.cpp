@@ -14,9 +14,9 @@ namespace svmp {
 namespace FE {
 namespace elements {
 
-using svmp::FE::basis::BasisFactory;
 using svmp::FE::basis::BasisRequest;
 using svmp::FE::quadrature::QuadratureFactory;
+namespace basis_factory = svmp::FE::basis::basis_factory;
 
 VectorElement::VectorElement(ElementType element_type,
                              int order,
@@ -56,7 +56,7 @@ VectorElement::VectorElement(ElementType element_type,
     req.continuity   = continuity;
     req.field_type   = FieldType::Vector;
 
-    basis_ = BasisFactory::create(req);
+    basis_ = basis_factory::create(req);
     if (!basis_) {
         throw FEException("VectorElement: BasisFactory returned null basis",
                           __FILE__, __LINE__, __func__, FEStatus::AssemblyError);

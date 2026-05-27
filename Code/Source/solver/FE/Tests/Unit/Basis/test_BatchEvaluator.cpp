@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Assembly/BatchedProjection.h"
+#include "FE/Assembly/BatchedStiffness.h"
 #include "FE/Basis/BatchEvaluator.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/SerendipityBasis.h"
@@ -97,7 +99,7 @@ TEST(BatchEvaluator, WeightedSumMatchesPointwise) {
     }
 
     std::vector<Real> result_batch(nq, Real(0));
-    batch.weighted_sum(coeffs.data(), weights.data(), result_batch.data());
+    assembly::weighted_sum(batch, coeffs.data(), weights.data(), result_batch.data());
 
     std::vector<Real> result_ref(nq, Real(0));
     for (std::size_t q = 0; q < nq; ++q) {
@@ -114,6 +116,34 @@ TEST(BatchEvaluator, WeightedSumMatchesPointwise) {
 
     for (std::size_t q = 0; q < nq; ++q) {
         EXPECT_NEAR(result_batch[q], result_ref[q], 1e-12);
+    }
+}
+
+TEST(BatchEvaluator, UsesPaddedAlignedPrimaryStorage) {
+    basis::LagrangeBasis basis(ElementType::Line2, 2);
+    auto quad = CustomQuadratureRule(
+        svmp::CellFamily::Line, 1, 3,
+        {
+            quadrature::QuadPoint{Real(-0.5), Real(0), Real(0)},
+            quadrature::QuadPoint{Real(0.0), Real(0), Real(0)},
+            quadrature::QuadPoint{Real(0.5), Real(0), Real(0)}
+        },
+        {Real(1.0), Real(1.0), Real(1.0)});
+
+    basis::BatchEvaluator batch(basis, quad, /*compute_gradients=*/true, /*compute_hessians=*/true);
+    const auto& data = batch.data();
+
+    ASSERT_GE(data.quad_stride, data.num_quad_points);
+    EXPECT_EQ(data.values.size(), data.num_basis * data.quad_stride);
+    EXPECT_EQ(data.gradients.size(), data.num_basis * 3u * data.quad_stride);
+    EXPECT_EQ(data.hessians.size(), data.num_basis * 9u * data.quad_stride);
+
+    for (std::size_t i = 0; i < data.num_basis; ++i) {
+        for (std::size_t q = data.num_quad_points; q < data.quad_stride; ++q) {
+            EXPECT_EQ(data.values_for_basis(i)[q], Real(0));
+            EXPECT_EQ(data.gradients_for_basis(i, 0u)[q], Real(0));
+            EXPECT_EQ(data.hessian(i, 0u, 0u, q), Real(0));
+        }
     }
 }
 
@@ -140,7 +170,7 @@ TEST(BatchEvaluator, WeightedGradientSumMatchesPointwise) {
     }
 
     std::vector<Real> result_batch(3 * nq, Real(0));
-    batch.weighted_gradient_sum(coeffs.data(), weights.data(), result_batch.data());
+    assembly::weighted_gradient_sum(batch, coeffs.data(), weights.data(), result_batch.data());
 
     std::vector<Real> result_ref(3 * nq, Real(0));
     for (std::size_t q = 0; q < nq; ++q) {
@@ -189,7 +219,7 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise) {
     }
 
     std::vector<Real> K_batch(n * n, Real(0));
-    batch.assemble_stiffness_contribution(D, weights.data(), K_batch.data());
+    assembly::assemble_stiffness_contribution(batch, D, weights.data(), K_batch.data());
 
     // Point-by-point reference using the same reference-space gradients
     std::vector<std::vector<basis::Gradient>> grads_q(nq);
@@ -239,7 +269,7 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_1D) {
     }
 
     std::vector<Real> K_batch(n * n, Real(0));
-    batch.assemble_stiffness_contribution(D, weights.data(), K_batch.data());
+    assembly::assemble_stiffness_contribution(batch, D, weights.data(), K_batch.data());
 
     std::vector<Real> K_ref(n * n, Real(0));
     for (std::size_t q = 0; q < nq; ++q) {
@@ -255,6 +285,61 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_1D) {
     for (std::size_t idx = 0; idx < n * n; ++idx) {
         EXPECT_NEAR(K_batch[idx], K_ref[idx], 1e-12);
     }
+}
+
+TEST(BatchEvaluator, AssembleStiffnessSupportsNonsymmetricTensor) {
+    basis::LagrangeBasis basis(ElementType::Quad4, 1);
+    quadrature::QuadrilateralQuadrature quad(3);
+
+    basis::BatchEvaluator batch(basis, quad, true, false);
+
+    const std::size_t n = basis.size();
+    const std::size_t nq = quad.num_points();
+    const int dim = basis.dimension();
+
+    ASSERT_EQ(dim, 2);
+
+    const Real D[4] = {Real(1.75), Real(0.8),
+                       Real(-0.25), Real(0.9)};
+
+    std::vector<Real> weights(nq);
+    for (std::size_t q = 0; q < nq; ++q) {
+        weights[q] = quad.weight(q);
+    }
+
+    std::vector<Real> K_batch(n * n, Real(42));
+    assembly::assemble_stiffness_contribution(batch, D, weights.data(), K_batch.data());
+
+    std::vector<Real> K_ref(n * n, Real(0));
+    for (std::size_t q = 0; q < nq; ++q) {
+        std::vector<basis::Gradient> grads;
+        basis.evaluate_gradients(quad.point(q), grads);
+        ASSERT_EQ(grads.size(), n);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) {
+                Real contribution = Real(0);
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        contribution += grads[i][static_cast<std::size_t>(d1)] *
+                                        D[static_cast<std::size_t>(d1 * dim + d2)] *
+                                        grads[j][static_cast<std::size_t>(d2)];
+                    }
+                }
+                K_ref[i * n + j] += contribution * weights[q];
+            }
+        }
+    }
+
+    bool found_nonsymmetric_entry = false;
+    for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < n; ++j) {
+            EXPECT_NEAR(K_batch[i * n + j], K_ref[i * n + j], 1e-12);
+            if (i != j && std::abs(K_ref[i * n + j] - K_ref[j * n + i]) > Real(1e-12)) {
+                found_nonsymmetric_entry = true;
+            }
+        }
+    }
+    EXPECT_TRUE(found_nonsymmetric_entry);
 }
 
 TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_3D) {
@@ -280,7 +365,7 @@ TEST(BatchEvaluator, AssembleStiffnessMatchesPointwise_3D) {
     }
 
     std::vector<Real> K_batch(n * n, Real(0));
-    batch.assemble_stiffness_contribution(D, weights.data(), K_batch.data());
+    assembly::assemble_stiffness_contribution(batch, D, weights.data(), K_batch.data());
 
     std::vector<Real> K_ref(n * n, Real(0));
     for (std::size_t q = 0; q < nq; ++q) {
@@ -457,6 +542,8 @@ TEST(BatchEvaluator, ThrowsWhenGradientsNotComputed) {
 
     const Real D[4] = {Real(1), Real(0), Real(0), Real(1)};
 
-    EXPECT_THROW(batch.weighted_gradient_sum(coeffs.data(), weights.data(), grad_result.data()), basis::BasisEvaluationException);
-    EXPECT_THROW(batch.assemble_stiffness_contribution(D, weights.data(), K.data()), basis::BasisEvaluationException);
+    EXPECT_THROW(assembly::weighted_gradient_sum(batch, coeffs.data(), weights.data(), grad_result.data()),
+                 basis::BasisEvaluationException);
+    EXPECT_THROW(assembly::assemble_stiffness_contribution(batch, D, weights.data(), K.data()),
+                 basis::BasisEvaluationException);
 }

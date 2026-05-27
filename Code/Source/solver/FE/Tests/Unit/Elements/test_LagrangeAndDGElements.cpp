@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Basis/LagrangeBasis.h"
 #include "FE/Elements/LagrangeElement.h"
 #include "FE/Elements/DiscontinuousElement.h"
 #include "FE/Elements/ElementTransform.h"

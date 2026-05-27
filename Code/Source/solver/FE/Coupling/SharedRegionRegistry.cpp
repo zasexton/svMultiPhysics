@@ -146,6 +146,7 @@ CouplingValidationResult SharedRegionRegistry::validateMonolithicFormsTopology()
                 });
                 continue;
             }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
             if (region.system == nullptr || !region.system->hasInterfaceMesh(region.marker)) {
                 result.add(CouplingDiagnostic{
                     .severity = CouplingDiagnosticSeverity::Error,
@@ -154,6 +155,7 @@ CouplingValidationResult SharedRegionRegistry::validateMonolithicFormsTopology()
                     .message = "interface shared-region participant mapping is missing registered interface topology",
                 });
             }
+#endif
         }
     }
     return result;

@@ -1,13 +1,21 @@
 #include <gtest/gtest.h>
 
 #include "Application/Core/ActiveDomainOutput.h"
+#include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/MeshAccess.h"
+#include "FE/Dofs/EntityDofMap.h"
+#include "FE/LevelSet/LevelSetInterfaceLifecycle.h"
+#include "FE/LevelSet/LevelSetRestart.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <array>
 #include <memory>
 #include <map>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -64,6 +72,28 @@ std::shared_ptr<svmp::Mesh> makeSingleQuadCellMesh(
       {quad});
   base->finalize();
   return svmp::create_mesh(std::move(base));
+}
+
+void setScalarVertexValue(std::vector<svmp::FE::Real>& state,
+                          const svmp::FE::systems::FESystem& system,
+                          svmp::FE::FieldId field,
+                          svmp::FE::GlobalIndex vertex,
+                          svmp::FE::Real value)
+{
+  const auto* entity_map =
+      system.fieldDofHandler(field).getEntityDofMap();
+  if (entity_map == nullptr) {
+    throw std::runtime_error("test scalar field has no EntityDofMap");
+  }
+  const auto dofs = entity_map->getVertexDofs(vertex);
+  if (dofs.size() != 1u) {
+    throw std::runtime_error("test scalar field expected one vertex DOF");
+  }
+  const auto index = system.fieldDofOffset(field) + dofs.front();
+  if (index < 0 || static_cast<std::size_t>(index) >= state.size()) {
+    throw std::runtime_error("test scalar field DOF is out of range");
+  }
+  state[static_cast<std::size_t>(index)] = value;
 }
 
 } // namespace
@@ -235,6 +265,111 @@ TEST(ActiveDomainOutput, TracksWetVolumeDriftAcrossAcceptedSteps)
   EXPECT_DOUBLE_EQ(zero_initial.initial_wet_volume, 0.0);
   EXPECT_DOUBLE_EQ(zero_relative.wet_volume_drift, 0.25);
   EXPECT_DOUBLE_EQ(zero_relative.relative_wet_volume_drift, 0.0);
+}
+
+TEST(ActiveDomainOutput, RestartedGeneratedActiveDomainWritesWetVolumeFields)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 719;
+  constexpr svmp::FE::Real cut_x = 0.75;
+  auto mesh = makeTwoQuadCellMesh();
+  auto scalar_space =
+      std::make_shared<svmp::FE::spaces::H1Space>(
+          svmp::FE::ElementType::Quad4,
+          /*order=*/1);
+
+  svmp::FE::systems::FESystem system(mesh);
+  const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1});
+  ASSERT_NO_THROW(system.setup());
+
+  std::vector<svmp::FE::Real> state(
+      static_cast<std::size_t>(system.dofHandler().getNumDofs()),
+      svmp::FE::Real{0});
+  const auto& coords = mesh->X_ref();
+  const int dim = mesh->dim();
+  for (svmp::FE::GlobalIndex vertex = 0;
+       vertex < static_cast<svmp::FE::GlobalIndex>(mesh->n_vertices());
+       ++vertex) {
+    const auto x =
+        static_cast<svmp::FE::Real>(
+            coords[static_cast<std::size_t>(vertex) *
+                   static_cast<std::size_t>(dim)]);
+    setScalarVertexValue(state, system, phi, vertex, x - cut_x);
+  }
+
+  svmp::FE::level_set::LevelSetGeneratedInterfaceOptions options{};
+  options.level_set_field_name = "phi";
+  options.domain_id = "active_restart_output";
+  options.requested_interface_marker = interface_marker;
+  options.interface_quadrature_order = 0;
+  options.volume_quadrature_order = 1;
+
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  const auto built = lifecycle.build(system, options, state);
+  ASSERT_TRUE(built.success) << built.diagnostic;
+
+  const auto restart_record =
+      svmp::FE::level_set::captureLevelSetGeneratedInterfaceRestartRecord(
+          system,
+          options,
+          built);
+  std::string diagnostic;
+  EXPECT_TRUE(svmp::FE::level_set::levelSetGeneratedInterfaceRestartRecordMatches(
+      system,
+      restart_record,
+      &diagnostic)) << diagnostic;
+
+  const auto restored_options =
+      svmp::FE::level_set::optionsFromLevelSetGeneratedInterfaceRestartRecord(
+          restart_record);
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle restored_lifecycle;
+  restored_lifecycle.restoreValueRevision(restart_record.value_revision);
+  const auto restored = restored_lifecycle.build(
+      system,
+      restored_options,
+      state);
+  ASSERT_TRUE(restored.success) << restored.diagnostic;
+
+  svmp::FE::assembly::CutIntegrationContext context;
+  context.addGeneratedInterfaceDomain(
+      restored.domain,
+      svmp::FE::geometry::CutIntegrationSide::Negative);
+  const auto rules =
+      context.generatedVolumeRulesForMarkerAndSide(
+          interface_marker,
+          svmp::FE::geometry::CutIntegrationSide::Negative);
+  ASSERT_FALSE(rules.empty());
+
+  const auto fields_written =
+      application::core::writeWetVolumeFractionField(
+          *mesh,
+          "WetVolumeFraction",
+          rules,
+          "WetVolumeMeasure");
+  EXPECT_EQ(fields_written, 2u);
+  ASSERT_TRUE(mesh->has_field(svmp::EntityKind::Volume, "WetVolumeFraction"));
+  ASSERT_TRUE(mesh->has_field(svmp::EntityKind::Volume, "WetVolumeMeasure"));
+
+  const auto fraction_handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeFraction");
+  const auto measure_handle =
+      mesh->field_handle(svmp::EntityKind::Volume, "WetVolumeMeasure");
+  const auto* fraction =
+      static_cast<const double*>(mesh->field_data(fraction_handle));
+  const auto* measure =
+      static_cast<const double*>(mesh->field_data(measure_handle));
+  ASSERT_NE(fraction, nullptr);
+  ASSERT_NE(measure, nullptr);
+  EXPECT_NEAR(fraction[0], static_cast<double>(cut_x), 1.0e-12);
+  EXPECT_DOUBLE_EQ(fraction[1], 0.0);
+  EXPECT_NEAR(measure[0], static_cast<double>(cut_x), 1.0e-12);
+  EXPECT_DOUBLE_EQ(measure[1], 0.0);
+#endif
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH

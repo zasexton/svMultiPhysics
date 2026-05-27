@@ -119,6 +119,7 @@ const char* toString(CouplingCoordinateConfiguration configuration) noexcept
     return "unknown";
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 std::optional<svmp::Configuration> toMeshConfiguration(
     CouplingCoordinateConfiguration configuration) noexcept
 {
@@ -130,6 +131,7 @@ std::optional<svmp::Configuration> toMeshConfiguration(
     }
     return std::nullopt;
 }
+#endif
 
 const char* toString(CouplingValueRank rank) noexcept
 {

@@ -7,8 +7,15 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Topology/CellTopology.h"
+#endif
 
 namespace svmp::FE::level_set {
 namespace {
@@ -189,14 +196,25 @@ struct SurfacePrimitive {
     return coefficients[static_cast<std::size_t>(dof)];
 }
 
-void setCoefficientAtVertex(const dofs::EntityDofMap& entity_map,
-                            GlobalIndex vertex,
-                            Real value,
-                            std::vector<Real>& coefficients)
+[[nodiscard]] std::span<const GlobalIndex> scalarVertexDofSpan(
+    const dofs::EntityDofMap& entity_map,
+    GlobalIndex vertex,
+    std::size_t coefficient_count)
 {
     const auto dofs = entity_map.getVertexDofs(vertex);
+    if (dofs.empty()) {
+        return dofs;
+    }
+    if (dofs.size() != 1u) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires at most one scalar DOF per mesh vertex");
+    }
     const auto dof = dofs.front();
-    coefficients[static_cast<std::size_t>(dof)] = value;
+    if (dof < 0 || static_cast<std::size_t>(dof) >= coefficient_count) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair found a vertex DOF outside the coefficient span");
+    }
+    return dofs;
 }
 
 [[nodiscard]] Real nearestDistanceToInterface(
@@ -210,44 +228,24 @@ void setCoefficientAtVertex(const dofs::EntityDofMap& entity_map,
     return best;
 }
 
-} // namespace
+struct LinearInterfacePrimitiveSet {
+    std::vector<SurfacePrimitive> primitives{};
+    std::size_t cut_cells{0u};
+};
 
-LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
+[[nodiscard]] LinearInterfacePrimitiveSet buildLinearInterfacePrimitives(
     const assembly::IMeshAccess& mesh,
-    const dofs::DofHandler& level_set_dofs,
-    const LevelSetReinitializationOptions& options,
-    std::span<const Real> input_coefficients,
-    std::vector<Real>& repaired_coefficients)
+    const dofs::EntityDofMap& entity_map,
+    Real tolerance,
+    std::span<const Real> coefficients)
 {
-    const auto expected = static_cast<std::size_t>(level_set_dofs.getNumDofs());
-    if (!(options.signed_distance_tolerance > 0.0)) {
-        throw std::invalid_argument(
-            "level-set signed-distance repair requires a positive signed-distance tolerance");
-    }
-    if (input_coefficients.size() != expected) {
-        throw std::invalid_argument(
-            "level-set signed-distance repair received an incompatible coefficient span");
-    }
-    const auto* entity_map = level_set_dofs.getEntityDofMap();
-    if (entity_map == nullptr) {
-        throw std::invalid_argument(
-            "level-set signed-distance repair requires a scalar nodal field");
-    }
-    if (entity_map->numVertices() != mesh.numVertices()) {
-        throw std::invalid_argument(
-            "level-set signed-distance repair requires field and mesh vertex counts to match");
-    }
-
-    repaired_coefficients.assign(input_coefficients.begin(), input_coefficients.end());
-
     CutInterfaceDomainRequest request{};
     request.source = LevelSetInterfaceSource::fromField(FieldId{0});
     request.interface_marker = 0;
-    request.tolerance = options.signed_distance_tolerance;
+    request.tolerance = tolerance;
     request.quadrature_order = 1;
 
-    std::vector<SurfacePrimitive> primitives;
-    std::size_t cut_cells = 0u;
+    LinearInterfacePrimitiveSet output;
     std::vector<GlobalIndex> cell_nodes;
     std::vector<std::array<Real, 3>> cell_coordinates;
     mesh.forEachCell([&](GlobalIndex cell_id) {
@@ -272,9 +270,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         input.level_set_values.reserve(count);
         for (std::size_t i = 0; i < count; ++i) {
             input.level_set_values.push_back(
-                coefficientAtVertex(*entity_map,
+                coefficientAtVertex(entity_map,
                                     cell_nodes[i],
-                                    input_coefficients));
+                                    coefficients));
         }
 
         interfaces::LevelSetCellCutResult cut_result;
@@ -297,29 +295,51 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
             for (const auto& vertex : fragment.vertices) {
                 primitive.points.push_back(vertex.point);
             }
-            primitives.push_back(std::move(primitive));
+            output.primitives.push_back(std::move(primitive));
             added_cell_fragment = true;
         }
         if (added_cell_fragment) {
-            ++cut_cells;
+            ++output.cut_cells;
         }
     });
+    return output;
+}
 
+template <typename ForEachDofPoint>
+[[nodiscard]] LevelSetSignedDistanceRepairResult repairSignedDistanceCoefficientsFromPrimitives(
+    const LevelSetReinitializationOptions& options,
+    std::span<const Real> input_coefficients,
+    std::vector<Real>& repaired_coefficients,
+    const LinearInterfacePrimitiveSet& primitive_set,
+    ForEachDofPoint&& for_each_dof_point)
+{
     LevelSetSignedDistanceRepairResult result;
     result.method = LevelSetReinitializationMethod::Projection;
-    result.interface_fragments = primitives.size();
-    result.cut_cells = cut_cells;
-    if (primitives.empty()) {
+    result.interface_fragments = primitive_set.primitives.size();
+    result.cut_cells = primitive_set.cut_cells;
+    if (primitive_set.primitives.empty()) {
         result.success = false;
         result.diagnostic = "level-set signed-distance repair found no active interface fragments";
         return result;
     }
 
+    const auto expected = input_coefficients.size();
     Real interface_displacement_squared_sum = 0.0;
-    for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
-        const auto original = coefficientAtVertex(*entity_map, vertex, input_coefficients);
-        const auto x = mesh.getNodeCoordinates(vertex);
-        const Real d = nearestDistanceToInterface(x, primitives);
+    std::vector<unsigned char> repaired_once(expected, 0u);
+
+    const auto repair_dof_at_point = [&](GlobalIndex dof,
+                                         const std::array<Real, 3>& x) {
+        if (dof < 0 || static_cast<std::size_t>(dof) >= expected) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair found a cell DOF outside the coefficient span");
+        }
+        const auto dof_index = static_cast<std::size_t>(dof);
+        if (repaired_once[dof_index] != 0u) {
+            return;
+        }
+
+        const auto original = input_coefficients[dof_index];
+        const Real d = nearestDistanceToInterface(x, primitive_set.primitives);
         if (!std::isfinite(d)) {
             throw std::runtime_error(
                 "level-set signed-distance repair produced a non-finite distance");
@@ -330,7 +350,9 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         } else if (original < -options.signed_distance_tolerance) {
             repaired = -d;
         }
-        setCoefficientAtVertex(*entity_map, vertex, repaired, repaired_coefficients);
+        repaired_coefficients[dof_index] = repaired;
+        repaired_once[dof_index] = 1u;
+
         const Real abs_update = std::abs(repaired - original);
         result.max_abs_update = std::max(result.max_abs_update, abs_update);
         result.max_distance = std::max(result.max_distance, d);
@@ -342,7 +364,23 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
             ++result.interface_displacement_samples;
         }
         ++result.repaired_dofs;
+    };
+
+    for_each_dof_point(repair_dof_at_point);
+
+    const auto unrepaired =
+        static_cast<std::size_t>(std::count(repaired_once.begin(),
+                                            repaired_once.end(),
+                                            static_cast<unsigned char>(0u)));
+    if (unrepaired != 0u) {
+        result.success = false;
+        result.diagnostic =
+            "level-set signed-distance repair left " +
+            std::to_string(unrepaired) +
+            " coefficient(s) without an entity-aware mesh-node binding";
+        return result;
     }
+
     if (result.interface_displacement_samples > 0u) {
         result.l2_interface_displacement =
             std::sqrt(interface_displacement_squared_sum /
@@ -350,6 +388,361 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
     }
     result.success = true;
     return result;
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+struct GeometryOrderInfo {
+    int order{1};
+    svmp::CellTopology::HighOrderKind kind{
+        svmp::CellTopology::HighOrderKind::Lagrange};
+};
+
+[[nodiscard]] GeometryOrderInfo inferGeometryOrder(
+    svmp::CellFamily family,
+    int declared_order,
+    int num_corners,
+    std::size_t node_count)
+{
+    GeometryOrderInfo info;
+    info.order = std::max(1, declared_order);
+    const int corners = std::max(0, num_corners);
+    if (node_count <= static_cast<std::size_t>(corners)) {
+        return info;
+    }
+    if (family == svmp::CellFamily::Line) {
+        if (node_count >= 2u) {
+            info.order = static_cast<int>(node_count) - 1;
+        }
+        return info;
+    }
+    const int p_lag =
+        svmp::CellTopology::infer_lagrange_order(family, node_count);
+    const int p_ser =
+        svmp::CellTopology::infer_serendipity_order(family, node_count);
+    if (p_lag > 0 &&
+        (declared_order <= 1 || p_lag == declared_order ||
+         p_ser != declared_order)) {
+        info.order = p_lag;
+        info.kind = svmp::CellTopology::HighOrderKind::Lagrange;
+    } else if (p_ser > 0) {
+        info.order = p_ser;
+        info.kind = svmp::CellTopology::HighOrderKind::Serendipity;
+    } else if (p_lag > 0) {
+        info.order = p_lag;
+        info.kind = svmp::CellTopology::HighOrderKind::Lagrange;
+    }
+    return info;
+}
+
+[[nodiscard]] int topologicalDimension(svmp::CellFamily family) noexcept
+{
+    switch (family) {
+    case svmp::CellFamily::Line:
+        return 1;
+    case svmp::CellFamily::Triangle:
+    case svmp::CellFamily::Quad:
+    case svmp::CellFamily::Polygon:
+        return 2;
+    case svmp::CellFamily::Tetra:
+    case svmp::CellFamily::Hex:
+    case svmp::CellFamily::Wedge:
+    case svmp::CellFamily::Pyramid:
+    case svmp::CellFamily::Polyhedron:
+        return 3;
+    default:
+        return 0;
+    }
+}
+
+[[nodiscard]] std::vector<svmp::index_t> faceInteriorGeometryNodes(
+    const svmp::MeshBase& mesh,
+    svmp::index_t face)
+{
+    auto [face_nodes, n_face_nodes] = mesh.face_vertices_span(face);
+    std::vector<svmp::index_t> interior;
+    if (face_nodes == nullptr || n_face_nodes == 0u) {
+        return interior;
+    }
+
+    svmp::CellShape shape{};
+    shape.num_corners = static_cast<int>(n_face_nodes);
+    const auto& face_shapes = mesh.face_shapes();
+    if (static_cast<std::size_t>(face) < face_shapes.size()) {
+        shape = face_shapes[static_cast<std::size_t>(face)];
+    }
+    if (topologicalDimension(shape.family) != 2) {
+        return interior;
+    }
+
+    const auto info =
+        inferGeometryOrder(shape.family, shape.order, shape.num_corners,
+                           n_face_nodes);
+    std::vector<bool> on_boundary(n_face_nodes, false);
+    const auto boundary =
+        svmp::CellTopology::get_oriented_boundary_faces_view(shape.family);
+    if (boundary.face_count <= 0) {
+        const int corners =
+            std::min<int>(std::max(0, shape.num_corners),
+                          static_cast<int>(n_face_nodes));
+        for (int i = 0; i < corners; ++i) {
+            on_boundary[static_cast<std::size_t>(i)] = true;
+        }
+    } else {
+        for (int local_face = 0; local_face < boundary.face_count; ++local_face) {
+            for (const auto local_node :
+                 svmp::CellTopology::high_order_face_local_nodes(
+                     shape.family, info.order, local_face, info.kind)) {
+                const auto idx = static_cast<std::size_t>(local_node);
+                if (idx < n_face_nodes) {
+                    on_boundary[idx] = true;
+                }
+            }
+        }
+    }
+
+    for (std::size_t i = 0; i < n_face_nodes; ++i) {
+        if (!on_boundary[i]) {
+            interior.push_back(face_nodes[i]);
+        }
+    }
+    return interior;
+}
+
+template <typename Callback>
+void forEachNativeMeshScalarDofPoint(
+    const svmp::MeshBase& mesh,
+    const assembly::IMeshAccess& coordinate_access,
+    const dofs::EntityDofMap& entity_map,
+    std::size_t coefficient_count,
+    Callback&& callback)
+{
+    std::vector<unsigned char> bound(coefficient_count, 0u);
+    const auto bind = [&](svmp::index_t geometry_node, GlobalIndex dof) {
+        if (geometry_node < 0 ||
+            static_cast<std::size_t>(geometry_node) >=
+                static_cast<std::size_t>(mesh.n_vertices())) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair found a mesh geometry node outside the mesh");
+        }
+        if (dof < 0 || static_cast<std::size_t>(dof) >= coefficient_count) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair found an entity DOF outside the coefficient span");
+        }
+        const auto sdof = static_cast<std::size_t>(dof);
+        if (bound[sdof] != 0u) {
+            return;
+        }
+        callback(dof, coordinate_access.getNodeCoordinates(geometry_node));
+        bound[sdof] = 1u;
+    };
+
+    const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
+    if (entity_map.numVertices() < n_vertices) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair field does not cover every mesh vertex");
+    }
+    for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto dofs = entity_map.getVertexDofs(vertex);
+        if (dofs.empty()) {
+            continue;
+        }
+        if (dofs.size() != 1u) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair requires scalar vertex DOFs");
+        }
+        bind(static_cast<svmp::index_t>(vertex), dofs.front());
+    }
+
+    std::map<std::pair<svmp::index_t, svmp::index_t>, svmp::index_t>
+        edge_by_vertices;
+    auto make_edge_key = [](svmp::index_t a, svmp::index_t b) {
+        if (b < a) {
+            std::swap(a, b);
+        }
+        return std::pair<svmp::index_t, svmp::index_t>{a, b};
+    };
+    for (svmp::index_t edge = 0;
+         edge < static_cast<svmp::index_t>(mesh.n_edges());
+         ++edge) {
+        const auto vertices = mesh.edge_vertices(edge);
+        edge_by_vertices.emplace(make_edge_key(vertices[0], vertices[1]), edge);
+    }
+
+    auto bind_edge_interior = [&](svmp::index_t cell,
+                                  int local_edge,
+                                  svmp::index_t endpoint_a,
+                                  svmp::index_t endpoint_b) {
+        const auto edge_it =
+            edge_by_vertices.find(make_edge_key(endpoint_a, endpoint_b));
+        if (edge_it == edge_by_vertices.end()) {
+            return;
+        }
+        const auto edge = edge_it->second;
+        const auto edge_geometry = mesh.cell_edge_geometry_dofs(cell, local_edge);
+        if (edge_geometry.size() <= 2u) {
+            return;
+        }
+        const auto canonical = mesh.edge_vertices(edge);
+        const bool forward =
+            edge_geometry.front() == canonical[0] &&
+            edge_geometry.back() == canonical[1];
+        const bool reverse =
+            edge_geometry.front() == canonical[1] &&
+            edge_geometry.back() == canonical[0];
+        if (!forward && !reverse) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair found high-order edge geometry inconsistent with mesh topology");
+        }
+
+        const auto interior_count = edge_geometry.size() - 2u;
+        const auto edge_dofs = entity_map.getEdgeDofs(edge);
+        if (edge_dofs.empty()) {
+            return;
+        }
+        if (edge_dofs.size() != interior_count) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair edge DOF count does not match high-order mesh edge nodes");
+        }
+        for (std::size_t j = 0; j < interior_count; ++j) {
+            const auto geometry_index =
+                forward ? (j + 1u) : (edge_geometry.size() - 2u - j);
+            bind(edge_geometry[geometry_index], edge_dofs[j]);
+        }
+    };
+
+    for (svmp::index_t cell = 0;
+         cell < static_cast<svmp::index_t>(mesh.n_cells());
+         ++cell) {
+        auto [cell_vertices, n_cell_vertices] = mesh.cell_vertices_span(cell);
+        if (cell_vertices == nullptr || n_cell_vertices == 0u) {
+            continue;
+        }
+        const auto& shape = mesh.cell_shape(cell);
+        if (shape.family == svmp::CellFamily::Polygon) {
+            const int corner_count =
+                shape.num_corners > 0
+                    ? std::min<int>(shape.num_corners,
+                                    static_cast<int>(n_cell_vertices))
+                    : static_cast<int>(n_cell_vertices);
+            if (corner_count >= 2) {
+                const auto edges =
+                    svmp::CellTopology::get_polygon_edges_view(corner_count);
+                for (int local_edge = 0; local_edge < edges.edge_count;
+                     ++local_edge) {
+                    const auto local_a = edges.pairs_flat[2 * local_edge];
+                    const auto local_b = edges.pairs_flat[2 * local_edge + 1];
+                    if (local_a < 0 || local_b < 0 ||
+                        static_cast<std::size_t>(local_a) >= n_cell_vertices ||
+                        static_cast<std::size_t>(local_b) >= n_cell_vertices) {
+                        continue;
+                    }
+                    bind_edge_interior(
+                        cell,
+                        local_edge,
+                        cell_vertices[static_cast<std::size_t>(local_a)],
+                        cell_vertices[static_cast<std::size_t>(local_b)]);
+                }
+            }
+        } else {
+            const auto edges = svmp::CellTopology::get_edges_view(shape.family);
+            for (int local_edge = 0; local_edge < edges.edge_count;
+                 ++local_edge) {
+                const auto local_a = edges.pairs_flat[2 * local_edge];
+                const auto local_b = edges.pairs_flat[2 * local_edge + 1];
+                if (local_a < 0 || local_b < 0 ||
+                    static_cast<std::size_t>(local_a) >= n_cell_vertices ||
+                    static_cast<std::size_t>(local_b) >= n_cell_vertices) {
+                    continue;
+                }
+                bind_edge_interior(
+                    cell,
+                    local_edge,
+                    cell_vertices[static_cast<std::size_t>(local_a)],
+                    cell_vertices[static_cast<std::size_t>(local_b)]);
+            }
+        }
+
+        const auto cell_geometry = mesh.cell_interior_geometry_dofs(cell);
+        const auto cell_dofs =
+            entity_map.getCellInteriorDofs(static_cast<GlobalIndex>(cell));
+        if (!cell_dofs.empty()) {
+            if (cell_dofs.size() != cell_geometry.size()) {
+                throw std::invalid_argument(
+                    "level-set signed-distance repair cell-interior DOF count does not match high-order mesh nodes");
+            }
+            for (std::size_t j = 0; j < cell_geometry.size(); ++j) {
+                bind(cell_geometry[j], cell_dofs[j]);
+            }
+        }
+    }
+
+    for (svmp::index_t face = 0;
+         face < static_cast<svmp::index_t>(mesh.n_faces());
+         ++face) {
+        const auto face_dofs =
+            entity_map.getFaceDofs(static_cast<GlobalIndex>(face));
+        if (face_dofs.empty()) {
+            continue;
+        }
+        const auto face_geometry = faceInteriorGeometryNodes(mesh, face);
+        if (face_dofs.size() != face_geometry.size()) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair face DOF count does not match high-order mesh face nodes");
+        }
+        for (std::size_t j = 0; j < face_geometry.size(); ++j) {
+            bind(face_geometry[j], face_dofs[j]);
+        }
+    }
+}
+#endif
+
+} // namespace
+
+LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& level_set_dofs,
+    const LevelSetReinitializationOptions& options,
+    std::span<const Real> input_coefficients,
+    std::vector<Real>& repaired_coefficients)
+{
+    const auto expected = static_cast<std::size_t>(level_set_dofs.getNumDofs());
+    if (!(options.signed_distance_tolerance > 0.0)) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires a positive signed-distance tolerance");
+    }
+    if (input_coefficients.size() != expected) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair received an incompatible coefficient span");
+    }
+    const auto* entity_map = level_set_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires a scalar nodal field");
+    }
+
+    repaired_coefficients.assign(input_coefficients.begin(), input_coefficients.end());
+
+    const auto primitive_set =
+        buildLinearInterfacePrimitives(mesh,
+                                       *entity_map,
+                                       options.signed_distance_tolerance,
+                                       input_coefficients);
+    return repairSignedDistanceCoefficientsFromPrimitives(
+        options,
+        input_coefficients,
+        repaired_coefficients,
+        primitive_set,
+        [&](const auto& repair_dof_at_point) {
+            for (GlobalIndex vertex = 0; vertex < mesh.numVertices(); ++vertex) {
+                const auto vertex_dofs =
+                    scalarVertexDofSpan(*entity_map, vertex, expected);
+                if (vertex_dofs.empty()) {
+                    continue;
+                }
+                repair_dof_at_point(vertex_dofs.front(),
+                                    mesh.getNodeCoordinates(vertex));
+            }
+        });
 }
 
 LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
@@ -373,11 +766,88 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
                 field_coefficients.begin());
 
     std::vector<Real> repaired_field;
-    auto result = repairLevelSetSignedDistanceByProjection(system.meshAccess(),
-                                                           field_dofs,
-                                                           options,
-                                                           field_coefficients,
-                                                           repaired_field);
+    repaired_field.assign(field_coefficients.begin(), field_coefficients.end());
+    const auto& mesh_access = system.meshAccess();
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    if (entity_map == nullptr) {
+        throw std::invalid_argument(
+            "level-set signed-distance repair requires a scalar nodal field");
+    }
+    const auto primitive_set =
+        buildLinearInterfacePrimitives(mesh_access,
+                                       *entity_map,
+                                       options.signed_distance_tolerance,
+                                       field_coefficients);
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto* native_mesh = system.mesh();
+    if (native_mesh == nullptr) {
+        auto result = repairSignedDistanceCoefficientsFromPrimitives(
+            options,
+            std::span<const Real>(field_coefficients.data(),
+                                  field_coefficients.size()),
+            repaired_field,
+            primitive_set,
+            [&](const auto& repair_dof_at_point) {
+                for (GlobalIndex vertex = 0;
+                     vertex < mesh_access.numVertices();
+                     ++vertex) {
+                    const auto vertex_dofs =
+                        scalarVertexDofSpan(*entity_map,
+                                            vertex,
+                                            field_coefficients.size());
+                    if (vertex_dofs.empty()) {
+                        continue;
+                    }
+                    repair_dof_at_point(
+                        vertex_dofs.front(),
+                        mesh_access.getNodeCoordinates(vertex));
+                }
+            });
+        repaired_solution.assign(input_solution.begin(), input_solution.end());
+        std::copy(repaired_field.begin(),
+                  repaired_field.end(),
+                  repaired_solution.begin() + static_cast<std::ptrdiff_t>(offset));
+        return result;
+    }
+
+    auto result = repairSignedDistanceCoefficientsFromPrimitives(
+        options,
+        std::span<const Real>(field_coefficients.data(),
+                              field_coefficients.size()),
+        repaired_field,
+        primitive_set,
+        [&](const auto& repair_dof_at_point) {
+            forEachNativeMeshScalarDofPoint(
+                native_mesh->local_mesh(),
+                mesh_access,
+                *entity_map,
+                field_coefficients.size(),
+                repair_dof_at_point);
+        });
+#else
+    auto result = repairSignedDistanceCoefficientsFromPrimitives(
+        options,
+        std::span<const Real>(field_coefficients.data(),
+                              field_coefficients.size()),
+        repaired_field,
+        primitive_set,
+        [&](const auto& repair_dof_at_point) {
+            for (GlobalIndex vertex = 0;
+                 vertex < mesh_access.numVertices();
+                 ++vertex) {
+                const auto vertex_dofs =
+                    scalarVertexDofSpan(*entity_map,
+                                        vertex,
+                                        field_coefficients.size());
+                if (vertex_dofs.empty()) {
+                    continue;
+                }
+                repair_dof_at_point(vertex_dofs.front(),
+                                    mesh_access.getNodeCoordinates(vertex));
+            }
+        });
+#endif
 
     repaired_solution.assign(input_solution.begin(), input_solution.end());
     std::copy(repaired_field.begin(),

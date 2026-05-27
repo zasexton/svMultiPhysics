@@ -99,6 +99,8 @@ captureLevelSetGeneratedInterfaceRestartRecord(
         options.implicit_cut_root_max_iterations;
     record.implicit_cut_max_subdivision_depth =
         options.implicit_cut_max_subdivision_depth;
+    record.affected_cell_neighborhood_layers =
+        options.affected_cell_neighborhood_layers;
     record.keep_degenerate_fragments = options.keep_degenerate_fragments;
     record.value_revision = result.value_revision;
     record.mesh_geometry_revision = result.domain.request().mesh_geometry_revision;
@@ -140,6 +142,8 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
         record.implicit_cut_root_max_iterations;
     options.implicit_cut_max_subdivision_depth =
         record.implicit_cut_max_subdivision_depth;
+    options.affected_cell_neighborhood_layers =
+        record.affected_cell_neighborhood_layers;
     options.keep_degenerate_fragments = record.keep_degenerate_fragments;
     return options;
 }
@@ -206,8 +210,11 @@ bool levelSetGeneratedInterfaceRestartRecordMatches(
         return false;
     }
     if (record.geometry_tangent_policy ==
-        GeometryTangentPolicy::DifferentiatedQuadrature) {
-        setDiagnostic(diagnostic, "generated-interface restart geometry tangent policy is not implemented");
+            GeometryTangentPolicy::DifferentiatedQuadrature &&
+        (record.geometry_mode != GeneratedInterfaceGeometryMode::LinearCorner ||
+         record.implicit_cut_quadrature_backend !=
+             ImplicitCutQuadratureBackend::LinearCorner)) {
+        setDiagnostic(diagnostic, "generated-interface restart differentiated geometry tangent policy requires linear geometry");
         return false;
     }
 

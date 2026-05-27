@@ -27,9 +27,9 @@ static double integrate_triangle_edge_flux(const RaviartThomasBasis& rt,
     const auto& en = ref.edge_nodes(edge_id);
     EXPECT_EQ(en.size(), 2u);
     const Vector<Real, 3> p0 =
-        NodeOrdering::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(en[0]));
+        ReferenceNodeLayout::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(en[0]));
     const Vector<Real, 3> p1 =
-        NodeOrdering::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(en[1]));
+        ReferenceNodeLayout::get_node_coords(ElementType::Triangle3, static_cast<std::size_t>(en[1]));
 
     const Vector<Real, 3> tvec = p1 - p0;
     const Real len = tvec.norm();
@@ -70,11 +70,11 @@ static double integrate_tetra_face_flux(const RaviartThomasBasis& rt,
     EXPECT_EQ(fn.size(), 3u);
 
     const Vector<Real, 3> v0 =
-        NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(fn[0]));
+        ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(fn[0]));
     const Vector<Real, 3> v1 =
-        NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(fn[1]));
+        ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(fn[1]));
     const Vector<Real, 3> v2 =
-        NodeOrdering::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(fn[2]));
+        ReferenceNodeLayout::get_node_coords(ElementType::Tetra4, static_cast<std::size_t>(fn[2]));
     const Vector<Real, 3> e01 = v1 - v0;
     const Vector<Real, 3> e02 = v2 - v0;
     const Vector<Real, 3> cr = e01.cross(e02);

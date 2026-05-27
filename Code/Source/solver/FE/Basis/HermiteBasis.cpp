@@ -10,56 +10,260 @@
 
 #include "Basis/BasisExceptions.h"
 
+#include <array>
+
 namespace svmp {
 namespace FE {
 namespace basis {
 
 namespace {
 
-inline void hermite_1d(const Real s,
-                       Real& H1, Real& H2, Real& H3, Real& H4,
-                       Real& dH1_ds, Real& dH2_ds, Real& dH3_ds, Real& dH4_ds,
-                       Real& ddH1_ds2, Real& ddH2_ds2, Real& ddH3_ds2, Real& ddH4_ds2) {
+using CubicCoefficients = std::array<Real, 4>;
+
+constexpr std::array<CubicCoefficients, 4> kHermiteCoefficients{{
+    CubicCoefficients{Real(1), Real(0), Real(-3), Real(2)},
+    CubicCoefficients{Real(0), Real(1), Real(-2), Real(1)},
+    CubicCoefficients{Real(0), Real(0), Real(3), Real(-2)},
+    CubicCoefficients{Real(0), Real(0), Real(-1), Real(1)},
+}};
+
+constexpr std::array<Real, 4> kHermiteModeScale{
+    Real(1), Real(2), Real(1), Real(2)};
+
+[[nodiscard]] constexpr Real evaluate_cubic(const CubicCoefficients& coeffs,
+                                            Real t) noexcept {
+    return ((coeffs[3] * t + coeffs[2]) * t + coeffs[1]) * t + coeffs[0];
+}
+
+[[nodiscard]] constexpr Real evaluate_cubic_derivative(
+    const CubicCoefficients& coeffs,
+    Real t) noexcept {
+    return (Real(3) * coeffs[3] * t + Real(2) * coeffs[2]) * t + coeffs[1];
+}
+
+[[nodiscard]] constexpr Real evaluate_cubic_second_derivative(
+    const CubicCoefficients& coeffs,
+    Real t) noexcept {
+    return Real(6) * coeffs[3] * t + Real(2) * coeffs[2];
+}
+
+constexpr void hermite_1d(const Real s,
+                          Real& H1, Real& H2, Real& H3, Real& H4,
+                          Real& dH1_ds, Real& dH2_ds,
+                          Real& dH3_ds, Real& dH4_ds,
+                          Real& ddH1_ds2, Real& ddH2_ds2,
+                          Real& ddH3_ds2, Real& ddH4_ds2) {
     // Map reference coordinate s ∈ [-1,1] to t ∈ [0,1]
     const Real t  = Real(0.5) * (s + Real(1));
-    const Real t2 = t * t;
-    const Real t3 = t2 * t;
-
-    // Standard cubic Hermite basis in t (value and slope with respect to t)
-    const Real h1 = Real(1) - Real(3) * t2 + Real(2) * t3;  // value at left
-    const Real h2 = t - Real(2) * t2 + t3;                  // slope at left
-    const Real h3 = Real(3) * t2 - Real(2) * t3;            // value at right
-    const Real h4 = -t2 + t3;                               // slope at right
-
-    // Derivatives w.r.t t
-    const Real dh1_dt = -Real(6) * t + Real(6) * t2;
-    const Real dh2_dt = Real(1) - Real(4) * t + Real(3) * t2;
-    const Real dh3_dt = Real(6) * t - Real(6) * t2;
-    const Real dh4_dt = -Real(2) * t + Real(3) * t2;
-    const Real ddh1_dt2 = -Real(6) + Real(12) * t;
-    const Real ddh2_dt2 = -Real(4) + Real(6) * t;
-    const Real ddh3_dt2 = Real(6) - Real(12) * t;
-    const Real ddh4_dt2 = -Real(2) + Real(6) * t;
 
     const Real dt_ds = Real(0.5);
 
     // Scale slope modes so that derivatives are taken with respect to s,
     // i.e., dH2/ds = 1 at the left node and dH4/ds = 1 at the right node.
-    H1 = h1;
-    H3 = h3;
-    H2 = Real(2) * h2;
-    H4 = Real(2) * h4;
+    H1 = kHermiteModeScale[0] * evaluate_cubic(kHermiteCoefficients[0], t);
+    H2 = kHermiteModeScale[1] * evaluate_cubic(kHermiteCoefficients[1], t);
+    H3 = kHermiteModeScale[2] * evaluate_cubic(kHermiteCoefficients[2], t);
+    H4 = kHermiteModeScale[3] * evaluate_cubic(kHermiteCoefficients[3], t);
 
-    dH1_ds = dh1_dt * dt_ds;
-    dH3_ds = dh3_dt * dt_ds;
-    dH2_ds = Real(2) * dh2_dt * dt_ds;
-    dH4_ds = Real(2) * dh4_dt * dt_ds;
+    dH1_ds = kHermiteModeScale[0]
+             * evaluate_cubic_derivative(kHermiteCoefficients[0], t) * dt_ds;
+    dH2_ds = kHermiteModeScale[1]
+             * evaluate_cubic_derivative(kHermiteCoefficients[1], t) * dt_ds;
+    dH3_ds = kHermiteModeScale[2]
+             * evaluate_cubic_derivative(kHermiteCoefficients[2], t) * dt_ds;
+    dH4_ds = kHermiteModeScale[3]
+             * evaluate_cubic_derivative(kHermiteCoefficients[3], t) * dt_ds;
 
     const Real dt_ds_sq = dt_ds * dt_ds;
-    ddH1_ds2 = ddh1_dt2 * dt_ds_sq;
-    ddH3_ds2 = ddh3_dt2 * dt_ds_sq;
-    ddH2_ds2 = Real(2) * ddh2_dt2 * dt_ds_sq;
-    ddH4_ds2 = Real(2) * ddh4_dt2 * dt_ds_sq;
+    ddH1_ds2 = kHermiteModeScale[0]
+               * evaluate_cubic_second_derivative(kHermiteCoefficients[0], t)
+               * dt_ds_sq;
+    ddH2_ds2 = kHermiteModeScale[1]
+               * evaluate_cubic_second_derivative(kHermiteCoefficients[1], t)
+               * dt_ds_sq;
+    ddH3_ds2 = kHermiteModeScale[2]
+               * evaluate_cubic_second_derivative(kHermiteCoefficients[2], t)
+               * dt_ds_sq;
+    ddH4_ds2 = kHermiteModeScale[3]
+               * evaluate_cubic_second_derivative(kHermiteCoefficients[3], t)
+               * dt_ds_sq;
+}
+
+constexpr std::size_t kMaxHermiteDofs = 64u;
+
+struct HermiteAxis {
+    std::array<Real, 4> value{};
+    std::array<Real, 4> first{};
+    std::array<Real, 4> second{};
+};
+
+constexpr HermiteAxis hermite_axis(const Real s) {
+    HermiteAxis axis;
+    hermite_1d(s,
+               axis.value[0],
+               axis.value[1],
+               axis.value[2],
+               axis.value[3],
+               axis.first[0],
+               axis.first[1],
+               axis.first[2],
+               axis.first[3],
+               axis.second[0],
+               axis.second[1],
+               axis.second[2],
+               axis.second[3]);
+    return axis;
+}
+
+void write_gradient(Real* SVMP_RESTRICT gradients_out,
+                    std::size_t dof,
+                    Real dx,
+                    Real dy,
+                    Real dz) {
+    if (gradients_out == nullptr) {
+        return;
+    }
+    Real* g = gradients_out + dof * 3u;
+    g[0] = dx;
+    g[1] = dy;
+    g[2] = dz;
+}
+
+void write_hessian(Real* SVMP_RESTRICT hessians_out,
+                   std::size_t dof,
+                   Real xx,
+                   Real yy,
+                   Real zz,
+                   Real xy,
+                   Real xz,
+                   Real yz) {
+    if (hessians_out == nullptr) {
+        return;
+    }
+    Real* H = hessians_out + dof * 9u;
+    H[0] = xx;
+    H[1] = xy;
+    H[2] = xz;
+    H[3] = xy;
+    H[4] = yy;
+    H[5] = yz;
+    H[6] = xz;
+    H[7] = yz;
+    H[8] = zz;
+}
+
+void write_hermite_tensor_to(int dimension,
+                             const math::Vector<Real, 3>& xi,
+                             Real* SVMP_RESTRICT values_out,
+                             Real* SVMP_RESTRICT gradients_out,
+                             Real* SVMP_RESTRICT hessians_out) {
+    const HermiteAxis x = hermite_axis(xi[0]);
+    static constexpr std::array<int, 4> line_mode{{0, 2, 1, 3}};
+
+    if (dimension == 1) {
+        for (std::size_t dof = 0; dof < line_mode.size(); ++dof) {
+            const int ix = line_mode[dof];
+            if (values_out != nullptr) {
+                values_out[dof] = x.value[static_cast<std::size_t>(ix)];
+            }
+            write_gradient(gradients_out,
+                           dof,
+                           x.first[static_cast<std::size_t>(ix)],
+                           Real(0),
+                           Real(0));
+            write_hessian(hessians_out,
+                          dof,
+                          x.second[static_cast<std::size_t>(ix)],
+                          Real(0),
+                          Real(0),
+                          Real(0),
+                          Real(0),
+                          Real(0));
+        }
+        return;
+    }
+
+    const HermiteAxis y = hermite_axis(xi[1]);
+    static constexpr std::array<int, 4> quad_x_mode{{0, 2, 2, 0}};
+    static constexpr std::array<int, 4> quad_y_mode{{0, 0, 2, 2}};
+
+    if (dimension == 2) {
+        for (std::size_t corner = 0; corner < quad_x_mode.size(); ++corner) {
+            const int ix0 = quad_x_mode[corner];
+            const int iy0 = quad_y_mode[corner];
+            const std::size_t base = 4u * corner;
+            for (std::size_t local = 0; local < 4u; ++local) {
+                const int ix = ix0 + ((local & 1u) != 0u ? 1 : 0);
+                const int iy = iy0 + ((local & 2u) != 0u ? 1 : 0);
+                const auto ux = static_cast<std::size_t>(ix);
+                const auto uy = static_cast<std::size_t>(iy);
+                const std::size_t dof = base + local;
+
+                if (values_out != nullptr) {
+                    values_out[dof] = x.value[ux] * y.value[uy];
+                }
+                write_gradient(gradients_out,
+                               dof,
+                               x.first[ux] * y.value[uy],
+                               x.value[ux] * y.first[uy],
+                               Real(0));
+                write_hessian(hessians_out,
+                              dof,
+                              x.second[ux] * y.value[uy],
+                              x.value[ux] * y.second[uy],
+                              Real(0),
+                              x.first[ux] * y.first[uy],
+                              Real(0),
+                              Real(0));
+            }
+        }
+        return;
+    }
+
+    const HermiteAxis z = hermite_axis(xi[2]);
+    static constexpr std::array<int, 8> hex_x_mode{{0, 2, 2, 0, 0, 2, 2, 0}};
+    static constexpr std::array<int, 8> hex_y_mode{{0, 0, 2, 2, 0, 0, 2, 2}};
+    static constexpr std::array<int, 8> hex_z_mode{{0, 0, 0, 0, 2, 2, 2, 2}};
+    static constexpr std::array<std::array<int, 3>, 8> local_offset{{
+        {{0, 0, 0}},
+        {{1, 0, 0}},
+        {{0, 1, 0}},
+        {{0, 0, 1}},
+        {{1, 1, 0}},
+        {{1, 0, 1}},
+        {{0, 1, 1}},
+        {{1, 1, 1}},
+    }};
+
+    for (std::size_t corner = 0; corner < hex_x_mode.size(); ++corner) {
+        const std::size_t base = 8u * corner;
+        for (std::size_t local = 0; local < local_offset.size(); ++local) {
+            const int ix = hex_x_mode[corner] + local_offset[local][0];
+            const int iy = hex_y_mode[corner] + local_offset[local][1];
+            const int iz = hex_z_mode[corner] + local_offset[local][2];
+            const auto ux = static_cast<std::size_t>(ix);
+            const auto uy = static_cast<std::size_t>(iy);
+            const auto uz = static_cast<std::size_t>(iz);
+            const std::size_t dof = base + local;
+
+            if (values_out != nullptr) {
+                values_out[dof] = x.value[ux] * y.value[uy] * z.value[uz];
+            }
+            write_gradient(gradients_out,
+                           dof,
+                           x.first[ux] * y.value[uy] * z.value[uz],
+                           x.value[ux] * y.first[uy] * z.value[uz],
+                           x.value[ux] * y.value[uy] * z.first[uz]);
+            write_hessian(hessians_out,
+                          dof,
+                          x.second[ux] * y.value[uy] * z.value[uz],
+                          x.value[ux] * y.second[uy] * z.value[uz],
+                          x.value[ux] * y.value[uy] * z.second[uz],
+                          x.first[ux] * y.first[uy] * z.value[uz],
+                          x.first[ux] * y.value[uy] * z.first[uz],
+                          x.value[ux] * y.first[uy] * z.first[uz]);
+        }
+    }
 }
 
 } // namespace
@@ -96,376 +300,132 @@ HermiteBasis::HermiteBasis(ElementType element_type,
 void HermiteBasis::evaluate_values(const math::Vector<Real, 3>& xi,
                                    std::vector<Real>& values) const {
     values.resize(size_);
-
-    if (dimension_ == 1) {
-        Real H1, H2, H3, H4;
-        Real dH1, dH2, dH3, dH4, ddH1, ddH2, ddH3, ddH4;
-        hermite_1d(xi[0], H1, H2, H3, H4, dH1, dH2, dH3, dH4, ddH1, ddH2, ddH3, ddH4);
-
-        values[0] = H1;
-        values[1] = H3;
-        values[2] = H2;
-        values[3] = H4;
-        return;
-    }
-
-    if (dimension_ == 2) {
-        Real H1x, H2x, H3x, H4x;
-        Real dH1x, dH2x, dH3x, dH4x, ddH1x, ddH2x, ddH3x, ddH4x;
-        Real H1y, H2y, H3y, H4y;
-        Real dH1y, dH2y, dH3y, dH4y, ddH1y, ddH2y, ddH3y, ddH4y;
-
-        hermite_1d(xi[0], H1x, H2x, H3x, H4x, dH1x, dH2x, dH3x, dH4x,
-                   ddH1x, ddH2x, ddH3x, ddH4x);
-        hermite_1d(xi[1], H1y, H2y, H3y, H4y, dH1y, dH2y, dH3y, dH4y,
-                   ddH1y, ddH2y, ddH3y, ddH4y);
-
-        auto set_corner = [&](int corner,
-                              Real Vx, Real Sx,
-                              Real Vy, Real Sy) {
-            const std::size_t base = static_cast<std::size_t>(4 * corner);
-            values[base + 0] = Vx * Vy;  // value DOF
-            values[base + 1] = Sx * Vy;  // d/dx DOF
-            values[base + 2] = Vx * Sy;  // d/dy DOF
-            values[base + 3] = Sx * Sy;  // d2/(dx dy) DOF
-        };
-
-        // Corner 0: (-1, -1)  -> left/bottom
-        set_corner(0, H1x, H2x, H1y, H2y);
-        // Corner 1: (+1, -1)  -> right/bottom
-        set_corner(1, H3x, H4x, H1y, H2y);
-        // Corner 2: (+1, +1)  -> right/top
-        set_corner(2, H3x, H4x, H3y, H4y);
-        // Corner 3: (-1, +1)  -> left/top
-        set_corner(3, H1x, H2x, H3y, H4y);
-        return;
-    }
-
-    if (dimension_ == 3) {
-        Real Hx[4], dHx[4];
-        Real ddHx[4];
-        Real Hy[4], dHy[4], ddHy[4];
-        Real Hz[4], dHz[4], ddHz[4];
-        hermite_1d(xi[0], Hx[0], Hx[1], Hx[2], Hx[3], dHx[0], dHx[1], dHx[2], dHx[3],
-                   ddHx[0], ddHx[1], ddHx[2], ddHx[3]);
-        hermite_1d(xi[1], Hy[0], Hy[1], Hy[2], Hy[3], dHy[0], dHy[1], dHy[2], dHy[3],
-                   ddHy[0], ddHy[1], ddHy[2], ddHy[3]);
-        hermite_1d(xi[2], Hz[0], Hz[1], Hz[2], Hz[3], dHz[0], dHz[1], dHz[2], dHz[3],
-                   ddHz[0], ddHz[1], ddHz[2], ddHz[3]);
-
-        // Hex8 corner ordering (VTK): 0(-,-,-), 1(+,-,-), 2(+,+,-), 3(-,+,-),
-        //                             4(-,-,+), 5(+,-,+), 6(+,+,+), 7(-,+,+)
-        // For each corner: (Vx, Sx) = (H1, H2) for left, (H3, H4) for right
-        const int cx[] = {0, 2, 2, 0, 0, 2, 2, 0}; // index into Hx: 0=H1(left), 2=H3(right)
-        const int cy[] = {0, 0, 2, 2, 0, 0, 2, 2};
-        const int cz[] = {0, 0, 0, 0, 2, 2, 2, 2};
-
-        for (int c = 0; c < 8; ++c) {
-            const std::size_t base = static_cast<std::size_t>(8 * c);
-            const int ix = cx[c], iy = cy[c], iz = cz[c];
-            // Value (Vx), slope (Sx=Vx+1) indices into Hx/Hy/Hz arrays
-            const Real Vx = Hx[ix], Sx = Hx[ix + 1];
-            const Real Vy = Hy[iy], Sy = Hy[iy + 1];
-            const Real Vz = Hz[iz], Sz = Hz[iz + 1];
-
-            values[base + 0] = Vx * Vy * Vz;  // value
-            values[base + 1] = Sx * Vy * Vz;  // d/dx
-            values[base + 2] = Vx * Sy * Vz;  // d/dy
-            values[base + 3] = Vx * Vy * Sz;  // d/dz
-            values[base + 4] = Sx * Sy * Vz;  // d2/(dx dy)
-            values[base + 5] = Sx * Vy * Sz;  // d2/(dx dz)
-            values[base + 6] = Vx * Sy * Sz;  // d2/(dy dz)
-            values[base + 7] = Sx * Sy * Sz;  // d3/(dx dy dz)
-        }
-        return;
-    }
-
-    throw BasisEvaluationException("HermiteBasis::evaluate_values: unsupported dimension",
-                                   __FILE__, __LINE__, __func__);
-}
-
-void HermiteBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
-                                     std::vector<Hessian>& hessians) const {
-    hessians.resize(size_);
-
-    if (dimension_ == 1) {
-        Real H1, H2, H3, H4;
-        Real dH1, dH2, dH3, dH4;
-        Real ddH1, ddH2, ddH3, ddH4;
-        hermite_1d(xi[0], H1, H2, H3, H4, dH1, dH2, dH3, dH4, ddH1, ddH2, ddH3, ddH4);
-
-        for (auto& H : hessians) {
-            H = Hessian{};
-        }
-        hessians[0](0, 0) = ddH1;
-        hessians[1](0, 0) = ddH3;
-        hessians[2](0, 0) = ddH2;
-        hessians[3](0, 0) = ddH4;
-        return;
-    }
-
-    if (dimension_ == 2) {
-        Real Hx[4], dHx[4], ddHx[4];
-        Real Hy[4], dHy[4], ddHy[4];
-        hermite_1d(xi[0], Hx[0], Hx[1], Hx[2], Hx[3], dHx[0], dHx[1], dHx[2], dHx[3],
-                   ddHx[0], ddHx[1], ddHx[2], ddHx[3]);
-        hermite_1d(xi[1], Hy[0], Hy[1], Hy[2], Hy[3], dHy[0], dHy[1], dHy[2], dHy[3],
-                   ddHy[0], ddHy[1], ddHy[2], ddHy[3]);
-
-        auto set_corner = [&](int corner,
-                              Real Vx, Real dVx, Real ddVx,
-                              Real Sx, Real dSx, Real ddSx,
-                              Real Vy, Real dVy, Real ddVy,
-                              Real Sy, Real dSy, Real ddSy) {
-            const std::size_t base = static_cast<std::size_t>(4 * corner);
-
-            auto fill = [&](std::size_t offset,
-                            Real ax, Real dax, Real ddax,
-                            Real ay, Real day, Real dday) {
-                Hessian H{};
-                H(0, 0) = ddax * ay;
-                H(0, 1) = dax * day;
-                H(1, 0) = H(0, 1);
-                H(1, 1) = ax * dday;
-                hessians[base + offset] = H;
-            };
-
-            fill(0, Vx, dVx, ddVx, Vy, dVy, ddVy);
-            fill(1, Sx, dSx, ddSx, Vy, dVy, ddVy);
-            fill(2, Vx, dVx, ddVx, Sy, dSy, ddSy);
-            fill(3, Sx, dSx, ddSx, Sy, dSy, ddSy);
-        };
-
-        set_corner(0, Hx[0], dHx[0], ddHx[0], Hx[1], dHx[1], ddHx[1],
-                   Hy[0], dHy[0], ddHy[0], Hy[1], dHy[1], ddHy[1]);
-        set_corner(1, Hx[2], dHx[2], ddHx[2], Hx[3], dHx[3], ddHx[3],
-                   Hy[0], dHy[0], ddHy[0], Hy[1], dHy[1], ddHy[1]);
-        set_corner(2, Hx[2], dHx[2], ddHx[2], Hx[3], dHx[3], ddHx[3],
-                   Hy[2], dHy[2], ddHy[2], Hy[3], dHy[3], ddHy[3]);
-        set_corner(3, Hx[0], dHx[0], ddHx[0], Hx[1], dHx[1], ddHx[1],
-                   Hy[2], dHy[2], ddHy[2], Hy[3], dHy[3], ddHy[3]);
-        return;
-    }
-
-    if (dimension_ == 3) {
-        Real Hx[4], dHx[4], ddHx[4];
-        Real Hy[4], dHy[4], ddHy[4];
-        Real Hz[4], dHz[4], ddHz[4];
-        hermite_1d(xi[0], Hx[0], Hx[1], Hx[2], Hx[3], dHx[0], dHx[1], dHx[2], dHx[3],
-                   ddHx[0], ddHx[1], ddHx[2], ddHx[3]);
-        hermite_1d(xi[1], Hy[0], Hy[1], Hy[2], Hy[3], dHy[0], dHy[1], dHy[2], dHy[3],
-                   ddHy[0], ddHy[1], ddHy[2], ddHy[3]);
-        hermite_1d(xi[2], Hz[0], Hz[1], Hz[2], Hz[3], dHz[0], dHz[1], dHz[2], dHz[3],
-                   ddHz[0], ddHz[1], ddHz[2], ddHz[3]);
-
-        const int cx[] = {0, 2, 2, 0, 0, 2, 2, 0};
-        const int cy[] = {0, 0, 2, 2, 0, 0, 2, 2};
-        const int cz[] = {0, 0, 0, 0, 2, 2, 2, 2};
-
-        auto fill = [&](std::size_t idx,
-                        Real ax, Real dax, Real ddax,
-                        Real ay, Real day, Real dday,
-                        Real az, Real daz, Real ddaz) {
-            Hessian H{};
-            H(0, 0) = ddax * ay * az;
-            H(1, 1) = ax * dday * az;
-            H(2, 2) = ax * ay * ddaz;
-            H(0, 1) = dax * day * az;
-            H(1, 0) = H(0, 1);
-            H(0, 2) = dax * ay * daz;
-            H(2, 0) = H(0, 2);
-            H(1, 2) = ax * day * daz;
-            H(2, 1) = H(1, 2);
-            hessians[idx] = H;
-        };
-
-        for (int c = 0; c < 8; ++c) {
-            const std::size_t base = static_cast<std::size_t>(8 * c);
-            const int ix = cx[c];
-            const int iy = cy[c];
-            const int iz = cz[c];
-            fill(base + 0, Hx[ix], dHx[ix], ddHx[ix], Hy[iy], dHy[iy], ddHy[iy], Hz[iz], dHz[iz], ddHz[iz]);
-            fill(base + 1, Hx[ix + 1], dHx[ix + 1], ddHx[ix + 1], Hy[iy], dHy[iy], ddHy[iy], Hz[iz], dHz[iz], ddHz[iz]);
-            fill(base + 2, Hx[ix], dHx[ix], ddHx[ix], Hy[iy + 1], dHy[iy + 1], ddHy[iy + 1], Hz[iz], dHz[iz], ddHz[iz]);
-            fill(base + 3, Hx[ix], dHx[ix], ddHx[ix], Hy[iy], dHy[iy], ddHy[iy], Hz[iz + 1], dHz[iz + 1], ddHz[iz + 1]);
-            fill(base + 4, Hx[ix + 1], dHx[ix + 1], ddHx[ix + 1], Hy[iy + 1], dHy[iy + 1], ddHy[iy + 1], Hz[iz], dHz[iz], ddHz[iz]);
-            fill(base + 5, Hx[ix + 1], dHx[ix + 1], ddHx[ix + 1], Hy[iy], dHy[iy], ddHy[iy], Hz[iz + 1], dHz[iz + 1], ddHz[iz + 1]);
-            fill(base + 6, Hx[ix], dHx[ix], ddHx[ix], Hy[iy + 1], dHy[iy + 1], ddHy[iy + 1], Hz[iz + 1], dHz[iz + 1], ddHz[iz + 1]);
-            fill(base + 7, Hx[ix + 1], dHx[ix + 1], ddHx[ix + 1], Hy[iy + 1], dHy[iy + 1], ddHy[iy + 1], Hz[iz + 1], dHz[iz + 1], ddHz[iz + 1]);
-        }
-        return;
-    }
-
-    throw BasisEvaluationException("HermiteBasis::evaluate_hessians: unsupported dimension",
-                                   __FILE__, __LINE__, __func__);
+    evaluate_values_to(xi, values.data());
 }
 
 void HermiteBasis::evaluate_gradients(const math::Vector<Real, 3>& xi,
                                       std::vector<Gradient>& gradients) const {
     gradients.resize(size_);
-
-    if (dimension_ == 1) {
-        Real H1, H2, H3, H4;
-        Real dH1, dH2, dH3, dH4, ddH1, ddH2, ddH3, ddH4;
-        hermite_1d(xi[0], H1, H2, H3, H4, dH1, dH2, dH3, dH4, ddH1, ddH2, ddH3, ddH4);
-
-        gradients[0] = Gradient{};
-        gradients[1] = Gradient{};
-        gradients[2] = Gradient{};
-        gradients[3] = Gradient{};
-
-        gradients[0][0] = dH1;
-        gradients[1][0] = dH3;
-        gradients[2][0] = dH2;
-        gradients[3][0] = dH4;
-        return;
+    std::array<Real, kMaxHermiteDofs * 3u> raw{};
+    evaluate_gradients_to(xi, raw.data());
+    for (std::size_t dof = 0; dof < size_; ++dof) {
+        gradients[dof] = Gradient{};
+        gradients[dof][0] = raw[dof * 3u + 0u];
+        gradients[dof][1] = raw[dof * 3u + 1u];
+        gradients[dof][2] = raw[dof * 3u + 2u];
     }
+}
 
-    if (dimension_ == 2) {
-        Real H1x, H2x, H3x, H4x;
-        Real dH1x, dH2x, dH3x, dH4x, ddH1x, ddH2x, ddH3x, ddH4x;
-        Real H1y, H2y, H3y, H4y;
-        Real dH1y, dH2y, dH3y, dH4y, ddH1y, ddH2y, ddH3y, ddH4y;
-
-        hermite_1d(xi[0], H1x, H2x, H3x, H4x, dH1x, dH2x, dH3x, dH4x,
-                   ddH1x, ddH2x, ddH3x, ddH4x);
-        hermite_1d(xi[1], H1y, H2y, H3y, H4y, dH1y, dH2y, dH3y, dH4y,
-                   ddH1y, ddH2y, ddH3y, ddH4y);
-
-        auto set_corner = [&](int corner,
-                              Real Vx, Real dVx,
-                              Real Sx, Real dSx,
-                              Real Vy, Real dVy,
-                              Real Sy, Real dSy) {
-            const std::size_t base = static_cast<std::size_t>(4 * corner);
-
-            // Value DOF: N = Vx * Vy
-            gradients[base + 0] = Gradient{};
-            gradients[base + 0][0] = dVx * Vy;
-            gradients[base + 0][1] = Vx * dVy;
-
-            // d/dx DOF: N = Sx * Vy
-            gradients[base + 1] = Gradient{};
-            gradients[base + 1][0] = dSx * Vy;
-            gradients[base + 1][1] = Sx * dVy;
-
-            // d/dy DOF: N = Vx * Sy
-            gradients[base + 2] = Gradient{};
-            gradients[base + 2][0] = dVx * Sy;
-            gradients[base + 2][1] = Vx * dSy;
-
-            // d2/(dx dy) DOF: N = Sx * Sy
-            gradients[base + 3] = Gradient{};
-            gradients[base + 3][0] = dSx * Sy;
-            gradients[base + 3][1] = Sx * dSy;
-        };
-
-        // Corner 0: (-1, -1)  -> left/bottom
-        set_corner(0,
-                   H1x, dH1x,
-                   H2x, dH2x,
-                   H1y, dH1y,
-                   H2y, dH2y);
-        // Corner 1: (+1, -1)  -> right/bottom
-        set_corner(1,
-                   H3x, dH3x,
-                   H4x, dH4x,
-                   H1y, dH1y,
-                   H2y, dH2y);
-        // Corner 2: (+1, +1)  -> right/top
-        set_corner(2,
-                   H3x, dH3x,
-                   H4x, dH4x,
-                   H3y, dH3y,
-                   H4y, dH4y);
-        // Corner 3: (-1, +1)  -> left/top
-        set_corner(3,
-                   H1x, dH1x,
-                   H2x, dH2x,
-                   H3y, dH3y,
-                   H4y, dH4y);
-        return;
-    }
-
-    if (dimension_ == 3) {
-        Real Hx[4], dHx[4], ddHx[4];
-        Real Hy[4], dHy[4], ddHy[4];
-        Real Hz[4], dHz[4], ddHz[4];
-        hermite_1d(xi[0], Hx[0], Hx[1], Hx[2], Hx[3], dHx[0], dHx[1], dHx[2], dHx[3],
-                   ddHx[0], ddHx[1], ddHx[2], ddHx[3]);
-        hermite_1d(xi[1], Hy[0], Hy[1], Hy[2], Hy[3], dHy[0], dHy[1], dHy[2], dHy[3],
-                   ddHy[0], ddHy[1], ddHy[2], ddHy[3]);
-        hermite_1d(xi[2], Hz[0], Hz[1], Hz[2], Hz[3], dHz[0], dHz[1], dHz[2], dHz[3],
-                   ddHz[0], ddHz[1], ddHz[2], ddHz[3]);
-
-        const int cx[] = {0, 2, 2, 0, 0, 2, 2, 0};
-        const int cy[] = {0, 0, 2, 2, 0, 0, 2, 2};
-        const int cz[] = {0, 0, 0, 0, 2, 2, 2, 2};
-
-        for (int c = 0; c < 8; ++c) {
-            const std::size_t base = static_cast<std::size_t>(8 * c);
-            const int ix = cx[c], iy = cy[c], iz = cz[c];
-            const Real Vx = Hx[ix], Sx = Hx[ix + 1];
-            const Real Vy = Hy[iy], Sy = Hy[iy + 1];
-            const Real Vz = Hz[iz], Sz = Hz[iz + 1];
-            const Real dVx = dHx[ix], dSx = dHx[ix + 1];
-            const Real dVy = dHy[iy], dSy = dHy[iy + 1];
-            const Real dVz = dHz[iz], dSz = dHz[iz + 1];
-
-            // 8 DOFs per corner, 3 gradient components each
-            // DOF 0: Vx*Vy*Vz
-            gradients[base + 0] = Gradient{};
-            gradients[base + 0][0] = dVx * Vy * Vz;
-            gradients[base + 0][1] = Vx * dVy * Vz;
-            gradients[base + 0][2] = Vx * Vy * dVz;
-
-            // DOF 1: Sx*Vy*Vz
-            gradients[base + 1] = Gradient{};
-            gradients[base + 1][0] = dSx * Vy * Vz;
-            gradients[base + 1][1] = Sx * dVy * Vz;
-            gradients[base + 1][2] = Sx * Vy * dVz;
-
-            // DOF 2: Vx*Sy*Vz
-            gradients[base + 2] = Gradient{};
-            gradients[base + 2][0] = dVx * Sy * Vz;
-            gradients[base + 2][1] = Vx * dSy * Vz;
-            gradients[base + 2][2] = Vx * Sy * dVz;
-
-            // DOF 3: Vx*Vy*Sz
-            gradients[base + 3] = Gradient{};
-            gradients[base + 3][0] = dVx * Vy * Sz;
-            gradients[base + 3][1] = Vx * dVy * Sz;
-            gradients[base + 3][2] = Vx * Vy * dSz;
-
-            // DOF 4: Sx*Sy*Vz
-            gradients[base + 4] = Gradient{};
-            gradients[base + 4][0] = dSx * Sy * Vz;
-            gradients[base + 4][1] = Sx * dSy * Vz;
-            gradients[base + 4][2] = Sx * Sy * dVz;
-
-            // DOF 5: Sx*Vy*Sz
-            gradients[base + 5] = Gradient{};
-            gradients[base + 5][0] = dSx * Vy * Sz;
-            gradients[base + 5][1] = Sx * dVy * Sz;
-            gradients[base + 5][2] = Sx * Vy * dSz;
-
-            // DOF 6: Vx*Sy*Sz
-            gradients[base + 6] = Gradient{};
-            gradients[base + 6][0] = dVx * Sy * Sz;
-            gradients[base + 6][1] = Vx * dSy * Sz;
-            gradients[base + 6][2] = Vx * Sy * dSz;
-
-            // DOF 7: Sx*Sy*Sz
-            gradients[base + 7] = Gradient{};
-            gradients[base + 7][0] = dSx * Sy * Sz;
-            gradients[base + 7][1] = Sx * dSy * Sz;
-            gradients[base + 7][2] = Sx * Sy * dSz;
+void HermiteBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                     std::vector<Hessian>& hessians) const {
+    hessians.resize(size_);
+    std::array<Real, kMaxHermiteDofs * 9u> raw{};
+    evaluate_hessians_to(xi, raw.data());
+    for (std::size_t dof = 0; dof < size_; ++dof) {
+        Hessian H{};
+        for (std::size_t row = 0; row < 3u; ++row) {
+            for (std::size_t col = 0; col < 3u; ++col) {
+                H(row, col) = raw[dof * 9u + row * 3u + col];
+            }
         }
-        return;
+        hessians[dof] = H;
+    }
+}
+
+void HermiteBasis::evaluate_all(const math::Vector<Real, 3>& xi,
+                                std::vector<Real>& values,
+                                std::vector<Gradient>& gradients,
+                                std::vector<Hessian>& hessians) const {
+    values.resize(size_);
+    gradients.resize(size_);
+    hessians.resize(size_);
+
+    std::array<Real, kMaxHermiteDofs * 3u> raw_gradients{};
+    std::array<Real, kMaxHermiteDofs * 9u> raw_hessians{};
+    write_hermite_tensor_to(dimension_,
+                            xi,
+                            values.data(),
+                            raw_gradients.data(),
+                            raw_hessians.data());
+
+    for (std::size_t dof = 0; dof < size_; ++dof) {
+        gradients[dof] = Gradient{};
+        gradients[dof][0] = raw_gradients[dof * 3u + 0u];
+        gradients[dof][1] = raw_gradients[dof * 3u + 1u];
+        gradients[dof][2] = raw_gradients[dof * 3u + 2u];
+
+        Hessian H{};
+        for (std::size_t row = 0; row < 3u; ++row) {
+            for (std::size_t col = 0; col < 3u; ++col) {
+                H(row, col) = raw_hessians[dof * 9u + row * 3u + col];
+            }
+        }
+        hessians[dof] = H;
+    }
+}
+
+void HermiteBasis::evaluate_values_to(const math::Vector<Real, 3>& xi,
+                                      Real* SVMP_RESTRICT values_out) const {
+    write_hermite_tensor_to(dimension_, xi, values_out, nullptr, nullptr);
+}
+
+void HermiteBasis::evaluate_gradients_to(const math::Vector<Real, 3>& xi,
+                                         Real* SVMP_RESTRICT gradients_out) const {
+    write_hermite_tensor_to(dimension_, xi, nullptr, gradients_out, nullptr);
+}
+
+void HermiteBasis::evaluate_hessians_to(const math::Vector<Real, 3>& xi,
+                                        Real* SVMP_RESTRICT hessians_out) const {
+    write_hermite_tensor_to(dimension_, xi, nullptr, nullptr, hessians_out);
+}
+
+void HermiteBasis::evaluate_all_to(const math::Vector<Real, 3>& xi,
+                                   Real* SVMP_RESTRICT values_out,
+                                   Real* SVMP_RESTRICT gradients_out,
+                                   Real* SVMP_RESTRICT hessians_out) const {
+    write_hermite_tensor_to(dimension_, xi, values_out, gradients_out, hessians_out);
+}
+
+void HermiteBasis::evaluate_at_quadrature_points_strided(
+    const std::vector<math::Vector<Real, 3>>& points,
+    std::size_t output_stride,
+    Real* SVMP_RESTRICT values_out,
+    Real* SVMP_RESTRICT gradients_out,
+    Real* SVMP_RESTRICT hessians_out) const {
+    const std::size_t num_qpts = points.size();
+    if (output_stride < num_qpts) {
+        throw BasisConfigurationException(
+            "HermiteBasis strided evaluation requires output_stride >= points.size()",
+            __FILE__, __LINE__, __func__);
     }
 
-    throw BasisEvaluationException("HermiteBasis::evaluate_gradients: unsupported dimension",
-                                   __FILE__, __LINE__, __func__);
+    std::array<Real, kMaxHermiteDofs> values{};
+    std::array<Real, kMaxHermiteDofs * 3u> gradients{};
+    std::array<Real, kMaxHermiteDofs * 9u> hessians{};
+
+    for (std::size_t q = 0; q < num_qpts; ++q) {
+        write_hermite_tensor_to(dimension_,
+                                points[q],
+                                values_out != nullptr ? values.data() : nullptr,
+                                gradients_out != nullptr ? gradients.data() : nullptr,
+                                hessians_out != nullptr ? hessians.data() : nullptr);
+
+        if (values_out != nullptr) {
+            for (std::size_t dof = 0; dof < size_; ++dof) {
+                values_out[dof * output_stride + q] = values[dof];
+            }
+        }
+        if (gradients_out != nullptr) {
+            for (std::size_t row = 0; row < size_ * 3u; ++row) {
+                gradients_out[row * output_stride + q] = gradients[row];
+            }
+        }
+        if (hessians_out != nullptr) {
+            for (std::size_t row = 0; row < size_ * 9u; ++row) {
+                hessians_out[row * output_stride + q] = hessians[row];
+            }
+        }
+    }
 }
 
 } // namespace basis

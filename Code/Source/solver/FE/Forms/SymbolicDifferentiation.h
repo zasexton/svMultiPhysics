@@ -115,6 +115,31 @@ struct SymbolicDiffResult {
                                                      const FormExpr& direction);
 
 /**
+ * @brief Directional derivative of an expression w.r.t. the geometric normal terminal.
+ *
+ * This computes d(expr)/d(normal)[direction] and treats field, trial, test, and
+ * other geometry terminals as constants. It is intended for unfitted interface
+ * shape tangents where the generated quadrature is refreshed but the interface
+ * integrand still contains an explicit normal() terminal.
+ */
+[[nodiscard]] FormExpr directionalDerivativeWrtNormal(const FormExpr& expr,
+                                                      const FormExpr& direction);
+
+/**
+ * @brief Directional derivative of an expression with respect to quadrature
+ * point motion in physical space.
+ *
+ * This computes the point-location contribution d(expr(x))[direction] by
+ * differentiating finite-element value terminals through their spatial
+ * gradients and treating measure wrappers as pass-through containers. It is
+ * intended for unfitted level-set shape tangents where generated interface
+ * quadrature points move with the zero contour.
+ */
+[[nodiscard]] FormExpr directionalDerivativeWrtSpatialCoordinate(
+    const FormExpr& expr,
+    const FormExpr& direction);
+
+/**
  * @brief Hessian-vector product of a residual form w.r.t. the active TrialFunction
  *
  * This returns a bilinear form representing:

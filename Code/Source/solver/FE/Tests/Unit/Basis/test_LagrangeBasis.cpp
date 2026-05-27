@@ -17,7 +17,7 @@ using svmp::FE::ElementType;
 using svmp::FE::Real;
 using svmp::FE::basis::Gradient;
 using svmp::FE::basis::Hessian;
-using svmp::FE::basis::NodeOrdering;
+using svmp::FE::basis::ReferenceNodeLayout;
 
 namespace {
 
@@ -353,11 +353,11 @@ void expect_nodes_match_node_ordering(ElementType canonical_type,
     LagrangeBasis basis(canonical_type, order);
     const auto& nodes = basis.nodes();
 
-    ASSERT_EQ(nodes.size(), NodeOrdering::num_nodes(node_ordering_type));
+    ASSERT_EQ(nodes.size(), ReferenceNodeLayout::num_nodes(node_ordering_type));
     ASSERT_EQ(nodes.size(), basis.size());
 
     for (std::size_t i = 0; i < nodes.size(); ++i) {
-        const auto expected = NodeOrdering::get_node_coords(node_ordering_type, i);
+        const auto expected = ReferenceNodeLayout::get_node_coords(node_ordering_type, i);
         EXPECT_NEAR(nodes[i][0], expected[0], 1e-14);
         EXPECT_NEAR(nodes[i][1], expected[1], 1e-14);
         EXPECT_NEAR(nodes[i][2], expected[2], 1e-14);
@@ -954,6 +954,152 @@ void expect_pyramid_edge_trace_matches_line_basis(int order,
     }
 }
 
+struct StridedOutputRequest {
+    bool values;
+    bool gradients;
+    bool hessians;
+};
+
+void expect_strided_matches_pointwise(ElementType type,
+                                      int order,
+                                      const StridedOutputRequest& request) {
+    LagrangeBasis basis(type, order);
+    const auto points = dense_sample_points_for(type);
+    const std::size_t stride = points.size() + 3u;
+    constexpr Real sentinel = Real(-12345.25);
+
+    std::vector<Real> values(request.values ? basis.size() * stride : 0u, sentinel);
+    std::vector<Real> gradients(request.gradients ? basis.size() * 3u * stride : 0u, sentinel);
+    std::vector<Real> hessians(request.hessians ? basis.size() * 9u * stride : 0u, sentinel);
+
+    basis.evaluate_at_quadrature_points_strided(
+        points,
+        stride,
+        request.values ? values.data() : nullptr,
+        request.gradients ? gradients.data() : nullptr,
+        request.hessians ? hessians.data() : nullptr);
+
+    const Real tol = (type == ElementType::Pyramid5 || type == ElementType::Pyramid14)
+        ? Real(5e-10)
+        : Real(1e-12);
+
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        if (request.values) {
+            std::vector<Real> expected;
+            basis.evaluate_values(points[q], expected);
+            ASSERT_EQ(expected.size(), basis.size());
+            for (std::size_t d = 0; d < basis.size(); ++d) {
+                EXPECT_NEAR(values[d * stride + q], expected[d], tol)
+                    << "type=" << static_cast<int>(type)
+                    << ", order=" << order
+                    << ", dof=" << d
+                    << ", q=" << q;
+            }
+        }
+
+        if (request.gradients) {
+            std::vector<Gradient> expected;
+            basis.evaluate_gradients(points[q], expected);
+            ASSERT_EQ(expected.size(), basis.size());
+            for (std::size_t d = 0; d < basis.size(); ++d) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    EXPECT_NEAR(gradients[(d * 3u + c) * stride + q], expected[d][c], tol)
+                        << "type=" << static_cast<int>(type)
+                        << ", order=" << order
+                        << ", dof=" << d
+                        << ", component=" << c
+                        << ", q=" << q;
+                }
+            }
+        }
+
+        if (request.hessians) {
+            std::vector<Hessian> expected;
+            basis.evaluate_hessians(points[q], expected);
+            ASSERT_EQ(expected.size(), basis.size());
+            for (std::size_t d = 0; d < basis.size(); ++d) {
+                for (std::size_t r = 0; r < 3u; ++r) {
+                    for (std::size_t c = 0; c < 3u; ++c) {
+                        EXPECT_NEAR(hessians[(d * 9u + r * 3u + c) * stride + q],
+                                    expected[d](r, c),
+                                    Real(4) * tol)
+                            << "type=" << static_cast<int>(type)
+                            << ", order=" << order
+                            << ", dof=" << d
+                            << ", hessian=(" << r << "," << c << ")"
+                            << ", q=" << q;
+                    }
+                }
+            }
+        }
+    }
+
+    const auto expect_padding_untouched = [&](const std::vector<Real>& buffer,
+                                              std::size_t rows) {
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t q = points.size(); q < stride; ++q) {
+                EXPECT_EQ(buffer[row * stride + q], sentinel)
+                    << "type=" << static_cast<int>(type)
+                    << ", order=" << order
+                    << ", row=" << row
+                    << ", padding q=" << q;
+            }
+        }
+    };
+
+    if (request.values) {
+        expect_padding_untouched(values, basis.size());
+    }
+    if (request.gradients) {
+        expect_padding_untouched(gradients, basis.size() * 3u);
+    }
+    if (request.hessians) {
+        expect_padding_untouched(hessians, basis.size() * 9u);
+    }
+}
+
+void expect_raw_to_matches_vector_evaluation(ElementType type, int order) {
+    LagrangeBasis basis(type, order);
+    const Real tol = (type == ElementType::Pyramid5 || type == ElementType::Pyramid14)
+        ? Real(5e-10)
+        : Real(1e-12);
+
+    for (const auto& point : sample_points_for(type)) {
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        basis.evaluate_all(point, values, gradients, hessians);
+
+        std::vector<Real> raw_values(basis.size());
+        std::vector<Real> raw_gradients(basis.size() * 3u);
+        std::vector<Real> raw_hessians(basis.size() * 9u);
+        basis.evaluate_values_to(point, raw_values.data());
+        basis.evaluate_gradients_to(point, raw_gradients.data());
+        basis.evaluate_hessians_to(point, raw_hessians.data());
+
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            EXPECT_NEAR(raw_values[i], values[i], tol)
+                << "type=" << static_cast<int>(type) << ", order=" << order << ", dof=" << i;
+            for (std::size_t c = 0; c < 3u; ++c) {
+                EXPECT_NEAR(raw_gradients[i * 3u + c], gradients[i][c], tol)
+                    << "type=" << static_cast<int>(type)
+                    << ", order=" << order
+                    << ", dof=" << i
+                    << ", gradient component=" << c;
+            }
+            for (std::size_t r = 0; r < 3u; ++r) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    EXPECT_NEAR(raw_hessians[i * 9u + r * 3u + c], hessians[i](r, c), Real(4) * tol)
+                        << "type=" << static_cast<int>(type)
+                        << ", order=" << order
+                        << ", dof=" << i
+                        << ", hessian=(" << r << "," << c << ")";
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 TEST(LagrangeBasis, QuadPartitionOfUnity) {
@@ -1098,12 +1244,12 @@ TEST(LagrangeBasis, WedgeAndPyramidPartitionOfUnity) {
         const double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
         EXPECT_NEAR(sum, 1.0, 1e-12);
 
-        // Wedge18 should report 18 nodes in NodeOrdering
-        EXPECT_EQ(NodeOrdering::num_nodes(ElementType::Wedge18), 18u);
+        // Wedge18 should report 18 nodes in ReferenceNodeLayout
+        EXPECT_EQ(ReferenceNodeLayout::num_nodes(ElementType::Wedge18), 18u);
         // Corner nodes should match Wedge6 vertices
-        auto v0 = NodeOrdering::get_node_coords(ElementType::Wedge18, 0);
-        auto v1 = NodeOrdering::get_node_coords(ElementType::Wedge18, 1);
-        auto v2 = NodeOrdering::get_node_coords(ElementType::Wedge18, 2);
+        auto v0 = ReferenceNodeLayout::get_node_coords(ElementType::Wedge18, 0);
+        auto v1 = ReferenceNodeLayout::get_node_coords(ElementType::Wedge18, 1);
+        auto v2 = ReferenceNodeLayout::get_node_coords(ElementType::Wedge18, 2);
         EXPECT_NEAR(v0[0], Real(0), 1e-14);
         EXPECT_NEAR(v0[1], Real(0), 1e-14);
         EXPECT_NEAR(v0[2], Real(-1), 1e-14);
@@ -1122,6 +1268,53 @@ TEST(LagrangeBasis, WedgeAndPyramidPartitionOfUnity) {
         pyr.evaluate_values(xi, vals);
         const double sum = std::accumulate(vals.begin(), vals.end(), 0.0);
         EXPECT_NEAR(sum, 1.0, 1e-12);
+    }
+}
+
+TEST(LagrangeBasis, NonTensorStridedEvaluationMatchesPointwise) {
+    const std::vector<std::pair<ElementType, int>> cases = {
+        {ElementType::Triangle3, 3},
+        {ElementType::Tetra4, 3},
+        {ElementType::Wedge6, 3},
+        {ElementType::Pyramid5, 3},
+    };
+    const std::vector<StridedOutputRequest> requests = {
+        {true, false, false},
+        {false, true, false},
+        {false, false, true},
+        {true, true, false},
+        {true, false, true},
+        {false, true, true},
+        {true, true, true},
+    };
+
+    for (const auto& [type, order] : cases) {
+        for (const auto& request : requests) {
+            SCOPED_TRACE(static_cast<int>(type));
+            SCOPED_TRACE(order);
+            SCOPED_TRACE(request.values ? "values" : "no values");
+            SCOPED_TRACE(request.gradients ? "gradients" : "no gradients");
+            SCOPED_TRACE(request.hessians ? "hessians" : "no hessians");
+            expect_strided_matches_pointwise(type, order, request);
+        }
+    }
+}
+
+TEST(LagrangeBasis, RawOutputSinksMatchVectorEvaluationAcrossTopologies) {
+    const std::vector<std::pair<ElementType, int>> cases = {
+        {ElementType::Line2, 4},
+        {ElementType::Quad4, 3},
+        {ElementType::Hex8, 3},
+        {ElementType::Triangle3, 4},
+        {ElementType::Tetra4, 3},
+        {ElementType::Wedge6, 3},
+        {ElementType::Pyramid5, 3},
+    };
+
+    for (const auto& [type, order] : cases) {
+        SCOPED_TRACE(static_cast<int>(type));
+        SCOPED_TRACE(order);
+        expect_raw_to_matches_vector_evaluation(type, order);
     }
 }
 
@@ -1192,8 +1385,8 @@ TEST(LagrangeBasis, GeneratedNodeOrderingIsDeterministicAcrossOrders) {
 
     for (const auto& c : cases) {
         for (int order = 0; order <= c.max_order; ++order) {
-            const auto generated_a = NodeOrdering::get_lagrange_node_coords(c.type, order);
-            const auto generated_b = NodeOrdering::get_lagrange_node_coords(c.type, order);
+            const auto generated_a = ReferenceNodeLayout::get_lagrange_node_coords(c.type, order);
+            const auto generated_b = ReferenceNodeLayout::get_lagrange_node_coords(c.type, order);
             ASSERT_EQ(generated_a.size(), expected_lagrange_size(c.type, order));
             ASSERT_EQ(generated_a.size(), generated_b.size());
             for (std::size_t i = 0; i < generated_a.size(); ++i) {
@@ -1217,9 +1410,9 @@ TEST(LagrangeBasis, NodeOrderingMatchesReferenceCoordinateOracles) {
     for (ElementType type : cases) {
         const auto expected = reference_node_coords(type);
         ASSERT_FALSE(expected.empty());
-        ASSERT_EQ(NodeOrdering::num_nodes(type), expected.size());
+        ASSERT_EQ(ReferenceNodeLayout::num_nodes(type), expected.size());
         for (std::size_t i = 0; i < expected.size(); ++i) {
-            const auto actual = NodeOrdering::get_node_coords(type, i);
+            const auto actual = ReferenceNodeLayout::get_node_coords(type, i);
             EXPECT_TRUE(points_close(actual, expected[i]))
                 << "Element type " << static_cast<int>(type)
                 << ", node " << i;
@@ -1250,10 +1443,10 @@ TEST(LagrangeBasis, GeneratedLowOrderOrderingMatchesPublicAliasPaths) {
     };
 
     for (const auto& c : cases) {
-        const auto generated = NodeOrdering::get_lagrange_node_coords(c.type, c.order);
-        ASSERT_EQ(generated.size(), NodeOrdering::num_nodes(c.public_alias));
+        const auto generated = ReferenceNodeLayout::get_lagrange_node_coords(c.type, c.order);
+        ASSERT_EQ(generated.size(), ReferenceNodeLayout::num_nodes(c.public_alias));
         for (std::size_t i = 0; i < generated.size(); ++i) {
-            const auto public_alias = NodeOrdering::get_node_coords(c.public_alias, i);
+            const auto public_alias = ReferenceNodeLayout::get_node_coords(c.public_alias, i);
             EXPECT_TRUE(points_close(generated[i], public_alias));
         }
     }
@@ -1317,6 +1510,77 @@ TEST(LagrangeBasis, PartitionGradientAndHessianSumsAcrossCanonicalTopologiesAndO
     }
 }
 
+TEST(LagrangeBasis, SimplexAxisScratchDynamicFallbackForHighOrder) {
+    const struct Case {
+        ElementType type;
+        int order;
+        Point point;
+        Real tolerance;
+    } cases[] = {
+        {ElementType::Triangle3, 13, Point{Real(0.19), Real(0.31), Real(0)}, Real(1e-8)},
+        {ElementType::Tetra4, 13, Point{Real(0.13), Real(0.17), Real(0.19)}, Real(1e-7)},
+    };
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        std::vector<Real> values;
+        std::vector<Gradient> gradients;
+        std::vector<Hessian> hessians;
+        basis.evaluate_all(c.point, values, gradients, hessians);
+
+        ASSERT_EQ(values.size(), basis.size());
+        ASSERT_EQ(gradients.size(), basis.size());
+        ASSERT_EQ(hessians.size(), basis.size());
+
+        Real value_sum = Real(0);
+        Gradient gradient_sum{};
+        Hessian hessian_sum{};
+        for (std::size_t i = 0; i < basis.size(); ++i) {
+            value_sum += values[i];
+            for (std::size_t d = 0; d < 3u; ++d) {
+                gradient_sum[d] += gradients[i][d];
+                for (std::size_t e = 0; e < 3u; ++e) {
+                    hessian_sum(d, e) += hessians[i](d, e);
+                }
+            }
+        }
+
+        EXPECT_NEAR(value_sum, Real(1), c.tolerance);
+        for (std::size_t d = 0; d < 3u; ++d) {
+            EXPECT_NEAR(gradient_sum[d], Real(0), c.tolerance);
+            for (std::size_t e = 0; e < 3u; ++e) {
+                EXPECT_NEAR(hessian_sum(d, e), Real(0), Real(10) * c.tolerance);
+            }
+        }
+    }
+}
+
+TEST(LagrangeBasis, HighOrderAxisNearNodeMaintainsPartitionAndDerivativeSums) {
+    const int order = 16;
+    const LagrangeBasis basis(ElementType::Line2, order);
+    const Real node = Real(-1) + Real(2 * 5) / static_cast<Real>(order);
+    const Point point{node + Real(1e-7), Real(0), Real(0)};
+
+    std::vector<Real> values;
+    std::vector<Gradient> gradients;
+    std::vector<Hessian> hessians;
+    basis.evaluate_all(point, values, gradients, hessians);
+    ASSERT_EQ(values.size(), basis.size());
+
+    Real value_sum = Real(0);
+    Real gradient_sum = Real(0);
+    Real hessian_sum = Real(0);
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        value_sum += values[i];
+        gradient_sum += gradients[i][0];
+        hessian_sum += hessians[i](0, 0);
+    }
+
+    EXPECT_NEAR(value_sum, Real(1), Real(1e-12));
+    EXPECT_NEAR(gradient_sum, Real(0), Real(1e-8));
+    EXPECT_NEAR(hessian_sum, Real(0), Real(1e-5));
+}
+
 TEST(LagrangeBasis, PyramidFaceTracesMatchLowerDimensionalLagrangeBases) {
     const PyramidFace faces[] = {
         PyramidFace::Base,
@@ -1354,7 +1618,7 @@ TEST(LagrangeBasis, PyramidEdgeTracesMatchLineLagrangeBasis) {
 }
 
 TEST(LagrangeBasis, Pyramid14RationalNodalAndPartition) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     LagrangeBasis basis(ElementType::Pyramid14, 2);
     EXPECT_EQ(basis.dimension(), 3);
@@ -1362,7 +1626,7 @@ TEST(LagrangeBasis, Pyramid14RationalNodalAndPartition) {
 
     // Kronecker nodal property at all Pyramid14 nodes
     for (std::size_t i = 0; i < basis.size(); ++i) {
-        auto xi = NodeOrdering::get_node_coords(ElementType::Pyramid14, i);
+        auto xi = ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i);
         std::vector<Real> vals;
         basis.evaluate_values(xi, vals);
         ASSERT_EQ(vals.size(), basis.size());
@@ -1437,7 +1701,7 @@ TEST(LagrangeBasis, HigherOrderP4KroneckerAndPartition) {
 }
 
 TEST(LagrangeBasis, Pyramid14InterpolatesQuadraticPolynomials) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     LagrangeBasis basis(ElementType::Pyramid14, 2);
     const std::size_t n = basis.size();
@@ -1446,7 +1710,7 @@ TEST(LagrangeBasis, Pyramid14InterpolatesQuadraticPolynomials) {
     std::vector<svmp::FE::math::Vector<Real,3>> nodes;
     nodes.reserve(n);
     for (std::size_t i = 0; i < n; ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Pyramid14, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i));
     }
 
     auto interpolate_and_check = [&](auto f, Real tol) {
@@ -1493,7 +1757,7 @@ TEST(LagrangeBasis, Pyramid14InterpolatesQuadraticPolynomials) {
 }
 
 TEST(LagrangeBasis, Pyramid14GradientMatchesLinearFunctionGradient) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     LagrangeBasis basis(ElementType::Pyramid14, 2);
     const std::size_t n = basis.size();
@@ -1505,7 +1769,7 @@ TEST(LagrangeBasis, Pyramid14GradientMatchesLinearFunctionGradient) {
 
     std::vector<Real> coeffs(n);
     for (std::size_t i = 0; i < n; ++i) {
-        const auto x = NodeOrdering::get_node_coords(ElementType::Pyramid14, i);
+        const auto x = ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i);
         coeffs[i] = a * x[0] + b * x[1] + c * x[2];
     }
 
@@ -2017,4 +2281,40 @@ TEST(LagrangeBasis, QuadraticPolynomialReproductionAcrossSupportedQuadraticShape
             expect_polynomial_reproduction(c, volume_exponents, Real(2e-10));
         }
     }
+}
+
+TEST(LagrangeBasis, HighOrderTensorLagrangeMaintainsPartitionAndDerivativeSums) {
+    const std::vector<LagrangeAccuracyCase> cases = {
+        {ElementType::Line2, 8, {Point{-0.875, 0, 0}, Point{0.125, 0, 0}, Point{1, 0, 0}}},
+        {ElementType::Quad4, 7, {Point{0.2, -0.35, 0}, Point{-1, 0.5, 0}, Point{0.5, 1, 0}}},
+        {ElementType::Hex8, 6, {Point{0.1, -0.2, 0.3}, Point{-1, 0.5, 1}, Point{0.75, -1, -0.5}}},
+    };
+
+    for (const auto& c : cases) {
+        LagrangeBasis basis(c.type, c.order);
+        expect_partition_gradient_hessian_sums(basis, c.points, Real(2e-12), Real(2e-8));
+    }
+}
+
+TEST(LagrangeBasis, HighOrderTensorLagrangeReproducesTensorPolynomials) {
+    const LagrangeAccuracyCase line{ElementType::Line2,
+                                    8,
+                                    {Point{-0.73, 0, 0}, Point{-0.1, 0, 0}, Point{0.64, 0, 0}}};
+    expect_polynomial_reproduction(line,
+                                   {{0, 0, 0}, {1, 0, 0}, {4, 0, 0}, {8, 0, 0}},
+                                   Real(1e-11));
+
+    const LagrangeAccuracyCase quad{ElementType::Quad4,
+                                    7,
+                                    {Point{-0.6, -0.2, 0}, Point{0.15, 0.45, 0}, Point{0.8, -0.55, 0}}};
+    expect_polynomial_reproduction(quad,
+                                   {{0, 0, 0}, {7, 0, 0}, {0, 7, 0}, {4, 3, 0}},
+                                   Real(5e-10));
+
+    const LagrangeAccuracyCase hex{ElementType::Hex8,
+                                   6,
+                                   {Point{-0.4, 0.2, -0.3}, Point{0.35, -0.55, 0.25}, Point{0.75, 0.4, -0.65}}};
+    expect_polynomial_reproduction(hex,
+                                   {{0, 0, 0}, {6, 0, 0}, {0, 6, 0}, {0, 0, 6}, {3, 2, 4}},
+                                   Real(2e-9));
 }

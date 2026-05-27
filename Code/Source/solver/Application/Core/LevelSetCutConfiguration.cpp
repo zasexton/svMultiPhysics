@@ -1,5 +1,6 @@
 #include "Application/Core/LevelSetCutConfiguration.h"
 
+#include "Application/Core/OopMpiLog.h"
 #include "Parameters.h"
 
 #include <algorithm>
@@ -9,6 +10,8 @@
 #include <initializer_list>
 #include <map>
 #include <optional>
+#include <ostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -53,6 +56,35 @@ std::string normalizedToken(std::string value)
                              }),
               value.end());
   return value;
+}
+
+const char* activeSideName(LevelSetActiveSide side) noexcept
+{
+  return side == LevelSetActiveSide::Negative
+             ? "LevelSetNegative"
+             : "LevelSetPositive";
+}
+
+svmp::FE::geometry::CutIntegrationSide cutIntegrationSide(
+    LevelSetActiveSide side) noexcept
+{
+  return side == LevelSetActiveSide::Negative
+             ? svmp::FE::geometry::CutIntegrationSide::Negative
+             : svmp::FE::geometry::CutIntegrationSide::Positive;
+}
+
+const char* fieldSourceKindName(
+    svmp::FE::systems::FieldSourceKind kind) noexcept
+{
+  switch (kind) {
+    case svmp::FE::systems::FieldSourceKind::Unknown:
+      return "Unknown";
+    case svmp::FE::systems::FieldSourceKind::PrescribedData:
+      return "PrescribedData";
+    case svmp::FE::systems::FieldSourceKind::DerivedFromUnknown:
+      return "DerivedFromUnknown";
+  }
+  return "Unknown";
 }
 
 void mixRequestPolicyHash(std::uint64_t& h, std::uint64_t value) noexcept
@@ -174,6 +206,8 @@ bool requestMatches(const ActiveCutVolumeRequest& a,
              b.implicit_cut_root_max_iterations &&
          a.implicit_cut_max_subdivision_depth ==
              b.implicit_cut_max_subdivision_depth &&
+         a.affected_cell_neighborhood_layers ==
+             b.affected_cell_neighborhood_layers &&
          a.active_side == b.active_side &&
          a.allow_corner_linearized_geometry ==
              b.allow_corner_linearized_geometry &&
@@ -181,19 +215,31 @@ bool requestMatches(const ActiveCutVolumeRequest& a,
              b.require_production_qualified_implicit_cut_backend;
 }
 
+void mergeRequestRetention(ActiveCutVolumeRequest& target,
+                           const ActiveCutVolumeRequest& source) noexcept
+{
+  if (source.volume_retention ==
+      ActiveCutVolumeRetention::ActiveAndInactive) {
+    target.volume_retention =
+        ActiveCutVolumeRetention::ActiveAndInactive;
+  }
+}
+
 void appendUniqueRequest(std::vector<ActiveCutVolumeRequest>& requests,
                          ActiveCutVolumeRequest request)
 {
-  const auto duplicate =
-      std::any_of(
+  const auto existing =
+      std::find_if(
           requests.begin(),
           requests.end(),
-          [&](const ActiveCutVolumeRequest& existing) {
-            return requestMatches(existing, request);
+          [&](const ActiveCutVolumeRequest& candidate) {
+            return requestMatches(candidate, request);
           });
-  if (!duplicate) {
-    requests.push_back(std::move(request));
+  if (existing != requests.end()) {
+    mergeRequestRetention(*existing, request);
+    return;
   }
+  requests.push_back(std::move(request));
 }
 
 std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
@@ -230,12 +276,19 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   }
 
   ActiveCutVolumeRequest request{};
-  if (active_token == "levelsetpositive" ||
-      active_token == "positive" ||
-      active_token == "phipositive") {
+  if (active_token == "levelsetnegative" ||
+      active_token == "negative" ||
+      active_token == "phinegative") {
+    request.active_side = LevelSetActiveSide::Negative;
+  } else if (active_token == "levelsetpositive" ||
+             active_token == "positive" ||
+             active_token == "phipositive") {
     request.active_side = LevelSetActiveSide::Positive;
   } else {
-    request.active_side = LevelSetActiveSide::Negative;
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Unknown Active_domain '" +
+        trimCopy(*active_domain) +
+        "'. Supported values: None, LevelSetNegative, or LevelSetPositive.");
   }
   if (const auto field =
           firstDefinedParameter(cut_params, {"Level_set_field_name",
@@ -328,15 +381,16 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
     request.implicit_cut_fallback_policy =
         parseImplicitCutFallbackPolicy(*fallback_policy);
   }
-  if (const auto tangent_policy =
-          firstDefinedParameter(
-              cut_params,
-              {"Geometry_tangent_policy",
-               "GeometryTangentPolicy",
-               "Generated_interface_geometry_tangent_policy",
-               "GeneratedInterfaceGeometryTangentPolicy",
-               "Implicit_geometry_tangent_policy",
-               "ImplicitGeometryTangentPolicy"})) {
+  const auto tangent_policy =
+      firstDefinedParameter(
+          cut_params,
+          {"Geometry_tangent_policy",
+           "GeometryTangentPolicy",
+           "Generated_interface_geometry_tangent_policy",
+           "GeneratedInterfaceGeometryTangentPolicy",
+           "Implicit_geometry_tangent_policy",
+           "ImplicitGeometryTangentPolicy"});
+  if (tangent_policy.has_value()) {
     request.geometry_tangent_policy =
         parseGeometryTangentPolicy(*tangent_policy);
   }
@@ -376,6 +430,23 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
                "ImplicitCutSubdivisionDepth"})) {
     request.implicit_cut_max_subdivision_depth = *max_subdivision_depth;
   }
+  if (const auto affected_neighborhood_layers =
+          firstDefinedIntParameter(
+              cut_params,
+              {"Affected_cell_neighborhood_layers",
+               "AffectedCellNeighborhoodLayers",
+               "Generated_interface_affected_cell_neighborhood_layers",
+               "GeneratedInterfaceAffectedCellNeighborhoodLayers",
+               "Generated_cut_refresh_neighborhood_layers",
+               "GeneratedCutRefreshNeighborhoodLayers"})) {
+    if (*affected_neighborhood_layers < 0) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Generated interface affected-cell "
+          "neighborhood layers must be nonnegative.");
+    }
+    request.affected_cell_neighborhood_layers =
+        *affected_neighborhood_layers;
+  }
   if (const auto allow_corner_linearized =
           firstDefinedBoolParameter(
               cut_params,
@@ -384,6 +455,20 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
                "Allow_corner_linearized_geometry",
                "AllowCornerLinearizedGeometry"})) {
     request.allow_corner_linearized_geometry = *allow_corner_linearized;
+  }
+  if (const auto velocity_extension =
+          firstDefinedBoolParameter(
+              cut_params,
+              {"Enable_velocity_extension",
+               "EnableVelocityExtension",
+               "Velocity_extension",
+               "VelocityExtension",
+               "Free_surface_velocity_extension",
+               "FreeSurfaceVelocityExtension"})) {
+    if (*velocity_extension) {
+      request.volume_retention =
+          ActiveCutVolumeRetention::ActiveAndInactive;
+    }
   }
   if (const auto required_qualification =
           firstDefinedParameter(
@@ -408,6 +493,24 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
           "[svMultiPhysics::Application] Unknown implicit cut backend qualification requirement '" +
           *required_qualification + "'. Supported values: ProductionQualified or none.");
     }
+  }
+  if (!tangent_policy.has_value() &&
+      request.geometry_mode ==
+          svmp::FE::level_set::GeneratedInterfaceGeometryMode::LinearCorner &&
+      request.implicit_cut_backend ==
+          svmp::FE::level_set::ImplicitCutQuadratureBackend::LinearCorner) {
+    request.geometry_tangent_policy =
+        svmp::FE::level_set::GeometryTangentPolicy::DifferentiatedQuadrature;
+  }
+  if (request.geometry_mode ==
+          svmp::FE::level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit &&
+      request.geometry_tangent_policy ==
+          svmp::FE::level_set::GeometryTangentPolicy::DifferentiatedQuadrature) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] HighOrderImplicit generated interface "
+        "geometry does not support Geometry_tangent_policy=DifferentiatedQuadrature. "
+        "Use Geometry_tangent_policy=RefreshedFrozenQuadrature, or use "
+        "LinearCorner geometry for differentiated quadrature.");
   }
   return request;
 }
@@ -635,7 +738,13 @@ std::uint64_t activeCutVolumeRequestPolicyKey(
         h,
         static_cast<std::uint64_t>(
             request.implicit_cut_max_subdivision_depth));
+    mixRequestPolicyHash(
+        h,
+        static_cast<std::uint64_t>(
+            request.affected_cell_neighborhood_layers));
     mixRequestPolicyHash(h, static_cast<std::uint64_t>(request.active_side));
+    mixRequestPolicyHash(
+        h, static_cast<std::uint64_t>(request.volume_retention));
     mixRequestPolicyHash(
         h,
         static_cast<std::uint64_t>(
@@ -646,6 +755,105 @@ std::uint64_t activeCutVolumeRequestPolicyKey(
             request.require_production_qualified_implicit_cut_backend));
   }
   return h;
+}
+
+std::optional<int> resolvedActiveCutVolumeInterfaceMarker(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutVolumeRequest& request)
+{
+  if (request.requested_interface_marker >= 0) {
+    return request.requested_interface_marker;
+  }
+
+  const auto field_id = system.findFieldByName(request.level_set_field_name);
+  if (field_id == svmp::FE::INVALID_FIELD_ID) {
+    return std::nullopt;
+  }
+
+  svmp::FE::interfaces::GeneratedInterfaceMarkerKey key{};
+  key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(field_id);
+  key.domain_id = request.domain_id;
+  key.isovalue = static_cast<svmp::FE::Real>(request.isovalue);
+  key.requested_marker = request.requested_interface_marker;
+  return svmp::FE::interfaces::stableGeneratedInterfaceMarker(key);
+}
+
+int requireResolvedActiveCutVolumeInterfaceMarker(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutVolumeRequest& request)
+{
+  const auto marker = resolvedActiveCutVolumeInterfaceMarker(system, request);
+  if (marker.has_value()) {
+    return *marker;
+  }
+
+  const std::string equation_type =
+      request.equation_type.empty() ? std::string{"<unknown>"}
+                                    : request.equation_type;
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Equation-level level-set cut domain for equation '" +
+      equation_type + "' references level-set field '" +
+      request.level_set_field_name +
+      "' before that field is registered. Declare the level_set equation before "
+      "the cut-domain consumer, or set Interface_marker explicitly.");
+}
+
+void validateEquationLevelCutVolumeConsumer(
+    const svmp::FE::systems::FESystem& system,
+    const ActiveCutVolumeRequest& request,
+    int resolved_marker)
+{
+  if (request.origin != ActiveCutVolumeRequestOrigin::Equation) {
+    return;
+  }
+  const auto side = cutIntegrationSide(request.active_side);
+  if (system.cutVolumeKernelCount(resolved_marker, side) > 0u) {
+    const auto phi_field = system.findFieldByName(request.level_set_field_name);
+    if (phi_field != svmp::FE::INVALID_FIELD_ID) {
+      const auto& phi_record = system.fieldRecord(phi_field);
+      if (phi_record.source_kind !=
+          svmp::FE::systems::FieldSourceKind::PrescribedData) {
+        static std::set<std::string> warned;
+        const std::string warning_key =
+            request.equation_type + "|" + request.domain_id + "|" +
+            request.level_set_field_name + "|" +
+            std::to_string(resolved_marker) + "|" +
+            activeSideName(request.active_side);
+        if (warned.insert(warning_key).second) {
+          oopCout()
+              << "[svMultiPhysics::Application] WARNING equation-level "
+              << "level-set cut-domain uses a moving level-set field with "
+              << "only a first-order Hadamard cut-volume shape tangent; "
+              << "full differentiated cut quadrature remains unavailable"
+              << " equation_type='" << request.equation_type << "'"
+              << " field='" << request.level_set_field_name << "'"
+              << " field_source="
+              << fieldSourceKindName(phi_record.source_kind)
+              << " domain_id='" << request.domain_id << "'"
+              << " marker=" << resolved_marker
+              << " active_side=" << activeSideName(request.active_side)
+              << " geometry_tangent_policy="
+              << svmp::FE::level_set::geometryTangentPolicyName(
+                     request.geometry_tangent_policy)
+              << " diagnostic=equation_level_cut_domain_hadamard_shape_tangent"
+              << std::endl;
+        }
+      }
+    }
+    return;
+  }
+
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] Equation-level level-set cut-domain "
+      "request for equation_type='" + request.equation_type +
+      "' field='" + request.level_set_field_name + "' domain_id='" +
+      request.domain_id + "' resolved marker=" +
+      std::to_string(resolved_marker) + " active_side=" +
+      activeSideName(request.active_side) +
+      " has no matching dCutVolume(...) form consumer. "
+      "Add volume terms restricted with dCutVolume(marker, side), remove the "
+      "equation-level cut-domain request, or keep this as an unfitted "
+      "free-surface boundary request owned by Navier-Stokes.");
 }
 
 } // namespace core

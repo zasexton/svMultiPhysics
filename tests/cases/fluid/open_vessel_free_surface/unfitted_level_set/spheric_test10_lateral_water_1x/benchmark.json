@@ -15,6 +15,22 @@
     "The mesh encodes the 1x rectangular tank and still-water fill level.",
     "The published roll-angle history and pressure records are external benchmark data."
   ],
+  "pressure_gauge": {
+    "coordinates": [
+      0.450848281065893,
+      0.0696025357517264,
+      0.0315304156128796
+    ],
+    "expected_initial_hydrostatic_pressure": 229.11597185186804,
+    "initial_phi": -0.023397464248273603,
+    "node_id": 149
+  },
+  "pressure_gauge_verification": {
+    "current_prescribed_pressure_matches_initial_hydrostatic": true,
+    "initial_pressure_error_after_constraint": 0.0,
+    "previous_surface_target_pressure": 0.0,
+    "previous_surface_target_pressure_error": -229.11597185186804
+  },
   "representation": "unfitted_level_set",
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-10"

@@ -15,14 +15,14 @@ using namespace svmp::FE;
 using namespace svmp::FE::geometry;
 
 TEST(Pyramid14Mapping, IdentityRationalGeometry) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     // Build identity geometry for reference Pyramid14 using its canonical nodes
     std::vector<math::Vector<Real,3>> nodes;
-    const std::size_t nn = NodeOrdering::num_nodes(ElementType::Pyramid14);
+    const std::size_t nn = ReferenceNodeLayout::num_nodes(ElementType::Pyramid14);
     nodes.reserve(nn);
     for (std::size_t i = 0; i < nn; ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Pyramid14, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i));
     }
 
     MappingRequest req{ElementType::Pyramid14, 2, false, nullptr};
@@ -49,13 +49,13 @@ TEST(Pyramid14Mapping, IdentityRationalGeometry) {
 }
 
 TEST(Pyramid14Mapping, IdentityRationalGeometryBoundaryAndNearApex) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     std::vector<math::Vector<Real,3>> nodes;
-    const std::size_t nn = NodeOrdering::num_nodes(ElementType::Pyramid14);
+    const std::size_t nn = ReferenceNodeLayout::num_nodes(ElementType::Pyramid14);
     nodes.reserve(nn);
     for (std::size_t i = 0; i < nn; ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Pyramid14, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i));
     }
 
     MappingRequest req{ElementType::Pyramid14, 2, false, nullptr};
@@ -87,13 +87,13 @@ TEST(Pyramid14Mapping, IdentityRationalGeometryBoundaryAndNearApex) {
 }
 
 TEST(Pyramid14Mapping, AffineDistortionIsReproducedAndInverted) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     std::vector<math::Vector<Real,3>> nodes;
-    const std::size_t nn = NodeOrdering::num_nodes(ElementType::Pyramid14);
+    const std::size_t nn = ReferenceNodeLayout::num_nodes(ElementType::Pyramid14);
     nodes.reserve(nn);
     for (std::size_t i = 0; i < nn; ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Pyramid14, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i));
     }
 
     auto affine = [](const math::Vector<Real,3>& p) {
@@ -132,13 +132,13 @@ TEST(Pyramid14Mapping, AffineDistortionIsReproducedAndInverted) {
 }
 
 TEST(Pyramid14Mapping, CurvedGeometryInverseMappingRobust) {
-    using svmp::FE::basis::NodeOrdering;
+    using svmp::FE::basis::ReferenceNodeLayout;
 
     std::vector<math::Vector<Real,3>> nodes;
-    const std::size_t nn = NodeOrdering::num_nodes(ElementType::Pyramid14);
+    const std::size_t nn = ReferenceNodeLayout::num_nodes(ElementType::Pyramid14);
     nodes.reserve(nn);
     for (std::size_t i = 0; i < nn; ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Pyramid14, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Pyramid14, i));
     }
 
     // Keep the 5 vertices fixed; perturb higher-order nodes mildly to induce curvature.

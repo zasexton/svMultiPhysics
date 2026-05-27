@@ -14,6 +14,10 @@
 
 #include <array>
 #include <cmath>
+#include <exception>
+#include <numeric>
+#include <thread>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::basis;
@@ -64,6 +68,87 @@ void expect_quad_serendipity_nodal(int order) {
     EXPECT_NEAR(grad_sum[1], 0.0, 1e-10);
 }
 
+struct TensorStridedRequest {
+    bool values;
+    bool gradients;
+    bool hessians;
+};
+
+void expect_tensor_strided_matches_pointwise(
+    const TensorProductBasis<LagrangeBasis>& basis,
+    const std::vector<svmp::FE::math::Vector<Real, 3>>& points,
+    const TensorStridedRequest& request) {
+    const std::size_t stride = points.size() + 5u;
+    constexpr Real sentinel = Real(-991.5);
+
+    std::vector<Real> values(request.values ? basis.size() * stride : 0u, sentinel);
+    std::vector<Real> gradients(request.gradients ? basis.size() * 3u * stride : 0u, sentinel);
+    std::vector<Real> hessians(request.hessians ? basis.size() * 9u * stride : 0u, sentinel);
+
+    basis.evaluate_at_quadrature_points_strided(
+        points,
+        stride,
+        request.values ? values.data() : nullptr,
+        request.gradients ? gradients.data() : nullptr,
+        request.hessians ? hessians.data() : nullptr);
+
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        if (request.values) {
+            std::vector<Real> expected;
+            basis.evaluate_values(points[q], expected);
+            ASSERT_EQ(expected.size(), basis.size());
+            for (std::size_t i = 0; i < basis.size(); ++i) {
+                EXPECT_NEAR(values[i * stride + q], expected[i], Real(1e-12));
+            }
+        }
+        if (request.gradients) {
+            std::vector<Gradient> expected;
+            basis.evaluate_gradients(points[q], expected);
+            ASSERT_EQ(expected.size(), basis.size());
+            for (std::size_t i = 0; i < basis.size(); ++i) {
+                for (std::size_t c = 0; c < 3u; ++c) {
+                    EXPECT_NEAR(gradients[(i * 3u + c) * stride + q],
+                                expected[i][c],
+                                Real(1e-12));
+                }
+            }
+        }
+        if (request.hessians) {
+            std::vector<Hessian> expected;
+            basis.evaluate_hessians(points[q], expected);
+            ASSERT_EQ(expected.size(), basis.size());
+            for (std::size_t i = 0; i < basis.size(); ++i) {
+                for (std::size_t r = 0; r < 3u; ++r) {
+                    for (std::size_t c = 0; c < 3u; ++c) {
+                        EXPECT_NEAR(hessians[(i * 9u + r * 3u + c) * stride + q],
+                                    expected[i](r, c),
+                                    Real(1e-11));
+                    }
+                }
+            }
+        }
+    }
+
+    const auto expect_padding_untouched = [&](const std::vector<Real>& buffer,
+                                              std::size_t rows) {
+        for (std::size_t row = 0; row < rows; ++row) {
+            for (std::size_t q = points.size(); q < stride; ++q) {
+                EXPECT_EQ(buffer[row * stride + q], sentinel);
+            }
+        }
+    };
+
+    if (request.values) {
+        expect_padding_untouched(values, basis.size());
+    }
+    if (request.gradients) {
+        expect_padding_untouched(gradients, basis.size() * 3u);
+    }
+    if (request.hessians) {
+        expect_padding_untouched(hessians, basis.size() * 9u);
+    }
+}
+
 } // namespace
 
 TEST(SerendipityBasis, QuadraticHasEightFunctions) {
@@ -102,7 +187,7 @@ TEST(SerendipityBasis, Hex20FieldBasisNodalAndPartition) {
     std::vector<svmp::FE::math::Vector<Real,3>> nodes;
     nodes.reserve(basis.size());
     for (std::size_t i = 0; i < basis.size(); ++i) {
-        nodes.push_back(NodeOrdering::get_node_coords(ElementType::Hex20, i));
+        nodes.push_back(ReferenceNodeLayout::get_node_coords(ElementType::Hex20, i));
     }
 
     // Nodal property: N_i(node_j) ≈ δ_ij
@@ -318,6 +403,40 @@ TEST(TensorProductBasis, GradientsMatchLagrange) {
     }
 }
 
+TEST(TensorProductBasis, StridedEvaluationMatchesPointwise) {
+    LagrangeBasis line(ElementType::Line2, 3);
+    TensorProductBasis<LagrangeBasis> tensor2(line, 2);
+    TensorProductBasis<LagrangeBasis> tensor3(line, 3);
+
+    const std::vector<svmp::FE::math::Vector<Real, 3>> quad_points = {
+        {Real(-0.7), Real(-0.25), Real(0)},
+        {Real(0.2), Real(0.4), Real(0)},
+        {Real(0.75), Real(-0.6), Real(0)},
+    };
+    const std::vector<svmp::FE::math::Vector<Real, 3>> hex_points = {
+        {Real(-0.6), Real(-0.25), Real(0.1)},
+        {Real(0.1), Real(0.45), Real(-0.35)},
+        {Real(0.65), Real(-0.55), Real(0.7)},
+    };
+    const std::vector<TensorStridedRequest> requests = {
+        {true, false, false},
+        {false, true, false},
+        {false, false, true},
+        {true, true, false},
+        {true, false, true},
+        {false, true, true},
+        {true, true, true},
+    };
+
+    for (const auto& request : requests) {
+        SCOPED_TRACE(request.values ? "values" : "no values");
+        SCOPED_TRACE(request.gradients ? "gradients" : "no gradients");
+        SCOPED_TRACE(request.hessians ? "hessians" : "no hessians");
+        expect_tensor_strided_matches_pointwise(tensor2, quad_points, request);
+        expect_tensor_strided_matches_pointwise(tensor3, hex_points, request);
+    }
+}
+
 TEST(TensorProductBasis, AnisotropicOrdersMatchManualConstruction) {
     LagrangeBasis bx(ElementType::Line2, 1); // 2 nodes
     LagrangeBasis by(ElementType::Line2, 2); // 3 nodes
@@ -400,6 +519,107 @@ TEST(ModalTransform, ConditionNumberFiniteAndReasonable) {
     const Real cond = transform.condition_number();
     EXPECT_GT(cond, 1.0);
     EXPECT_LT(cond, Real(1e6));
+}
+
+TEST(ModalTransform, LazyInverseAccessorMatchesVandermondeSolve) {
+    const int order = 3;
+    HierarchicalBasis modal(ElementType::Line2, order);
+    LagrangeBasis nodal(ElementType::Line2, order);
+    ModalTransform transform(modal, nodal);
+
+    const auto& V = transform.vandermonde();
+    const auto& Vinv = transform.vandermonde_inverse();
+    ASSERT_EQ(V.size(), Vinv.size());
+    const std::size_t n = V.size();
+    for (std::size_t row = 0; row < n; ++row) {
+        ASSERT_EQ(V[row].size(), n);
+        ASSERT_EQ(Vinv[row].size(), n);
+    }
+
+    for (std::size_t row = 0; row < n; ++row) {
+        for (std::size_t col = 0; col < n; ++col) {
+            Real product = Real(0);
+            for (std::size_t k = 0; k < n; ++k) {
+                product += V[row][k] * Vinv[k][col];
+            }
+            EXPECT_NEAR(product, row == col ? Real(1) : Real(0), Real(1.0e-10));
+        }
+    }
+}
+
+TEST(ModalTransform, LazyInverseAccessorIsThreadSafe) {
+    const int order = 5;
+    HierarchicalBasis modal(ElementType::Line2, order);
+    LagrangeBasis nodal(ElementType::Line2, order);
+    ModalTransform transform(modal, nodal);
+
+    constexpr std::size_t num_threads = 8;
+    std::array<const std::vector<std::vector<Real>>*, num_threads> inverses{};
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (std::size_t i = 0; i < num_threads; ++i) {
+        threads.emplace_back([&transform, &inverses, i]() {
+            inverses[i] = &transform.vandermonde_inverse();
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    ASSERT_NE(inverses[0], nullptr);
+    const auto& V = transform.vandermonde();
+    const auto& Vinv = *inverses[0];
+    ASSERT_EQ(V.size(), Vinv.size());
+    for (std::size_t i = 1; i < num_threads; ++i) {
+        EXPECT_EQ(inverses[i], inverses[0]);
+    }
+    for (std::size_t row = 0; row < V.size(); ++row) {
+        ASSERT_EQ(V[row].size(), V.size());
+        ASSERT_EQ(Vinv[row].size(), V.size());
+    }
+}
+
+TEST(ModalTransform, CachedConstructionIsThreadSafe) {
+    constexpr std::size_t num_threads = 8;
+    constexpr int order = 4;
+    const std::vector<Real> modal_coeffs{Real(0.25), Real(-0.5), Real(0.75),
+                                         Real(0.1), Real(-0.2)};
+
+    HierarchicalBasis baseline_modal(ElementType::Line2, order);
+    LagrangeBasis baseline_nodal(ElementType::Line2, order);
+    ModalTransform baseline_transform(baseline_modal, baseline_nodal);
+    const auto expected = baseline_transform.nodal_to_modal(
+        baseline_transform.modal_to_nodal(modal_coeffs));
+
+    std::array<std::vector<Real>, num_threads> observed;
+    std::array<std::exception_ptr, num_threads> errors{};
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (std::size_t thread_index = 0; thread_index < num_threads; ++thread_index) {
+        threads.emplace_back([&, thread_index]() {
+            try {
+                HierarchicalBasis modal(ElementType::Line2, order);
+                LagrangeBasis nodal(ElementType::Line2, order);
+                ModalTransform transform(modal, nodal);
+                observed[thread_index] =
+                    transform.nodal_to_modal(transform.modal_to_nodal(modal_coeffs));
+            } catch (...) {
+                errors[thread_index] = std::current_exception();
+            }
+        });
+    }
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    for (std::size_t thread_index = 0; thread_index < num_threads; ++thread_index) {
+        ASSERT_FALSE(errors[thread_index]);
+        ASSERT_EQ(observed[thread_index].size(), expected.size());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_NEAR(observed[thread_index][i], expected[i], Real(1e-10))
+                << "thread=" << thread_index << " entry=" << i;
+        }
+    }
 }
 
 TEST(ModalTransform, ThrowsOnMismatchedSizes) {
@@ -723,6 +943,34 @@ TEST(SerendipityBasis, Wedge15GradientMatchesNumerical) {
     }
 }
 
+TEST(SerendipityBasis, Quad8NodalValuesAndPartitionOfUnity) {
+    SerendipityBasis basis(ElementType::Quad8, 2);
+    const auto& nodes = basis.nodes();
+    ASSERT_EQ(nodes.size(), 8u);
+
+    for (std::size_t node = 0; node < nodes.size(); ++node) {
+        std::vector<Real> values;
+        basis.evaluate_values(nodes[node], values);
+        ASSERT_EQ(values.size(), 8u);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            const Real expected = (i == node) ? Real(1) : Real(0);
+            EXPECT_NEAR(values[i], expected, 1e-12) << "node=" << node << " basis=" << i;
+        }
+    }
+
+    const std::vector<svmp::FE::math::Vector<Real, 3>> test_points = {
+        {Real(0.0), Real(0.0), Real(0.0)},
+        {Real(0.3), Real(-0.5), Real(0.0)},
+        {Real(-0.7), Real(0.4), Real(0.0)},
+    };
+    for (const auto& xi : test_points) {
+        std::vector<Real> values;
+        basis.evaluate_values(xi, values);
+        const Real sum = std::accumulate(values.begin(), values.end(), Real(0));
+        EXPECT_NEAR(sum, Real(1), 1e-12);
+    }
+}
+
 TEST(SerendipityBasis, Quad8GradientSumZero) {
     SerendipityBasis basis(ElementType::Quad8, 2);
 
@@ -744,6 +992,37 @@ TEST(SerendipityBasis, Quad8GradientSumZero) {
         }
         EXPECT_NEAR(sum[0], 0.0, 1e-10);
         EXPECT_NEAR(sum[1], 0.0, 1e-10);
+    }
+}
+
+TEST(SerendipityBasis, Quad8HessianSumZero) {
+    SerendipityBasis basis(ElementType::Quad8, 2);
+
+    const std::vector<svmp::FE::math::Vector<Real, 3>> test_points = {
+        {Real(0.0), Real(0.0), Real(0.0)},
+        {Real(0.3), Real(-0.5), Real(0.0)},
+        {Real(-0.7), Real(0.4), Real(0.0)},
+    };
+
+    for (const auto& xi : test_points) {
+        std::vector<Hessian> hessians;
+        basis.evaluate_hessians(xi, hessians);
+        ASSERT_EQ(hessians.size(), 8u);
+
+        Hessian sum{};
+        for (const auto& hessian : hessians) {
+            for (std::size_t row = 0; row < 3u; ++row) {
+                for (std::size_t col = 0; col < 3u; ++col) {
+                    sum(row, col) += hessian(row, col);
+                }
+            }
+        }
+        for (std::size_t row = 0; row < 3u; ++row) {
+            for (std::size_t col = 0; col < 3u; ++col) {
+                EXPECT_NEAR(sum(row, col), Real(0), 1e-12)
+                    << "row=" << row << " col=" << col;
+            }
+        }
     }
 }
 

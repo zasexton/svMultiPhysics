@@ -37,6 +37,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/Utils/BackendOptions.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ElementFactory.h"
 #include "Elements/ElementValidator.h"
@@ -66,6 +67,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <sstream>
 #include <string_view>
@@ -87,6 +89,7 @@
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Motion/MotionFields.h"
 #include "Mesh/Motion/MotionState.h"
+#include "Mesh/Topology/CellTopology.h"
 #include "Systems/MeshSearchAccess.h"
 #endif
 
@@ -6182,6 +6185,26 @@ bool FESystem::hasField(std::string_view name) const noexcept
     return findFieldByName(name) != INVALID_FIELD_ID;
 }
 
+std::vector<FieldId> FESystem::unknownFieldIdsInDofMapOrder() const
+{
+    requireSetup();
+
+    std::vector<FieldId> fields;
+    fields.reserve(field_map_.numFields());
+    for (std::size_t i = 0; i < field_map_.numFields(); ++i) {
+        const auto& descriptor = field_map_.getField(i);
+        const auto field = findFieldByName(descriptor.name);
+        FE_THROW_IF(field == INVALID_FIELD_ID, InvalidStateException,
+                    "FESystem::unknownFieldIdsInDofMapOrder: field map references unknown field '" +
+                        descriptor.name + "'");
+        FE_THROW_IF(!fieldParticipatesInUnknownVector(field), InvalidStateException,
+                    "FESystem::unknownFieldIdsInDofMapOrder: field map references non-unknown field '" +
+                        descriptor.name + "'");
+        fields.push_back(field);
+    }
+    return fields;
+}
+
 namespace {
 
 MeshMotionFieldRole parseMeshMotionFieldRole(std::string_view role_name)
@@ -6909,6 +6932,647 @@ struct MeshMotionSyncEntry {
     svmp::motion::MotionFieldRole mesh_role{svmp::motion::MotionFieldRole::Displacement};
 };
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+template <typename Callback>
+FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
+    const svmp::MeshBase& mesh,
+    const dofs::EntityDofMap& entity_map,
+    std::size_t components,
+    std::size_t coefficient_count,
+    std::string_view context,
+    Callback&& callback)
+{
+    FESystem::MeshVertexFieldProjectionResult result{};
+    if (components == 0u || coefficient_count == 0u) {
+        result.unassigned_dofs = coefficient_count;
+        return result;
+    }
+
+    const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
+    FE_THROW_IF(entity_map.numVertices() < n_vertices, InvalidStateException,
+                std::string(context) + ": FE field does not cover every mesh vertex");
+
+    std::vector<std::uint8_t> dof_expected(coefficient_count, 0u);
+    std::vector<std::uint8_t> dof_bound(coefficient_count, 0u);
+    const bool has_component_stride =
+        components > 1u && (coefficient_count % components == 0u);
+    const std::size_t component_stride =
+        has_component_stride ? (coefficient_count / components) : 0u;
+    auto bind = [&](svmp::index_t geometry_vertex,
+                    std::size_t component,
+                    GlobalIndex dof) {
+        FE_THROW_IF(component >= components, InvalidArgumentException,
+                    std::string(context) + ": component index out of range");
+        FE_THROW_IF(geometry_vertex < 0 ||
+                        static_cast<std::size_t>(geometry_vertex) >=
+                            static_cast<std::size_t>(n_vertices),
+                    InvalidStateException,
+                    std::string(context) + ": mesh geometry vertex index out of range");
+        FE_THROW_IF(dof < 0 ||
+                        static_cast<std::size_t>(dof) >= coefficient_count,
+                    InvalidStateException,
+                    std::string(context) + ": FE coefficient index out of range");
+        const auto sdof = static_cast<std::size_t>(dof);
+        if (dof_bound[sdof] != 0u) {
+            return;
+        }
+        callback(static_cast<std::size_t>(geometry_vertex), component, dof);
+        dof_bound[sdof] = 1u;
+        ++result.values_written;
+    };
+    auto entity_dof_for_component =
+        [&](std::span<const GlobalIndex> entity_dofs,
+            std::size_t entity_node_count,
+            std::size_t component,
+            std::size_t node_index,
+            std::string_view entity_name) -> GlobalIndex {
+        FE_THROW_IF(node_index >= entity_node_count, InvalidArgumentException,
+                    std::string(context) + ": " + std::string(entity_name) +
+                        " node index out of range");
+        if (entity_dofs.size() == entity_node_count * components) {
+            return entity_dofs[component * entity_node_count + node_index];
+        }
+        if (entity_dofs.size() == entity_node_count && has_component_stride) {
+            const auto base = entity_dofs[node_index];
+            FE_THROW_IF(base < 0, InvalidStateException,
+                        std::string(context) + ": negative " +
+                            std::string(entity_name) + " scalar DOF");
+            const auto shifted =
+                static_cast<std::size_t>(base) + component * component_stride;
+            FE_THROW_IF(shifted >= coefficient_count, InvalidStateException,
+                        std::string(context) + ": component-shifted " +
+                            std::string(entity_name) +
+                            " DOF is outside the coefficient span");
+            return static_cast<GlobalIndex>(shifted);
+        }
+        FE_THROW_IF(true, InvalidStateException,
+                    std::string(context) + ": " + std::string(entity_name) +
+                        " DOF count does not match field components");
+        return INVALID_GLOBAL_INDEX;
+    };
+    auto mark_expected = [&](std::span<const GlobalIndex> entity_dofs,
+                             std::size_t entity_node_count,
+                             std::string_view entity_name) {
+        FE_THROW_IF(entity_node_count == 0u && !entity_dofs.empty(),
+                    InvalidStateException,
+                    std::string(context) + ": " + std::string(entity_name) +
+                        " DOFs require matching mesh geometry nodes");
+        for (std::size_t c = 0; c < components; ++c) {
+            for (std::size_t j = 0; j < entity_node_count; ++j) {
+                const auto dof =
+                    entity_dof_for_component(
+                        entity_dofs, entity_node_count, c, j, entity_name);
+                FE_THROW_IF(dof < 0 ||
+                                static_cast<std::size_t>(dof) >= coefficient_count,
+                            InvalidStateException,
+                            std::string(context) + ": expected " +
+                                std::string(entity_name) +
+                                " DOF is outside the coefficient span");
+                dof_expected[static_cast<std::size_t>(dof)] = 1u;
+            }
+        }
+    };
+
+    for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
+        const auto vertex_dofs = entity_map.getVertexDofs(vertex);
+        if (vertex_dofs.empty()) {
+            continue;
+        }
+        mark_expected(vertex_dofs, 1u, "vertex");
+        for (std::size_t c = 0; c < components; ++c) {
+            bind(static_cast<svmp::index_t>(vertex),
+                 c,
+                 entity_dof_for_component(
+                     vertex_dofs, 1u, c, 0u, "vertex"));
+        }
+    }
+
+    std::map<std::pair<svmp::index_t, svmp::index_t>, svmp::index_t>
+        edge_by_vertices;
+    auto make_edge_key = [](svmp::index_t a, svmp::index_t b) {
+        if (b < a) {
+            std::swap(a, b);
+        }
+        return std::pair<svmp::index_t, svmp::index_t>{a, b};
+    };
+    const bool use_2d_faces_as_edges =
+        mesh.dim() == 2 &&
+        mesh.codim1_storage_mode() == svmp::MeshCodim1StorageMode::Full &&
+        mesh.n_faces() > 0u &&
+        !mesh.face2vertex_offsets().empty() &&
+        !mesh.face2vertex().empty();
+    auto edge_entity_endpoints =
+        [&](svmp::index_t edge_entity) -> std::optional<std::array<svmp::index_t, 2>> {
+        if (use_2d_faces_as_edges) {
+            if (edge_entity < 0 ||
+                static_cast<std::size_t>(edge_entity) >= mesh.n_faces()) {
+                return std::nullopt;
+            }
+            auto [face_nodes, n_face_nodes] = mesh.face_vertices_span(edge_entity);
+            if (face_nodes == nullptr || n_face_nodes < 2u) {
+                return std::nullopt;
+            }
+            return std::array<svmp::index_t, 2>{
+                face_nodes[0],
+                face_nodes[n_face_nodes - 1u]};
+        }
+        if (edge_entity < 0 ||
+            static_cast<std::size_t>(edge_entity) >= mesh.n_edges()) {
+            return std::nullopt;
+        }
+        const auto vertices = mesh.edge_vertices(edge_entity);
+        return std::array<svmp::index_t, 2>{vertices[0], vertices[1]};
+    };
+    const auto n_edge_entities =
+        use_2d_faces_as_edges ? mesh.n_faces() : mesh.n_edges();
+    for (svmp::index_t edge = 0;
+         edge < static_cast<svmp::index_t>(n_edge_entities);
+         ++edge) {
+        const auto endpoints = edge_entity_endpoints(edge);
+        if (!endpoints.has_value()) {
+            continue;
+        }
+        edge_by_vertices.emplace(
+            make_edge_key((*endpoints)[0], (*endpoints)[1]),
+            edge);
+    }
+
+    auto bind_edge_interior = [&](svmp::index_t cell,
+                                  int local_edge,
+                                  svmp::index_t endpoint_a,
+                                  svmp::index_t endpoint_b) {
+        if (edge_by_vertices.empty()) {
+            return;
+        }
+        const auto edge_it =
+            edge_by_vertices.find(make_edge_key(endpoint_a, endpoint_b));
+        if (edge_it == edge_by_vertices.end()) {
+            return;
+        }
+
+        const auto edge = edge_it->second;
+        const auto edge_geometry = mesh.cell_edge_geometry_dofs(cell, local_edge);
+        const auto edge_dofs =
+            entity_map.getEdgeDofs(static_cast<GlobalIndex>(edge));
+        if (edge_dofs.empty()) {
+            return;
+        }
+        if (edge_geometry.size() <= 2u) {
+            mark_expected(edge_dofs, 0u, "edge");
+            return;
+        }
+
+        const auto canonical = edge_entity_endpoints(edge);
+        if (!canonical.has_value()) {
+            mark_expected(edge_dofs, 0u, "edge");
+            return;
+        }
+        const bool forward =
+            edge_geometry.front() == (*canonical)[0] &&
+            edge_geometry.back() == (*canonical)[1];
+        const bool reverse =
+            edge_geometry.front() == (*canonical)[1] &&
+            edge_geometry.back() == (*canonical)[0];
+        FE_THROW_IF(!forward && !reverse, InvalidStateException,
+                    std::string(context) +
+                        ": high-order edge geometry endpoints do not match mesh edge topology");
+
+        const auto interior_count = edge_geometry.size() - 2u;
+        mark_expected(edge_dofs, interior_count, "edge");
+
+        for (std::size_t c = 0; c < components; ++c) {
+            for (std::size_t j = 0; j < interior_count; ++j) {
+                const auto geometry_index =
+                    forward ? (j + 1u) : (edge_geometry.size() - 2u - j);
+                const auto dof =
+                    entity_dof_for_component(
+                        edge_dofs, interior_count, c, j, "edge");
+                bind(edge_geometry[geometry_index], c, dof);
+            }
+        }
+    };
+
+    struct GeometryOrderInfo {
+        int order{1};
+        svmp::CellTopology::HighOrderKind kind{
+            svmp::CellTopology::HighOrderKind::Lagrange};
+    };
+    auto infer_geometry_order =
+        [](svmp::CellFamily family,
+           int declared_order,
+           int num_corners,
+           std::size_t node_count) {
+            GeometryOrderInfo info{};
+            info.order = std::max(1, declared_order);
+            const int corners = std::max(0, num_corners);
+            if (node_count <= static_cast<std::size_t>(corners)) {
+                return info;
+            }
+            if (family == svmp::CellFamily::Line) {
+                if (node_count >= 2u) {
+                    info.order = static_cast<int>(node_count) - 1;
+                }
+                return info;
+            }
+            const int p_lag =
+                svmp::CellTopology::infer_lagrange_order(family, node_count);
+            const int p_ser =
+                svmp::CellTopology::infer_serendipity_order(family, node_count);
+            if (p_lag > 0 &&
+                (declared_order <= 1 || p_lag == declared_order ||
+                 p_ser != declared_order)) {
+                info.order = p_lag;
+                info.kind = svmp::CellTopology::HighOrderKind::Lagrange;
+            } else if (p_ser > 0) {
+                info.order = p_ser;
+                info.kind = svmp::CellTopology::HighOrderKind::Serendipity;
+            } else if (p_lag > 0) {
+                info.order = p_lag;
+                info.kind = svmp::CellTopology::HighOrderKind::Lagrange;
+            }
+            return info;
+        };
+    auto topological_dimension = [](svmp::CellFamily family) {
+        switch (family) {
+        case svmp::CellFamily::Line:
+            return 1;
+        case svmp::CellFamily::Triangle:
+        case svmp::CellFamily::Quad:
+        case svmp::CellFamily::Polygon:
+            return 2;
+        case svmp::CellFamily::Tetra:
+        case svmp::CellFamily::Hex:
+        case svmp::CellFamily::Wedge:
+        case svmp::CellFamily::Pyramid:
+        case svmp::CellFamily::Polyhedron:
+            return 3;
+        default:
+            return 0;
+        }
+    };
+    auto face_interior_geometry = [&](svmp::index_t face) {
+        auto [face_nodes, n_face_nodes] = mesh.face_vertices_span(face);
+        std::vector<svmp::index_t> interior;
+        if (face_nodes == nullptr || n_face_nodes == 0u) {
+            return interior;
+        }
+
+        svmp::CellShape shape{};
+        shape.num_corners = static_cast<int>(n_face_nodes);
+        const auto& face_shapes = mesh.face_shapes();
+        if (static_cast<std::size_t>(face) < face_shapes.size()) {
+            shape = face_shapes[static_cast<std::size_t>(face)];
+        }
+
+        if (topological_dimension(shape.family) != 2) {
+            return interior;
+        }
+
+        const auto info =
+            infer_geometry_order(shape.family,
+                                 shape.order,
+                                 shape.num_corners,
+                                 n_face_nodes);
+        std::vector<bool> on_boundary(n_face_nodes, false);
+        const auto boundary =
+            svmp::CellTopology::get_oriented_boundary_faces_view(shape.family);
+        if (boundary.face_count <= 0) {
+            const int corners =
+                std::min<int>(std::max(0, shape.num_corners),
+                              static_cast<int>(n_face_nodes));
+            for (int i = 0; i < corners; ++i) {
+                on_boundary[static_cast<std::size_t>(i)] = true;
+            }
+        } else {
+            for (int local_face = 0; local_face < boundary.face_count;
+                 ++local_face) {
+                for (const auto local_node :
+                     svmp::CellTopology::high_order_face_local_nodes(
+                         shape.family, info.order, local_face, info.kind)) {
+                    const auto idx = static_cast<std::size_t>(local_node);
+                    if (idx < n_face_nodes) {
+                        on_boundary[idx] = true;
+                    }
+                }
+            }
+        }
+
+        for (std::size_t i = 0; i < n_face_nodes; ++i) {
+            if (!on_boundary[i]) {
+                interior.push_back(face_nodes[i]);
+            }
+        }
+        return interior;
+    };
+
+    for (svmp::index_t cell = 0;
+         cell < static_cast<svmp::index_t>(mesh.n_cells());
+         ++cell) {
+        auto [cell_vertices, n_cell_vertices] = mesh.cell_vertices_span(cell);
+        if (cell_vertices == nullptr || n_cell_vertices == 0u) {
+            continue;
+        }
+
+        const auto& shape = mesh.cell_shape(cell);
+        if (shape.family == svmp::CellFamily::Polygon) {
+            const int corner_count =
+                shape.num_corners > 0
+                    ? std::min<int>(shape.num_corners,
+                                    static_cast<int>(n_cell_vertices))
+                    : static_cast<int>(n_cell_vertices);
+            if (corner_count >= 2) {
+                const auto edges =
+                    svmp::CellTopology::get_polygon_edges_view(corner_count);
+                for (int local_edge = 0; local_edge < edges.edge_count;
+                     ++local_edge) {
+                    const auto local_a = edges.pairs_flat[2 * local_edge];
+                    const auto local_b = edges.pairs_flat[2 * local_edge + 1];
+                    if (local_a < 0 || local_b < 0 ||
+                        static_cast<std::size_t>(local_a) >= n_cell_vertices ||
+                        static_cast<std::size_t>(local_b) >= n_cell_vertices) {
+                        continue;
+                    }
+                    bind_edge_interior(
+                        cell,
+                        local_edge,
+                        cell_vertices[static_cast<std::size_t>(local_a)],
+                        cell_vertices[static_cast<std::size_t>(local_b)]);
+                }
+            }
+        } else {
+            const auto edges =
+                svmp::CellTopology::get_edges_view(shape.family);
+            for (int local_edge = 0; local_edge < edges.edge_count;
+                 ++local_edge) {
+                const auto local_a = edges.pairs_flat[2 * local_edge];
+                const auto local_b = edges.pairs_flat[2 * local_edge + 1];
+                if (local_a < 0 || local_b < 0 ||
+                    static_cast<std::size_t>(local_a) >= n_cell_vertices ||
+                    static_cast<std::size_t>(local_b) >= n_cell_vertices) {
+                    continue;
+                }
+                bind_edge_interior(
+                    cell,
+                    local_edge,
+                    cell_vertices[static_cast<std::size_t>(local_a)],
+                    cell_vertices[static_cast<std::size_t>(local_b)]);
+            }
+        }
+
+        const auto cell_geometry = mesh.cell_interior_geometry_dofs(cell);
+        const auto cell_dofs =
+            entity_map.getCellInteriorDofs(static_cast<GlobalIndex>(cell));
+        if (!cell_dofs.empty()) {
+            mark_expected(cell_dofs, cell_geometry.size(), "cell-interior");
+            for (std::size_t c = 0; c < components; ++c) {
+                for (std::size_t j = 0; j < cell_geometry.size(); ++j) {
+                    bind(cell_geometry[j], c,
+                         entity_dof_for_component(
+                             cell_dofs,
+                             cell_geometry.size(),
+                             c,
+                             j,
+                             "cell-interior"));
+                }
+            }
+        }
+    }
+
+    for (svmp::index_t face = 0;
+         face < static_cast<svmp::index_t>(mesh.n_faces());
+         ++face) {
+        const auto face_dofs =
+            entity_map.getFaceDofs(static_cast<GlobalIndex>(face));
+        if (face_dofs.empty()) {
+            continue;
+        }
+
+        const auto face_geometry = face_interior_geometry(face);
+        mark_expected(face_dofs, face_geometry.size(), "face");
+        for (std::size_t c = 0; c < components; ++c) {
+            for (std::size_t j = 0; j < face_geometry.size(); ++j) {
+                bind(face_geometry[j], c,
+                     entity_dof_for_component(
+                         face_dofs,
+                         face_geometry.size(),
+                         c,
+                         j,
+                         "face"));
+            }
+        }
+    }
+
+    for (std::size_t dof = 0; dof < coefficient_count; ++dof) {
+        if (dof_expected[dof] != 0u && dof_bound[dof] == 0u) {
+            ++result.unassigned_dofs;
+        }
+    }
+    return result;
+}
+
+std::vector<Real> solveDenseInterpolationSystem(
+    std::vector<Real> matrix,
+    std::vector<Real> rhs,
+    std::string_view context)
+{
+    const std::size_t n = rhs.size();
+    FE_THROW_IF(n == 0u || matrix.size() != n * n, InvalidArgumentException,
+                std::string(context) +
+                    ": invalid local interpolation system size");
+
+    Real max_entry = Real{0};
+    for (const auto value : matrix) {
+        max_entry = std::max(max_entry, std::abs(value));
+    }
+    const Real pivot_tol =
+        std::numeric_limits<Real>::epsilon() *
+        Real{1024} * std::max<Real>(Real{1}, max_entry);
+
+    for (std::size_t column = 0; column < n; ++column) {
+        std::size_t pivot = column;
+        Real pivot_abs = std::abs(matrix[column * n + column]);
+        for (std::size_t row = column + 1u; row < n; ++row) {
+            const Real candidate = std::abs(matrix[row * n + column]);
+            if (candidate > pivot_abs) {
+                pivot_abs = candidate;
+                pivot = row;
+            }
+        }
+        FE_THROW_IF(pivot_abs <= pivot_tol, InvalidStateException,
+                    std::string(context) +
+                        ": non-nodal mesh-vertex projection interpolation matrix is singular");
+        if (pivot != column) {
+            for (std::size_t j = column; j < n; ++j) {
+                std::swap(matrix[column * n + j], matrix[pivot * n + j]);
+            }
+            std::swap(rhs[column], rhs[pivot]);
+        }
+
+        const Real diag = matrix[column * n + column];
+        for (std::size_t row = column + 1u; row < n; ++row) {
+            const Real factor = matrix[row * n + column] / diag;
+            if (factor == Real{0}) {
+                continue;
+            }
+            matrix[row * n + column] = Real{0};
+            for (std::size_t j = column + 1u; j < n; ++j) {
+                matrix[row * n + j] -= factor * matrix[column * n + j];
+            }
+            rhs[row] -= factor * rhs[column];
+        }
+    }
+
+    std::vector<Real> solution(n, Real{0});
+    for (std::size_t rev = 0; rev < n; ++rev) {
+        const std::size_t row = n - 1u - rev;
+        Real value = rhs[row];
+        for (std::size_t j = row + 1u; j < n; ++j) {
+            value -= matrix[row * n + j] * solution[j];
+        }
+        solution[row] = value / matrix[row * n + row];
+    }
+    return solution;
+}
+
+FESystem::MeshVertexFieldProjectionResult projectMeshVertexValuesByLocalInterpolation(
+    const svmp::MeshBase& mesh,
+    const spaces::FunctionSpace& space,
+    const dofs::DofHandler& field_dofs,
+    std::span<const Real> mesh_values,
+    std::size_t mesh_components,
+    std::size_t components,
+    std::span<Real> coefficients,
+    std::span<std::uint8_t> assigned,
+    std::string_view context)
+{
+    FE_THROW_IF(space.is_variable_order(), InvalidStateException,
+                std::string(context) +
+                    ": non-nodal mesh-vertex projection does not support variable-order spaces");
+    FE_THROW_IF(space.element().basis().is_vector_valued(), InvalidStateException,
+                std::string(context) +
+                    ": non-nodal mesh-vertex projection currently supports scalar H1/product bases only");
+
+    const std::size_t scalar_dofs = space.element().basis().size();
+    FE_THROW_IF(scalar_dofs == 0u, InvalidStateException,
+                std::string(context) +
+                    ": non-nodal mesh-vertex projection requires basis functions");
+    FE_THROW_IF(space.dofs_per_element() != scalar_dofs * components,
+                InvalidStateException,
+                std::string(context) +
+                    ": non-nodal mesh-vertex projection requires component-major scalar basis layout");
+
+    const auto reference_nodes =
+        basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            space.element_type(),
+            space.polynomial_order());
+    FE_THROW_IF(reference_nodes.size() != scalar_dofs, InvalidStateException,
+                std::string(context) +
+                    ": non-nodal mesh-vertex projection requires matching Lagrange interpolation nodes");
+
+    std::vector<Real> interpolation_matrix(scalar_dofs * scalar_dofs, Real{0});
+    std::vector<Real> values;
+    for (std::size_t row = 0; row < scalar_dofs; ++row) {
+        space.element().basis().evaluate_values(reference_nodes[row], values);
+        FE_THROW_IF(values.size() != scalar_dofs, InvalidStateException,
+                    std::string(context) +
+                        ": non-nodal basis value count changed during projection");
+        for (std::size_t col = 0; col < scalar_dofs; ++col) {
+            interpolation_matrix[row * scalar_dofs + col] = values[col];
+        }
+    }
+
+    std::vector<std::uint8_t> coefficient_written(coefficients.size(), 0u);
+    if (!assigned.empty()) {
+        std::fill(assigned.begin(),
+                  assigned.begin() +
+                      static_cast<std::ptrdiff_t>(coefficients.size()),
+                  std::uint8_t{0});
+    }
+
+    FESystem::MeshVertexFieldProjectionResult result{};
+    const auto write_coefficient =
+        [&](std::size_t dof, Real value) {
+            FE_THROW_IF(dof >= coefficients.size(), InvalidStateException,
+                        std::string(context) +
+                            ": non-nodal projection DOF is outside the coefficient span");
+            if (coefficient_written[dof] != 0u) {
+                const Real scale =
+                    std::max<Real>(Real{1},
+                                   std::max(std::abs(coefficients[dof]),
+                                            std::abs(value)));
+                FE_THROW_IF(std::abs(coefficients[dof] - value) >
+                                Real{1.0e-10} * scale,
+                            InvalidStateException,
+                            std::string(context) +
+                                ": non-nodal mesh-vertex projection produced inconsistent shared DOF values");
+                return;
+            }
+            coefficients[dof] = value;
+            coefficient_written[dof] = 1u;
+            if (!assigned.empty()) {
+                assigned[dof] = 1u;
+            }
+            ++result.values_written;
+        };
+
+    for (svmp::index_t cell = 0;
+         cell < static_cast<svmp::index_t>(mesh.n_cells());
+         ++cell) {
+        auto [cell_vertices, n_cell_vertices] = mesh.cell_vertices_span(cell);
+        FE_THROW_IF(cell_vertices == nullptr ||
+                        n_cell_vertices != scalar_dofs,
+                    InvalidStateException,
+                    std::string(context) +
+                        ": non-nodal mesh-vertex projection requires one mesh point per scalar FE DOF on each cell");
+        const auto cell_dofs =
+            field_dofs.getCellDofs(static_cast<GlobalIndex>(cell));
+        FE_THROW_IF(cell_dofs.size() != scalar_dofs * components,
+                    InvalidStateException,
+                    std::string(context) +
+                        ": non-nodal mesh-vertex projection cell DOF layout mismatch");
+
+        for (std::size_t component = 0; component < components; ++component) {
+            std::vector<Real> rhs(scalar_dofs, Real{0});
+            for (std::size_t row = 0; row < scalar_dofs; ++row) {
+                const auto vertex = cell_vertices[row];
+                FE_THROW_IF(vertex < 0 ||
+                                static_cast<std::size_t>(vertex) >=
+                                    mesh.n_vertices(),
+                            InvalidStateException,
+                            std::string(context) +
+                                ": non-nodal projection mesh vertex index out of range");
+                rhs[row] =
+                    mesh_values[static_cast<std::size_t>(vertex) *
+                                    mesh_components +
+                                component];
+            }
+
+            const auto local_coefficients =
+                solveDenseInterpolationSystem(
+                    interpolation_matrix,
+                    std::move(rhs),
+                    context);
+            const std::size_t component_offset = component * scalar_dofs;
+            for (std::size_t j = 0; j < scalar_dofs; ++j) {
+                const auto dof = cell_dofs[component_offset + j];
+                FE_THROW_IF(dof < 0, InvalidStateException,
+                            std::string(context) +
+                                ": non-nodal projection encountered a negative DOF");
+                write_coefficient(static_cast<std::size_t>(dof),
+                                  local_coefficients[j]);
+            }
+        }
+    }
+
+    for (std::size_t dof = 0; dof < coefficients.size(); ++dof) {
+        if (coefficient_written[dof] == 0u) {
+            ++result.unassigned_dofs;
+        }
+    }
+    return result;
+}
+#endif
+
 } // namespace
 
 std::size_t FESystem::syncBoundMeshMotionFieldsToPrescribedBuffers()
@@ -7044,6 +7708,12 @@ std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
                     "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh field '" +
                         rec.name + "' has fewer components than FE field '" +
                         rec.name + "'");
+        const auto mesh_entity_count =
+            svmp::MeshFields::field_entity_count(local_mesh, mesh_field);
+        FE_THROW_IF(mesh_entity_count < static_cast<std::size_t>(n_vertices),
+                    InvalidArgumentException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh field '" +
+                        rec.name + "' has fewer entries than mesh vertices");
         FE_THROW_IF(entity_map->numVertices() < n_vertices, InvalidStateException,
                     "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
                         rec.name + "' does not cover every mesh vertex");
@@ -7056,80 +7726,23 @@ std::size_t FESystem::syncPrescribedVertexFieldsFromMeshFields()
             static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs()),
             Real{0});
 
-        bool all_mesh_vertices_have_vertex_dofs = true;
-        for (GlobalIndex v = 0; v < n_vertices; ++v) {
-            const auto vertex_dofs = entity_map->getVertexDofs(v);
-            if (vertex_dofs.size() < components) {
-                all_mesh_vertices_have_vertex_dofs = false;
-                break;
-            }
-        }
-
-        if (all_mesh_vertices_have_vertex_dofs) {
-            for (GlobalIndex v = 0; v < n_vertices; ++v) {
-                const auto vertex_dofs = entity_map->getVertexDofs(v);
-                const auto v_base = static_cast<std::size_t>(v) * mesh_components;
-                for (std::size_t c = 0; c < components; ++c) {
-                    const auto dof = vertex_dofs[c];
-                    FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >=
-                                             buffer.coefficients.size(),
-                                InvalidStateException,
-                                "FESystem::syncPrescribedVertexFieldsFromMeshFields: field DOF index out of range");
-                    buffer.coefficients[static_cast<std::size_t>(dof)] =
-                        static_cast<Real>(values[v_base + c]);
-                    ++values_written;
-                }
-            }
-        } else {
-#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-            std::vector<std::uint8_t> coefficient_written(buffer.coefficients.size(), 0u);
-            for (GlobalIndex cell = 0;
-                 cell < static_cast<GlobalIndex>(local_mesh.n_cells());
-                 ++cell) {
-                auto [cell_vertices, n_cell_vertices] =
-                    local_mesh.cell_vertices_span(static_cast<svmp::index_t>(cell));
-                FE_THROW_IF(cell_vertices == nullptr || n_cell_vertices == 0u,
-                            InvalidStateException,
-                            "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
-                                rec.name + "' cannot sync from empty cell connectivity");
-
-                const auto cell_dofs = field_dof_handlers_[field_idx].getCellDofs(cell);
-                const auto expected_cell_dofs = n_cell_vertices * components;
-                FE_THROW_IF(cell_dofs.size() != expected_cell_dofs,
-                            InvalidStateException,
-                            "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
-                                rec.name + "' cell DOF count does not match mesh point field connectivity");
-
-                for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
-                    const auto vertex = cell_vertices[local_node];
-                    FE_THROW_IF(vertex < 0 || static_cast<std::size_t>(vertex) >=
-                                             static_cast<std::size_t>(n_vertices),
-                                InvalidStateException,
-                                "FESystem::syncPrescribedVertexFieldsFromMeshFields: mesh vertex index out of range");
-                    const auto v_base = static_cast<std::size_t>(vertex) * mesh_components;
-                    for (std::size_t c = 0; c < components; ++c) {
-                        const auto cell_dof_position =
-                            c * n_cell_vertices + local_node;
-                        const auto dof = cell_dofs[cell_dof_position];
-                        FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >=
-                                                 buffer.coefficients.size(),
-                                    InvalidStateException,
-                                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: field DOF index out of range");
-                        const auto sdof = static_cast<std::size_t>(dof);
-                        buffer.coefficients[sdof] =
-                            static_cast<Real>(values[v_base + c]);
-                        if (coefficient_written[sdof] == 0u) {
-                            coefficient_written[sdof] = 1u;
-                            ++values_written;
-                        }
-                    }
-                }
-            }
-#else
-            FE_THROW(InvalidStateException,
-                     "FESystem::syncPrescribedVertexFieldsFromMeshFields: high-order mesh point sync requires Mesh support");
-#endif
-        }
+        const auto projection =
+            projectMeshVertexValuesToFieldCoefficients(
+                rec.id,
+                std::span<const Real>(
+                    reinterpret_cast<const Real*>(values),
+                    mesh_entity_count * mesh_components),
+                mesh_components,
+                std::span<Real>(buffer.coefficients.data(),
+                                buffer.coefficients.size()),
+                {},
+                "FESystem::syncPrescribedVertexFieldsFromMeshFields");
+        FE_THROW_IF(projection.unassigned_dofs != 0u, InvalidStateException,
+                    "FESystem::syncPrescribedVertexFieldsFromMeshFields: FE field '" +
+                        rec.name + "' has " +
+                        std::to_string(projection.unassigned_dofs) +
+                        " coefficient(s) without a safe mesh-vertex projection");
+        values_written += projection.values_written;
         ++buffer.revision;
     }
 
@@ -7724,6 +8337,55 @@ FESystem::formInstallCellDomainRestrictions() const noexcept
     return form_install_cell_domain_restrictions_;
 }
 
+FESystem::FormCellDomainRestrictionScope::FormCellDomainRestrictionScope(
+    FESystem& system,
+    std::vector<FormCellDomainRestriction> restrictions)
+    : system_(&system)
+    , previous_(system.formInstallCellDomainRestrictions())
+{
+    system_->setFormInstallCellDomainRestrictions(std::move(restrictions));
+}
+
+FESystem::FormCellDomainRestrictionScope::~FormCellDomainRestrictionScope()
+{
+    restore();
+}
+
+FESystem::FormCellDomainRestrictionScope::FormCellDomainRestrictionScope(
+    FormCellDomainRestrictionScope&& other) noexcept
+    : system_(std::exchange(other.system_, nullptr))
+    , previous_(std::move(other.previous_))
+{
+}
+
+FESystem::FormCellDomainRestrictionScope&
+FESystem::FormCellDomainRestrictionScope::operator=(
+    FormCellDomainRestrictionScope&& other) noexcept
+{
+    if (this != &other) {
+        restore();
+        system_ = std::exchange(other.system_, nullptr);
+        previous_ = std::move(other.previous_);
+    }
+    return *this;
+}
+
+void FESystem::FormCellDomainRestrictionScope::restore() noexcept
+{
+    if (system_ == nullptr) {
+        return;
+    }
+    system_->setFormInstallCellDomainRestrictions(std::move(previous_));
+    system_ = nullptr;
+}
+
+FESystem::FormCellDomainRestrictionScope
+FESystem::scopedFormInstallCellDomainRestrictions(
+    std::vector<FormCellDomainRestriction> restrictions)
+{
+    return FormCellDomainRestrictionScope(*this, std::move(restrictions));
+}
+
 void FESystem::addCellKernel(OperatorTag op, FieldId field,
                              std::shared_ptr<assembly::AssemblyKernel> kernel)
 {
@@ -8206,6 +8868,97 @@ bool FESystem::fieldActiveOnCell(FieldId field, GlobalIndex cell_id) const
     return cell_id >= begin && cell_id < end;
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+FESystem::MeshVertexFieldProjectionResult
+FESystem::projectMeshVertexValuesToFieldCoefficients(
+    FieldId field,
+    std::span<const Real> mesh_values,
+    std::size_t mesh_components,
+    std::span<Real> coefficients,
+    std::span<std::uint8_t> assigned,
+    std::string_view context) const
+{
+    requireSetup();
+    const auto& mesh = singleMesh(context);
+    const auto n_vertices = static_cast<std::size_t>(mesh.n_vertices());
+
+    const auto field_idx = static_cast<std::size_t>(field);
+    FE_THROW_IF(field < 0 || field_idx >= field_dof_handlers_.size(),
+                InvalidArgumentException,
+                std::string(context) + ": invalid FieldId");
+
+    const auto& rec = field_registry_.get(field);
+    const auto components =
+        static_cast<std::size_t>(std::max(1, rec.components));
+    FE_THROW_IF(mesh_components < components, InvalidArgumentException,
+                std::string(context) +
+                    ": mesh field has fewer components than the FE field");
+    FE_THROW_IF(mesh_values.size() < n_vertices * mesh_components,
+                InvalidArgumentException,
+                std::string(context) +
+                    ": mesh field value span is smaller than the mesh vertex count");
+
+    const auto n_dofs =
+        static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs());
+    FE_THROW_IF(coefficients.size() < n_dofs, InvalidArgumentException,
+                std::string(context) +
+                    ": coefficient span is smaller than the FE field DOF count");
+    FE_THROW_IF(!assigned.empty() && assigned.size() < n_dofs,
+                InvalidArgumentException,
+                std::string(context) +
+                    ": assigned span is smaller than the FE field DOF count");
+
+    FE_THROW_IF(!rec.space, InvalidStateException,
+                std::string(context) + ": FE field has no function space");
+    const auto basis_type = rec.space->element().basis().basis_type();
+
+    if (!assigned.empty()) {
+        std::fill(assigned.begin(), assigned.begin() +
+                                      static_cast<std::ptrdiff_t>(n_dofs),
+                  std::uint8_t{0});
+    }
+
+    const auto* entity_map =
+        field_dof_handlers_[field_idx].getEntityDofMap();
+    FE_THROW_IF(entity_map == nullptr, InvalidStateException,
+                std::string(context) +
+                    ": FE field must have EntityDofMap metadata");
+
+    if (basis_type != BasisType::Lagrange &&
+        basis_type != BasisType::Serendipity) {
+        return projectMeshVertexValuesByLocalInterpolation(
+            mesh.local_mesh(),
+            *rec.space,
+            field_dof_handlers_[field_idx],
+            mesh_values,
+            mesh_components,
+            components,
+            coefficients,
+            assigned,
+            context);
+    }
+
+    auto result =
+        enumerateMeshVertexDofBindings(
+            mesh.local_mesh(),
+            *entity_map,
+            components,
+            n_dofs,
+            context,
+            [&](std::size_t vertex, std::size_t component, GlobalIndex local_dof) {
+                const auto dof = static_cast<std::size_t>(local_dof);
+                const auto value_index = vertex * mesh_components + component;
+                coefficients[dof] =
+                    static_cast<Real>(mesh_values[value_index]);
+                if (!assigned.empty()) {
+                    assigned[dof] = 1u;
+                }
+            });
+
+    return result;
+}
+#endif
+
 std::string FESystem::assemblerName() const
 {
     if (!assembler_) {
@@ -8324,6 +9077,12 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
 
     const auto& rec = field_registry_.get(field);
     const auto ncomp = static_cast<std::size_t>(std::max(1, rec.components));
+    FE_CHECK_NOT_NULL(rec.space.get(), "FESystem::evaluateFieldAtVertices: field.space");
+    const auto basis_type = rec.space->element().basis().basis_type();
+    if (basis_type != BasisType::Lagrange &&
+        basis_type != BasisType::Serendipity) {
+        return false;
+    }
 
     FE_THROW_IF(out.size() < static_cast<std::size_t>(n_vertices) * ncomp, InvalidArgumentException,
                 "FESystem::evaluateFieldAtVertices: output buffer too small");
@@ -8367,6 +9126,30 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
         return static_cast<double>(state.u[idx]);
     };
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const auto& mesh = singleMesh("FESystem::evaluateFieldAtVertices");
+    if (mesh.n_vertices() < static_cast<std::size_t>(n_vertices)) {
+        return false;
+    }
+    std::vector<std::uint8_t> vertex_component_written(
+        static_cast<std::size_t>(n_vertices) * ncomp, 0u);
+    const auto projection =
+        enumerateMeshVertexDofBindings(
+            mesh.local_mesh(),
+            *entity_map,
+            ncomp,
+            static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs()),
+            "FESystem::evaluateFieldAtVertices",
+            [&](std::size_t vertex, std::size_t component, GlobalIndex local_dof) {
+                const auto out_index = vertex * ncomp + component;
+                out[out_index] = read_coefficient(local_dof);
+                vertex_component_written[out_index] = 1u;
+            });
+    (void)projection;
+    return std::find(vertex_component_written.begin(),
+                     vertex_component_written.end(),
+                     std::uint8_t{0}) == vertex_component_written.end();
+#else
     bool all_mesh_vertices_have_vertex_dofs = true;
     for (GlobalIndex v = 0; v < n_vertices; ++v) {
         if (entity_map->getVertexDofs(v).size() != ncomp) {
@@ -8374,49 +9157,8 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
             break;
         }
     }
-
     if (!all_mesh_vertices_have_vertex_dofs) {
-#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-        const auto& mesh = singleMesh("FESystem::evaluateFieldAtVertices");
-        if (mesh.n_vertices() < static_cast<std::size_t>(n_vertices)) {
-            return false;
-        }
-        const auto& local_mesh = mesh.local_mesh();
-        std::vector<std::uint8_t> vertex_written(
-            static_cast<std::size_t>(n_vertices), 0u);
-        for (svmp::index_t cell = 0; cell < local_mesh.n_cells(); ++cell) {
-            auto [cell_vertices, n_cell_vertices] = local_mesh.cell_vertices_span(cell);
-            if (cell_vertices == nullptr || n_cell_vertices == 0u) {
-                return false;
-            }
-            const auto cell_dofs =
-                field_dof_handlers_[field_idx].getCellDofs(static_cast<GlobalIndex>(cell));
-            if (cell_dofs.size() != n_cell_vertices * ncomp) {
-                return false;
-            }
-
-            for (std::size_t local_node = 0; local_node < n_cell_vertices; ++local_node) {
-                const auto vertex = cell_vertices[local_node];
-                if (vertex < 0 || vertex >= static_cast<svmp::index_t>(n_vertices)) {
-                    return false;
-                }
-                const auto vertex_index = static_cast<std::size_t>(vertex);
-                if (vertex_written[vertex_index] != 0u) {
-                    continue;
-                }
-                const auto out_base = vertex_index * ncomp;
-                for (std::size_t c = 0; c < ncomp; ++c) {
-                    const auto cell_dof_position = c * n_cell_vertices + local_node;
-                    out[out_base + c] = read_coefficient(cell_dofs[cell_dof_position]);
-                }
-                vertex_written[vertex_index] = 1u;
-            }
-        }
-        return std::find(vertex_written.begin(), vertex_written.end(), 0u) ==
-               vertex_written.end();
-#else
         return false;
-#endif
     }
 
     for (GlobalIndex v = 0; v < n_vertices; ++v) {
@@ -8428,6 +9170,7 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
     }
 
     return true;
+#endif
 }
 
 const FieldRecord& FESystem::fieldRecord(FieldId field) const
@@ -18093,6 +18836,8 @@ FESystem::AuxiliaryAnalysisSummary FESystem::auxiliaryAnalysisSummary() const
 void FESystem::updateConstraints(double time, double dt)
 {
     requireSetup();
+    (void)refreshConstraintStateForCurrentRevisions(time, dt, /*allow_structural_rebuild=*/true);
+
     has_last_constraint_update_time_ = true;
     last_constraint_update_time_ = time;
     last_constraint_update_dt_ = dt;
