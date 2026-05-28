@@ -190,11 +190,25 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
   auto& cm = main_sim_->com_mod.cm;
   auto& cm_mod = main_sim_->cm_mod;
 
-  // Build per-role sub-XMLs from the main XML (all ranks write identical content).
-  std::string fluid_xml = build_sub_xml(xml_file_path_, "partitioned_fluid");
-  std::string solid_xml = build_sub_xml(xml_file_path_, "partitioned_solid");
-  std::string mesh_xml  = build_sub_xml(xml_file_path_, "partitioned_mesh");
+  // Compute deterministic temp XML paths (same formula as in build_sub_xml).
+  auto make_path = [&](const std::string& role) -> std::string {
+    std::string base = xml_file_path_;
+    auto slash = base.find_last_of('/');
+    std::string dir = (slash != std::string::npos) ? base.substr(0, slash + 1) : "./";
+    return dir + ".partfsi_" + role + "_tmp.xml";
+  };
+  std::string fluid_xml = make_path("partitioned_fluid");
+  std::string solid_xml = make_path("partitioned_solid");
+  std::string mesh_xml  = make_path("partitioned_mesh");
   temp_xml_paths_ = {fluid_xml, solid_xml, mesh_xml};
+
+  // Only rank 0 writes the XML files to avoid concurrent write corruption.
+  if (cm.mas(cm_mod)) {
+    build_sub_xml(xml_file_path_, "partitioned_fluid");
+    build_sub_xml(xml_file_path_, "partitioned_solid");
+    build_sub_xml(xml_file_path_, "partitioned_mesh");
+  }
+  MPI_Barrier(cm.com());
 
   // 3 separate sub-sims: fluid, solid, mesh
   fluid_sim_ = std::make_unique<Simulation>();
@@ -205,7 +219,6 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
 
   mesh_sim_ = std::make_unique<Simulation>();
   init_sub_sim(mesh_sim_.get(), mesh_xml);
-
 
   if (cm.mas(cm_mod)) {
     // Open log files
@@ -225,7 +238,8 @@ PartitionedFSI::PartitionedFSI(Simulation* main_simulation,
 
 PartitionedFSI::~PartitionedFSI()
 {
-  for (const auto& p : temp_xml_paths_) std::remove(p.c_str());
+  if (main_sim_->com_mod.cm.mas(main_sim_->cm_mod))
+    for (const auto& p : temp_xml_paths_) std::remove(p.c_str());
 }
 
 //----------------------------------------------------------------------
