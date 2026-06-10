@@ -2080,6 +2080,24 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeo
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 }
 
+TEST(MovingDomainPhysics, NavierStokesRotatingFrameCoriolisAddsVelocityCoupling)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+    opts.rotating_frame_coriolis_enabled = true;
+    opts.rotating_frame_angular_velocity = {0.0, 0.0, 2.5};
+
+    FE::systems::FESystem system(mesh);
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(system);
+
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CrossProduct));
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+}
+
 TEST(MovingDomainPhysics, CurrentFaceGeometryMeanCurvatureTracksCurvedHexFace)
 {
     auto basis = std::make_shared<FE::basis::LagrangeBasis>(FE::ElementType::Hex27, 2);
@@ -3288,6 +3306,67 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
+     NavierStokesUnfittedIncrementalPressurePolicyInstallsRuntimeDtForm)
+{
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_convection = false;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+        .external_pressure = 1.0,
+        .cut_cell_stabilization = {
+            .enabled = true,
+            .velocity_gradient_penalty = 2.0,
+            .pressure_gradient_penalty = 0.25,
+            .pressure_policy =
+                ns::FreeSurfacePressureStabilizationPolicy::Incremental,
+        },
+    });
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+    FE::interfaces::GeneratedInterfaceMarkerKey key{};
+    key.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi);
+    key.domain_id = "free_surface";
+    const int expected_marker = FE::interfaces::stableGeneratedInterfaceMarker(key);
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto p_id = system.findFieldByName("p");
+    ASSERT_NE(p_id, FE::INVALID_FIELD_ID);
+    EXPECT_GT(interiorFaceKernelCountForBlock(system, p_id, p_id, expected_marker), 0u);
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::InteriorFaceIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::EffectiveTimeStep));
+    EXPECT_NE(log_output.find("pressure_stabilization_policy=Incremental"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_stabilization=enabled"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_stabilization_form=incremental"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_derivative_orders=1"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("pressure_scaling=h^3/mu"),
+              std::string::npos);
+}
+
+TEST(MovingDomainPhysics,
      NavierStokesUnfittedHighOrderVelocityPolicyLimitsToFirstDerivative)
 {
     const auto mesh = makeMesh();
@@ -3761,6 +3840,59 @@ TEST(MovingDomainPhysics, NavierStokesActiveDomainInstallsCutVolumeKernels)
     }
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellIntegral));
+}
+
+TEST(MovingDomainPhysics, NavierStokesPspgContinuityFullCellSupportAddsCellKernel)
+{
+    ScopedEnvVar full_cell_support(
+        "SVMP_NS_PSPG_CONTINUITY_FULL_CELL_SUPPORT",
+        std::string("1"));
+
+    constexpr int interface_marker = 52;
+    const auto mesh = makeMesh();
+    auto u_space = makeVelocitySpace(mesh);
+    auto p_space = makePressureSpace(mesh);
+    auto opts = baseNavierStokesOptions();
+    opts.enable_vms = true;
+
+    opts.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker,
+        .level_set_field_name = "phi",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
+    });
+
+    FE::systems::FESystem system(mesh);
+    system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = p_space,
+        .components = 1,
+        .source_kind = FE::systems::FieldSourceKind::PrescribedData,
+    });
+
+    ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    module.registerOn(system);
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    const auto& equations = system.operatorDefinition("equations");
+    EXPECT_FALSE(equations.cells.empty());
+    ASSERT_FALSE(equations.cut_volumes.empty());
+    for (const auto& term : equations.cut_volumes) {
+        EXPECT_EQ(term.marker, interface_marker);
+        EXPECT_EQ(term.side, FE::geometry::CutIntegrationSide::Negative);
+    }
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellIntegral));
+    EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CutVolumeIntegral));
+    EXPECT_NE(log_output.find(
+                  "diagnostic=navier_stokes_pspg_continuity_volume_support"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("full_cell_vms_pspg_plus_active_galerkin"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("qualification=DiagnosticOnly"),
+              std::string::npos);
 }
 
 TEST(MovingDomainPhysics, NavierStokesActiveDomainCutVolumeSamplesNonconstantVelocity)

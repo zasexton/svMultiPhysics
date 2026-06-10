@@ -18,6 +18,8 @@ namespace lagrange_pyramid {
 
 const std::vector<math::Vector<Real, 3>>& nodes(int order);
 
+void prewarm_scratch(int order, std::size_t max_qpts = 0);
+
 void evaluate_values(int order,
                      const math::Vector<Real, 3>& xi,
                      std::vector<Real>& values);

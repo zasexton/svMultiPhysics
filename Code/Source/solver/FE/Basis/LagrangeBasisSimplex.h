@@ -38,6 +38,15 @@ void evaluate_triangle_simplex_basis_strided(
     Real* SVMP_RESTRICT gradients_out,
     Real* SVMP_RESTRICT hessians_out);
 
+void evaluate_triangle_simplex_basis_wedge_components_strided(
+    const std::vector<std::array<int, 4>>& simplex_exponents,
+    int order,
+    const std::vector<math::Vector<Real, 3>>& points,
+    std::size_t output_stride,
+    Real* SVMP_RESTRICT values_out,
+    Real* SVMP_RESTRICT gradients_xy_out,
+    Real* SVMP_RESTRICT hessians_xx_xy_yy_out);
+
 void evaluate_tetrahedron_simplex_basis(const std::vector<std::array<int, 4>>& simplex_exponents,
                                         int order,
                                         const math::Vector<Real, 3>& xi,

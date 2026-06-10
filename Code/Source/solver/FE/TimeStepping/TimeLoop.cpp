@@ -329,6 +329,10 @@ TimeLoop::TimeLoop(TimeLoopOptions options)
                 "TimeLoop: t0/t_end must be finite and t_end >= t0");
     FE_THROW_IF(options_.max_steps <= 0, InvalidArgumentException,
                 "TimeLoop: max_steps must be > 0");
+    FE_THROW_IF(options_.last_step_absorb_fraction < 0.0 ||
+                    !std::isfinite(options_.last_step_absorb_fraction),
+                InvalidArgumentException,
+                "TimeLoop: last_step_absorb_fraction must be finite and >= 0");
 
     if (options_.scheme == SchemeKind::ThetaMethod) {
         FE_THROW_IF(!(options_.theta >= 0.0 && options_.theta <= 1.0) || !std::isfinite(options_.theta),
@@ -1639,6 +1643,29 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     const int max_retries = adaptive ? std::max(0, options_.step_controller->maxRetries()) : 0;
     double dt_next = options_.dt;
 
+    auto adjustStepToFinalInterval = [&](double time, double candidate_dt) {
+        double dt_adjusted = candidate_dt;
+        if (!options_.adjust_last_step) {
+            return dt_adjusted;
+        }
+
+        const double remaining = t_end - time;
+        if (remaining < dt_adjusted) {
+            return remaining;
+        }
+
+        const double fraction = options_.last_step_absorb_fraction;
+        if (fraction > 0.0 && dt_adjusted > 0.0) {
+            const double terminal_remainder = remaining - dt_adjusted;
+            if (terminal_remainder > 0.0 &&
+                terminal_remainder <= fraction * dt_adjusted) {
+                return remaining;
+            }
+        }
+
+        return dt_adjusted;
+    };
+
 	    if (options_.scheme == SchemeKind::VSVO_BDF) {
 	        FE_THROW_IF(!adaptive, InvalidArgumentException,
 	                    "TimeLoop: VSVO_BDF scheme requires a step_controller");
@@ -1686,9 +1713,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 history.setTime(t_end);
                 return report;
             }
-            if (remaining0 < dt) {
-                dt = remaining0;
-            }
+            dt = adjustStepToFinalInterval(t, dt);
         }
 
         bool accepted = false;
@@ -1705,9 +1730,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     history.setTime(t_end);
                     return report;
                 }
-                if (remaining < dt) {
-                    dt = remaining;
-                }
+                dt = adjustStepToFinalInterval(t, dt);
             }
 
             history.setDt(dt);
@@ -2598,47 +2621,114 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 callbacks.on_nonlinear_done(history, nr);
             }
 
+            auto make_step_attempt_info = [&](bool nonlinear_converged) {
+                StepAttemptInfo info;
+                info.time = t;
+                info.t_end = t_end;
+                info.dt = dt;
+                info.dt_prev = dt_prev_step;
+                info.step_index = step;
+                info.attempt_index = attempt;
+                info.scheme_order = scheme_order;
+                info.nonlinear_converged = nonlinear_converged;
+                info.newton = nr;
+                info.error_norm = error_norm;
+                info.error_norm_low = error_norm_low;
+                info.error_norm_high = error_norm_high;
+                return info;
+            };
+
             bool accept_step = nr.converged;
 
             if (accept_step) {
-                if (adaptive) {
-                    StepAttemptInfo info;
-                    info.time = t;
-                    info.t_end = t_end;
-                    info.dt = dt;
-                    info.dt_prev = dt_prev_step;
-                    info.step_index = step;
-                    info.attempt_index = attempt;
-                    info.scheme_order = scheme_order;
-                    info.nonlinear_converged = true;
-                    info.newton = nr;
-                    info.error_norm = error_norm;
-                    info.error_norm_low = error_norm_low;
-                    info.error_norm_high = error_norm_high;
+                if (callbacks.on_before_step_accept &&
+                    !callbacks.on_before_step_accept(history, nr)) {
+                    if (callbacks.on_step_rejected) {
+                        callbacks.on_step_rejected(
+                            history, StepRejectReason::ErrorTooLarge, nr);
+                    }
+                    if (!adaptive) {
+                        FE_THROW(
+                            FEException,
+                            "TimeLoop: converged step rejected before accept");
+                    }
 
-	                    const auto decision = options_.step_controller->onAccepted(info);
-	                    if (!decision.accept) {
-	                        if (callbacks.on_step_rejected) {
-	                            callbacks.on_step_rejected(history, StepRejectReason::ErrorTooLarge, nr);
-	                        }
-	                        if (!decision.retry) {
-	                            report.success = false;
-	                            report.steps_taken = step;
-	                            report.final_time = history.time();
-	                            const std::string base = decision.message.empty() ? "TimeLoop: step rejected" : decision.message;
-	                            if (info.error_norm > 0.0 && std::isfinite(info.error_norm)) {
-	                                report.message = base + " (dt=" + std::to_string(info.dt) +
-	                                    ", order=" + std::to_string(info.scheme_order) +
-	                                    ", error_norm=" + std::to_string(info.error_norm) + ")";
-	                            } else {
-	                                report.message = base + " (dt=" + std::to_string(info.dt) +
-	                                    ", order=" + std::to_string(info.scheme_order) + ")";
-	                            }
-	                            return report;
-	                        }
+                    const auto info = make_step_attempt_info(/*nonlinear_converged=*/true);
+                    const auto decision =
+                        options_.step_controller->onRejected(
+                            info, StepRejectReason::ErrorTooLarge);
+                    if (!decision.retry) {
+                        report.success = false;
+                        report.steps_taken = step;
+                        report.final_time = history.time();
+                        const std::string base =
+                            decision.message.empty()
+                                ? "TimeLoop: converged step rejected before accept"
+                                : decision.message;
+                        if (info.error_norm > 0.0 && std::isfinite(info.error_norm)) {
+                            report.message = base + " (dt=" +
+                                std::to_string(info.dt) + ", order=" +
+                                std::to_string(info.scheme_order) +
+                                ", error_norm=" +
+                                std::to_string(info.error_norm) + ")";
+                        } else {
+                            report.message = base + " (dt=" +
+                                std::to_string(info.dt) + ", order=" +
+                                std::to_string(info.scheme_order) + ")";
+                        }
+                        return report;
+                    }
+
+                    const double new_dt = decision.next_dt;
+                    FE_THROW_IF(!(new_dt > 0.0) || !std::isfinite(new_dt),
+                                systems::InvalidStateException,
+                                "TimeLoop: step controller returned invalid dt");
+                    if (callbacks.on_dt_updated) {
+                        callbacks.on_dt_updated(dt, new_dt, step, attempt);
+                    }
+                    dt = new_dt;
+                    if (decision.next_order > 0) {
+                        order = decision.next_order;
+                    }
+                    continue;
+                }
+
+                if (adaptive) {
+                    const auto info = make_step_attempt_info(/*nonlinear_converged=*/true);
+
+                    const auto decision = options_.step_controller->onAccepted(info);
+                    if (!decision.accept) {
+                        if (callbacks.on_step_rejected) {
+                            callbacks.on_step_rejected(
+                                history, StepRejectReason::ErrorTooLarge, nr);
+                        }
+                        if (!decision.retry) {
+                            report.success = false;
+                            report.steps_taken = step;
+                            report.final_time = history.time();
+                            const std::string base =
+                                decision.message.empty()
+                                    ? "TimeLoop: step rejected"
+                                    : decision.message;
+                            if (info.error_norm > 0.0 && std::isfinite(info.error_norm)) {
+                                report.message =
+                                    base + " (dt=" + std::to_string(info.dt) +
+                                    ", order=" +
+                                    std::to_string(info.scheme_order) +
+                                    ", error_norm=" +
+                                    std::to_string(info.error_norm) + ")";
+                            } else {
+                                report.message =
+                                    base + " (dt=" + std::to_string(info.dt) +
+                                    ", order=" +
+                                    std::to_string(info.scheme_order) + ")";
+                            }
+                            return report;
+                        }
 
                         const double new_dt = decision.next_dt;
-                        FE_THROW_IF(!(new_dt > 0.0) || !std::isfinite(new_dt), systems::InvalidStateException,
+                        FE_THROW_IF(!(new_dt > 0.0) || !std::isfinite(new_dt),
+                                    systems::InvalidStateException,
                                     "TimeLoop: step controller returned invalid dt");
                         if (callbacks.on_dt_updated) {
                             callbacks.on_dt_updated(dt, new_dt, step, attempt);
@@ -3012,19 +3102,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 callbacks.on_step_rejected(history, StepRejectReason::NonlinearSolveFailed, nr);
             }
 
-            StepAttemptInfo info;
-            info.time = t;
-            info.t_end = t_end;
-            info.dt = dt;
-            info.dt_prev = dt_prev_step;
-            info.step_index = step;
-            info.attempt_index = attempt;
-            info.scheme_order = scheme_order;
-            info.nonlinear_converged = false;
-            info.newton = nr;
-            info.error_norm = error_norm;
-            info.error_norm_low = error_norm_low;
-            info.error_norm_high = error_norm_high;
+            const auto info = make_step_attempt_info(/*nonlinear_converged=*/false);
 
             const auto decision = options_.step_controller->onRejected(info, StepRejectReason::NonlinearSolveFailed);
             if (!decision.retry) {

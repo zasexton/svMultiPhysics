@@ -13,6 +13,7 @@
 #include "Basis/BasisExceptions.h"
 #include "BasisTolerance.h"
 #include "Math/DenseLinearAlgebra.h"
+#include "Math/DenseTransformKernels.h"
 #include "LagrangeBasisUtility.h"
 #include "PyramidModalBasis.h"
 
@@ -170,6 +171,35 @@ public:
         ApexData apex;
     };
 
+    struct EvaluationScratch {
+        std::vector<Real> modal_values;
+        std::vector<Real> modal_gradient_components;
+        std::vector<Real> modal_hessian_components;
+        std::vector<Gradient> modal_gradients;
+        std::vector<Hessian> modal_hessians;
+        pyramid_modal::EvaluationPoint modal_point;
+
+        void prewarm(std::size_t max_size, std::size_t max_qpts) {
+            const std::size_t batched_size = max_size * std::max<std::size_t>(max_qpts, 1u);
+            modal_values.reserve(batched_size);
+            modal_gradient_components.reserve(batched_size * 3u);
+            modal_hessian_components.reserve(batched_size * 9u);
+            modal_gradients.reserve(max_size);
+            modal_hessians.reserve(max_size);
+        }
+    };
+
+    static EvaluationScratch& evaluation_scratch() {
+        // Scratch is intentionally thread-local: production assembly uses a
+        // persistent worker-thread team, so buffers stay warm on each worker.
+        static thread_local EvaluationScratch scratch;
+        return scratch;
+    }
+
+    static void prewarm_scratch(std::size_t max_size, std::size_t max_qpts) {
+        evaluation_scratch().prewarm(max_size, max_qpts);
+    }
+
     static bool is_apex_point(const math::Vector<Real, 3>& xi) {
         const Real tol = apex_coord_tolerance();
         return std::abs(xi[0]) <= tol &&
@@ -231,9 +261,12 @@ public:
                     inverse[modal_j * n + basis_i];
             }
         }
-
         data.apex = build_apex_data(data);
         return data;
+    }
+
+    static bool has_low_order_fast_modal_to_nodal(const OrderData& data) noexcept {
+        return data.order == 1 || data.order == 2;
     }
 
     static const OrderData& get(int order) {
@@ -272,14 +305,19 @@ public:
             return;
         }
 
-        static thread_local std::vector<Real> modal;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal = scratch.modal_values;
+        auto& modal_point = scratch.modal_point;
         modal.resize(data.modal_terms.size());
         pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             pyramid_modal::evaluate_term(data.modal_terms[m], modal_point, modal[m]);
         }
-        apply_modal_to_nodal(data, modal, values);
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal(data, modal, values);
+        } else {
+            apply_modal_to_nodal(data, modal, values);
+        }
     }
 
     static void evaluate_gradients(const OrderData& data,
@@ -296,15 +334,20 @@ public:
             return;
         }
 
-        static thread_local std::vector<Gradient> modal_gradients;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_gradients = scratch.modal_gradients;
+        auto& modal_point = scratch.modal_point;
         modal_gradients.resize(data.modal_terms.size());
         pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             Real value = Real(0);
             pyramid_modal::evaluate_term(data.modal_terms[m], modal_point, value, &modal_gradients[m]);
         }
-        apply_modal_to_nodal(data, modal_gradients, gradients);
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal(data, modal_gradients, gradients);
+        } else {
+            apply_modal_to_nodal(data, modal_gradients, gradients);
+        }
     }
 
     static void evaluate_hessians(const OrderData& data,
@@ -321,15 +364,20 @@ public:
             return;
         }
 
-        static thread_local std::vector<Hessian> modal_hessians;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_hessians = scratch.modal_hessians;
+        auto& modal_point = scratch.modal_point;
         modal_hessians.resize(data.modal_terms.size());
         pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             Real value = Real(0);
             pyramid_modal::evaluate_term(data.modal_terms[m], modal_point, value, nullptr, &modal_hessians[m]);
         }
-        apply_modal_to_nodal(data, modal_hessians, hessians);
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal(data, modal_hessians, hessians);
+        } else {
+            apply_modal_to_nodal(data, modal_hessians, hessians);
+        }
     }
 
     static void evaluate_all(const OrderData& data,
@@ -356,10 +404,11 @@ public:
         }
 
         const std::size_t n = data.modal_terms.size();
-        static thread_local std::vector<Real> modal_values;
-        static thread_local std::vector<Gradient> modal_gradients;
-        static thread_local std::vector<Hessian> modal_hessians;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_values = scratch.modal_values;
+        auto& modal_gradients = scratch.modal_gradients;
+        auto& modal_hessians = scratch.modal_hessians;
+        auto& modal_point = scratch.modal_point;
         modal_values.resize(n);
         modal_gradients.resize(n);
         modal_hessians.resize(n);
@@ -368,6 +417,12 @@ public:
         for (std::size_t m = 0; m < n; ++m) {
             pyramid_modal::evaluate_term(
                 data.modal_terms[m], modal_point, modal_values[m], &modal_gradients[m], &modal_hessians[m]);
+        }
+
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal_all(
+                data, modal_values, modal_gradients, modal_hessians, values, gradients, hessians);
+            return;
         }
 
         values.resize(n);
@@ -415,14 +470,19 @@ public:
             return;
         }
 
-        static thread_local std::vector<Real> modal;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal = scratch.modal_values;
+        auto& modal_point = scratch.modal_point;
         modal.resize(data.modal_terms.size());
         pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             pyramid_modal::evaluate_term(data.modal_terms[m], modal_point, modal[m]);
         }
-        apply_modal_to_nodal_to(data, modal, values_out);
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal_to(data, modal, values_out);
+        } else {
+            apply_modal_to_nodal_to(data, modal, values_out);
+        }
     }
 
     static void evaluate_gradients_to(const OrderData& data,
@@ -443,15 +503,20 @@ public:
             return;
         }
 
-        static thread_local std::vector<Gradient> modal_gradients;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_gradients = scratch.modal_gradients;
+        auto& modal_point = scratch.modal_point;
         modal_gradients.resize(data.modal_terms.size());
         pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             Real value = Real(0);
             pyramid_modal::evaluate_term(data.modal_terms[m], modal_point, value, &modal_gradients[m]);
         }
-        apply_modal_to_nodal_to(data, modal_gradients, gradients_out);
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal_to(data, modal_gradients, gradients_out);
+        } else {
+            apply_modal_to_nodal_to(data, modal_gradients, gradients_out);
+        }
     }
 
     static void evaluate_hessians_to(const OrderData& data,
@@ -470,15 +535,20 @@ public:
             return;
         }
 
-        static thread_local std::vector<Hessian> modal_hessians;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_hessians = scratch.modal_hessians;
+        auto& modal_point = scratch.modal_point;
         modal_hessians.resize(data.modal_terms.size());
         pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
         for (std::size_t m = 0; m < data.modal_terms.size(); ++m) {
             Real value = Real(0);
             pyramid_modal::evaluate_term(data.modal_terms[m], modal_point, value, nullptr, &modal_hessians[m]);
         }
-        apply_modal_to_nodal_to(data, modal_hessians, hessians_out);
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal_to(data, modal_hessians, hessians_out);
+        } else {
+            apply_modal_to_nodal_to(data, modal_hessians, hessians_out);
+        }
     }
 
     static void evaluate_all_to(const OrderData& data,
@@ -512,10 +582,11 @@ public:
         }
 
         const std::size_t n = data.modal_terms.size();
-        static thread_local std::vector<Real> modal_values;
-        static thread_local std::vector<Gradient> modal_gradients;
-        static thread_local std::vector<Hessian> modal_hessians;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_values = scratch.modal_values;
+        auto& modal_gradients = scratch.modal_gradients;
+        auto& modal_hessians = scratch.modal_hessians;
+        auto& modal_point = scratch.modal_point;
         modal_values.resize(n);
         modal_gradients.resize(n);
         modal_hessians.resize(n);
@@ -524,6 +595,12 @@ public:
         for (std::size_t m = 0; m < n; ++m) {
             pyramid_modal::evaluate_term(
                 data.modal_terms[m], modal_point, modal_values[m], &modal_gradients[m], &modal_hessians[m]);
+        }
+
+        if (has_low_order_fast_modal_to_nodal(data)) {
+            apply_sparse_basis_to_nodal_all_to(
+                data, modal_values, modal_gradients, modal_hessians, values_out, gradients_out, hessians_out);
+            return;
         }
 
         for (std::size_t basis_i = 0; basis_i < n; ++basis_i) {
@@ -664,6 +741,242 @@ private:
         }
     }
 
+    template <int Px,
+              int Py,
+              int Pz,
+              int DenomPower,
+              bool NeedValues,
+              bool NeedGradients,
+              bool NeedHessians>
+    static void fill_low_order_modal_jet(std::size_t modal_i,
+                                         const Real* SVMP_RESTRICT xp,
+                                         const Real* SVMP_RESTRICT yp,
+                                         const Real* SVMP_RESTRICT zp,
+                                         const Real* SVMP_RESTRICT inv_tp,
+                                         Real* SVMP_RESTRICT modal_values,
+                                         Real (*SVMP_RESTRICT modal_gradients)[3],
+                                         Real (*SVMP_RESTRICT modal_hessians)[9]) {
+        const Real xy_base = xp[Px] * yp[Py];
+        const Real base = xy_base * zp[Pz];
+        const Real inv_denom = inv_tp[DenomPower];
+        const Real value = base * inv_denom;
+
+        if constexpr (NeedValues) {
+            modal_values[modal_i] = value;
+        }
+        if constexpr (NeedGradients) {
+            Real* g = modal_gradients[modal_i];
+            if constexpr (Px > 0) {
+                g[0] = static_cast<Real>(Px) * xp[Px - 1] * yp[Py] * zp[Pz] * inv_denom;
+            } else {
+                g[0] = Real(0);
+            }
+            if constexpr (Py > 0) {
+                g[1] = static_cast<Real>(Py) * xp[Px] * yp[Py - 1] * zp[Pz] * inv_denom;
+            } else {
+                g[1] = Real(0);
+            }
+            Real gz = Real(0);
+            if constexpr (Pz > 0) {
+                gz += static_cast<Real>(Pz) * xy_base * zp[Pz - 1] * inv_denom;
+            }
+            if constexpr (DenomPower > 0) {
+                gz += static_cast<Real>(DenomPower) * base * inv_tp[DenomPower + 1];
+            }
+            g[2] = gz;
+        }
+        if constexpr (NeedHessians) {
+            Real* H = modal_hessians[modal_i];
+            if constexpr (Px > 1) {
+                H[0] = static_cast<Real>(Px * (Px - 1)) *
+                       xp[Px - 2] * yp[Py] * zp[Pz] * inv_denom;
+            } else {
+                H[0] = Real(0);
+            }
+            if constexpr (Py > 1) {
+                H[4] = static_cast<Real>(Py * (Py - 1)) *
+                       xp[Px] * yp[Py - 2] * zp[Pz] * inv_denom;
+            } else {
+                H[4] = Real(0);
+            }
+            Real hxy = Real(0);
+            if constexpr (Px > 0 && Py > 0) {
+                hxy = static_cast<Real>(Px * Py) *
+                      xp[Px - 1] * yp[Py - 1] * zp[Pz] * inv_denom;
+            }
+            H[1] = hxy;
+            H[3] = hxy;
+
+            Real hxz = Real(0);
+            if constexpr (Px > 0) {
+                constexpr Real px_real = static_cast<Real>(Px);
+                const Real x_deriv_y = px_real * xp[Px - 1] * yp[Py];
+                if constexpr (Pz > 0) {
+                    hxz += x_deriv_y * static_cast<Real>(Pz) *
+                           zp[Pz - 1] * inv_denom;
+                }
+                if constexpr (DenomPower > 0) {
+                    hxz += x_deriv_y * static_cast<Real>(DenomPower) *
+                           zp[Pz] * inv_tp[DenomPower + 1];
+                }
+            }
+            H[2] = hxz;
+            H[6] = hxz;
+
+            Real hyz = Real(0);
+            if constexpr (Py > 0) {
+                constexpr Real py_real = static_cast<Real>(Py);
+                const Real x_y_deriv = py_real * xp[Px] * yp[Py - 1];
+                if constexpr (Pz > 0) {
+                    hyz += x_y_deriv * static_cast<Real>(Pz) *
+                           zp[Pz - 1] * inv_denom;
+                }
+                if constexpr (DenomPower > 0) {
+                    hyz += x_y_deriv * static_cast<Real>(DenomPower) *
+                           zp[Pz] * inv_tp[DenomPower + 1];
+                }
+            }
+            H[5] = hyz;
+            H[7] = hyz;
+
+            Real hzz = Real(0);
+            if constexpr (Pz > 1) {
+                hzz += static_cast<Real>(Pz * (Pz - 1)) *
+                       xy_base * zp[Pz - 2] * inv_denom;
+            }
+            if constexpr (Pz > 0 && DenomPower > 0) {
+                hzz += static_cast<Real>(2 * Pz * DenomPower) * xy_base *
+                       zp[Pz - 1] * inv_tp[DenomPower + 1];
+            }
+            if constexpr (DenomPower > 0) {
+                hzz += static_cast<Real>(DenomPower * (DenomPower + 1)) *
+                       base * inv_tp[DenomPower + 2];
+            }
+            H[8] = hzz;
+        }
+    }
+
+    template <bool NeedValues, bool NeedGradients, bool NeedHessians>
+    static void evaluate_low_order_modal_jets(const OrderData& data,
+                                              const math::Vector<Real, 3>& xi,
+                                              Real* SVMP_RESTRICT modal_values,
+                                              Real (*SVMP_RESTRICT modal_gradients)[3],
+                                              Real (*SVMP_RESTRICT modal_hessians)[9]) {
+        const Real x = xi[0];
+        const Real y = xi[1];
+        const Real z = xi[2];
+        const Real inv_t = Real(1) / (Real(1) - z);
+        const Real xp[3] = {Real(1), x, x * x};
+        const Real yp[3] = {Real(1), y, y * y};
+        const Real zp[3] = {Real(1), z, z * z};
+        Real inv_tp[5] = {Real(1), inv_t, Real(0), Real(0), Real(0)};
+        inv_tp[2] = inv_tp[1] * inv_t;
+        inv_tp[3] = inv_tp[2] * inv_t;
+        inv_tp[4] = inv_tp[3] * inv_t;
+
+        fill_low_order_modal_jet<0, 0, 0, 0, NeedValues, NeedGradients, NeedHessians>(
+            0u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<1, 0, 0, 0, NeedValues, NeedGradients, NeedHessians>(
+            1u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        if (data.order == 1) {
+            fill_low_order_modal_jet<0, 1, 0, 0, NeedValues, NeedGradients, NeedHessians>(
+                2u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+            fill_low_order_modal_jet<1, 1, 0, 1, NeedValues, NeedGradients, NeedHessians>(
+                3u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+            fill_low_order_modal_jet<0, 0, 1, 0, NeedValues, NeedGradients, NeedHessians>(
+                4u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+            return;
+        }
+
+        fill_low_order_modal_jet<2, 0, 0, 0, NeedValues, NeedGradients, NeedHessians>(
+            2u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<0, 1, 0, 0, NeedValues, NeedGradients, NeedHessians>(
+            3u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<1, 1, 0, 1, NeedValues, NeedGradients, NeedHessians>(
+            4u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<2, 1, 0, 1, NeedValues, NeedGradients, NeedHessians>(
+            5u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<0, 2, 0, 0, NeedValues, NeedGradients, NeedHessians>(
+            6u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<1, 2, 0, 1, NeedValues, NeedGradients, NeedHessians>(
+            7u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<2, 2, 0, 2, NeedValues, NeedGradients, NeedHessians>(
+            8u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<0, 0, 1, 0, NeedValues, NeedGradients, NeedHessians>(
+            9u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<1, 0, 1, 0, NeedValues, NeedGradients, NeedHessians>(
+            10u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<0, 1, 1, 0, NeedValues, NeedGradients, NeedHessians>(
+            11u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<1, 1, 1, 1, NeedValues, NeedGradients, NeedHessians>(
+            12u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+        fill_low_order_modal_jet<0, 0, 2, 0, NeedValues, NeedGradients, NeedHessians>(
+            13u, xp, yp, zp, inv_tp, modal_values, modal_gradients, modal_hessians);
+    }
+
+    template <bool NeedValues, bool NeedGradients, bool NeedHessians>
+    static bool try_evaluate_low_order_strided(
+        const OrderData& data,
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) {
+        if (!has_low_order_fast_modal_to_nodal(data)) {
+            return false;
+        }
+        for (const auto& xi : points) {
+            validate_top_plane_query(xi);
+            if (is_apex_point(xi)) {
+                return false;
+            }
+        }
+
+        Real modal_values[14];
+        Real modal_gradients[14][3];
+        Real modal_hessians[14][9];
+        for (std::size_t q = 0; q < points.size(); ++q) {
+            evaluate_low_order_modal_jets<NeedValues, NeedGradients, NeedHessians>(
+                data, points[q], modal_values, modal_gradients, modal_hessians);
+            if constexpr (NeedValues) {
+                apply_low_order_combination(
+                    data,
+                    1u,
+                    [&](std::size_t modal_i, std::size_t) {
+                        return modal_values[modal_i];
+                    },
+                    [&](std::size_t basis_i, std::size_t, Real value) {
+                        values_out[basis_i * output_stride + q] = value;
+                    });
+            }
+            if constexpr (NeedGradients) {
+                apply_low_order_combination(
+                    data,
+                    3u,
+                    [&](std::size_t modal_i, std::size_t component) {
+                        return modal_gradients[modal_i][component];
+                    },
+                    [&](std::size_t basis_i, std::size_t component, Real value) {
+                        gradients_out[basis_i * 3u * output_stride +
+                                      component * output_stride + q] = value;
+                    });
+            }
+            if constexpr (NeedHessians) {
+                apply_low_order_combination(
+                    data,
+                    9u,
+                    [&](std::size_t modal_i, std::size_t component) {
+                        return modal_hessians[modal_i][component];
+                    },
+                    [&](std::size_t basis_i, std::size_t component, Real value) {
+                        hessians_out[basis_i * 9u * output_stride +
+                                     component * output_stride + q] = value;
+                    });
+            }
+        }
+        return true;
+    }
+
     template <bool NeedValues, bool NeedGradients, bool NeedHessians>
     static void evaluate_at_quadrature_points_strided_impl(
         const OrderData& data,
@@ -676,11 +989,16 @@ private:
         if (points.empty() || n == 0u) {
             return;
         }
+        if (try_evaluate_low_order_strided<NeedValues, NeedGradients, NeedHessians>(
+                data, points, output_stride, values_out, gradients_out, hessians_out)) {
+            return;
+        }
 
-        static thread_local std::vector<Real> modal_values;
-        static thread_local std::vector<Gradient> modal_gradients;
-        static thread_local std::vector<Hessian> modal_hessians;
-        static thread_local pyramid_modal::EvaluationPoint modal_point;
+        auto& scratch = evaluation_scratch();
+        auto& modal_values = scratch.modal_values;
+        auto& modal_gradients = scratch.modal_gradients;
+        auto& modal_hessians = scratch.modal_hessians;
+        auto& modal_point = scratch.modal_point;
         if constexpr (NeedValues) {
             modal_values.resize(n);
         }
@@ -689,6 +1007,101 @@ private:
         }
         if constexpr (NeedHessians) {
             modal_hessians.resize(n);
+        }
+        const bool use_fast_modal_to_nodal = has_low_order_fast_modal_to_nodal(data);
+
+        if (!use_fast_modal_to_nodal) {
+            bool has_apex_query = false;
+            for (const auto& xi : points) {
+                validate_top_plane_query(xi);
+                has_apex_query = has_apex_query || is_apex_point(xi);
+            }
+
+            if (!has_apex_query) {
+                const std::size_t num_qpts = points.size();
+                if constexpr (NeedValues) {
+                    modal_values.resize(n * num_qpts);
+                }
+                if constexpr (NeedGradients) {
+                    scratch.modal_gradient_components.resize(n * 3u * num_qpts);
+                }
+                if constexpr (NeedHessians) {
+                    scratch.modal_hessian_components.resize(n * 9u * num_qpts);
+                }
+
+                for (std::size_t q = 0; q < num_qpts; ++q) {
+                    const auto& xi = points[q];
+                    pyramid_modal::prepare_evaluation_point(data.modal_terms, xi, modal_point);
+                    for (std::size_t modal_j = 0; modal_j < n; ++modal_j) {
+                        Real modal_value = Real(0);
+                        Gradient modal_gradient{};
+                        Hessian modal_hessian{};
+                        pyramid_modal::evaluate_term(
+                            data.modal_terms[modal_j],
+                            modal_point,
+                            modal_value,
+                            NeedGradients ? &modal_gradient : nullptr,
+                            NeedHessians ? &modal_hessian : nullptr);
+                        if constexpr (NeedValues) {
+                            modal_values[modal_j * num_qpts + q] = modal_value;
+                        }
+                        if constexpr (NeedGradients) {
+                            for (std::size_t component = 0; component < 3u; ++component) {
+                                scratch.modal_gradient_components[
+                                    (modal_j * 3u + component) * num_qpts + q] =
+                                    modal_gradient[component];
+                            }
+                        }
+                        if constexpr (NeedHessians) {
+                            for (std::size_t component = 0; component < 9u; ++component) {
+                                scratch.modal_hessian_components[
+                                    (modal_j * 9u + component) * num_qpts + q] =
+                                    modal_hessian.data()[component];
+                            }
+                        }
+                    }
+                }
+
+                const Real* transform = data.modal_to_nodal.data();
+                if constexpr (NeedValues) {
+                    math::dense_transform_batched_row_major(
+                        transform,
+                        n,
+                        n,
+                        modal_values.data(),
+                        num_qpts,
+                        values_out,
+                        output_stride,
+                        num_qpts);
+                }
+                if constexpr (NeedGradients) {
+                    for (std::size_t component = 0; component < 3u; ++component) {
+                        math::dense_transform_batched_row_major(
+                            transform,
+                            n,
+                            n,
+                            scratch.modal_gradient_components.data() + component * num_qpts,
+                            3u * num_qpts,
+                            gradients_out + component * output_stride,
+                            3u * output_stride,
+                            num_qpts);
+                    }
+                }
+                if constexpr (NeedHessians) {
+                    for (std::size_t component = 0; component < 9u; ++component) {
+                        math::dense_transform_batched_row_major(
+                            transform,
+                            n,
+                            n,
+                            scratch.modal_hessian_components.data() + component * num_qpts,
+                            9u * num_qpts,
+                            hessians_out + component * output_stride,
+                            9u * output_stride,
+                            num_qpts);
+                    }
+                }
+                return;
+            }
         }
 
         for (std::size_t q = 0; q < points.size(); ++q) {
@@ -727,6 +1140,45 @@ private:
                         gradient_out,
                         hessian_out);
                 }
+            }
+
+            if (use_fast_modal_to_nodal) {
+                if constexpr (NeedValues) {
+                    apply_low_order_combination(
+                        data,
+                        1u,
+                        [&](std::size_t modal_i, std::size_t) {
+                            return modal_values[modal_i];
+                        },
+                        [&](std::size_t basis_i, std::size_t, Real value) {
+                            values_out[basis_i * output_stride + q] = value;
+                        });
+                }
+                if constexpr (NeedGradients) {
+                    apply_low_order_combination(
+                        data,
+                        3u,
+                        [&](std::size_t modal_i, std::size_t component) {
+                            return modal_gradients[modal_i][component];
+                        },
+                        [&](std::size_t basis_i, std::size_t component, Real value) {
+                            gradients_out[basis_i * 3u * output_stride +
+                                          component * output_stride + q] = value;
+                        });
+                }
+                if constexpr (NeedHessians) {
+                    apply_low_order_combination(
+                        data,
+                        9u,
+                        [&](std::size_t modal_i, std::size_t component) {
+                            return modal_hessians[modal_i].data()[component];
+                        },
+                        [&](std::size_t basis_i, std::size_t component, Real value) {
+                            hessians_out[basis_i * 9u * output_stride +
+                                         component * output_stride + q] = value;
+                        });
+                }
+                continue;
             }
 
             for (std::size_t basis_i = 0; basis_i < n; ++basis_i) {
@@ -1213,6 +1665,224 @@ private:
         }
     };
 
+    template <typename Get, typename Set>
+    static void apply_order1_combination(std::size_t components,
+                                         const Get& get,
+                                         const Set& set) {
+        for (std::size_t c = 0; c < components; ++c) {
+            const Real m0 = get(0u, c);
+            const Real m1 = get(1u, c);
+            const Real m2 = get(2u, c);
+            const Real m3 = get(3u, c);
+            const Real m4 = get(4u, c);
+            set(0u, c, Real(0.25) * (m0 - m1 - m2 + m3 - m4));
+            set(1u, c, Real(0.25) * (m0 + m1 - m2 - m3 - m4));
+            set(2u, c, Real(0.25) * (m0 + m1 + m2 + m3 - m4));
+            set(3u, c, Real(0.25) * (m0 - m1 + m2 - m3 - m4));
+            set(4u, c, m4);
+        }
+    }
+
+    template <typename Get, typename Set>
+    static void apply_order2_combination(std::size_t components,
+                                         const Get& get,
+                                         const Set& set) {
+        for (std::size_t c = 0; c < components; ++c) {
+            const Real m0 = get(0u, c);
+            const Real m1 = get(1u, c);
+            const Real m2 = get(2u, c);
+            const Real m3 = get(3u, c);
+            const Real m4 = get(4u, c);
+            const Real m5 = get(5u, c);
+            const Real m6 = get(6u, c);
+            const Real m7 = get(7u, c);
+            const Real m8 = get(8u, c);
+            const Real m9 = get(9u, c);
+            const Real m10 = get(10u, c);
+            const Real m11 = get(11u, c);
+            const Real m12 = get(12u, c);
+            const Real m13 = get(13u, c);
+            set(0u, c, Real(0.25) * (m4 - m5 - m7 + m8 - m9 + m10 + m11 - Real(2) * m12 + m13));
+            set(1u, c, Real(0.25) * (-m4 - m5 + m7 + m8 - m9 - m10 + m11 + Real(2) * m12 + m13));
+            set(2u, c, Real(0.25) * (m4 + m5 + m7 + m8 - m9 - m10 - m11 - Real(2) * m12 + m13));
+            set(3u, c, Real(0.25) * (-m4 + m5 - m7 + m8 - m9 + m10 - m11 + Real(2) * m12 + m13));
+            set(4u, c, -m9 + Real(2) * m13);
+            set(5u, c, Real(0.5) * (-m3 + m5 + m6 - m8 + m11));
+            set(6u, c, Real(0.5) * (m1 + m2 - m7 - m8 - m10));
+            set(7u, c, Real(0.5) * (m3 - m5 + m6 - m8 - m11));
+            set(8u, c, Real(0.5) * (-m1 + m2 + m7 - m8 + m10));
+            set(9u, c, m9 - m10 - m11 + m12 - m13);
+            set(10u, c, m9 + m10 - m11 - m12 - m13);
+            set(11u, c, m9 + m10 + m11 + m12 - m13);
+            set(12u, c, m9 - m10 + m11 - m12 - m13);
+            set(13u, c, m0 - m2 - m6 + m8 - Real(2) * m9 + m13);
+        }
+    }
+
+    template <typename Get, typename Set>
+    static void apply_low_order_combination(const OrderData& data,
+                                            std::size_t components,
+                                            const Get& get,
+                                            const Set& set) {
+        if (data.order == 1) {
+            apply_order1_combination(components, get, set);
+            return;
+        }
+        apply_order2_combination(components, get, set);
+    }
+
+    static void apply_sparse_basis_to_nodal(const OrderData& data,
+                                            const std::vector<Real>& modal_values,
+                                            std::vector<Real>& nodal_values) {
+        const std::size_t n = modal_values.size();
+        nodal_values.resize(n);
+        apply_low_order_combination(
+            data,
+            1u,
+            [&](std::size_t modal_i, std::size_t) { return modal_values[modal_i]; },
+            [&](std::size_t basis_i, std::size_t, Real value) { nodal_values[basis_i] = value; });
+    }
+
+    static void apply_sparse_basis_to_nodal_to(const OrderData& data,
+                                               const std::vector<Real>& modal_values,
+                                               Real* SVMP_RESTRICT nodal_values) {
+        apply_low_order_combination(
+            data,
+            1u,
+            [&](std::size_t modal_i, std::size_t) { return modal_values[modal_i]; },
+            [&](std::size_t basis_i, std::size_t, Real value) { nodal_values[basis_i] = value; });
+    }
+
+    static void apply_sparse_basis_to_nodal(const OrderData& data,
+                                            const std::vector<Gradient>& modal_gradients,
+                                            std::vector<Gradient>& nodal_gradients) {
+        const std::size_t n = modal_gradients.size();
+        nodal_gradients.resize(n);
+        apply_low_order_combination(
+            data,
+            3u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_gradients[modal_i][component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_gradients[basis_i][component] = value;
+            });
+    }
+
+    static void apply_sparse_basis_to_nodal_to(const OrderData& data,
+                                               const std::vector<Gradient>& modal_gradients,
+                                               Real* SVMP_RESTRICT nodal_gradients) {
+        apply_low_order_combination(
+            data,
+            3u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_gradients[modal_i][component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_gradients[basis_i * 3u + component] = value;
+            });
+    }
+
+    static void apply_sparse_basis_to_nodal(const OrderData& data,
+                                            const std::vector<Hessian>& modal_hessians,
+                                            std::vector<Hessian>& nodal_hessians) {
+        const std::size_t n = modal_hessians.size();
+        nodal_hessians.resize(n);
+        apply_low_order_combination(
+            data,
+            9u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_hessians[modal_i].data()[component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_hessians[basis_i].data()[component] = value;
+            });
+    }
+
+    static void apply_sparse_basis_to_nodal_to(const OrderData& data,
+                                               const std::vector<Hessian>& modal_hessians,
+                                               Real* SVMP_RESTRICT nodal_hessians) {
+        apply_low_order_combination(
+            data,
+            9u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_hessians[modal_i].data()[component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_hessians[basis_i * 9u + component] = value;
+            });
+    }
+
+    static void apply_sparse_basis_to_nodal_all(
+        const OrderData& data,
+        const std::vector<Real>& modal_values,
+        const std::vector<Gradient>& modal_gradients,
+        const std::vector<Hessian>& modal_hessians,
+        std::vector<Real>& nodal_values,
+        std::vector<Gradient>& nodal_gradients,
+        std::vector<Hessian>& nodal_hessians) {
+        const std::size_t n = modal_values.size();
+        nodal_values.resize(n);
+        nodal_gradients.resize(n);
+        nodal_hessians.resize(n);
+        apply_low_order_combination(
+            data,
+            1u,
+            [&](std::size_t modal_i, std::size_t) { return modal_values[modal_i]; },
+            [&](std::size_t basis_i, std::size_t, Real value) { nodal_values[basis_i] = value; });
+        apply_low_order_combination(
+            data,
+            3u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_gradients[modal_i][component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_gradients[basis_i][component] = value;
+            });
+        apply_low_order_combination(
+            data,
+            9u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_hessians[modal_i].data()[component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_hessians[basis_i].data()[component] = value;
+            });
+    }
+
+    static void apply_sparse_basis_to_nodal_all_to(
+        const OrderData& data,
+        const std::vector<Real>& modal_values,
+        const std::vector<Gradient>& modal_gradients,
+        const std::vector<Hessian>& modal_hessians,
+        Real* SVMP_RESTRICT nodal_values,
+        Real* SVMP_RESTRICT nodal_gradients,
+        Real* SVMP_RESTRICT nodal_hessians) {
+        apply_low_order_combination(
+            data,
+            1u,
+            [&](std::size_t modal_i, std::size_t) { return modal_values[modal_i]; },
+            [&](std::size_t basis_i, std::size_t, Real value) { nodal_values[basis_i] = value; });
+        apply_low_order_combination(
+            data,
+            3u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_gradients[modal_i][component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_gradients[basis_i * 3u + component] = value;
+            });
+        apply_low_order_combination(
+            data,
+            9u,
+            [&](std::size_t modal_i, std::size_t component) {
+                return modal_hessians[modal_i].data()[component];
+            },
+            [&](std::size_t basis_i, std::size_t component, Real value) {
+                nodal_hessians[basis_i * 9u + component] = value;
+            });
+    }
+
     template <typename Sink>
     // Keep modal transform helpers free of forced-inline attributes unless
     // compiler-versioned benchmarks and LLVM IR checks show a stable benefit.
@@ -1312,6 +1982,11 @@ namespace lagrange_pyramid {
 
 const std::vector<math::Vector<Real, 3>>& nodes(int order) {
     return PyramidLagrangeCache::get(order).nodes;
+}
+
+void prewarm_scratch(int order, std::size_t max_qpts) {
+    const auto& data = PyramidLagrangeCache::get(order);
+    PyramidLagrangeCache::prewarm_scratch(data.modal_terms.size(), max_qpts);
 }
 
 void evaluate_values(int order,

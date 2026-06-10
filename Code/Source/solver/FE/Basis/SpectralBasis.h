@@ -40,6 +40,9 @@ namespace detail {
 struct SpectralModalMatrixData;
 } // namespace detail
 
+void prewarm_spectral_basis_scratch(std::size_t max_size,
+                                    std::size_t max_qpts = 0);
+
 class SpectralBasis : public BasisFunction {
 public:
     SpectralBasis(ElementType type, int order);

@@ -154,6 +154,7 @@ struct NewtonReport {
 
 struct NewtonWorkspace {
     std::unique_ptr<backends::GenericMatrix> jacobian{};
+    std::unique_ptr<backends::GenericMatrix> diagnostic_jacobian_scratch{};
     std::unique_ptr<backends::GenericVector> residual{};
     std::unique_ptr<backends::GenericVector> delta{};
     std::unique_ptr<backends::GenericVector> u_backup{};

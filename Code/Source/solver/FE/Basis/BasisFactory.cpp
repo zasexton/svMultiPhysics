@@ -56,6 +56,9 @@ enum class DescriptorOrderPolicy {
 
 using DescriptorFactory =
     std::shared_ptr<BasisFunction> (*)(const BasisRequest&, int);
+using RequestPredicate = bool (*)(const BasisRequest&);
+using RequestValidator = void (*)(const BasisRequest&);
+using RequestFactory = std::shared_ptr<BasisFunction> (*)(const BasisRequest&);
 
 struct BasisDescriptor {
     BasisType canonical_type;
@@ -65,6 +68,13 @@ struct BasisDescriptor {
     const char* negative_order_message;
     const char* explicit_order_message;
     DescriptorFactory factory;
+};
+
+struct BasisCreationDescriptor {
+    const char* name;
+    RequestPredicate matches;
+    RequestValidator validate;
+    RequestFactory factory;
 };
 
 template <typename BasisT>
@@ -567,48 +577,50 @@ std::vector<DofAssociation> build_quad_compatible_vector_associations(
     CompatibleTensorVectorBasis::Family family,
     const std::array<int, 2>& first_extents,
     const std::array<int, 2>& second_extents) {
+    struct QuadComponentRule {
+        int boundary_axis;
+        int low_entity;
+        int high_entity;
+        bool reverse_low;
+        bool reverse_high;
+    };
+
+    constexpr std::array<QuadComponentRule, 2> hcurl_rules{{
+        {1, 0, 2, false, true},
+        {0, 3, 1, true, false},
+    }};
+    constexpr std::array<QuadComponentRule, 2> hdiv_rules{{
+        {0, 3, 1, true, false},
+        {1, 0, 2, false, true},
+    }};
+
     std::vector<DofAssociation> associations;
     associations.reserve(static_cast<std::size_t>(first_extents[0] * first_extents[1] +
                                                   second_extents[0] * second_extents[1]));
 
     int cell_moment = 0;
 
-    if (family == CompatibleTensorVectorBasis::Family::HCurl) {
-        const int nx = first_extents[0];
-        const int ny = first_extents[1];
-        for (int j = 0; j < ny; ++j) {
-            for (int i = 0; i < nx; ++i) {
-                DofAssociation assoc{};
-                if (j == 0) {
-                    assoc.entity_type = DofEntity::Edge;
-                    assoc.entity_id = 0;
-                    assoc.moment_index = i;
-                } else if (j == ny - 1) {
-                    assoc.entity_type = DofEntity::Edge;
-                    assoc.entity_id = 2;
-                    assoc.moment_index = (nx - 1) - i;
-                } else {
-                    assoc.entity_type = DofEntity::Interior;
-                    assoc.entity_id = 0;
-                    assoc.moment_index = cell_moment++;
-                }
-                associations.push_back(assoc);
-            }
-        }
+    auto append_component = [&](const std::array<int, 2>& extents,
+                                const QuadComponentRule& rule) {
+        const int moment_axis = 1 - rule.boundary_axis;
+        for (int j = 0; j < extents[1]; ++j) {
+            for (int i = 0; i < extents[0]; ++i) {
+                const std::array<int, 2> coord{i, j};
+                const int boundary = coord[static_cast<std::size_t>(rule.boundary_axis)];
+                const int moment_coord = coord[static_cast<std::size_t>(moment_axis)];
+                const int moment_extent = extents[static_cast<std::size_t>(moment_axis)];
 
-        const int mx = second_extents[0];
-        const int my = second_extents[1];
-        for (int j = 0; j < my; ++j) {
-            for (int i = 0; i < mx; ++i) {
                 DofAssociation assoc{};
-                if (i == mx - 1) {
+                if (boundary == 0) {
                     assoc.entity_type = DofEntity::Edge;
-                    assoc.entity_id = 1;
-                    assoc.moment_index = j;
-                } else if (i == 0) {
+                    assoc.entity_id = rule.low_entity;
+                    assoc.moment_index =
+                        rule.reverse_low ? (moment_extent - 1) - moment_coord : moment_coord;
+                } else if (boundary == extents[static_cast<std::size_t>(rule.boundary_axis)] - 1) {
                     assoc.entity_type = DofEntity::Edge;
-                    assoc.entity_id = 3;
-                    assoc.moment_index = (my - 1) - j;
+                    assoc.entity_id = rule.high_entity;
+                    assoc.moment_index =
+                        rule.reverse_high ? (moment_extent - 1) - moment_coord : moment_coord;
                 } else {
                     assoc.entity_type = DofEntity::Interior;
                     assoc.entity_id = 0;
@@ -617,55 +629,19 @@ std::vector<DofAssociation> build_quad_compatible_vector_associations(
                 associations.push_back(assoc);
             }
         }
+    };
+
+    if (family == CompatibleTensorVectorBasis::Family::HCurl) {
+        append_component(first_extents, hcurl_rules[0]);
+        append_component(second_extents, hcurl_rules[1]);
         return associations;
     }
 
     BASIS_CHECK_CONFIG(family == CompatibleTensorVectorBasis::Family::HDiv,
                  "BasisFactory: unsupported compatible vector family");
 
-    const int nx = first_extents[0];
-    const int ny = first_extents[1];
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            DofAssociation assoc{};
-            if (i == nx - 1) {
-                assoc.entity_type = DofEntity::Edge;
-                assoc.entity_id = 1;
-                assoc.moment_index = j;
-            } else if (i == 0) {
-                assoc.entity_type = DofEntity::Edge;
-                assoc.entity_id = 3;
-                assoc.moment_index = (ny - 1) - j;
-            } else {
-                assoc.entity_type = DofEntity::Interior;
-                assoc.entity_id = 0;
-                assoc.moment_index = cell_moment++;
-            }
-            associations.push_back(assoc);
-        }
-    }
-
-    const int mx = second_extents[0];
-    const int my = second_extents[1];
-    for (int j = 0; j < my; ++j) {
-        for (int i = 0; i < mx; ++i) {
-            DofAssociation assoc{};
-            if (j == 0) {
-                assoc.entity_type = DofEntity::Edge;
-                assoc.entity_id = 0;
-                assoc.moment_index = i;
-            } else if (j == my - 1) {
-                assoc.entity_type = DofEntity::Edge;
-                assoc.entity_id = 2;
-                assoc.moment_index = (mx - 1) - i;
-            } else {
-                assoc.entity_type = DofEntity::Interior;
-                assoc.entity_id = 0;
-                assoc.moment_index = cell_moment++;
-            }
-            associations.push_back(assoc);
-        }
-    }
+    append_component(first_extents, hdiv_rules[0]);
+    append_component(second_extents, hdiv_rules[1]);
 
     return associations;
 }
@@ -687,6 +663,35 @@ std::vector<DofAssociation> build_hex_compatible_vector_associations(
     std::array<int, 12> edge_moment{};
     std::array<int, 6> face_moment{};
     int cell_moment = 0;
+
+    struct HcurlEdgeRule {
+        int first_side;
+        int second_side;
+        int edge_id;
+        bool reverse;
+    };
+
+    struct HcurlComponentRule {
+        std::array<int, 2> boundary_axes;
+        std::array<int, 2> first_axis_faces;
+        std::array<int, 2> second_axis_faces;
+        std::array<HcurlEdgeRule, 4> edge_rules;
+    };
+
+    constexpr std::array<std::array<int, 2>, 3> hdiv_component_faces{{
+        {{5, 3}},
+        {{2, 4}},
+        {{0, 1}},
+    }};
+
+    constexpr std::array<HcurlComponentRule, 3> hcurl_component_rules{{
+        {{{1, 2}}, {{2, 4}}, {{0, 1}},
+         {{{0, 0, 0, false}, {1, 0, 2, true}, {0, 1, 4, false}, {1, 1, 6, true}}}},
+        {{{0, 2}}, {{5, 3}}, {{0, 1}},
+         {{{1, 0, 1, false}, {0, 0, 3, true}, {1, 1, 5, false}, {0, 1, 7, true}}}},
+        {{{0, 1}}, {{5, 3}}, {{2, 4}},
+         {{{0, 0, 8, false}, {1, 0, 9, false}, {1, 1, 10, false}, {0, 1, 11, false}}}},
+    }};
 
     auto push_face = [&](int face_id) {
         DofAssociation assoc{};
@@ -713,145 +718,80 @@ std::vector<DofAssociation> build_hex_compatible_vector_associations(
     };
 
     if (family == CompatibleTensorVectorBasis::Family::HDiv) {
-        const auto& ex = component_extents[0];
-        for (int k = 0; k < ex[2]; ++k) {
-            for (int j = 0; j < ex[1]; ++j) {
-                for (int i = 0; i < ex[0]; ++i) {
-                    if (i == 0) {
-                        push_face(5);
-                    } else if (i == ex[0] - 1) {
-                        push_face(3);
-                    } else {
-                        push_interior();
+        for (std::size_t component = 0; component < component_extents.size(); ++component) {
+            const auto& extents = component_extents[component];
+            const auto& faces = hdiv_component_faces[component];
+            for (int k = 0; k < extents[2]; ++k) {
+                for (int j = 0; j < extents[1]; ++j) {
+                    for (int i = 0; i < extents[0]; ++i) {
+                        const std::array<int, 3> coord{i, j, k};
+                        const int axis_coord = coord[component];
+                        if (axis_coord == 0) {
+                            push_face(faces[0]);
+                        } else if (axis_coord == extents[component] - 1) {
+                            push_face(faces[1]);
+                        } else {
+                            push_interior();
+                        }
                     }
                 }
             }
         }
-
-        const auto& ey = component_extents[1];
-        for (int k = 0; k < ey[2]; ++k) {
-            for (int j = 0; j < ey[1]; ++j) {
-                for (int i = 0; i < ey[0]; ++i) {
-                    if (j == 0) {
-                        push_face(2);
-                    } else if (j == ey[1] - 1) {
-                        push_face(4);
-                    } else {
-                        push_interior();
-                    }
-                }
-            }
-        }
-
-        const auto& ez = component_extents[2];
-        for (int k = 0; k < ez[2]; ++k) {
-            for (int j = 0; j < ez[1]; ++j) {
-                for (int i = 0; i < ez[0]; ++i) {
-                    if (k == 0) {
-                        push_face(0);
-                    } else if (k == ez[2] - 1) {
-                        push_face(1);
-                    } else {
-                        push_interior();
-                    }
-                }
-            }
-        }
-
         return associations;
     }
 
     BASIS_CHECK_CONFIG(family == CompatibleTensorVectorBasis::Family::HCurl,
                  "BasisFactory: unsupported compatible vector family");
 
-    const auto& ex = component_extents[0];
-    for (int k = 0; k < ex[2]; ++k) {
-        for (int j = 0; j < ex[1]; ++j) {
-            for (int i = 0; i < ex[0]; ++i) {
-                const bool on_y = (j == 0 || j == ex[1] - 1);
-                const bool on_z = (k == 0 || k == ex[2] - 1);
-                if (on_y && on_z) {
-                    int edge_id = 0;
-                    int moment_index = i;
-                    if (j == 0 && k == 0) {
-                        edge_id = 0;
-                    } else if (j == ex[1] - 1 && k == 0) {
-                        edge_id = 2;
-                        moment_index = (ex[0] - 1) - i;
-                    } else if (j == 0 && k == ex[2] - 1) {
-                        edge_id = 4;
-                    } else {
-                        edge_id = 6;
-                        moment_index = (ex[0] - 1) - i;
-                    }
-                    push_edge(edge_id, moment_index);
-                } else if (on_y) {
-                    push_face(j == 0 ? 2 : 4);
-                } else if (on_z) {
-                    push_face(k == 0 ? 0 : 1);
-                } else {
-                    push_interior();
-                }
-            }
+    auto boundary_side = [](int coord, int extent) {
+        if (coord == 0) {
+            return 0;
         }
-    }
-
-    const auto& ey = component_extents[1];
-    for (int k = 0; k < ey[2]; ++k) {
-        for (int j = 0; j < ey[1]; ++j) {
-            for (int i = 0; i < ey[0]; ++i) {
-                const bool on_x = (i == 0 || i == ey[0] - 1);
-                const bool on_z = (k == 0 || k == ey[2] - 1);
-                if (on_x && on_z) {
-                    int edge_id = 0;
-                    int moment_index = j;
-                    if (i == ey[0] - 1 && k == 0) {
-                        edge_id = 1;
-                    } else if (i == 0 && k == 0) {
-                        edge_id = 3;
-                        moment_index = (ey[1] - 1) - j;
-                    } else if (i == ey[0] - 1 && k == ey[2] - 1) {
-                        edge_id = 5;
-                    } else {
-                        edge_id = 7;
-                        moment_index = (ey[1] - 1) - j;
-                    }
-                    push_edge(edge_id, moment_index);
-                } else if (on_x) {
-                    push_face(i == ey[0] - 1 ? 3 : 5);
-                } else if (on_z) {
-                    push_face(k == 0 ? 0 : 1);
-                } else {
-                    push_interior();
-                }
-            }
+        if (coord == extent - 1) {
+            return 1;
         }
-    }
+        return -1;
+    };
 
-    const auto& ez = component_extents[2];
-    for (int k = 0; k < ez[2]; ++k) {
-        for (int j = 0; j < ez[1]; ++j) {
-            for (int i = 0; i < ez[0]; ++i) {
-                const bool on_x = (i == 0 || i == ez[0] - 1);
-                const bool on_y = (j == 0 || j == ez[1] - 1);
-                if (on_x && on_y) {
-                    int edge_id = 0;
-                    if (i == 0 && j == 0) {
-                        edge_id = 8;
-                    } else if (i == ez[0] - 1 && j == 0) {
-                        edge_id = 9;
-                    } else if (i == ez[0] - 1 && j == ez[1] - 1) {
-                        edge_id = 10;
+    for (std::size_t component = 0; component < component_extents.size(); ++component) {
+        const auto& extents = component_extents[component];
+        const auto& rule = hcurl_component_rules[component];
+        for (int k = 0; k < extents[2]; ++k) {
+            for (int j = 0; j < extents[1]; ++j) {
+                for (int i = 0; i < extents[0]; ++i) {
+                    const std::array<int, 3> coord{i, j, k};
+                    const int first_axis = rule.boundary_axes[0];
+                    const int second_axis = rule.boundary_axes[1];
+                    const int first_side =
+                        boundary_side(coord[static_cast<std::size_t>(first_axis)],
+                                      extents[static_cast<std::size_t>(first_axis)]);
+                    const int second_side =
+                        boundary_side(coord[static_cast<std::size_t>(second_axis)],
+                                      extents[static_cast<std::size_t>(second_axis)]);
+
+                    if (first_side >= 0 && second_side >= 0) {
+                        const auto edge = std::find_if(
+                            rule.edge_rules.begin(),
+                            rule.edge_rules.end(),
+                            [&](const HcurlEdgeRule& candidate) {
+                                return candidate.first_side == first_side &&
+                                       candidate.second_side == second_side;
+                            });
+                        BASIS_CHECK_CONFIG(edge != rule.edge_rules.end(),
+                                     "BasisFactory: missing compatible HCurl edge association rule");
+                        const int moment_coord = coord[component];
+                        const int moment_extent = extents[component];
+                        push_edge(edge->edge_id,
+                                  edge->reverse
+                                      ? (moment_extent - 1) - moment_coord
+                                      : moment_coord);
+                    } else if (first_side >= 0) {
+                        push_face(rule.first_axis_faces[static_cast<std::size_t>(first_side)]);
+                    } else if (second_side >= 0) {
+                        push_face(rule.second_axis_faces[static_cast<std::size_t>(second_side)]);
                     } else {
-                        edge_id = 11;
+                        push_interior();
                     }
-                    push_edge(edge_id, k);
-                } else if (on_x) {
-                    push_face(i == ez[0] - 1 ? 3 : 5);
-                } else if (on_y) {
-                    push_face(j == 0 ? 2 : 4);
-                } else {
-                    push_interior();
                 }
             }
         }
@@ -959,94 +899,140 @@ std::shared_ptr<BasisFunction> create_compatible_tensor_vector_basis(
                                                          ElementType::Hex8);
 }
 
-} // namespace
+bool matches_hdiv_request(const BasisRequest& req) {
+    return req.continuity == Continuity::H_div;
+}
 
-std::shared_ptr<BasisFunction> basis_factory::create(const BasisRequest& req) {
-    // Vector-valued conforming bases take precedence
-    if (req.continuity == Continuity::H_div) {
-        validate_vector_factory_request(req, Continuity::H_div);
+bool matches_hcurl_request(const BasisRequest& req) {
+    return req.continuity == Continuity::H_curl;
+}
 
-        if (req.basis_type == BasisType::BSpline || req.basis_type == BasisType::NURBS) {
-            return create_compatible_tensor_vector_basis(req, Continuity::H_div);
-        }
+bool matches_c1_request(const BasisRequest& req) {
+    return req.continuity == Continuity::C1;
+}
 
-        const int order = *req.order;
+bool matches_bspline_request(const BasisRequest& req) {
+    return req.basis_type == BasisType::BSpline;
+}
 
-        // Allow explicit family selection via BasisType.
-        if (req.basis_type == BasisType::RaviartThomas) {
-            return std::make_shared<RaviartThomasBasis>(req.element_type, order);
-        }
-        if (req.basis_type == BasisType::BDM) {
-            return std::make_shared<BDMBasis>(req.element_type, order);
-        }
+bool matches_nurbs_request(const BasisRequest& req) {
+    return req.basis_type == BasisType::NURBS;
+}
 
-        // Default selection (BasisType::Lagrange): use Raviart-Thomas unless the
-        // caller explicitly requests BDM.
+bool matches_custom_request(const BasisRequest& req) {
+    return req.basis_type == BasisType::Custom;
+}
+
+bool matches_scalar_descriptor_request(const BasisRequest& req) {
+    return find_scalar_basis_descriptor(req.basis_type) != nullptr;
+}
+
+void validate_hdiv_request(const BasisRequest& req) {
+    validate_vector_factory_request(req, Continuity::H_div);
+}
+
+void validate_hcurl_request(const BasisRequest& req) {
+    validate_vector_factory_request(req, Continuity::H_curl);
+}
+
+std::shared_ptr<BasisFunction> create_hdiv_basis(const BasisRequest& req) {
+    if (req.basis_type == BasisType::BSpline || req.basis_type == BasisType::NURBS) {
+        return create_compatible_tensor_vector_basis(req, Continuity::H_div);
+    }
+
+    const int order = *req.order;
+    if (req.basis_type == BasisType::RaviartThomas) {
         return std::make_shared<RaviartThomasBasis>(req.element_type, order);
     }
-
-    if (req.continuity == Continuity::H_curl) {
-        validate_vector_factory_request(req, Continuity::H_curl);
-        if (req.basis_type == BasisType::BSpline || req.basis_type == BasisType::NURBS) {
-            return create_compatible_tensor_vector_basis(req, Continuity::H_curl);
-        }
-        return std::make_shared<NedelecBasis>(req.element_type, *req.order);
+    if (req.basis_type == BasisType::BDM) {
+        return std::make_shared<BDMBasis>(req.element_type, order);
     }
 
-    // L² (discontinuous) uses the same reference-space shape functions as C0.
-    // DOF ownership (element-local vs shared) is managed at the Space/Element level.
-    // Fall through to the BasisType switch intentionally.
-    if (req.continuity == Continuity::L2) {
-        // Intentional fall-through to BasisType dispatch below
-    }
+    return std::make_shared<RaviartThomasBasis>(req.element_type, order);
+}
 
-    // Intentional narrow contract: C¹ scalar bases route only through the
-    // cubic Hermite family on Line2/Quad4/Hex8.
-    else if (req.continuity == Continuity::C1) {
-        if (req.field_type == FieldType::Scalar) {
-            return std::make_shared<HermiteBasis>(
-                req.element_type,
-                require_basis_order(req,
-                                    "BasisFactory: C1/Hermite creation requires an explicit order",
-                                    "BasisFactory: C1/Hermite requires non-negative order"));
-        }
-        throw BasisConfigurationException("BasisFactory: C1 continuity currently supports scalar fields only",
+std::shared_ptr<BasisFunction> create_hcurl_basis(const BasisRequest& req) {
+    if (req.basis_type == BasisType::BSpline || req.basis_type == BasisType::NURBS) {
+        return create_compatible_tensor_vector_basis(req, Continuity::H_curl);
+    }
+    return std::make_shared<NedelecBasis>(req.element_type, *req.order);
+}
+
+std::shared_ptr<BasisFunction> create_c1_basis(const BasisRequest& req) {
+    if (req.field_type == FieldType::Scalar) {
+        return std::make_shared<HermiteBasis>(
+            req.element_type,
+            require_basis_order(req,
+                                "BasisFactory: C1/Hermite creation requires an explicit order",
+                                "BasisFactory: C1/Hermite requires non-negative order"));
+    }
+    throw BasisConfigurationException("BasisFactory: C1 continuity currently supports scalar fields only",
+                                      __FILE__, __LINE__, __func__);
+}
+
+std::shared_ptr<BasisFunction> create_custom_basis(const BasisRequest& req) {
+    if (req.custom_id.empty()) {
+        throw BasisConfigurationException("BasisFactory: BasisType::Custom requires a non-empty custom_id",
                                           __FILE__, __LINE__, __func__);
     }
 
-    if (req.basis_type == BasisType::BSpline) {
-        return create_bspline_basis(req);
-    }
-    if (req.basis_type == BasisType::NURBS) {
-        return create_nurbs_basis(req);
-    }
-    if (req.basis_type == BasisType::Custom) {
-        if (req.custom_id.empty()) {
-            throw BasisConfigurationException("BasisFactory: BasisType::Custom requires a non-empty custom_id",
+    basis_factory::CustomFactory factory;
+    {
+        std::lock_guard<std::mutex> lock(custom_registry_mutex());
+        const auto it = custom_registry().find(req.custom_id);
+        if (it == custom_registry().end()) {
+            throw BasisConfigurationException("BasisFactory: unknown custom basis id \"" + req.custom_id + "\"",
                                               __FILE__, __LINE__, __func__);
         }
-
-        basis_factory::CustomFactory factory;
-        {
-            std::lock_guard<std::mutex> lock(custom_registry_mutex());
-            const auto it = custom_registry().find(req.custom_id);
-            if (it == custom_registry().end()) {
-                throw BasisConfigurationException("BasisFactory: unknown custom basis id \"" + req.custom_id + "\"",
-                                                  __FILE__, __LINE__, __func__);
-            }
-            factory = it->second;
-        }
-
-        auto basis = factory(req);
-        if (!basis) {
-            throw BasisConstructionException("BasisFactory: custom basis factory returned null",
-                                             __FILE__, __LINE__, __func__);
-        }
-        return basis;
+        factory = it->second;
     }
 
-    if (const BasisDescriptor* descriptor = find_scalar_basis_descriptor(req.basis_type)) {
-        return create_from_descriptor(*descriptor, req);
+    auto basis = factory(req);
+    if (!basis) {
+        throw BasisConstructionException("BasisFactory: custom basis factory returned null",
+                                         __FILE__, __LINE__, __func__);
+    }
+    return basis;
+}
+
+std::shared_ptr<BasisFunction> create_scalar_descriptor_basis(const BasisRequest& req) {
+    const BasisDescriptor* descriptor = find_scalar_basis_descriptor(req.basis_type);
+    if (descriptor == nullptr) {
+        throw BasisConfigurationException("Unsupported basis type in BasisFactory",
+                                          __FILE__, __LINE__, __func__);
+    }
+    return create_from_descriptor(*descriptor, req);
+}
+
+constexpr std::array<BasisCreationDescriptor, 7> basis_creation_descriptors() {
+    return {{
+        {"H(div)", &matches_hdiv_request, &validate_hdiv_request, &create_hdiv_basis},
+        {"H(curl)", &matches_hcurl_request, &validate_hcurl_request, &create_hcurl_basis},
+        {"C1", &matches_c1_request, nullptr, &create_c1_basis},
+        {"BSpline", &matches_bspline_request, nullptr, &create_bspline_basis},
+        {"NURBS", &matches_nurbs_request, nullptr, &create_nurbs_basis},
+        {"Custom", &matches_custom_request, nullptr, &create_custom_basis},
+        {"Scalar", &matches_scalar_descriptor_request, nullptr, &create_scalar_descriptor_basis},
+    }};
+}
+
+} // namespace
+
+std::shared_ptr<BasisFunction> basis_factory::create(const BasisRequest& req) {
+    // L² (discontinuous) uses the same reference-space shape functions as C0.
+    // DOF ownership (element-local vs shared) is managed at the Space/Element level.
+    // The descriptor order is semantically meaningful: vector-valued conforming
+    // continuities take precedence, C1 has its narrow Hermite contract, and L2
+    // intentionally falls through to the scalar basis-family descriptor.
+    static constexpr auto descriptors = basis_creation_descriptors();
+    for (const BasisCreationDescriptor& descriptor : descriptors) {
+        if (!descriptor.matches(req)) {
+            continue;
+        }
+        if (descriptor.validate != nullptr) {
+            descriptor.validate(req);
+        }
+        return descriptor.factory(req);
     }
 
     throw BasisConfigurationException("Unsupported basis type in BasisFactory",

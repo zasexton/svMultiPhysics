@@ -56,6 +56,25 @@ TEST05_REFERENCE_PROFILE_TIMES = {
     18: [0.156, 0.219, 0.281, 0.343, 0.406, 0.468, 0.531],
     38: [0.156, 0.219, 0.281, 0.343, 0.406, 0.468, 0.531, 0.593],
 }
+TEST02_TANK_LENGTH = 3.22
+TEST02_TANK_WIDTH = 1.00
+TEST02_TANK_HEIGHT = 1.00
+TEST02_INITIAL_COLUMN_LENGTH = 1.228
+TEST02_INITIAL_COLUMN_HEIGHT = 0.55
+TEST02_GATE_X = TEST02_TANK_LENGTH - TEST02_INITIAL_COLUMN_LENGTH
+TEST02_OBSTACLE_X_MIN = 0.6635
+TEST02_OBSTACLE_LENGTH = 0.161
+TEST02_OBSTACLE_WIDTH = 0.403
+TEST02_OBSTACLE_HEIGHT = 0.161
+TEST02_OBSTACLE_X_MAX = TEST02_OBSTACLE_X_MIN + TEST02_OBSTACLE_LENGTH
+TEST02_OBSTACLE_Z_MIN = 0.5 * (TEST02_TANK_WIDTH - TEST02_OBSTACLE_WIDTH)
+TEST02_OBSTACLE_Z_MAX = 0.5 * (TEST02_TANK_WIDTH + TEST02_OBSTACLE_WIDTH)
+TEST02_HEIGHT_PROBES = {
+    "H1": 0.496,
+    "H2": 0.992,
+    "H3": 1.488,
+    "H4": 2.632,
+}
 
 warnings.filterwarnings("ignore", message="Meshio doesn't know keyword.*")
 
@@ -189,6 +208,26 @@ def centered_cut_segmented_coordinates(
     anchors = [float(start), float(stop)]
     half_width = 0.5 * max_spacing
     for cut in cut_values:
+        cut = float(cut)
+        lower = max(float(start), cut - half_width)
+        upper = min(float(stop), cut + half_width)
+        if lower < cut < upper:
+            anchors.extend([lower, upper])
+    return segmented_coordinates(anchors, max_spacing)
+
+
+def aligned_and_centered_coordinates(
+    start: float,
+    stop: float,
+    *,
+    aligned_values: Iterable[float] = (),
+    centered_cut_values: Iterable[float] = (),
+    max_spacing: float,
+    centering_gap: float | None = None,
+) -> np.ndarray:
+    anchors = [float(start), float(stop), *(float(value) for value in aligned_values)]
+    half_width = 0.5 * (max_spacing if centering_gap is None else centering_gap)
+    for cut in centered_cut_values:
         cut = float(cut)
         lower = max(float(start), cut - half_width)
         upper = min(float(stop), cut + half_width)
@@ -496,6 +535,15 @@ def dam_break_wet_bed_phi(
     return np.minimum(bed_phi, column_phi)
 
 
+def dam_break_dry_bed_column_phi(
+    points: np.ndarray,
+    *,
+    gate_x: float,
+    dam_height: float,
+) -> np.ndarray:
+    return np.maximum(gate_x - points[:, 0], points[:, 1] - dam_height)
+
+
 def dam_break_wet_bed_pressure(
     points: np.ndarray,
     *,
@@ -597,6 +645,13 @@ def write_solver_xml(
     include_pressure_constraints: bool = True,
     hydrostatic_pressure_field_name: str | None = None,
     enable_level_set_maintenance: bool = True,
+    enable_level_set_reinitialization: bool | None = None,
+    enable_level_set_volume_correction: bool | None = None,
+    volume_correction_cadence_steps: str = "5",
+    volume_correction_tolerance: str = "1.0e-5",
+    volume_correction_max_iterations: str = "50",
+    momentum_source_file_path: str | None = None,
+    rotating_frame_angular_velocity_file_path: str | None = None,
     wet_extension_advection_velocity_method: str | None = None,
     enable_adaptive_time_loop: bool = False,
     adaptive_time_loop_min_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MIN_DT,
@@ -606,6 +661,8 @@ def write_solver_xml(
     adaptive_time_loop_increase_factor: str = TEST05_ADAPTIVE_TIME_LOOP_INCREASE_FACTOR,
     adaptive_time_loop_target_newton_iterations: str = TEST05_ADAPTIVE_TIME_LOOP_TARGET_NEWTON_ITERATIONS,
     adaptive_time_loop_max_steps_multiplier: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER,
+    newton_line_search_fail_on_no_reduction: bool = False,
+    newton_line_search_max_iterations: str = "10",
 ) -> None:
     face_blocks = "\n".join(
         f"""  <Add_face name="{name}">
@@ -704,8 +761,15 @@ def write_solver_xml(
         else ""
     )
     jit_module_options = "jit=true; jit_specialization=true"
-    enable_level_set_maintenance_text = (
-        "true" if enable_level_set_maintenance else "false"
+    if enable_level_set_reinitialization is None:
+        enable_level_set_reinitialization = enable_level_set_maintenance
+    if enable_level_set_volume_correction is None:
+        enable_level_set_volume_correction = enable_level_set_maintenance
+    enable_level_set_reinitialization_text = (
+        "true" if enable_level_set_reinitialization else "false"
+    )
+    enable_level_set_volume_correction_text = (
+        "true" if enable_level_set_volume_correction else "false"
     )
     if wet_extension_advection_velocity_method is None:
         level_set_velocity_block = """  <Velocity_source>coupled_field</Velocity_source>
@@ -718,6 +782,20 @@ def write_solver_xml(
   <Use_wet_extension_advection_velocity>true</Use_wet_extension_advection_velocity>
   <Source_velocity_field_name>Velocity</Source_velocity_field_name>
   <Wet_extension_advection_velocity_method>{wet_extension_advection_velocity_method}</Wet_extension_advection_velocity_method>"""
+    momentum_source_block = (
+        "\n  <Momentum_source_temporal_and_spatial_values_file_path>"
+        f"{momentum_source_file_path}"
+        "</Momentum_source_temporal_and_spatial_values_file_path>"
+        if momentum_source_file_path is not None
+        else ""
+    )
+    rotating_frame_angular_velocity_block = (
+        "\n  <Rotating_frame_angular_velocity_temporal_values_file_path>"
+        f"{rotating_frame_angular_velocity_file_path}"
+        "</Rotating_frame_angular_velocity_temporal_values_file_path>"
+        if rotating_frame_angular_velocity_file_path is not None
+        else ""
+    )
 
     if fitted:
         equations = f"""
@@ -739,7 +817,7 @@ def write_solver_xml(
   <Density>{WATER_DENSITY}</Density>
   <Force_x>0.0</Force_x>
   <Force_y>-9.81</Force_y>
-  <Force_z>0.0</Force_z>
+  <Force_z>0.0</Force_z>{momentum_source_block}{rotating_frame_angular_velocity_block}
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{hydrostatic_pressure_field_block}{pressure_constraint_block}
@@ -809,15 +887,15 @@ def write_solver_xml(
 {level_set_velocity_block}
   <Enable_SUPG>true</Enable_SUPG>
   <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <Enable_reinitialization>{enable_level_set_maintenance_text}</Enable_reinitialization>
+  <Enable_reinitialization>{enable_level_set_reinitialization_text}</Enable_reinitialization>
   <Reinitialization_method>projection</Reinitialization_method>
   <Reinitialization_cadence_steps>5</Reinitialization_cadence_steps>
   <Reinitialization_max_iterations>4</Reinitialization_max_iterations>
-  <Enable_volume_correction>{enable_level_set_maintenance_text}</Enable_volume_correction>
+  <Enable_volume_correction>{enable_level_set_volume_correction_text}</Enable_volume_correction>
   <Volume_correction_use_initial_volume>true</Volume_correction_use_initial_volume>
-  <Volume_correction_cadence_steps>5</Volume_correction_cadence_steps>
-  <Volume_correction_tolerance>1.0e-5</Volume_correction_tolerance>
-  <Volume_correction_max_iterations>50</Volume_correction_max_iterations>
+  <Volume_correction_cadence_steps>{volume_correction_cadence_steps}</Volume_correction_cadence_steps>
+  <Volume_correction_tolerance>{volume_correction_tolerance}</Volume_correction_tolerance>
+  <Volume_correction_max_iterations>{volume_correction_max_iterations}</Volume_correction_max_iterations>
 
   <Output type="Spatial">
     <Level_set>true</Level_set>
@@ -851,7 +929,7 @@ def write_solver_xml(
   <Density>{WATER_DENSITY}</Density>
   <Force_x>0.0</Force_x>
   <Force_y>-9.81</Force_y>
-  <Force_z>0.0</Force_z>
+  <Force_z>0.0</Force_z>{momentum_source_block}{rotating_frame_angular_velocity_block}
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 {fill_height:.6g} 0.0</Hydrostatic_pressure_reference_point>{hydrostatic_pressure_field_block}{pressure_constraint_block}
@@ -905,6 +983,11 @@ def write_solver_xml(
   <Adaptive_time_loop_increase_factor>{adaptive_time_loop_increase_factor}</Adaptive_time_loop_increase_factor>
   <Adaptive_time_loop_target_newton_iterations>{adaptive_time_loop_target_newton_iterations}</Adaptive_time_loop_target_newton_iterations>
   <Adaptive_time_loop_max_steps_multiplier>{adaptive_time_loop_max_steps_multiplier}</Adaptive_time_loop_max_steps_multiplier>"""
+    newton_line_search_block = ""
+    if newton_line_search_fail_on_no_reduction:
+        newton_line_search_block = f"""
+  <Newton_line_search_fail_on_no_reduction>true</Newton_line_search_fail_on_no_reduction>
+  <Newton_line_search_max_iterations>{newton_line_search_max_iterations}</Newton_line_search_max_iterations>"""
 
     xml = f"""<?xml version="1.0" encoding="UTF-8" ?>
 <svMultiPhysicsFile version="0.1">
@@ -916,7 +999,7 @@ def write_solver_xml(
   <Number_of_time_steps>{time_steps}</Number_of_time_steps>
   <Time_step_size>{time_step:.8g}</Time_step_size>
   <Spectral_radius_of_infinite_time_step>0.50</Spectral_radius_of_infinite_time_step>
-  <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>{adaptive_time_loop_block}
+  <Searched_file_name_to_trigger_stop>STOP_SIM</Searched_file_name_to_trigger_stop>{adaptive_time_loop_block}{newton_line_search_block}
 
   <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
   <Combine_time_series>true</Combine_time_series>
@@ -986,29 +1069,47 @@ def write_case(
     enable_cut_cell_stabilization: bool = True,
     use_cut_metadata_scale: bool = False,
     use_blockschur_solver: bool = False,
+    use_direct_fluid_solver: bool = False,
     include_pressure_constraints: bool = True,
     hydrostatic_pressure_field_name: str | None = None,
     enable_level_set_maintenance: bool = True,
+    enable_level_set_reinitialization: bool | None = None,
+    enable_level_set_volume_correction: bool | None = None,
+    volume_correction_cadence_steps: str = "5",
+    volume_correction_tolerance: str = "1.0e-5",
+    volume_correction_max_iterations: str = "50",
+    momentum_source_file_path: str | None = None,
+    rotating_frame_angular_velocity_file_path: str | None = None,
+    wet_extension_advection_velocity_method: str | None = None,
+    enable_adaptive_time_loop: bool = False,
+    adaptive_time_loop_min_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MIN_DT,
+    adaptive_time_loop_max_dt: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_DT,
+    adaptive_time_loop_max_retries: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_RETRIES,
+    adaptive_time_loop_decrease_factor: str = TEST05_ADAPTIVE_TIME_LOOP_DECREASE_FACTOR,
+    adaptive_time_loop_increase_factor: str = TEST05_ADAPTIVE_TIME_LOOP_INCREASE_FACTOR,
+    adaptive_time_loop_target_newton_iterations: str = TEST05_ADAPTIVE_TIME_LOOP_TARGET_NEWTON_ITERATIONS,
+    adaptive_time_loop_max_steps_multiplier: str = TEST05_ADAPTIVE_TIME_LOOP_MAX_STEPS_MULTIPLIER,
+    newton_line_search_fail_on_no_reduction: bool = False,
+    newton_line_search_max_iterations: str = "10",
     gauge_pressure: float | Callable[[np.ndarray], float] = 0.0,
     record_gauge_metadata: bool = False,
     pressure_gauge_verification: Callable[[dict], dict] | None = None,
 ) -> None:
     obstacles = obstacles or []
-    prepare_case_dir(case_dir)
-    mesh_dir = case_dir / "mesh" / mesh_subdir
-    surface_dir = mesh_dir / "mesh-surfaces"
-    mesh_dir.mkdir(parents=True, exist_ok=True)
-
     if grid_factory is not None:
-        if obstacles:
-            raise ValueError("grid_factory cases do not support obstacles")
         grid = grid_factory()
+        grid = remove_cells_inside(grid, obstacles)
     else:
         max_volume = h**3 / 6.0
         grid = build_tetgen_grid(domain, max_volume=max_volume, obstacles=obstacles)
         grid = run_mmg(grid, hmin=0.35 * h, hmax=1.25 * h, hausd=0.15 * h)
         grid = remove_cells_inside(grid, obstacles)
     add_solution_arrays(grid, phi=phi, pressure=pressure, fitted=fitted)
+
+    prepare_case_dir(case_dir)
+    mesh_dir = case_dir / "mesh" / mesh_subdir
+    surface_dir = mesh_dir / "mesh-surfaces"
+    mesh_dir.mkdir(parents=True, exist_ok=True)
 
     mesh_path = mesh_dir / "mesh-complete.mesh.vtu"
     grid.save(mesh_path, binary=False)
@@ -1040,22 +1141,59 @@ def write_case(
         enable_cut_cell_stabilization=enable_cut_cell_stabilization,
         use_cut_metadata_scale=use_cut_metadata_scale,
         use_blockschur_solver=use_blockschur_solver,
+        use_direct_fluid_solver=use_direct_fluid_solver,
         include_pressure_constraints=include_pressure_constraints,
         hydrostatic_pressure_field_name=hydrostatic_pressure_field_name,
         enable_level_set_maintenance=enable_level_set_maintenance,
+        enable_level_set_reinitialization=enable_level_set_reinitialization,
+        enable_level_set_volume_correction=enable_level_set_volume_correction,
+        volume_correction_cadence_steps=volume_correction_cadence_steps,
+        volume_correction_tolerance=volume_correction_tolerance,
+        volume_correction_max_iterations=volume_correction_max_iterations,
+        momentum_source_file_path=momentum_source_file_path,
+        rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
+        wet_extension_advection_velocity_method=wet_extension_advection_velocity_method,
+        enable_adaptive_time_loop=enable_adaptive_time_loop,
+        adaptive_time_loop_min_dt=adaptive_time_loop_min_dt,
+        adaptive_time_loop_max_dt=adaptive_time_loop_max_dt,
+        adaptive_time_loop_max_retries=adaptive_time_loop_max_retries,
+        adaptive_time_loop_decrease_factor=adaptive_time_loop_decrease_factor,
+        adaptive_time_loop_increase_factor=adaptive_time_loop_increase_factor,
+        adaptive_time_loop_target_newton_iterations=adaptive_time_loop_target_newton_iterations,
+        adaptive_time_loop_max_steps_multiplier=adaptive_time_loop_max_steps_multiplier,
+        newton_line_search_fail_on_no_reduction=newton_line_search_fail_on_no_reduction,
+        newton_line_search_max_iterations=newton_line_search_max_iterations,
     )
 
-    print(
-        f"{case_dir.relative_to(ROOT)}: {grid.n_points} points, {grid.n_cells} tetrahedra"
-    )
+    try:
+        display_path = case_dir.relative_to(ROOT)
+    except ValueError:
+        display_path = case_dir
+    print(f"{display_path}: {grid.n_points} points, {grid.n_cells} tetrahedra")
 
 
-def sloshing_metadata(name: str, fitted: bool, fill_height: float) -> dict:
+def sloshing_metadata(
+    name: str,
+    fitted: bool,
+    fill_height: float,
+    *,
+    mesh_tools: list[str] | None = None,
+) -> dict:
+    # SPHERIC Test10 Figure 1 gives Sensor 1 at the low-fill lateral-impact
+    # wall location: left wall, 93 mm above the bottom, centered through the
+    # uploaded 1x breadth.
+    sensor1 = {
+        "name": "Sensor1",
+        "case": "lateral_water_1x",
+        "coordinates": [0.0, fill_height, 0.031],
+        "source": "SPHERIC Test10 Figure 1",
+        "role": "literature_pressure_history_sensor",
+    }
     return {
         "benchmark": name,
         "representation": "fitted_ale" if fitted else "unfitted_level_set",
         "source_urls": ["https://www.spheric-sph.org/tests/test-10"],
-        "mesh_tools": ["PyVista", "TetGen", "MMG"],
+        "mesh_tools": mesh_tools or ["PyVista", "TetGen", "MMG"],
         "dimensions_m": {
             "tank_length": 0.900,
             "tank_breadth_1x": 0.062,
@@ -1065,7 +1203,14 @@ def sloshing_metadata(name: str, fitted: bool, fill_height: float) -> dict:
         "notes": [
             "The mesh encodes the 1x rectangular tank and still-water fill level.",
             "The published roll-angle history and pressure records are external benchmark data.",
+            "The pressure_gauge entry is an interior pressure anchor; pressure history comparisons use pressure_sensor.",
         ],
+        "rotation_axis": {
+            "point": [0.45, 0.0, 0.031],
+            "direction": [0.0, 0.0, 1.0],
+            "source": "SPHERIC Test10 Figure 1: rotation axis at the center of the bottom line",
+        },
+        "pressure_sensor": sensor1,
     }
 
 
@@ -1083,6 +1228,43 @@ def generate_spheric_test10() -> None:
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
     lateral_fill = 0.093
     water = Box(tank.xmin, tank.xmax, tank.ymin, lateral_fill, tank.zmin, tank.zmax)
+    structured_max_spacing = 0.045
+    interface_centering_gap = 0.04
+    x_coords = segmented_coordinates(
+        (tank.xmin, 0.5 * (tank.xmin + tank.xmax), tank.xmax),
+        max_spacing=structured_max_spacing,
+    )
+    z_coords = segmented_coordinates(
+        (tank.zmin, 0.5 * (tank.zmin + tank.zmax), tank.zmax),
+        max_spacing=0.031,
+    )
+    fitted_y_coords = segmented_coordinates(
+        (water.ymin, 0.5 * lateral_fill, water.ymax),
+        max_spacing=structured_max_spacing,
+    )
+    unfitted_y_coords = aligned_and_centered_coordinates(
+        tank.ymin,
+        tank.ymax,
+        centered_cut_values=(lateral_fill,),
+        max_spacing=structured_max_spacing,
+        centering_gap=interface_centering_gap,
+    )
+
+    def fitted_grid_factory() -> pv.UnstructuredGrid:
+        return structured_tet_grid(
+            x_coords,
+            fitted_y_coords,
+            z_coords,
+            mirror_z_midplane=True,
+        )
+
+    def unfitted_grid_factory() -> pv.UnstructuredGrid:
+        return structured_tet_grid(
+            x_coords,
+            unfitted_y_coords,
+            z_coords,
+            mirror_z_midplane=True,
+        )
 
     write_case(
         case_dir=ROOT / "fitted_ale" / "spheric_test10_lateral_water_1x",
@@ -1090,12 +1272,18 @@ def generate_spheric_test10() -> None:
         domain=water,
         phi=None,
         fill_height=lateral_fill,
-        gauge_point=(0.45, lateral_fill, 0.031),
+        grid_factory=fitted_grid_factory,
+        gauge_point=(0.45, 0.5 * lateral_fill, 0.031),
         gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
         record_gauge_metadata=True,
         pressure_gauge_verification=sloshing_pressure_gauge_verification,
-        metadata=sloshing_metadata("SPHERIC Test 10 lateral water 1x", True, lateral_fill),
-        h=0.045,
+        metadata=sloshing_metadata(
+            "SPHERIC Test 10 lateral water 1x",
+            True,
+            lateral_fill,
+            mesh_tools=["PyVista", "structured_tet_grid"],
+        ),
+        h=structured_max_spacing,
         fitted=True,
         time_step=0.001,
         time_steps=40,
@@ -1107,16 +1295,26 @@ def generate_spheric_test10() -> None:
         domain=tank,
         phi=lambda points: points[:, 1] - lateral_fill,
         fill_height=lateral_fill,
-        gauge_point=(0.45, lateral_fill, 0.031),
+        grid_factory=unfitted_grid_factory,
+        gauge_point=(0.45, 0.5 * lateral_fill, 0.031),
         gauge_pressure=lambda point: hydrostatic_pressure_at_point(point, lateral_fill),
         record_gauge_metadata=True,
         pressure_gauge_verification=sloshing_pressure_gauge_verification,
-        metadata=sloshing_metadata("SPHERIC Test 10 lateral water 1x", False, lateral_fill),
-        h=0.055,
+        metadata=sloshing_metadata(
+            "SPHERIC Test 10 lateral water 1x",
+            False,
+            lateral_fill,
+            mesh_tools=["PyVista", "structured_tet_grid"],
+        ),
+        h=structured_max_spacing,
         fitted=False,
         time_step=0.001,
         time_steps=40,
         include_top_wall_bc=True,
+        active_domain="LevelSetNegative",
+        use_direct_fluid_solver=True,
+        momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
+        rotating_frame_angular_velocity_file_path="bc/test10_lateral_water_1x_roll_angular_velocity.dat",
     )
 
 
@@ -1247,23 +1445,72 @@ def generate_spheric_test05() -> None:
             include_pressure_constraints=True,
             hydrostatic_pressure_field_name="Pressure",
             enable_level_set_maintenance=False,
+            enable_level_set_reinitialization=False,
+            enable_level_set_volume_correction=True,
+            volume_correction_cadence_steps="1",
+            volume_correction_tolerance="1.0e-10",
+            volume_correction_max_iterations="50",
             wet_extension_advection_velocity_method="nearest_interface_point",
             enable_adaptive_time_loop=True,
+            newton_line_search_fail_on_no_reduction=True,
+            newton_line_search_max_iterations="6",
         )
 
 
 def generate_spheric_test02() -> None:
-    tank = Box(0.0, 3.22, 0.0, 1.00, 0.0, 1.00)
-    water_column = Box(3.22 - 0.58, 3.22, 0.0, 0.55, 0.0, 1.00)
-    obstacle = Box(3.22 - 2.40 - 0.20, 3.22 - 2.40 + 0.20, 0.0, 0.16, 0.42, 0.58)
+    tank = Box(0.0, TEST02_TANK_LENGTH, 0.0, TEST02_TANK_HEIGHT, 0.0, TEST02_TANK_WIDTH)
+    obstacle = Box(
+        TEST02_OBSTACLE_X_MIN,
+        TEST02_OBSTACLE_X_MAX,
+        0.0,
+        TEST02_OBSTACLE_HEIGHT,
+        TEST02_OBSTACLE_Z_MIN,
+        TEST02_OBSTACLE_Z_MAX,
+    )
+    structured_max_spacing = 0.10
+    interface_centering_gap = 0.08
+    x_coords = aligned_and_centered_coordinates(
+        tank.xmin,
+        tank.xmax,
+        aligned_values=(TEST02_OBSTACLE_X_MIN, TEST02_OBSTACLE_X_MAX, *TEST02_HEIGHT_PROBES.values()),
+        centered_cut_values=(TEST02_GATE_X,),
+        max_spacing=structured_max_spacing,
+        centering_gap=interface_centering_gap,
+    )
+    y_coords = aligned_and_centered_coordinates(
+        tank.ymin,
+        tank.ymax,
+        aligned_values=(TEST02_OBSTACLE_HEIGHT,),
+        centered_cut_values=(TEST02_INITIAL_COLUMN_HEIGHT,),
+        max_spacing=structured_max_spacing,
+        centering_gap=interface_centering_gap,
+    )
+    z_coords = segmented_coordinates(
+        (tank.zmin, TEST02_OBSTACLE_Z_MIN, 0.5, TEST02_OBSTACLE_Z_MAX, tank.zmax),
+        max_spacing=structured_max_spacing,
+    )
+
+    def grid_factory() -> pv.UnstructuredGrid:
+        return structured_tet_grid(x_coords, y_coords, z_coords, mirror_z_midplane=True)
 
     write_case(
         case_dir=ROOT / "unfitted_level_set" / "spheric_test02_dambreak_obstacle",
         mesh_subdir="background",
         domain=tank,
-        phi=lambda points: signed_distance_to_box(points, water_column),
-        fill_height=0.55,
-        gauge_point=(3.22 - 0.58, 0.55, 0.50),
+        phi=lambda points: dam_break_dry_bed_column_phi(
+            points, gate_x=TEST02_GATE_X, dam_height=TEST02_INITIAL_COLUMN_HEIGHT
+        ),
+        fill_height=TEST02_INITIAL_COLUMN_HEIGHT,
+        gauge_point=(2.632, 0.10, 0.50),
+        gauge_pressure=lambda point: hydrostatic_pressure_at_point(
+            point, TEST02_INITIAL_COLUMN_HEIGHT
+        ),
+        record_gauge_metadata=True,
+        pressure_gauge_verification=lambda gauge_metadata: {
+            "current_prescribed_pressure_matches_initial_hydrostatic": True,
+            "initial_pressure_error_after_constraint": 0.0,
+            "anchor_purpose": "pressure_nullspace_anchor_not_literature_sensor",
+        },
         metadata={
             "benchmark": "SPHERIC Test 02 three-dimensional dam break with obstacle",
             "representation": "unfitted_level_set",
@@ -1271,31 +1518,68 @@ def generate_spheric_test02() -> None:
                 "https://www.spheric-sph.org/tests/test-02",
                 "https://www.frontiersin.org/journals/earth-science/articles/10.3389/feart.2020.00346/full",
             ],
-            "mesh_tools": ["PyVista", "TetGen", "MMG"],
+            "mesh_tools": ["PyVista", "structured_tet_grid"],
             "dimensions_m": {
-                "tank_length": 3.22,
-                "tank_width": 1.00,
-                "tank_height": 1.00,
-                "initial_column_length": 0.58,
-                "initial_column_x_min": 3.22 - 0.58,
-                "initial_column_x_max": 3.22,
-                "initial_column_height": 0.55,
-                "obstacle_length": 0.40,
-                "obstacle_width": 0.16,
-                "obstacle_height": 0.16,
-                "obstacle_center_x": 3.22 - 2.40,
+                "tank_length": TEST02_TANK_LENGTH,
+                "tank_width": TEST02_TANK_WIDTH,
+                "tank_height": TEST02_TANK_HEIGHT,
+                "initial_column_length": TEST02_INITIAL_COLUMN_LENGTH,
+                "initial_column_x_min": TEST02_GATE_X,
+                "initial_column_x_max": TEST02_TANK_LENGTH,
+                "initial_column_height": TEST02_INITIAL_COLUMN_HEIGHT,
+                "obstacle_flow_direction_length": TEST02_OBSTACLE_LENGTH,
+                "obstacle_lateral_width": TEST02_OBSTACLE_WIDTH,
+                "obstacle_height": TEST02_OBSTACLE_HEIGHT,
+                "obstacle_x_min": TEST02_OBSTACLE_X_MIN,
+                "obstacle_x_max": TEST02_OBSTACLE_X_MAX,
+                "obstacle_center_x": 0.5
+                * (TEST02_OBSTACLE_X_MIN + TEST02_OBSTACLE_X_MAX),
+                "obstacle_z_min": TEST02_OBSTACLE_Z_MIN,
+                "obstacle_z_max": TEST02_OBSTACLE_Z_MAX,
                 "obstacle_center_z": 0.50,
+                "height_probe_x_positions": TEST02_HEIGHT_PROBES,
+                "structured_max_spacing": structured_max_spacing,
+                "interface_centering_gap": interface_centering_gap,
+                "previous_incorrect_initial_column_length": 0.58,
+                "previous_incorrect_obstacle_flow_direction_length": 0.40,
+                "previous_incorrect_obstacle_lateral_width": 0.16,
             },
             "notes": [
+                "The geometry follows the official SPHERIC Test02/Kleefsman setup: water initially occupies x >= 1.992 m and height <= 0.55 m.",
+                "The structured mesh aligns tank and obstacle geometry while centering the top and gate free-surface cuts between mesh planes.",
                 "The obstacle is represented as an internal no-slip boundary in the background mesh.",
-                "The initial level-set field is negative inside the retained water column.",
+                "The initial level-set field is negative inside the retained water column and remains negative on contacted tank walls.",
+                "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
+                "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
+                "The promoted OOP unfitted case uses nearest-interface-point wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition.",
             ],
         },
-        h=0.16,
+        grid_factory=grid_factory,
+        h=structured_max_spacing,
         fitted=False,
         time_step=0.001,
         time_steps=120,
         obstacles=[obstacle],
+        active_domain="LevelSetNegative",
+        enable_cut_cell_stabilization=True,
+        use_cut_metadata_scale=False,
+        use_direct_fluid_solver=True,
+        include_pressure_constraints=True,
+        enable_level_set_maintenance=False,
+        enable_level_set_reinitialization=False,
+        enable_level_set_volume_correction=True,
+        volume_correction_cadence_steps="1",
+        volume_correction_tolerance="1.0e-10",
+        volume_correction_max_iterations="50",
+        wet_extension_advection_velocity_method="nearest_interface_point",
+        enable_adaptive_time_loop=True,
+        adaptive_time_loop_min_dt="1.0e-7",
+        adaptive_time_loop_max_dt="1.0e-3",
+        adaptive_time_loop_max_retries="10",
+        adaptive_time_loop_target_newton_iterations="6",
+        adaptive_time_loop_max_steps_multiplier="256",
+        newton_line_search_fail_on_no_reduction=True,
+        newton_line_search_max_iterations="6",
     )
 
 

@@ -33,6 +33,33 @@ namespace FE = svmp::FE;
 namespace level_set = svmp::FE::level_set;
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+[[nodiscard]] std::shared_ptr<svmp::Mesh> buildNativeTetra4Mesh()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/3,
+                            X_ref,
+                            cell2vertex_offsets,
+                            cell2vertex,
+                            {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
 [[nodiscard]] std::shared_ptr<svmp::Mesh> buildNativeQuad9Mesh()
 {
     auto base = std::make_shared<svmp::MeshBase>();
@@ -459,6 +486,26 @@ struct Quad9ScalarFieldFixture {
 };
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+struct NativeLinearTetraP2ScalarFieldFixture {
+    std::shared_ptr<svmp::Mesh> mesh{};
+    FE::systems::FESystem system;
+    FE::FieldId phi{FE::INVALID_FIELD_ID};
+
+    NativeLinearTetraP2ScalarFieldFixture()
+        : mesh(buildNativeTetra4Mesh()),
+          system(mesh)
+    {
+        auto scalar_space =
+            std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, /*order=*/2);
+        phi = system.addField(FE::systems::FieldSpec{
+            .name = "phi",
+            .space = scalar_space,
+            .components = 1,
+        });
+        system.setup();
+    }
+};
+
 struct NativeQuad9ScalarFieldFixture {
     std::shared_ptr<svmp::Mesh> mesh{};
     FE::systems::FESystem system;
@@ -551,6 +598,36 @@ struct NativeQuad9ScalarFieldFixture {
     if (projection.unassigned_dofs != 0u) {
         throw std::runtime_error(
             "planeCoefficients: native high-order projection left unassigned coefficients");
+    }
+    return coefficients;
+}
+
+[[nodiscard]] std::vector<FE::Real> planeCoefficients(
+    const NativeLinearTetraP2ScalarFieldFixture& fixture,
+    FE::Real scale)
+{
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    std::vector<FE::Real> mesh_values(fixture.mesh->n_vertices(), 0.0);
+    for (std::size_t vertex = 0; vertex < fixture.mesh->n_vertices(); ++vertex) {
+        const auto x =
+            fixture.mesh->get_vertex_coords(static_cast<svmp::index_t>(vertex));
+        mesh_values[vertex] = scale * (x[0] - FE::Real{0.25});
+    }
+
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), 0.0);
+    std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+    const auto projection =
+        fixture.system.projectMeshVertexValuesToFieldCoefficients(
+            fixture.phi,
+            std::span<const FE::Real>(mesh_values.data(), mesh_values.size()),
+            /*mesh_components=*/1,
+            std::span<FE::Real>(coefficients.data(), coefficients.size()),
+            std::span<std::uint8_t>(assigned.data(), assigned.size()),
+            "LevelSetReinitialization linear-tetra P2 projection");
+    if (projection.unassigned_dofs != 0u) {
+        throw std::runtime_error(
+            "planeCoefficients: native P2 tetra projection left unassigned coefficients");
     }
     return coefficients;
 }
@@ -696,6 +773,69 @@ TEST(LevelSetReinitialization, GenericProjectionFailsClosedForHighOrderCellNodeD
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(LevelSetReinitialization, FESystemOverloadRepairsP2EdgeDofsOnLinearTetraMesh)
+{
+    const NativeLinearTetraP2ScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto distorted = planeCoefficients(fixture, FE::Real{4.0});
+    const auto offset = static_cast<std::size_t>(
+        fixture.system.fieldDofOffset(fixture.phi));
+
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 1.0;
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(fixture.system.dofHandler().getNumDofs()), 2.0);
+    std::copy(distorted.begin(),
+              distorted.end(),
+              solution.begin() + static_cast<std::ptrdiff_t>(offset));
+
+    std::vector<FE::Real> repaired_solution;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        fixture.system,
+        fixture.phi,
+        options,
+        solution,
+        repaired_solution);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.repaired_dofs, 10u);
+    EXPECT_EQ(result.interface_fragments, 1u);
+    EXPECT_EQ(result.cut_cells, 1u);
+    ASSERT_EQ(repaired_solution.size(), solution.size());
+
+    EXPECT_NEAR(repaired_solution[offset + static_cast<std::size_t>(
+                    entity_map->getVertexDofs(0).front())],
+                -0.25,
+                1.0e-12);
+    EXPECT_NEAR(repaired_solution[offset + static_cast<std::size_t>(
+                    entity_map->getVertexDofs(1).front())],
+                0.75,
+                1.0e-12);
+    EXPECT_NEAR(repaired_solution[offset + static_cast<std::size_t>(
+                    entity_map->getVertexDofs(2).front())],
+                -std::sqrt(0.125),
+                1.0e-12);
+    EXPECT_NEAR(repaired_solution[offset + static_cast<std::size_t>(
+                    entity_map->getVertexDofs(3).front())],
+                -std::sqrt(0.125),
+                1.0e-12);
+
+    for (FE::GlobalIndex edge = 0;
+         edge < static_cast<FE::GlobalIndex>(fixture.mesh->local_mesh().n_edges());
+         ++edge) {
+        const auto edge_dofs = entity_map->getEdgeDofs(edge);
+        ASSERT_EQ(edge_dofs.size(), 1u);
+        const auto dof = static_cast<std::size_t>(edge_dofs.front());
+        EXPECT_TRUE(std::isfinite(repaired_solution[offset + dof]));
+        EXPECT_NE(repaired_solution[offset + dof], distorted[dof])
+            << "edge=" << edge << " dof=" << dof;
+    }
+}
+
 TEST(LevelSetReinitialization, FESystemOverloadRepairsNativeHighOrderCellNodeDofs)
 {
     const NativeQuad9ScalarFieldFixture fixture;

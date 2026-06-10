@@ -52,6 +52,7 @@
   <Min_iterations>1</Min_iterations>
   <Max_iterations>4</Max_iterations>
   <Tolerance>1.0e-4</Tolerance>
+  <Module_options>jit=true; jit_specialization=true</Module_options>
 
   <Level_set_field_name>phi</Level_set_field_name>
   <Operator_tag>equations</Operator_tag>
@@ -88,21 +89,24 @@
     <Max_iterations>50</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>
     <Tolerance>1.0e-4</Tolerance>
-    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
+    <Absolute_tolerance>1.0e-10</Absolute_tolerance>
   </LS>
 </Add_equation>
 
 <Add_equation type="fluid">
   <Coupled>true</Coupled>
   <Min_iterations>1</Min_iterations>
-  <Max_iterations>8</Max_iterations>
-  <Tolerance>1.0e-4</Tolerance>
+  <Max_iterations>12</Max_iterations>
+  <Tolerance>2.0e-2</Tolerance>
+  <Module_options>jit=true; jit_specialization=true</Module_options>
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Density>998.2</Density>
   <Force_x>0.0</Force_x>
   <Force_y>-9.81</Force_y>
   <Force_z>0.0</Force_z>
+  <Momentum_source_temporal_and_spatial_values_file_path>bc/test10_lateral_water_1x_roll_body_force.dat</Momentum_source_temporal_and_spatial_values_file_path>
+  <Rotating_frame_angular_velocity_temporal_values_file_path>bc/test10_lateral_water_1x_roll_angular_velocity.dat</Rotating_frame_angular_velocity_temporal_values_file_path>
   <Hydrostatic_pressure_initialization>true</Hydrostatic_pressure_initialization>
   <Hydrostatic_pressure_reference>0.0</Hydrostatic_pressure_reference>
   <Hydrostatic_pressure_reference_point>0.0 0.093 0.0</Hydrostatic_pressure_reference_point>
@@ -124,9 +128,9 @@
     <Volume>true</Volume>
   </Output>
 
-  <LS type="GMRES">
-    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+  <LS type="Direct">
+    <Linear_algebra type="eigen">
+      <Preconditioner>none</Preconditioner>
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>80</Krylov_space_dimension>
@@ -167,6 +171,8 @@
     <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
     <Active_domain_method>CutVolume</Active_domain_method>
+    <Enable_velocity_extension>true</Enable_velocity_extension>
+    <Velocity_extension_diffusivity>1.0</Velocity_extension_diffusivity>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
     <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>

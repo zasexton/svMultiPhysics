@@ -30,9 +30,23 @@ struct BSplineDerivativeScratch {
     std::vector<Real> values;
     std::vector<Real> first;
     std::vector<Real> second;
+
+    void prewarm(std::size_t max_active_support) {
+        const std::size_t n = std::max<std::size_t>(max_active_support, 1u);
+        ndu.reserve(n * n);
+        left.reserve(n);
+        right.reserve(n);
+        a.reserve(2u * n);
+        ders.reserve(3u * n);
+        values.reserve(n);
+        first.reserve(n);
+        second.reserve(n);
+    }
 };
 
 BSplineDerivativeScratch& bspline_derivative_scratch() {
+    // Scratch is intentionally thread-local: assembly and benchmark callers run
+    // evaluation on persistent worker threads, so capacity is reused by thread.
     static thread_local BSplineDerivativeScratch scratch;
     return scratch;
 }
@@ -238,6 +252,10 @@ void basis_funs_and_derivatives_flat(const std::vector<Real>& knots,
 
 } // namespace
 
+void prewarm_bspline_basis_scratch(std::size_t max_active_support) {
+    bspline_derivative_scratch().prewarm(max_active_support);
+}
+
 BSplineBasis::BSplineBasis(int degree, std::vector<Real> knots)
     : degree_(degree),
       knots_(std::move(knots)) {
@@ -362,26 +380,24 @@ void BSplineBasis::evaluate_point_strided(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    static thread_local std::vector<Real> active_values;
-    static thread_local std::vector<Real> active_first;
-    static thread_local std::vector<Real> active_second;
+    auto& scratch = bspline_derivative_scratch();
 
     const auto active = evaluate_active_support(
         xi,
-        active_values,
-        (gradients_out != nullptr || hessians_out != nullptr) ? &active_first : nullptr,
-        hessians_out != nullptr ? &active_second : nullptr);
+        scratch.values,
+        (gradients_out != nullptr || hessians_out != nullptr) ? &scratch.first : nullptr,
+        hessians_out != nullptr ? &scratch.second : nullptr);
 
     for (std::size_t offset = 0; offset < active.count; ++offset) {
         const std::size_t i = active.first_index + offset;
         if (values_out != nullptr) {
-            values_out[i * output_stride + q] = active_values[offset];
+            values_out[i * output_stride + q] = scratch.values[offset];
         }
         if (gradients_out != nullptr) {
-            gradients_out[(i * 3u) * output_stride + q] = active_first[offset];
+            gradients_out[(i * 3u) * output_stride + q] = scratch.first[offset];
         }
         if (hessians_out != nullptr) {
-            hessians_out[(i * 9u) * output_stride + q] = active_second[offset];
+            hessians_out[(i * 9u) * output_stride + q] = scratch.second[offset];
         }
     }
 }

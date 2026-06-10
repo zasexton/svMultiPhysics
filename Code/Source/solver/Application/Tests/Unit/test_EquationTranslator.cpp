@@ -286,6 +286,28 @@ TEST(EquationTranslatorDomainDefaults, BuildInputKeepsMomentumSourceFieldOptions
   EXPECT_EQ(input.equation_params.at("Auto_register_momentum_source_field").value, "false");
 }
 
+TEST(EquationTranslatorDomainDefaults, BuildInputKeepsRotatingFrameCoriolisOptions)
+{
+  auto mesh = buildTranslatorMesh();
+  auto params = parseEquationXml(R"xml(
+<Add_equation type="fluid">
+  <Rotating_frame_coriolis>true</Rotating_frame_coriolis>
+  <Rotating_frame_angular_velocity_temporal_values_file_path>bc/omega.dat</Rotating_frame_angular_velocity_temporal_values_file_path>
+  <Viscosity model="Constant">
+    <Value>1.003e-3</Value>
+  </Viscosity>
+</Add_equation>
+)xml");
+
+  const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
+
+  ASSERT_TRUE(input.equation_params.at("Rotating_frame_coriolis").defined);
+  EXPECT_EQ(input.equation_params.at("Rotating_frame_coriolis").value, "true");
+  ASSERT_TRUE(input.equation_params.at("Rotating_frame_angular_velocity_temporal_values_file_path").defined);
+  EXPECT_EQ(input.equation_params.at("Rotating_frame_angular_velocity_temporal_values_file_path").value,
+            "bc/omega.dat");
+}
+
 TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
 {
   auto mesh = buildTranslatorMesh();

@@ -812,6 +812,17 @@ void ParallelAssembler::setCutIntegrationContext(const CutIntegrationContext* co
     local_assembler_.setCutIntegrationContext(context);
 }
 
+void ParallelAssembler::setAssemblyDiagnosticContext(
+    const AssemblyDiagnosticContext& context) noexcept
+{
+    local_assembler_.setAssemblyDiagnosticContext(context);
+}
+
+void ParallelAssembler::clearAssemblyDiagnosticContext() noexcept
+{
+    local_assembler_.clearAssemblyDiagnosticContext();
+}
+
 void ParallelAssembler::setCoupledValues(std::span<const Real> integrals,
                                          std::span<const Real> aux_state) noexcept
 {

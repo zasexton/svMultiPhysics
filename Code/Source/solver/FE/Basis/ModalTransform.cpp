@@ -25,9 +25,9 @@ struct ModalTransform::SolverStorage {
 
 struct ModalTransform::TransformData {
     std::size_t size{0};
-    std::vector<Real> vandermonde_flat;
     std::shared_ptr<const SolverStorage> vandermonde_solver;
     std::vector<std::vector<Real>> vandermonde_rows;
+    Real condition_estimate{0};
     mutable std::once_flag vandermonde_inv_once;
     mutable std::vector<std::vector<Real>> vandermonde_inv;
 };
@@ -98,7 +98,7 @@ ModalTransform::get_or_build_transform_data(const BasisFunction& modal_basis,
     const std::size_t n = nodal_basis.size();
     auto data = std::make_shared<TransformData>();
     data->size = n;
-    data->vandermonde_flat.assign(n * n, Real(0));
+    std::vector<Real> vandermonde_flat(n * n, Real(0));
     data->vandermonde_rows.assign(n, std::vector<Real>(n, Real(0)));
     const auto& nodes = nodal_basis.nodes();
     std::vector<Real> row;
@@ -111,12 +111,19 @@ ModalTransform::get_or_build_transform_data(const BasisFunction& modal_basis,
         }
         std::copy(row.begin(), row.end(), data->vandermonde_rows[i].begin());
         std::copy(row.begin(), row.end(),
-                  data->vandermonde_flat.begin() + static_cast<std::ptrdiff_t>(i * n));
+                  vandermonde_flat.begin() + static_cast<std::ptrdiff_t>(i * n));
     }
 
+    const auto diagnostics =
+        math::dense_matrix_diagnostics(std::span<const Real>(vandermonde_flat.data(),
+                                                               vandermonde_flat.size()),
+                                       n, n, "ModalTransform Vandermonde");
     auto storage = std::make_shared<SolverStorage>();
     storage->solver =
-        math::factor_dense_matrix(data->vandermonde_flat, n, "ModalTransform Vandermonde");
+        math::factor_dense_matrix(std::move(vandermonde_flat), n, "ModalTransform Vandermonde");
+    data->condition_estimate = std::isfinite(diagnostics.condition_estimate)
+                                   ? diagnostics.condition_estimate
+                                   : storage->solver.diagnostics.condition_estimate;
     data->vandermonde_solver = std::move(storage);
     data->vandermonde_inv.clear();
 
@@ -164,7 +171,7 @@ std::vector<Real> ModalTransform::modal_to_nodal(const std::vector<Real>& modal_
     }
     std::vector<Real> nodal(n, Real(0));
     for (std::size_t i = 0; i < n; ++i) {
-        const Real* row = transform_data_->vandermonde_flat.data() + i * n;
+        const Real* row = transform_data_->vandermonde_rows[i].data();
         for (std::size_t j = 0; j < n; ++j) {
             nodal[i] += row[j] * modal_coeffs[j];
         }
@@ -183,15 +190,7 @@ std::vector<Real> ModalTransform::nodal_to_modal(const std::vector<Real>& nodal_
 }
 
 Real ModalTransform::condition_number() const {
-    const std::size_t n = transform_data_->size;
-    const auto diagnostics =
-        math::dense_matrix_diagnostics(std::span<const Real>(transform_data_->vandermonde_flat.data(),
-                                                               transform_data_->vandermonde_flat.size()),
-                                         n, n, "ModalTransform Vandermonde");
-    if (std::isfinite(diagnostics.condition_estimate)) {
-        return diagnostics.condition_estimate;
-    }
-    return transform_data_->vandermonde_solver->solver.diagnostics.condition_estimate;
+    return transform_data_->condition_estimate;
 }
 
 } // namespace basis

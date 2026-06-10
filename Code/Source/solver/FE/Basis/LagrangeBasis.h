@@ -15,10 +15,13 @@
 
 #include "BasisFunction.h"
 #include <array>
+#include <cstddef>
 
 namespace svmp {
 namespace FE {
 namespace basis {
+
+void prewarm_lagrange_basis_scratch(int max_order, std::size_t max_qpts = 0);
 
 /**
  * @brief Complete nodal H1 Lagrange basis on canonical reference topologies
@@ -108,6 +111,7 @@ private:
     std::vector<TensorNodeIndex> tensor_indices_;
     std::vector<std::array<int, 4>> simplex_exponents_;
     std::vector<WedgeNodeIndex> wedge_indices_;
+    std::vector<std::size_t> wedge_node_by_tri_z_;
 
     // Precomputed Horner-form coefficients of the 1D Lagrange basis.
     // Layout per axis (n_axis = nodes_1d_.size() = order_+1):

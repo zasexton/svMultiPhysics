@@ -15,7 +15,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -89,6 +93,92 @@ namespace {
         oss << "|...";
     }
     return oss.str();
+}
+
+[[nodiscard]] std::string formatDofList(std::span<const GlobalIndex> values)
+{
+    if (values.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        oss << values[i];
+    }
+    return oss.str();
+}
+
+[[nodiscard]] const char* entityKindName(dofs::EntityKind kind) noexcept
+{
+    switch (kind) {
+    case dofs::EntityKind::Vertex:
+        return "Vertex";
+    case dofs::EntityKind::Edge:
+        return "Edge";
+    case dofs::EntityKind::Face:
+        return "Face";
+    case dofs::EntityKind::Cell:
+        return "Cell";
+    }
+    return "Unknown";
+}
+
+void appendSampleDofsFromEnv(const char* raw, std::vector<GlobalIndex>& out)
+{
+    if (raw == nullptr || raw[0] == '\0') {
+        return;
+    }
+
+    std::string text(raw);
+    for (auto& ch : text) {
+        if (ch == ',' || ch == '|' || ch == ';') {
+            ch = ' ';
+        }
+    }
+
+    std::istringstream stream(text);
+    std::string token;
+    while (stream >> token) {
+        const auto dash_pos = token.find('-', token[0] == '-' ? 1u : 0u);
+        try {
+            if (dash_pos != std::string::npos) {
+                const auto first = static_cast<GlobalIndex>(
+                    std::stoll(token.substr(0u, dash_pos)));
+                const auto last = static_cast<GlobalIndex>(
+                    std::stoll(token.substr(dash_pos + 1u)));
+                const auto step = first <= last ? GlobalIndex{1} : GlobalIndex{-1};
+                for (GlobalIndex value = first;; value += step) {
+                    out.push_back(value);
+                    if (value == last) {
+                        break;
+                    }
+                }
+            } else {
+                out.push_back(static_cast<GlobalIndex>(std::stoll(token)));
+            }
+        } catch (const std::exception&) {
+            FE_LOG_INFO(
+                "LevelSetActiveSideVertexDirichletConstraint: diagnostic=level_set_active_side_vertex_constraint_sample_parse skipped_token='" +
+                token + "'");
+        }
+    }
+}
+
+[[nodiscard]] std::vector<GlobalIndex> sampledConstraintDofs(
+    const std::string& field_name)
+{
+    std::vector<GlobalIndex> out;
+    appendSampleDofsFromEnv(
+        std::getenv("SVMP_LEVEL_SET_ACTIVE_CONSTRAINT_SAMPLE_DOFS"), out);
+    if (field_name == "Pressure" || field_name == "p") {
+        appendSampleDofsFromEnv(
+            std::getenv("SVMP_ACTIVE_PRESSURE_CONSTRAINT_SAMPLE_DOFS"), out);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
 }
 
 struct EntityDofSupportCounts {
@@ -314,6 +404,16 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
     std::vector<unsigned char> has_active_dof_support(
         static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
+    std::vector<Real> active_dof_retained_measure(
+        static_cast<std::size_t>(n_field_dofs), Real{0.0});
+    std::vector<Real> active_dof_min_volume_fraction(
+        static_cast<std::size_t>(n_field_dofs),
+        std::numeric_limits<Real>::infinity());
+    std::vector<Real> active_dof_max_volume_fraction(
+        static_cast<std::size_t>(n_field_dofs),
+        -std::numeric_limits<Real>::infinity());
+    std::vector<std::size_t> active_dof_retained_rule_count(
+        static_cast<std::size_t>(n_field_dofs), std::size_t{0u});
     std::size_t active_support_cells = 0u;
     std::size_t active_support_cells_from_volume_support = 0u;
     std::size_t active_support_cells_from_cut_adjacent_facets = 0u;
@@ -394,6 +494,34 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             mark_vertex_support(static_cast<GlobalIndex>(vertices[i]));
         }
         return true;
+    };
+    const auto record_retained_rule_support =
+        [&](GlobalIndex cell, const geometry::CutQuadratureRule& rule) {
+        if (cell < 0 || static_cast<std::size_t>(cell) >= mesh.n_cells()) {
+            return;
+        }
+        const Real measure =
+            std::isfinite(rule.measure) && rule.measure > Real{0.0}
+                ? rule.measure
+                : Real{0.0};
+        const bool have_volume_fraction =
+            std::isfinite(rule.volume_fraction);
+        for (const auto local_dof : dh.getCellDofs(cell)) {
+            if (local_dof < 0 || local_dof >= n_field_dofs) {
+                continue;
+            }
+            const auto idx = static_cast<std::size_t>(local_dof);
+            active_dof_retained_measure[idx] += measure;
+            ++active_dof_retained_rule_count[idx];
+            if (have_volume_fraction) {
+                active_dof_min_volume_fraction[idx] =
+                    std::min(active_dof_min_volume_fraction[idx],
+                             rule.volume_fraction);
+                active_dof_max_volume_fraction[idx] =
+                    std::max(active_dof_max_volume_fraction[idx],
+                             rule.volume_fraction);
+            }
+        }
     };
     const auto mark_cut_adjacent_facet_active =
         [&](GlobalIndex cell, GlobalIndex facet) -> bool {
@@ -486,14 +614,17 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     };
 
     const auto* cut_context = system.cutIntegrationContext();
-    if (interface_marker_ >= 0 && cut_context != nullptr &&
-        cut_context->hasGeneratedVolumeMarker(interface_marker_)) {
+    const bool has_retained_generated_volume_support =
+        interface_marker_ >= 0 && cut_context != nullptr &&
+        cut_context->hasGeneratedVolumeMarker(interface_marker_);
+    if (has_retained_generated_volume_support) {
         support_mode = "retained_cut_volume";
         const auto active_rule_indices =
             cut_context->generatedVolumeRuleIndexSpanForMarkerAndSide(
                 interface_marker_,
                 toCutIntegrationSide(active_side_));
         const auto& metadata = cut_context->metadata();
+        const auto& volume_rules = cut_context->volumeRules();
         for (const auto index : active_rule_indices) {
             if (index >= metadata.size()) {
                 continue;
@@ -502,6 +633,10 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             const auto cell = rule_metadata.parent_entity >= 0
                                   ? rule_metadata.parent_entity
                                   : rule_metadata.cell;
+            if (index < volume_rules.size()) {
+                record_retained_rule_support(
+                    static_cast<GlobalIndex>(cell), volume_rules[index]);
+            }
             if (mark_cell_active(static_cast<GlobalIndex>(cell))) {
                 ++active_support_cells_from_volume_support;
             }
@@ -543,7 +678,7 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         }
     }
 
-    if (interface_marker_ >= 0 && cut_context != nullptr) {
+    if (has_retained_generated_volume_support) {
         const auto* facet_set =
             cut_context->facetSetHandleForMarker(interface_marker_);
         if (facet_set != nullptr && facet_set->hasFacetMetadata()) {
@@ -563,12 +698,25 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
                 }
             }
         }
+    } else if (interface_marker_ >= 0 && cut_context != nullptr &&
+               cut_context->facetSetHandleForMarker(interface_marker_) != nullptr) {
+        support_mode += "+cut_adjacent_facets_skipped_no_retained_volume";
     }
 #else
     std::vector<unsigned char> has_active_support(
         static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
     std::vector<unsigned char> has_active_dof_support(
         static_cast<std::size_t>(n_field_dofs), static_cast<unsigned char>(0));
+    std::vector<Real> active_dof_retained_measure(
+        static_cast<std::size_t>(n_field_dofs), Real{0.0});
+    std::vector<Real> active_dof_min_volume_fraction(
+        static_cast<std::size_t>(n_field_dofs),
+        std::numeric_limits<Real>::infinity());
+    std::vector<Real> active_dof_max_volume_fraction(
+        static_cast<std::size_t>(n_field_dofs),
+        -std::numeric_limits<Real>::infinity());
+    std::vector<std::size_t> active_dof_retained_rule_count(
+        static_cast<std::size_t>(n_field_dofs), std::size_t{0u});
     std::size_t active_support_cells = 0u;
     std::size_t active_support_cells_from_volume_support = 0u;
     std::size_t active_support_cells_from_cut_adjacent_facets = 0u;
@@ -631,6 +779,78 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
             incrementEntityDofCount(
                 constrained_owned_by_entity, *entity_map, local_dof);
         }
+    }
+
+    for (const auto local_dof : sampledConstraintDofs(rec.name)) {
+        std::ostringstream sample;
+        sample << "LevelSetActiveSideVertexDirichletConstraint: diagnostic=level_set_active_side_vertex_constraint_sample"
+               << " field='" << rec.name << "'"
+               << " level_set_field='" << level_set_field_name_ << "'"
+               << " local_dof=" << local_dof;
+        if (local_dof < 0 || local_dof >= n_field_dofs) {
+            sample << " status=out_of_range"
+                   << " total_dofs=" << n_field_dofs;
+            FE_LOG_INFO(sample.str());
+            continue;
+        }
+
+        const GlobalIndex global_dof = offset + local_dof;
+        const bool owned_dof = owned.contains(global_dof);
+        const bool active_dof_support =
+            has_active_dof_support[static_cast<std::size_t>(local_dof)] !=
+            static_cast<unsigned char>(0);
+        sample << " status=ok"
+               << " global_dof=" << global_dof
+               << " owned=" << (owned_dof ? 1 : 0)
+               << " active_dof_support=" << (active_dof_support ? 1 : 0)
+               << " inactive_constraint=" << (active_dof_support ? 0 : 1)
+               << " constrained_owned="
+               << ((!active_dof_support && owned_dof) ? 1 : 0)
+               << " retained_rule_count="
+               << active_dof_retained_rule_count[static_cast<std::size_t>(local_dof)]
+               << " retained_measure="
+               << active_dof_retained_measure[static_cast<std::size_t>(local_dof)];
+        if (active_dof_retained_rule_count[
+                static_cast<std::size_t>(local_dof)] > 0u &&
+            std::isfinite(active_dof_min_volume_fraction[
+                static_cast<std::size_t>(local_dof)])) {
+            sample << " retained_min_volume_fraction="
+                   << active_dof_min_volume_fraction[
+                          static_cast<std::size_t>(local_dof)]
+                   << " retained_max_volume_fraction="
+                   << active_dof_max_volume_fraction[
+                          static_cast<std::size_t>(local_dof)];
+        } else {
+            sample << " retained_min_volume_fraction=none"
+                   << " retained_max_volume_fraction=none";
+        }
+
+        const auto entity = entity_map->getDofEntity(local_dof);
+        if (!entity.has_value()) {
+            sample << " entity_kind=Unknown entity_id=-1 entity_dofs=none";
+            FE_LOG_INFO(sample.str());
+            continue;
+        }
+
+        sample << " entity_kind=" << entityKindName(entity->kind)
+               << " entity_id=" << entity->id
+               << " entity_dofs="
+               << formatDofList(
+                      entity_map->getEntityDofs(entity->kind, entity->id));
+        if (entity->kind == dofs::EntityKind::Vertex &&
+            entity->id >= 0 && entity->id < n_vertices) {
+            const auto vertex = entity->id;
+            const auto phi = level_set.values[
+                static_cast<std::size_t>(vertex) * level_set.components];
+            const bool active_sign = isActive(phi, isovalue_, active_side_);
+            const bool active_support =
+                has_active_support[static_cast<std::size_t>(vertex)] !=
+                static_cast<unsigned char>(0);
+            sample << " vertex_phi=" << phi
+                   << " vertex_active_sign=" << (active_sign ? 1 : 0)
+                   << " vertex_active_support=" << (active_support ? 1 : 0);
+        }
+        FE_LOG_INFO(sample.str());
     }
 
     std::ostringstream oss;

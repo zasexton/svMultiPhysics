@@ -12,6 +12,7 @@
 #include "OrthogonalPolynomials.h"
 #include "PyramidModalBasis.h"
 #include "Math/DenseLinearAlgebra.h"
+#include "Math/DenseTransformKernels.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -26,10 +27,8 @@ namespace basis {
 namespace detail {
 
 struct SpectralModalMatrixData {
-    // Row-major [basis, modal] transform used by independent derivative calls.
+    // Canonical row-major [basis, modal] modal-to-nodal transform.
     std::vector<Real> modal_to_nodal_by_basis;
-    // Row-major [modal, basis] transform used by fused accumulation.
-    std::vector<Real> modal_to_nodal_by_modal;
 };
 
 } // namespace detail
@@ -88,9 +87,42 @@ struct SpectralScratch {
     std::vector<math::Vector<Real, 3>> face_points;
     std::vector<math::Vector<Real, 3>> axis_points;
     pyramid_modal::EvaluationPoint pyramid_point;
+
+    void prewarm(std::size_t max_size, std::size_t max_qpts) {
+        const std::size_t batched_size = max_size * std::max<std::size_t>(max_qpts, 1u);
+        lx.reserve(max_size);
+        dx.reserve(max_size);
+        ddx.reserve(max_size);
+        ly.reserve(max_size);
+        dy.reserve(max_size);
+        ddy.reserve(max_size);
+        lz.reserve(max_size);
+        dz.reserve(max_size);
+        ddz.reserve(max_size);
+        modal_values.reserve(batched_size);
+        modal_gradient_components.reserve(batched_size * 3u);
+        modal_hessian_components.reserve(batched_size * 9u);
+        nodal_gradient_components.reserve(max_size * 3u);
+        nodal_hessian_components.reserve(max_size * 9u);
+        modal_gradients.reserve(max_size);
+        modal_hessians.reserve(max_size);
+        face_values.reserve(max_size);
+        face_gradients.reserve(max_size * 3u);
+        face_hessians.reserve(max_size * 9u);
+        axis_values.reserve(max_size);
+        axis_gradients.reserve(max_size);
+        axis_hessians.reserve(max_size);
+        axis_temp_values.reserve(max_size);
+        axis_temp_gradients.reserve(max_size);
+        axis_temp_hessians.reserve(max_size);
+        face_points.reserve(max_qpts);
+        axis_points.reserve(max_qpts);
+    }
 };
 
 SpectralScratch& spectral_scratch() {
+    // Scratch is intentionally thread-local: production assembly uses a
+    // persistent worker-thread team, so buffers stay warm on each worker.
     static thread_local SpectralScratch scratch;
     return scratch;
 }
@@ -191,6 +223,11 @@ void append_unique_point(std::vector<math::Vector<Real, 3>>& points,
 }
 
 } // namespace
+
+void prewarm_spectral_basis_scratch(std::size_t max_size,
+                                    std::size_t max_qpts) {
+    spectral_scratch().prewarm(max_size, max_qpts);
+}
 
 SpectralBasis::SpectralBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order), size_(0) {
@@ -719,8 +756,7 @@ void SpectralBasis::build_inverse_vandermonde() {
     math::validate_dense_inverse_diagnostics(inverse_result, n, label);
 
     auto matrices = std::make_shared<detail::SpectralModalMatrixData>();
-    matrices->modal_to_nodal_by_modal = std::move(inverse_result.inverse);
-    const std::vector<Real>& inverse = matrices->modal_to_nodal_by_modal;
+    const std::vector<Real>& inverse = inverse_result.inverse;
     matrices->modal_to_nodal_by_basis.assign(n * n, Real(0));
     for (std::size_t basis_i = 0; basis_i < n; ++basis_i) {
         for (std::size_t modal_j = 0; modal_j < n; ++modal_j) {
@@ -741,10 +777,6 @@ void SpectralBasis::build_inverse_vandermonde() {
 // compiler-versioned benchmarks and LLVM IR checks show a stable benefit.
 const std::vector<Real>& SpectralBasis::modal_to_nodal_by_basis() const noexcept {
     return modal_matrices_->modal_to_nodal_by_basis;
-}
-
-const std::vector<Real>& SpectralBasis::modal_to_nodal_by_modal() const noexcept {
-    return modal_matrices_->modal_to_nodal_by_modal;
 }
 
 void SpectralBasis::apply_modal_to_nodal(std::span<const Real> modal,
@@ -1008,11 +1040,11 @@ void SpectralBasis::evaluate_spectral_flat(const math::Vector<Real, 3>& xi,
                 (need_gradients || need_hessians) ? &modal_gradient : nullptr,
                 need_hessians ? &modal_hessian : nullptr);
 
-            const Real* coeffs = modal_to_nodal_by_modal().data() + modal_j * size_;
+            const Real* transform = modal_to_nodal_by_basis().data();
             const Real* modal_gradient_data = modal_gradient.data();
             const Real* modal_hessian_data = modal_hessian.data();
             for (std::size_t basis_i = 0; basis_i < size_; ++basis_i) {
-                const Real coeff = coeffs[basis_i];
+                const Real coeff = transform[basis_i * size_ + modal_j];
                 if (need_values) {
                     values_out[basis_i * layout.output_stride + layout.q] +=
                         coeff * modal_value;
@@ -1845,61 +1877,65 @@ void SpectralBasis::write_modal_batch_strided(
         }
     }
 
-    for (std::size_t basis_i = 0; basis_i < size_; ++basis_i) {
-        Real* value_row = need_values ? values_out + basis_i * output_stride : nullptr;
-        Real* gradient_rows[3] = {};
-        Real* hessian_rows[9] = {};
-
-        if (need_values) {
-            std::fill_n(value_row, num_qpts, Real(0));
+    const Real* transform = modal_to_nodal_by_basis().data();
+    if (need_values) {
+        math::dense_transform_batched_row_major(
+            transform,
+            size_,
+            size_,
+            scratch.modal_values.data(),
+            num_qpts,
+            values_out,
+            output_stride,
+            num_qpts);
+    }
+    if (need_gradients) {
+        const auto active_components = static_cast<std::size_t>(components);
+        for (std::size_t component = 0; component < active_components; ++component) {
+            math::dense_transform_batched_row_major(
+                transform,
+                size_,
+                size_,
+                scratch.modal_gradient_components.data() + component * num_qpts,
+                3u * num_qpts,
+                gradients_out + component * output_stride,
+                3u * output_stride,
+                num_qpts);
         }
-        if (need_gradients) {
-            for (std::size_t c = 0; c < 3u; ++c) {
-                gradient_rows[c] = gradients_out + (basis_i * 3u + c) * output_stride;
-                std::fill_n(gradient_rows[c], num_qpts, Real(0));
+        for (std::size_t component = active_components; component < 3u; ++component) {
+            for (std::size_t basis_i = 0; basis_i < size_; ++basis_i) {
+                std::fill_n(gradients_out + (basis_i * 3u + component) * output_stride,
+                            num_qpts,
+                            Real(0));
             }
         }
-        if (need_hessians) {
-            for (std::size_t rc = 0; rc < 9u; ++rc) {
-                hessian_rows[rc] = hessians_out + (basis_i * 9u + rc) * output_stride;
-                std::fill_n(hessian_rows[rc], num_qpts, Real(0));
+    }
+    if (need_hessians) {
+        const auto active_components = static_cast<std::size_t>(components);
+        for (std::size_t r = 0; r < active_components; ++r) {
+            for (std::size_t c = 0; c < active_components; ++c) {
+                const std::size_t component = r * 3u + c;
+                math::dense_transform_batched_row_major(
+                    transform,
+                    size_,
+                    size_,
+                    scratch.modal_hessian_components.data() + component * num_qpts,
+                    9u * num_qpts,
+                    hessians_out + component * output_stride,
+                    9u * output_stride,
+                    num_qpts);
             }
         }
-
-        const Real* coeffs = modal_to_nodal_by_basis().data() + basis_i * size_;
-        for (std::size_t modal_j = 0; modal_j < size_; ++modal_j) {
-            const Real coeff = coeffs[modal_j];
-            if (need_values) {
-                const Real* modal_values = scratch.modal_values.data() + modal_j * num_qpts;
-                for (std::size_t q = 0; q < num_qpts; ++q) {
-                    value_row[q] += coeff * modal_values[q];
-                }
+        for (std::size_t component = 0; component < 9u; ++component) {
+            const std::size_t r = component / 3u;
+            const std::size_t c = component % 3u;
+            if (r < active_components && c < active_components) {
+                continue;
             }
-            if (need_gradients) {
-                for (int component = 0; component < components; ++component) {
-                    const auto c = static_cast<std::size_t>(component);
-                    const Real* modal_gradient_row =
-                        scratch.modal_gradient_components.data() + (modal_j * 3u + c) * num_qpts;
-                    Real* gradient_row = gradient_rows[c];
-                    for (std::size_t q = 0; q < num_qpts; ++q) {
-                        gradient_row[q] += coeff * modal_gradient_row[q];
-                    }
-                }
-            }
-            if (need_hessians) {
-                for (int r = 0; r < components; ++r) {
-                    const auto sr = static_cast<std::size_t>(r);
-                    for (int c = 0; c < components; ++c) {
-                        const auto sc = static_cast<std::size_t>(c);
-                        const auto component = sr * 3u + sc;
-                        const Real* modal_hessian_row =
-                            scratch.modal_hessian_components.data() + (modal_j * 9u + component) * num_qpts;
-                        Real* hessian_row = hessian_rows[component];
-                        for (std::size_t q = 0; q < num_qpts; ++q) {
-                            hessian_row[q] += coeff * modal_hessian_row[q];
-                        }
-                    }
-                }
+            for (std::size_t basis_i = 0; basis_i < size_; ++basis_i) {
+                std::fill_n(hessians_out + (basis_i * 9u + component) * output_stride,
+                            num_qpts,
+                            Real(0));
             }
         }
     }

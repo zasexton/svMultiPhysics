@@ -1077,8 +1077,10 @@ public:
      * @brief Get previous-step solution gradient at quadrature point
      */
     [[nodiscard]] Vector3D previousSolutionGradient(LocalIndex q) const;
+    [[nodiscard]] Vector3D previousSolutionGradient(LocalIndex q, int k) const;
 
     [[nodiscard]] Matrix3x3 previousSolutionJacobian(LocalIndex q) const;
+    [[nodiscard]] Matrix3x3 previousSolutionJacobian(LocalIndex q, int k) const;
 
     /**
      * @brief Get previous-previous solution gradient at quadrature point
@@ -1184,14 +1186,21 @@ public:
      *
      * History indexing convention: k=1 is u^{n-1}, k=2 is u^{n-2}, ...
      */
-    void setFieldPreviousSolutionScalarK(FieldId field, int k, std::span<const Real> values);
+    void setFieldPreviousSolutionScalarK(FieldId field,
+                                         int k,
+                                         std::span<const Real> values,
+                                         std::span<const Vector3D> gradients = {});
 
     /**
      * @brief Bind previous (history) vector field values at quadrature points
      *
      * History indexing convention: k=1 is u^{n-1}, k=2 is u^{n-2}, ...
      */
-    void setFieldPreviousSolutionVectorK(FieldId field, int k, int value_dimension, std::span<const Vector3D> values);
+    void setFieldPreviousSolutionVectorK(FieldId field,
+                                         int k,
+                                         int value_dimension,
+                                         std::span<const Vector3D> values,
+                                         std::span<const Matrix3x3> jacobians = {});
 
     [[nodiscard]] bool hasFieldSolutionData(FieldId field) const noexcept;
     [[nodiscard]] FieldType fieldSolutionFieldType(FieldId field) const;
@@ -1209,6 +1218,8 @@ public:
 
     [[nodiscard]] Real fieldPreviousValue(FieldId field, LocalIndex q, int k) const;
     [[nodiscard]] Vector3D fieldPreviousVectorValue(FieldId field, LocalIndex q, int k) const;
+    [[nodiscard]] Vector3D fieldPreviousGradient(FieldId field, LocalIndex q, int k) const;
+    [[nodiscard]] Matrix3x3 fieldPreviousJacobian(FieldId field, LocalIndex q, int k) const;
 
     /**
      * @brief JIT-friendly, flat views of auxiliary field solution data
@@ -2164,6 +2175,8 @@ private:
         //   history_values[(k-1)*n_qpts + q] == field value at quadrature point q from u^{n-k}.
         JITAlignedVector<Real> history_values{};
         JITAlignedVector<Vector3D> history_vector_values{};
+        JITAlignedVector<Vector3D> history_gradients{};
+        JITAlignedVector<Matrix3x3> history_jacobians{};
         JITAlignedVector<Vector3D> gradients{};
         JITAlignedVector<Matrix3x3> jacobians{};
         JITAlignedVector<Matrix3x3> hessians{};

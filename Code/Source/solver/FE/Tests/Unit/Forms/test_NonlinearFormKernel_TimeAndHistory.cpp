@@ -208,6 +208,57 @@ TEST(TimeDerivativeOpsTest, BDF2Dt1MatchesExplicitHistoryCombinationAndJacobianM
     expectJacobianMatchesCentralFD(mesh, space, assembler, kernel_dt, U, /*eps=*/1e-7, /*tol=*/1e-10);
 }
 
+TEST(TimeDerivativeOpsTest, BDF2GradientDt1MatchesExplicitHistoryGradientCombination)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    constexpr Real dt_step = 0.2;
+    // BDF2: (3 u^n - 4 u^{n-1} + u^{n-2}) / (2 dt)
+    const Real a0 = Real(1.5) / dt_step;
+    const Real a1 = Real(-2.0) / dt_step;
+    const Real a2 = Real(0.5) / dt_step;
+
+    assembly::TimeIntegrationContext ti;
+    ti.integrator_name = "unit_bdf2_grad";
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {a0, a1, a2};
+    ti.dt1 = dt1;
+
+    FormCompiler compiler;
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+
+    const auto dt_form = inner(grad(dt(u, 1)), grad(v)).dx();
+    const auto explicit_grad =
+        FormExpr::constant(a0) * grad(u) +
+        FormExpr::constant(a1) * grad(FormExpr::previousSolution(1)) +
+        FormExpr::constant(a2) * grad(FormExpr::previousSolution(2));
+    const auto explicit_form = inner(explicit_grad, grad(v)).dx();
+
+    auto ir_dt = compiler.compileResidual(dt_form);
+    auto ir_ex = compiler.compileResidual(explicit_form);
+
+    NonlinearFormKernel kernel_dt(std::move(ir_dt), ADMode::Forward);
+    NonlinearFormKernel kernel_ex(std::move(ir_ex), ADMode::Forward);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setTimeIntegrationContext(&ti);
+
+    std::vector<Real> U = {0.03, 0.11, -0.07, 0.05};
+    std::vector<Real> U_prev = {-0.02, 0.06, 0.09, -0.01};
+    std::vector<Real> U_prev2 = {0.04, -0.05, 0.01, 0.08};
+    assembler.setCurrentSolution(U);
+    assembler.setPreviousSolution(U_prev);
+    assembler.setPreviousSolution2(U_prev2);
+
+    expectResidualAndJacobianMatch(mesh, space, assembler, kernel_dt, kernel_ex, /*n_dofs=*/4, /*tol=*/1e-12);
+    expectJacobianMatchesCentralFD(mesh, space, assembler, kernel_dt, U, /*eps=*/1e-7, /*tol=*/1e-9);
+}
+
 TEST(HistoryOpsTest, HistoryConvolutionMatchesExplicitSumAndHasNoJacobianContribution)
 {
     SingleTetraMeshAccess mesh;

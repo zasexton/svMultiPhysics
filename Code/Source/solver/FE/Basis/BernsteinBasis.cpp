@@ -252,52 +252,95 @@ void simplex_term(const std::array<int, 4>& exponents,
     }
 }
 
-struct BernsteinSpanWriter {
-    std::span<Real> values;
-    std::span<Gradient> gradients;
-    std::span<Hessian> hessians;
-
-    bool wants_values() const noexcept { return !values.empty(); }
-    bool wants_gradients() const noexcept { return !gradients.empty(); }
-    bool wants_hessians() const noexcept { return !hessians.empty(); }
-
-    void write_value(std::size_t index, Real value) const {
-        values[index] = value;
-    }
-
-    void write_gradient(std::size_t index, const Gradient& gradient) const {
-        gradients[index] = gradient;
-    }
-
-    void write_hessian(std::size_t index, const Hessian& hessian) const {
-        hessians[index] = hessian;
-    }
+enum class BernsteinWriterLayout {
+    Span,
+    Raw,
 };
 
-struct BernsteinRawWriter {
+template <BernsteinWriterLayout Layout>
+struct BernsteinWriter {
+    std::span<Real> values_span;
+    std::span<Gradient> gradients_span;
+    std::span<Hessian> hessians_span;
     std::size_t stride{1};
     std::size_t offset{0};
     Real* values{nullptr};
     Real* gradients{nullptr};
     Real* hessians{nullptr};
 
-    bool wants_values() const noexcept { return values != nullptr; }
-    bool wants_gradients() const noexcept { return gradients != nullptr; }
-    bool wants_hessians() const noexcept { return hessians != nullptr; }
+    static BernsteinWriter spans(std::span<Real> values_in,
+                                 std::span<Gradient> gradients_in,
+                                 std::span<Hessian> hessians_in) {
+        BernsteinWriter writer;
+        writer.values_span = values_in;
+        writer.gradients_span = gradients_in;
+        writer.hessians_span = hessians_in;
+        return writer;
+    }
+
+    static BernsteinWriter raw(std::size_t stride_in,
+                               std::size_t offset_in,
+                               Real* values_in,
+                               Real* gradients_in,
+                               Real* hessians_in) {
+        BernsteinWriter writer;
+        writer.stride = stride_in;
+        writer.offset = offset_in;
+        writer.values = values_in;
+        writer.gradients = gradients_in;
+        writer.hessians = hessians_in;
+        return writer;
+    }
+
+    bool wants_values() const noexcept {
+        if constexpr (Layout == BernsteinWriterLayout::Span) {
+            return !values_span.empty();
+        } else {
+            return values != nullptr;
+        }
+    }
+
+    bool wants_gradients() const noexcept {
+        if constexpr (Layout == BernsteinWriterLayout::Span) {
+            return !gradients_span.empty();
+        } else {
+            return gradients != nullptr;
+        }
+    }
+
+    bool wants_hessians() const noexcept {
+        if constexpr (Layout == BernsteinWriterLayout::Span) {
+            return !hessians_span.empty();
+        } else {
+            return hessians != nullptr;
+        }
+    }
 
     void write_value(std::size_t index, Real value) const {
-        values[index * stride + offset] = value;
+        if constexpr (Layout == BernsteinWriterLayout::Span) {
+            values_span[index] = value;
+        } else {
+            values[index * stride + offset] = value;
+        }
     }
 
     void write_gradient(std::size_t index, const Gradient& gradient) const {
-        const std::size_t base = index * 3u;
-        gradients[(base + 0u) * stride + offset] = gradient[0];
-        gradients[(base + 1u) * stride + offset] = gradient[1];
-        gradients[(base + 2u) * stride + offset] = gradient[2];
+        if constexpr (Layout == BernsteinWriterLayout::Span) {
+            gradients_span[index] = gradient;
+        } else {
+            const std::size_t base = index * 3u;
+            gradients[(base + 0u) * stride + offset] = gradient[0];
+            gradients[(base + 1u) * stride + offset] = gradient[1];
+            gradients[(base + 2u) * stride + offset] = gradient[2];
+        }
     }
 
     void write_hessian(std::size_t index, const Hessian& hessian) const {
-        store_hessian_strided(hessian, hessians + index * 9u * stride, stride, offset);
+        if constexpr (Layout == BernsteinWriterLayout::Span) {
+            hessians_span[index] = hessian;
+        } else {
+            store_hessian_strided(hessian, hessians + index * 9u * stride, stride, offset);
+        }
     }
 };
 
@@ -786,7 +829,8 @@ void BernsteinBasis::evaluate_into_raw(const math::Vector<Real, 3>& xi,
                                        Real* SVMP_RESTRICT values_out,
                                        Real* SVMP_RESTRICT gradients_out,
                                        Real* SVMP_RESTRICT hessians_out) const {
-    BernsteinRawWriter writer{output_stride, output_offset, values_out, gradients_out, hessians_out};
+    const auto writer = BernsteinWriter<BernsteinWriterLayout::Raw>::raw(
+        output_stride, output_offset, values_out, gradients_out, hessians_out);
     evaluate_into_writer(xi, writer);
 }
 
@@ -794,7 +838,7 @@ void BernsteinBasis::evaluate_into(const math::Vector<Real, 3>& xi,
                                    std::span<Real> values,
                                    std::span<Gradient> gradients,
                                    std::span<Hessian> hessians) const {
-    BernsteinSpanWriter writer{values, gradients, hessians};
+    const auto writer = BernsteinWriter<BernsteinWriterLayout::Span>::spans(values, gradients, hessians);
     evaluate_into_writer(xi, writer);
 }
 

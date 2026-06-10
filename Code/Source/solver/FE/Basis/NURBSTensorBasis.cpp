@@ -73,119 +73,141 @@ std::uint64_t real_identity_word(Real value) noexcept {
     return bits;
 }
 
-struct NURBSTensorVectorWriter {
-    std::vector<Real>* values{nullptr};
-    std::vector<Gradient>* gradients{nullptr};
-    std::vector<Hessian>* hessians{nullptr};
-
-    bool wants_values() const noexcept { return values != nullptr; }
-    bool wants_gradients() const noexcept { return gradients != nullptr; }
-    bool wants_hessians() const noexcept { return hessians != nullptr; }
-
-    void reset(std::size_t size) const {
-        if (values != nullptr) {
-            values->assign(size, Real(0));
-        }
-        if (gradients != nullptr) {
-            gradients->assign(size, Gradient{});
-        }
-        if (hessians != nullptr) {
-            hessians->assign(size, Hessian{});
-        }
-    }
-
-    void value(std::size_t idx, Real v) const {
-        (*values)[idx] = v;
-    }
-
-    void gradient(std::size_t idx, int component, Real v) const {
-        (*gradients)[idx][static_cast<std::size_t>(component)] = v;
-    }
-
-    void hessian(std::size_t idx, int row, int col, Real v) const {
-        (*hessians)[idx](static_cast<std::size_t>(row),
-                         static_cast<std::size_t>(col)) = v;
-    }
+enum class NURBSTensorWriterLayout {
+    DenseVector,
+    Raw,
+    Compact,
 };
 
-struct NURBSTensorRawWriter {
-    std::size_t q{0};
-    std::size_t stride{1};
-    Real* values{nullptr};
-    Real* gradients{nullptr};
-    Real* hessians{nullptr};
-    OutputInitialization initialization{OutputInitialization::ClearAllRequestedRows};
-
-    bool wants_values() const noexcept { return values != nullptr; }
-    bool wants_gradients() const noexcept { return gradients != nullptr; }
-    bool wants_hessians() const noexcept { return hessians != nullptr; }
-
-    void reset(std::size_t size) const {
-        if (initialization == OutputInitialization::CallerPrecleared) {
-            return;
-        }
-        if (values != nullptr) {
-            for (std::size_t dof = 0; dof < size; ++dof) {
-                values[dof * stride + q] = Real(0);
-            }
-        }
-        if (gradients != nullptr) {
-            for (std::size_t dof = 0; dof < size; ++dof) {
-                for (std::size_t component = 0; component < 3u; ++component) {
-                    gradients[(dof * 3u + component) * stride + q] = Real(0);
-                }
-            }
-        }
-        if (hessians != nullptr) {
-            for (std::size_t dof = 0; dof < size; ++dof) {
-                for (std::size_t component = 0; component < 9u; ++component) {
-                    hessians[(dof * 9u + component) * stride + q] = Real(0);
-                }
-            }
-        }
-    }
-
-    void value(std::size_t idx, Real v) const {
-        values[idx * stride + q] = v;
-    }
-
-    void gradient(std::size_t idx, int component, Real v) const {
-        gradients[(idx * 3u + static_cast<std::size_t>(component)) * stride + q] = v;
-    }
-
-    void hessian(std::size_t idx, int row, int col, Real v) const {
-        hessians[(idx * 9u + static_cast<std::size_t>(row * 3 + col)) * stride + q] = v;
-    }
-};
-
-struct NURBSTensorCompactWriter {
+template <NURBSTensorWriterLayout Layout>
+struct NURBSTensorWriter {
     std::vector<std::size_t>* indices{nullptr};
     std::vector<Real>* values{nullptr};
     std::vector<Gradient>* gradients{nullptr};
     std::vector<Hessian>* hessians{nullptr};
+    std::size_t q{0};
+    std::size_t stride{1};
+    Real* values_raw{nullptr};
+    Real* gradients_raw{nullptr};
+    Real* hessians_raw{nullptr};
+    OutputInitialization initialization{OutputInitialization::ClearAllRequestedRows};
     mutable std::size_t last_index{std::numeric_limits<std::size_t>::max()};
     mutable std::size_t last_position{0};
 
-    bool wants_values() const noexcept { return values != nullptr; }
-    bool wants_gradients() const noexcept { return gradients != nullptr; }
-    bool wants_hessians() const noexcept { return hessians != nullptr; }
-
-    void reset(std::size_t) const {
-        indices->clear();
-        if (values != nullptr) {
-            values->clear();
-        }
-        if (gradients != nullptr) {
-            gradients->clear();
-        }
-        if (hessians != nullptr) {
-            hessians->clear();
-        }
-        last_index = std::numeric_limits<std::size_t>::max();
-        last_position = 0;
+    static NURBSTensorWriter dense_vector(std::vector<Real>* values_in,
+                                          std::vector<Gradient>* gradients_in,
+                                          std::vector<Hessian>* hessians_in) {
+        NURBSTensorWriter writer;
+        writer.values = values_in;
+        writer.gradients = gradients_in;
+        writer.hessians = hessians_in;
+        return writer;
     }
 
-    std::size_t ensure_position(std::size_t idx) const {
+    static NURBSTensorWriter raw(std::size_t q_in,
+                                 std::size_t stride_in,
+                                 Real* values_in,
+                                 Real* gradients_in,
+                                 Real* hessians_in,
+                                 OutputInitialization initialization_in =
+                                     OutputInitialization::ClearAllRequestedRows) {
+        NURBSTensorWriter writer;
+        writer.q = q_in;
+        writer.stride = stride_in;
+        writer.values_raw = values_in;
+        writer.gradients_raw = gradients_in;
+        writer.hessians_raw = hessians_in;
+        writer.initialization = initialization_in;
+        return writer;
+    }
+
+    static NURBSTensorWriter compact(std::vector<std::size_t>* indices_in,
+                                     std::vector<Real>* values_in,
+                                     std::vector<Gradient>* gradients_in,
+                                     std::vector<Hessian>* hessians_in) {
+        NURBSTensorWriter writer;
+        writer.indices = indices_in;
+        writer.values = values_in;
+        writer.gradients = gradients_in;
+        writer.hessians = hessians_in;
+        return writer;
+    }
+
+    bool wants_values() const noexcept {
+        if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            return values_raw != nullptr;
+        } else {
+            return values != nullptr;
+        }
+    }
+
+    bool wants_gradients() const noexcept {
+        if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            return gradients_raw != nullptr;
+        } else {
+            return gradients != nullptr;
+        }
+    }
+
+    bool wants_hessians() const noexcept {
+        if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            return hessians_raw != nullptr;
+        } else {
+            return hessians != nullptr;
+        }
+    }
+
+    void reset(std::size_t size) const {
+        if constexpr (Layout == NURBSTensorWriterLayout::DenseVector) {
+            if (values != nullptr) {
+                values->assign(size, Real(0));
+            }
+            if (gradients != nullptr) {
+                gradients->assign(size, Gradient{});
+            }
+            if (hessians != nullptr) {
+                hessians->assign(size, Hessian{});
+            }
+        } else if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            if (initialization == OutputInitialization::CallerPrecleared) {
+                return;
+            }
+            if (values_raw != nullptr) {
+                for (std::size_t dof = 0; dof < size; ++dof) {
+                    values_raw[dof * stride + q] = Real(0);
+                }
+            }
+            if (gradients_raw != nullptr) {
+                for (std::size_t dof = 0; dof < size; ++dof) {
+                    for (std::size_t component = 0; component < 3u; ++component) {
+                        gradients_raw[(dof * 3u + component) * stride + q] = Real(0);
+                    }
+                }
+            }
+            if (hessians_raw != nullptr) {
+                for (std::size_t dof = 0; dof < size; ++dof) {
+                    for (std::size_t component = 0; component < 9u; ++component) {
+                        hessians_raw[(dof * 9u + component) * stride + q] = Real(0);
+                    }
+                }
+            }
+        } else {
+            indices->clear();
+            if (values != nullptr) {
+                values->clear();
+            }
+            if (gradients != nullptr) {
+                gradients->clear();
+            }
+            if (hessians != nullptr) {
+                hessians->clear();
+            }
+            last_index = std::numeric_limits<std::size_t>::max();
+            last_position = 0;
+        }
+    }
+
+    std::size_t compact_position(std::size_t idx) const {
         if (last_index == idx) {
             return last_position;
         }
@@ -205,16 +227,35 @@ struct NURBSTensorCompactWriter {
     }
 
     void value(std::size_t idx, Real v) const {
-        (*values)[ensure_position(idx)] = v;
+        if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            values_raw[idx * stride + q] = v;
+        } else if constexpr (Layout == NURBSTensorWriterLayout::DenseVector) {
+            (*values)[idx] = v;
+        } else {
+            (*values)[compact_position(idx)] = v;
+        }
     }
 
     void gradient(std::size_t idx, int component, Real v) const {
-        (*gradients)[ensure_position(idx)][static_cast<std::size_t>(component)] = v;
+        if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            gradients_raw[(idx * 3u + static_cast<std::size_t>(component)) * stride + q] = v;
+        } else if constexpr (Layout == NURBSTensorWriterLayout::DenseVector) {
+            (*gradients)[idx][static_cast<std::size_t>(component)] = v;
+        } else {
+            (*gradients)[compact_position(idx)][static_cast<std::size_t>(component)] = v;
+        }
     }
 
     void hessian(std::size_t idx, int row, int col, Real v) const {
-        (*hessians)[ensure_position(idx)](static_cast<std::size_t>(row),
-                                          static_cast<std::size_t>(col)) = v;
+        if constexpr (Layout == NURBSTensorWriterLayout::Raw) {
+            hessians_raw[(idx * 9u + static_cast<std::size_t>(row * 3 + col)) * stride + q] = v;
+        } else if constexpr (Layout == NURBSTensorWriterLayout::DenseVector) {
+            (*hessians)[idx](static_cast<std::size_t>(row),
+                             static_cast<std::size_t>(col)) = v;
+        } else {
+            (*hessians)[compact_position(idx)](static_cast<std::size_t>(row),
+                                               static_cast<std::size_t>(col)) = v;
+        }
     }
 };
 
@@ -681,7 +722,8 @@ NURBSTensorBasis::ActiveTensorSupportRange NURBSTensorBasis::evaluate_active_sup
         return range;
     }
 
-    const NURBSTensorCompactWriter writer{&global_indices, values, gradients, hessians};
+    const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::Compact>::compact(
+        &global_indices, values, gradients, hessians);
     evaluate_nurbs_tensor_active_support(*this, xi, writer);
     return range;
 }
@@ -691,7 +733,8 @@ void NURBSTensorBasis::evaluate_rational_active_support(
     std::vector<Real>* values,
     std::vector<Gradient>* gradients,
     std::vector<Hessian>* hessians) const {
-    const NURBSTensorVectorWriter writer{values, gradients, hessians};
+    const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::DenseVector>::dense_vector(
+        values, gradients, hessians);
     evaluate_nurbs_tensor_active_support(*this, xi, writer);
 }
 
@@ -719,19 +762,22 @@ void NURBSTensorBasis::evaluate_all(const math::Vector<Real, 3>& xi,
 
 void NURBSTensorBasis::evaluate_values_to(const math::Vector<Real, 3>& xi,
                                           Real* SVMP_RESTRICT values_out) const {
-    const NURBSTensorRawWriter writer{0u, 1u, values_out, nullptr, nullptr};
+    const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::Raw>::raw(
+        0u, 1u, values_out, nullptr, nullptr);
     evaluate_nurbs_tensor_active_support(*this, xi, writer);
 }
 
 void NURBSTensorBasis::evaluate_gradients_to(const math::Vector<Real, 3>& xi,
                                              Real* SVMP_RESTRICT gradients_out) const {
-    const NURBSTensorRawWriter writer{0u, 1u, nullptr, gradients_out, nullptr};
+    const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::Raw>::raw(
+        0u, 1u, nullptr, gradients_out, nullptr);
     evaluate_nurbs_tensor_active_support(*this, xi, writer);
 }
 
 void NURBSTensorBasis::evaluate_hessians_to(const math::Vector<Real, 3>& xi,
                                             Real* SVMP_RESTRICT hessians_out) const {
-    const NURBSTensorRawWriter writer{0u, 1u, nullptr, nullptr, hessians_out};
+    const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::Raw>::raw(
+        0u, 1u, nullptr, nullptr, hessians_out);
     evaluate_nurbs_tensor_active_support(*this, xi, writer);
 }
 
@@ -761,7 +807,8 @@ void NURBSTensorBasis::evaluate_at_quadrature_points_strided(
     }
 
     for (std::size_t q = 0; q < num_qpts; ++q) {
-        const NURBSTensorRawWriter writer{q, output_stride, values_out, gradients_out, hessians_out};
+        const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::Raw>::raw(
+            q, output_stride, values_out, gradients_out, hessians_out);
         evaluate_nurbs_tensor_active_support(*this, points[q], writer);
     }
 }
@@ -780,13 +827,13 @@ void NURBSTensorBasis::fill_scalar_cache_entry(
     }
 
     for (std::size_t q = 0; q < num_qpts; ++q) {
-        const NURBSTensorRawWriter writer{
+        const auto writer = NURBSTensorWriter<NURBSTensorWriterLayout::Raw>::raw(
             q,
             output_stride,
             values_out,
             gradients_out,
             hessians_out,
-            OutputInitialization::CallerPrecleared};
+            OutputInitialization::CallerPrecleared);
         evaluate_nurbs_tensor_active_support(*this, points[q], writer);
     }
 }

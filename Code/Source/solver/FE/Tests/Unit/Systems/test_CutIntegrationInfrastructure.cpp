@@ -3130,6 +3130,16 @@ TEST(CutIntegrationInfrastructure, CapsCutAdjacentFacetStabilizationScales)
                      CutIntegrationContext::maxCutCellStabilizationScale());
 }
 
+TEST(CutIntegrationInfrastructure, GeneratedCutVolumePruneThresholdIsBounded)
+{
+    EXPECT_DOUBLE_EQ(CutIntegrationContext::defaultMinGeneratedCutVolumeFraction(),
+                     1.0e-8);
+    const auto threshold = CutIntegrationContext::minGeneratedCutVolumeFraction();
+    EXPECT_TRUE(std::isfinite(threshold));
+    EXPECT_GT(threshold, 0.0);
+    EXPECT_LT(threshold, 1.0);
+}
+
 TEST(CutIntegrationInfrastructure, BindsCutAdjacentFacetScalesFromSelectedSideMetadata)
 {
     CutIntegrationContext context;

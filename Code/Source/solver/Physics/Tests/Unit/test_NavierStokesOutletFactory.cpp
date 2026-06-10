@@ -108,6 +108,21 @@ Opts::CoupledRCRCROutflowBC makeRCRCROpts(int marker)
     return o;
 }
 
+TEST(NavierStokesBCFactories, VelocityEssentialBCRespectsActiveComponents)
+{
+    Opts::VelocityDirichletBC bc;
+    bc.boundary_marker = 12;
+    bc.value = {Opts::ScalarValue{1.0}, Opts::ScalarValue{2.0}, Opts::ScalarValue{3.0}};
+    bc.active_components = {true, false, true};
+
+    const auto boundary_condition = Factories::toVelocityEssentialBC(bc, 3, "Velocity");
+    const auto constraints = boundary_condition->getStrongConstraints(FieldId{7});
+
+    ASSERT_EQ(constraints.size(), 2u);
+    EXPECT_EQ(constraints[0].component, 0);
+    EXPECT_EQ(constraints[1].component, 2);
+}
+
 std::string autoBoundaryIntegralName(int boundary_marker, std::size_t ordinal = 0)
 {
     return "_boundary_integral_b" + std::to_string(boundary_marker) + "_" +

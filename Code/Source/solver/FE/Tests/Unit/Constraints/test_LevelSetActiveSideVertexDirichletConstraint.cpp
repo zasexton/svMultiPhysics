@@ -20,7 +20,10 @@
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
 
+#include <cstdlib>
 #include <memory>
+#include <optional>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -139,6 +142,34 @@ std::shared_ptr<Mesh> buildTwoTetraPairWithCutLeftCell()
     }
     return system.fieldDofOffset(field) + dofs.front();
 }
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* key, const char* value)
+        : key_(key)
+    {
+        if (const char* prior = std::getenv(key_)) {
+            prior_value_ = std::string(prior);
+        }
+        ::setenv(key_, value, 1);
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (prior_value_.has_value()) {
+            ::setenv(key_, prior_value_->c_str(), 1);
+        } else {
+            ::unsetenv(key_);
+        }
+    }
+
+    ScopedEnvVar(const ScopedEnvVar&) = delete;
+    ScopedEnvVar& operator=(const ScopedEnvVar&) = delete;
+
+private:
+    const char* key_;
+    std::optional<std::string> prior_value_;
+};
 
 [[nodiscard]] std::vector<GlobalIndex> vertexDofs(const systems::FESystem& system,
                                                   FieldId field,
@@ -340,6 +371,50 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     EXPECT_FALSE(constraints.isConstrained(vertexDof(system, pressure, 3)));
     EXPECT_FALSE(constraints.isConstrained(vertexDof(system, pressure, 4)));
     EXPECT_TRUE(constraints.isConstrained(vertexDof(system, pressure, 5)));
+#endif
+}
+
+TEST(LevelSetActiveSideVertexDirichletConstraint,
+     LogsSampledDofEntityAndSupportWhenRequested)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    ScopedEnvVar sample_dofs(
+        "SVMP_LEVEL_SET_ACTIVE_CONSTRAINT_SAMPLE_DOFS", "2|999");
+    auto mesh = buildTwoQuadStripWithCutLeftCell();
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
+
+    systems::FESystem system(mesh);
+    const auto pressure = system.addField(
+        systems::FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("pressure");
+    system.addSystemConstraint(
+        std::make_unique<LevelSetActiveSideVertexDirichletConstraint>(
+            pressure,
+            "phi",
+            LevelSetConstraintSide::Negative,
+            Real{0.0},
+            Real{0.0}));
+
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    ASSERT_NO_THROW(system.setup());
+    auto log_output = testing::internal::GetCapturedStdout();
+    log_output += testing::internal::GetCapturedStderr();
+
+    EXPECT_NE(log_output.find(
+                  "diagnostic=level_set_active_side_vertex_constraint_sample"),
+              std::string::npos);
+    EXPECT_NE(log_output.find("field='p'"), std::string::npos);
+    EXPECT_NE(log_output.find("local_dof=2"), std::string::npos);
+    EXPECT_NE(log_output.find("entity_kind=Vertex"), std::string::npos);
+    EXPECT_NE(log_output.find("entity_id=2"), std::string::npos);
+    EXPECT_NE(log_output.find("active_dof_support=0"), std::string::npos);
+    EXPECT_NE(log_output.find("inactive_constraint=1"), std::string::npos);
+    EXPECT_NE(log_output.find("vertex_phi=1"), std::string::npos);
+    EXPECT_NE(log_output.find("local_dof=999"), std::string::npos);
+    EXPECT_NE(log_output.find("status=out_of_range"), std::string::npos);
 #endif
 }
 
@@ -935,7 +1010,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
-     PrunedCutAdjacentFacetSupportKeepsP3QuadSharedEdgeTraceDofsActive)
+     PrunedCutAdjacentFacetSupportDoesNotKeepP3QuadSharedEdgeTraceDofsActive)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1008,14 +1083,14 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     auto log_output = testing::internal::GetCapturedStdout();
     log_output += testing::internal::GetCapturedStderr();
 
-    EXPECT_FALSE(system.constraints().isConstrained(
+    EXPECT_TRUE(system.constraints().isConstrained(
         vertexDof(system, pressure, 1)));
-    EXPECT_FALSE(system.constraints().isConstrained(
+    EXPECT_TRUE(system.constraints().isConstrained(
         vertexDof(system, pressure, 4)));
     const auto shared_edge_dofs = edgeDofs(system, pressure, shared_edge);
     ASSERT_EQ(shared_edge_dofs.size(), 2u);
     for (const auto dof : shared_edge_dofs) {
-        EXPECT_FALSE(system.constraints().isConstrained(dof));
+        EXPECT_TRUE(system.constraints().isConstrained(dof));
     }
 
     const auto& pressure_dofs = system.fieldDofHandler(pressure);
@@ -1030,19 +1105,19 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     }
 
     EXPECT_NE(log_output.find(
-                  "support_mode=cell_patch+cut_adjacent_facets"),
+                  "support_mode=cell_patch+cut_adjacent_facets_skipped_no_retained_volume"),
               std::string::npos);
     EXPECT_NE(log_output.find(
-                  "active_support_cells_from_cut_adjacent_facets=2"),
+                  "active_support_cells_from_cut_adjacent_facets=0"),
               std::string::npos);
-    EXPECT_NE(log_output.find("active_support_vertex_dofs=2"), std::string::npos);
-    EXPECT_NE(log_output.find("active_support_edge_dofs=2"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_vertex_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_edge_dofs=0"), std::string::npos);
     EXPECT_NE(log_output.find("active_support_cell_dofs=0"), std::string::npos);
 #endif
 }
 
 TEST(LevelSetActiveSideVertexDirichletConstraint,
-     PrunedCutAdjacentFacetSupportKeepsP3TetraSharedFaceTraceDofsActive)
+     PrunedCutAdjacentFacetSupportDoesNotKeepP3TetraSharedFaceTraceDofsActive)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -1120,7 +1195,7 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
     log_output += testing::internal::GetCapturedStderr();
 
     for (const auto vertex : {0, 1, 2}) {
-        EXPECT_FALSE(system.constraints().isConstrained(
+        EXPECT_TRUE(system.constraints().isConstrained(
             vertexDof(system, pressure, vertex)));
     }
 
@@ -1128,41 +1203,33 @@ TEST(LevelSetActiveSideVertexDirichletConstraint,
         const auto shared_edge_dofs = edgeDofs(system, pressure, edge);
         ASSERT_EQ(shared_edge_dofs.size(), 2u);
         for (const auto dof : shared_edge_dofs) {
-            EXPECT_FALSE(system.constraints().isConstrained(dof));
+            EXPECT_TRUE(system.constraints().isConstrained(dof));
         }
     }
 
     const auto shared_face_dofs = faceDofs(system, pressure, shared_facet);
     ASSERT_EQ(shared_face_dofs.size(), 1u);
     for (const auto dof : shared_face_dofs) {
-        EXPECT_FALSE(system.constraints().isConstrained(dof));
+        EXPECT_TRUE(system.constraints().isConstrained(dof));
     }
 
     const auto* entity = system.fieldDofHandler(pressure).getEntityDofMap();
     ASSERT_NE(entity, nullptr);
-    std::unordered_set<GlobalIndex> active_support;
-    for (const auto edge : {shared_edge_01, shared_edge_12, shared_edge_20}) {
-        for (const auto local_dof : entity->getEdgeDofs(edge)) {
-            active_support.insert(local_dof);
-        }
-    }
-    for (const auto local_dof : entity->getFaceDofs(shared_facet)) {
-        active_support.insert(local_dof);
-    }
+    const std::unordered_set<GlobalIndex> active_support;
     EXPECT_EQ(expectInactiveEdgeDofsConstrained(system, pressure, active_support),
-              12u);
+              18u);
     EXPECT_EQ(expectInactiveFaceDofsConstrained(system, pressure, active_support),
-              6u);
+              7u);
 
     EXPECT_NE(log_output.find(
-                  "support_mode=cell_patch+cut_adjacent_facets"),
+                  "support_mode=cell_patch+cut_adjacent_facets_skipped_no_retained_volume"),
               std::string::npos);
     EXPECT_NE(log_output.find(
-                  "active_support_cells_from_cut_adjacent_facets=2"),
+                  "active_support_cells_from_cut_adjacent_facets=0"),
               std::string::npos);
-    EXPECT_NE(log_output.find("active_support_vertex_dofs=3"), std::string::npos);
-    EXPECT_NE(log_output.find("active_support_edge_dofs=6"), std::string::npos);
-    EXPECT_NE(log_output.find("active_support_face_dofs=1"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_vertex_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_edge_dofs=0"), std::string::npos);
+    EXPECT_NE(log_output.find("active_support_face_dofs=0"), std::string::npos);
     EXPECT_NE(log_output.find("active_support_cell_dofs=0"), std::string::npos);
 #endif
 }

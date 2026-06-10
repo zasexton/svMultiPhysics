@@ -69,6 +69,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <tuple>
@@ -6933,6 +6934,11 @@ struct MeshMotionSyncEntry {
 };
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+struct MeshVertexInterpolationTerm {
+    std::size_t vertex{0};
+    Real weight{Real{0}};
+};
+
 template <typename Callback>
 FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
     const svmp::MeshBase& mesh,
@@ -6958,16 +6964,20 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
         components > 1u && (coefficient_count % components == 0u);
     const std::size_t component_stride =
         has_component_stride ? (coefficient_count / components) : 0u;
-    auto bind = [&](svmp::index_t geometry_vertex,
-                    std::size_t component,
-                    GlobalIndex dof) {
+    auto bind_interpolation =
+        [&](std::span<const MeshVertexInterpolationTerm> terms,
+            std::size_t component,
+            GlobalIndex dof) {
         FE_THROW_IF(component >= components, InvalidArgumentException,
                     std::string(context) + ": component index out of range");
-        FE_THROW_IF(geometry_vertex < 0 ||
-                        static_cast<std::size_t>(geometry_vertex) >=
-                            static_cast<std::size_t>(n_vertices),
-                    InvalidStateException,
-                    std::string(context) + ": mesh geometry vertex index out of range");
+        FE_THROW_IF(terms.empty(), InvalidArgumentException,
+                    std::string(context) + ": empty mesh interpolation stencil");
+        for (const auto& term : terms) {
+            FE_THROW_IF(term.vertex >= static_cast<std::size_t>(n_vertices),
+                        InvalidStateException,
+                        std::string(context) +
+                            ": mesh geometry vertex index out of range");
+        }
         FE_THROW_IF(dof < 0 ||
                         static_cast<std::size_t>(dof) >= coefficient_count,
                     InvalidStateException,
@@ -6976,9 +6986,25 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
         if (dof_bound[sdof] != 0u) {
             return;
         }
-        callback(static_cast<std::size_t>(geometry_vertex), component, dof);
+        callback(component, dof, terms);
         dof_bound[sdof] = 1u;
         ++result.values_written;
+    };
+    auto bind = [&](svmp::index_t geometry_vertex,
+                    std::size_t component,
+                    GlobalIndex dof) {
+        FE_THROW_IF(geometry_vertex < 0, InvalidStateException,
+                    std::string(context) +
+                        ": mesh geometry vertex index out of range");
+        const std::array<MeshVertexInterpolationTerm, 1> terms{{
+            MeshVertexInterpolationTerm{
+                static_cast<std::size_t>(geometry_vertex),
+                Real{1}}}};
+        bind_interpolation(
+            std::span<const MeshVertexInterpolationTerm>(terms.data(),
+                                                         terms.size()),
+            component,
+            dof);
     };
     auto entity_dof_for_component =
         [&](std::span<const GlobalIndex> entity_dofs,
@@ -7032,11 +7058,48 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
             }
         }
     };
+    std::optional<bool> entity_dofs_are_component_expanded;
+    auto infer_entity_node_count =
+        [&](std::span<const GlobalIndex> entity_dofs,
+            std::string_view entity_name) -> std::size_t {
+        if (entity_dofs.empty()) {
+            return 0u;
+        }
+        if (components == 1u) {
+            return entity_dofs.size();
+        }
+        if (entity_dofs_are_component_expanded.has_value()) {
+            if (*entity_dofs_are_component_expanded) {
+                FE_THROW_IF(entity_dofs.size() % components != 0u,
+                            InvalidStateException,
+                            std::string(context) + ": " +
+                                std::string(entity_name) +
+                                " DOF count does not match field components");
+                return entity_dofs.size() / components;
+            }
+            return entity_dofs.size();
+        }
+        if (has_component_stride) {
+            return entity_dofs.size();
+        }
+        FE_THROW_IF(entity_dofs.size() % components != 0u,
+                    InvalidStateException,
+                    std::string(context) + ": " + std::string(entity_name) +
+                        " DOF count does not match field components");
+        return entity_dofs.size() / components;
+    };
 
     for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto vertex_dofs = entity_map.getVertexDofs(vertex);
         if (vertex_dofs.empty()) {
             continue;
+        }
+        if (components > 1u && !entity_dofs_are_component_expanded.has_value()) {
+            if (vertex_dofs.size() == components) {
+                entity_dofs_are_component_expanded = true;
+            } else if (vertex_dofs.size() == 1u) {
+                entity_dofs_are_component_expanded = false;
+            }
         }
         mark_expected(vertex_dofs, 1u, "vertex");
         for (std::size_t c = 0; c < components; ++c) {
@@ -7083,6 +7146,20 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
         const auto vertices = mesh.edge_vertices(edge_entity);
         return std::array<svmp::index_t, 2>{vertices[0], vertices[1]};
     };
+    auto vertex_gid = [&](svmp::index_t vertex) -> gid_t {
+        const auto sv = static_cast<std::size_t>(vertex);
+        if (vertex >= 0 && sv < mesh.vertex_gids().size()) {
+            return mesh.vertex_gids()[sv];
+        }
+        return static_cast<gid_t>(vertex);
+    };
+    auto canonical_edge_dof_endpoints =
+        [&](std::array<svmp::index_t, 2> endpoints) {
+        if (vertex_gid(endpoints[1]) < vertex_gid(endpoints[0])) {
+            std::swap(endpoints[0], endpoints[1]);
+        }
+        return endpoints;
+    };
     const auto n_edge_entities =
         use_2d_faces_as_edges ? mesh.n_faces() : mesh.n_edges();
     for (svmp::index_t edge = 0;
@@ -7118,7 +7195,37 @@ FESystem::MeshVertexFieldProjectionResult enumerateMeshVertexDofBindings(
             return;
         }
         if (edge_geometry.size() <= 2u) {
-            mark_expected(edge_dofs, 0u, "edge");
+            const auto canonical = edge_entity_endpoints(edge);
+            if (!canonical.has_value()) {
+                mark_expected(edge_dofs, 0u, "edge");
+                return;
+            }
+            const auto endpoints = canonical_edge_dof_endpoints(*canonical);
+            const auto interior_count =
+                infer_entity_node_count(edge_dofs, "edge");
+            mark_expected(edge_dofs, interior_count, "edge");
+            for (std::size_t c = 0; c < components; ++c) {
+                for (std::size_t j = 0; j < interior_count; ++j) {
+                    const Real t =
+                        static_cast<Real>(j + 1u) /
+                        static_cast<Real>(interior_count + 1u);
+                    const std::array<MeshVertexInterpolationTerm, 2> terms{{
+                        MeshVertexInterpolationTerm{
+                            static_cast<std::size_t>(endpoints[0]),
+                            Real{1} - t},
+                        MeshVertexInterpolationTerm{
+                            static_cast<std::size_t>(endpoints[1]),
+                            t}}};
+                    const auto dof =
+                        entity_dof_for_component(
+                            edge_dofs, interior_count, c, j, "edge");
+                    bind_interpolation(
+                        std::span<const MeshVertexInterpolationTerm>(
+                            terms.data(), terms.size()),
+                        c,
+                        dof);
+                }
+            }
             return;
         }
 
@@ -8532,7 +8639,8 @@ void FESystem::addCutVolumeKernel(OperatorTag op,
                                   geometry::CutIntegrationSide side,
                                   FieldId test_field,
                                   FieldId trial_field,
-                                  std::shared_ptr<assembly::AssemblyKernel> kernel)
+                                  std::shared_ptr<assembly::AssemblyKernel> kernel,
+                                  std::string source_component_tag)
 {
     invalidateSetup();
     FE_THROW_IF(side == geometry::CutIntegrationSide::Interface,
@@ -8552,7 +8660,12 @@ void FESystem::addCutVolumeKernel(OperatorTag op,
         field_registry_.markTimeDependent(trial_field, kernel->maxTemporalDerivativeOrder());
     }
     def.cut_volumes.push_back(CutVolumeTerm{
-        interface_marker, side, test_field, trial_field, std::move(kernel)});
+        interface_marker,
+        side,
+        test_field,
+        trial_field,
+        std::move(source_component_tag),
+        std::move(kernel)});
 }
 
 std::size_t FESystem::cutVolumeKernelCount(
@@ -8945,11 +9058,19 @@ FESystem::projectMeshVertexValuesToFieldCoefficients(
             components,
             n_dofs,
             context,
-            [&](std::size_t vertex, std::size_t component, GlobalIndex local_dof) {
+            [&](std::size_t component,
+                GlobalIndex local_dof,
+                std::span<const MeshVertexInterpolationTerm> terms) {
                 const auto dof = static_cast<std::size_t>(local_dof);
-                const auto value_index = vertex * mesh_components + component;
-                coefficients[dof] =
-                    static_cast<Real>(mesh_values[value_index]);
+                Real value{0};
+                for (const auto& term : terms) {
+                    const auto value_index =
+                        term.vertex * mesh_components + component;
+                    value +=
+                        term.weight *
+                        static_cast<Real>(mesh_values[value_index]);
+                }
+                coefficients[dof] = value;
                 if (!assigned.empty()) {
                     assigned[dof] = 1u;
                 }
@@ -9140,7 +9261,13 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
             ncomp,
             static_cast<std::size_t>(field_dof_handlers_[field_idx].getNumDofs()),
             "FESystem::evaluateFieldAtVertices",
-            [&](std::size_t vertex, std::size_t component, GlobalIndex local_dof) {
+            [&](std::size_t component,
+                GlobalIndex local_dof,
+                std::span<const MeshVertexInterpolationTerm> terms) {
+                if (terms.size() != 1u || terms.front().weight != Real{1}) {
+                    return;
+                }
+                const auto vertex = terms.front().vertex;
                 const auto out_index = vertex * ncomp + component;
                 out[out_index] = read_coefficient(local_dof);
                 vertex_component_written[out_index] = 1u;

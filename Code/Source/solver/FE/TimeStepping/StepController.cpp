@@ -92,8 +92,10 @@ StepDecision SimpleStepController::onRejected(const StepAttemptInfo& info, StepR
     }
 
     if (options_.min_dt > 0.0 && d.next_dt <= options_.min_dt + 0.0) {
-        // If we're already at min_dt and still rejecting, stop retrying.
-        if (info.attempt_index >= options_.max_retries) {
+        // Allow a larger failed step to retry once at min_dt, but do not
+        // repeat identical min_dt attempts after the floor itself failed.
+        if (info.dt <= options_.min_dt + 0.0 ||
+            info.attempt_index >= options_.max_retries) {
             d.retry = false;
         }
     }
@@ -103,4 +105,3 @@ StepDecision SimpleStepController::onRejected(const StepAttemptInfo& info, StepR
 } // namespace timestepping
 } // namespace FE
 } // namespace svmp
-

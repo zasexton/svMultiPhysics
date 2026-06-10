@@ -69,6 +69,279 @@ namespace {
 
 using FreeSurfaceBoundary = IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary;
 
+struct DiagnosticBooleanOverride {
+    bool value{false};
+    std::string name{};
+    std::string raw{};
+};
+
+struct DiagnosticScalarOverride {
+    FE::Real value{0.0};
+    std::string name{};
+    std::string raw{};
+};
+
+enum class PspgPressureGradientForm {
+    Absolute,
+    Incremental,
+};
+
+struct DiagnosticPspgPressureGradientFormOverride {
+    PspgPressureGradientForm value{PspgPressureGradientForm::Absolute};
+    std::string name{};
+    std::string raw{};
+};
+
+const char* pspgPressureGradientFormName(PspgPressureGradientForm form)
+{
+    switch (form) {
+    case PspgPressureGradientForm::Absolute:
+        return "absolute";
+    case PspgPressureGradientForm::Incremental:
+        return "incremental";
+    }
+    return "unknown";
+}
+
+std::optional<DiagnosticBooleanOverride> readDiagnosticBooleanOverride(
+    const char* name)
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return std::nullopt;
+    }
+
+    std::string normalized(env);
+    std::transform(
+        normalized.begin(),
+        normalized.end(),
+        normalized.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+
+    const bool value =
+        normalized != "0" && normalized != "false" &&
+        normalized != "no" && normalized != "off";
+    return DiagnosticBooleanOverride{value, name, env};
+}
+
+std::optional<DiagnosticBooleanOverride> navierStokesVmsDiagnosticOverride()
+{
+    if (auto enable = readDiagnosticBooleanOverride("SVMP_NS_ENABLE_VMS")) {
+        return enable;
+    }
+    if (auto disable = readDiagnosticBooleanOverride("SVMP_NS_DISABLE_VMS")) {
+        if (disable->value) {
+            disable->value = false;
+            return disable;
+        }
+    }
+    return std::nullopt;
+}
+
+bool pressureRowContributionDiagnosticEnabled()
+{
+    if (auto value =
+            readDiagnosticBooleanOverride(
+                "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC")) {
+        return value->value;
+    }
+    if (auto value =
+            readDiagnosticBooleanOverride(
+                "SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC")) {
+        return value->value;
+    }
+    return false;
+}
+
+bool navierStokesPspgContinuityFullCellSupportDiagnosticEnabled()
+{
+    if (auto value = readDiagnosticBooleanOverride(
+            "SVMP_NS_PSPG_CONTINUITY_FULL_CELL_SUPPORT")) {
+        return value->value;
+    }
+    if (auto value = readDiagnosticBooleanOverride(
+            "SVMP_PSPG_CONTINUITY_FULL_CELL_SUPPORT")) {
+        return value->value;
+    }
+    return false;
+}
+
+std::optional<DiagnosticScalarOverride> readPositiveDiagnosticScalarOverride(
+    const char* name)
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return std::nullopt;
+    }
+    try {
+        const FE::Real parsed = static_cast<FE::Real>(std::stod(env));
+        if (parsed > FE::Real{0.0} && std::isfinite(parsed)) {
+            return DiagnosticScalarOverride{parsed, name, env};
+        }
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+}
+
+std::optional<DiagnosticScalarOverride> readNonnegativeDiagnosticScalarOverride(
+    const char* name)
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return std::nullopt;
+    }
+    try {
+        const FE::Real parsed = static_cast<FE::Real>(std::stod(env));
+        if (parsed >= FE::Real{0.0} && std::isfinite(parsed)) {
+            return DiagnosticScalarOverride{parsed, name, env};
+        }
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+}
+
+std::optional<DiagnosticScalarOverride> freeSurfacePressureReferenceProbe()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_FREE_SURFACE_PRESSURE_REFERENCE_PROBE_PENALTY")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_FREE_SURFACE_PRESSURE_REFERENCE_PROBE_PENALTY");
+}
+
+std::optional<DiagnosticScalarOverride> freeSurfaceTangentialPressureGradientProbe()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_FREE_SURFACE_TANGENTIAL_PRESSURE_GRADIENT_SCALE")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_FREE_SURFACE_TANGENTIAL_PRESSURE_GRADIENT_SCALE");
+}
+
+std::optional<DiagnosticScalarOverride> navierStokesPspgPressureGradientScale()
+{
+    if (auto value = readNonnegativeDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_PRESSURE_GRADIENT_SCALE")) {
+        return value;
+    }
+    return readNonnegativeDiagnosticScalarOverride(
+        "SVMP_PSPG_PRESSURE_GRADIENT_SCALE");
+}
+
+std::optional<DiagnosticScalarOverride> navierStokesPspgNonpressureResidualScale()
+{
+    if (auto value = readNonnegativeDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_NONPRESSURE_RESIDUAL_SCALE")) {
+        return value;
+    }
+    return readNonnegativeDiagnosticScalarOverride(
+        "SVMP_PSPG_NONPRESSURE_RESIDUAL_SCALE");
+}
+
+std::optional<DiagnosticScalarOverride>
+navierStokesPspgPressureGradientCutVolumeScaleCap()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_PRESSURE_GRADIENT_CUT_VOLUME_SCALE_CAP")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_PSPG_PRESSURE_GRADIENT_CUT_VOLUME_SCALE_CAP");
+}
+
+std::optional<DiagnosticScalarOverride>
+navierStokesPspgBoundaryPressureGradientScale()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_BOUNDARY_PRESSURE_GRADIENT_SCALE")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_PSPG_BOUNDARY_PRESSURE_GRADIENT_SCALE");
+}
+
+std::optional<DiagnosticScalarOverride>
+navierStokesPspgBoundaryPressureFluxScale()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_PSPG_BOUNDARY_PRESSURE_FLUX_SCALE");
+}
+
+std::optional<DiagnosticScalarOverride>
+navierStokesPspgBoundaryTangentialPressureGradientScale()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_BOUNDARY_TANGENTIAL_PRESSURE_GRADIENT_SCALE")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_PSPG_BOUNDARY_TANGENTIAL_PRESSURE_GRADIENT_SCALE");
+}
+
+std::optional<DiagnosticScalarOverride>
+navierStokesPspgBoundaryTangentialMomentumResidualScale()
+{
+    if (auto value = readPositiveDiagnosticScalarOverride(
+            "SVMP_NS_PSPG_BOUNDARY_TANGENTIAL_MOMENTUM_RESIDUAL_SCALE")) {
+        return value;
+    }
+    return readPositiveDiagnosticScalarOverride(
+        "SVMP_PSPG_BOUNDARY_TANGENTIAL_MOMENTUM_RESIDUAL_SCALE");
+}
+
+std::optional<DiagnosticPspgPressureGradientFormOverride>
+readPspgPressureGradientFormOverride(const char* name)
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return std::nullopt;
+    }
+
+    std::string normalized(env);
+    std::transform(
+        normalized.begin(),
+        normalized.end(),
+        normalized.begin(),
+        [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+
+    if (normalized == "absolute" || normalized == "state" ||
+        normalized == "current") {
+        return DiagnosticPspgPressureGradientFormOverride{
+            PspgPressureGradientForm::Absolute,
+            name,
+            env};
+    }
+    if (normalized == "incremental" || normalized == "increment" ||
+        normalized == "delta") {
+        return DiagnosticPspgPressureGradientFormOverride{
+            PspgPressureGradientForm::Incremental,
+            name,
+            env};
+    }
+    return std::nullopt;
+}
+
+std::optional<DiagnosticPspgPressureGradientFormOverride>
+navierStokesPspgPressureGradientForm()
+{
+    if (auto value = readPspgPressureGradientFormOverride(
+            "SVMP_NS_PSPG_PRESSURE_GRADIENT_FORM")) {
+        return value;
+    }
+    return readPspgPressureGradientFormOverride(
+        "SVMP_PSPG_PRESSURE_GRADIENT_FORM");
+}
+
 bool constrainInactiveActiveDomainVelocity()
 {
     const char* env = std::getenv("SVMP_CONSTRAIN_INACTIVE_ACTIVE_DOMAIN_VELOCITY");
@@ -1256,6 +1529,8 @@ namespace {
     switch (policy) {
     case FreeSurfacePressureStabilizationPolicy::Enabled:
         return "Enabled";
+    case FreeSurfacePressureStabilizationPolicy::Incremental:
+        return "Incremental";
     case FreeSurfacePressureStabilizationPolicy::Disabled:
         return "Disabled";
     case FreeSurfacePressureStabilizationPolicy::DisabledForRefreshedFrozenHighOrder:
@@ -1269,6 +1544,7 @@ namespace {
 {
     switch (bc.cut_cell_stabilization.pressure_policy) {
     case FreeSurfacePressureStabilizationPolicy::Enabled:
+    case FreeSurfacePressureStabilizationPolicy::Incremental:
         return "none";
     case FreeSurfacePressureStabilizationPolicy::Disabled:
         return "explicit_policy_disabled";
@@ -1528,7 +1804,8 @@ void applyFreeSurfaceCutCellStabilization(
     FE::Real stabilization_epsilon,
     int velocity_components,
     int velocity_polynomial_order,
-    int pressure_polynomial_order)
+    int pressure_polynomial_order,
+    FE::forms::FormExpr* pressure_stabilization_form = nullptr)
 {
     if (!isUnfittedLevelSet(bc) || !bc.cut_cell_stabilization.enabled) {
         return;
@@ -1545,6 +1822,10 @@ void applyFreeSurfaceCutCellStabilization(
     };
     const bool pressure_stabilization_enabled =
         pressureStabilizationActive(bc);
+    const bool pressure_stabilization_incremental =
+        pressure_stabilization_enabled &&
+        cut.pressure_policy ==
+            FreeSurfacePressureStabilizationPolicy::Incremental;
     const int configured_velocity_derivative_order =
         std::clamp(cut.velocity_max_derivative_order, 1,
                    supported_derivative_order);
@@ -1553,7 +1834,11 @@ void applyFreeSurfaceCutCellStabilization(
                              configured_velocity_derivative_order));
     const int pressure_derivative_order =
         pressure_stabilization_enabled
-            ? (pressure_polynomial_order > 1 ? supported_derivative_order : 1)
+            ? (pressure_stabilization_incremental
+                   ? 1
+                   : (pressure_polynomial_order > 1
+                          ? supported_derivative_order
+                          : 1))
             : 0;
     const int max_derivative_order =
         velocity_derivative_order > pressure_derivative_order
@@ -1563,6 +1848,7 @@ void applyFreeSurfaceCutCellStabilization(
         (velocity_polynomial_order > supported_derivative_order &&
          configured_velocity_derivative_order >= supported_derivative_order) ||
         (pressure_stabilization_enabled &&
+         !pressure_stabilization_incremental &&
          pressure_polynomial_order > supported_derivative_order);
     const bool clamped_velocity_derivative_policy =
         cut.velocity_max_derivative_order != configured_velocity_derivative_order;
@@ -1614,6 +1900,11 @@ void applyFreeSurfaceCutCellStabilization(
         << pressureStabilizationPolicyName(cut.pressure_policy)
         << " pressure_stabilization="
         << (pressure_stabilization_enabled ? "enabled" : "disabled")
+        << " pressure_stabilization_form="
+        << (pressure_stabilization_enabled
+                ? (pressure_stabilization_incremental ? "incremental"
+                                                      : "absolute")
+                : "disabled")
         << " pressure_disabled_reason="
         << pressureStabilizationDisabledReason(bc)
         << " facet_scope=cut-adjacent"
@@ -1698,30 +1989,41 @@ void applyFreeSurfaceCutCellStabilization(
         const auto pressure_penalty = bc_forms::toScalarExpr(
             cut.pressure_gradient_penalty,
             freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", bc));
+        const auto stabilized_pressure =
+            pressure_stabilization_incremental
+                ? FE::forms::FormExpr::effectiveTimeStep() * FE::forms::dt(p)
+                : p;
         const auto pressure_jump_p =
-            FE::forms::cutAdjacentFacetGradientJump(p);
+            FE::forms::cutAdjacentFacetGradientJump(stabilized_pressure);
         const auto pressure_jump_q =
             FE::forms::cutAdjacentFacetGradientJump(q);
-        continuity_form =
-            continuity_form +
+        auto pressure_form =
             FE::forms::cutAdjacentFacetIntegral(
                 cut_scale * pressure_penalty * h3 /
-                (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                    (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
                     FE::forms::inner(pressure_jump_p, pressure_jump_q),
                 bc.interface_marker);
 
         if (pressure_derivative_order > 1) {
             const auto pressure_second_jump_p =
-                FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(p);
+                FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(
+                    stabilized_pressure);
             const auto pressure_second_jump_q =
                 FE::forms::cutAdjacentFacetSecondNormalDerivativeJump(q);
-            continuity_form =
-                continuity_form +
+            pressure_form =
+                pressure_form +
                 FE::forms::cutAdjacentFacetIntegral(
                     cut_scale * pressure_penalty * h5 /
-                    (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                        (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
                         pressure_second_jump_p * pressure_second_jump_q,
                     bc.interface_marker);
+        }
+        continuity_form = continuity_form + pressure_form;
+        if (pressure_stabilization_form != nullptr) {
+            *pressure_stabilization_form =
+                pressure_stabilization_form->isValid()
+                    ? (*pressure_stabilization_form + pressure_form)
+                    : pressure_form;
         }
     }
 }
@@ -2701,19 +3003,25 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                               const FE::forms::FormExpr& mesh_velocity,
                               const FE::forms::FormExpr& mu,
                               const IncompressibleNavierStokesVMSOptions& options,
-                              bool ale_enabled)
+                              bool ale_enabled,
+                              FE::forms::FormExpr* pressure_reference_probe_form = nullptr,
+                              FE::forms::FormExpr* tangential_pressure_gradient_probe_form = nullptr)
 {
     using namespace FE::forms;
 
     validateFreeSurfaceBoundary(bc, ale_enabled);
     warnUnfittedRawCurvatureIfNeeded(bc);
 
+    const auto pressure_reference_probe = freeSurfacePressureReferenceProbe();
+    const auto tangential_pressure_gradient_probe =
+        freeSurfaceTangentialPressureGradientProbe();
     const bool has_dynamic_stress =
         !bc::isZeroConstantScalarValue(bc.external_pressure) ||
         !bc::isZeroConstantScalarValue(bc.surface_tension);
     const bool needs_surface_normal =
         has_dynamic_stress ||
-        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None;
+        bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None ||
+        tangential_pressure_gradient_probe.has_value();
     if (isUnfittedLevelSet(bc)) {
         FE_LOG_INFO(
             std::string("IncompressibleNavierStokesVMSModule: unfitted free-surface boundary mode marker=") +
@@ -2740,6 +3048,37 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             pressureStabilizationDisabledReason(bc) +
             " velocity_extension=" + (bc.velocity_extension.enabled ? "enabled" : "disabled"));
     }
+    const auto p_ext = bc::toScalarExpr(
+        bc.external_pressure,
+        freeSurfaceValueName("ns_free_surface_external_pressure", bc));
+    if (pressure_reference_probe.has_value()) {
+        const auto pressure_reference_form =
+            integrateOnFreeSurface(
+                FormExpr::constant(pressure_reference_probe->value) *
+                    (p - p_ext) * q,
+                bc,
+                ale_enabled);
+        continuity_form = continuity_form + pressure_reference_form;
+        if (pressure_reference_probe_form != nullptr) {
+            *pressure_reference_probe_form =
+                pressure_reference_probe_form->isValid()
+                    ? (*pressure_reference_probe_form +
+                       pressure_reference_form)
+                    : pressure_reference_form;
+        }
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=free_surface_pressure_reference_probe") +
+            " marker=" +
+            std::to_string(isUnfittedLevelSet(bc) ? bc.interface_marker
+                                                  : bc.boundary_marker) +
+            " domain=" + (isUnfittedLevelSet(bc) ? "generated_interface"
+                                                  : "boundary") +
+            " env=" + pressure_reference_probe->name +
+            " raw='" + pressure_reference_probe->raw + "'" +
+            " penalty=" + std::to_string(pressure_reference_probe->value) +
+            " form=continuity_pressure_trace_reference"
+            " reference=free_surface_external_pressure");
+    }
     if (!needs_surface_normal) {
         if (isUnfittedLevelSet(bc)) {
             FE_LOG_WARNING(
@@ -2759,9 +3098,6 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
                        : (useFittedCurrentGeometry(bc, ale_enabled)
                               ? currentNormal()
                               : FormExpr::normal());
-    const auto p_ext = bc::toScalarExpr(
-        bc.external_pressure,
-        freeSurfaceValueName("ns_free_surface_external_pressure", bc));
     const auto gamma = bc::toScalarExpr(
         bc.surface_tension,
         freeSurfaceValueName("ns_free_surface_surface_tension", bc));
@@ -2800,6 +3136,37 @@ void applyFreeSurfaceBoundary(FE::forms::FormExpr& momentum_form,
             v,
             bc,
             system);
+    }
+
+    if (tangential_pressure_gradient_probe.has_value()) {
+        const auto grad_q_tangent = grad(q) - dot(grad(q), n) * n;
+        const auto grad_p_tangent = grad(p) - dot(grad(p), n) * n;
+        const auto pressure_gradient_integrand =
+            FormExpr::constant(tangential_pressure_gradient_probe->value) *
+            inner(grad_q_tangent, grad_p_tangent);
+        const auto pressure_gradient_form =
+            integrateOnFreeSurface(pressure_gradient_integrand, bc, ale_enabled);
+        continuity_form = continuity_form + pressure_gradient_form;
+        if (tangential_pressure_gradient_probe_form != nullptr) {
+            *tangential_pressure_gradient_probe_form =
+                tangential_pressure_gradient_probe_form->isValid()
+                    ? (*tangential_pressure_gradient_probe_form +
+                       pressure_gradient_form)
+                    : pressure_gradient_form;
+        }
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=free_surface_tangential_pressure_gradient_probe") +
+            " marker=" +
+            std::to_string(isUnfittedLevelSet(bc) ? bc.interface_marker
+                                                  : bc.boundary_marker) +
+            " domain=" + (isUnfittedLevelSet(bc) ? "generated_interface"
+                                                  : "boundary") +
+            " env=" + tangential_pressure_gradient_probe->name +
+            " raw='" + tangential_pressure_gradient_probe->raw + "'" +
+            " scale=" +
+            std::to_string(tangential_pressure_gradient_probe->value) +
+            " form=continuity_free_surface_tangential_pressure_gradient"
+            " reference=free_surface_external_pressure");
     }
 
     switch (bc.kinematic_enforcement) {
@@ -2979,6 +3346,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (dim < 1 || dim > 3) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: velocity space must have 1..3 components");
     }
+    if (options_.rotating_frame_coriolis_enabled && dim != 3) {
+        throw std::invalid_argument(
+            "IncompressibleNavierStokesVMSModule::registerOn: rotating-frame Coriolis forcing requires a 3D velocity space");
+    }
     if (pressure_space_->value_dimension() != 1) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: pressure space must be scalar");
     }
@@ -2988,7 +3359,145 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     if (options_.viscosity_model == nullptr && !(options_.viscosity > 0.0)) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: viscosity must be > 0 when viscosity_model is not provided");
     }
-    if (options_.enable_vms && !(options_.stabilization_epsilon > 0.0)) {
+    const auto vms_override = navierStokesVmsDiagnosticOverride();
+    const bool enable_vms =
+        vms_override.has_value() ? vms_override->value : options_.enable_vms;
+    const auto pspg_pressure_gradient_scale_override =
+        navierStokesPspgPressureGradientScale();
+    const FE::Real pspg_pressure_gradient_scale =
+        pspg_pressure_gradient_scale_override.has_value()
+            ? pspg_pressure_gradient_scale_override->value
+            : FE::Real{1.0};
+    const auto pspg_nonpressure_residual_scale_override =
+        navierStokesPspgNonpressureResidualScale();
+    const FE::Real pspg_nonpressure_residual_scale =
+        pspg_nonpressure_residual_scale_override.has_value()
+            ? pspg_nonpressure_residual_scale_override->value
+            : FE::Real{1.0};
+    const auto pspg_pressure_gradient_cut_volume_scale_cap_override =
+        navierStokesPspgPressureGradientCutVolumeScaleCap();
+    const FE::Real pspg_pressure_gradient_cut_volume_scale_cap =
+        pspg_pressure_gradient_cut_volume_scale_cap_override.has_value()
+            ? pspg_pressure_gradient_cut_volume_scale_cap_override->value
+            : FE::Real{1.0};
+    const bool pspg_continuity_full_cell_support =
+        navierStokesPspgContinuityFullCellSupportDiagnosticEnabled();
+    const auto pspg_pressure_gradient_form_override =
+        navierStokesPspgPressureGradientForm();
+    const PspgPressureGradientForm pspg_pressure_gradient_form =
+        pspg_pressure_gradient_form_override.has_value()
+            ? pspg_pressure_gradient_form_override->value
+            : PspgPressureGradientForm::Absolute;
+    const auto pspg_boundary_pressure_gradient_scale_override =
+        navierStokesPspgBoundaryPressureGradientScale();
+    const FE::Real pspg_boundary_pressure_gradient_scale =
+        pspg_boundary_pressure_gradient_scale_override.has_value()
+            ? pspg_boundary_pressure_gradient_scale_override->value
+            : FE::Real{0.0};
+    const auto pspg_boundary_pressure_flux_scale_override =
+        navierStokesPspgBoundaryPressureFluxScale();
+    const FE::Real pspg_boundary_pressure_flux_scale =
+        pspg_boundary_pressure_flux_scale_override.has_value()
+            ? pspg_boundary_pressure_flux_scale_override->value
+            : FE::Real{0.0};
+    const auto pspg_boundary_tangential_pressure_gradient_scale_override =
+        navierStokesPspgBoundaryTangentialPressureGradientScale();
+    const FE::Real pspg_boundary_tangential_pressure_gradient_scale =
+        pspg_boundary_tangential_pressure_gradient_scale_override.has_value()
+            ? pspg_boundary_tangential_pressure_gradient_scale_override->value
+            : FE::Real{0.0};
+    const auto pspg_boundary_tangential_momentum_residual_scale_override =
+        navierStokesPspgBoundaryTangentialMomentumResidualScale();
+    const FE::Real pspg_boundary_tangential_momentum_residual_scale =
+        pspg_boundary_tangential_momentum_residual_scale_override.has_value()
+            ? pspg_boundary_tangential_momentum_residual_scale_override->value
+            : FE::Real{0.0};
+    if (vms_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_vms_override") +
+            " env=" + vms_override->name +
+            " raw='" + vms_override->raw + "'" +
+            " option_enable_vms=" + (options_.enable_vms ? "1" : "0") +
+            " effective_enable_vms=" + (enable_vms ? "1" : "0"));
+    }
+    if (pspg_pressure_gradient_scale_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_scale") +
+            " env=" + pspg_pressure_gradient_scale_override->name +
+            " raw='" + pspg_pressure_gradient_scale_override->raw + "'" +
+            " scale=" + std::to_string(
+                static_cast<double>(pspg_pressure_gradient_scale)));
+    }
+    if (pspg_nonpressure_residual_scale_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_nonpressure_residual_scale") +
+            " env=" + pspg_nonpressure_residual_scale_override->name +
+            " raw='" + pspg_nonpressure_residual_scale_override->raw + "'" +
+            " scale=" + std::to_string(
+                static_cast<double>(pspg_nonpressure_residual_scale)));
+    }
+    if (pspg_pressure_gradient_cut_volume_scale_cap_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_cut_volume_scale_cap") +
+            " env=" +
+            pspg_pressure_gradient_cut_volume_scale_cap_override->name +
+            " raw='" +
+            pspg_pressure_gradient_cut_volume_scale_cap_override->raw + "'" +
+            " cap=" + std::to_string(
+                static_cast<double>(
+                    pspg_pressure_gradient_cut_volume_scale_cap)));
+    }
+    if (pspg_pressure_gradient_form_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_form") +
+            " env=" + pspg_pressure_gradient_form_override->name +
+            " raw='" + pspg_pressure_gradient_form_override->raw + "'" +
+            " form=" +
+            pspgPressureGradientFormName(pspg_pressure_gradient_form));
+    }
+    if (pspg_boundary_pressure_gradient_scale_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_pressure_gradient_scale") +
+            " env=" + pspg_boundary_pressure_gradient_scale_override->name +
+            " raw='" + pspg_boundary_pressure_gradient_scale_override->raw + "'" +
+            " scale=" + std::to_string(
+                static_cast<double>(
+                    pspg_boundary_pressure_gradient_scale)));
+    }
+    if (pspg_boundary_pressure_flux_scale_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_pressure_flux_scale") +
+            " env=" + pspg_boundary_pressure_flux_scale_override->name +
+            " raw='" + pspg_boundary_pressure_flux_scale_override->raw + "'" +
+            " scale=" + std::to_string(
+                static_cast<double>(
+                    pspg_boundary_pressure_flux_scale)));
+    }
+    if (pspg_boundary_tangential_pressure_gradient_scale_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_tangential_pressure_gradient_scale") +
+            " env=" +
+            pspg_boundary_tangential_pressure_gradient_scale_override->name +
+            " raw='" +
+            pspg_boundary_tangential_pressure_gradient_scale_override->raw +
+            "'" +
+            " scale=" + std::to_string(
+                static_cast<double>(
+                    pspg_boundary_tangential_pressure_gradient_scale)));
+    }
+    if (pspg_boundary_tangential_momentum_residual_scale_override.has_value()) {
+        FE_LOG_INFO(
+            std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_tangential_momentum_residual_scale") +
+            " env=" +
+            pspg_boundary_tangential_momentum_residual_scale_override->name +
+            " raw='" +
+            pspg_boundary_tangential_momentum_residual_scale_override->raw +
+            "'" +
+            " scale=" + std::to_string(
+                static_cast<double>(
+                    pspg_boundary_tangential_momentum_residual_scale)));
+    }
+    if (enable_vms && !(options_.stabilization_epsilon > 0.0)) {
         throw std::invalid_argument("IncompressibleNavierStokesVMSModule::registerOn: stabilization_epsilon must be > 0 when VMS is enabled");
     }
 
@@ -3174,6 +3683,17 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
                     *velocity_space_,
                     options_.body_force_field_name);
     }
+    if (options_.rotating_frame_coriolis_enabled) {
+        std::vector<FormExpr> omega_comp;
+        omega_comp.reserve(3u);
+        for (int d = 0; d < 3; ++d) {
+            omega_comp.push_back(bc::toScalarExpr(
+                options_.rotating_frame_angular_velocity[static_cast<std::size_t>(d)],
+                "ns_rotating_frame_angular_velocity_" + std::to_string(d)));
+        }
+        f = f + FormExpr::constant(-2.0) *
+                    cross(FormExpr::asVector(std::move(omega_comp)), u);
+    }
 
     const auto eps_for_mu = sym(grad(u));
     const auto gamma_for_mu =
@@ -3214,7 +3734,16 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
     //         + grad(p) - div(2 mu sym(grad(u)))
     // with a = u - w_mesh for ALE and chi set by the moving-control-volume option.
     const auto stress = FormExpr::constant(2.0) * mu * sym(grad(u));
-    const auto r_m = rho * (dt(u) + grad(u) * a + moving_volume_strong - f) + grad(p) - div(stress);
+    const auto pressure_gradient_residual = grad(p);
+    const auto pspg_pressure_gradient_pressure =
+        pspg_pressure_gradient_form == PspgPressureGradientForm::Incremental
+            ? FormExpr::effectiveTimeStep() * dt(p)
+            : p;
+    const auto pspg_pressure_gradient_residual =
+        grad(pspg_pressure_gradient_pressure);
+    const auto r_m_without_pressure =
+        rho * (dt(u) + grad(u) * a + moving_volume_strong - f) - div(stress);
+    const auto r_m = r_m_without_pressure + pressure_gradient_residual;
 
     // Galerkin terms.
     const auto inertia = rho * inner(dt(u), v);
@@ -3231,8 +3760,15 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
 
     FormExpr active_momentum_integrand = galerkin_momentum_integrand;
     FormExpr active_continuity_integrand = galerkin_continuity_integrand;
+    FormExpr vms_pspg_continuity_integrand;
+    FormExpr vms_pspg_pressure_gradient_integrand;
+    FormExpr vms_pspg_nonpressure_integrand;
+    FormExpr vms_pspg_boundary_pressure_gradient_form;
+    FormExpr vms_pspg_boundary_pressure_flux_form;
+    FormExpr vms_pspg_boundary_tangential_pressure_gradient_form;
+    FormExpr vms_pspg_boundary_tangential_momentum_residual_form;
 
-    if (options_.enable_vms) {
+    if (enable_vms) {
         // Residual-based VMS with static subscales:
         //   u' = -tau_M * R_m
         //   p' = -tau_C * (div u)
@@ -3286,13 +3822,370 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             forcing + supg + cross_stress;
 
         // Continuity: Galerkin + VMS (PSPG-like).
-        active_continuity_integrand = q * div(u) - inner(grad(q), u_sub);
+        const auto pspg_pressure_gradient_scale_expr =
+            FormExpr::constant(pspg_pressure_gradient_scale);
+        FormExpr pspg_pressure_gradient_support_scale =
+            FormExpr::constant(1.0);
+        if (pspg_pressure_gradient_cut_volume_scale_cap_override.has_value()) {
+            if (active_volume_domain.has_value() &&
+                active_volume_domain->method ==
+                    FreeSurfaceActiveDomainMethod::CutVolume &&
+                pspg_pressure_gradient_cut_volume_scale_cap > FE::Real{1.0}) {
+                const auto fraction_floor = FormExpr::constant(1.0e-12);
+                pspg_pressure_gradient_support_scale =
+                    FE::forms::min(
+                        FormExpr::constant(
+                            pspg_pressure_gradient_cut_volume_scale_cap),
+                        FormExpr::constant(1.0) /
+                            FE::forms::max(
+                                FE::forms::cutVolumeFraction(),
+                                fraction_floor));
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_cut_volume_support_scale") +
+                    " status=installed"
+                    " form=cut_volume_fraction_inverse_cap"
+                    " cap=" + std::to_string(
+                        static_cast<double>(
+                            pspg_pressure_gradient_cut_volume_scale_cap)));
+            } else {
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_pressure_gradient_cut_volume_support_scale") +
+                    " status=skipped"
+                    " reason=no_cut_volume_active_domain_or_cap_leq_one"
+                    " cap=" + std::to_string(
+                        static_cast<double>(
+                            pspg_pressure_gradient_cut_volume_scale_cap)));
+            }
+        }
+        const auto pspg_continuity_momentum_residual =
+            FormExpr::constant(pspg_nonpressure_residual_scale) *
+            r_m_without_pressure +
+            pspg_pressure_gradient_scale_expr *
+            pspg_pressure_gradient_support_scale *
+            pspg_pressure_gradient_residual;
+        vms_pspg_pressure_gradient_integrand =
+            pspg_pressure_gradient_scale_expr *
+            pspg_pressure_gradient_support_scale *
+            inner(grad(q), tau_m * pspg_pressure_gradient_residual);
+        vms_pspg_nonpressure_integrand =
+            FormExpr::constant(pspg_nonpressure_residual_scale) *
+            inner(grad(q), tau_m * r_m_without_pressure);
+        vms_pspg_continuity_integrand =
+            vms_pspg_pressure_gradient_integrand +
+            vms_pspg_nonpressure_integrand;
+        if (pspg_continuity_full_cell_support) {
+            active_continuity_integrand = galerkin_continuity_integrand;
+            FE_LOG_INFO(
+                "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_continuity_volume_support"
+                " status=installed"
+                " form=full_cell_vms_pspg_plus_active_galerkin"
+                " qualification=DiagnosticOnly"
+                " env=SVMP_NS_PSPG_CONTINUITY_FULL_CELL_SUPPORT");
+        } else {
+            active_continuity_integrand =
+                galerkin_continuity_integrand + vms_pspg_nonpressure_integrand;
+        }
+
+        if (pspg_boundary_pressure_gradient_scale > FE::Real{0.0}) {
+            std::vector<int> wall_markers;
+            auto append_marker = [&wall_markers](int marker) {
+                if (marker < 0) {
+                    return;
+                }
+                if (std::find(wall_markers.begin(), wall_markers.end(), marker) ==
+                    wall_markers.end()) {
+                    wall_markers.push_back(marker);
+                }
+            };
+            for (const auto& bc : options_.velocity_dirichlet) {
+                append_marker(bc.boundary_marker);
+            }
+            for (const auto& bc : options_.velocity_dirichlet_weak) {
+                append_marker(bc.boundary_marker);
+            }
+
+            if (wall_markers.empty()) {
+                FE_LOG_WARNING(
+                    "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_pressure_gradient"
+                    " status=skipped"
+                    " reason=no_velocity_dirichlet_markers");
+            } else {
+                std::sort(wall_markers.begin(), wall_markers.end());
+                const auto n_wall = FormExpr::normal();
+                const auto boundary_pressure_gradient_integrand =
+                    FormExpr::constant(pspg_boundary_pressure_gradient_scale) *
+                    h() * tau_m *
+                    dot(grad(q), n_wall) *
+                    dot(pspg_pressure_gradient_residual, n_wall);
+                std::ostringstream marker_stream;
+                for (std::size_t i = 0; i < wall_markers.size(); ++i) {
+                    const int marker = wall_markers[i];
+                    auto boundary_form =
+                        boundary_pressure_gradient_integrand.ds(marker);
+                    vms_pspg_boundary_pressure_gradient_form =
+                        vms_pspg_boundary_pressure_gradient_form.isValid()
+                            ? (vms_pspg_boundary_pressure_gradient_form +
+                               boundary_form)
+                            : boundary_form;
+                    if (i > 0) {
+                        marker_stream << "|";
+                    }
+                    marker_stream << marker;
+                }
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_pressure_gradient") +
+                    " status=installed"
+                    " form=wall_normal_pressure_gradient"
+                    " pressure_gradient_form=" +
+                    pspgPressureGradientFormName(
+                        pspg_pressure_gradient_form) +
+                    " scale=" + std::to_string(
+                        static_cast<double>(
+                            pspg_boundary_pressure_gradient_scale)) +
+                    " boundary_markers=" + marker_stream.str());
+            }
+        }
+
+        if (pspg_boundary_pressure_flux_scale > FE::Real{0.0}) {
+            std::vector<int> wall_markers;
+            auto append_marker = [&wall_markers](int marker) {
+                if (marker < 0) {
+                    return;
+                }
+                if (std::find(wall_markers.begin(), wall_markers.end(), marker) ==
+                    wall_markers.end()) {
+                    wall_markers.push_back(marker);
+                }
+            };
+            for (const auto& bc : options_.velocity_dirichlet) {
+                append_marker(bc.boundary_marker);
+            }
+            for (const auto& bc : options_.velocity_dirichlet_weak) {
+                append_marker(bc.boundary_marker);
+            }
+
+            if (wall_markers.empty()) {
+                FE_LOG_WARNING(
+                    "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_pressure_flux"
+                    " status=skipped"
+                    " reason=no_velocity_dirichlet_markers");
+            } else {
+                std::sort(wall_markers.begin(), wall_markers.end());
+                const auto n_wall = FormExpr::normal();
+                const auto boundary_pressure_flux_integrand =
+                    FormExpr::constant(
+                        -pspg_boundary_pressure_flux_scale) *
+                    q * tau_m *
+                    dot(pspg_pressure_gradient_residual, n_wall);
+                std::ostringstream marker_stream;
+                for (std::size_t i = 0; i < wall_markers.size(); ++i) {
+                    const int marker = wall_markers[i];
+                    auto boundary_form =
+                        boundary_pressure_flux_integrand.ds(marker);
+                    vms_pspg_boundary_pressure_flux_form =
+                        vms_pspg_boundary_pressure_flux_form.isValid()
+                            ? (vms_pspg_boundary_pressure_flux_form +
+                               boundary_form)
+                            : boundary_form;
+                    if (i > 0) {
+                        marker_stream << "|";
+                    }
+                    marker_stream << marker;
+                }
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_pressure_flux") +
+                    " status=installed"
+                    " form=wall_pressure_flux"
+                    " pressure_gradient_form=" +
+                    pspgPressureGradientFormName(
+                        pspg_pressure_gradient_form) +
+                    " scale=" + std::to_string(
+                        static_cast<double>(
+                            pspg_boundary_pressure_flux_scale)) +
+                    " boundary_markers=" + marker_stream.str());
+            }
+        }
+
+        if (pspg_boundary_tangential_pressure_gradient_scale > FE::Real{0.0}) {
+            std::vector<int> wall_markers;
+            auto append_marker = [&wall_markers](int marker) {
+                if (marker < 0) {
+                    return;
+                }
+                if (std::find(wall_markers.begin(), wall_markers.end(), marker) ==
+                    wall_markers.end()) {
+                    wall_markers.push_back(marker);
+                }
+            };
+            for (const auto& bc : options_.velocity_dirichlet) {
+                append_marker(bc.boundary_marker);
+            }
+            for (const auto& bc : options_.velocity_dirichlet_weak) {
+                append_marker(bc.boundary_marker);
+            }
+
+            if (wall_markers.empty()) {
+                FE_LOG_WARNING(
+                    "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_tangential_pressure_gradient"
+                    " status=skipped"
+                    " reason=no_velocity_dirichlet_markers");
+            } else {
+                std::sort(wall_markers.begin(), wall_markers.end());
+                const auto n_wall = FormExpr::normal();
+                const auto grad_q_tangent =
+                    grad(q) - dot(grad(q), n_wall) * n_wall;
+                const auto pspg_pressure_gradient_tangent =
+                    pspg_pressure_gradient_residual -
+                    dot(pspg_pressure_gradient_residual, n_wall) * n_wall;
+                const auto boundary_tangential_pressure_gradient_integrand =
+                    FormExpr::constant(
+                        pspg_boundary_tangential_pressure_gradient_scale) *
+                    h() * tau_m *
+                    dot(
+                        grad_q_tangent,
+                        pspg_pressure_gradient_tangent);
+                std::ostringstream marker_stream;
+                for (std::size_t i = 0; i < wall_markers.size(); ++i) {
+                    const int marker = wall_markers[i];
+                    auto boundary_form =
+                        boundary_tangential_pressure_gradient_integrand.ds(marker);
+                    vms_pspg_boundary_tangential_pressure_gradient_form =
+                        vms_pspg_boundary_tangential_pressure_gradient_form.isValid()
+                            ? (vms_pspg_boundary_tangential_pressure_gradient_form +
+                               boundary_form)
+                            : boundary_form;
+                    if (i > 0) {
+                        marker_stream << "|";
+                    }
+                    marker_stream << marker;
+                }
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_tangential_pressure_gradient") +
+                    " status=installed"
+                    " form=wall_tangential_pressure_gradient"
+                    " pressure_gradient_form=" +
+                    pspgPressureGradientFormName(
+                        pspg_pressure_gradient_form) +
+                    " scale=" + std::to_string(
+                        static_cast<double>(
+                            pspg_boundary_tangential_pressure_gradient_scale)) +
+                    " boundary_markers=" + marker_stream.str());
+            }
+        }
+
+        if (pspg_boundary_tangential_momentum_residual_scale > FE::Real{0.0}) {
+            std::vector<int> wall_markers;
+            auto append_marker = [&wall_markers](int marker) {
+                if (marker < 0) {
+                    return;
+                }
+                if (std::find(wall_markers.begin(), wall_markers.end(), marker) ==
+                    wall_markers.end()) {
+                    wall_markers.push_back(marker);
+                }
+            };
+            for (const auto& bc : options_.velocity_dirichlet) {
+                append_marker(bc.boundary_marker);
+            }
+            for (const auto& bc : options_.velocity_dirichlet_weak) {
+                append_marker(bc.boundary_marker);
+            }
+
+            if (wall_markers.empty()) {
+                FE_LOG_WARNING(
+                    "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_tangential_momentum_residual"
+                    " status=skipped"
+                    " reason=no_velocity_dirichlet_markers");
+            } else {
+                std::sort(wall_markers.begin(), wall_markers.end());
+                const auto n_wall = FormExpr::normal();
+                const auto grad_q_tangent =
+                    grad(q) - dot(grad(q), n_wall) * n_wall;
+                const auto pspg_momentum_residual_tangent =
+                    pspg_continuity_momentum_residual -
+                    dot(pspg_continuity_momentum_residual, n_wall) * n_wall;
+                const auto boundary_tangential_momentum_residual_integrand =
+                    FormExpr::constant(
+                        pspg_boundary_tangential_momentum_residual_scale) *
+                    h() *
+                    dot(
+                        grad_q_tangent,
+                        tau_m * pspg_momentum_residual_tangent);
+                std::ostringstream marker_stream;
+                for (std::size_t i = 0; i < wall_markers.size(); ++i) {
+                    const int marker = wall_markers[i];
+                    auto boundary_form =
+                        boundary_tangential_momentum_residual_integrand.ds(marker);
+                    vms_pspg_boundary_tangential_momentum_residual_form =
+                        vms_pspg_boundary_tangential_momentum_residual_form.isValid()
+                            ? (vms_pspg_boundary_tangential_momentum_residual_form +
+                               boundary_form)
+                            : boundary_form;
+                    if (i > 0) {
+                        marker_stream << "|";
+                    }
+                    marker_stream << marker;
+                }
+                FE_LOG_INFO(
+                    std::string("IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pspg_boundary_tangential_momentum_residual") +
+                    " status=installed"
+                    " form=wall_tangential_momentum_residual"
+                    " pressure_gradient_form=" +
+                    pspgPressureGradientFormName(
+                        pspg_pressure_gradient_form) +
+                    " pressure_gradient_scale=" + std::to_string(
+                        static_cast<double>(pspg_pressure_gradient_scale)) +
+                    " scale=" + std::to_string(
+                        static_cast<double>(
+                            pspg_boundary_tangential_momentum_residual_scale)) +
+                    " boundary_markers=" + marker_stream.str());
+            }
+        }
     }
 
     FormExpr momentum_form =
         integrateOnActiveVolume(active_momentum_integrand, active_volume_domain);
     FormExpr continuity_form =
         integrateOnActiveVolume(active_continuity_integrand, active_volume_domain);
+    FormExpr vms_pspg_pressure_gradient_form;
+    if (vms_pspg_pressure_gradient_integrand.isValid()) {
+        vms_pspg_pressure_gradient_form =
+            pspg_continuity_full_cell_support
+                ? vms_pspg_pressure_gradient_integrand.dx()
+                : integrateOnActiveVolume(
+                      vms_pspg_pressure_gradient_integrand,
+                      active_volume_domain);
+    }
+    if (pspg_continuity_full_cell_support &&
+        vms_pspg_nonpressure_integrand.isValid()) {
+        continuity_form = continuity_form + vms_pspg_nonpressure_integrand.dx();
+    }
+    FormExpr active_continuity_diagnostic_form = continuity_form;
+    if (vms_pspg_pressure_gradient_form.isValid()) {
+        active_continuity_diagnostic_form =
+            active_continuity_diagnostic_form + vms_pspg_pressure_gradient_form;
+    }
+    if (vms_pspg_boundary_pressure_gradient_form.isValid()) {
+        continuity_form =
+            continuity_form + vms_pspg_boundary_pressure_gradient_form;
+    }
+    if (vms_pspg_boundary_pressure_flux_form.isValid()) {
+        continuity_form =
+            continuity_form + vms_pspg_boundary_pressure_flux_form;
+    }
+    if (vms_pspg_boundary_tangential_pressure_gradient_form.isValid()) {
+        continuity_form =
+            continuity_form +
+            vms_pspg_boundary_tangential_pressure_gradient_form;
+    }
+    if (vms_pspg_boundary_tangential_momentum_residual_form.isValid()) {
+        continuity_form =
+            continuity_form +
+            vms_pspg_boundary_tangential_momentum_residual_form;
+    }
+    FormExpr pressure_ghost_penalty_form;
+    FormExpr free_surface_pressure_reference_probe_form;
+    FormExpr free_surface_tangential_pressure_gradient_probe_form;
     FormExpr level_set_shape_tangent_form;
     appendCutVolumeShapeTangentForm(
         level_set_shape_tangent_form,
@@ -3302,6 +4195,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         level_set_shape_tangent_form,
         active_continuity_integrand,
         active_volume_domain);
+    if (!pspg_continuity_full_cell_support &&
+        vms_pspg_pressure_gradient_integrand.isValid()) {
+        appendCutVolumeShapeTangentForm(
+            level_set_shape_tangent_form,
+            vms_pspg_pressure_gradient_integrand,
+            active_volume_domain);
+    }
 
     // ---------------------------------------------------------------------
     // Boundary conditions (installer + factories)
@@ -3343,7 +4243,13 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             mesh_velocity,
             mu,
             options_,
-            options_.enable_ale);
+            options_.enable_ale,
+            pressureRowContributionDiagnosticEnabled()
+                ? &free_surface_pressure_reference_probe_form
+                : nullptr,
+            pressureRowContributionDiagnosticEnabled()
+                ? &free_surface_tangential_pressure_gradient_probe_form
+                : nullptr);
         applyFreeSurfaceVelocityExtension(
             momentum_form,
             level_set_shape_tangent_form,
@@ -3371,7 +4277,10 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             options_.stabilization_epsilon,
             dim,
             velocity_space_->polynomial_order(),
-            pressure_space_->polynomial_order());
+            pressure_space_->polynomial_order(),
+            pressureRowContributionDiagnosticEnabled()
+                ? &pressure_ghost_penalty_form
+                : nullptr);
     }
 
     bc_manager.install(options_.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim); });
@@ -3413,6 +4322,142 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
         effective_free_surfaces, system, install);
     ale_binding.configureInstallOptions(install);
     (void)FE::systems::installFormulation(system, "equations", {u_id, p_id}, residual, install);
+    if (vms_pspg_pressure_gradient_form.isValid()) {
+        auto direct_pspg_install = install;
+        direct_pspg_install.source_component_tag =
+            "navier_stokes_vms_pspg_pressure_gradient";
+        if (std::find(direct_pspg_install.extra_trial_fields.begin(),
+                      direct_pspg_install.extra_trial_fields.end(),
+                      u_id) == direct_pspg_install.extra_trial_fields.end()) {
+            direct_pspg_install.extra_trial_fields.push_back(u_id);
+        }
+        (void)FE::systems::installFormulation(
+            system,
+            "equations",
+            {p_id},
+            vms_pspg_pressure_gradient_form,
+            direct_pspg_install);
+    }
+
+    if (pressureRowContributionDiagnosticEnabled()) {
+        auto diagnostic_install = install;
+        if (std::find(diagnostic_install.extra_trial_fields.begin(),
+                      diagnostic_install.extra_trial_fields.end(),
+                      u_id) == diagnostic_install.extra_trial_fields.end()) {
+            diagnostic_install.extra_trial_fields.push_back(u_id);
+        }
+        FE_LOG_INFO(
+            "IncompressibleNavierStokesVMSModule: diagnostic=navier_stokes_pressure_row_contribution_operators"
+            " installing=1"
+            " ops=equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_vms_pspg_boundary_pressure_gradient|equations_diagnostic_ns_vms_pspg_boundary_pressure_flux|equations_diagnostic_ns_vms_pspg_boundary_tangential_pressure_gradient|equations_diagnostic_ns_vms_pspg_boundary_tangential_momentum_residual|equations_diagnostic_ns_pressure_ghost_penalty|equations_diagnostic_ns_free_surface_pressure_reference_probe|equations_diagnostic_ns_free_surface_tangential_pressure_gradient_probe");
+        (void)FE::systems::installFormulation(
+            system,
+            "equations_diagnostic_ns_galerkin_continuity",
+            {p_id},
+            integrateOnActiveVolume(
+                galerkin_continuity_integrand,
+                active_volume_domain),
+            diagnostic_install);
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_active_continuity",
+                {p_id},
+                active_continuity_diagnostic_form,
+                diagnostic_install);
+        if (vms_pspg_continuity_integrand.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg",
+                {p_id},
+                pspg_continuity_full_cell_support
+                    ? vms_pspg_continuity_integrand.dx()
+                    : integrateOnActiveVolume(
+                          vms_pspg_continuity_integrand,
+                          active_volume_domain),
+                diagnostic_install);
+        }
+        if (vms_pspg_pressure_gradient_integrand.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg_pressure_gradient",
+                {p_id},
+                pspg_continuity_full_cell_support
+                    ? vms_pspg_pressure_gradient_integrand.dx()
+                    : integrateOnActiveVolume(
+                          vms_pspg_pressure_gradient_integrand,
+                          active_volume_domain),
+                diagnostic_install);
+        }
+        if (vms_pspg_nonpressure_integrand.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg_nonpressure",
+                {p_id},
+                pspg_continuity_full_cell_support
+                    ? vms_pspg_nonpressure_integrand.dx()
+                    : integrateOnActiveVolume(
+                          vms_pspg_nonpressure_integrand,
+                          active_volume_domain),
+                diagnostic_install);
+        }
+        if (vms_pspg_boundary_pressure_gradient_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg_boundary_pressure_gradient",
+                {p_id},
+                vms_pspg_boundary_pressure_gradient_form,
+                diagnostic_install);
+        }
+        if (vms_pspg_boundary_pressure_flux_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg_boundary_pressure_flux",
+                {p_id},
+                vms_pspg_boundary_pressure_flux_form,
+                diagnostic_install);
+        }
+        if (vms_pspg_boundary_tangential_pressure_gradient_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg_boundary_tangential_pressure_gradient",
+                {p_id},
+                vms_pspg_boundary_tangential_pressure_gradient_form,
+                diagnostic_install);
+        }
+        if (vms_pspg_boundary_tangential_momentum_residual_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_vms_pspg_boundary_tangential_momentum_residual",
+                {p_id},
+                vms_pspg_boundary_tangential_momentum_residual_form,
+                diagnostic_install);
+        }
+        if (pressure_ghost_penalty_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_pressure_ghost_penalty",
+                {p_id},
+                pressure_ghost_penalty_form,
+                diagnostic_install);
+        }
+        if (free_surface_pressure_reference_probe_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_free_surface_pressure_reference_probe",
+                {p_id},
+                free_surface_pressure_reference_probe_form,
+                diagnostic_install);
+        }
+        if (free_surface_tangential_pressure_gradient_probe_form.isValid()) {
+            (void)FE::systems::installFormulation(
+                system,
+                "equations_diagnostic_ns_free_surface_tangential_pressure_gradient_probe",
+                {p_id},
+                free_surface_tangential_pressure_gradient_probe_form,
+                diagnostic_install);
+        }
+    }
+
     if (level_set_shape_tangent_form.isValid()) {
         std::array<FE::FieldId, 2> test_fields{{u_id, p_id}};
         std::vector<FE::FieldId> phi_trial_fields;

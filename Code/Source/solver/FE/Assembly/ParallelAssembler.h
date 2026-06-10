@@ -184,6 +184,9 @@ public:
     void setUserData(const void* user_data) noexcept override;
     void setJITConstants(std::span<const Real> constants) noexcept override;
     void setCutIntegrationContext(const CutIntegrationContext* context) noexcept override;
+    void setAssemblyDiagnosticContext(
+        const AssemblyDiagnosticContext& context) noexcept override;
+    void clearAssemblyDiagnosticContext() noexcept override;
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept override;
     void setAuxiliaryValues(std::span<const Real> inputs,

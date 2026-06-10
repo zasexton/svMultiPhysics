@@ -104,6 +104,23 @@ std::shared_ptr<BasisFunction> make_quad_nurbs_component(Real center_weight) {
         std::move(weights));
 }
 
+std::vector<DofAssociation> vector_associations(const std::shared_ptr<BasisFunction>& basis) {
+    const auto* vector_basis = dynamic_cast<const VectorBasisFunction*>(basis.get());
+    EXPECT_NE(vector_basis, nullptr);
+    return vector_basis != nullptr ? vector_basis->dof_associations() : std::vector<DofAssociation>{};
+}
+
+void expect_association(const std::vector<DofAssociation>& associations,
+                        std::size_t index,
+                        DofEntity entity,
+                        int entity_id,
+                        int moment_index) {
+    ASSERT_LT(index, associations.size());
+    EXPECT_EQ(associations[index].entity_type, entity) << "index " << index;
+    EXPECT_EQ(associations[index].entity_id, entity_id) << "index " << index;
+    EXPECT_EQ(associations[index].moment_index, moment_index) << "index " << index;
+}
+
 std::vector<DofAssociation> compatible_associations(
     const std::vector<std::shared_ptr<BasisFunction>>& components) {
     std::size_t size = 0;
@@ -1612,6 +1629,43 @@ TEST(BasisFactory, CreatesCompatibleQuadVectorSplineAndNurbsBases) {
     ASSERT_EQ(divergence.size(), nurbs_basis->size());
 }
 
+TEST(BasisFactory, CompatibleQuadVectorAssociationsKeepGoldenBoundaryOrdering) {
+    BasisRequest hcurl_req{ElementType::Quad4, BasisType::BSpline, 2, Continuity::H_curl, FieldType::Vector};
+    hcurl_req.axis_orders = {2, 2};
+    hcurl_req.axis_knot_vectors = {
+        make_open_uniform_knots(2, 4),
+        make_open_uniform_knots(2, 4)
+    };
+
+    const auto hcurl_basis = basis_factory::create(hcurl_req);
+    const auto& hcurl = vector_associations(hcurl_basis);
+    ASSERT_EQ(hcurl.size(), 24u);
+    expect_association(hcurl, 0u, DofEntity::Edge, 0, 0);
+    expect_association(hcurl, 2u, DofEntity::Edge, 0, 2);
+    expect_association(hcurl, 9u, DofEntity::Edge, 2, 2);
+    expect_association(hcurl, 11u, DofEntity::Edge, 2, 0);
+    expect_association(hcurl, 12u, DofEntity::Edge, 3, 2);
+    expect_association(hcurl, 15u, DofEntity::Edge, 1, 0);
+    expect_association(hcurl, 20u, DofEntity::Edge, 3, 0);
+    expect_association(hcurl, 23u, DofEntity::Edge, 1, 2);
+
+    BasisRequest hdiv_req{ElementType::Quad4, BasisType::NURBS, 2, Continuity::H_div, FieldType::Vector};
+    hdiv_req.axis_orders = hcurl_req.axis_orders;
+    hdiv_req.axis_knot_vectors = hcurl_req.axis_knot_vectors;
+    hdiv_req.tensor_extents = {4, 4};
+    hdiv_req.weights.assign(16u, Real(1));
+
+    const auto hdiv_basis = basis_factory::create(hdiv_req);
+    const auto& hdiv = vector_associations(hdiv_basis);
+    ASSERT_EQ(hdiv.size(), 24u);
+    expect_association(hdiv, 0u, DofEntity::Edge, 3, 2);
+    expect_association(hdiv, 3u, DofEntity::Edge, 1, 0);
+    expect_association(hdiv, 8u, DofEntity::Edge, 3, 0);
+    expect_association(hdiv, 11u, DofEntity::Edge, 1, 2);
+    expect_association(hdiv, 12u, DofEntity::Edge, 0, 0);
+    expect_association(hdiv, 23u, DofEntity::Edge, 2, 0);
+}
+
 TEST(BasisFactory, CreatesCompatibleHexVectorSplineAndNurbsBases) {
     BasisRequest spline_req{ElementType::Hex8, BasisType::BSpline, 2, Continuity::H_curl, FieldType::Vector};
     spline_req.axis_orders = {2, 2, 2};
@@ -1681,6 +1735,47 @@ TEST(BasisFactory, CreatesCompatibleHexVectorSplineAndNurbsBases) {
     EXPECT_EQ(std::count_if(nurbs_assoc.begin(), nurbs_assoc.end(), [](const DofAssociation& assoc) {
         return assoc.entity_type == DofEntity::Interior;
     }), 54);
+}
+
+TEST(BasisFactory, CompatibleHexVectorAssociationsKeepGoldenBoundaryOrdering) {
+    BasisRequest hcurl_req{ElementType::Hex8, BasisType::BSpline, 2, Continuity::H_curl, FieldType::Vector};
+    hcurl_req.axis_orders = {2, 2, 2};
+    hcurl_req.axis_knot_vectors = {
+        make_open_uniform_knots(2, 4),
+        make_open_uniform_knots(2, 4),
+        make_open_uniform_knots(2, 4)
+    };
+
+    const auto hcurl_basis = basis_factory::create(hcurl_req);
+    const auto& hcurl = vector_associations(hcurl_basis);
+    ASSERT_EQ(hcurl.size(), 144u);
+    expect_association(hcurl, 0u, DofEntity::Edge, 0, 0);
+    expect_association(hcurl, 2u, DofEntity::Edge, 0, 2);
+    expect_association(hcurl, 9u, DofEntity::Edge, 2, 2);
+    expect_association(hcurl, 36u, DofEntity::Edge, 4, 0);
+    expect_association(hcurl, 47u, DofEntity::Edge, 6, 0);
+    expect_association(hcurl, 48u, DofEntity::Edge, 3, 2);
+    expect_association(hcurl, 51u, DofEntity::Edge, 1, 0);
+    expect_association(hcurl, 95u, DofEntity::Edge, 5, 2);
+    expect_association(hcurl, 96u, DofEntity::Edge, 8, 0);
+    expect_association(hcurl, 99u, DofEntity::Edge, 9, 0);
+    expect_association(hcurl, 143u, DofEntity::Edge, 10, 2);
+
+    BasisRequest hdiv_req{ElementType::Hex8, BasisType::NURBS, 2, Continuity::H_div, FieldType::Vector};
+    hdiv_req.axis_orders = hcurl_req.axis_orders;
+    hdiv_req.axis_knot_vectors = hcurl_req.axis_knot_vectors;
+    hdiv_req.tensor_extents = {4, 4, 4};
+    hdiv_req.weights.assign(64u, Real(1));
+
+    const auto hdiv_basis = basis_factory::create(hdiv_req);
+    const auto& hdiv = vector_associations(hdiv_basis);
+    ASSERT_EQ(hdiv.size(), 108u);
+    expect_association(hdiv, 0u, DofEntity::Face, 5, 0);
+    expect_association(hdiv, 3u, DofEntity::Face, 3, 0);
+    expect_association(hdiv, 36u, DofEntity::Face, 2, 0);
+    expect_association(hdiv, 45u, DofEntity::Face, 4, 0);
+    expect_association(hdiv, 72u, DofEntity::Face, 0, 0);
+    expect_association(hdiv, 99u, DofEntity::Face, 1, 0);
 }
 
 TEST(BasisFactory, DefaultHDivOrderOneOnTwoDimensionalCellsUsesRaviartThomas) {

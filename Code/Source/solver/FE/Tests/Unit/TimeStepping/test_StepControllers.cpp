@@ -105,6 +105,52 @@ TEST(SimpleStepController, RejectedStopsWhenAtMinDtAndRetriesExceeded)
     EXPECT_NEAR(d.next_dt, 0.1, 1e-15);
 }
 
+TEST(SimpleStepController, RejectedStopsImmediatelyWhenCurrentDtIsMinDt)
+{
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+    using svmp::FE::timestepping::StepAttemptInfo;
+    using svmp::FE::timestepping::StepRejectReason;
+
+    SimpleStepControllerOptions o;
+    o.min_dt = 0.1;
+    o.max_retries = 8;
+    o.decrease_factor = 0.5;
+    SimpleStepController ctrl(o);
+
+    StepAttemptInfo info;
+    info.dt = 0.1;
+    info.attempt_index = 0;
+
+    const auto d = ctrl.onRejected(info, StepRejectReason::NonlinearSolveFailed);
+    EXPECT_FALSE(d.accept);
+    EXPECT_FALSE(d.retry);
+    EXPECT_NEAR(d.next_dt, 0.1, 1e-15);
+}
+
+TEST(SimpleStepController, RejectedLargerStepCanRetryAtMinDt)
+{
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+    using svmp::FE::timestepping::StepAttemptInfo;
+    using svmp::FE::timestepping::StepRejectReason;
+
+    SimpleStepControllerOptions o;
+    o.min_dt = 0.1;
+    o.max_retries = 8;
+    o.decrease_factor = 0.5;
+    SimpleStepController ctrl(o);
+
+    StepAttemptInfo info;
+    info.dt = 0.15;
+    info.attempt_index = 0;
+
+    const auto d = ctrl.onRejected(info, StepRejectReason::NonlinearSolveFailed);
+    EXPECT_FALSE(d.accept);
+    EXPECT_TRUE(d.retry);
+    EXPECT_NEAR(d.next_dt, 0.1, 1e-15);
+}
+
 TEST(VSVO_BDF_Controller, ValidatesOptions)
 {
     using svmp::FE::timestepping::VSVO_BDF_Controller;

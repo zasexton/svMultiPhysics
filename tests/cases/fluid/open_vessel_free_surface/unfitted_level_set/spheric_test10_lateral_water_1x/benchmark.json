@@ -8,30 +8,54 @@
   },
   "mesh_tools": [
     "PyVista",
-    "TetGen",
-    "MMG"
+    "structured_tet_grid"
   ],
   "notes": [
     "The mesh encodes the 1x rectangular tank and still-water fill level.",
-    "The published roll-angle history and pressure records are external benchmark data."
+    "The published roll-angle history and pressure records are external benchmark data.",
+    "The pressure_gauge entry is an interior pressure anchor; pressure history comparisons use pressure_sensor."
   ],
   "pressure_gauge": {
     "coordinates": [
-      0.450848281065893,
-      0.0696025357517264,
-      0.0315304156128796
+      0.45,
+      0.0365,
+      0.031
     ],
-    "expected_initial_hydrostatic_pressure": 229.11597185186804,
-    "initial_phi": -0.023397464248273603,
-    "node_id": 149
+    "expected_initial_hydrostatic_pressure": 553.267323,
+    "initial_phi": -0.0565,
+    "node_id": 304
   },
   "pressure_gauge_verification": {
     "current_prescribed_pressure_matches_initial_hydrostatic": true,
     "initial_pressure_error_after_constraint": 0.0,
     "previous_surface_target_pressure": 0.0,
-    "previous_surface_target_pressure_error": -229.11597185186804
+    "previous_surface_target_pressure_error": -553.267323
+  },
+  "pressure_sensor": {
+    "case": "lateral_water_1x",
+    "coordinates": [
+      0.0,
+      0.093,
+      0.031
+    ],
+    "name": "Sensor1",
+    "role": "literature_pressure_history_sensor",
+    "source": "SPHERIC Test10 Figure 1"
   },
   "representation": "unfitted_level_set",
+  "rotation_axis": {
+    "direction": [
+      0.0,
+      0.0,
+      1.0
+    ],
+    "point": [
+      0.45,
+      0.0,
+      0.031
+    ],
+    "source": "SPHERIC Test10 Figure 1: rotation axis at the center of the bottom line"
+  },
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-10"
   ]

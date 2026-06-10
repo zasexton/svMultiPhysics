@@ -715,6 +715,85 @@ TEST(FormKernelDGTest, CutStabilizationScaleUsesAdjacentCutCellMetadata)
     }
 }
 
+TEST(FormKernelDGTest, CutStabilizationScaleCanBeCappedByFormMinimum)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto cut_scale =
+        min(cutStabilizationScale(), FormExpr::constant(3.0));
+    const auto form = (cut_scale * inner(jump(u), jump(v))).dS();
+
+    auto ir = compiler.compileBilinear(form);
+    FormKernel kernel(std::move(ir));
+
+    assembly::CutIntegrationContext cut_context;
+    assembly::CutCellAssemblyMetadata metadata;
+    metadata.parent_entity = 0;
+    metadata.volume_fraction = 0.25;
+    metadata.side = geometry::CutIntegrationSide::Negative;
+
+    geometry::CutQuadratureRule rule;
+    rule.kind = geometry::CutQuadratureKind::Volume;
+    rule.side = geometry::CutIntegrationSide::Negative;
+    rule.volume_fraction = metadata.volume_fraction;
+    rule.provenance.parent_entity = metadata.parent_entity;
+    cut_context.addVolumeRule(metadata, rule);
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.setCutIntegrationContext(&cut_context);
+
+    assembly::DenseMatrixView mat(8);
+    mat.zero();
+
+    const auto result =
+        assembler.assembleInteriorFaces(mesh, space, space, kernel, mat, nullptr);
+    EXPECT_EQ(result.interior_faces_assembled, 1);
+
+    const Real raw_eta = 4.0;
+    const Real capped_eta = 3.0;
+    const Real area = std::sqrt(3.0) / 2.0;
+    const Real raw_diag = raw_eta * (area / 6.0);
+    const Real capped_diag = capped_eta * (area / 6.0);
+    const Real capped_off = capped_eta * (area / 12.0);
+
+    auto expected_entry = [&](GlobalIndex i, GlobalIndex j) -> Real {
+        auto faceIndex = [](GlobalIndex dof) -> int {
+            if (dof == 1) return 0;
+            if (dof == 2) return 1;
+            if (dof == 3) return 2;
+            if (dof == 4) return 0;
+            if (dof == 5) return 1;
+            if (dof == 6) return 2;
+            return -1;
+        };
+        auto isMinus = [](GlobalIndex dof) -> bool { return dof < 4; };
+
+        const int fi = faceIndex(i);
+        const int fj = faceIndex(j);
+        if (fi < 0 || fj < 0) return 0.0;
+
+        const bool same_side = (isMinus(i) == isMinus(j));
+        const Real base = (fi == fj) ? capped_diag : capped_off;
+        return same_side ? base : -base;
+    };
+
+    EXPECT_NEAR(mat.getMatrixEntry(1, 1), capped_diag, 5e-11);
+    EXPECT_GT(std::abs(mat.getMatrixEntry(1, 1) - raw_diag), 1e-4);
+
+    for (GlobalIndex i = 0; i < 8; ++i) {
+        for (GlobalIndex j = 0; j < 8; ++j) {
+            SCOPED_TRACE(::testing::Message() << "i=" << i << ", j=" << j);
+            EXPECT_NEAR(mat.getMatrixEntry(i, j), expected_entry(i, j), 5e-11);
+        }
+    }
+}
+
 TEST(FormKernelDGTest, CutStabilizationScaleIsZeroAwayFromCutCells)
 {
     TwoTetraSharedFaceMeshAccess mesh;

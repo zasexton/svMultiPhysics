@@ -27,9 +27,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -101,6 +103,105 @@ const char* compiler_version() noexcept {
 #endif
 }
 
+std::size_t simd_width_bytes() noexcept {
+#if defined(__AVX512F__)
+    return 64u;
+#elif defined(__AVX__)
+    return 32u;
+#elif defined(__SSE2__) || defined(__ARM_NEON)
+    return 16u;
+#else
+    return sizeof(Real);
+#endif
+}
+
+std::string csv_token(std::string value) {
+    for (char& ch : value) {
+        if (ch == ',' || ch == '\n' || ch == '\r' || ch == '\t') {
+            ch = ' ';
+        }
+    }
+    return value.empty() ? std::string{"unknown"} : value;
+}
+
+std::string build_flags_token() {
+    if (const char* env = std::getenv("SVMP_BASIS_BENCH_FLAGS")) {
+        return csv_token(env);
+    }
+#if defined(__OPTIMIZE__)
+    return "optimized";
+#else
+    return "unoptimized";
+#endif
+}
+
+std::string cpu_model_token() {
+    static const std::string model = []() {
+        std::ifstream cpuinfo("/proc/cpuinfo");
+        std::string line;
+        while (std::getline(cpuinfo, line)) {
+            constexpr const char* key = "model name";
+            if (line.rfind(key, 0) == 0) {
+                const auto colon = line.find(':');
+                if (colon != std::string::npos) {
+                    return csv_token(line.substr(colon + 2u));
+                }
+            }
+        }
+        return std::string{"unknown"};
+    }();
+    return model;
+}
+
+std::string memory_bandwidth_token() {
+    if (const char* env = std::getenv("SVMP_BASIS_BENCH_STREAM_GBPS")) {
+        return csv_token(env);
+    }
+    return "unmeasured";
+}
+
+double positive_env_double(const char* name) noexcept {
+    const char* env = std::getenv(name);
+    if (env == nullptr || *env == '\0') {
+        return 0.0;
+    }
+    char* end = nullptr;
+    const double value = std::strtod(env, &end);
+    if (end == env || value <= 0.0) {
+        return 0.0;
+    }
+    return value;
+}
+
+double peak_gflops() noexcept {
+    return positive_env_double("SVMP_BASIS_BENCH_PEAK_GFLOPS");
+}
+
+double stream_gbps() noexcept {
+    return positive_env_double("SVMP_BASIS_BENCH_STREAM_GBPS");
+}
+
+double machine_balance_flop_per_byte() noexcept {
+    if (const double explicit_balance =
+            positive_env_double("SVMP_BASIS_BENCH_MACHINE_BALANCE_FLOP_PER_BYTE");
+        explicit_balance > 0.0) {
+        return explicit_balance;
+    }
+    const double peak = peak_gflops();
+    const double stream = stream_gbps();
+    if (peak > 0.0 && stream > 0.0) {
+        return peak / stream;
+    }
+    return 8.0;
+}
+
+std::string vector_efficiency_token() {
+    if (const char* env = std::getenv("SVMP_BASIS_BENCH_VECTOR_EFFICIENCY")) {
+        return csv_token(env);
+    }
+    return "unmeasured";
+}
+
 void consume(double value) noexcept {
     g_sink = static_cast<double>(g_sink) + value;
 }
@@ -133,9 +234,12 @@ struct Result {
     double seconds;
     std::size_t allocations;
     std::size_t estimated_bytes_per_call;
+    double modeled_flops_per_call{0.0};
+    std::size_t modeled_min_bytes_per_call{0u};
     std::size_t repeats;
     double min_seconds;
     double max_seconds;
+    std::size_t worker_threads{0u};
 };
 
 class SpinBarrier {
@@ -209,6 +313,8 @@ Result make_repeated_result(const char* name,
         median.seconds,
         median.allocations,
         estimated_bytes_per_call,
+        0.0,
+        0u,
         repeats,
         samples.front().seconds,
         samples.back().seconds
@@ -393,6 +499,32 @@ void print_result(const Result& r) {
     const double max_ns_per_call = r.max_seconds * 1.0e9 / static_cast<double>(r.iterations);
     const double allocs_per_call = static_cast<double>(r.allocations) /
                                    static_cast<double>(r.iterations);
+    const double arithmetic_intensity = r.modeled_min_bytes_per_call == 0u
+        ? 0.0
+        : r.modeled_flops_per_call / static_cast<double>(r.modeled_min_bytes_per_call);
+    const double machine_balance = machine_balance_flop_per_byte();
+    const char* bound_class = r.modeled_flops_per_call <= 0.0 ||
+                                      r.modeled_min_bytes_per_call == 0u
+                                  ? "unmodeled"
+                                  : (arithmetic_intensity < machine_balance
+                                         ? "memory"
+                                         : "compute");
+    const double peak = peak_gflops();
+    const double stream = stream_gbps();
+    double model_lower_bound_ns = 0.0;
+    if (r.modeled_flops_per_call > 0.0 &&
+        r.modeled_min_bytes_per_call > 0u &&
+        peak > 0.0 &&
+        stream > 0.0) {
+        const double compute_ns = r.modeled_flops_per_call / peak;
+        const double memory_ns =
+            static_cast<double>(r.modeled_min_bytes_per_call) / stream;
+        model_lower_bound_ns = std::max(compute_ns, memory_ns);
+    }
+    const double measured_to_model_bound =
+        model_lower_bound_ns > 0.0 ? ns_per_call / model_lower_bound_ns : 0.0;
+    const std::size_t row_thread_count =
+        r.worker_threads != 0u ? r.worker_threads : benchmark_thread_count();
     std::cout << r.name << ','
               << r.category << ','
               << compiler_id() << ','
@@ -403,10 +535,24 @@ void print_result(const Result& r) {
               << r.allocations << ','
               << allocs_per_call << ','
               << r.estimated_bytes_per_call << ','
+              << r.modeled_flops_per_call << ','
+              << r.modeled_min_bytes_per_call << ','
+              << arithmetic_intensity << ','
+              << bound_class << ','
+              << model_lower_bound_ns << ','
+              << measured_to_model_bound << ','
+              << machine_balance << ','
+              << vector_efficiency_token() << ','
               << static_cast<double>(g_sink) << ','
               << r.repeats << ','
               << min_ns_per_call << ','
-              << max_ns_per_call << '\n';
+              << max_ns_per_call << ','
+              << build_flags_token() << ','
+              << cpu_model_token() << ','
+              << std::thread::hardware_concurrency() << ','
+              << row_thread_count << ','
+              << simd_width_bytes() << ','
+              << memory_bandwidth_token() << '\n';
 }
 
 std::size_t scaled_iterations(std::size_t base, std::size_t requested) {
@@ -428,6 +574,551 @@ std::vector<Real> tensor_nurbs_weights(std::size_t count) {
         weights[i] += Real(0.01) * static_cast<Real>(i % 5u);
     }
     return weights;
+}
+
+bool lagrange_peak_scope_enabled() {
+    const char* env = std::getenv("SVMP_BASIS_BENCH_LAGRANGE_PEAK");
+    return env != nullptr && std::string(env) == "1";
+}
+
+bool lagrange_parallel_scope_enabled() {
+    const char* env = std::getenv("SVMP_BASIS_BENCH_LAGRANGE_PARALLEL");
+    return env != nullptr && std::string(env) == "1";
+}
+
+int lagrange_peak_max_order() {
+    const char* env = std::getenv("SVMP_BASIS_BENCH_LAGRANGE_PEAK_MAX_ORDER");
+    if (env == nullptr || *env == '\0') {
+        return 8;
+    }
+    const int requested = static_cast<int>(std::strtol(env, nullptr, 10));
+    return std::clamp(requested, 0, 8);
+}
+
+std::size_t scaled_lagrange_iterations(std::size_t base,
+                                       std::size_t dofs,
+                                       std::size_t requested) {
+    if (requested != 0u) {
+        return requested;
+    }
+    const std::size_t divisor = std::max<std::size_t>(1u, dofs / 8u);
+    return std::max<std::size_t>(5u, base / divisor);
+}
+
+std::size_t scaled_lagrange_parallel_iterations(std::size_t requested) {
+    if (requested != 0u) {
+        return requested;
+    }
+    return 200u;
+}
+
+struct LagrangePeakTopology {
+    const char* name;
+    ElementType type;
+    Vector<Real, 3> point;
+    std::array<Vector<Real, 3>, 4> batch_points;
+};
+
+struct KernelModel {
+    double flops_per_call{0.0};
+    std::size_t min_bytes_per_call{0u};
+};
+
+int reference_dimension(ElementType type) noexcept {
+    switch (type) {
+        case ElementType::Line2:
+            return 1;
+        case ElementType::Triangle3:
+        case ElementType::Quad4:
+            return 2;
+        case ElementType::Tetra4:
+        case ElementType::Hex8:
+        case ElementType::Wedge6:
+        case ElementType::Pyramid5:
+            return 3;
+        default:
+            return 3;
+    }
+}
+
+bool is_tensor_lagrange_topology(ElementType type) noexcept {
+    return type == ElementType::Line2 ||
+           type == ElementType::Quad4 ||
+           type == ElementType::Hex8;
+}
+
+bool is_simplex_lagrange_topology(ElementType type) noexcept {
+    return type == ElementType::Triangle3 ||
+           type == ElementType::Tetra4;
+}
+
+std::size_t output_components(bool values,
+                              bool gradients,
+                              bool hessians) noexcept {
+    return (values ? 1u : 0u) +
+           (gradients ? 3u : 0u) +
+           (hessians ? 9u : 0u);
+}
+
+double active_components_for_flops(int dimension,
+                                   bool values,
+                                   bool gradients,
+                                   bool hessians) noexcept {
+    return (values ? 1.0 : 0.0) +
+           (gradients ? static_cast<double>(dimension) : 0.0) +
+           (hessians ? static_cast<double>(dimension * dimension) : 0.0);
+}
+
+double pyramid_fast_combination_nonzeros(int order) noexcept {
+    if (order == 1) {
+        return 21.0;
+    }
+    if (order == 2) {
+        return 84.0;
+    }
+    return 0.0;
+}
+
+std::size_t lagrange_tensor_axis_table_bytes(ElementType type,
+                                             int order,
+                                             std::size_t qpts,
+                                             bool values,
+                                             bool gradients,
+                                             bool hessians) noexcept {
+    if (!is_tensor_lagrange_topology(type) || order <= 3) {
+        return 0u;
+    }
+
+    const std::size_t n_axis = static_cast<std::size_t>(order + 1);
+    const std::size_t dim = static_cast<std::size_t>(reference_dimension(type));
+    const bool q4_product_axis_path =
+        qpts == 4u &&
+        (type == ElementType::Line2 ||
+         type == ElementType::Quad4 ||
+         (type == ElementType::Hex8 &&
+          gradients &&
+          !values &&
+          !hessians));
+    if (q4_product_axis_path) {
+        return dim * qpts * n_axis * sizeof(Real);
+    }
+
+    std::size_t entries_per_axis = n_axis * n_axis;
+    if (gradients || hessians) {
+        entries_per_axis += n_axis * (n_axis - 1u);
+    }
+    if (hessians) {
+        entries_per_axis += n_axis * (n_axis - 2u);
+    }
+    (void)values;
+    return dim * qpts * entries_per_axis * sizeof(Real);
+}
+
+KernelModel lagrange_kernel_model(ElementType type,
+                                  int order,
+                                  std::size_t dofs,
+                                  std::size_t qpts,
+                                  bool values,
+                                  bool gradients,
+                                  bool hessians) {
+    const int dim = reference_dimension(type);
+    const double components =
+        active_components_for_flops(dim, values, gradients, hessians);
+    const std::size_t output_bytes =
+        dofs * output_components(values, gradients, hessians) * qpts * sizeof(Real);
+    const std::size_t point_bytes =
+        qpts * static_cast<std::size_t>(std::max(dim, 1)) * sizeof(Real);
+    const std::size_t table_bytes =
+        lagrange_tensor_axis_table_bytes(type, order, qpts, values, gradients, hessians);
+    const std::size_t bytes = output_bytes + point_bytes + table_bytes;
+
+    double flops = 0.0;
+    if (components > 0.0) {
+        const double q = static_cast<double>(qpts);
+        const double n = static_cast<double>(dofs);
+        const double p = static_cast<double>(std::max(order, 1));
+
+        if (is_tensor_lagrange_topology(type)) {
+            const double setup_per_axis = hessians ? 12.0 : (gradients ? 8.0 : 4.0);
+            const double product_flops =
+                static_cast<double>(std::max(dim - 1, 1));
+            flops = q * (static_cast<double>(dim * (order + 1)) * setup_per_axis +
+                         n * components * product_flops);
+        } else if (is_simplex_lagrange_topology(type)) {
+            flops = q * n * components * (2.0 * p + static_cast<double>(dim));
+        } else if (type == ElementType::Wedge6) {
+            const double setup =
+                static_cast<double>((order + 1) * (order + 1)) *
+                (hessians ? 14.0 : (gradients ? 9.0 : 5.0));
+            flops = q * (setup + n * components * 3.0);
+        } else if (type == ElementType::Pyramid5) {
+            const double modal_eval =
+                q * n * components * (4.0 * p + 2.0);
+            const double fast_nnz = pyramid_fast_combination_nonzeros(order);
+            if (fast_nnz > 0.0) {
+                flops = modal_eval + q * fast_nnz * components * 2.0;
+            } else {
+                flops = modal_eval + q * n * n * components * 2.0;
+            }
+        } else {
+            flops = q * n * components * (2.0 * p + static_cast<double>(dim));
+        }
+    }
+
+    return KernelModel{flops, bytes};
+}
+
+void attach_model(Result& result, const KernelModel& model) noexcept {
+    result.modeled_flops_per_call = model.flops_per_call;
+    result.modeled_min_bytes_per_call = model.min_bytes_per_call;
+}
+
+std::array<LagrangePeakTopology, 7> lagrange_peak_topologies() {
+    return {{
+        {"line", ElementType::Line2,
+         Vector<Real, 3>{Real(0.125), Real(0), Real(0)},
+         {Vector<Real, 3>{Real(-0.65), Real(0), Real(0)},
+          Vector<Real, 3>{Real(-0.15), Real(0), Real(0)},
+          Vector<Real, 3>{Real(0.35), Real(0), Real(0)},
+          Vector<Real, 3>{Real(0.75), Real(0), Real(0)}}},
+        {"triangle", ElementType::Triangle3,
+         Vector<Real, 3>{Real(0.2), Real(0.3), Real(0)},
+         {Vector<Real, 3>{Real(0.15), Real(0.2), Real(0)},
+          Vector<Real, 3>{Real(0.55), Real(0.1), Real(0)},
+          Vector<Real, 3>{Real(0.2), Real(0.55), Real(0)},
+          Vector<Real, 3>{Real(0.3), Real(0.25), Real(0)}}},
+        {"quad", ElementType::Quad4,
+         Vector<Real, 3>{Real(0.125), Real(-0.25), Real(0)},
+         {Vector<Real, 3>{Real(-0.7), Real(-0.6), Real(0)},
+          Vector<Real, 3>{Real(0.4), Real(-0.35), Real(0)},
+          Vector<Real, 3>{Real(-0.2), Real(0.45), Real(0)},
+          Vector<Real, 3>{Real(0.65), Real(0.55), Real(0)}}},
+        {"tet", ElementType::Tetra4,
+         Vector<Real, 3>{Real(0.2), Real(0.2), Real(0.2)},
+         {Vector<Real, 3>{Real(0.12), Real(0.18), Real(0.22)},
+          Vector<Real, 3>{Real(0.45), Real(0.12), Real(0.16)},
+          Vector<Real, 3>{Real(0.16), Real(0.44), Real(0.14)},
+          Vector<Real, 3>{Real(0.18), Real(0.16), Real(0.42)}}},
+        {"hex", ElementType::Hex8,
+         Vector<Real, 3>{Real(0.125), Real(-0.25), Real(0.375)},
+         {Vector<Real, 3>{Real(-0.55), Real(-0.45), Real(-0.35)},
+          Vector<Real, 3>{Real(0.45), Real(-0.25), Real(0.2)},
+          Vector<Real, 3>{Real(-0.25), Real(0.5), Real(-0.15)},
+          Vector<Real, 3>{Real(0.6), Real(0.35), Real(0.55)}}},
+        {"wedge", ElementType::Wedge6,
+         Vector<Real, 3>{Real(0.2), Real(0.2), Real(0.1)},
+         {Vector<Real, 3>{Real(0.15), Real(0.2), Real(-0.55)},
+          Vector<Real, 3>{Real(0.45), Real(0.15), Real(-0.1)},
+          Vector<Real, 3>{Real(0.2), Real(0.45), Real(0.25)},
+          Vector<Real, 3>{Real(0.3), Real(0.25), Real(0.65)}}},
+        {"pyramid", ElementType::Pyramid5,
+         Vector<Real, 3>{Real(0.1), Real(-0.2), Real(0.25)},
+         {Vector<Real, 3>{Real(-0.35), Real(-0.25), Real(0.1)},
+          Vector<Real, 3>{Real(0.25), Real(-0.2), Real(0.25)},
+          Vector<Real, 3>{Real(-0.12), Real(0.22), Real(0.35)},
+          Vector<Real, 3>{Real(0.08), Real(0.05), Real(0.7)}}},
+    }};
+}
+
+void run_lagrange_peak_scope(std::size_t requested_iterations) {
+    const int max_order = lagrange_peak_max_order();
+    const auto topologies = lagrange_peak_topologies();
+    for (const auto& topology : topologies) {
+        for (int order = 0; order <= max_order; ++order) {
+            const std::string construction_name =
+                std::string("lagrange_") + topology.name + "_order" +
+                std::to_string(order) + "_construction";
+            print_result(run_case(
+                construction_name.c_str(),
+                "lagrange_construction",
+                scaled_lagrange_iterations(20, 1u, requested_iterations),
+                0,
+                0,
+                [&]() {
+                    LagrangeBasis basis(topology.type, order);
+                    consume(static_cast<double>(basis.size()));
+                }));
+
+            LagrangeBasis basis(topology.type, order);
+            const std::size_t dofs = basis.size();
+            const std::size_t scalar_iterations =
+                scaled_lagrange_iterations(5000, dofs, requested_iterations);
+            const std::size_t strided_iterations =
+                scaled_lagrange_iterations(1000, dofs, requested_iterations);
+            const std::size_t stride = topology.batch_points.size();
+            const std::vector<Vector<Real, 3>> points(topology.batch_points.begin(),
+                                                      topology.batch_points.end());
+            svmp::FE::basis::prewarm_lagrange_basis_scratch(order, points.size());
+
+            std::vector<Real> values(dofs);
+            std::vector<Gradient> gradients(dofs);
+            std::vector<Hessian> hessians(dofs);
+            std::vector<Real> raw_values(dofs);
+            std::vector<Real> raw_gradients(dofs * 3u);
+            std::vector<Real> raw_hessians(dofs * 9u);
+            std::vector<Real> values_strided(dofs * stride, Real(0));
+            std::vector<Real> gradients_strided(dofs * 3u * stride, Real(0));
+            std::vector<Real> hessians_strided(dofs * 9u * stride, Real(0));
+            std::size_t scalar_point_cursor = 0;
+            auto next_scalar_point = [&]() -> const Vector<Real, 3>& {
+                const Vector<Real, 3>& point = points[scalar_point_cursor];
+                scalar_point_cursor = (scalar_point_cursor + 1u) & 3u;
+                return point;
+            };
+
+            auto run_scalar = [&](const char* op,
+                                  bool need_values,
+                                  bool need_gradients,
+                                  bool need_hessians,
+                                  std::size_t bytes,
+                                  auto&& fn) {
+                const std::string name =
+                    std::string("lagrange_") + topology.name + "_order" +
+                    std::to_string(order) + "_point_" + op;
+                auto result = run_case(
+                    name.c_str(),
+                    "lagrange_scalar_point",
+                    scalar_iterations,
+                    25,
+                    bytes,
+                    [&]() {
+                        fn();
+                    });
+                attach_model(result,
+                             lagrange_kernel_model(topology.type,
+                                                   order,
+                                                   dofs,
+                                                   1u,
+                                                   need_values,
+                                                   need_gradients,
+                                                   need_hessians));
+                print_result(result);
+            };
+
+            run_scalar("values", true, false, false, dofs * sizeof(Real), [&]() {
+                basis.evaluate_values(next_scalar_point(), values);
+                consume(values[0]);
+            });
+            run_scalar("gradients", false, true, false, dofs * 3u * sizeof(Real), [&]() {
+                basis.evaluate_gradients(next_scalar_point(), gradients);
+                consume(gradients[0][0]);
+            });
+            run_scalar("hessians", false, false, true, dofs * 9u * sizeof(Real), [&]() {
+                basis.evaluate_hessians(next_scalar_point(), hessians);
+                consume(hessians[0](0, 0));
+            });
+            run_scalar("all", true, true, true, dofs * 13u * sizeof(Real), [&]() {
+                basis.evaluate_all(next_scalar_point(), values, gradients, hessians);
+                consume(values[0] + gradients[0][0] + hessians[0](0, 0));
+            });
+
+            auto run_raw_to = [&](const char* op,
+                                  bool need_values,
+                                  bool need_gradients,
+                                  bool need_hessians,
+                                  std::size_t bytes,
+                                  auto&& fn) {
+                const std::string name =
+                    std::string("lagrange_") + topology.name + "_order" +
+                    std::to_string(order) + "_to_" + op;
+                auto result = run_case(
+                    name.c_str(),
+                    "lagrange_raw_to_point",
+                    scalar_iterations,
+                    25,
+                    bytes,
+                    [&]() {
+                        fn();
+                    });
+                attach_model(result,
+                             lagrange_kernel_model(topology.type,
+                                                   order,
+                                                   dofs,
+                                                   1u,
+                                                   need_values,
+                                                   need_gradients,
+                                                   need_hessians));
+                print_result(result);
+            };
+
+            run_raw_to("values", true, false, false, dofs * sizeof(Real), [&]() {
+                basis.evaluate_values_to(next_scalar_point(), raw_values.data());
+                consume(raw_values[0]);
+            });
+            run_raw_to("gradients", false, true, false, dofs * 3u * sizeof(Real), [&]() {
+                basis.evaluate_gradients_to(next_scalar_point(), raw_gradients.data());
+                consume(raw_gradients[0]);
+            });
+            run_raw_to("hessians", false, false, true, dofs * 9u * sizeof(Real), [&]() {
+                basis.evaluate_hessians_to(next_scalar_point(), raw_hessians.data());
+                consume(raw_hessians[0]);
+            });
+            run_raw_to("all", true, true, true, dofs * 13u * sizeof(Real), [&]() {
+                const auto& point = next_scalar_point();
+                basis.evaluate_values_to(point, raw_values.data());
+                basis.evaluate_gradients_to(point, raw_gradients.data());
+                basis.evaluate_hessians_to(point, raw_hessians.data());
+                consume(raw_values[0] + raw_gradients[0] + raw_hessians[0]);
+            });
+
+            auto run_strided = [&](const char* op,
+                                   bool need_values,
+                                   bool need_gradients,
+                                   bool need_hessians,
+                                   std::size_t components) {
+                const std::string name =
+                    std::string("lagrange_") + topology.name + "_order" +
+                    std::to_string(order) + "_strided_" + op;
+                auto result = run_case(
+                    name.c_str(),
+                    "lagrange_strided_batch",
+                    strided_iterations,
+                    10,
+                    dofs * components * stride * sizeof(Real),
+                    [&]() {
+                        basis.evaluate_at_quadrature_points_strided(
+                            points,
+                            stride,
+                            need_values ? values_strided.data() : nullptr,
+                            need_gradients ? gradients_strided.data() : nullptr,
+                            need_hessians ? hessians_strided.data() : nullptr);
+                        Real sample = Real(0);
+                        if (need_values) sample += values_strided[0];
+                        if (need_gradients) sample += gradients_strided[0];
+                        if (need_hessians) sample += hessians_strided[0];
+                        consume(sample);
+                    });
+                attach_model(result,
+                             lagrange_kernel_model(topology.type,
+                                                   order,
+                                                   dofs,
+                                                   points.size(),
+                                                   need_values,
+                                                   need_gradients,
+                                                   need_hessians));
+                print_result(result);
+            };
+
+            run_strided("values", true, false, false, 1u);
+            run_strided("gradients", false, true, false, 3u);
+            run_strided("hessians", false, false, true, 9u);
+            run_strided("all", true, true, true, 13u);
+        }
+    }
+}
+
+void run_lagrange_parallel_scope(std::size_t requested_iterations) {
+    constexpr int order = 4;
+    constexpr ElementType element_type = ElementType::Hex8;
+    const std::array<Vector<Real, 3>, 8> batch_points{{
+        Vector<Real, 3>{Real(-0.55), Real(-0.45), Real(-0.35)},
+        Vector<Real, 3>{Real(0.45), Real(-0.25), Real(0.2)},
+        Vector<Real, 3>{Real(-0.25), Real(0.5), Real(-0.15)},
+        Vector<Real, 3>{Real(0.6), Real(0.35), Real(0.55)},
+        Vector<Real, 3>{Real(-0.4), Real(0.15), Real(0.3)},
+        Vector<Real, 3>{Real(0.25), Real(-0.55), Real(-0.2)},
+        Vector<Real, 3>{Real(-0.1), Real(-0.2), Real(0.65)},
+        Vector<Real, 3>{Real(0.15), Real(0.25), Real(-0.55)},
+    }};
+    const std::vector<Vector<Real, 3>> points(batch_points.begin(), batch_points.end());
+    const std::size_t stride = points.size() + 1u;
+    const std::size_t iterations_per_thread = scaled_lagrange_parallel_iterations(requested_iterations);
+    const LagrangeBasis size_probe(element_type, order);
+    const std::size_t dofs = size_probe.size();
+    const KernelModel model =
+        lagrange_kernel_model(element_type, order, dofs, points.size(), true, true, true);
+
+    const std::array<std::size_t, 5> thread_counts{{1u, 2u, 4u, 8u, 16u}};
+    for (const std::size_t thread_count : thread_counts) {
+        for (const bool schedule_only : {true, false}) {
+            const std::string name =
+                std::string("lagrange_parallel_hex_order4_") +
+                (schedule_only ? "schedule_only" : "strided_all") +
+                "_threads" + std::to_string(thread_count);
+            const char* category =
+                schedule_only ? "lagrange_parallel_schedule" : "lagrange_parallel_eval";
+            const std::size_t total_iterations = iterations_per_thread * thread_count;
+            const std::size_t bytes = schedule_only
+                ? 0u
+                : dofs * 13u * stride * sizeof(Real);
+
+            auto result = make_repeated_result(
+                name.c_str(),
+                category,
+                total_iterations,
+                bytes,
+                [&]() {
+                    std::atomic<std::size_t> ready{0};
+                    std::atomic<bool> start{false};
+                    std::vector<double> local_sums(thread_count, 0.0);
+                    std::vector<std::thread> threads;
+                    threads.reserve(thread_count);
+
+                    for (std::size_t thread = 0; thread < thread_count; ++thread) {
+                        threads.emplace_back([&, thread]() {
+                            LagrangeBasis basis(element_type, order);
+                            svmp::FE::basis::prewarm_lagrange_basis_scratch(order, points.size());
+                            std::vector<Real> values(dofs * stride, Real(0));
+                            std::vector<Real> gradients(dofs * 3u * stride, Real(0));
+                            std::vector<Real> hessians(dofs * 9u * stride, Real(0));
+
+                            ready.fetch_add(1, std::memory_order_release);
+                            while (!start.load(std::memory_order_acquire)) {
+                                std::this_thread::yield();
+                            }
+
+                            double local = 0.0;
+                            for (std::size_t iter = 0; iter < iterations_per_thread; ++iter) {
+                                if (schedule_only) {
+                                    local += static_cast<double>((thread + 1u) * (iter + 1u)) *
+                                             1.0e-12;
+                                } else {
+                                    basis.evaluate_at_quadrature_points_strided(
+                                        points,
+                                        stride,
+                                        values.data(),
+                                        gradients.data(),
+                                        hessians.data());
+                                    local += values[0] + gradients[0] + hessians[0];
+                                }
+                            }
+                            local_sums[thread] = local;
+                        });
+                    }
+
+                    while (ready.load(std::memory_order_acquire) != thread_count) {
+                        std::this_thread::yield();
+                    }
+
+                    auto t0 = Clock::now();
+                    std::size_t allocations = 0;
+                    {
+                        CountingScope counting;
+                        start.store(true, std::memory_order_release);
+                        for (auto& thread : threads) {
+                            thread.join();
+                        }
+                        allocations = g_allocations.load(std::memory_order_relaxed);
+                    }
+                    auto t1 = Clock::now();
+
+                    for (double value : local_sums) {
+                        consume(value);
+                    }
+
+                    return TimedSample{
+                        std::chrono::duration<double>(t1 - t0).count(),
+                        allocations
+                    };
+                });
+
+            result.worker_threads = thread_count;
+            if (!schedule_only) {
+                attach_model(result, model);
+            }
+            print_result(result);
+        }
+    }
 }
 
 } // namespace
@@ -512,8 +1203,14 @@ int main(int argc, char** argv) {
     std::cout << std::unitbuf;
     std::cout << "case,category,compiler_id,compiler_version,iterations,"
                  "seconds,ns_per_call,allocations,"
-                 "allocations_per_call,estimated_bytes_per_call,sink,"
-                 "repeats,min_ns_per_call,max_ns_per_call\n";
+                 "allocations_per_call,estimated_bytes_per_call,"
+                 "modeled_flops_per_call,modeled_min_bytes_per_call,"
+                 "arithmetic_intensity_flop_per_byte,bound_class,"
+                 "model_lower_bound_ns,measured_to_model_bound,"
+                 "machine_balance_flop_per_byte,vector_efficiency,sink,"
+                 "repeats,min_ns_per_call,max_ns_per_call,"
+                 "build_flags,cpu_model,hardware_threads,bench_threads,"
+                 "simd_width_bytes,stream_gbps\n";
 
     {
         LagrangeBasis basis(ElementType::Hex8, 2);
@@ -576,13 +1273,20 @@ int main(int argc, char** argv) {
         };
 
     run_lagrange_pyramid_strided_case(
-        2, 4, "lagrange_pyramid_order2_strided_values", true, false, false, 4000);
+        2, 4, "lagrange_pyramid_special_order2_strided_values", true, false, false, 4000);
     run_lagrange_pyramid_strided_case(
-        2, 4, "lagrange_pyramid_order2_strided_values_gradients", true, true, false, 3000);
+        2, 4, "lagrange_pyramid_special_order2_strided_values_gradients", true, true, false, 3000);
     run_lagrange_pyramid_strided_case(
-        2, 4, "lagrange_pyramid_order2_strided_hessians", false, false, true, 2000);
+        2, 4, "lagrange_pyramid_special_order2_strided_hessians", false, false, true, 2000);
     run_lagrange_pyramid_strided_case(
-        5, 6, "lagrange_pyramid_order5_strided_all", true, true, true, 500);
+        5, 6, "lagrange_pyramid_special_order5_strided_all", true, true, true, 500);
+
+    if (lagrange_peak_scope_enabled()) {
+        run_lagrange_peak_scope(requested_iterations);
+    }
+    if (lagrange_parallel_scope_enabled()) {
+        run_lagrange_parallel_scope(requested_iterations);
+    }
 
     {
         BernsteinBasis basis(ElementType::Hex8, 5);
@@ -765,6 +1469,65 @@ int main(int argc, char** argv) {
         print_result(run_case(
             "tensor_bspline_quad_degree3_strided_all", "tensor_spline_strided",
             scaled_iterations(100000, requested_iterations), 500, bytes,
+            [&]() {
+                basis.evaluate_at_quadrature_points_strided(
+                    quad->points(), stride, values.data(), gradients.data(), hessians.data());
+                consume(values[0] + gradients[0] + hessians[0]);
+            }));
+    }
+
+    {
+        TensorProductBasis<BSplineBasis, 1> basis(BSplineBasis(3, cubic_open_knots()));
+        auto quad = svmp::FE::quadrature::QuadratureFactory::create(ElementType::Line2, 4);
+        const std::size_t stride = quad->num_points() + 1u;
+        std::vector<Real> values(basis.size() * stride, Real(0));
+        std::vector<Real> gradients(basis.size() * 3u * stride, Real(0));
+        std::vector<Real> hessians(basis.size() * 9u * stride, Real(0));
+        const std::size_t bytes = basis.size() * (1u + 3u + 9u) * stride * sizeof(Real);
+        print_result(run_case(
+            "tensor_bspline_line_degree3_static_dim1_strided_all", "tensor_spline_strided_static",
+            scaled_iterations(100000, requested_iterations), 500, bytes,
+            [&]() {
+                basis.evaluate_at_quadrature_points_strided(
+                    quad->points(), stride, values.data(), gradients.data(), hessians.data());
+                consume(values[0] + gradients[0] + hessians[0]);
+            }));
+    }
+
+    {
+        TensorProductBasis<BSplineBasis, 2> basis(
+            BSplineBasis(3, cubic_open_knots()),
+            BSplineBasis(3, cubic_open_knots()));
+        auto quad = svmp::FE::quadrature::QuadratureFactory::create(ElementType::Quad4, 4);
+        const std::size_t stride = quad->num_points() + 1u;
+        std::vector<Real> values(basis.size() * stride, Real(0));
+        std::vector<Real> gradients(basis.size() * 3u * stride, Real(0));
+        std::vector<Real> hessians(basis.size() * 9u * stride, Real(0));
+        const std::size_t bytes = basis.size() * (1u + 3u + 9u) * stride * sizeof(Real);
+        print_result(run_case(
+            "tensor_bspline_quad_degree3_static_dim2_strided_all", "tensor_spline_strided_static",
+            scaled_iterations(100000, requested_iterations), 500, bytes,
+            [&]() {
+                basis.evaluate_at_quadrature_points_strided(
+                    quad->points(), stride, values.data(), gradients.data(), hessians.data());
+                consume(values[0] + gradients[0] + hessians[0]);
+            }));
+    }
+
+    {
+        TensorProductBasis<BSplineBasis, 3> basis(
+            BSplineBasis(3, cubic_open_knots()),
+            BSplineBasis(3, cubic_open_knots()),
+            BSplineBasis(3, cubic_open_knots()));
+        auto quad = svmp::FE::quadrature::QuadratureFactory::create(ElementType::Hex8, 4);
+        const std::size_t stride = quad->num_points() + 1u;
+        std::vector<Real> values(basis.size() * stride, Real(0));
+        std::vector<Real> gradients(basis.size() * 3u * stride, Real(0));
+        std::vector<Real> hessians(basis.size() * 9u * stride, Real(0));
+        const std::size_t bytes = basis.size() * (1u + 3u + 9u) * stride * sizeof(Real);
+        print_result(run_case(
+            "tensor_bspline_hex_degree3_static_dim3_strided_all", "tensor_spline_strided_static",
+            scaled_iterations(50000, requested_iterations), 250, bytes,
             [&]() {
                 basis.evaluate_at_quadrature_points_strided(
                     quad->points(), stride, values.data(), gradients.data(), hessians.data());

@@ -35,6 +35,7 @@ inline constexpr std::size_t kJITPointerAlignmentBytes = kFEPreferredAlignmentBy
  * - hessians:          [n_qpts * 9]
  * - laplacians:        [n_qpts]
  * - history_values:    [history_count * n_qpts]
+ * - history_gradients_xyz: [history_count * n_qpts * 3]
  *
  * Vector-valued field (FieldType::Vector):
  * - vector_values_xyz: [n_qpts * 3]  (components beyond value_dim may be zero)
@@ -42,6 +43,7 @@ inline constexpr std::size_t kJITPointerAlignmentBytes = kFEPreferredAlignmentBy
  * - component_hessians:[n_qpts * value_dim * 9]
  * - component_laplacians:[n_qpts * value_dim]
  * - history_vector_values_xyz: [history_count * n_qpts * 3]
+ * - history_jacobians: [history_count * n_qpts * 9]
  */
 struct FieldSolutionEntryV1 {
     std::int32_t field_id{-1};
@@ -64,6 +66,8 @@ struct FieldSolutionEntryV1 {
     std::uint32_t history_count{0};
     const Real* history_values{nullptr};
     const Real* history_vector_values_xyz{nullptr};
+    const Real* history_gradients_xyz{nullptr};
+    const Real* history_jacobians{nullptr};
 };
 
 static_assert(std::is_standard_layout_v<FieldSolutionEntryV1>);

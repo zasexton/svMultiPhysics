@@ -392,6 +392,34 @@ bool startsWith(std::string_view value, std::string_view prefix)
 
 } // namespace
 
+TEST(GeneralSimulationParameters, ParsesOptionalStartTime)
+{
+  tinyxml2::XMLDocument doc;
+  const auto status = doc.Parse(R"xml(
+<svMultiPhysicsFile>
+  <GeneralSimulationParameters>
+    <Continue_previous_simulation>false</Continue_previous_simulation>
+    <Number_of_time_steps>2</Number_of_time_steps>
+    <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+    <Spectral_radius_of_infinite_time_step>0.5</Spectral_radius_of_infinite_time_step>
+    <Start_saving_after_time_step>1</Start_saving_after_time_step>
+    <Start_time>0.9</Start_time>
+    <Time_step_size>0.000625</Time_step_size>
+  </GeneralSimulationParameters>
+</svMultiPhysicsFile>
+)xml");
+  ASSERT_EQ(status, tinyxml2::XML_SUCCESS) << doc.ErrorStr();
+
+  auto* root = doc.FirstChildElement("svMultiPhysicsFile");
+  ASSERT_NE(root, nullptr);
+
+  GeneralSimulationParameters general;
+  general.set_values(root);
+
+  ASSERT_TRUE(general.start_time.defined());
+  EXPECT_DOUBLE_EQ(general.start_time.value(), 0.9);
+}
+
 TEST(OpenVesselExamples, FittedAleCaseDeclaresRequiredControls)
 {
   const auto case_dir = openVesselCaseDir("fitted_ale");

@@ -54,6 +54,10 @@ struct TimeLoopOptions {
     int max_steps{1000000};
 
     bool adjust_last_step{true};
+    // When adjust_last_step is enabled, absorb a terminal remainder smaller
+    // than this fraction of the current step by slightly enlarging the current
+    // step to land exactly on t_end. A value <= 0 disables absorption.
+    double last_step_absorb_fraction{0.0};
 
     SchemeKind scheme{SchemeKind::BackwardEuler};
     double theta{1.0};
@@ -109,6 +113,16 @@ struct TimeLoopCallbacks {
      */
     std::function<bool(TimeHistory&, double solve_time, double dt)> on_before_physics_solve{};
     std::function<void(const TimeHistory&, const NewtonReport&)> on_nonlinear_done{};
+    /**
+     * @brief Optional hook run after a nonlinear solve has produced a converged
+     * candidate state in `TimeHistory::u()` and before adaptive acceptance or
+     * time-history commit.
+     *
+     * Return false to reject the converged candidate as `ErrorTooLarge`.
+     * Adaptive runs retry through the configured StepController; fixed-step
+     * runs throw because there is no retry policy.
+     */
+    std::function<bool(TimeHistory&, const NewtonReport&)> on_before_step_accept{};
     std::function<void(TimeHistory&)> on_step_accepted{};
 
     std::function<void(const TimeHistory&, StepRejectReason, const NewtonReport&)> on_step_rejected{};

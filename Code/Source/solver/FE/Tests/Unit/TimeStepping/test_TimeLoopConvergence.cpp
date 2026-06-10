@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -118,7 +119,11 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
                                      double theta = 0.5,
                                      int newton_max_iterations = 8,
                                      double newton_abs_tolerance = 1e-12,
-                                     double newton_rel_tolerance = 0.0)
+                                     double newton_rel_tolerance = 0.0,
+                                     std::function<void(
+                                         svmp::FE::timestepping::TimeLoopCallbacks&,
+                                         svmp::FE::timestepping::TimeHistory&)>
+                                         configure_callbacks = {})
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -208,6 +213,9 @@ std::vector<Real> runReactionProblem(svmp::FE::timestepping::SchemeKind scheme,
     callbacks.on_nonlinear_done = [&last_nr](const svmp::FE::timestepping::TimeHistory&, const svmp::FE::timestepping::NewtonReport& nr) {
         last_nr = nr;
     };
+    if (configure_callbacks) {
+        configure_callbacks(callbacks, history);
+    }
 
     svmp::FE::timestepping::TimeLoopReport rep;
     try {
@@ -1535,6 +1543,98 @@ TEST(TimeLoopSanity, BackwardEuler_SingleStep_AdvancesSolution)
     for (std::size_t i = 0; i < u_dt.size(); ++i) {
         EXPECT_NEAR(static_cast<double>(u_dt[i]), static_cast<double>(u0[i]) * scale, 1e-12);
     }
+}
+
+TEST(TimeLoopCallbacks, BeforeStepAcceptRejectsConvergedCandidateAndRetries)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    using svmp::FE::timestepping::SimpleStepController;
+    using svmp::FE::timestepping::SimpleStepControllerOptions;
+    using svmp::FE::timestepping::StepRejectReason;
+
+    SimpleStepControllerOptions controller_options;
+    controller_options.decrease_factor = 0.5;
+    controller_options.increase_factor = 1.0;
+    controller_options.max_retries = 3;
+    auto controller =
+        std::make_shared<SimpleStepController>(controller_options);
+
+    int candidate_calls = 0;
+    int rejected_calls = 0;
+    int accepted_calls = 0;
+    std::vector<double> accepted_times;
+    std::vector<double> retry_dt_updates;
+
+    const auto final_values = runReactionProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler,
+        /*dt=*/0.2,
+        /*t_end=*/0.2,
+        /*lambda=*/1.0,
+        /*history_depth=*/2,
+        controller,
+        /*generalized_alpha_rho_inf=*/1.0,
+        /*dg_degree=*/1,
+        /*cg_degree=*/2,
+        svmp::FE::timestepping::CollocationSolveStrategy::Monolithic,
+        /*collocation_max_outer_iterations=*/4,
+        /*collocation_outer_tolerance=*/0.0,
+        /*exact_initial_history=*/false,
+        /*theta=*/0.5,
+        /*newton_max_iterations=*/8,
+        /*newton_abs_tolerance=*/1e-12,
+        /*newton_rel_tolerance=*/0.0,
+        [&](svmp::FE::timestepping::TimeLoopCallbacks& callbacks,
+            svmp::FE::timestepping::TimeHistory&) {
+            callbacks.on_before_step_accept =
+                [&](svmp::FE::timestepping::TimeHistory& h,
+                    const svmp::FE::timestepping::NewtonReport& nr) {
+                    ++candidate_calls;
+                    EXPECT_TRUE(nr.converged);
+                    if (candidate_calls == 1) {
+                        EXPECT_EQ(h.stepIndex(), 0);
+                        EXPECT_NEAR(h.time(), 0.0, 1e-15);
+                        EXPECT_NEAR(h.dt(), 0.2, 1e-15);
+                        return false;
+                    }
+                    return true;
+                };
+            callbacks.on_step_rejected =
+                [&](const svmp::FE::timestepping::TimeHistory& h,
+                    StepRejectReason reason,
+                    const svmp::FE::timestepping::NewtonReport& nr) {
+                    ++rejected_calls;
+                    EXPECT_EQ(reason, StepRejectReason::ErrorTooLarge);
+                    EXPECT_TRUE(nr.converged);
+                    EXPECT_EQ(h.stepIndex(), 0);
+                    EXPECT_NEAR(h.time(), 0.0, 1e-15);
+                    EXPECT_NEAR(h.dt(), 0.2, 1e-15);
+                };
+            callbacks.on_step_accepted =
+                [&](svmp::FE::timestepping::TimeHistory& h) {
+                    ++accepted_calls;
+                    accepted_times.push_back(h.time());
+                };
+            callbacks.on_dt_updated =
+                [&](double old_dt, double new_dt, int step_index, int attempt_index) {
+                    if (step_index == 0 && attempt_index == 0) {
+                        retry_dt_updates.push_back(old_dt);
+                        retry_dt_updates.push_back(new_dt);
+                    }
+                };
+        });
+
+    ASSERT_EQ(final_values.size(), 4u);
+    EXPECT_EQ(candidate_calls, 3);
+    EXPECT_EQ(rejected_calls, 1);
+    EXPECT_EQ(accepted_calls, 2);
+    ASSERT_EQ(accepted_times.size(), 2u);
+    EXPECT_NEAR(accepted_times[0], 0.1, 1e-15);
+    EXPECT_NEAR(accepted_times[1], 0.2, 1e-15);
+    ASSERT_EQ(retry_dt_updates.size(), 2u);
+    EXPECT_NEAR(retry_dt_updates[0], 0.2, 1e-15);
+    EXPECT_NEAR(retry_dt_updates[1], 0.1, 1e-15);
 }
 
 TEST(TimeLoopConvergence, Bdf2_IsSecondOrder_ForReactionEquation)

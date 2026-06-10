@@ -218,6 +218,9 @@ public:
     void setUserData(const void* user_data) noexcept override;
     void setJITConstants(std::span<const Real> constants) noexcept override;
     void setCutIntegrationContext(const CutIntegrationContext* context) noexcept override;
+    void setAssemblyDiagnosticContext(
+        const AssemblyDiagnosticContext& context) noexcept override;
+    void clearAssemblyDiagnosticContext() noexcept override;
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept override;
     void setAuxiliaryValues(std::span<const Real> inputs,
@@ -1006,6 +1009,7 @@ private:
     const void* user_data_{nullptr};
     std::span<const Real> jit_constants_{};
     const CutIntegrationContext* cut_integration_context_{nullptr};
+    std::optional<AssemblyDiagnosticContext> diagnostic_context_{};
     std::span<const Real> coupled_integrals_{};
     std::span<const Real> coupled_aux_state_{};
     std::span<const Real> auxiliary_inputs_{};

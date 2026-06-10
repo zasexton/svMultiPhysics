@@ -1492,6 +1492,7 @@ class EquationParameters : public ParameterLists
 ///   <Continue_previous_simulation> 0 </Continue_previous_simulation>
 ///   <Number_of_spatial_dimensions> 3 </Number_of_spatial_dimensions>
 ///   <Number_of_time_steps> 1 </Number_of_time_steps>
+///   <Start_time> 0.0 </Start_time>
 ///   <Time_step_size> 1e-4 </Time_step_size>
 ///   <Spectral_radius_of_infinite_time_step> 0.50 </Spectral_radius_of_infinite_time_step>
 ///   <Searched_file_name_to_trigger_stop> STOP_SIM </Searched_file_name_to_trigger_stop>
@@ -1532,17 +1533,20 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<bool> warning;
     Parameter<bool> use_new_oop_solver;
     Parameter<bool> enable_adaptive_time_loop;
+    Parameter<bool> newton_line_search_fail_on_no_reduction;
 
     Parameter<double> adaptive_time_loop_decrease_factor;
     Parameter<double> adaptive_time_loop_increase_factor;
     Parameter<double> adaptive_time_loop_max_dt;
     Parameter<double> adaptive_time_loop_min_dt;
     Parameter<double> spectral_radius_of_infinite_time_step;
+    Parameter<double> start_time;
     Parameter<double> time_step_size;
 
     Parameter<int> adaptive_time_loop_max_retries;
     Parameter<int> adaptive_time_loop_max_steps_multiplier;
     Parameter<int> adaptive_time_loop_target_newton_iterations;
+    Parameter<int> newton_line_search_max_iterations;
     Parameter<int> increment_in_saving_restart_files;
     Parameter<int> increment_in_saving_vtk_files;
     Parameter<int> number_of_spatial_dimensions;

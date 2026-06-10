@@ -61,6 +61,7 @@ struct CutVolumeTerm {
     geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
     FieldId test_field{INVALID_FIELD_ID};
     FieldId trial_field{INVALID_FIELD_ID};
+    std::string source_component_tag{};
     std::shared_ptr<assembly::AssemblyKernel> kernel;
 };
 

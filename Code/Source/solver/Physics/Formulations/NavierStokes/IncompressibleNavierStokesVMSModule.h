@@ -102,6 +102,7 @@ enum class FreeSurfaceWallSlipModel : std::uint8_t {
 
 enum class FreeSurfacePressureStabilizationPolicy : std::uint8_t {
     Enabled,
+    Incremental,
     Disabled,
     DisabledForRefreshedFrozenHighOrder
 };
@@ -112,6 +113,7 @@ struct IncompressibleNavierStokesVMSOptions {
     struct VelocityDirichletBC {
         int boundary_marker{-1};
         std::array<ScalarValue, 3> value{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+        std::array<bool, 3> active_components{true, true, true};
     };
 
     struct PressureDirichletBC {
@@ -330,6 +332,9 @@ struct IncompressibleNavierStokesVMSOptions {
     bool has_body_force_spacetime{false};
     std::string body_force_field_name{};
     bool auto_register_body_force_field{true};
+    bool rotating_frame_coriolis_enabled{false};
+    std::array<ScalarValue, 3> rotating_frame_angular_velocity{
+        ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
 
     struct HydrostaticPressureInitialization {
         bool enabled{false};

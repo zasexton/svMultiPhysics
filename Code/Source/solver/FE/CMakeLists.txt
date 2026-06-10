@@ -350,6 +350,7 @@ set(FE_MATH_HEADERS
     Math/IntegerMath.h
     Math/PyramidTensorCoordinates.h
     Math/DenseLinearAlgebra.h
+    Math/DenseTransformKernels.h
     Math/LU.h
 )
 
@@ -410,11 +411,14 @@ set(FE_MATH_SOURCES
 	    Basis/OrthogonalPolynomials.cpp
 	    Basis/VectorBasis.cpp
 	    Basis/VectorBasisBDM.cpp
+	    Basis/VectorBasisBDM_Runtime.cpp
 	    Basis/VectorBasisDirectSeeds.cpp
 	    Basis/VectorBasisDofAssociations.cpp
 	    Basis/VectorBasisEvaluationHelpers.cpp
 	    Basis/VectorBasisNedelec.cpp
+	    Basis/VectorBasisNedelec_Runtime.cpp
 	    Basis/VectorBasisRaviartThomas.cpp
+	    Basis/VectorBasisRaviartThomas_Runtime.cpp
 	    Basis/VectorBasisRtConstruction.cpp
 	    Basis/CompatibleTensorVectorBasis.cpp
 	    Basis/TensorBasis.cpp
@@ -1916,10 +1920,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/LagrangeBasisSimplex.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/SpectralBasis.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisBDM.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisBDM_Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisDirectSeeds.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisEvaluationHelpers.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisNedelec.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisNedelec_Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRaviartThomas.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRaviartThomas_Runtime.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/VectorBasisRtConstruction.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Basis/BatchEvaluator.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Assembly/BatchedProjection.cpp

@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -41,6 +42,8 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#include <set>
+#include <span>
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
@@ -69,6 +72,715 @@ namespace {
         return !(v == "0" || v == "false" || v == "off" || v == "no");
     }();
     return enabled;
+}
+
+[[nodiscard]] bool envBoolEnabled(const char* name) noexcept
+{
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') {
+        return false;
+    }
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+[[nodiscard]] bool newtonFieldResidualDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC") ||
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_RESIDUAL_DIAGNOSTIC") ||
+        envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
+        envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool pressureRowContributionDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
+        envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool newtonMatrixSupportDiagnosticRequested() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_NEWTON_MATRIX_SUPPORT_DIAGNOSTIC") ||
+        std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS") != nullptr;
+    return enabled;
+}
+
+[[nodiscard]] bool activePressureSupportRankDiagnosticRequested() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_DIAGNOSTIC") ||
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_GUARD") ||
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_CLAMP");
+    return enabled;
+}
+
+[[nodiscard]] bool activePressureSupportRankGuardEnabled() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_GUARD");
+    return enabled;
+}
+
+[[nodiscard]] bool activePressureSupportRankClampEnabled() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_CLAMP");
+    return enabled;
+}
+
+[[nodiscard]] bool activePressureGraphCompletionEnabled() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION");
+    return enabled;
+}
+
+[[nodiscard]] bool activePressureUpdateSupportDiagnosticRequested() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] int activePressureSupportRankAllowedZeroVelocityRows() noexcept
+{
+    static const int allowed = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_ALLOWED_ZERO_VELOCITY_ROWS");
+        if (env == nullptr || env[0] == '\0') {
+            return 0;
+        }
+        try {
+            return std::max(0, std::stoi(env));
+        } catch (const std::exception&) {
+            return 0;
+        }
+    }();
+    return allowed;
+}
+
+[[nodiscard]] double activePressureSupportRankTolerance() noexcept
+{
+    static const double tolerance = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_TOLERANCE");
+        if (env == nullptr || env[0] == '\0') {
+            return 1.0e-14;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return 1.0e-14;
+    }();
+    return tolerance;
+}
+
+[[nodiscard]] double activePressureSupportRankClampCouplingThreshold() noexcept
+{
+    static const double threshold = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_CLAMP_MAX_VELOCITY_ROW_SUM");
+        if (env == nullptr || env[0] == '\0') {
+            return activePressureSupportRankTolerance();
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return activePressureSupportRankTolerance();
+    }();
+    return threshold;
+}
+
+[[nodiscard]] double activePressureSupportRankClampSelfThreshold() noexcept
+{
+    static const double threshold = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_CLAMP_MAX_PRESSURE_SELF_ROW_SUM");
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_CLAMP_MAX_SELF_ROW_SUM");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            return -1.0;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return -1.0;
+    }();
+    return threshold;
+}
+
+[[nodiscard]] double activePressureGraphCompletionCouplingThreshold() noexcept
+{
+    static const double threshold = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_VELOCITY_ROW_SUM");
+        if (env == nullptr || env[0] == '\0') {
+            return activePressureSupportRankTolerance();
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return activePressureSupportRankTolerance();
+    }();
+    return threshold;
+}
+
+[[nodiscard]] double activePressureGraphCompletionSelfThreshold() noexcept
+{
+    static const double threshold = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_PRESSURE_SELF_ROW_SUM");
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_SELF_ROW_SUM");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            return -1.0;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return -1.0;
+    }();
+    return threshold;
+}
+
+[[nodiscard]] double activePressureGraphCompletionWeightScale() noexcept
+{
+    static const double scale = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_WEIGHT_SCALE");
+        if (env == nullptr || env[0] == '\0') {
+            return 1.0;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed > 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return 1.0;
+    }();
+    return scale;
+}
+
+[[nodiscard]] double activePressureGraphCompletionMaxEdgeScale() noexcept
+{
+    static const double scale = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_EDGE_SCALE");
+        if (env == nullptr || env[0] == '\0') {
+            return 16.0;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 1.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return 16.0;
+    }();
+    return scale;
+}
+
+[[nodiscard]] int activePressureGraphCompletionMaxRows() noexcept
+{
+    static const int max_rows = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_ROWS");
+        if (env == nullptr || env[0] == '\0') {
+            return 512;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return parsed < 0 ? -1 : parsed;
+        } catch (const std::exception&) {
+            return 512;
+        }
+    }();
+    return max_rows;
+}
+
+[[nodiscard]] int activePressureGraphCompletionMaxActiveNeighbors() noexcept
+{
+    static const int max_neighbors = [] {
+        const char* env = std::getenv(
+            "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_ACTIVE_NEIGHBORS");
+        if (env == nullptr || env[0] == '\0') {
+            return 64;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return parsed < 0 ? -1 : parsed;
+        } catch (const std::exception&) {
+            return 64;
+        }
+    }();
+    return max_neighbors;
+}
+
+[[nodiscard]] int activePressureGraphCompletionPressureNeighborDepth() noexcept
+{
+    static const int depth = [] {
+        const char* env = std::getenv(
+            "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_PRESSURE_NEIGHBOR_DEPTH");
+        if (env == nullptr || env[0] == '\0') {
+            return 1;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return std::clamp(parsed, 1, 8);
+        } catch (const std::exception&) {
+            return 1;
+        }
+    }();
+    return depth;
+}
+
+[[nodiscard]] int activePressureGraphCompletionMaxBalancePressureEdgeDegree() noexcept
+{
+    static const int max_degree = [] {
+        const char* env = std::getenv(
+            "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_BALANCE_PRESSURE_EDGE_DEGREE");
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv(
+                "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MAX_BALANCE_PRESSURE_DEGREE");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            return 3;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return parsed < 0 ? -1 : parsed;
+        } catch (const std::exception&) {
+            return 3;
+        }
+    }();
+    return max_degree;
+}
+
+[[nodiscard]] const std::string& activePressureGraphCompletionMode()
+{
+    static const std::string mode = [] {
+        const char* env = std::getenv("SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_MODE");
+        if (env != nullptr && env[0] != '\0') {
+            std::string parsed(env);
+            std::transform(parsed.begin(), parsed.end(), parsed.begin(),
+                           [](unsigned char c) {
+                               return static_cast<char>(std::tolower(c));
+                           });
+            return parsed;
+        }
+        return std::string("cycle");
+    }();
+    return mode;
+}
+
+[[nodiscard]] double activePressureUpdateSupportWeakVelocityThreshold() noexcept
+{
+    static const double threshold = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_WEAK_VELOCITY_ROW_SUM");
+        if (env == nullptr || env[0] == '\0') {
+            return -1.0;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return -1.0;
+    }();
+    return threshold;
+}
+
+[[nodiscard]] double activePressureUpdateSupportWeakSelfThreshold() noexcept
+{
+    static const double threshold = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_WEAK_PRESSURE_SELF_ROW_SUM");
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_WEAK_SELF_ROW_SUM");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            return -1.0;
+        }
+        try {
+            const double parsed = std::stod(env);
+            if (parsed >= 0.0 && std::isfinite(parsed)) {
+                return parsed;
+            }
+        } catch (const std::exception&) {
+        }
+        return -1.0;
+    }();
+    return threshold;
+}
+
+[[nodiscard]] int activePressureSupportRankSampleLimit() noexcept
+{
+    static const int limit = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_SAMPLE_LIMIT");
+        if (env == nullptr || env[0] == '\0') {
+            return 16;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return parsed < 0 ? -1 : parsed;
+        } catch (const std::exception&) {
+            return 16;
+        }
+    }();
+    return limit;
+}
+
+[[nodiscard]] int activePressureUpdateSupportSampleLimit() noexcept
+{
+    static const int limit = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_SAMPLE_LIMIT");
+        if (env == nullptr || env[0] == '\0') {
+            return 12;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return parsed < 0 ? -1 : parsed;
+        } catch (const std::exception&) {
+            return 12;
+        }
+    }();
+    return limit;
+}
+
+[[nodiscard]] int activePressureUpdateSupportActionSampleLimit() noexcept
+{
+    static const int limit = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_ACTION_SAMPLE_LIMIT");
+        if (env == nullptr || env[0] == '\0') {
+            return 4;
+        }
+        try {
+            const int parsed = std::stoi(env);
+            return parsed < 0 ? -1 : parsed;
+        } catch (const std::exception&) {
+            return 4;
+        }
+    }();
+    return limit;
+}
+
+[[nodiscard]] const std::string& newtonFieldResidualDiagnosticFieldName()
+{
+    static const std::string field_name = [] {
+        const char* env = std::getenv("SVMP_NEWTON_FIELD_RESIDUAL_FIELD");
+        if (env != nullptr && env[0] != '\0') {
+            return std::string(env);
+        }
+        return std::string("Pressure");
+    }();
+    return field_name;
+}
+
+[[nodiscard]] const std::string& activePressureSupportRankPressureFieldName()
+{
+    static const std::string field_name = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_PRESSURE_FIELD");
+        if (env != nullptr && env[0] != '\0') {
+            return std::string(env);
+        }
+        return std::string("Pressure");
+    }();
+    return field_name;
+}
+
+[[nodiscard]] const std::string& activePressureSupportRankCouplingFieldName()
+{
+    static const std::string field_name = [] {
+        const char* env =
+            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_COUPLING_FIELD");
+        if (env != nullptr && env[0] != '\0') {
+            return std::string(env);
+        }
+        return std::string("Velocity");
+    }();
+    return field_name;
+}
+
+std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
+{
+    std::vector<GlobalIndex> out;
+    std::string normalized(text);
+    std::replace(normalized.begin(), normalized.end(), ',', '|');
+    std::size_t begin = 0u;
+    while (begin < normalized.size()) {
+        const auto end = normalized.find('|', begin);
+        const auto token =
+            normalized.substr(begin, end == std::string::npos
+                                         ? std::string::npos
+                                         : end - begin);
+        const auto dash = token.find('-');
+        try {
+            if (dash != std::string::npos) {
+                const auto first =
+                    static_cast<GlobalIndex>(std::stoll(token.substr(0, dash)));
+                const auto last =
+                    static_cast<GlobalIndex>(std::stoll(token.substr(dash + 1)));
+                const auto step = (last >= first) ? GlobalIndex{1} : GlobalIndex{-1};
+                for (GlobalIndex value = first;; value += step) {
+                    out.push_back(value);
+                    if (value == last) {
+                        break;
+                    }
+                }
+            } else if (!token.empty()) {
+                out.push_back(static_cast<GlobalIndex>(std::stoll(token)));
+            }
+        } catch (const std::exception&) {
+            // Ignore malformed diagnostic tokens; the surrounding diagnostic is
+            // intentionally best-effort.
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1u;
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+[[nodiscard]] const std::vector<GlobalIndex>& newtonFieldResidualDiagnosticSampleDofs()
+{
+    static const std::vector<GlobalIndex> dofs = [] {
+        const char* env = std::getenv("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS");
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            return std::vector<GlobalIndex>{};
+        }
+        return parseGlobalIndexList(env);
+    }();
+    return dofs;
+}
+
+[[nodiscard]] const std::vector<GlobalIndex>& newtonMatrixSupportGlobalSampleDofs()
+{
+    static const std::vector<GlobalIndex> dofs = [] {
+        const char* env = std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
+        if (env == nullptr || env[0] == '\0') {
+            return std::vector<GlobalIndex>{};
+        }
+        return parseGlobalIndexList(env);
+    }();
+    return dofs;
+}
+
+[[nodiscard]] const std::vector<GlobalIndex>& newtonMatrixSupportPressureLocalSampleDofs()
+{
+    static const std::vector<GlobalIndex> dofs = [] {
+        const char* env = std::getenv("SVMP_ACTIVE_PRESSURE_CONSTRAINT_SAMPLE_DOFS");
+        if (env == nullptr || env[0] == '\0') {
+            return std::vector<GlobalIndex>{};
+        }
+        return parseGlobalIndexList(env);
+    }();
+    return dofs;
+}
+
+[[nodiscard]] const std::vector<GlobalIndex>& activePressureGraphCompletionExplicitBalanceGlobalDofs()
+{
+    static const std::vector<GlobalIndex> dofs = [] {
+        const char* env = std::getenv(
+            "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_BALANCE_GLOBAL_DOFS");
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv(
+                "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_EXPLICIT_BALANCE_GLOBAL_DOFS");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            env = std::getenv(
+                "SVMP_ACTIVE_PRESSURE_GRAPH_COMPLETION_BALANCE_DOFS");
+        }
+        if (env == nullptr || env[0] == '\0') {
+            return std::vector<GlobalIndex>{};
+        }
+        return parseGlobalIndexList(env);
+    }();
+    return dofs;
+}
+
+[[nodiscard]] bool pressureRowContributionMatrixDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        pressureRowContributionDiagnosticEnabled() &&
+        (envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_NS_DIRECT_PSPG_FORMULATION_CANDIDATE_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_DIRECT_PSPG_FORMULATION_CANDIDATE_DIAGNOSTIC") ||
+         std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS") != nullptr ||
+         std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS") != nullptr ||
+         std::getenv("SVMP_ACTIVE_PRESSURE_CONSTRAINT_SAMPLE_DOFS") != nullptr);
+    return enabled;
+}
+
+[[nodiscard]] bool pressureRowContributionMatrixSummaryDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        pressureRowContributionDiagnosticEnabled() &&
+        (envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC"));
+    return enabled;
+}
+
+[[nodiscard]] bool directPspgFormulationCandidateDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        pressureRowContributionDiagnosticEnabled() &&
+        (envBoolEnabled("SVMP_NS_DIRECT_PSPG_FORMULATION_CANDIDATE_DIAGNOSTIC") ||
+         envBoolEnabled("SVMP_DIRECT_PSPG_FORMULATION_CANDIDATE_DIAGNOSTIC"));
+    return enabled;
+}
+
+[[nodiscard]] bool directPspgFormulationCandidateOpSelected(std::string_view op) noexcept
+{
+    return op == "equations_diagnostic_ns_vms_pspg_pressure_gradient";
+}
+
+[[nodiscard]] bool pressureRowContributionMatrixSummaryOpSelected(
+    std::string_view op)
+{
+    const char* env =
+        std::getenv("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
+    if (env == nullptr || env[0] == '\0') {
+        env = std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
+    }
+    if (env == nullptr || env[0] == '\0') {
+        return true;
+    }
+
+    std::string selected(env);
+    std::replace(selected.begin(), selected.end(), ',', '|');
+    std::replace(selected.begin(), selected.end(), ';', '|');
+    std::size_t begin = 0u;
+    while (begin < selected.size()) {
+        const auto end = selected.find('|', begin);
+        std::string token =
+            selected.substr(begin, end == std::string::npos
+                                       ? std::string::npos
+                                       : end - begin);
+        token.erase(token.begin(),
+                    std::find_if(token.begin(), token.end(), [](unsigned char c) {
+                        return !std::isspace(c);
+                    }));
+        token.erase(std::find_if(token.rbegin(), token.rend(), [](unsigned char c) {
+                        return !std::isspace(c);
+                    }).base(),
+                    token.end());
+        if (token == "*" || token == op ||
+            (!token.empty() &&
+             op.find(std::string_view(token)) != std::string_view::npos)) {
+            return true;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1u;
+    }
+    return false;
+}
+
+struct NewtonMatrixSupportFieldRange {
+    std::string name;
+    GlobalIndex begin = INVALID_GLOBAL_INDEX;
+    GlobalIndex end = INVALID_GLOBAL_INDEX;
+};
+
+[[nodiscard]] std::vector<NewtonMatrixSupportFieldRange>
+newtonMatrixSupportFieldRanges(const systems::FESystem& sys)
+{
+    std::vector<NewtonMatrixSupportFieldRange> ranges;
+    for (const auto field : sys.unknownFieldIdsInDofMapOrder()) {
+        const auto begin = sys.fieldDofOffset(field);
+        const auto dofs = sys.fieldDofHandler(field).getNumDofs();
+        if (begin < 0 || dofs <= 0) {
+            continue;
+        }
+        ranges.push_back(NewtonMatrixSupportFieldRange{
+            sys.fieldRecord(field).name,
+            begin,
+            begin + dofs,
+        });
+    }
+    return ranges;
+}
+
+void addMatrixSupportFieldAbs(
+    std::span<const NewtonMatrixSupportFieldRange> ranges,
+    GlobalIndex dof,
+    double abs_value,
+    std::vector<double>& sums)
+{
+    for (std::size_t i = 0; i < ranges.size(); ++i) {
+        if (dof >= ranges[i].begin && dof < ranges[i].end) {
+            sums[i] += abs_value;
+            return;
+        }
+    }
+}
+
+[[nodiscard]] std::string formatMatrixSupportFieldSums(
+    std::span<const NewtonMatrixSupportFieldRange> ranges,
+    std::span<const double> sums)
+{
+    if (ranges.empty() || sums.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    const auto count = std::min(ranges.size(), sums.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        oss << ranges[i].name << ':' << sums[i];
+    }
+    return oss.str();
 }
 
 [[nodiscard]] bool linearProbeDumpEnabled() noexcept
@@ -1876,6 +2588,5322 @@ void logVectorComponentNorms(const systems::FESystem& sys,
             << " min=" << min_value
             << " max=" << max_value << "]";
     }
+    FE_LOG_INFO(oss.str());
+}
+
+void logNewtonFieldResidualDiagnostic(
+    const systems::FESystem& sys,
+    backends::GenericVector& residual,
+    std::string_view phase,
+    NewtonOptions::StateSynchronizationPoint sync_point,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!newtonFieldResidualDiagnosticEnabled()) {
+        return;
+    }
+
+    const auto& field_name = newtonFieldResidualDiagnosticFieldName();
+    const auto field_id = sys.findFieldByName(field_name);
+    if (field_id == INVALID_FIELD_ID) {
+        if (mpiRank() == 0) {
+            FE_LOG_INFO(
+                "NewtonSolver: field residual diagnostic skipped "
+                "diagnostic=newton_field_residual_skipped reason=field_not_found "
+                "field='" + field_name + "'");
+        }
+        return;
+    }
+
+    const auto field_offset = sys.fieldDofOffset(field_id);
+    const auto field_dofs = sys.fieldDofHandler(field_id).getNumDofs();
+    if (field_offset < 0 || field_dofs <= 0) {
+        if (mpiRank() == 0) {
+            std::ostringstream oss;
+            oss << "NewtonSolver: field residual diagnostic skipped"
+                << " diagnostic=newton_field_residual_skipped"
+                << " reason=invalid_field_range"
+                << " field='" << field_name << "'"
+                << " field_offset=" << field_offset
+                << " field_dofs=" << field_dofs;
+            FE_LOG_INFO(oss.str());
+        }
+        return;
+    }
+
+    const auto owned_dofs =
+        ownedDofsForVector(residual, sys.dofHandler().getPartition().locallyOwned());
+    auto view = residual.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "NewtonSolver: field residual diagnostic view");
+
+    const auto field_begin = field_offset;
+    const auto field_end = field_offset + field_dofs;
+    long double local_sq = 0.0L;
+    double local_sum = 0.0;
+    double local_min = std::numeric_limits<double>::infinity();
+    double local_max = -std::numeric_limits<double>::infinity();
+    double local_max_abs = 0.0;
+    double local_worst_value = 0.0;
+    GlobalIndex local_worst_dof = INVALID_GLOBAL_INDEX;
+    unsigned long long local_count = 0ull;
+
+    for (const auto dof : owned_dofs) {
+        if (dof < field_begin || dof >= field_end) {
+            continue;
+        }
+        const double value = static_cast<double>(view->getVectorEntry(dof));
+        local_sq += static_cast<long double>(value) *
+                    static_cast<long double>(value);
+        local_sum += value;
+        local_min = std::min(local_min, value);
+        local_max = std::max(local_max, value);
+        ++local_count;
+        const double abs_value = std::abs(value);
+        if (abs_value > local_max_abs) {
+            local_max_abs = abs_value;
+            local_worst_value = value;
+            local_worst_dof = dof;
+        }
+    }
+
+    double global_sq = static_cast<double>(local_sq);
+    double global_sum = local_sum;
+    double global_min = local_min;
+    double global_max = local_max;
+    double global_max_abs = local_max_abs;
+    unsigned long long global_count = local_count;
+
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    if (mpi_initialized) {
+        const double local_sq_double = static_cast<double>(local_sq);
+        MPI_Allreduce(&local_sq_double, &global_sq, 1, MPI_DOUBLE, MPI_SUM,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_sum, &global_sum, 1, MPI_DOUBLE, MPI_SUM,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_min, &global_min, 1, MPI_DOUBLE, MPI_MIN,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_max, &global_max, 1, MPI_DOUBLE, MPI_MAX,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_max_abs, &global_max_abs, 1, MPI_DOUBLE, MPI_MAX,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(&local_count, &global_count, 1,
+                      MPI_UNSIGNED_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    }
+#endif
+
+    if (global_count == 0ull) {
+        global_min = 0.0;
+        global_max = 0.0;
+    }
+    const double global_norm = std::sqrt(std::max(0.0, global_sq));
+    const double global_mean =
+        global_count > 0ull ? global_sum / static_cast<double>(global_count)
+                            : 0.0;
+
+    std::ostringstream oss;
+    oss << "NewtonSolver: field residual diagnostic"
+        << " diagnostic=newton_field_residual"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " sync_point=" << stateSyncPointName(sync_point)
+        << " field='" << field_name << "'"
+        << " field_offset=" << field_offset
+        << " field_dofs=" << field_dofs
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " owned_field_dofs=" << global_count
+        << " norm=" << global_norm
+        << " mean=" << global_mean
+        << " min=" << global_min
+        << " max=" << global_max
+        << " global_max_abs=" << global_max_abs
+        << " local_worst_dof=" << local_worst_dof
+        << " local_worst_value=" << local_worst_value
+        << " local_max_abs=" << local_max_abs;
+
+    const auto& sample_dofs = newtonFieldResidualDiagnosticSampleDofs();
+    if (!sample_dofs.empty()) {
+        oss << " sampled_dofs=";
+        bool emitted = false;
+        for (const auto dof : sample_dofs) {
+            if (dof < 0 || dof >= residual.size()) {
+                continue;
+            }
+            if (emitted) {
+                oss << "|";
+            }
+            oss << dof << ":" << static_cast<double>(view->getVectorEntry(dof));
+            emitted = true;
+        }
+        if (!emitted) {
+            oss << "none";
+        }
+    }
+    FE_LOG_INFO(oss.str());
+}
+
+std::string firstNonzeroMatrixIndices(const backends::GenericMatrix& matrix,
+                                      GlobalIndex fixed_index,
+                                      bool scan_row,
+                                      Real tiny,
+                                      int limit = 12)
+{
+    const GlobalIndex extent = scan_row ? matrix.numCols() : matrix.numRows();
+    std::ostringstream oss;
+    int emitted = 0;
+    for (GlobalIndex i = 0; i < extent && emitted < limit; ++i) {
+        const Real value =
+            scan_row ? matrix.getEntry(fixed_index, i) : matrix.getEntry(i, fixed_index);
+        if (std::abs(value) <= tiny || !std::isfinite(value)) {
+            continue;
+        }
+        if (emitted > 0) {
+            oss << '|';
+        }
+        oss << i << ':' << static_cast<double>(value);
+        ++emitted;
+    }
+    if (emitted == 0) {
+        return "none";
+    }
+    return oss.str();
+}
+
+void logNewtonMatrixSupportDiagnostic(const systems::FESystem& sys,
+                                      const backends::GenericMatrix& matrix,
+                                      std::span<const GlobalIndex> constrained_dofs,
+                                      std::string_view phase,
+                                      int iteration,
+                                      double solve_time,
+                                      double dt)
+{
+    if (!newtonMatrixSupportDiagnosticRequested()) {
+        return;
+    }
+
+    std::vector<GlobalIndex> sample_dofs =
+        newtonMatrixSupportGlobalSampleDofs();
+
+    const auto pressure_field = sys.findFieldByName("Pressure");
+    GlobalIndex pressure_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex pressure_dofs = 0;
+    if (pressure_field != INVALID_FIELD_ID) {
+        pressure_offset = sys.fieldDofOffset(pressure_field);
+        pressure_dofs = sys.fieldDofHandler(pressure_field).getNumDofs();
+        for (const auto local_dof : newtonMatrixSupportPressureLocalSampleDofs()) {
+            if (local_dof < 0 || local_dof >= pressure_dofs || pressure_offset < 0) {
+                continue;
+            }
+            sample_dofs.push_back(pressure_offset + local_dof);
+        }
+    }
+
+    std::sort(sample_dofs.begin(), sample_dofs.end());
+    sample_dofs.erase(std::unique(sample_dofs.begin(), sample_dofs.end()),
+                      sample_dofs.end());
+    if (sample_dofs.empty()) {
+        return;
+    }
+
+    const auto field_ranges = newtonMatrixSupportFieldRanges(sys);
+    constexpr Real tiny = Real(1.0e-14);
+    for (const auto dof : sample_dofs) {
+        std::ostringstream oss;
+        oss << std::setprecision(17);
+        oss << "NewtonSolver: matrix support diagnostic"
+            << " diagnostic=newton_matrix_support_sample"
+            << " rank=" << mpiRank()
+            << " iteration=" << iteration
+            << " phase='" << phase << "'"
+            << " backend=" << backends::backendKindToString(matrix.backendKind())
+            << " solve_time=" << solve_time
+            << " dt=" << dt
+            << " dof=" << dof;
+        if (dof < 0 || dof >= matrix.numRows() || dof >= matrix.numCols()) {
+            oss << " status=out_of_range"
+                << " rows=" << matrix.numRows()
+                << " cols=" << matrix.numCols();
+            FE_LOG_INFO(oss.str());
+            continue;
+        }
+
+        double row_abs_sum = 0.0;
+        double col_abs_sum = 0.0;
+        int row_numeric_entries = 0;
+        int col_numeric_entries = 0;
+        double row_max_abs = 0.0;
+        double col_max_abs = 0.0;
+        double row_constrained_abs_sum = 0.0;
+        double row_unconstrained_abs_sum = 0.0;
+        double col_constrained_abs_sum = 0.0;
+        double col_unconstrained_abs_sum = 0.0;
+        std::vector<double> row_field_abs_sums(field_ranges.size(), 0.0);
+        std::vector<double> col_field_abs_sums(field_ranges.size(), 0.0);
+        std::vector<double> row_constrained_field_abs_sums(field_ranges.size(), 0.0);
+        std::vector<double> row_unconstrained_field_abs_sums(field_ranges.size(), 0.0);
+        std::vector<double> col_constrained_field_abs_sums(field_ranges.size(), 0.0);
+        std::vector<double> col_unconstrained_field_abs_sums(field_ranges.size(), 0.0);
+        for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+            const Real value = matrix.getEntry(dof, col);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double abs_value = std::abs(static_cast<double>(value));
+            row_abs_sum += abs_value;
+            row_max_abs = std::max(row_max_abs, abs_value);
+            const bool constrained_col =
+                std::binary_search(
+                    constrained_dofs.begin(), constrained_dofs.end(), col);
+            if (constrained_col) {
+                row_constrained_abs_sum += abs_value;
+                addMatrixSupportFieldAbs(
+                    field_ranges,
+                    col,
+                    abs_value,
+                    row_constrained_field_abs_sums);
+            } else {
+                row_unconstrained_abs_sum += abs_value;
+                addMatrixSupportFieldAbs(
+                    field_ranges,
+                    col,
+                    abs_value,
+                    row_unconstrained_field_abs_sums);
+            }
+            addMatrixSupportFieldAbs(
+                field_ranges,
+                col,
+                abs_value,
+                row_field_abs_sums);
+            if (abs_value > static_cast<double>(tiny)) {
+                ++row_numeric_entries;
+            }
+        }
+        for (GlobalIndex row = 0; row < matrix.numRows(); ++row) {
+            const Real value = matrix.getEntry(row, dof);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double abs_value = std::abs(static_cast<double>(value));
+            col_abs_sum += abs_value;
+            col_max_abs = std::max(col_max_abs, abs_value);
+            const bool constrained_row =
+                std::binary_search(
+                    constrained_dofs.begin(), constrained_dofs.end(), row);
+            if (constrained_row) {
+                col_constrained_abs_sum += abs_value;
+                addMatrixSupportFieldAbs(
+                    field_ranges,
+                    row,
+                    abs_value,
+                    col_constrained_field_abs_sums);
+            } else {
+                col_unconstrained_abs_sum += abs_value;
+                addMatrixSupportFieldAbs(
+                    field_ranges,
+                    row,
+                    abs_value,
+                    col_unconstrained_field_abs_sums);
+            }
+            addMatrixSupportFieldAbs(
+                field_ranges,
+                row,
+                abs_value,
+                col_field_abs_sums);
+            if (abs_value > static_cast<double>(tiny)) {
+                ++col_numeric_entries;
+            }
+        }
+
+        oss << " status=ok"
+            << " row_abs_sum=" << row_abs_sum
+            << " row_numeric_entries=" << row_numeric_entries
+            << " row_max_abs=" << row_max_abs
+            << " col_abs_sum=" << col_abs_sum
+            << " col_numeric_entries=" << col_numeric_entries
+            << " col_max_abs=" << col_max_abs
+            << " row_constrained_abs_sum=" << row_constrained_abs_sum
+            << " row_unconstrained_abs_sum=" << row_unconstrained_abs_sum
+            << " col_constrained_abs_sum=" << col_constrained_abs_sum
+            << " col_unconstrained_abs_sum=" << col_unconstrained_abs_sum
+            << " diag=" << static_cast<double>(matrix.getEntry(dof, dof))
+            << " row_field_abs_sums="
+            << formatMatrixSupportFieldSums(field_ranges, row_field_abs_sums)
+            << " row_constrained_field_abs_sums="
+            << formatMatrixSupportFieldSums(
+                   field_ranges, row_constrained_field_abs_sums)
+            << " row_unconstrained_field_abs_sums="
+            << formatMatrixSupportFieldSums(
+                   field_ranges, row_unconstrained_field_abs_sums)
+            << " col_field_abs_sums="
+            << formatMatrixSupportFieldSums(field_ranges, col_field_abs_sums)
+            << " col_constrained_field_abs_sums="
+            << formatMatrixSupportFieldSums(
+                   field_ranges, col_constrained_field_abs_sums)
+            << " col_unconstrained_field_abs_sums="
+            << formatMatrixSupportFieldSums(
+                   field_ranges, col_unconstrained_field_abs_sums)
+            << " row_first_nonzero="
+            << firstNonzeroMatrixIndices(matrix, dof, /*scan_row=*/true, tiny)
+            << " col_first_nonzero="
+            << firstNonzeroMatrixIndices(matrix, dof, /*scan_row=*/false, tiny);
+
+        if (pressure_offset >= 0 &&
+            dof >= pressure_offset &&
+            dof < pressure_offset + pressure_dofs) {
+            oss << " field='Pressure'"
+                << " field_local_dof=" << (dof - pressure_offset);
+        }
+        FE_LOG_INFO(oss.str());
+    }
+}
+
+[[nodiscard]] std::optional<NewtonMatrixSupportFieldRange>
+newtonMatrixSupportFieldRangeByName(const systems::FESystem& sys,
+                                    std::string_view field_name)
+{
+    for (const auto field : sys.unknownFieldIdsInDofMapOrder()) {
+        const auto& rec = sys.fieldRecord(field);
+        if (rec.name != field_name) {
+            continue;
+        }
+        const auto begin = sys.fieldDofOffset(field);
+        const auto dofs = sys.fieldDofHandler(field).getNumDofs();
+        if (begin < 0 || dofs <= 0) {
+            return std::nullopt;
+        }
+        return NewtonMatrixSupportFieldRange{
+            rec.name,
+            begin,
+            begin + dofs,
+        };
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] bool dofInFieldRange(GlobalIndex dof,
+                                   const NewtonMatrixSupportFieldRange& range) noexcept
+{
+    return dof >= range.begin && dof < range.end;
+}
+
+struct ActivePressureSupportRankRow {
+    GlobalIndex local_dof = INVALID_GLOBAL_INDEX;
+    GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
+    double row_abs_sum = 0.0;
+    double col_abs_sum = 0.0;
+    double row_coupling_abs_sum = 0.0;
+    double col_coupling_abs_sum = 0.0;
+    double row_self_abs_sum = 0.0;
+    double col_self_abs_sum = 0.0;
+    double row_self_sum = 0.0;
+    double row_self_offdiag_abs_sum = 0.0;
+    double row_self_signed_abs_ratio = 0.0;
+    double row_self_diag_abs_ratio = 0.0;
+    double diag = 0.0;
+};
+
+struct ActivePressureUpdateActionTerm {
+    GlobalIndex local_dof = INVALID_GLOBAL_INDEX;
+    GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
+    double matrix_value = 0.0;
+    double update = 0.0;
+    double action = 0.0;
+};
+
+struct ActivePressureUpdateSupportRow : ActivePressureSupportRankRow {
+    double update = 0.0;
+    double abs_update = 0.0;
+    double rhs = 0.0;
+    double row_action = 0.0;
+    double row_coupling_action = 0.0;
+    double row_self_action = 0.0;
+    double row_self_constant_action = 0.0;
+    double row_self_nonconstant_action = 0.0;
+    double row_other_action = 0.0;
+    double row_linear_residual = 0.0;
+    std::vector<ActivePressureUpdateActionTerm> pressure_action_terms;
+    std::vector<ActivePressureUpdateActionTerm> coupling_action_terms;
+};
+
+struct ActivePressureSupportRankSummary {
+    std::string pressure_field;
+    std::string coupling_field;
+    GlobalIndex pressure_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex pressure_dofs = 0;
+    GlobalIndex coupling_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex coupling_dofs = 0;
+    GlobalIndex constrained_pressure_rows = 0;
+    GlobalIndex unconstrained_pressure_rows = 0;
+    GlobalIndex zero_row_count = 0;
+    GlobalIndex zero_col_count = 0;
+    GlobalIndex zero_diag_count = 0;
+    GlobalIndex zero_coupling_row_block_count = 0;
+    GlobalIndex zero_coupling_col_block_count = 0;
+    GlobalIndex zero_self_row_block_count = 0;
+    GlobalIndex zero_self_col_block_count = 0;
+    GlobalIndex positive_coupling_row_block_count = 0;
+    GlobalIndex positive_self_row_block_count = 0;
+    GlobalIndex weak_coupling_row_block_count = 0;
+    GlobalIndex weak_self_row_block_count = 0;
+    GlobalIndex weak_coupling_and_self_row_block_count = 0;
+    GlobalIndex pressure_only_row_block_count = 0;
+    GlobalIndex pressure_only_col_block_count = 0;
+    double min_positive_coupling_row_abs_sum =
+        std::numeric_limits<double>::infinity();
+    double max_coupling_row_abs_sum = 0.0;
+    double min_positive_self_row_abs_sum =
+        std::numeric_limits<double>::infinity();
+    double max_self_row_abs_sum = 0.0;
+    std::vector<GlobalIndex> zero_coupling_row_global_dofs;
+    std::vector<GlobalIndex> clamp_candidate_row_global_dofs;
+    std::vector<ActivePressureSupportRankRow> zero_coupling_row_samples;
+    std::vector<ActivePressureSupportRankRow> zero_row_samples;
+    std::vector<ActivePressureSupportRankRow> weakest_coupling_row_samples;
+    std::vector<ActivePressureSupportRankRow> weakest_self_row_samples;
+    std::vector<ActivePressureSupportRankRow> clamp_candidate_row_samples;
+};
+
+struct ActivePressureUpdateSupportSummary {
+    std::string pressure_field;
+    std::string coupling_field;
+    GlobalIndex pressure_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex pressure_dofs = 0;
+    GlobalIndex coupling_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex coupling_dofs = 0;
+    GlobalIndex constrained_pressure_rows = 0;
+    GlobalIndex unconstrained_pressure_rows = 0;
+    GlobalIndex zero_coupling_row_block_count = 0;
+    GlobalIndex weak_coupling_row_block_count = 0;
+    GlobalIndex positive_coupling_row_block_count = 0;
+    GlobalIndex zero_self_row_block_count = 0;
+    GlobalIndex weak_self_row_block_count = 0;
+    GlobalIndex positive_self_row_block_count = 0;
+    double max_abs_update = 0.0;
+    double zero_coupling_max_abs_update = 0.0;
+    double weak_coupling_max_abs_update = 0.0;
+    double positive_coupling_max_abs_update = 0.0;
+    double zero_self_max_abs_update = 0.0;
+    double weak_self_max_abs_update = 0.0;
+    double positive_self_max_abs_update = 0.0;
+    GlobalIndex max_update_local_dof = INVALID_GLOBAL_INDEX;
+    GlobalIndex max_update_global_dof = INVALID_GLOBAL_INDEX;
+    double max_update_rhs = 0.0;
+    double max_update_row_action = 0.0;
+    double max_update_row_coupling_action = 0.0;
+    double max_update_row_self_action = 0.0;
+    double max_update_row_self_constant_action = 0.0;
+    double max_update_row_self_nonconstant_action = 0.0;
+    double max_update_row_other_action = 0.0;
+    double max_update_row_linear_residual = 0.0;
+    GlobalIndex same_sign_pressure_action_top_edge_count = 0;
+    GlobalIndex same_sign_pressure_action_component_count = 0;
+    GlobalIndex same_sign_pressure_action_largest_component_size = 0;
+    GlobalIndex same_sign_pressure_action_covered_top_update_count = 0;
+    GlobalIndex same_sign_pressure_action_isolated_top_update_count = 0;
+    int same_sign_pressure_action_largest_component_has_max_update = 0;
+    std::vector<GlobalIndex> same_sign_pressure_action_covered_global_dofs;
+    std::vector<GlobalIndex> same_sign_pressure_action_isolated_global_dofs;
+    std::vector<GlobalIndex> same_sign_pressure_action_largest_component_global_dofs;
+    std::vector<ActivePressureUpdateSupportRow> top_update_samples;
+};
+
+[[nodiscard]] std::string formatGlobalIndexListSample(
+    std::span<const GlobalIndex> values,
+    int limit);
+
+[[nodiscard]] std::string formatActivePressureSupportRankDofSamples(
+    std::span<const ActivePressureSupportRankRow> rows,
+    bool local)
+{
+    if (rows.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        oss << (local ? rows[i].local_dof : rows[i].global_dof);
+    }
+    return oss.str();
+}
+
+[[nodiscard]] std::string formatActivePressureSupportRankRowDetails(
+    std::span<const ActivePressureSupportRankRow> rows)
+{
+    if (rows.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto& row = rows[i];
+        if (i > 0u) {
+            oss << '|';
+        }
+        oss << row.local_dof << ':' << row.global_dof
+            << ":row=" << row.row_abs_sum
+            << ":row_coupling=" << row.row_coupling_abs_sum
+            << ":row_self=" << row.row_self_abs_sum
+            << ":row_self_sum=" << row.row_self_sum
+            << ":row_self_offdiag=" << row.row_self_offdiag_abs_sum
+            << ":row_self_signed_abs_ratio="
+            << row.row_self_signed_abs_ratio
+            << ":row_self_diag_abs_ratio=" << row.row_self_diag_abs_ratio
+            << ":col=" << row.col_abs_sum
+            << ":col_coupling=" << row.col_coupling_abs_sum
+            << ":col_self=" << row.col_self_abs_sum
+            << ":diag=" << row.diag;
+    }
+    return oss.str();
+}
+
+[[nodiscard]] std::vector<GlobalIndex>
+pressureOperatorMatrixSupportSampleDofs(
+    const NewtonMatrixSupportFieldRange& pressure_range)
+{
+    std::vector<GlobalIndex> sample_dofs =
+        newtonFieldResidualDiagnosticSampleDofs();
+
+    const auto& matrix_sample_dofs = newtonMatrixSupportGlobalSampleDofs();
+    sample_dofs.insert(sample_dofs.end(),
+                       matrix_sample_dofs.begin(),
+                       matrix_sample_dofs.end());
+
+    for (const auto local_dof : newtonMatrixSupportPressureLocalSampleDofs()) {
+        if (local_dof < 0 ||
+            local_dof >= pressure_range.end - pressure_range.begin ||
+            pressure_range.begin < 0) {
+            continue;
+        }
+        sample_dofs.push_back(pressure_range.begin + local_dof);
+    }
+
+    std::sort(sample_dofs.begin(), sample_dofs.end());
+    sample_dofs.erase(std::unique(sample_dofs.begin(), sample_dofs.end()),
+                      sample_dofs.end());
+    return sample_dofs;
+}
+
+void logPressureRowOperatorMatrixSupportDiagnostic(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    std::string_view phase,
+    std::string_view op,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!pressureRowContributionMatrixDiagnosticEnabled()) {
+        return;
+    }
+
+    const auto pressure_range =
+        newtonMatrixSupportFieldRangeByName(sys, "Pressure");
+    const auto coupling_range =
+        newtonMatrixSupportFieldRangeByName(sys, "Velocity");
+    if (!pressure_range.has_value() || !coupling_range.has_value()) {
+        if (mpiRank() == 0) {
+            FE_LOG_INFO(
+                "NewtonSolver: pressure row operator matrix support diagnostic "
+                "diagnostic=pressure_row_operator_matrix_support status=field_missing "
+                "pressure_field='Pressure' coupling_field='Velocity' op='" +
+                std::string(op) + "' phase='" + std::string(phase) + "'");
+        }
+        return;
+    }
+
+    const auto sample_dofs =
+        pressureOperatorMatrixSupportSampleDofs(*pressure_range);
+    if (sample_dofs.empty()) {
+        return;
+    }
+
+    constexpr Real tiny = Real(1.0e-14);
+    for (const auto dof : sample_dofs) {
+        std::ostringstream oss;
+        oss << std::setprecision(17);
+        oss << "NewtonSolver: pressure row operator matrix support diagnostic"
+            << " diagnostic=pressure_row_operator_matrix_support"
+            << " rank=" << mpiRank()
+            << " iteration=" << iteration
+            << " phase='" << phase << "'"
+            << " op='" << op << "'"
+            << " backend=" << backends::backendKindToString(matrix.backendKind())
+            << " solve_time=" << solve_time
+            << " dt=" << dt
+            << " pressure_field='Pressure'"
+            << " coupling_field='Velocity'"
+            << " pressure_offset=" << pressure_range->begin
+            << " pressure_dofs=" << (pressure_range->end - pressure_range->begin)
+            << " coupling_offset=" << coupling_range->begin
+            << " coupling_dofs=" << (coupling_range->end - coupling_range->begin)
+            << " dof=" << dof;
+
+        if (dof < 0 || dof >= matrix.numRows() || dof >= matrix.numCols()) {
+            oss << " status=out_of_range"
+                << " rows=" << matrix.numRows()
+                << " cols=" << matrix.numCols();
+            FE_LOG_INFO(oss.str());
+            continue;
+        }
+        if (!dofInFieldRange(dof, *pressure_range)) {
+            oss << " status=non_pressure_row";
+            FE_LOG_INFO(oss.str());
+            continue;
+        }
+
+        ActivePressureSupportRankRow row;
+        row.global_dof = dof;
+        row.local_dof = dof - pressure_range->begin;
+        int row_numeric_entries = 0;
+        int row_self_numeric_entries = 0;
+        int row_coupling_numeric_entries = 0;
+        int col_numeric_entries = 0;
+        int col_self_numeric_entries = 0;
+        int col_coupling_numeric_entries = 0;
+
+        for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+            const Real value = matrix.getEntry(dof, col);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double abs_value = std::abs(static_cast<double>(value));
+            row.row_abs_sum += abs_value;
+            if (abs_value > static_cast<double>(tiny)) {
+                ++row_numeric_entries;
+            }
+            if (dofInFieldRange(col, *coupling_range)) {
+                row.row_coupling_abs_sum += abs_value;
+                if (abs_value > static_cast<double>(tiny)) {
+                    ++row_coupling_numeric_entries;
+                }
+            }
+            if (dofInFieldRange(col, *pressure_range)) {
+                row.row_self_abs_sum += abs_value;
+                row.row_self_sum += static_cast<double>(value);
+                if (abs_value > static_cast<double>(tiny)) {
+                    ++row_self_numeric_entries;
+                }
+            }
+        }
+        for (GlobalIndex matrix_row = 0; matrix_row < matrix.numRows(); ++matrix_row) {
+            const Real value = matrix.getEntry(matrix_row, dof);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double abs_value = std::abs(static_cast<double>(value));
+            row.col_abs_sum += abs_value;
+            if (abs_value > static_cast<double>(tiny)) {
+                ++col_numeric_entries;
+            }
+            if (dofInFieldRange(matrix_row, *coupling_range)) {
+                row.col_coupling_abs_sum += abs_value;
+                if (abs_value > static_cast<double>(tiny)) {
+                    ++col_coupling_numeric_entries;
+                }
+            }
+            if (dofInFieldRange(matrix_row, *pressure_range)) {
+                row.col_self_abs_sum += abs_value;
+                if (abs_value > static_cast<double>(tiny)) {
+                    ++col_self_numeric_entries;
+                }
+            }
+        }
+
+        row.diag = static_cast<double>(matrix.getEntry(dof, dof));
+        row.row_self_offdiag_abs_sum =
+            std::max(0.0, row.row_self_abs_sum - std::abs(row.diag));
+        if (row.row_self_abs_sum > 0.0) {
+            row.row_self_signed_abs_ratio =
+                std::abs(row.row_self_sum) / row.row_self_abs_sum;
+            row.row_self_diag_abs_ratio =
+                std::abs(row.diag) / row.row_self_abs_sum;
+        }
+
+        oss << " status=ok"
+            << " field='Pressure'"
+            << " field_local_dof=" << row.local_dof
+            << " pressure_local_dof=" << row.local_dof
+            << " row_abs_sum=" << row.row_abs_sum
+            << " row_numeric_entries=" << row_numeric_entries
+            << " row_self_abs_sum=" << row.row_self_abs_sum
+            << " row_self_numeric_entries=" << row_self_numeric_entries
+            << " row_self_sum=" << row.row_self_sum
+            << " row_self_offdiag_abs_sum=" << row.row_self_offdiag_abs_sum
+            << " row_self_signed_abs_ratio="
+            << row.row_self_signed_abs_ratio
+            << " row_self_diag_abs_ratio=" << row.row_self_diag_abs_ratio
+            << " row_coupling_abs_sum=" << row.row_coupling_abs_sum
+            << " row_coupling_numeric_entries=" << row_coupling_numeric_entries
+            << " col_abs_sum=" << row.col_abs_sum
+            << " col_numeric_entries=" << col_numeric_entries
+            << " col_self_abs_sum=" << row.col_self_abs_sum
+            << " col_self_numeric_entries=" << col_self_numeric_entries
+            << " col_coupling_abs_sum=" << row.col_coupling_abs_sum
+            << " col_coupling_numeric_entries=" << col_coupling_numeric_entries
+            << " diag=" << row.diag
+            << " row_first_nonzero="
+            << firstNonzeroMatrixIndices(matrix, dof, /*scan_row=*/true, tiny)
+            << " col_first_nonzero="
+            << firstNonzeroMatrixIndices(matrix, dof, /*scan_row=*/false, tiny);
+        FE_LOG_INFO(oss.str());
+    }
+}
+
+[[nodiscard]] std::string formatActivePressureUpdateActionTerms(
+    std::span<const ActivePressureUpdateActionTerm> terms)
+{
+    if (terms.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    for (std::size_t i = 0; i < terms.size(); ++i) {
+        const auto& term = terms[i];
+        if (i > 0u) {
+            oss << '~';
+        }
+        oss << term.local_dof << '/' << term.global_dof
+            << "/m=" << term.matrix_value
+            << "/u=" << term.update
+            << "/a=" << term.action;
+    }
+    return oss.str();
+}
+
+[[nodiscard]] std::string formatActivePressureUpdateSupportRowDetails(
+    std::span<const ActivePressureUpdateSupportRow> rows)
+{
+    if (rows.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto& row = rows[i];
+        if (i > 0u) {
+            oss << '|';
+        }
+        oss << row.local_dof << ':' << row.global_dof
+            << ":update=" << row.update
+            << ":abs_update=" << row.abs_update
+            << ":rhs=" << row.rhs
+            << ":row_action=" << row.row_action
+            << ":row_coupling_action=" << row.row_coupling_action
+            << ":row_self_action=" << row.row_self_action
+            << ":row_self_constant_action="
+            << row.row_self_constant_action
+            << ":row_self_nonconstant_action="
+            << row.row_self_nonconstant_action
+            << ":row_other_action=" << row.row_other_action
+            << ":row_linear_residual=" << row.row_linear_residual
+            << ":row=" << row.row_abs_sum
+            << ":row_coupling=" << row.row_coupling_abs_sum
+            << ":row_self=" << row.row_self_abs_sum
+            << ":row_self_sum=" << row.row_self_sum
+            << ":row_self_offdiag=" << row.row_self_offdiag_abs_sum
+            << ":row_self_signed_abs_ratio="
+            << row.row_self_signed_abs_ratio
+            << ":row_self_diag_abs_ratio=" << row.row_self_diag_abs_ratio
+            << ":col=" << row.col_abs_sum
+            << ":col_coupling=" << row.col_coupling_abs_sum
+            << ":col_self=" << row.col_self_abs_sum
+            << ":diag=" << row.diag
+            << ":pressure_action_terms="
+            << formatActivePressureUpdateActionTerms(
+                   row.pressure_action_terms)
+            << ":coupling_action_terms="
+            << formatActivePressureUpdateActionTerms(
+                   row.coupling_action_terms);
+    }
+    return oss.str();
+}
+
+[[nodiscard]] bool sameNonzeroSign(double left, double right) noexcept
+{
+    if (left == 0.0 || right == 0.0) {
+        return false;
+    }
+    return (left > 0.0) == (right > 0.0);
+}
+
+void addSameSignPressureActionComponentSummary(
+    ActivePressureUpdateSupportSummary& summary)
+{
+    std::map<GlobalIndex, double> update_by_dof;
+    for (const auto& row : summary.top_update_samples) {
+        update_by_dof[row.global_dof] = row.update;
+    }
+    if (update_by_dof.empty()) {
+        return;
+    }
+
+    std::set<std::pair<GlobalIndex, GlobalIndex>> edges;
+    std::map<GlobalIndex, std::vector<GlobalIndex>> adjacency;
+    for (const auto& row : summary.top_update_samples) {
+        const auto row_it = update_by_dof.find(row.global_dof);
+        if (row_it == update_by_dof.end()) {
+            continue;
+        }
+        for (const auto& term : row.pressure_action_terms) {
+            if (term.global_dof == row.global_dof) {
+                continue;
+            }
+            const auto neighbor_it = update_by_dof.find(term.global_dof);
+            if (neighbor_it == update_by_dof.end()) {
+                continue;
+            }
+            if (!sameNonzeroSign(row_it->second, neighbor_it->second)) {
+                continue;
+            }
+            const auto left = std::min(row.global_dof, term.global_dof);
+            const auto right = std::max(row.global_dof, term.global_dof);
+            edges.insert({left, right});
+        }
+    }
+
+    for (const auto& edge : edges) {
+        adjacency[edge.first].push_back(edge.second);
+        adjacency[edge.second].push_back(edge.first);
+    }
+    summary.same_sign_pressure_action_top_edge_count =
+        static_cast<GlobalIndex>(edges.size());
+
+    std::set<GlobalIndex> covered;
+    std::set<GlobalIndex> seen;
+    std::vector<GlobalIndex> largest_component;
+    for (const auto& entry : adjacency) {
+        const auto start = entry.first;
+        if (seen.count(start) != 0u) {
+            continue;
+        }
+        std::vector<GlobalIndex> pending{start};
+        std::vector<GlobalIndex> component;
+        seen.insert(start);
+        while (!pending.empty()) {
+            const auto dof = pending.back();
+            pending.pop_back();
+            component.push_back(dof);
+            covered.insert(dof);
+            for (const auto neighbor : adjacency[dof]) {
+                if (seen.count(neighbor) != 0u) {
+                    continue;
+                }
+                seen.insert(neighbor);
+                pending.push_back(neighbor);
+            }
+        }
+        std::sort(component.begin(), component.end());
+        ++summary.same_sign_pressure_action_component_count;
+        if (component.size() > largest_component.size() ||
+            (component.size() == largest_component.size() &&
+             !component.empty() &&
+             !largest_component.empty() &&
+             component.front() < largest_component.front())) {
+            largest_component = component;
+        }
+    }
+
+    summary.same_sign_pressure_action_covered_global_dofs.assign(
+        covered.begin(), covered.end());
+    summary.same_sign_pressure_action_covered_top_update_count =
+        static_cast<GlobalIndex>(
+            summary.same_sign_pressure_action_covered_global_dofs.size());
+
+    std::vector<GlobalIndex> isolated;
+    for (const auto& row : summary.top_update_samples) {
+        if (covered.count(row.global_dof) == 0u) {
+            isolated.push_back(row.global_dof);
+        }
+    }
+    std::sort(isolated.begin(), isolated.end());
+    summary.same_sign_pressure_action_isolated_global_dofs = isolated;
+    summary.same_sign_pressure_action_isolated_top_update_count =
+        static_cast<GlobalIndex>(isolated.size());
+    summary.same_sign_pressure_action_largest_component_global_dofs =
+        largest_component;
+    summary.same_sign_pressure_action_largest_component_size =
+        static_cast<GlobalIndex>(largest_component.size());
+    summary.same_sign_pressure_action_largest_component_has_max_update =
+        std::find(largest_component.begin(),
+                  largest_component.end(),
+                  summary.max_update_global_dof) != largest_component.end()
+            ? 1
+            : 0;
+}
+
+[[nodiscard]] ActivePressureSupportRankSummary scanActivePressureSupportRank(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view pressure_field_name,
+    std::string_view coupling_field_name,
+    double tolerance,
+    int sample_limit,
+    double clamp_coupling_threshold = -1.0,
+    double clamp_self_threshold = -1.0)
+{
+    ActivePressureSupportRankSummary summary;
+    summary.pressure_field = std::string(pressure_field_name);
+    summary.coupling_field = std::string(coupling_field_name);
+
+    const auto pressure_range =
+        newtonMatrixSupportFieldRangeByName(sys, pressure_field_name);
+    const auto coupling_range =
+        newtonMatrixSupportFieldRangeByName(sys, coupling_field_name);
+    if (!pressure_range.has_value() || !coupling_range.has_value()) {
+        return summary;
+    }
+
+    summary.pressure_offset = pressure_range->begin;
+    summary.pressure_dofs = pressure_range->end - pressure_range->begin;
+    summary.coupling_offset = coupling_range->begin;
+    summary.coupling_dofs = coupling_range->end - coupling_range->begin;
+
+    const auto can_add_sample = [sample_limit](const auto& samples) {
+        return sample_limit < 0 ||
+               static_cast<int>(samples.size()) < sample_limit;
+    };
+    const auto add_weakest_coupling_sample =
+        [sample_limit](std::vector<ActivePressureSupportRankRow>& samples,
+                       const ActivePressureSupportRankRow& row) {
+            if (sample_limit == 0) {
+                return;
+            }
+            samples.push_back(row);
+            std::sort(samples.begin(), samples.end(),
+                      [](const ActivePressureSupportRankRow& a,
+                         const ActivePressureSupportRankRow& b) {
+                          if (a.row_coupling_abs_sum == b.row_coupling_abs_sum) {
+                              return a.global_dof < b.global_dof;
+                          }
+                          return a.row_coupling_abs_sum < b.row_coupling_abs_sum;
+                      });
+            if (sample_limit > 0 &&
+                static_cast<int>(samples.size()) > sample_limit) {
+                samples.pop_back();
+            }
+        };
+    const auto add_weakest_self_sample =
+        [sample_limit](std::vector<ActivePressureSupportRankRow>& samples,
+                       const ActivePressureSupportRankRow& row) {
+            if (sample_limit == 0) {
+                return;
+            }
+            samples.push_back(row);
+            std::sort(samples.begin(), samples.end(),
+                      [](const ActivePressureSupportRankRow& a,
+                         const ActivePressureSupportRankRow& b) {
+                          if (a.row_self_abs_sum == b.row_self_abs_sum) {
+                              return a.global_dof < b.global_dof;
+                          }
+                          return a.row_self_abs_sum < b.row_self_abs_sum;
+                      });
+            if (sample_limit > 0 &&
+                static_cast<int>(samples.size()) > sample_limit) {
+                samples.pop_back();
+            }
+        };
+
+    for (GlobalIndex local_dof = 0; local_dof < summary.pressure_dofs; ++local_dof) {
+        const auto global_dof = summary.pressure_offset + local_dof;
+        if (std::binary_search(
+                constrained_dofs.begin(), constrained_dofs.end(), global_dof)) {
+            ++summary.constrained_pressure_rows;
+            continue;
+        }
+
+        ++summary.unconstrained_pressure_rows;
+        ActivePressureSupportRankRow row;
+        row.local_dof = local_dof;
+        row.global_dof = global_dof;
+        if (global_dof < 0 ||
+            global_dof >= matrix.numRows() ||
+            global_dof >= matrix.numCols()) {
+            if (can_add_sample(summary.zero_row_samples)) {
+                summary.zero_row_samples.push_back(row);
+            }
+            ++summary.zero_row_count;
+            ++summary.zero_col_count;
+            ++summary.zero_diag_count;
+            ++summary.zero_coupling_row_block_count;
+            ++summary.zero_coupling_col_block_count;
+            ++summary.zero_self_row_block_count;
+            ++summary.zero_self_col_block_count;
+            continue;
+        }
+
+        for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+            const Real value = matrix.getEntry(global_dof, col);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double abs_value = std::abs(static_cast<double>(value));
+            row.row_abs_sum += abs_value;
+            if (dofInFieldRange(col, *coupling_range)) {
+                row.row_coupling_abs_sum += abs_value;
+            }
+            if (dofInFieldRange(col, *pressure_range)) {
+                row.row_self_abs_sum += abs_value;
+                row.row_self_sum += static_cast<double>(value);
+            }
+        }
+        for (GlobalIndex matrix_row = 0; matrix_row < matrix.numRows(); ++matrix_row) {
+            const Real value = matrix.getEntry(matrix_row, global_dof);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double abs_value = std::abs(static_cast<double>(value));
+            row.col_abs_sum += abs_value;
+            if (dofInFieldRange(matrix_row, *coupling_range)) {
+                row.col_coupling_abs_sum += abs_value;
+            }
+            if (dofInFieldRange(matrix_row, *pressure_range)) {
+                row.col_self_abs_sum += abs_value;
+            }
+        }
+        row.diag = static_cast<double>(matrix.getEntry(global_dof, global_dof));
+        row.row_self_offdiag_abs_sum =
+            std::max(0.0, row.row_self_abs_sum - std::abs(row.diag));
+        if (row.row_self_abs_sum > 0.0) {
+            row.row_self_signed_abs_ratio =
+                std::abs(row.row_self_sum) / row.row_self_abs_sum;
+            row.row_self_diag_abs_ratio =
+                std::abs(row.diag) / row.row_self_abs_sum;
+        }
+
+        const bool zero_row = std::abs(row.row_abs_sum) <= tolerance;
+        const bool zero_col = std::abs(row.col_abs_sum) <= tolerance;
+        const bool zero_diag = std::abs(row.diag) <= tolerance;
+        const bool zero_coupling_row =
+            std::abs(row.row_coupling_abs_sum) <= tolerance;
+        const bool zero_coupling_col =
+            std::abs(row.col_coupling_abs_sum) <= tolerance;
+        const bool zero_self_row = std::abs(row.row_self_abs_sum) <= tolerance;
+        const bool zero_self_col = std::abs(row.col_self_abs_sum) <= tolerance;
+        const bool weak_coupling_row =
+            !zero_coupling_row &&
+            clamp_coupling_threshold >= 0.0 &&
+            row.row_coupling_abs_sum <= clamp_coupling_threshold;
+        const bool weak_self_row =
+            !zero_self_row &&
+            clamp_self_threshold >= 0.0 &&
+            row.row_self_abs_sum <= clamp_self_threshold;
+        if (zero_row) {
+            ++summary.zero_row_count;
+            if (can_add_sample(summary.zero_row_samples)) {
+                summary.zero_row_samples.push_back(row);
+            }
+        }
+        if (zero_col) {
+            ++summary.zero_col_count;
+        }
+        if (zero_diag) {
+            ++summary.zero_diag_count;
+        }
+        if (zero_coupling_row) {
+            ++summary.zero_coupling_row_block_count;
+            summary.zero_coupling_row_global_dofs.push_back(global_dof);
+            if (can_add_sample(summary.zero_coupling_row_samples)) {
+                summary.zero_coupling_row_samples.push_back(row);
+            }
+        } else {
+            ++summary.positive_coupling_row_block_count;
+            summary.min_positive_coupling_row_abs_sum =
+                std::min(summary.min_positive_coupling_row_abs_sum,
+                         row.row_coupling_abs_sum);
+            summary.max_coupling_row_abs_sum =
+                std::max(summary.max_coupling_row_abs_sum,
+                         row.row_coupling_abs_sum);
+            add_weakest_coupling_sample(
+                summary.weakest_coupling_row_samples, row);
+        }
+        if (weak_coupling_row) {
+            ++summary.weak_coupling_row_block_count;
+        }
+        if (zero_coupling_col) {
+            ++summary.zero_coupling_col_block_count;
+        }
+        if (zero_self_row) {
+            ++summary.zero_self_row_block_count;
+        } else {
+            ++summary.positive_self_row_block_count;
+            summary.min_positive_self_row_abs_sum =
+                std::min(summary.min_positive_self_row_abs_sum,
+                         row.row_self_abs_sum);
+            summary.max_self_row_abs_sum =
+                std::max(summary.max_self_row_abs_sum,
+                         row.row_self_abs_sum);
+            add_weakest_self_sample(summary.weakest_self_row_samples, row);
+        }
+        if (weak_self_row) {
+            ++summary.weak_self_row_block_count;
+        }
+        if (weak_coupling_row && weak_self_row) {
+            ++summary.weak_coupling_and_self_row_block_count;
+        }
+        if (zero_self_col) {
+            ++summary.zero_self_col_block_count;
+        }
+        if (zero_coupling_row && !zero_self_row) {
+            ++summary.pressure_only_row_block_count;
+        }
+        if (zero_coupling_col && !zero_self_col) {
+            ++summary.pressure_only_col_block_count;
+        }
+        const bool clamp_coupling_candidate =
+            clamp_coupling_threshold >= 0.0 &&
+            row.row_coupling_abs_sum <= clamp_coupling_threshold;
+        const bool clamp_self_candidate =
+            clamp_self_threshold >= 0.0 &&
+            row.row_self_abs_sum <= clamp_self_threshold;
+        if (clamp_coupling_candidate || clamp_self_candidate) {
+            summary.clamp_candidate_row_global_dofs.push_back(global_dof);
+            if (can_add_sample(summary.clamp_candidate_row_samples)) {
+                summary.clamp_candidate_row_samples.push_back(row);
+            }
+        }
+    }
+
+    return summary;
+}
+
+void logPressureRowOperatorMatrixSummaryDiagnostic(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view phase,
+    std::string_view op,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!pressureRowContributionMatrixSummaryDiagnosticEnabled() ||
+        !pressureRowContributionMatrixSummaryOpSelected(op)) {
+        return;
+    }
+
+    const auto& pressure_field = activePressureSupportRankPressureFieldName();
+    const auto& coupling_field = activePressureSupportRankCouplingFieldName();
+    const double tolerance = activePressureSupportRankTolerance();
+    const double weak_coupling_threshold =
+        activePressureUpdateSupportWeakVelocityThreshold();
+    const double weak_self_threshold =
+        activePressureUpdateSupportWeakSelfThreshold();
+    const int sample_limit = activePressureSupportRankSampleLimit();
+    const auto summary = scanActivePressureSupportRank(
+        sys,
+        matrix,
+        constrained_dofs,
+        pressure_field,
+        coupling_field,
+        tolerance,
+        sample_limit,
+        weak_coupling_threshold,
+        weak_self_threshold);
+
+    if (summary.pressure_dofs <= 0 || summary.coupling_dofs <= 0) {
+        FE_LOG_INFO(
+            "NewtonSolver: pressure row operator matrix summary"
+            " diagnostic=pressure_row_operator_matrix_summary"
+            " status=field_missing"
+            " op='" +
+            std::string(op) +
+            "' phase='" + std::string(phase) + "'"
+            " pressure_field='" + pressure_field + "'"
+            " coupling_field='" + coupling_field + "'");
+        return;
+    }
+
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    oss << "NewtonSolver: pressure row operator matrix summary"
+        << " diagnostic=pressure_row_operator_matrix_summary"
+        << " status=ok"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " op='" << op << "'"
+        << " backend=" << backends::backendKindToString(matrix.backendKind())
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " pressure_field='" << summary.pressure_field << "'"
+        << " coupling_field='" << summary.coupling_field << "'"
+        << " pressure_offset=" << summary.pressure_offset
+        << " pressure_dofs=" << summary.pressure_dofs
+        << " coupling_offset=" << summary.coupling_offset
+        << " coupling_dofs=" << summary.coupling_dofs
+        << " constrained_pressure_rows=" << summary.constrained_pressure_rows
+        << " unconstrained_pressure_rows=" << summary.unconstrained_pressure_rows
+        << " zero_row_count=" << summary.zero_row_count
+        << " zero_col_count=" << summary.zero_col_count
+        << " zero_diag_count=" << summary.zero_diag_count
+        << " zero_coupling_row_block_count="
+        << summary.zero_coupling_row_block_count
+        << " zero_coupling_col_block_count="
+        << summary.zero_coupling_col_block_count
+        << " zero_self_row_block_count=" << summary.zero_self_row_block_count
+        << " zero_self_col_block_count=" << summary.zero_self_col_block_count
+        << " positive_coupling_row_block_count="
+        << summary.positive_coupling_row_block_count
+        << " positive_self_row_block_count="
+        << summary.positive_self_row_block_count
+        << " weak_coupling_row_block_count="
+        << summary.weak_coupling_row_block_count
+        << " weak_self_row_block_count="
+        << summary.weak_self_row_block_count
+        << " weak_coupling_and_self_row_block_count="
+        << summary.weak_coupling_and_self_row_block_count
+        << " min_positive_coupling_row_abs_sum="
+        << (std::isfinite(summary.min_positive_coupling_row_abs_sum)
+                ? summary.min_positive_coupling_row_abs_sum
+                : 0.0)
+        << " max_coupling_row_abs_sum="
+        << summary.max_coupling_row_abs_sum
+        << " min_positive_self_row_abs_sum="
+        << (std::isfinite(summary.min_positive_self_row_abs_sum)
+                ? summary.min_positive_self_row_abs_sum
+                : 0.0)
+        << " max_self_row_abs_sum="
+        << summary.max_self_row_abs_sum
+        << " pressure_only_row_block_count="
+        << summary.pressure_only_row_block_count
+        << " pressure_only_col_block_count="
+        << summary.pressure_only_col_block_count
+        << " tolerance=" << tolerance
+        << " weak_coupling_threshold=" << weak_coupling_threshold
+        << " weak_self_threshold=" << weak_self_threshold
+        << " sample_limit=" << sample_limit
+        << " zero_coupling_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_coupling_row_samples, /*local=*/true)
+        << " zero_coupling_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_coupling_row_samples, /*local=*/false)
+        << " zero_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_row_samples, /*local=*/true)
+        << " zero_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_row_samples, /*local=*/false)
+        << " weakest_coupling_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_coupling_row_samples, /*local=*/true)
+        << " weakest_coupling_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_coupling_row_samples, /*local=*/false)
+        << " weakest_self_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_self_row_samples, /*local=*/true)
+        << " weakest_self_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_self_row_samples, /*local=*/false);
+    FE_LOG_INFO(oss.str());
+}
+
+void logDirectPspgFormulationCandidateDiagnostic(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    backends::GenericVector& residual,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view phase,
+    std::string_view op,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!directPspgFormulationCandidateDiagnosticEnabled() ||
+        !directPspgFormulationCandidateOpSelected(op)) {
+        return;
+    }
+
+    const auto& pressure_field = activePressureSupportRankPressureFieldName();
+    const auto pressure_range =
+        newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+    if (!pressure_range.has_value()) {
+        FE_LOG_INFO(
+            "NewtonSolver: direct PSPG formulation candidate diagnostic"
+            " diagnostic=direct_pspg_formulation_candidate status=field_missing"
+            " pressure_field='" +
+            pressure_field + "' op='" + std::string(op) +
+            "' phase='" + std::string(phase) + "'");
+        return;
+    }
+
+    struct DirectPspgCandidateRow {
+        GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
+        double row_self_abs_sum = 0.0;
+        double row_self_constrained_abs_sum = 0.0;
+        double row_self_unconstrained_abs_sum = 0.0;
+        double row_self_sum = 0.0;
+        double diag = 0.0;
+        double row_self_offdiag_abs_sum = 0.0;
+        double row_self_signed_abs_ratio = 0.0;
+        double row_self_diag_abs_ratio = 0.0;
+        double residual_value = 0.0;
+        int row_self_numeric_entries = 0;
+        int row_self_constrained_numeric_entries = 0;
+        int row_self_unconstrained_numeric_entries = 0;
+        int residual_sign = 0;
+    };
+
+    constexpr double tiny = 1.0e-14;
+    const double tolerance = activePressureSupportRankTolerance();
+    std::vector<DirectPspgCandidateRow> direct_rows;
+    int min_direct_self_entries = std::numeric_limits<int>::max();
+    int max_direct_self_entries = 0;
+    int max_unconstrained_direct_self_entries = 0;
+    double min_positive_direct_self_abs_sum =
+        std::numeric_limits<double>::infinity();
+    double max_direct_self_abs_sum = 0.0;
+
+    for (GlobalIndex dof = pressure_range->begin; dof < pressure_range->end; ++dof) {
+        if (dof < 0 ||
+            dof >= matrix.numRows() ||
+            dof >= matrix.numCols() ||
+            std::binary_search(
+                constrained_dofs.begin(), constrained_dofs.end(), dof)) {
+            continue;
+        }
+        DirectPspgCandidateRow row;
+        row.global_dof = dof;
+        for (GlobalIndex col = pressure_range->begin;
+             col < pressure_range->end;
+             ++col) {
+            const Real value = matrix.getEntry(dof, col);
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const double as_double = static_cast<double>(value);
+            const double abs_value = std::abs(as_double);
+            if (col == dof) {
+                row.diag = as_double;
+            }
+            row.row_self_abs_sum += abs_value;
+            row.row_self_sum += as_double;
+            if (abs_value > tiny) {
+                ++row.row_self_numeric_entries;
+                if (std::binary_search(
+                        constrained_dofs.begin(), constrained_dofs.end(), col)) {
+                    ++row.row_self_constrained_numeric_entries;
+                    row.row_self_constrained_abs_sum += abs_value;
+                } else {
+                    ++row.row_self_unconstrained_numeric_entries;
+                    row.row_self_unconstrained_abs_sum += abs_value;
+                }
+            }
+        }
+        if (row.row_self_abs_sum <= tolerance ||
+            row.row_self_numeric_entries <= 0) {
+            continue;
+        }
+        row.row_self_offdiag_abs_sum =
+            std::max(0.0, row.row_self_abs_sum - std::abs(row.diag));
+        row.row_self_signed_abs_ratio =
+            std::abs(row.row_self_sum) / row.row_self_abs_sum;
+        row.row_self_diag_abs_ratio =
+            std::abs(row.diag) / row.row_self_abs_sum;
+        direct_rows.push_back(row);
+        min_direct_self_entries =
+            std::min(min_direct_self_entries, row.row_self_numeric_entries);
+        max_direct_self_entries =
+            std::max(max_direct_self_entries, row.row_self_numeric_entries);
+        max_unconstrained_direct_self_entries =
+            std::max(max_unconstrained_direct_self_entries,
+                     row.row_self_unconstrained_numeric_entries);
+        min_positive_direct_self_abs_sum =
+            std::min(min_positive_direct_self_abs_sum, row.row_self_abs_sum);
+        max_direct_self_abs_sum =
+            std::max(max_direct_self_abs_sum, row.row_self_abs_sum);
+    }
+
+    constexpr double kDirectSelfRowSumLeakThreshold = 0.25;
+    constexpr double kDirectSelfNullPreservingThreshold = 0.05;
+    constexpr double kDirectSelfDiagDominantThreshold = 0.6;
+    constexpr double kDirectSelfBalancedDiagLowThreshold = 0.45;
+    constexpr double kDirectSelfBalancedDiagHighThreshold = 0.55;
+    double max_direct_self_row_sum_leak_ratio = 0.0;
+    double min_direct_self_diag_abs_ratio =
+        std::numeric_limits<double>::infinity();
+    double max_direct_self_diag_abs_ratio = 0.0;
+    std::vector<GlobalIndex> high_direct_self_row_sum_leak_global_dofs;
+    std::vector<GlobalIndex> null_preserving_direct_self_global_dofs;
+    std::vector<GlobalIndex> diag_dominant_direct_self_global_dofs;
+    std::vector<GlobalIndex> balanced_diag_direct_self_global_dofs;
+    for (const auto& row : direct_rows) {
+        max_direct_self_row_sum_leak_ratio =
+            std::max(max_direct_self_row_sum_leak_ratio,
+                     row.row_self_signed_abs_ratio);
+        min_direct_self_diag_abs_ratio =
+            std::min(min_direct_self_diag_abs_ratio,
+                     row.row_self_diag_abs_ratio);
+        max_direct_self_diag_abs_ratio =
+            std::max(max_direct_self_diag_abs_ratio,
+                     row.row_self_diag_abs_ratio);
+        if (row.row_self_signed_abs_ratio >=
+            kDirectSelfRowSumLeakThreshold) {
+            high_direct_self_row_sum_leak_global_dofs.push_back(
+                row.global_dof);
+        }
+        if (row.row_self_signed_abs_ratio <=
+            kDirectSelfNullPreservingThreshold) {
+            null_preserving_direct_self_global_dofs.push_back(row.global_dof);
+        }
+        if (row.row_self_diag_abs_ratio >=
+            kDirectSelfDiagDominantThreshold) {
+            diag_dominant_direct_self_global_dofs.push_back(row.global_dof);
+        }
+        if (row.row_self_diag_abs_ratio >=
+                kDirectSelfBalancedDiagLowThreshold &&
+            row.row_self_diag_abs_ratio <=
+                kDirectSelfBalancedDiagHighThreshold) {
+            balanced_diag_direct_self_global_dofs.push_back(row.global_dof);
+        }
+    }
+
+    auto residual_view = residual.createAssemblyView();
+    FE_CHECK_NOT_NULL(
+        residual_view.get(),
+        "NewtonSolver: direct PSPG formulation candidate residual view");
+    const double residual_sign_threshold = tolerance;
+    int residual_positive_direct_row_count = 0;
+    int residual_negative_direct_row_count = 0;
+    int residual_zero_direct_row_count = 0;
+    int residual_nonfinite_direct_row_count = 0;
+    double min_positive_residual_abs = std::numeric_limits<double>::infinity();
+    double max_residual_abs = 0.0;
+    std::map<GlobalIndex, int> residual_sign_by_dof;
+    for (auto& row : direct_rows) {
+        const double residual_value =
+            static_cast<double>(residual_view->getVectorEntry(row.global_dof));
+        row.residual_value = residual_value;
+        if (!std::isfinite(residual_value)) {
+            ++residual_nonfinite_direct_row_count;
+            residual_sign_by_dof[row.global_dof] = 0;
+            continue;
+        }
+        const double residual_abs = std::abs(residual_value);
+        max_residual_abs = std::max(max_residual_abs, residual_abs);
+        if (residual_abs > residual_sign_threshold) {
+            min_positive_residual_abs =
+                std::min(min_positive_residual_abs, residual_abs);
+            row.residual_sign = residual_value > 0.0 ? 1 : -1;
+        }
+        if (row.residual_sign > 0) {
+            ++residual_positive_direct_row_count;
+        } else if (row.residual_sign < 0) {
+            ++residual_negative_direct_row_count;
+        } else {
+            ++residual_zero_direct_row_count;
+        }
+        residual_sign_by_dof[row.global_dof] = row.residual_sign;
+    }
+
+    std::vector<GlobalIndex> sparse_direct_self_global_dofs;
+    for (const auto& row : direct_rows) {
+        if (row.row_self_numeric_entries < max_direct_self_entries) {
+            sparse_direct_self_global_dofs.push_back(row.global_dof);
+        }
+    }
+    constexpr double kConstrainedPressureNeighborRatioThreshold = 0.25;
+    std::vector<GlobalIndex> constrained_pressure_neighbor_global_dofs;
+    std::vector<GlobalIndex> high_constrained_pressure_neighbor_ratio_global_dofs;
+    std::vector<GlobalIndex> sparse_unconstrained_direct_self_global_dofs;
+    std::set<GlobalIndex> constrained_or_sparse_unconstrained_direct_self_set;
+    for (const auto& row : direct_rows) {
+        if (row.row_self_constrained_numeric_entries > 0) {
+            constrained_pressure_neighbor_global_dofs.push_back(row.global_dof);
+            constrained_or_sparse_unconstrained_direct_self_set.insert(
+                row.global_dof);
+        }
+        if (row.row_self_abs_sum > 0.0 &&
+            row.row_self_constrained_abs_sum / row.row_self_abs_sum >=
+                kConstrainedPressureNeighborRatioThreshold) {
+            high_constrained_pressure_neighbor_ratio_global_dofs.push_back(
+                row.global_dof);
+        }
+        if (row.row_self_unconstrained_numeric_entries <
+            max_unconstrained_direct_self_entries) {
+            sparse_unconstrained_direct_self_global_dofs.push_back(
+                row.global_dof);
+            constrained_or_sparse_unconstrained_direct_self_set.insert(
+                row.global_dof);
+        }
+    }
+    std::vector<GlobalIndex>
+        constrained_or_sparse_unconstrained_direct_self_global_dofs(
+            constrained_or_sparse_unconstrained_direct_self_set.begin(),
+            constrained_or_sparse_unconstrained_direct_self_set.end());
+    constexpr double kLowDirectSelfRatioThreshold = 0.25;
+    constexpr double kModerateDirectSelfRatioThreshold = 0.5;
+    std::vector<GlobalIndex> low_direct_self_ratio_global_dofs;
+    std::vector<GlobalIndex> moderate_direct_self_ratio_global_dofs;
+    if (max_direct_self_abs_sum > 0.0) {
+        for (const auto& row : direct_rows) {
+            const double ratio = row.row_self_abs_sum / max_direct_self_abs_sum;
+            if (ratio <= kLowDirectSelfRatioThreshold) {
+                low_direct_self_ratio_global_dofs.push_back(row.global_dof);
+            }
+            if (ratio <= kModerateDirectSelfRatioThreshold) {
+                moderate_direct_self_ratio_global_dofs.push_back(row.global_dof);
+            }
+        }
+    }
+
+    std::set<std::pair<GlobalIndex, GlobalIndex>> pressure_action_edges;
+    std::set<GlobalIndex> pressure_action_covered;
+    std::map<GlobalIndex, GlobalIndex> pressure_action_degree_by_dof;
+    std::map<GlobalIndex, double> pressure_action_abs_sum_by_dof;
+    for (const auto& row : direct_rows) {
+        pressure_action_degree_by_dof[row.global_dof] = 0;
+        pressure_action_abs_sum_by_dof[row.global_dof] = 0.0;
+    }
+    for (std::size_t i = 0; i < direct_rows.size(); ++i) {
+        const auto row_i = direct_rows[i].global_dof;
+        for (std::size_t j = i + 1u; j < direct_rows.size(); ++j) {
+            const auto row_j = direct_rows[j].global_dof;
+            const double row_edge =
+                static_cast<double>(matrix.getEntry(row_i, row_j));
+            const double col_edge =
+                static_cast<double>(matrix.getEntry(row_j, row_i));
+            if (!std::isfinite(row_edge) || !std::isfinite(col_edge)) {
+                continue;
+            }
+            const double symmetric_offdiag = 0.5 * (row_edge + col_edge);
+            if (!(symmetric_offdiag < -tolerance)) {
+                continue;
+            }
+            const double edge_abs = std::abs(symmetric_offdiag);
+            pressure_action_edges.insert({row_i, row_j});
+            pressure_action_covered.insert(row_i);
+            pressure_action_covered.insert(row_j);
+            ++pressure_action_degree_by_dof[row_i];
+            ++pressure_action_degree_by_dof[row_j];
+            pressure_action_abs_sum_by_dof[row_i] += edge_abs;
+            pressure_action_abs_sum_by_dof[row_j] += edge_abs;
+        }
+    }
+
+    std::vector<GlobalIndex> pressure_action_covered_global_dofs(
+        pressure_action_covered.begin(), pressure_action_covered.end());
+    std::vector<GlobalIndex> pressure_action_isolated_global_dofs;
+    for (const auto& row : direct_rows) {
+        if (pressure_action_covered.count(row.global_dof) == 0u) {
+            pressure_action_isolated_global_dofs.push_back(row.global_dof);
+        }
+    }
+
+    std::set<std::pair<GlobalIndex, GlobalIndex>>
+        residual_sign_pressure_action_edges;
+    std::set<GlobalIndex> residual_sign_pressure_action_covered;
+    std::map<GlobalIndex, std::vector<GlobalIndex>>
+        residual_sign_pressure_action_neighbors;
+    std::size_t residual_opposite_sign_pressure_action_edge_count = 0;
+    std::size_t residual_zero_or_missing_sign_pressure_action_edge_count = 0;
+    for (const auto& row : direct_rows) {
+        residual_sign_pressure_action_neighbors[row.global_dof];
+    }
+    for (const auto& edge : pressure_action_edges) {
+        const int first_sign = residual_sign_by_dof[edge.first];
+        const int second_sign = residual_sign_by_dof[edge.second];
+        if (first_sign != 0 && second_sign != 0 && first_sign == second_sign) {
+            residual_sign_pressure_action_edges.insert(edge);
+            residual_sign_pressure_action_covered.insert(edge.first);
+            residual_sign_pressure_action_covered.insert(edge.second);
+            residual_sign_pressure_action_neighbors[edge.first].push_back(
+                edge.second);
+            residual_sign_pressure_action_neighbors[edge.second].push_back(
+                edge.first);
+        } else if (first_sign != 0 && second_sign != 0) {
+            ++residual_opposite_sign_pressure_action_edge_count;
+        } else {
+            ++residual_zero_or_missing_sign_pressure_action_edge_count;
+        }
+    }
+
+    std::vector<GlobalIndex> residual_sign_pressure_action_covered_global_dofs(
+        residual_sign_pressure_action_covered.begin(),
+        residual_sign_pressure_action_covered.end());
+    std::vector<GlobalIndex> residual_sign_pressure_action_isolated_global_dofs;
+    for (const auto& row : direct_rows) {
+        if (residual_sign_pressure_action_covered.count(row.global_dof) == 0u) {
+            residual_sign_pressure_action_isolated_global_dofs.push_back(
+                row.global_dof);
+        }
+    }
+
+    constexpr GlobalIndex kPressureActionLowDegreeThreshold = 2;
+    constexpr GlobalIndex kPressureActionModerateDegreeThreshold = 4;
+    constexpr double kPressureActionLowSumRatioThreshold = 0.25;
+    constexpr double kPressureActionModerateSumRatioThreshold = 0.5;
+    constexpr double kPressureActionSelfDominantThreshold = 0.75;
+    GlobalIndex max_pressure_action_degree = 0;
+    double max_pressure_action_abs_sum = 0.0;
+    std::vector<GlobalIndex> pressure_action_low_degree_global_dofs;
+    std::vector<GlobalIndex> pressure_action_moderate_degree_global_dofs;
+    std::vector<GlobalIndex> pressure_action_low_sum_ratio_global_dofs;
+    std::vector<GlobalIndex> pressure_action_moderate_sum_ratio_global_dofs;
+    std::vector<GlobalIndex> pressure_action_self_dominant_global_dofs;
+    for (const auto& row : direct_rows) {
+        const auto degree = pressure_action_degree_by_dof[row.global_dof];
+        const auto action_sum = pressure_action_abs_sum_by_dof[row.global_dof];
+        max_pressure_action_degree =
+            std::max(max_pressure_action_degree, degree);
+        max_pressure_action_abs_sum =
+            std::max(max_pressure_action_abs_sum, action_sum);
+        if (degree <= kPressureActionLowDegreeThreshold) {
+            pressure_action_low_degree_global_dofs.push_back(row.global_dof);
+        }
+        if (degree <= kPressureActionModerateDegreeThreshold) {
+            pressure_action_moderate_degree_global_dofs.push_back(
+                row.global_dof);
+        }
+        const double total_action_support =
+            row.row_self_abs_sum + action_sum;
+        if (total_action_support > 0.0 &&
+            row.row_self_abs_sum / total_action_support >=
+                kPressureActionSelfDominantThreshold) {
+            pressure_action_self_dominant_global_dofs.push_back(
+                row.global_dof);
+        }
+    }
+    if (max_pressure_action_abs_sum > 0.0) {
+        for (const auto& row : direct_rows) {
+            const double ratio =
+                pressure_action_abs_sum_by_dof[row.global_dof] /
+                max_pressure_action_abs_sum;
+            if (ratio <= kPressureActionLowSumRatioThreshold) {
+                pressure_action_low_sum_ratio_global_dofs.push_back(
+                    row.global_dof);
+            }
+            if (ratio <= kPressureActionModerateSumRatioThreshold) {
+                pressure_action_moderate_sum_ratio_global_dofs.push_back(
+                    row.global_dof);
+            }
+        }
+    }
+
+    std::set<GlobalIndex> sparse_candidate_set(
+        sparse_direct_self_global_dofs.begin(),
+        sparse_direct_self_global_dofs.end());
+    std::set<GlobalIndex> sparse_or_moderate_direct_self_set =
+        sparse_candidate_set;
+    sparse_or_moderate_direct_self_set.insert(
+        moderate_direct_self_ratio_global_dofs.begin(),
+        moderate_direct_self_ratio_global_dofs.end());
+    std::vector<GlobalIndex> sparse_or_moderate_direct_self_global_dofs(
+        sparse_or_moderate_direct_self_set.begin(),
+        sparse_or_moderate_direct_self_set.end());
+
+    std::set<GlobalIndex> preferred_candidate_set = sparse_candidate_set;
+    preferred_candidate_set.insert(pressure_action_covered.begin(),
+                                   pressure_action_covered.end());
+    std::vector<GlobalIndex> preferred_candidate_global_dofs(
+        preferred_candidate_set.begin(), preferred_candidate_set.end());
+
+    std::map<GlobalIndex, std::vector<GlobalIndex>> pressure_action_neighbors;
+    std::map<GlobalIndex, double> direct_self_abs_by_dof;
+    for (const auto& row : direct_rows) {
+        pressure_action_neighbors[row.global_dof];
+        direct_self_abs_by_dof[row.global_dof] = row.row_self_abs_sum;
+    }
+    for (const auto& edge : pressure_action_edges) {
+        pressure_action_neighbors[edge.first].push_back(edge.second);
+        pressure_action_neighbors[edge.second].push_back(edge.first);
+    }
+    std::map<GlobalIndex, std::set<GlobalIndex>> pressure_action_neighbor_sets;
+    for (const auto& row : direct_rows) {
+        const auto neighbor_it = pressure_action_neighbors.find(row.global_dof);
+        if (neighbor_it == pressure_action_neighbors.end()) {
+            pressure_action_neighbor_sets[row.global_dof];
+            continue;
+        }
+        pressure_action_neighbor_sets[row.global_dof] =
+            std::set<GlobalIndex>(
+                neighbor_it->second.begin(), neighbor_it->second.end());
+    }
+    constexpr GlobalIndex kPressureActionLowTwoHopThreshold = 4;
+    constexpr double kPressureActionHighTwoHopRatioThreshold = 0.5;
+    constexpr double kPressureActionLowClusteringThreshold = 0.25;
+    constexpr double kPressureActionHighClusteringThreshold = 0.75;
+    GlobalIndex max_pressure_action_two_hop_completion_count = 0;
+    GlobalIndex pressure_action_clustering_eligible_row_count = 0;
+    double min_pressure_action_clustering_ratio =
+        std::numeric_limits<double>::infinity();
+    double max_pressure_action_clustering_ratio = 0.0;
+    std::map<GlobalIndex, GlobalIndex> pressure_action_two_hop_count_by_dof;
+    std::vector<GlobalIndex> pressure_action_zero_two_hop_global_dofs;
+    std::vector<GlobalIndex> pressure_action_low_two_hop_global_dofs;
+    std::vector<GlobalIndex> pressure_action_high_two_hop_global_dofs;
+    std::vector<GlobalIndex> pressure_action_zero_clustering_global_dofs;
+    std::vector<GlobalIndex> pressure_action_low_clustering_global_dofs;
+    std::vector<GlobalIndex> pressure_action_high_clustering_global_dofs;
+    for (const auto& row : direct_rows) {
+        const auto row_it =
+            pressure_action_neighbor_sets.find(row.global_dof);
+        const auto& row_neighbors = row_it->second;
+        std::set<GlobalIndex> two_hop_candidates;
+        for (const auto neighbor : row_neighbors) {
+            const auto neighbor_it =
+                pressure_action_neighbor_sets.find(neighbor);
+            if (neighbor_it == pressure_action_neighbor_sets.end()) {
+                continue;
+            }
+            for (const auto candidate : neighbor_it->second) {
+                if (candidate == row.global_dof ||
+                    row_neighbors.count(candidate) != 0u) {
+                    continue;
+                }
+                two_hop_candidates.insert(candidate);
+            }
+        }
+        const GlobalIndex two_hop_count =
+            static_cast<GlobalIndex>(two_hop_candidates.size());
+        pressure_action_two_hop_count_by_dof[row.global_dof] = two_hop_count;
+        max_pressure_action_two_hop_completion_count =
+            std::max(max_pressure_action_two_hop_completion_count,
+                     two_hop_count);
+        if (two_hop_count == 0) {
+            pressure_action_zero_two_hop_global_dofs.push_back(row.global_dof);
+        }
+        if (two_hop_count <= kPressureActionLowTwoHopThreshold) {
+            pressure_action_low_two_hop_global_dofs.push_back(row.global_dof);
+        }
+
+        if (row_neighbors.size() < 2u) {
+            continue;
+        }
+        ++pressure_action_clustering_eligible_row_count;
+        GlobalIndex neighbor_edge_count = 0;
+        std::vector<GlobalIndex> neighbors(
+            row_neighbors.begin(), row_neighbors.end());
+        for (std::size_t i = 0; i < neighbors.size(); ++i) {
+            for (std::size_t j = i + 1u; j < neighbors.size(); ++j) {
+                const auto first_neighbor_it =
+                    pressure_action_neighbor_sets.find(neighbors[i]);
+                if (first_neighbor_it != pressure_action_neighbor_sets.end() &&
+                    first_neighbor_it->second.count(neighbors[j]) != 0u) {
+                    ++neighbor_edge_count;
+                }
+            }
+        }
+        const auto possible_neighbor_edges =
+            static_cast<double>(neighbors.size() * (neighbors.size() - 1u)) /
+            2.0;
+        const double clustering_ratio =
+            possible_neighbor_edges > 0.0
+                ? static_cast<double>(neighbor_edge_count) /
+                      possible_neighbor_edges
+                : 0.0;
+        min_pressure_action_clustering_ratio =
+            std::min(min_pressure_action_clustering_ratio, clustering_ratio);
+        max_pressure_action_clustering_ratio =
+            std::max(max_pressure_action_clustering_ratio, clustering_ratio);
+        if (neighbor_edge_count == 0) {
+            pressure_action_zero_clustering_global_dofs.push_back(
+                row.global_dof);
+        }
+        if (clustering_ratio <= kPressureActionLowClusteringThreshold) {
+            pressure_action_low_clustering_global_dofs.push_back(
+                row.global_dof);
+        }
+        if (clustering_ratio >= kPressureActionHighClusteringThreshold) {
+            pressure_action_high_clustering_global_dofs.push_back(
+                row.global_dof);
+        }
+    }
+    if (max_pressure_action_two_hop_completion_count > 0) {
+        for (const auto& entry : pressure_action_two_hop_count_by_dof) {
+            const double ratio =
+                static_cast<double>(entry.second) /
+                static_cast<double>(max_pressure_action_two_hop_completion_count);
+            if (ratio >= kPressureActionHighTwoHopRatioThreshold) {
+                pressure_action_high_two_hop_global_dofs.push_back(entry.first);
+            }
+        }
+    }
+
+    std::map<GlobalIndex, int> pressure_action_discovery_time;
+    std::map<GlobalIndex, int> pressure_action_low_link;
+    std::map<GlobalIndex, GlobalIndex> pressure_action_dfs_parent;
+    std::set<GlobalIndex> pressure_action_articulation_set;
+    std::set<GlobalIndex> pressure_action_bridge_endpoint_set;
+    int pressure_action_dfs_time = 0;
+    std::function<void(GlobalIndex)> visitPressureActionGraph =
+        [&](GlobalIndex current) {
+            pressure_action_discovery_time[current] =
+                ++pressure_action_dfs_time;
+            pressure_action_low_link[current] =
+                pressure_action_discovery_time[current];
+            int child_count = 0;
+            const auto neighbor_it =
+                pressure_action_neighbor_sets.find(current);
+            if (neighbor_it == pressure_action_neighbor_sets.end()) {
+                return;
+            }
+            for (const auto neighbor : neighbor_it->second) {
+                if (pressure_action_discovery_time.count(neighbor) == 0u) {
+                    pressure_action_dfs_parent[neighbor] = current;
+                    ++child_count;
+                    visitPressureActionGraph(neighbor);
+                    pressure_action_low_link[current] =
+                        std::min(pressure_action_low_link[current],
+                                 pressure_action_low_link[neighbor]);
+                    const bool is_root =
+                        pressure_action_dfs_parent.count(current) == 0u;
+                    if (is_root && child_count > 1) {
+                        pressure_action_articulation_set.insert(current);
+                    }
+                    if (!is_root &&
+                        pressure_action_low_link[neighbor] >=
+                            pressure_action_discovery_time[current]) {
+                        pressure_action_articulation_set.insert(current);
+                    }
+                    if (pressure_action_low_link[neighbor] >
+                        pressure_action_discovery_time[current]) {
+                        pressure_action_bridge_endpoint_set.insert(current);
+                        pressure_action_bridge_endpoint_set.insert(neighbor);
+                    }
+                } else {
+                    const auto parent_it =
+                        pressure_action_dfs_parent.find(current);
+                    if (parent_it == pressure_action_dfs_parent.end() ||
+                        parent_it->second != neighbor) {
+                        pressure_action_low_link[current] =
+                            std::min(pressure_action_low_link[current],
+                                     pressure_action_discovery_time[neighbor]);
+                    }
+                }
+            }
+        };
+    for (const auto& row : direct_rows) {
+        if (pressure_action_discovery_time.count(row.global_dof) == 0u) {
+            visitPressureActionGraph(row.global_dof);
+        }
+    }
+    std::vector<GlobalIndex> pressure_action_articulation_global_dofs(
+        pressure_action_articulation_set.begin(),
+        pressure_action_articulation_set.end());
+    std::vector<GlobalIndex> pressure_action_bridge_endpoint_global_dofs(
+        pressure_action_bridge_endpoint_set.begin(),
+        pressure_action_bridge_endpoint_set.end());
+    auto expandPressureActionNeighborhood =
+        [&](const std::set<GlobalIndex>& seeds,
+            int radius) -> std::vector<GlobalIndex> {
+        std::set<GlobalIndex> selected = seeds;
+        std::vector<GlobalIndex> frontier(seeds.begin(), seeds.end());
+        for (int depth = 0; depth < radius && !frontier.empty(); ++depth) {
+            std::vector<GlobalIndex> next_frontier;
+            for (const auto current : frontier) {
+                const auto neighbor_it = pressure_action_neighbors.find(current);
+                if (neighbor_it == pressure_action_neighbors.end()) {
+                    continue;
+                }
+                for (const auto neighbor : neighbor_it->second) {
+                    if (selected.insert(neighbor).second) {
+                        next_frontier.push_back(neighbor);
+                    }
+                }
+            }
+            frontier = std::move(next_frontier);
+        }
+        return std::vector<GlobalIndex>(selected.begin(), selected.end());
+    };
+    const auto sparse_seeded_pressure_action_radius1_global_dofs =
+        expandPressureActionNeighborhood(sparse_candidate_set, 1);
+    const auto sparse_seeded_pressure_action_radius2_global_dofs =
+        expandPressureActionNeighborhood(sparse_candidate_set, 2);
+    constexpr double kGraphLocalLowDirectSelfRatioThreshold = 0.5;
+    constexpr double kGraphLocalModerateDirectSelfRatioThreshold = 0.75;
+    std::vector<GlobalIndex> graph_local_low_direct_self_ratio_global_dofs;
+    std::vector<GlobalIndex> graph_local_moderate_direct_self_ratio_global_dofs;
+    GlobalIndex graph_local_neighbor_positive_row_count = 0;
+    for (const auto& row : direct_rows) {
+        const auto neighbor_it =
+            pressure_action_neighbors.find(row.global_dof);
+        if (neighbor_it == pressure_action_neighbors.end() ||
+            neighbor_it->second.empty()) {
+            continue;
+        }
+        double max_neighbor_self_abs_sum = 0.0;
+        for (const auto neighbor : neighbor_it->second) {
+            const auto support_it = direct_self_abs_by_dof.find(neighbor);
+            if (support_it != direct_self_abs_by_dof.end()) {
+                max_neighbor_self_abs_sum =
+                    std::max(max_neighbor_self_abs_sum, support_it->second);
+            }
+        }
+        if (max_neighbor_self_abs_sum <= 0.0) {
+            continue;
+        }
+        ++graph_local_neighbor_positive_row_count;
+        const double local_ratio =
+            row.row_self_abs_sum / max_neighbor_self_abs_sum;
+        if (local_ratio <= kGraphLocalLowDirectSelfRatioThreshold) {
+            graph_local_low_direct_self_ratio_global_dofs.push_back(
+                row.global_dof);
+        }
+        if (local_ratio <= kGraphLocalModerateDirectSelfRatioThreshold) {
+            graph_local_moderate_direct_self_ratio_global_dofs.push_back(
+                row.global_dof);
+        }
+    }
+    std::set<GlobalIndex> visited_pressure_action_rows;
+    std::vector<GlobalIndex> sparse_seeded_pressure_action_component_global_dofs;
+    std::size_t pressure_action_component_count = 0;
+    std::size_t pressure_action_largest_component_size = 0;
+    std::size_t sparse_seeded_pressure_action_component_count = 0;
+    for (const auto& row : direct_rows) {
+        if (visited_pressure_action_rows.count(row.global_dof) != 0u) {
+            continue;
+        }
+        ++pressure_action_component_count;
+        std::vector<GlobalIndex> component;
+        std::vector<GlobalIndex> stack{row.global_dof};
+        visited_pressure_action_rows.insert(row.global_dof);
+        bool has_sparse_seed = false;
+        while (!stack.empty()) {
+            const GlobalIndex current = stack.back();
+            stack.pop_back();
+            component.push_back(current);
+            if (sparse_candidate_set.count(current) != 0u) {
+                has_sparse_seed = true;
+            }
+            const auto neighbor_it = pressure_action_neighbors.find(current);
+            if (neighbor_it == pressure_action_neighbors.end()) {
+                continue;
+            }
+            for (const auto neighbor : neighbor_it->second) {
+                if (visited_pressure_action_rows.insert(neighbor).second) {
+                    stack.push_back(neighbor);
+                }
+            }
+        }
+        pressure_action_largest_component_size =
+            std::max(pressure_action_largest_component_size, component.size());
+        if (has_sparse_seed) {
+            ++sparse_seeded_pressure_action_component_count;
+            sparse_seeded_pressure_action_component_global_dofs.insert(
+                sparse_seeded_pressure_action_component_global_dofs.end(),
+                component.begin(),
+                component.end());
+        }
+    }
+    std::sort(
+        sparse_seeded_pressure_action_component_global_dofs.begin(),
+        sparse_seeded_pressure_action_component_global_dofs.end());
+    sparse_seeded_pressure_action_component_global_dofs.erase(
+        std::unique(
+            sparse_seeded_pressure_action_component_global_dofs.begin(),
+            sparse_seeded_pressure_action_component_global_dofs.end()),
+        sparse_seeded_pressure_action_component_global_dofs.end());
+
+    std::set<GlobalIndex> residual_sign_preferred_candidate_set =
+        sparse_candidate_set;
+    residual_sign_preferred_candidate_set.insert(
+        residual_sign_pressure_action_covered.begin(),
+        residual_sign_pressure_action_covered.end());
+    std::vector<GlobalIndex> residual_sign_preferred_candidate_global_dofs(
+        residual_sign_preferred_candidate_set.begin(),
+        residual_sign_preferred_candidate_set.end());
+
+    std::set<GlobalIndex> visited_residual_sign_pressure_action_rows;
+    std::vector<GlobalIndex>
+        sparse_seeded_residual_sign_pressure_action_component_global_dofs;
+    std::size_t residual_sign_pressure_action_component_count = 0;
+    std::size_t residual_sign_pressure_action_largest_component_size = 0;
+    std::size_t
+        sparse_seeded_residual_sign_pressure_action_component_count = 0;
+    for (const auto& row : direct_rows) {
+        if (visited_residual_sign_pressure_action_rows.count(row.global_dof) !=
+            0u) {
+            continue;
+        }
+        ++residual_sign_pressure_action_component_count;
+        std::vector<GlobalIndex> component;
+        std::vector<GlobalIndex> stack{row.global_dof};
+        visited_residual_sign_pressure_action_rows.insert(row.global_dof);
+        bool has_sparse_seed = false;
+        while (!stack.empty()) {
+            const GlobalIndex current = stack.back();
+            stack.pop_back();
+            component.push_back(current);
+            if (sparse_candidate_set.count(current) != 0u) {
+                has_sparse_seed = true;
+            }
+            const auto neighbor_it =
+                residual_sign_pressure_action_neighbors.find(current);
+            if (neighbor_it ==
+                residual_sign_pressure_action_neighbors.end()) {
+                continue;
+            }
+            for (const auto neighbor : neighbor_it->second) {
+                if (visited_residual_sign_pressure_action_rows.insert(neighbor)
+                        .second) {
+                    stack.push_back(neighbor);
+                }
+            }
+        }
+        residual_sign_pressure_action_largest_component_size =
+            std::max(residual_sign_pressure_action_largest_component_size,
+                     component.size());
+        if (has_sparse_seed) {
+            ++sparse_seeded_residual_sign_pressure_action_component_count;
+            sparse_seeded_residual_sign_pressure_action_component_global_dofs
+                .insert(
+                    sparse_seeded_residual_sign_pressure_action_component_global_dofs
+                        .end(),
+                    component.begin(),
+                    component.end());
+        }
+    }
+    std::sort(
+        sparse_seeded_residual_sign_pressure_action_component_global_dofs
+            .begin(),
+        sparse_seeded_residual_sign_pressure_action_component_global_dofs.end());
+    sparse_seeded_residual_sign_pressure_action_component_global_dofs.erase(
+        std::unique(
+            sparse_seeded_residual_sign_pressure_action_component_global_dofs
+                .begin(),
+            sparse_seeded_residual_sign_pressure_action_component_global_dofs
+                .end()),
+        sparse_seeded_residual_sign_pressure_action_component_global_dofs.end());
+
+    constexpr std::size_t kCandidateSampleLimit = 2048;
+
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    oss << "NewtonSolver: direct PSPG formulation candidate diagnostic"
+        << " diagnostic=direct_pspg_formulation_candidate"
+        << " status=ok"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " op='" << op << "'"
+        << " backend=" << backends::backendKindToString(matrix.backendKind())
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " pressure_field='" << pressure_field << "'"
+        << " pressure_offset=" << pressure_range->begin
+        << " pressure_dofs=" << (pressure_range->end - pressure_range->begin)
+        << " tolerance=" << tolerance
+        << " selector='sparse_direct_self_or_matrix_pressure_action_patch'"
+        << " direct_self_positive_row_count=" << direct_rows.size()
+        << " min_direct_self_numeric_entries="
+        << (direct_rows.empty() ? 0 : min_direct_self_entries)
+        << " max_direct_self_numeric_entries=" << max_direct_self_entries
+        << " max_unconstrained_direct_self_numeric_entries="
+        << max_unconstrained_direct_self_entries
+        << " min_positive_direct_self_abs_sum="
+        << (std::isfinite(min_positive_direct_self_abs_sum)
+                ? min_positive_direct_self_abs_sum
+                : 0.0)
+        << " max_direct_self_abs_sum=" << max_direct_self_abs_sum
+        << " direct_self_row_sum_leak_threshold="
+        << kDirectSelfRowSumLeakThreshold
+        << " direct_self_null_preserving_threshold="
+        << kDirectSelfNullPreservingThreshold
+        << " direct_self_diag_dominant_threshold="
+        << kDirectSelfDiagDominantThreshold
+        << " direct_self_balanced_diag_low_threshold="
+        << kDirectSelfBalancedDiagLowThreshold
+        << " direct_self_balanced_diag_high_threshold="
+        << kDirectSelfBalancedDiagHighThreshold
+        << " max_direct_self_row_sum_leak_ratio="
+        << max_direct_self_row_sum_leak_ratio
+        << " min_direct_self_diag_abs_ratio="
+        << (std::isfinite(min_direct_self_diag_abs_ratio)
+                ? min_direct_self_diag_abs_ratio
+                : 0.0)
+        << " max_direct_self_diag_abs_ratio="
+        << max_direct_self_diag_abs_ratio
+        << " high_direct_self_row_sum_leak_candidate_count="
+        << high_direct_self_row_sum_leak_global_dofs.size()
+        << " null_preserving_direct_self_candidate_count="
+        << null_preserving_direct_self_global_dofs.size()
+        << " diag_dominant_direct_self_candidate_count="
+        << diag_dominant_direct_self_global_dofs.size()
+        << " balanced_diag_direct_self_candidate_count="
+        << balanced_diag_direct_self_global_dofs.size()
+        << " sparse_direct_self_candidate_count="
+        << sparse_direct_self_global_dofs.size()
+        << " constrained_pressure_neighbor_candidate_count="
+        << constrained_pressure_neighbor_global_dofs.size()
+        << " constrained_pressure_neighbor_ratio_threshold="
+        << kConstrainedPressureNeighborRatioThreshold
+        << " high_constrained_pressure_neighbor_ratio_candidate_count="
+        << high_constrained_pressure_neighbor_ratio_global_dofs.size()
+        << " sparse_unconstrained_direct_self_candidate_count="
+        << sparse_unconstrained_direct_self_global_dofs.size()
+        << " constrained_or_sparse_unconstrained_direct_self_candidate_count="
+        << constrained_or_sparse_unconstrained_direct_self_global_dofs.size()
+        << " direct_self_low_ratio_threshold="
+        << kLowDirectSelfRatioThreshold
+        << " direct_self_moderate_ratio_threshold="
+        << kModerateDirectSelfRatioThreshold
+        << " low_direct_self_ratio_candidate_count="
+        << low_direct_self_ratio_global_dofs.size()
+        << " moderate_direct_self_ratio_candidate_count="
+        << moderate_direct_self_ratio_global_dofs.size()
+        << " sparse_or_moderate_direct_self_ratio_candidate_count="
+        << sparse_or_moderate_direct_self_global_dofs.size()
+        << " sparse_seeded_pressure_action_radius1_candidate_count="
+        << sparse_seeded_pressure_action_radius1_global_dofs.size()
+        << " sparse_seeded_pressure_action_radius2_candidate_count="
+        << sparse_seeded_pressure_action_radius2_global_dofs.size()
+        << " graph_local_direct_self_low_ratio_threshold="
+        << kGraphLocalLowDirectSelfRatioThreshold
+        << " graph_local_direct_self_moderate_ratio_threshold="
+        << kGraphLocalModerateDirectSelfRatioThreshold
+        << " graph_local_neighbor_positive_row_count="
+        << graph_local_neighbor_positive_row_count
+        << " graph_local_low_direct_self_ratio_candidate_count="
+        << graph_local_low_direct_self_ratio_global_dofs.size()
+        << " graph_local_moderate_direct_self_ratio_candidate_count="
+        << graph_local_moderate_direct_self_ratio_global_dofs.size()
+        << " matrix_pressure_action_edge_count="
+        << pressure_action_edges.size()
+        << " matrix_pressure_action_max_degree="
+        << max_pressure_action_degree
+        << " matrix_pressure_action_max_abs_sum="
+        << max_pressure_action_abs_sum
+        << " pressure_action_low_degree_threshold="
+        << kPressureActionLowDegreeThreshold
+        << " pressure_action_moderate_degree_threshold="
+        << kPressureActionModerateDegreeThreshold
+        << " pressure_action_low_degree_candidate_count="
+        << pressure_action_low_degree_global_dofs.size()
+        << " pressure_action_moderate_degree_candidate_count="
+        << pressure_action_moderate_degree_global_dofs.size()
+        << " pressure_action_low_sum_ratio_threshold="
+        << kPressureActionLowSumRatioThreshold
+        << " pressure_action_moderate_sum_ratio_threshold="
+        << kPressureActionModerateSumRatioThreshold
+        << " pressure_action_low_sum_ratio_candidate_count="
+        << pressure_action_low_sum_ratio_global_dofs.size()
+        << " pressure_action_moderate_sum_ratio_candidate_count="
+        << pressure_action_moderate_sum_ratio_global_dofs.size()
+        << " pressure_action_self_dominant_threshold="
+        << kPressureActionSelfDominantThreshold
+        << " pressure_action_self_dominant_candidate_count="
+        << pressure_action_self_dominant_global_dofs.size()
+        << " pressure_action_low_two_hop_threshold="
+        << kPressureActionLowTwoHopThreshold
+        << " pressure_action_high_two_hop_ratio_threshold="
+        << kPressureActionHighTwoHopRatioThreshold
+        << " matrix_pressure_action_max_two_hop_completion_count="
+        << max_pressure_action_two_hop_completion_count
+        << " pressure_action_zero_two_hop_candidate_count="
+        << pressure_action_zero_two_hop_global_dofs.size()
+        << " pressure_action_low_two_hop_candidate_count="
+        << pressure_action_low_two_hop_global_dofs.size()
+        << " pressure_action_high_two_hop_candidate_count="
+        << pressure_action_high_two_hop_global_dofs.size()
+        << " pressure_action_low_clustering_threshold="
+        << kPressureActionLowClusteringThreshold
+        << " pressure_action_high_clustering_threshold="
+        << kPressureActionHighClusteringThreshold
+        << " pressure_action_clustering_eligible_row_count="
+        << pressure_action_clustering_eligible_row_count
+        << " matrix_pressure_action_min_clustering_ratio="
+        << (std::isfinite(min_pressure_action_clustering_ratio)
+                ? min_pressure_action_clustering_ratio
+                : 0.0)
+        << " matrix_pressure_action_max_clustering_ratio="
+        << max_pressure_action_clustering_ratio
+        << " pressure_action_zero_clustering_candidate_count="
+        << pressure_action_zero_clustering_global_dofs.size()
+        << " pressure_action_low_clustering_candidate_count="
+        << pressure_action_low_clustering_global_dofs.size()
+        << " pressure_action_high_clustering_candidate_count="
+        << pressure_action_high_clustering_global_dofs.size()
+        << " pressure_action_articulation_candidate_count="
+        << pressure_action_articulation_global_dofs.size()
+        << " pressure_action_bridge_endpoint_candidate_count="
+        << pressure_action_bridge_endpoint_global_dofs.size()
+        << " matrix_pressure_action_component_count="
+        << pressure_action_component_count
+        << " matrix_pressure_action_largest_component_size="
+        << pressure_action_largest_component_size
+        << " matrix_pressure_action_covered_count="
+        << pressure_action_covered_global_dofs.size()
+        << " matrix_pressure_action_isolated_count="
+        << pressure_action_isolated_global_dofs.size()
+        << " sparse_seeded_matrix_pressure_action_component_count="
+        << sparse_seeded_pressure_action_component_count
+        << " sparse_seeded_matrix_pressure_action_component_dof_count="
+        << sparse_seeded_pressure_action_component_global_dofs.size()
+        << " residual_sign_threshold=" << residual_sign_threshold
+        << " residual_positive_direct_row_count="
+        << residual_positive_direct_row_count
+        << " residual_negative_direct_row_count="
+        << residual_negative_direct_row_count
+        << " residual_zero_direct_row_count="
+        << residual_zero_direct_row_count
+        << " residual_nonfinite_direct_row_count="
+        << residual_nonfinite_direct_row_count
+        << " residual_nonzero_direct_row_count="
+        << (residual_positive_direct_row_count +
+            residual_negative_direct_row_count)
+        << " min_positive_residual_abs="
+        << (std::isfinite(min_positive_residual_abs)
+                ? min_positive_residual_abs
+                : 0.0)
+        << " max_residual_abs=" << max_residual_abs
+        << " residual_sign_pressure_action_edge_count="
+        << residual_sign_pressure_action_edges.size()
+        << " residual_opposite_sign_pressure_action_edge_count="
+        << residual_opposite_sign_pressure_action_edge_count
+        << " residual_zero_or_missing_sign_pressure_action_edge_count="
+        << residual_zero_or_missing_sign_pressure_action_edge_count
+        << " residual_sign_pressure_action_component_count="
+        << residual_sign_pressure_action_component_count
+        << " residual_sign_pressure_action_largest_component_size="
+        << residual_sign_pressure_action_largest_component_size
+        << " residual_sign_pressure_action_covered_count="
+        << residual_sign_pressure_action_covered_global_dofs.size()
+        << " residual_sign_pressure_action_isolated_count="
+        << residual_sign_pressure_action_isolated_global_dofs.size()
+        << " sparse_seeded_residual_sign_pressure_action_component_count="
+        << sparse_seeded_residual_sign_pressure_action_component_count
+        << " sparse_seeded_residual_sign_pressure_action_component_dof_count="
+        << sparse_seeded_residual_sign_pressure_action_component_global_dofs
+               .size()
+        << " sparse_direct_self_or_residual_sign_pressure_action_candidate_count="
+        << residual_sign_preferred_candidate_global_dofs.size()
+        << " preferred_candidate_count="
+        << preferred_candidate_global_dofs.size()
+        << " artifact_limitation='matrix-sign and residual-sign pressure-action proxies; no update signs'"
+        << " high_direct_self_row_sum_leak_global_dofs="
+        << formatGlobalIndexListSample(
+               high_direct_self_row_sum_leak_global_dofs,
+               kCandidateSampleLimit)
+        << " null_preserving_direct_self_global_dofs="
+        << formatGlobalIndexListSample(
+               null_preserving_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " diag_dominant_direct_self_global_dofs="
+        << formatGlobalIndexListSample(
+               diag_dominant_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " balanced_diag_direct_self_global_dofs="
+        << formatGlobalIndexListSample(
+               balanced_diag_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_direct_self_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " constrained_pressure_neighbor_global_dofs="
+        << formatGlobalIndexListSample(
+               constrained_pressure_neighbor_global_dofs,
+               kCandidateSampleLimit)
+        << " high_constrained_pressure_neighbor_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               high_constrained_pressure_neighbor_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_unconstrained_direct_self_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_unconstrained_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " constrained_or_sparse_unconstrained_direct_self_global_dofs="
+        << formatGlobalIndexListSample(
+               constrained_or_sparse_unconstrained_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " low_direct_self_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               low_direct_self_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " moderate_direct_self_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               moderate_direct_self_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_or_moderate_direct_self_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_or_moderate_direct_self_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_seeded_pressure_action_radius1_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_seeded_pressure_action_radius1_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_seeded_pressure_action_radius2_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_seeded_pressure_action_radius2_global_dofs,
+               kCandidateSampleLimit)
+        << " graph_local_low_direct_self_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               graph_local_low_direct_self_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " graph_local_moderate_direct_self_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               graph_local_moderate_direct_self_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " matrix_pressure_action_covered_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_covered_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_low_degree_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_low_degree_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_moderate_degree_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_moderate_degree_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_low_sum_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_low_sum_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_moderate_sum_ratio_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_moderate_sum_ratio_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_self_dominant_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_self_dominant_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_zero_two_hop_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_zero_two_hop_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_low_two_hop_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_low_two_hop_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_high_two_hop_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_high_two_hop_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_zero_clustering_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_zero_clustering_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_low_clustering_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_low_clustering_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_high_clustering_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_high_clustering_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_articulation_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_articulation_global_dofs,
+               kCandidateSampleLimit)
+        << " pressure_action_bridge_endpoint_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_bridge_endpoint_global_dofs,
+               kCandidateSampleLimit)
+        << " matrix_pressure_action_isolated_global_dofs="
+        << formatGlobalIndexListSample(
+               pressure_action_isolated_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_seeded_matrix_pressure_action_component_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_seeded_pressure_action_component_global_dofs,
+               kCandidateSampleLimit)
+        << " residual_sign_pressure_action_covered_global_dofs="
+        << formatGlobalIndexListSample(
+               residual_sign_pressure_action_covered_global_dofs,
+               kCandidateSampleLimit)
+        << " residual_sign_pressure_action_isolated_global_dofs="
+        << formatGlobalIndexListSample(
+               residual_sign_pressure_action_isolated_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_seeded_residual_sign_pressure_action_component_global_dofs="
+        << formatGlobalIndexListSample(
+               sparse_seeded_residual_sign_pressure_action_component_global_dofs,
+               kCandidateSampleLimit)
+        << " sparse_direct_self_or_residual_sign_pressure_action_global_dofs="
+        << formatGlobalIndexListSample(
+               residual_sign_preferred_candidate_global_dofs,
+               kCandidateSampleLimit)
+        << " preferred_candidate_global_dofs="
+        << formatGlobalIndexListSample(
+               preferred_candidate_global_dofs,
+               kCandidateSampleLimit);
+    FE_LOG_INFO(oss.str());
+}
+
+[[nodiscard]] ActivePressureUpdateSupportSummary scanActivePressureUpdateSupport(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    backends::GenericVector& update,
+    backends::GenericVector& rhs,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view pressure_field_name,
+    std::string_view coupling_field_name,
+    double tolerance,
+    double weak_coupling_threshold,
+    double weak_self_threshold,
+    int sample_limit,
+    int action_sample_limit)
+{
+    ActivePressureUpdateSupportSummary summary;
+    summary.pressure_field = std::string(pressure_field_name);
+    summary.coupling_field = std::string(coupling_field_name);
+
+    const auto pressure_range =
+        newtonMatrixSupportFieldRangeByName(sys, pressure_field_name);
+    const auto coupling_range =
+        newtonMatrixSupportFieldRangeByName(sys, coupling_field_name);
+    if (!pressure_range.has_value() || !coupling_range.has_value()) {
+        return summary;
+    }
+
+    summary.pressure_offset = pressure_range->begin;
+    summary.pressure_dofs = pressure_range->end - pressure_range->begin;
+    summary.coupling_offset = coupling_range->begin;
+    summary.coupling_dofs = coupling_range->end - coupling_range->begin;
+
+    auto update_view = update.createAssemblyView();
+    FE_CHECK_NOT_NULL(update_view.get(),
+                      "NewtonSolver: pressure update support diagnostic view");
+    auto rhs_view = rhs.createAssemblyView();
+    FE_CHECK_NOT_NULL(rhs_view.get(),
+                      "NewtonSolver: pressure update support rhs diagnostic view");
+
+    const auto add_top_sample =
+        [sample_limit](std::vector<ActivePressureUpdateSupportRow>& samples,
+                       const ActivePressureUpdateSupportRow& row) {
+            if (sample_limit == 0) {
+                return;
+            }
+            samples.push_back(row);
+            std::sort(samples.begin(), samples.end(),
+                      [](const ActivePressureUpdateSupportRow& a,
+                         const ActivePressureUpdateSupportRow& b) {
+                          if (a.abs_update == b.abs_update) {
+                              return a.global_dof < b.global_dof;
+                          }
+                          return a.abs_update > b.abs_update;
+                      });
+            if (sample_limit > 0 &&
+                static_cast<int>(samples.size()) > sample_limit) {
+                samples.pop_back();
+            }
+        };
+    const auto add_action_term =
+        [action_sample_limit](std::vector<ActivePressureUpdateActionTerm>& terms,
+                              const ActivePressureUpdateActionTerm& term) {
+            if (action_sample_limit == 0) {
+                return;
+            }
+            terms.push_back(term);
+            std::sort(terms.begin(), terms.end(),
+                      [](const ActivePressureUpdateActionTerm& a,
+                         const ActivePressureUpdateActionTerm& b) {
+                          const double abs_a = std::abs(a.action);
+                          const double abs_b = std::abs(b.action);
+                          if (abs_a == abs_b) {
+                              return a.global_dof < b.global_dof;
+                          }
+                          return abs_a > abs_b;
+                      });
+            if (action_sample_limit > 0 &&
+                static_cast<int>(terms.size()) > action_sample_limit) {
+                terms.pop_back();
+            }
+        };
+
+    for (GlobalIndex local_dof = 0; local_dof < summary.pressure_dofs; ++local_dof) {
+        const auto global_dof = summary.pressure_offset + local_dof;
+        if (std::binary_search(
+                constrained_dofs.begin(), constrained_dofs.end(), global_dof)) {
+            ++summary.constrained_pressure_rows;
+            continue;
+        }
+
+        ++summary.unconstrained_pressure_rows;
+        ActivePressureUpdateSupportRow row;
+        row.local_dof = local_dof;
+        row.global_dof = global_dof;
+        if (global_dof >= 0 && global_dof < update.size()) {
+            row.update =
+                static_cast<double>(update_view->getVectorEntry(global_dof));
+            row.abs_update = std::abs(row.update);
+        }
+        if (global_dof >= 0 && global_dof < rhs.size()) {
+            row.rhs = static_cast<double>(rhs_view->getVectorEntry(global_dof));
+        }
+
+        if (global_dof >= 0 &&
+            global_dof < matrix.numRows() &&
+            global_dof < matrix.numCols()) {
+            for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+                const Real value = matrix.getEntry(global_dof, col);
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                const double abs_value = std::abs(static_cast<double>(value));
+                double update_value = 0.0;
+                if (col >= 0 && col < update.size()) {
+                    update_value =
+                        static_cast<double>(update_view->getVectorEntry(col));
+                }
+                const double action =
+                    static_cast<double>(value) * update_value;
+                row.row_action += action;
+                row.row_abs_sum += abs_value;
+                if (dofInFieldRange(col, *coupling_range)) {
+                    row.row_coupling_abs_sum += abs_value;
+                    row.row_coupling_action += action;
+                    add_action_term(
+                        row.coupling_action_terms,
+                        ActivePressureUpdateActionTerm{
+                            col - coupling_range->begin,
+                            col,
+                            static_cast<double>(value),
+                            update_value,
+                            action});
+                }
+                if (dofInFieldRange(col, *pressure_range)) {
+                    row.row_self_abs_sum += abs_value;
+                    row.row_self_sum += static_cast<double>(value);
+                    row.row_self_action += action;
+                    add_action_term(
+                        row.pressure_action_terms,
+                        ActivePressureUpdateActionTerm{
+                            col - pressure_range->begin,
+                            col,
+                            static_cast<double>(value),
+                            update_value,
+                            action});
+                }
+            }
+            for (GlobalIndex matrix_row = 0; matrix_row < matrix.numRows();
+                 ++matrix_row) {
+                const Real value = matrix.getEntry(matrix_row, global_dof);
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                const double abs_value = std::abs(static_cast<double>(value));
+                row.col_abs_sum += abs_value;
+                if (dofInFieldRange(matrix_row, *coupling_range)) {
+                    row.col_coupling_abs_sum += abs_value;
+                }
+                if (dofInFieldRange(matrix_row, *pressure_range)) {
+                    row.col_self_abs_sum += abs_value;
+                }
+            }
+            row.diag = static_cast<double>(matrix.getEntry(global_dof, global_dof));
+            row.row_self_offdiag_abs_sum =
+                std::max(0.0, row.row_self_abs_sum - std::abs(row.diag));
+            if (row.row_self_abs_sum > 0.0) {
+                row.row_self_signed_abs_ratio =
+                    std::abs(row.row_self_sum) / row.row_self_abs_sum;
+                row.row_self_diag_abs_ratio =
+                    std::abs(row.diag) / row.row_self_abs_sum;
+            }
+        }
+        row.row_self_constant_action = row.row_self_sum * row.update;
+        row.row_self_nonconstant_action =
+            row.row_self_action - row.row_self_constant_action;
+        row.row_other_action =
+            row.row_action - row.row_coupling_action - row.row_self_action;
+        row.row_linear_residual = row.row_action - row.rhs;
+
+        if (row.abs_update > summary.max_abs_update) {
+            summary.max_abs_update = row.abs_update;
+            summary.max_update_local_dof = row.local_dof;
+            summary.max_update_global_dof = row.global_dof;
+            summary.max_update_rhs = row.rhs;
+            summary.max_update_row_action = row.row_action;
+            summary.max_update_row_coupling_action = row.row_coupling_action;
+            summary.max_update_row_self_action = row.row_self_action;
+            summary.max_update_row_self_constant_action =
+                row.row_self_constant_action;
+            summary.max_update_row_self_nonconstant_action =
+                row.row_self_nonconstant_action;
+            summary.max_update_row_other_action = row.row_other_action;
+            summary.max_update_row_linear_residual = row.row_linear_residual;
+        }
+
+        const bool zero_coupling =
+            std::abs(row.row_coupling_abs_sum) <= tolerance;
+        const bool weak_coupling =
+            !zero_coupling &&
+            weak_coupling_threshold >= 0.0 &&
+            row.row_coupling_abs_sum <= weak_coupling_threshold;
+        if (zero_coupling) {
+            ++summary.zero_coupling_row_block_count;
+            summary.zero_coupling_max_abs_update =
+                std::max(summary.zero_coupling_max_abs_update, row.abs_update);
+        } else if (weak_coupling) {
+            ++summary.weak_coupling_row_block_count;
+            summary.weak_coupling_max_abs_update =
+                std::max(summary.weak_coupling_max_abs_update, row.abs_update);
+        } else {
+            ++summary.positive_coupling_row_block_count;
+            summary.positive_coupling_max_abs_update =
+                std::max(summary.positive_coupling_max_abs_update, row.abs_update);
+        }
+
+        const bool zero_self = std::abs(row.row_self_abs_sum) <= tolerance;
+        const bool weak_self =
+            !zero_self &&
+            weak_self_threshold >= 0.0 &&
+            row.row_self_abs_sum <= weak_self_threshold;
+        if (zero_self) {
+            ++summary.zero_self_row_block_count;
+            summary.zero_self_max_abs_update =
+                std::max(summary.zero_self_max_abs_update, row.abs_update);
+        } else if (weak_self) {
+            ++summary.weak_self_row_block_count;
+            summary.weak_self_max_abs_update =
+                std::max(summary.weak_self_max_abs_update, row.abs_update);
+        } else {
+            ++summary.positive_self_row_block_count;
+            summary.positive_self_max_abs_update =
+                std::max(summary.positive_self_max_abs_update, row.abs_update);
+        }
+
+        add_top_sample(summary.top_update_samples, row);
+    }
+
+    addSameSignPressureActionComponentSummary(summary);
+
+    return summary;
+}
+
+void logActivePressureSupportRankDiagnostic(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view phase,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!activePressureSupportRankDiagnosticRequested()) {
+        return;
+    }
+
+    const auto& pressure_field = activePressureSupportRankPressureFieldName();
+    const auto& coupling_field = activePressureSupportRankCouplingFieldName();
+    const double tolerance = activePressureSupportRankTolerance();
+    const int sample_limit = activePressureSupportRankSampleLimit();
+    const auto summary = scanActivePressureSupportRank(
+        sys,
+        matrix,
+        constrained_dofs,
+        pressure_field,
+        coupling_field,
+        tolerance,
+        sample_limit);
+
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    oss << "NewtonSolver: active pressure support-rank diagnostic"
+        << " diagnostic=active_pressure_support_rank"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " backend=" << backends::backendKindToString(matrix.backendKind())
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " pressure_field='" << summary.pressure_field << "'"
+        << " coupling_field='" << summary.coupling_field << "'"
+        << " pressure_offset=" << summary.pressure_offset
+        << " pressure_dofs=" << summary.pressure_dofs
+        << " coupling_offset=" << summary.coupling_offset
+        << " coupling_dofs=" << summary.coupling_dofs
+        << " constrained_pressure_rows=" << summary.constrained_pressure_rows
+        << " unconstrained_pressure_rows=" << summary.unconstrained_pressure_rows
+        << " zero_row_count=" << summary.zero_row_count
+        << " zero_col_count=" << summary.zero_col_count
+        << " zero_diag_count=" << summary.zero_diag_count
+        << " zero_coupling_row_block_count="
+        << summary.zero_coupling_row_block_count
+        << " zero_coupling_col_block_count="
+        << summary.zero_coupling_col_block_count
+        << " zero_self_row_block_count=" << summary.zero_self_row_block_count
+        << " zero_self_col_block_count=" << summary.zero_self_col_block_count
+        << " positive_coupling_row_block_count="
+        << summary.positive_coupling_row_block_count
+        << " positive_self_row_block_count="
+        << summary.positive_self_row_block_count
+        << " weak_coupling_row_block_count="
+        << summary.weak_coupling_row_block_count
+        << " weak_self_row_block_count="
+        << summary.weak_self_row_block_count
+        << " weak_coupling_and_self_row_block_count="
+        << summary.weak_coupling_and_self_row_block_count
+        << " min_positive_coupling_row_abs_sum="
+        << (std::isfinite(summary.min_positive_coupling_row_abs_sum)
+                ? summary.min_positive_coupling_row_abs_sum
+                : 0.0)
+        << " max_coupling_row_abs_sum="
+        << summary.max_coupling_row_abs_sum
+        << " min_positive_self_row_abs_sum="
+        << (std::isfinite(summary.min_positive_self_row_abs_sum)
+                ? summary.min_positive_self_row_abs_sum
+                : 0.0)
+        << " max_self_row_abs_sum="
+        << summary.max_self_row_abs_sum
+        << " pressure_only_row_block_count="
+        << summary.pressure_only_row_block_count
+        << " pressure_only_col_block_count="
+        << summary.pressure_only_col_block_count
+        << " tolerance=" << tolerance
+        << " zero_coupling_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_coupling_row_samples, /*local=*/true)
+        << " zero_coupling_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_coupling_row_samples, /*local=*/false)
+        << " zero_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_row_samples, /*local=*/true)
+        << " zero_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.zero_row_samples, /*local=*/false)
+        << " zero_coupling_row_details="
+        << formatActivePressureSupportRankRowDetails(
+               summary.zero_coupling_row_samples)
+        << " weakest_coupling_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_coupling_row_samples, /*local=*/true)
+        << " weakest_coupling_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_coupling_row_samples, /*local=*/false)
+        << " weakest_coupling_row_details="
+        << formatActivePressureSupportRankRowDetails(
+               summary.weakest_coupling_row_samples)
+        << " weakest_self_row_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_self_row_samples, /*local=*/true)
+        << " weakest_self_row_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.weakest_self_row_samples, /*local=*/false)
+        << " weakest_self_row_details="
+        << formatActivePressureSupportRankRowDetails(
+               summary.weakest_self_row_samples);
+    FE_LOG_INFO(oss.str());
+
+    if (activePressureSupportRankGuardEnabled() &&
+        summary.zero_coupling_row_block_count >
+            activePressureSupportRankAllowedZeroVelocityRows()) {
+        std::ostringstream msg;
+        msg << "NewtonSolver: active pressure support-rank guard failed for field '"
+            << summary.pressure_field << "' against coupling field '"
+            << summary.coupling_field << "': unconstrained pressure rows with zero "
+            << summary.coupling_field << " row-block support="
+            << summary.zero_coupling_row_block_count
+            << " allowed="
+            << activePressureSupportRankAllowedZeroVelocityRows()
+            << " sample_local_dofs="
+            << formatActivePressureSupportRankDofSamples(
+                   summary.zero_coupling_row_samples, /*local=*/true);
+        FE_THROW(FEException, msg.str());
+    }
+}
+
+void applyActivePressureSupportRankClamp(
+    const systems::FESystem& sys,
+    backends::GenericMatrix& matrix,
+    backends::GenericVector& rhs,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view phase,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!activePressureSupportRankClampEnabled()) {
+        return;
+    }
+
+    const auto& pressure_field = activePressureSupportRankPressureFieldName();
+    const auto& coupling_field = activePressureSupportRankCouplingFieldName();
+    const double tolerance = activePressureSupportRankTolerance();
+    const double clamp_coupling_threshold =
+        activePressureSupportRankClampCouplingThreshold();
+    const double clamp_self_threshold =
+        activePressureSupportRankClampSelfThreshold();
+    const int sample_limit = activePressureSupportRankSampleLimit();
+    const auto summary = scanActivePressureSupportRank(
+        sys,
+        matrix,
+        constrained_dofs,
+        pressure_field,
+        coupling_field,
+        tolerance,
+        sample_limit,
+        clamp_coupling_threshold,
+        clamp_self_threshold);
+
+    if (!summary.clamp_candidate_row_global_dofs.empty()) {
+        auto matrix_view = matrix.createAssemblyView();
+        FE_CHECK_NOT_NULL(matrix_view.get(),
+                          "NewtonSolver: active pressure support-rank clamp matrix view");
+        matrix_view->beginAssemblyPhase();
+        matrix_view->zeroRows(
+            std::span<const GlobalIndex>(summary.clamp_candidate_row_global_dofs.data(),
+                                         summary.clamp_candidate_row_global_dofs.size()),
+            /*set_diagonal=*/true);
+        matrix_view->finalizeAssembly();
+
+        zeroVectorEntries(
+            std::span<const GlobalIndex>(summary.clamp_candidate_row_global_dofs.data(),
+                                         summary.clamp_candidate_row_global_dofs.size()),
+            rhs);
+    }
+
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    oss << "NewtonSolver: active pressure support-rank clamp"
+        << " diagnostic=active_pressure_support_rank_clamp"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " backend=" << backends::backendKindToString(matrix.backendKind())
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " pressure_field='" << summary.pressure_field << "'"
+        << " coupling_field='" << summary.coupling_field << "'"
+        << " clamp_coupling_threshold=" << clamp_coupling_threshold
+        << " clamp_self_threshold=" << clamp_self_threshold
+        << " clamped_row_count=" << summary.clamp_candidate_row_global_dofs.size()
+        << " constrained_pressure_rows=" << summary.constrained_pressure_rows
+        << " unconstrained_pressure_rows=" << summary.unconstrained_pressure_rows
+        << " zero_coupling_row_block_count="
+        << summary.zero_coupling_row_block_count
+        << " positive_coupling_row_block_count="
+        << summary.positive_coupling_row_block_count
+        << " positive_self_row_block_count="
+        << summary.positive_self_row_block_count
+        << " min_positive_self_row_abs_sum="
+        << (std::isfinite(summary.min_positive_self_row_abs_sum)
+                ? summary.min_positive_self_row_abs_sum
+                : 0.0)
+        << " max_self_row_abs_sum="
+        << summary.max_self_row_abs_sum
+        << " pressure_only_row_block_count="
+        << summary.pressure_only_row_block_count
+        << " tolerance=" << tolerance
+        << " clamped_local_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.clamp_candidate_row_samples, /*local=*/true)
+        << " clamped_global_dofs="
+        << formatActivePressureSupportRankDofSamples(
+               summary.clamp_candidate_row_samples, /*local=*/false)
+        << " clamped_row_details="
+        << formatActivePressureSupportRankRowDetails(
+               summary.clamp_candidate_row_samples);
+    FE_LOG_INFO(oss.str());
+}
+
+[[nodiscard]] std::string formatGlobalIndexListSample(
+    std::span<const GlobalIndex> values,
+    int limit = 24)
+{
+    if (values.empty() || limit == 0) {
+        return "none";
+    }
+    std::ostringstream oss;
+    const int emit_count =
+        limit < 0 ? static_cast<int>(values.size())
+                  : std::min(limit, static_cast<int>(values.size()));
+    for (int i = 0; i < emit_count; ++i) {
+        if (i > 0) {
+            oss << '|';
+        }
+        oss << values[static_cast<std::size_t>(i)];
+    }
+    if (limit >= 0 && static_cast<int>(values.size()) > limit) {
+        oss << "|...";
+    }
+    return oss.str();
+}
+
+void applyActivePressureGraphCompletion(
+    const systems::FESystem& sys,
+    backends::GenericMatrix& matrix,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view phase,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!activePressureGraphCompletionEnabled()) {
+        return;
+    }
+
+    const auto& pressure_field = activePressureSupportRankPressureFieldName();
+    const auto& coupling_field = activePressureSupportRankCouplingFieldName();
+    const double tolerance = activePressureSupportRankTolerance();
+    const double coupling_threshold =
+        activePressureGraphCompletionCouplingThreshold();
+    const double self_threshold =
+        activePressureGraphCompletionSelfThreshold();
+    const int max_rows = activePressureGraphCompletionMaxRows();
+    const int max_balance_pressure_edge_degree =
+        activePressureGraphCompletionMaxBalancePressureEdgeDegree();
+    const auto& requested_mode = activePressureGraphCompletionMode();
+    const bool pressure_neighbor_mode =
+        requested_mode == "pressure_neighbor" ||
+        requested_mode == "pressure-neighbor" ||
+        requested_mode == "neighbor";
+    const bool shared_velocity_neighbor_mode =
+        requested_mode == "shared_velocity_neighbor" ||
+        requested_mode == "shared-velocity-neighbor" ||
+        requested_mode == "velocity_neighbor" ||
+        requested_mode == "velocity-neighbor";
+    const bool shared_pressure_neighbor_mode =
+        requested_mode == "shared_pressure_neighbor" ||
+        requested_mode == "shared-pressure-neighbor" ||
+        requested_mode == "pressure_pair" ||
+        requested_mode == "pressure-pair" ||
+        requested_mode == "shared_pressure_pair" ||
+        requested_mode == "shared-pressure-pair";
+    const bool shared_row_schur_support_gap_local_patch_completion_mode =
+        requested_mode ==
+            "shared_row_schur_support_gap_local_patch_completion" ||
+        requested_mode ==
+            "shared-row-schur-support-gap-local-patch-completion" ||
+        requested_mode == "shared_row_schur_support_gap_local_patch" ||
+        requested_mode == "shared-row-schur-support-gap-local-patch" ||
+        requested_mode == "schur_support_gap_local_patch_completion" ||
+        requested_mode == "schur-support-gap-local-patch-completion" ||
+        requested_mode == "schur_support_gap_local_patch" ||
+        requested_mode == "schur-support-gap-local-patch" ||
+        requested_mode == "direct_support_gap_local_patch_completion" ||
+        requested_mode == "direct-support-gap-local-patch-completion";
+    const bool shared_row_schur_support_gap_patch_completion_mode =
+        requested_mode == "shared_row_schur_support_gap_patch_completion" ||
+        requested_mode == "shared-row-schur-support-gap-patch-completion" ||
+        requested_mode == "shared_row_schur_support_gap_patch" ||
+        requested_mode == "shared-row-schur-support-gap-patch" ||
+        requested_mode == "schur_support_gap_patch_completion" ||
+        requested_mode == "schur-support-gap-patch-completion" ||
+        requested_mode == "schur_support_gap_patch" ||
+        requested_mode == "schur-support-gap-patch" ||
+        requested_mode == "direct_support_gap_patch_completion" ||
+        requested_mode == "direct-support-gap-patch-completion";
+    const bool shared_row_schur_completion_mode =
+        requested_mode == "shared_row_schur_completion" ||
+        requested_mode == "shared-row-schur-completion" ||
+        requested_mode == "shared_row_schur_all" ||
+        requested_mode == "shared-row-schur-all" ||
+        requested_mode == "all_shared_row_schur_completion" ||
+        requested_mode == "all-shared-row-schur-completion" ||
+        requested_mode == "shared_pressure_schur_completion" ||
+        requested_mode == "shared-pressure-schur-completion" ||
+        requested_mode == "schur_completion" ||
+        requested_mode == "schur-completion" ||
+        shared_row_schur_support_gap_local_patch_completion_mode ||
+        shared_row_schur_support_gap_patch_completion_mode;
+    const bool pressure_neighborhood_schur_candidate_mode =
+        requested_mode == "shared_row_schur_existing_edge_balance_neighborhood" ||
+        requested_mode == "shared-row-schur-existing-edge-balance-neighborhood" ||
+        requested_mode == "shared_row_schur_existing_edge_balance_neighbors" ||
+        requested_mode == "shared-row-schur-existing-edge-balance-neighbors" ||
+        requested_mode == "neighborhood_shared_row_schur_existing_edge_balance" ||
+        requested_mode == "neighborhood-shared-row-schur-existing-edge-balance" ||
+        requested_mode == "schur_existing_edge_balance_neighborhood" ||
+        requested_mode == "schur-existing-edge-balance-neighborhood" ||
+        requested_mode == "schur_existing_edge_balance_neighbors" ||
+        requested_mode == "schur-existing-edge-balance-neighbors";
+    const bool shared_row_schur_coupling_edge_balance_mode =
+        requested_mode == "shared_row_schur_coupling_edge_balance" ||
+        requested_mode == "shared-row-schur-coupling-edge-balance" ||
+        requested_mode == "schur_coupling_edge_balance" ||
+        requested_mode == "schur-coupling-edge-balance" ||
+        requested_mode == "shared_row_schur_selective_edge_balance" ||
+        requested_mode == "shared-row-schur-selective-edge-balance" ||
+        requested_mode == "schur_selective_edge_balance" ||
+        requested_mode == "schur-selective-edge-balance";
+    const bool shared_row_schur_low_degree_edge_balance_mode =
+        requested_mode == "shared_row_schur_low_degree_edge_balance" ||
+        requested_mode == "shared-row-schur-low-degree-edge-balance" ||
+        requested_mode == "schur_low_degree_edge_balance" ||
+        requested_mode == "schur-low-degree-edge-balance" ||
+        requested_mode == "shared_row_schur_boundary_edge_balance" ||
+        requested_mode == "shared-row-schur-boundary-edge-balance" ||
+        requested_mode == "schur_boundary_edge_balance" ||
+        requested_mode == "schur-boundary-edge-balance" ||
+        requested_mode == "shared_row_schur_weak_boundary_edge_balance" ||
+        requested_mode == "shared-row-schur-weak-boundary-edge-balance" ||
+        requested_mode == "schur_weak_boundary_edge_balance" ||
+        requested_mode == "schur-weak-boundary-edge-balance";
+    const bool shared_row_schur_support_gap_patch_edge_balance_mode =
+        requested_mode == "shared_row_schur_support_gap_patch_edge_balance" ||
+        requested_mode == "shared-row-schur-support-gap-patch-edge-balance" ||
+        requested_mode == "schur_support_gap_patch_edge_balance" ||
+        requested_mode == "schur-support-gap-patch-edge-balance" ||
+        requested_mode == "direct_support_gap_patch_edge_balance" ||
+        requested_mode == "direct-support-gap-patch-edge-balance";
+    const bool shared_row_schur_support_gap_local_patch_edge_balance_mode =
+        requested_mode ==
+            "shared_row_schur_support_gap_local_patch_edge_balance" ||
+        requested_mode ==
+            "shared-row-schur-support-gap-local-patch-edge-balance" ||
+        requested_mode == "schur_support_gap_local_patch_edge_balance" ||
+        requested_mode == "schur-support-gap-local-patch-edge-balance" ||
+        requested_mode == "direct_support_gap_local_patch_edge_balance" ||
+        requested_mode == "direct-support-gap-local-patch-edge-balance";
+    const bool shared_row_schur_explicit_edge_balance_mode =
+        requested_mode == "shared_row_schur_explicit_edge_balance" ||
+        requested_mode == "shared-row-schur-explicit-edge-balance" ||
+        requested_mode == "schur_explicit_edge_balance" ||
+        requested_mode == "schur-explicit-edge-balance" ||
+        requested_mode == "shared_row_schur_list_edge_balance" ||
+        requested_mode == "shared-row-schur-list-edge-balance" ||
+        requested_mode == "schur_list_edge_balance" ||
+        requested_mode == "schur-list-edge-balance";
+    const bool shared_row_schur_explicit_neighborhood_edge_balance_mode =
+        requested_mode == "shared_row_schur_explicit_neighborhood_edge_balance" ||
+        requested_mode == "shared-row-schur-explicit-neighborhood-edge-balance" ||
+        requested_mode == "shared_row_schur_explicit_neighbor_edge_balance" ||
+        requested_mode == "shared-row-schur-explicit-neighbor-edge-balance" ||
+        requested_mode == "schur_explicit_neighborhood_edge_balance" ||
+        requested_mode == "schur-explicit-neighborhood-edge-balance" ||
+        requested_mode == "schur_explicit_neighbor_edge_balance" ||
+        requested_mode == "schur-explicit-neighbor-edge-balance";
+    const bool shared_row_schur_explicit_balance_mode =
+        shared_row_schur_explicit_edge_balance_mode ||
+        shared_row_schur_explicit_neighborhood_edge_balance_mode;
+    const bool shared_row_schur_existing_edge_balance_mode =
+        requested_mode == "shared_row_schur_existing_edge_balance" ||
+        requested_mode == "shared-row-schur-existing-edge-balance" ||
+        requested_mode == "schur_existing_edge_balance" ||
+        requested_mode == "schur-existing-edge-balance" ||
+        requested_mode == "shared_row_schur_existing_edge_balance_all" ||
+        requested_mode == "shared-row-schur-existing-edge-balance-all" ||
+        requested_mode == "all_shared_row_schur_existing_edge_balance" ||
+        requested_mode == "all-shared-row-schur-existing-edge-balance" ||
+        requested_mode == "schur_existing_edge_balance_all" ||
+        requested_mode == "schur-existing-edge-balance-all" ||
+        requested_mode == "schur_edge_balance" ||
+        requested_mode == "schur-edge-balance" ||
+        requested_mode == "hybrid_schur_edge_balance" ||
+        requested_mode == "hybrid-schur-edge-balance" ||
+        shared_row_schur_coupling_edge_balance_mode ||
+        shared_row_schur_low_degree_edge_balance_mode ||
+        shared_row_schur_support_gap_local_patch_edge_balance_mode ||
+        shared_row_schur_support_gap_patch_edge_balance_mode ||
+        shared_row_schur_explicit_balance_mode ||
+        pressure_neighborhood_schur_candidate_mode;
+    const bool shared_row_schur_support_gap_local_patch_candidate_mode =
+        shared_row_schur_support_gap_local_patch_completion_mode ||
+        shared_row_schur_support_gap_local_patch_edge_balance_mode;
+    const bool shared_row_schur_support_gap_patch_candidate_mode =
+        shared_row_schur_support_gap_local_patch_candidate_mode ||
+        shared_row_schur_support_gap_patch_completion_mode ||
+        shared_row_schur_support_gap_patch_edge_balance_mode;
+    const bool all_pressure_schur_candidate_mode =
+        requested_mode == "shared_row_schur_all" ||
+        requested_mode == "shared-row-schur-all" ||
+        requested_mode == "all_shared_row_schur_completion" ||
+        requested_mode == "all-shared-row-schur-completion" ||
+        requested_mode == "shared_row_schur_existing_edge_balance_all" ||
+        requested_mode == "shared-row-schur-existing-edge-balance-all" ||
+        requested_mode == "all_shared_row_schur_existing_edge_balance" ||
+        requested_mode == "all-shared-row-schur-existing-edge-balance" ||
+        requested_mode == "schur_existing_edge_balance_all" ||
+        requested_mode == "schur-existing-edge-balance-all";
+    const bool existing_edge_balance_mode =
+        requested_mode == "existing_edge_balance" ||
+        requested_mode == "existing-edge-balance" ||
+        requested_mode == "edge_balance" ||
+        requested_mode == "edge-balance";
+    const bool existing_support_balance_mode =
+        requested_mode == "existing_support_balance" ||
+        requested_mode == "existing-support-balance" ||
+        requested_mode == "all_existing_edge_balance" ||
+        requested_mode == "all-existing-edge-balance" ||
+        requested_mode == "abs_edge_balance" ||
+        requested_mode == "abs-edge-balance";
+    const bool active_support_completion_mode =
+        requested_mode == "active_support_completion" ||
+        requested_mode == "active-support-completion" ||
+        requested_mode == "candidate_to_active_support" ||
+        requested_mode == "candidate-to-active-support" ||
+        requested_mode == "candidate_active_support" ||
+        requested_mode == "candidate-active-support" ||
+        requested_mode == "active_support" ||
+        requested_mode == "active-support";
+    const bool existing_pressure_balance_mode =
+        existing_edge_balance_mode || existing_support_balance_mode;
+    const bool direct_weighted_completion_mode =
+        existing_pressure_balance_mode ||
+        active_support_completion_mode ||
+        shared_row_schur_completion_mode ||
+        shared_row_schur_existing_edge_balance_mode;
+    const std::string_view effective_mode =
+        pressure_neighbor_mode ? std::string_view("pressure_neighbor")
+        : shared_velocity_neighbor_mode ? std::string_view("shared_velocity_neighbor")
+        : shared_pressure_neighbor_mode ? std::string_view("shared_pressure_neighbor")
+        : all_pressure_schur_candidate_mode &&
+                  shared_row_schur_existing_edge_balance_mode
+            ? std::string_view("shared_row_schur_existing_edge_balance_all")
+        : all_pressure_schur_candidate_mode
+            ? std::string_view("shared_row_schur_all")
+        : pressure_neighborhood_schur_candidate_mode
+            ? std::string_view(
+                  "shared_row_schur_existing_edge_balance_neighborhood")
+        : shared_row_schur_coupling_edge_balance_mode
+            ? std::string_view("shared_row_schur_coupling_edge_balance")
+        : shared_row_schur_low_degree_edge_balance_mode
+            ? std::string_view("shared_row_schur_low_degree_edge_balance")
+        : shared_row_schur_support_gap_local_patch_edge_balance_mode
+            ? std::string_view(
+                  "shared_row_schur_support_gap_local_patch_edge_balance")
+        : shared_row_schur_support_gap_patch_edge_balance_mode
+            ? std::string_view(
+                  "shared_row_schur_support_gap_patch_edge_balance")
+        : shared_row_schur_support_gap_local_patch_completion_mode
+            ? std::string_view(
+                  "shared_row_schur_support_gap_local_patch_completion")
+        : shared_row_schur_support_gap_patch_completion_mode
+            ? std::string_view(
+                  "shared_row_schur_support_gap_patch_completion")
+        : shared_row_schur_explicit_neighborhood_edge_balance_mode
+            ? std::string_view(
+                  "shared_row_schur_explicit_neighborhood_edge_balance")
+        : shared_row_schur_explicit_edge_balance_mode
+            ? std::string_view("shared_row_schur_explicit_edge_balance")
+        : shared_row_schur_existing_edge_balance_mode
+            ? std::string_view("shared_row_schur_existing_edge_balance")
+        : shared_row_schur_completion_mode ? std::string_view("shared_row_schur_completion")
+        : existing_edge_balance_mode ? std::string_view("existing_edge_balance")
+        : existing_support_balance_mode ? std::string_view("existing_support_balance")
+        : active_support_completion_mode ? std::string_view("active_support_completion")
+                                        : std::string_view("cycle");
+
+    const auto summary = scanActivePressureSupportRank(
+        sys,
+        matrix,
+        constrained_dofs,
+        pressure_field,
+        coupling_field,
+        tolerance,
+        /*sample_limit=*/0,
+        coupling_threshold,
+        self_threshold);
+
+    std::vector<GlobalIndex> candidates;
+    std::string_view candidate_selector = "support_rank_zero_or_weak_rows";
+    std::vector<GlobalIndex> support_gap_candidate_global_dofs;
+    std::vector<GlobalIndex> support_gap_patch_candidate_global_dofs;
+    double support_gap_self_threshold = 0.0;
+    std::string support_gap_self_threshold_source = "none";
+    int support_gap_patch_truncated = 0;
+    if (shared_row_schur_support_gap_patch_candidate_mode) {
+        candidate_selector =
+            shared_row_schur_support_gap_local_patch_candidate_mode
+                ? "pressure_self_support_gap_rows_plus_pressure_graph_local_patch"
+                : "pressure_self_support_gap_rows_plus_pressure_graph_patch";
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        std::vector<std::pair<GlobalIndex, double>> active_pressure_self_rows;
+        std::set<GlobalIndex> support_gap_rows;
+        std::set<GlobalIndex> expanded_candidate_rows;
+        if (pressure_range.has_value()) {
+            for (GlobalIndex dof = pressure_range->begin;
+                 dof < pressure_range->end;
+                 ++dof) {
+                if (dof < 0 ||
+                    dof >= matrix.numRows() ||
+                    dof >= matrix.numCols() ||
+                    std::binary_search(
+                        constrained_dofs.begin(), constrained_dofs.end(), dof)) {
+                    continue;
+                }
+                double row_self_abs_sum = 0.0;
+                for (GlobalIndex col = pressure_range->begin;
+                     col < pressure_range->end;
+                     ++col) {
+                    const Real value = matrix.getEntry(dof, col);
+                    if (std::isfinite(value)) {
+                        row_self_abs_sum +=
+                            std::abs(static_cast<double>(value));
+                    }
+                }
+                if (row_self_abs_sum > tolerance &&
+                    std::isfinite(row_self_abs_sum)) {
+                    active_pressure_self_rows.emplace_back(dof,
+                                                           row_self_abs_sum);
+                }
+            }
+
+            if (!active_pressure_self_rows.empty()) {
+                if (self_threshold >= 0.0) {
+                    support_gap_self_threshold = self_threshold;
+                    support_gap_self_threshold_source =
+                        "configured_pressure_self_row_sum";
+                } else {
+                    std::vector<double> row_self_values;
+                    row_self_values.reserve(active_pressure_self_rows.size());
+                    for (const auto& row : active_pressure_self_rows) {
+                        row_self_values.push_back(row.second);
+                    }
+                    std::sort(row_self_values.begin(), row_self_values.end());
+                    const std::size_t midpoint = row_self_values.size() / 2u;
+                    support_gap_self_threshold =
+                        row_self_values.size() % 2u == 0u
+                            ? 0.5 * (row_self_values[midpoint - 1u] +
+                                     row_self_values[midpoint])
+                            : row_self_values[midpoint];
+                    support_gap_self_threshold_source =
+                        "median_positive_pressure_self_row_abs_sum";
+                }
+
+                for (const auto& row : active_pressure_self_rows) {
+                    const bool weak_support =
+                        self_threshold >= 0.0
+                            ? row.second <=
+                                  support_gap_self_threshold + tolerance
+                            : row.second + tolerance <
+                                  support_gap_self_threshold;
+                    if (weak_support) {
+                        support_gap_rows.insert(row.first);
+                    }
+                }
+            }
+
+            expanded_candidate_rows = support_gap_rows;
+            const auto add_same_sign_pressure_neighbors =
+                [&](GlobalIndex row_i,
+                    std::vector<GlobalIndex>* newly_inserted) {
+                    if (row_i < pressure_range->begin ||
+                        row_i >= pressure_range->end ||
+                        row_i < 0 ||
+                        row_i >= matrix.numRows() ||
+                        row_i >= matrix.numCols()) {
+                        return;
+                    }
+                    for (GlobalIndex row_j = pressure_range->begin;
+                         row_j < pressure_range->end;
+                         ++row_j) {
+                        if (row_j == row_i ||
+                            row_j < 0 ||
+                            row_j >= matrix.numRows() ||
+                            row_j >= matrix.numCols() ||
+                            std::binary_search(
+                                constrained_dofs.begin(),
+                                constrained_dofs.end(),
+                                row_j)) {
+                            continue;
+                        }
+                        const double row_edge =
+                            static_cast<double>(matrix.getEntry(row_i, row_j));
+                        const double col_edge =
+                            static_cast<double>(matrix.getEntry(row_j, row_i));
+                        if (!std::isfinite(row_edge) ||
+                            !std::isfinite(col_edge)) {
+                            continue;
+                        }
+                        const double symmetric_offdiag =
+                            0.5 * (row_edge + col_edge);
+                        if (!(symmetric_offdiag < -tolerance)) {
+                            continue;
+                        }
+                        if (expanded_candidate_rows.count(row_j) != 0u) {
+                            continue;
+                        }
+                        if (max_rows >= 0 &&
+                            static_cast<int>(expanded_candidate_rows.size()) >=
+                                max_rows) {
+                            support_gap_patch_truncated = 1;
+                            continue;
+                        }
+                        expanded_candidate_rows.insert(row_j);
+                        if (newly_inserted != nullptr) {
+                            newly_inserted->push_back(row_j);
+                        }
+                    }
+                };
+            if (shared_row_schur_support_gap_local_patch_candidate_mode) {
+                std::vector<GlobalIndex> frontier(support_gap_rows.begin(),
+                                                  support_gap_rows.end());
+                const int pressure_neighbor_depth =
+                    activePressureGraphCompletionPressureNeighborDepth();
+                for (int depth = 0;
+                     depth < pressure_neighbor_depth && !frontier.empty();
+                     ++depth) {
+                    std::vector<GlobalIndex> next_frontier;
+                    for (const auto row_i : frontier) {
+                        add_same_sign_pressure_neighbors(row_i, &next_frontier);
+                    }
+                    std::sort(next_frontier.begin(), next_frontier.end());
+                    next_frontier.erase(
+                        std::unique(next_frontier.begin(), next_frontier.end()),
+                        next_frontier.end());
+                    frontier = std::move(next_frontier);
+                }
+            } else {
+                std::vector<GlobalIndex> stack(support_gap_rows.begin(),
+                                               support_gap_rows.end());
+                std::set<GlobalIndex> visited_rows;
+                while (!stack.empty()) {
+                    const auto row_i = stack.back();
+                    stack.pop_back();
+                    if (!visited_rows.insert(row_i).second) {
+                        continue;
+                    }
+                    std::vector<GlobalIndex> newly_inserted;
+                    add_same_sign_pressure_neighbors(row_i, &newly_inserted);
+                    stack.insert(stack.end(), newly_inserted.begin(),
+                                 newly_inserted.end());
+                }
+            }
+        }
+        support_gap_candidate_global_dofs.assign(support_gap_rows.begin(),
+                                                 support_gap_rows.end());
+        support_gap_patch_candidate_global_dofs.assign(
+            expanded_candidate_rows.begin(), expanded_candidate_rows.end());
+        candidates = support_gap_patch_candidate_global_dofs;
+    } else if (all_pressure_schur_candidate_mode) {
+        candidate_selector = "all_unconstrained_pressure_rows";
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        if (pressure_range.has_value()) {
+            for (GlobalIndex dof = pressure_range->begin;
+                 dof < pressure_range->end;
+                 ++dof) {
+                if (dof < 0 ||
+                    dof >= matrix.numRows() ||
+                    dof >= matrix.numCols() ||
+                    std::binary_search(
+                        constrained_dofs.begin(), constrained_dofs.end(), dof)) {
+                    continue;
+                }
+                candidates.push_back(dof);
+            }
+        }
+    } else if (pressure_neighborhood_schur_candidate_mode) {
+        candidate_selector =
+            "support_rank_rows_plus_pressure_graph_neighbors";
+        std::vector<GlobalIndex> seed_candidates =
+            summary.clamp_candidate_row_global_dofs;
+        std::sort(seed_candidates.begin(), seed_candidates.end());
+        seed_candidates.erase(
+            std::unique(seed_candidates.begin(), seed_candidates.end()),
+            seed_candidates.end());
+        if (max_rows >= 0 &&
+            static_cast<int>(seed_candidates.size()) > max_rows) {
+            seed_candidates.resize(static_cast<std::size_t>(max_rows));
+        }
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        const int max_pressure_neighbors =
+            activePressureGraphCompletionMaxActiveNeighbors();
+        const int pressure_neighbor_depth =
+            activePressureGraphCompletionPressureNeighborDepth();
+        std::set<GlobalIndex> expanded_candidate_rows(
+            seed_candidates.begin(), seed_candidates.end());
+        std::vector<GlobalIndex> frontier = seed_candidates;
+        if (pressure_range.has_value()) {
+            for (int depth = 0;
+                 depth < pressure_neighbor_depth && !frontier.empty();
+                 ++depth) {
+                std::vector<GlobalIndex> next_frontier;
+                for (const auto seed : frontier) {
+                    if (seed < pressure_range->begin ||
+                        seed >= pressure_range->end ||
+                        seed < 0 ||
+                        seed >= matrix.numRows() ||
+                        seed >= matrix.numCols()) {
+                        continue;
+                    }
+                    std::vector<std::pair<GlobalIndex, double>>
+                        pressure_neighbors;
+                    for (GlobalIndex neighbor = pressure_range->begin;
+                         neighbor < pressure_range->end;
+                         ++neighbor) {
+                        if (neighbor == seed ||
+                            neighbor < 0 ||
+                            neighbor >= matrix.numRows() ||
+                            neighbor >= matrix.numCols() ||
+                            std::binary_search(
+                                constrained_dofs.begin(),
+                                constrained_dofs.end(),
+                                neighbor)) {
+                            continue;
+                        }
+                        const double row_edge =
+                            static_cast<double>(matrix.getEntry(seed, neighbor));
+                        const double col_edge =
+                            static_cast<double>(matrix.getEntry(neighbor, seed));
+                        if (!std::isfinite(row_edge) ||
+                            !std::isfinite(col_edge)) {
+                            continue;
+                        }
+                        const double symmetric_offdiag =
+                            0.5 * (row_edge + col_edge);
+                        const double edge_weight =
+                            symmetric_offdiag < -tolerance
+                                ? -symmetric_offdiag
+                                : 0.0;
+                        if (edge_weight > tolerance &&
+                            std::isfinite(edge_weight)) {
+                            pressure_neighbors.emplace_back(
+                                neighbor, edge_weight);
+                        }
+                    }
+                    std::sort(
+                        pressure_neighbors.begin(),
+                        pressure_neighbors.end(),
+                        [](const auto& a, const auto& b) {
+                            if (a.second != b.second) {
+                                return a.second > b.second;
+                            }
+                            return a.first < b.first;
+                        });
+                    if (max_pressure_neighbors >= 0 &&
+                        static_cast<int>(pressure_neighbors.size()) >
+                            max_pressure_neighbors) {
+                        pressure_neighbors.resize(
+                            static_cast<std::size_t>(max_pressure_neighbors));
+                    }
+                    for (const auto& neighbor : pressure_neighbors) {
+                        if (expanded_candidate_rows.insert(neighbor.first).second) {
+                            next_frontier.push_back(neighbor.first);
+                        }
+                    }
+                }
+                std::sort(next_frontier.begin(), next_frontier.end());
+                next_frontier.erase(
+                    std::unique(next_frontier.begin(), next_frontier.end()),
+                    next_frontier.end());
+                frontier = std::move(next_frontier);
+            }
+        }
+        candidates.assign(expanded_candidate_rows.begin(),
+                          expanded_candidate_rows.end());
+    } else {
+        candidates = summary.clamp_candidate_row_global_dofs;
+    }
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                     candidates.end());
+    if (!all_pressure_schur_candidate_mode &&
+        !pressure_neighborhood_schur_candidate_mode &&
+        !shared_row_schur_support_gap_patch_candidate_mode &&
+        max_rows >= 0 &&
+        static_cast<int>(candidates.size()) > max_rows) {
+        candidates.resize(static_cast<std::size_t>(max_rows));
+    }
+    std::vector<GlobalIndex> explicit_balance_requested_global_dofs;
+    std::vector<GlobalIndex> explicit_balance_candidate_global_dofs;
+    if (shared_row_schur_explicit_balance_mode) {
+        explicit_balance_requested_global_dofs =
+            activePressureGraphCompletionExplicitBalanceGlobalDofs();
+        std::vector<GlobalIndex> explicit_balance_seed_global_dofs;
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        if (pressure_range.has_value()) {
+            for (const auto dof : explicit_balance_requested_global_dofs) {
+                if (dof < pressure_range->begin ||
+                    dof >= pressure_range->end ||
+                    dof < 0 ||
+                    dof >= matrix.numRows() ||
+                    dof >= matrix.numCols() ||
+                    std::binary_search(
+                        constrained_dofs.begin(), constrained_dofs.end(), dof)) {
+                    continue;
+                }
+                explicit_balance_seed_global_dofs.push_back(dof);
+            }
+        }
+        std::sort(explicit_balance_seed_global_dofs.begin(),
+                  explicit_balance_seed_global_dofs.end());
+        explicit_balance_seed_global_dofs.erase(
+            std::unique(explicit_balance_seed_global_dofs.begin(),
+                        explicit_balance_seed_global_dofs.end()),
+            explicit_balance_seed_global_dofs.end());
+
+        explicit_balance_candidate_global_dofs =
+            explicit_balance_seed_global_dofs;
+        if (shared_row_schur_explicit_neighborhood_edge_balance_mode &&
+            pressure_range.has_value()) {
+            const int max_pressure_neighbors =
+                activePressureGraphCompletionMaxActiveNeighbors();
+            const int pressure_neighbor_depth =
+                activePressureGraphCompletionPressureNeighborDepth();
+            std::set<GlobalIndex> expanded_balance_rows(
+                explicit_balance_seed_global_dofs.begin(),
+                explicit_balance_seed_global_dofs.end());
+            std::vector<GlobalIndex> frontier =
+                explicit_balance_seed_global_dofs;
+            for (int depth = 0;
+                 depth < pressure_neighbor_depth && !frontier.empty();
+                 ++depth) {
+                std::vector<GlobalIndex> next_frontier;
+                for (const auto seed : frontier) {
+                    if (seed < pressure_range->begin ||
+                        seed >= pressure_range->end ||
+                        seed < 0 ||
+                        seed >= matrix.numRows() ||
+                        seed >= matrix.numCols()) {
+                        continue;
+                    }
+                    std::vector<std::pair<GlobalIndex, double>>
+                        pressure_neighbors;
+                    for (GlobalIndex neighbor = pressure_range->begin;
+                         neighbor < pressure_range->end;
+                         ++neighbor) {
+                        if (neighbor == seed ||
+                            neighbor < 0 ||
+                            neighbor >= matrix.numRows() ||
+                            neighbor >= matrix.numCols() ||
+                            std::binary_search(
+                                constrained_dofs.begin(),
+                                constrained_dofs.end(),
+                                neighbor)) {
+                            continue;
+                        }
+                        const double row_edge =
+                            static_cast<double>(matrix.getEntry(seed, neighbor));
+                        const double col_edge =
+                            static_cast<double>(matrix.getEntry(neighbor, seed));
+                        if (!std::isfinite(row_edge) ||
+                            !std::isfinite(col_edge)) {
+                            continue;
+                        }
+                        const double symmetric_offdiag =
+                            0.5 * (row_edge + col_edge);
+                        const double edge_weight =
+                            symmetric_offdiag < -tolerance
+                                ? -symmetric_offdiag
+                                : 0.0;
+                        if (edge_weight > tolerance &&
+                            std::isfinite(edge_weight)) {
+                            pressure_neighbors.emplace_back(
+                                neighbor, edge_weight);
+                        }
+                    }
+                    std::sort(
+                        pressure_neighbors.begin(),
+                        pressure_neighbors.end(),
+                        [](const auto& a, const auto& b) {
+                            if (a.second != b.second) {
+                                return a.second > b.second;
+                            }
+                            return a.first < b.first;
+                        });
+                    if (max_pressure_neighbors >= 0 &&
+                        static_cast<int>(pressure_neighbors.size()) >
+                            max_pressure_neighbors) {
+                        pressure_neighbors.resize(
+                            static_cast<std::size_t>(max_pressure_neighbors));
+                    }
+                    for (const auto& neighbor : pressure_neighbors) {
+                        if (expanded_balance_rows.insert(neighbor.first).second) {
+                            next_frontier.push_back(neighbor.first);
+                        }
+                    }
+                }
+                std::sort(next_frontier.begin(), next_frontier.end());
+                next_frontier.erase(
+                    std::unique(next_frontier.begin(), next_frontier.end()),
+                    next_frontier.end());
+                frontier = std::move(next_frontier);
+            }
+            explicit_balance_candidate_global_dofs.assign(
+                expanded_balance_rows.begin(), expanded_balance_rows.end());
+        }
+
+        candidates.insert(candidates.end(),
+                          explicit_balance_candidate_global_dofs.begin(),
+                          explicit_balance_candidate_global_dofs.end());
+        std::sort(explicit_balance_candidate_global_dofs.begin(),
+                  explicit_balance_candidate_global_dofs.end());
+        explicit_balance_candidate_global_dofs.erase(
+            std::unique(explicit_balance_candidate_global_dofs.begin(),
+                        explicit_balance_candidate_global_dofs.end()),
+            explicit_balance_candidate_global_dofs.end());
+        if (candidate_selector == std::string_view("support_rank_zero_or_weak_rows")) {
+            candidate_selector =
+                shared_row_schur_explicit_neighborhood_edge_balance_mode
+                    ? "support_rank_zero_or_weak_rows_plus_explicit_balance_neighborhood_rows"
+                    : "support_rank_zero_or_weak_rows_plus_explicit_balance_rows";
+        }
+    }
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                     candidates.end());
+    const std::set<GlobalIndex> candidate_set(candidates.begin(),
+                                              candidates.end());
+    const std::set<GlobalIndex> support_gap_candidate_set(
+        support_gap_candidate_global_dofs.begin(),
+        support_gap_candidate_global_dofs.end());
+    const std::set<GlobalIndex> explicit_balance_candidate_set(
+        explicit_balance_candidate_global_dofs.begin(),
+        explicit_balance_candidate_global_dofs.end());
+    GlobalIndex zero_coupling_candidate_count = 0;
+    GlobalIndex weak_coupling_candidate_count = 0;
+    GlobalIndex zero_self_candidate_count = 0;
+    GlobalIndex weak_self_candidate_count = 0;
+    GlobalIndex weak_coupling_and_self_candidate_count = 0;
+    std::unordered_map<GlobalIndex, double> candidate_coupling_abs_sum_by_dof;
+    const auto class_pressure_range =
+        newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+    const auto class_coupling_range =
+        newtonMatrixSupportFieldRangeByName(sys, coupling_field);
+    if (class_pressure_range.has_value() && class_coupling_range.has_value()) {
+        for (const auto candidate : candidates) {
+            if (candidate < class_pressure_range->begin ||
+                candidate >= class_pressure_range->end ||
+                candidate < 0 ||
+                candidate >= matrix.numRows()) {
+                continue;
+            }
+            double row_coupling_abs_sum = 0.0;
+            double row_self_abs_sum = 0.0;
+            for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+                const Real value = matrix.getEntry(candidate, col);
+                if (!std::isfinite(value)) {
+                    continue;
+                }
+                const double abs_value = std::abs(static_cast<double>(value));
+                if (dofInFieldRange(col, *class_coupling_range)) {
+                    row_coupling_abs_sum += abs_value;
+                }
+                if (dofInFieldRange(col, *class_pressure_range)) {
+                    row_self_abs_sum += abs_value;
+                }
+            }
+            candidate_coupling_abs_sum_by_dof[candidate] =
+                row_coupling_abs_sum;
+            const bool zero_coupling = row_coupling_abs_sum <= tolerance;
+            const bool weak_coupling =
+                coupling_threshold >= 0.0 &&
+                row_coupling_abs_sum <= coupling_threshold;
+            const bool zero_self = row_self_abs_sum <= tolerance;
+            const bool weak_self =
+                self_threshold >= 0.0 &&
+                row_self_abs_sum <= self_threshold;
+            if (zero_coupling) {
+                ++zero_coupling_candidate_count;
+            }
+            if (weak_coupling && !zero_coupling) {
+                ++weak_coupling_candidate_count;
+            }
+            if (zero_self) {
+                ++zero_self_candidate_count;
+            }
+            if (weak_self && !zero_self) {
+                ++weak_self_candidate_count;
+            }
+            if (weak_coupling && weak_self) {
+                ++weak_coupling_and_self_candidate_count;
+            }
+        }
+    }
+    const auto candidate_is_coupling_deficient =
+        [&](GlobalIndex dof) -> bool {
+        const auto found = candidate_coupling_abs_sum_by_dof.find(dof);
+        if (found == candidate_coupling_abs_sum_by_dof.end()) {
+            return false;
+        }
+        const double coupling_abs_sum = found->second;
+        return coupling_abs_sum <= tolerance ||
+               (coupling_threshold >= 0.0 &&
+                coupling_abs_sum <= coupling_threshold);
+    };
+    GlobalIndex coupling_deficient_balance_candidate_count = 0;
+    std::vector<GlobalIndex> coupling_deficient_balance_candidate_global_dofs;
+    for (const auto candidate : candidates) {
+        if (candidate_is_coupling_deficient(candidate)) {
+            ++coupling_deficient_balance_candidate_count;
+            coupling_deficient_balance_candidate_global_dofs.push_back(candidate);
+        }
+    }
+
+    double min_positive_diag_abs = std::numeric_limits<double>::infinity();
+    for (const auto dof : candidates) {
+        if (dof < 0 || dof >= matrix.numRows() || dof >= matrix.numCols()) {
+            continue;
+        }
+        const double diag_abs =
+            std::abs(static_cast<double>(matrix.getEntry(dof, dof)));
+        if (diag_abs > tolerance && std::isfinite(diag_abs)) {
+            min_positive_diag_abs = std::min(min_positive_diag_abs, diag_abs);
+        }
+    }
+
+    std::vector<std::pair<GlobalIndex, GlobalIndex>> edges;
+    struct WeightedCompletionEdge {
+        GlobalIndex row_i = INVALID_GLOBAL_INDEX;
+        GlobalIndex row_j = INVALID_GLOBAL_INDEX;
+        double weight = 0.0;
+        double scale = 1.0;
+    };
+    std::vector<WeightedCompletionEdge> weighted_edges;
+    std::vector<GlobalIndex> neighbor_dofs;
+    std::string edge_weight_rule = "min_positive_candidate_diagonal";
+    std::string neighbor_policy = "none";
+    double target_self_row_abs_sum = 0.0;
+    double min_completion_edge_weight = std::numeric_limits<double>::infinity();
+    double max_completion_edge_weight = 0.0;
+    double min_completion_edge_scale = std::numeric_limits<double>::infinity();
+    double max_completion_edge_scale = 0.0;
+    GlobalIndex non_laplacian_existing_edge_count = 0;
+    GlobalIndex candidate_with_existing_pressure_edge_count = 0;
+    GlobalIndex candidate_with_laplacian_pressure_edge_count = 0;
+    GlobalIndex candidate_with_non_laplacian_only_pressure_edge_count = 0;
+    GlobalIndex shared_row_schur_hub_count = 0;
+    GlobalIndex shared_row_schur_candidate_edge_count = 0;
+    GlobalIndex shared_row_schur_contribution_count = 0;
+    GlobalIndex shared_row_schur_edge_count = 0;
+    GlobalIndex balance_candidate_row_count = 0;
+    GlobalIndex low_degree_balance_candidate_count = 0;
+    GlobalIndex explicit_balance_candidate_count =
+        static_cast<GlobalIndex>(explicit_balance_candidate_global_dofs.size());
+    std::vector<GlobalIndex> low_degree_balance_candidate_global_dofs;
+    std::vector<GlobalIndex> balance_candidate_global_dofs;
+    int min_candidate_pressure_edge_degree = 0;
+    int max_candidate_pressure_edge_degree = 0;
+    GlobalIndex existing_balance_edge_count = 0;
+    if (existing_pressure_balance_mode) {
+        edge_weight_rule =
+            existing_support_balance_mode
+                ? "existing_pressure_edges_abs_scaled_to_target_self_row_abs_sum"
+                : "existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum";
+        neighbor_policy =
+            existing_support_balance_mode
+                ? "all_existing_pressure_edges_incident_to_weak_rows"
+                : "existing_pressure_laplacian_edges_incident_to_weak_rows";
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        target_self_row_abs_sum =
+            summary.max_self_row_abs_sum *
+            activePressureGraphCompletionWeightScale();
+        const double max_edge_scale =
+            activePressureGraphCompletionMaxEdgeScale();
+        std::map<std::pair<GlobalIndex, GlobalIndex>, WeightedCompletionEdge>
+            edge_by_pair;
+        if (pressure_range.has_value() &&
+            target_self_row_abs_sum > tolerance &&
+            std::isfinite(target_self_row_abs_sum)) {
+            std::unordered_map<GlobalIndex, double> row_self_abs_cache;
+            const auto row_self_abs_sum = [&](GlobalIndex dof) -> double {
+                const auto cached = row_self_abs_cache.find(dof);
+                if (cached != row_self_abs_cache.end()) {
+                    return cached->second;
+                }
+                double sum = 0.0;
+                if (dof >= pressure_range->begin &&
+                    dof < pressure_range->end &&
+                    dof >= 0 &&
+                    dof < matrix.numRows()) {
+                    for (GlobalIndex col = pressure_range->begin;
+                         col < pressure_range->end;
+                         ++col) {
+                        const Real value = matrix.getEntry(dof, col);
+                        if (std::isfinite(value)) {
+                            sum += std::abs(static_cast<double>(value));
+                        }
+                    }
+                }
+                row_self_abs_cache.emplace(dof, sum);
+                return sum;
+            };
+            const auto row_scale = [&](GlobalIndex dof) -> double {
+                const double self = row_self_abs_sum(dof);
+                if (!(self > tolerance) || !std::isfinite(self)) {
+                    return 1.0;
+                }
+                const double needed = target_self_row_abs_sum / self;
+                if (!(needed > 1.0) || !std::isfinite(needed)) {
+                    return 1.0;
+                }
+                return std::min(max_edge_scale, needed);
+            };
+
+            for (const auto candidate : candidates) {
+                if (candidate < pressure_range->begin ||
+                    candidate >= pressure_range->end ||
+                    candidate < 0 ||
+                    candidate >= matrix.numRows() ||
+                    candidate >= matrix.numCols()) {
+                    continue;
+                }
+                const double candidate_scale = row_scale(candidate);
+                if (!(candidate_scale > 1.0)) {
+                    continue;
+                }
+                bool candidate_has_existing_edge = false;
+                bool candidate_has_laplacian_edge = false;
+                for (GlobalIndex neighbor = pressure_range->begin;
+                     neighbor < pressure_range->end;
+                     ++neighbor) {
+                    if (neighbor == candidate ||
+                        neighbor < 0 ||
+                        neighbor >= matrix.numRows() ||
+                        neighbor >= matrix.numCols() ||
+                        std::binary_search(
+                            constrained_dofs.begin(), constrained_dofs.end(), neighbor)) {
+                        continue;
+                    }
+                    const double row_edge =
+                        static_cast<double>(matrix.getEntry(candidate, neighbor));
+                    const double col_edge =
+                        static_cast<double>(matrix.getEntry(neighbor, candidate));
+                    if (!std::isfinite(row_edge) || !std::isfinite(col_edge)) {
+                        continue;
+                    }
+                    const double symmetric_offdiag =
+                        0.5 * (row_edge + col_edge);
+                    const double existing_abs =
+                        std::max(std::abs(row_edge), std::abs(col_edge));
+                    if (existing_abs > tolerance) {
+                        candidate_has_existing_edge = true;
+                    }
+                    const bool laplacian_like_edge =
+                        symmetric_offdiag < -tolerance;
+                    if (laplacian_like_edge) {
+                        candidate_has_laplacian_edge = true;
+                    } else if (existing_abs > tolerance) {
+                        ++non_laplacian_existing_edge_count;
+                    }
+                    if (!laplacian_like_edge && !existing_support_balance_mode) {
+                        continue;
+                    }
+                    if (existing_support_balance_mode && !(existing_abs > tolerance)) {
+                        continue;
+                    }
+                    const double base_weight =
+                        existing_support_balance_mode ? existing_abs : -symmetric_offdiag;
+                    const double neighbor_scale =
+                        candidate_set.count(neighbor) != 0u
+                            ? row_scale(neighbor)
+                            : 1.0;
+                    const double edge_scale =
+                        std::max(candidate_scale, neighbor_scale);
+                    if (!(edge_scale > 1.0) || !std::isfinite(edge_scale)) {
+                        continue;
+                    }
+                    const double delta_weight =
+                        base_weight * (edge_scale - 1.0);
+                    if (!(delta_weight > tolerance) ||
+                        !std::isfinite(delta_weight)) {
+                        continue;
+                    }
+                    const auto row_i = std::min(candidate, neighbor);
+                    const auto row_j = std::max(candidate, neighbor);
+                    auto& edge = edge_by_pair[{row_i, row_j}];
+                    if (!(edge.weight > delta_weight)) {
+                        edge.row_i = row_i;
+                        edge.row_j = row_j;
+                        edge.weight = delta_weight;
+                        edge.scale = edge_scale;
+                    }
+                }
+                if (candidate_has_existing_edge) {
+                    ++candidate_with_existing_pressure_edge_count;
+                }
+                if (candidate_has_laplacian_edge) {
+                    ++candidate_with_laplacian_pressure_edge_count;
+                }
+                if (candidate_has_existing_edge && !candidate_has_laplacian_edge) {
+                    ++candidate_with_non_laplacian_only_pressure_edge_count;
+                }
+            }
+        }
+
+        weighted_edges.reserve(edge_by_pair.size());
+        for (const auto& item : edge_by_pair) {
+            const auto& edge = item.second;
+            weighted_edges.push_back(edge);
+            neighbor_dofs.push_back(edge.row_i);
+            neighbor_dofs.push_back(edge.row_j);
+            min_completion_edge_weight =
+                std::min(min_completion_edge_weight, edge.weight);
+            max_completion_edge_weight =
+                std::max(max_completion_edge_weight, edge.weight);
+            min_completion_edge_scale =
+                std::min(min_completion_edge_scale, edge.scale);
+            max_completion_edge_scale =
+                std::max(max_completion_edge_scale, edge.scale);
+        }
+        std::sort(neighbor_dofs.begin(), neighbor_dofs.end());
+        neighbor_dofs.erase(std::unique(neighbor_dofs.begin(),
+                                        neighbor_dofs.end()),
+                            neighbor_dofs.end());
+    } else if (shared_row_schur_completion_mode ||
+               shared_row_schur_existing_edge_balance_mode) {
+        if (shared_row_schur_existing_edge_balance_mode) {
+            edge_weight_rule =
+                shared_row_schur_coupling_edge_balance_mode
+                    ? "shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum_for_coupling_deficient_candidates"
+                : shared_row_schur_low_degree_edge_balance_mode
+                    ? "shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum_for_low_degree_pressure_candidates"
+                : shared_row_schur_support_gap_local_patch_edge_balance_mode
+                    ? "support_gap_local_pressure_patch_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum_for_support_gap_rows"
+                : shared_row_schur_support_gap_patch_edge_balance_mode
+                    ? "support_gap_pressure_patch_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum_for_support_gap_rows"
+                : shared_row_schur_explicit_neighborhood_edge_balance_mode
+                    ? "shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum_for_explicit_balance_neighborhood_rows"
+                : shared_row_schur_explicit_edge_balance_mode
+                    ? "shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum_for_explicit_balance_rows"
+                : all_pressure_schur_candidate_mode
+                    ? "all_pressure_shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum"
+                : pressure_neighborhood_schur_candidate_mode
+                    ? "support_rank_pressure_neighborhood_shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum"
+                    : "shared_row_schur_completion_then_existing_pressure_laplacian_edges_scaled_to_target_self_row_abs_sum";
+            neighbor_policy =
+                shared_row_schur_coupling_edge_balance_mode
+                    ? "weak_candidate_pressure_schur_fill_then_existing_laplacian_edges_incident_to_coupling_deficient_rows"
+                : shared_row_schur_low_degree_edge_balance_mode
+                    ? "weak_candidate_pressure_schur_fill_then_existing_laplacian_edges_incident_to_low_degree_pressure_rows"
+                : shared_row_schur_support_gap_local_patch_edge_balance_mode
+                    ? "support_gap_local_pressure_patch_schur_fill_then_existing_laplacian_edges_incident_to_support_gap_rows"
+                : shared_row_schur_support_gap_patch_edge_balance_mode
+                    ? "support_gap_pressure_patch_schur_fill_then_existing_laplacian_edges_incident_to_support_gap_rows"
+                : shared_row_schur_explicit_neighborhood_edge_balance_mode
+                    ? "weak_candidate_pressure_schur_fill_then_existing_laplacian_edges_incident_to_explicit_balance_neighborhood_rows"
+                : shared_row_schur_explicit_edge_balance_mode
+                    ? "weak_candidate_pressure_schur_fill_then_existing_laplacian_edges_incident_to_explicit_balance_rows"
+                : all_pressure_schur_candidate_mode
+                    ? "all_unconstrained_pressure_rows_schur_fill_then_existing_laplacian_edges_incident_to_all_pressure_rows"
+                : pressure_neighborhood_schur_candidate_mode
+                    ? "support_rank_rows_plus_strongest_pressure_neighbors_schur_fill_then_existing_laplacian_edges_incident_to_expanded_rows"
+                    : "weak_candidate_pressure_schur_fill_then_existing_laplacian_edges_incident_to_weak_rows";
+        } else {
+            edge_weight_rule =
+                shared_row_schur_support_gap_local_patch_completion_mode
+                    ? "support_gap_local_pressure_patch_schur_completion_wi_wj_over_hub_support_sum"
+                : shared_row_schur_support_gap_patch_completion_mode
+                    ? "support_gap_pressure_patch_schur_completion_wi_wj_over_hub_support_sum"
+                    : "existing_pressure_laplacian_schur_fill_wi_wj_over_hub_support_sum";
+            neighbor_policy =
+                shared_row_schur_support_gap_local_patch_completion_mode
+                    ? "support_gap_local_pressure_patch_to_shared_row_pressure_neighbors"
+                : shared_row_schur_support_gap_patch_completion_mode
+                    ? "support_gap_pressure_patch_to_shared_row_pressure_neighbors"
+                : all_pressure_schur_candidate_mode
+                    ? "all_unconstrained_pressure_rows_to_shared_row_pressure_neighbors"
+                    : "weak_candidate_pressure_neighbors_to_shared_row_pressure_neighbors";
+        }
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        const int max_schur_neighbors =
+            activePressureGraphCompletionMaxActiveNeighbors();
+        std::map<std::pair<GlobalIndex, GlobalIndex>, WeightedCompletionEdge>
+            edge_by_pair;
+        std::map<GlobalIndex, std::vector<std::pair<GlobalIndex, double>>>
+            pressure_neighbor_cache;
+        std::set<GlobalIndex> schur_hubs;
+
+        if (pressure_range.has_value()) {
+            const auto pressure_neighbors =
+                [&](GlobalIndex hub)
+                    -> const std::vector<std::pair<GlobalIndex, double>>& {
+                const auto cached = pressure_neighbor_cache.find(hub);
+                if (cached != pressure_neighbor_cache.end()) {
+                    return cached->second;
+                }
+
+                std::vector<std::pair<GlobalIndex, double>> neighbors;
+                if (hub >= pressure_range->begin &&
+                    hub < pressure_range->end &&
+                    hub >= 0 &&
+                    hub < matrix.numRows() &&
+                    hub < matrix.numCols()) {
+                    for (GlobalIndex neighbor = pressure_range->begin;
+                         neighbor < pressure_range->end;
+                         ++neighbor) {
+                        if (neighbor == hub ||
+                            neighbor < 0 ||
+                            neighbor >= matrix.numRows() ||
+                            neighbor >= matrix.numCols() ||
+                            std::binary_search(
+                                constrained_dofs.begin(),
+                                constrained_dofs.end(),
+                                neighbor)) {
+                            continue;
+                        }
+                        const double row_edge =
+                            static_cast<double>(matrix.getEntry(hub, neighbor));
+                        const double col_edge =
+                            static_cast<double>(matrix.getEntry(neighbor, hub));
+                        if (!std::isfinite(row_edge) ||
+                            !std::isfinite(col_edge)) {
+                            continue;
+                        }
+                        const double symmetric_offdiag =
+                            0.5 * (row_edge + col_edge);
+                        const double edge_weight =
+                            symmetric_offdiag < -tolerance
+                                ? -symmetric_offdiag
+                                : 0.0;
+                        if (edge_weight > tolerance &&
+                            std::isfinite(edge_weight)) {
+                            neighbors.emplace_back(neighbor, edge_weight);
+                        }
+                    }
+                    std::sort(
+                        neighbors.begin(),
+                        neighbors.end(),
+                        [](const auto& a, const auto& b) {
+                            if (a.second != b.second) {
+                                return a.second > b.second;
+                            }
+                            return a.first < b.first;
+                        });
+                    if (max_schur_neighbors >= 0 &&
+                        static_cast<int>(neighbors.size()) >
+                            max_schur_neighbors) {
+                        neighbors.resize(
+                            static_cast<std::size_t>(max_schur_neighbors));
+                    }
+                }
+
+                auto inserted = pressure_neighbor_cache.emplace(
+                    hub, std::move(neighbors));
+                return inserted.first->second;
+            };
+
+            for (const auto candidate : candidates) {
+                if (candidate < pressure_range->begin ||
+                    candidate >= pressure_range->end ||
+                    candidate < 0 ||
+                    candidate >= matrix.numRows() ||
+                    candidate >= matrix.numCols()) {
+                    continue;
+                }
+                for (GlobalIndex hub = pressure_range->begin;
+                     hub < pressure_range->end;
+                     ++hub) {
+                    if (hub == candidate ||
+                        hub < 0 ||
+                        hub >= matrix.numRows() ||
+                        hub >= matrix.numCols() ||
+                        std::binary_search(
+                            constrained_dofs.begin(),
+                            constrained_dofs.end(),
+                            hub)) {
+                        continue;
+                    }
+                    const double candidate_row_edge =
+                        static_cast<double>(matrix.getEntry(candidate, hub));
+                    const double candidate_col_edge =
+                        static_cast<double>(matrix.getEntry(hub, candidate));
+                    if (!std::isfinite(candidate_row_edge) ||
+                        !std::isfinite(candidate_col_edge)) {
+                        continue;
+                    }
+                    const double candidate_symmetric_offdiag =
+                        0.5 * (candidate_row_edge + candidate_col_edge);
+                    const double candidate_edge_weight =
+                        candidate_symmetric_offdiag < -tolerance
+                            ? -candidate_symmetric_offdiag
+                            : 0.0;
+                    if (!(candidate_edge_weight > tolerance) ||
+                        !std::isfinite(candidate_edge_weight)) {
+                        continue;
+                    }
+
+                    ++shared_row_schur_candidate_edge_count;
+                    const auto& hub_neighbors = pressure_neighbors(hub);
+                    if (hub_neighbors.empty()) {
+                        continue;
+                    }
+
+                    double support_weight_sum = candidate_edge_weight;
+                    for (const auto& neighbor : hub_neighbors) {
+                        if (neighbor.first != candidate) {
+                            support_weight_sum += neighbor.second;
+                        }
+                    }
+                    if (!(support_weight_sum > tolerance) ||
+                        !std::isfinite(support_weight_sum)) {
+                        continue;
+                    }
+
+                    bool added_for_hub = false;
+                    for (const auto& neighbor : hub_neighbors) {
+                        if (neighbor.first == candidate) {
+                            continue;
+                        }
+                        const double weight =
+                            activePressureGraphCompletionWeightScale() *
+                            candidate_edge_weight *
+                            neighbor.second /
+                            support_weight_sum;
+                        if (!(weight > tolerance) || !std::isfinite(weight)) {
+                            continue;
+                        }
+                        const auto row_i = std::min(candidate, neighbor.first);
+                        const auto row_j = std::max(candidate, neighbor.first);
+                        auto& edge = edge_by_pair[{row_i, row_j}];
+                        edge.row_i = row_i;
+                        edge.row_j = row_j;
+                        edge.weight += weight;
+                        edge.scale = std::max(
+                            edge.scale,
+                            activePressureGraphCompletionWeightScale());
+                        ++shared_row_schur_contribution_count;
+                        added_for_hub = true;
+                    }
+                    if (added_for_hub) {
+                        schur_hubs.insert(hub);
+                    }
+                }
+            }
+        }
+
+        shared_row_schur_hub_count =
+            static_cast<GlobalIndex>(schur_hubs.size());
+        shared_row_schur_edge_count =
+            static_cast<GlobalIndex>(edge_by_pair.size());
+        if (shared_row_schur_existing_edge_balance_mode &&
+            pressure_range.has_value() &&
+            !edge_by_pair.empty()) {
+            std::map<GlobalIndex, double> schur_diag_delta;
+            std::map<std::pair<GlobalIndex, GlobalIndex>, double>
+                schur_edge_weight_by_pair;
+            for (const auto& item : edge_by_pair) {
+                const auto& edge = item.second;
+                schur_diag_delta[edge.row_i] += edge.weight;
+                schur_diag_delta[edge.row_j] += edge.weight;
+                schur_edge_weight_by_pair[{edge.row_i, edge.row_j}] +=
+                    edge.weight;
+            }
+
+            const auto schur_delta = [&](GlobalIndex row,
+                                         GlobalIndex col) -> double {
+                if (row == col) {
+                    const auto found = schur_diag_delta.find(row);
+                    return found != schur_diag_delta.end() ? found->second : 0.0;
+                }
+                const auto row_i = std::min(row, col);
+                const auto row_j = std::max(row, col);
+                const auto found = schur_edge_weight_by_pair.find({row_i, row_j});
+                return found != schur_edge_weight_by_pair.end()
+                           ? -found->second
+                           : 0.0;
+            };
+
+            std::unordered_map<GlobalIndex, double> row_self_abs_cache;
+            const auto row_self_abs_sum = [&](GlobalIndex dof) -> double {
+                const auto cached = row_self_abs_cache.find(dof);
+                if (cached != row_self_abs_cache.end()) {
+                    return cached->second;
+                }
+                double sum = 0.0;
+                if (dof >= pressure_range->begin &&
+                    dof < pressure_range->end &&
+                    dof >= 0 &&
+                    dof < matrix.numRows()) {
+                    for (GlobalIndex col = pressure_range->begin;
+                         col < pressure_range->end;
+                         ++col) {
+                        double value = static_cast<double>(matrix.getEntry(dof, col));
+                        value += schur_delta(dof, col);
+                        if (std::isfinite(value)) {
+                            sum += std::abs(value);
+                        }
+                    }
+                }
+                row_self_abs_cache.emplace(dof, sum);
+                return sum;
+            };
+
+            target_self_row_abs_sum = 0.0;
+            for (GlobalIndex dof = pressure_range->begin;
+                 dof < pressure_range->end;
+                 ++dof) {
+                if (dof < 0 ||
+                    dof >= matrix.numRows() ||
+                    dof >= matrix.numCols() ||
+                    std::binary_search(
+                        constrained_dofs.begin(), constrained_dofs.end(), dof)) {
+                    continue;
+                }
+                target_self_row_abs_sum =
+                    std::max(target_self_row_abs_sum, row_self_abs_sum(dof));
+            }
+            target_self_row_abs_sum *=
+                activePressureGraphCompletionWeightScale();
+            const double max_edge_scale =
+                activePressureGraphCompletionMaxEdgeScale();
+            std::unordered_map<GlobalIndex, int>
+                pressure_edge_degree_cache;
+            const auto pressure_edge_degree = [&](GlobalIndex dof) -> int {
+                const auto cached = pressure_edge_degree_cache.find(dof);
+                if (cached != pressure_edge_degree_cache.end()) {
+                    return cached->second;
+                }
+                int degree = 0;
+                if (dof >= pressure_range->begin &&
+                    dof < pressure_range->end &&
+                    dof >= 0 &&
+                    dof < matrix.numRows() &&
+                    dof < matrix.numCols()) {
+                    for (GlobalIndex neighbor = pressure_range->begin;
+                         neighbor < pressure_range->end;
+                         ++neighbor) {
+                        if (neighbor == dof ||
+                            neighbor < 0 ||
+                            neighbor >= matrix.numRows() ||
+                            neighbor >= matrix.numCols() ||
+                            std::binary_search(
+                                constrained_dofs.begin(),
+                                constrained_dofs.end(),
+                                neighbor)) {
+                            continue;
+                        }
+                        const double row_edge =
+                            static_cast<double>(matrix.getEntry(dof, neighbor));
+                        const double col_edge =
+                            static_cast<double>(matrix.getEntry(neighbor, dof));
+                        if (!std::isfinite(row_edge) ||
+                            !std::isfinite(col_edge)) {
+                            continue;
+                        }
+                        const double symmetric_offdiag =
+                            0.5 * (row_edge + col_edge);
+                        if (symmetric_offdiag < -tolerance) {
+                            ++degree;
+                        }
+                    }
+                }
+                pressure_edge_degree_cache.emplace(dof, degree);
+                return degree;
+            };
+            if (shared_row_schur_low_degree_edge_balance_mode) {
+                min_candidate_pressure_edge_degree =
+                    std::numeric_limits<int>::max();
+                for (const auto candidate : candidates) {
+                    if (candidate < pressure_range->begin ||
+                        candidate >= pressure_range->end ||
+                        candidate < 0 ||
+                        candidate >= matrix.numRows() ||
+                        candidate >= matrix.numCols()) {
+                        continue;
+                    }
+                    const int degree = pressure_edge_degree(candidate);
+                    min_candidate_pressure_edge_degree =
+                        std::min(min_candidate_pressure_edge_degree, degree);
+                    max_candidate_pressure_edge_degree =
+                        std::max(max_candidate_pressure_edge_degree, degree);
+                    if (max_balance_pressure_edge_degree < 0 ||
+                        degree <= max_balance_pressure_edge_degree) {
+                        ++low_degree_balance_candidate_count;
+                        low_degree_balance_candidate_global_dofs.push_back(candidate);
+                    }
+                }
+                if (min_candidate_pressure_edge_degree ==
+                    std::numeric_limits<int>::max()) {
+                    min_candidate_pressure_edge_degree = 0;
+                }
+            }
+            const auto candidate_is_balance_eligible =
+                [&](GlobalIndex dof) -> bool {
+                if (shared_row_schur_coupling_edge_balance_mode) {
+                    return candidate_is_coupling_deficient(dof);
+                }
+                if (shared_row_schur_low_degree_edge_balance_mode) {
+                    const int degree = pressure_edge_degree(dof);
+                    return max_balance_pressure_edge_degree < 0 ||
+                           degree <= max_balance_pressure_edge_degree;
+                }
+                if (shared_row_schur_support_gap_local_patch_edge_balance_mode ||
+                    shared_row_schur_support_gap_patch_edge_balance_mode) {
+                    return support_gap_candidate_set.count(dof) != 0u;
+                }
+                if (shared_row_schur_explicit_balance_mode) {
+                    return explicit_balance_candidate_set.count(dof) != 0u;
+                }
+                return true;
+            };
+            const auto row_scale = [&](GlobalIndex dof) -> double {
+                const double self = row_self_abs_sum(dof);
+                if (!(self > tolerance) || !std::isfinite(self)) {
+                    return 1.0;
+                }
+                const double needed = target_self_row_abs_sum / self;
+                if (!(needed > 1.0) || !std::isfinite(needed)) {
+                    return 1.0;
+                }
+                return std::min(max_edge_scale, needed);
+            };
+
+            std::map<std::pair<GlobalIndex, GlobalIndex>, WeightedCompletionEdge>
+                balance_edge_by_pair;
+            if (target_self_row_abs_sum > tolerance &&
+                std::isfinite(target_self_row_abs_sum)) {
+                for (const auto candidate : candidates) {
+                    if (candidate < pressure_range->begin ||
+                        candidate >= pressure_range->end ||
+                        candidate < 0 ||
+                        candidate >= matrix.numRows() ||
+                        candidate >= matrix.numCols()) {
+                        continue;
+                    }
+                    if (!candidate_is_balance_eligible(candidate)) {
+                        continue;
+                    }
+                    const double candidate_scale = row_scale(candidate);
+                    if (!(candidate_scale > 1.0)) {
+                        continue;
+                    }
+                    ++balance_candidate_row_count;
+                    balance_candidate_global_dofs.push_back(candidate);
+                    bool candidate_has_existing_edge = false;
+                    bool candidate_has_laplacian_edge = false;
+                    for (GlobalIndex neighbor = pressure_range->begin;
+                         neighbor < pressure_range->end;
+                         ++neighbor) {
+                        if (neighbor == candidate ||
+                            neighbor < 0 ||
+                            neighbor >= matrix.numRows() ||
+                            neighbor >= matrix.numCols() ||
+                            std::binary_search(
+                                constrained_dofs.begin(),
+                                constrained_dofs.end(),
+                                neighbor)) {
+                            continue;
+                        }
+                        double row_edge =
+                            static_cast<double>(matrix.getEntry(candidate, neighbor));
+                        row_edge += schur_delta(candidate, neighbor);
+                        double col_edge =
+                            static_cast<double>(matrix.getEntry(neighbor, candidate));
+                        col_edge += schur_delta(neighbor, candidate);
+                        if (!std::isfinite(row_edge) || !std::isfinite(col_edge)) {
+                            continue;
+                        }
+                        const double symmetric_offdiag =
+                            0.5 * (row_edge + col_edge);
+                        const double existing_abs =
+                            std::max(std::abs(row_edge), std::abs(col_edge));
+                        if (existing_abs > tolerance) {
+                            candidate_has_existing_edge = true;
+                        }
+                        const bool laplacian_like_edge =
+                            symmetric_offdiag < -tolerance;
+                        if (laplacian_like_edge) {
+                            candidate_has_laplacian_edge = true;
+                        } else if (existing_abs > tolerance) {
+                            ++non_laplacian_existing_edge_count;
+                        }
+                        if (!laplacian_like_edge) {
+                            continue;
+                        }
+                        const double neighbor_scale =
+                            candidate_set.count(neighbor) != 0u &&
+                                    candidate_is_balance_eligible(neighbor)
+                                ? row_scale(neighbor)
+                                : 1.0;
+                        const double edge_scale =
+                            std::max(candidate_scale, neighbor_scale);
+                        if (!(edge_scale > 1.0) || !std::isfinite(edge_scale)) {
+                            continue;
+                        }
+                        const double delta_weight =
+                            -symmetric_offdiag * (edge_scale - 1.0);
+                        if (!(delta_weight > tolerance) ||
+                            !std::isfinite(delta_weight)) {
+                            continue;
+                        }
+                        const auto row_i = std::min(candidate, neighbor);
+                        const auto row_j = std::max(candidate, neighbor);
+                        auto& edge = balance_edge_by_pair[{row_i, row_j}];
+                        if (!(edge.weight > delta_weight)) {
+                            edge.row_i = row_i;
+                            edge.row_j = row_j;
+                            edge.weight = delta_weight;
+                            edge.scale = edge_scale;
+                        }
+                    }
+                    if (candidate_has_existing_edge) {
+                        ++candidate_with_existing_pressure_edge_count;
+                    }
+                    if (candidate_has_laplacian_edge) {
+                        ++candidate_with_laplacian_pressure_edge_count;
+                    }
+                    if (candidate_has_existing_edge && !candidate_has_laplacian_edge) {
+                        ++candidate_with_non_laplacian_only_pressure_edge_count;
+                    }
+                }
+            }
+
+            existing_balance_edge_count =
+                static_cast<GlobalIndex>(balance_edge_by_pair.size());
+            for (const auto& item : balance_edge_by_pair) {
+                const auto& balance_edge = item.second;
+                auto& edge = edge_by_pair[item.first];
+                edge.row_i = balance_edge.row_i;
+                edge.row_j = balance_edge.row_j;
+                edge.weight += balance_edge.weight;
+                edge.scale = std::max(edge.scale, balance_edge.scale);
+            }
+        }
+        weighted_edges.reserve(edge_by_pair.size());
+        for (const auto& item : edge_by_pair) {
+            const auto& edge = item.second;
+            weighted_edges.push_back(edge);
+            neighbor_dofs.push_back(edge.row_i);
+            neighbor_dofs.push_back(edge.row_j);
+            min_completion_edge_weight =
+                std::min(min_completion_edge_weight, edge.weight);
+            max_completion_edge_weight =
+                std::max(max_completion_edge_weight, edge.weight);
+            min_completion_edge_scale =
+                std::min(min_completion_edge_scale, edge.scale);
+            max_completion_edge_scale =
+                std::max(max_completion_edge_scale, edge.scale);
+        }
+        std::sort(neighbor_dofs.begin(), neighbor_dofs.end());
+        neighbor_dofs.erase(std::unique(neighbor_dofs.begin(),
+                                        neighbor_dofs.end()),
+                            neighbor_dofs.end());
+    } else if (active_support_completion_mode) {
+        edge_weight_rule =
+            "min_positive_candidate_diagonal_distributed_to_active_pressure_support";
+        neighbor_policy = "strongest_unconstrained_pressure_self_rows";
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        const auto coupling_range =
+            newtonMatrixSupportFieldRangeByName(sys, coupling_field);
+        const int max_active_neighbors =
+            activePressureGraphCompletionMaxActiveNeighbors();
+        struct ActivePressureSupportMetric {
+            GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
+            double row_self_abs_sum = 0.0;
+            double row_coupling_abs_sum = 0.0;
+            double diag_abs = 0.0;
+        };
+        std::vector<ActivePressureSupportMetric> active_support_rows;
+        std::map<std::pair<GlobalIndex, GlobalIndex>, WeightedCompletionEdge>
+            edge_by_pair;
+        if (pressure_range.has_value() && coupling_range.has_value() &&
+            std::isfinite(min_positive_diag_abs)) {
+            for (GlobalIndex global_dof = pressure_range->begin;
+                 global_dof < pressure_range->end;
+                 ++global_dof) {
+                if (global_dof < 0 ||
+                    global_dof >= matrix.numRows() ||
+                    global_dof >= matrix.numCols() ||
+                    std::binary_search(
+                        constrained_dofs.begin(),
+                        constrained_dofs.end(),
+                        global_dof)) {
+                    continue;
+                }
+
+                ActivePressureSupportMetric metric;
+                metric.global_dof = global_dof;
+                metric.diag_abs = std::abs(
+                    static_cast<double>(matrix.getEntry(global_dof, global_dof)));
+                for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+                    const Real value = matrix.getEntry(global_dof, col);
+                    if (!std::isfinite(value)) {
+                        continue;
+                    }
+                    const double abs_value =
+                        std::abs(static_cast<double>(value));
+                    if (dofInFieldRange(col, *pressure_range)) {
+                        metric.row_self_abs_sum += abs_value;
+                    }
+                    if (dofInFieldRange(col, *coupling_range)) {
+                        metric.row_coupling_abs_sum += abs_value;
+                    }
+                }
+                if (metric.row_self_abs_sum > tolerance &&
+                    std::isfinite(metric.row_self_abs_sum)) {
+                    active_support_rows.push_back(metric);
+                }
+            }
+
+            std::sort(
+                active_support_rows.begin(),
+                active_support_rows.end(),
+                [](const ActivePressureSupportMetric& a,
+                   const ActivePressureSupportMetric& b) {
+                    if (a.row_self_abs_sum != b.row_self_abs_sum) {
+                        return a.row_self_abs_sum > b.row_self_abs_sum;
+                    }
+                    if (a.row_coupling_abs_sum != b.row_coupling_abs_sum) {
+                        return a.row_coupling_abs_sum > b.row_coupling_abs_sum;
+                    }
+                    if (a.diag_abs != b.diag_abs) {
+                        return a.diag_abs > b.diag_abs;
+                    }
+                    return a.global_dof < b.global_dof;
+                });
+
+            const double total_added_per_candidate =
+                min_positive_diag_abs * activePressureGraphCompletionWeightScale();
+            target_self_row_abs_sum = total_added_per_candidate;
+            for (const auto candidate : candidates) {
+                if (candidate < pressure_range->begin ||
+                    candidate >= pressure_range->end ||
+                    candidate < 0 ||
+                    candidate >= matrix.numRows() ||
+                    candidate >= matrix.numCols()) {
+                    continue;
+                }
+
+                std::vector<GlobalIndex> selected_neighbors;
+                selected_neighbors.reserve(
+                    max_active_neighbors < 0
+                        ? active_support_rows.size()
+                        : static_cast<std::size_t>(max_active_neighbors));
+                for (const auto& metric : active_support_rows) {
+                    if (metric.global_dof == candidate) {
+                        continue;
+                    }
+                    selected_neighbors.push_back(metric.global_dof);
+                    if (max_active_neighbors >= 0 &&
+                        static_cast<int>(selected_neighbors.size()) >=
+                            max_active_neighbors) {
+                        break;
+                    }
+                }
+                if (selected_neighbors.empty()) {
+                    continue;
+                }
+                const double edge_weight =
+                    total_added_per_candidate /
+                    static_cast<double>(selected_neighbors.size());
+                if (!(edge_weight > tolerance) || !std::isfinite(edge_weight)) {
+                    continue;
+                }
+                for (const auto neighbor : selected_neighbors) {
+                    const auto row_i = std::min(candidate, neighbor);
+                    const auto row_j = std::max(candidate, neighbor);
+                    auto& edge = edge_by_pair[{row_i, row_j}];
+                    edge.row_i = row_i;
+                    edge.row_j = row_j;
+                    edge.weight += edge_weight;
+                    edge.scale = std::max(
+                        edge.scale,
+                        activePressureGraphCompletionWeightScale());
+                }
+            }
+        }
+
+        weighted_edges.reserve(edge_by_pair.size());
+        for (const auto& item : edge_by_pair) {
+            const auto& edge = item.second;
+            weighted_edges.push_back(edge);
+            neighbor_dofs.push_back(edge.row_i);
+            neighbor_dofs.push_back(edge.row_j);
+            min_completion_edge_weight =
+                std::min(min_completion_edge_weight, edge.weight);
+            max_completion_edge_weight =
+                std::max(max_completion_edge_weight, edge.weight);
+            min_completion_edge_scale =
+                std::min(min_completion_edge_scale, edge.scale);
+            max_completion_edge_scale =
+                std::max(max_completion_edge_scale, edge.scale);
+        }
+        std::sort(neighbor_dofs.begin(), neighbor_dofs.end());
+        neighbor_dofs.erase(std::unique(neighbor_dofs.begin(),
+                                        neighbor_dofs.end()),
+                            neighbor_dofs.end());
+    } else if (shared_pressure_neighbor_mode) {
+        edge_weight_rule =
+            "min_positive_candidate_diagonal_to_shared_pressure_neighbor_pair";
+        neighbor_policy =
+            "candidate_pair_with_max_shared_pressure_neighbor_support";
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        struct CandidatePressureSignature {
+            GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
+            std::vector<std::pair<GlobalIndex, double>> pressure_neighbors;
+        };
+        const auto merge_pressure_signature =
+            [](std::vector<std::pair<GlobalIndex, double>>& signature) {
+                std::sort(signature.begin(), signature.end(),
+                          [](const auto& a, const auto& b) {
+                              return a.first < b.first;
+                          });
+                std::vector<std::pair<GlobalIndex, double>> merged;
+                merged.reserve(signature.size());
+                for (const auto& entry : signature) {
+                    if (!merged.empty() && merged.back().first == entry.first) {
+                        merged.back().second =
+                            std::max(merged.back().second, entry.second);
+                    } else {
+                        merged.push_back(entry);
+                    }
+                }
+                signature = std::move(merged);
+            };
+        const auto shared_pressure_neighbor_support =
+            [](const std::vector<std::pair<GlobalIndex, double>>& a,
+               const std::vector<std::pair<GlobalIndex, double>>& b,
+               std::vector<GlobalIndex>& shared_neighbors) {
+                double shared = 0.0;
+                int count = 0;
+                std::size_t i = 0;
+                std::size_t j = 0;
+                shared_neighbors.clear();
+                while (i < a.size() && j < b.size()) {
+                    if (a[i].first == b[j].first) {
+                        shared += std::min(a[i].second, b[j].second);
+                        shared_neighbors.push_back(a[i].first);
+                        ++count;
+                        ++i;
+                        ++j;
+                    } else if (a[i].first < b[j].first) {
+                        ++i;
+                    } else {
+                        ++j;
+                    }
+                }
+                return std::pair<double, int>{shared, count};
+            };
+        std::unordered_map<GlobalIndex, CandidatePressureSignature> signatures;
+        if (pressure_range.has_value()) {
+            signatures.reserve(candidates.size());
+            for (const auto candidate : candidates) {
+                if (candidate < pressure_range->begin ||
+                    candidate >= pressure_range->end ||
+                    candidate < 0 ||
+                    candidate >= matrix.numRows() ||
+                    candidate >= matrix.numCols()) {
+                    continue;
+                }
+                CandidatePressureSignature signature;
+                signature.global_dof = candidate;
+                for (GlobalIndex neighbor = pressure_range->begin;
+                     neighbor < pressure_range->end;
+                     ++neighbor) {
+                    if (neighbor == candidate ||
+                        candidate_set.count(neighbor) != 0u ||
+                        neighbor < 0 ||
+                        neighbor >= matrix.numRows() ||
+                        neighbor >= matrix.numCols() ||
+                        std::binary_search(
+                            constrained_dofs.begin(), constrained_dofs.end(), neighbor)) {
+                        continue;
+                    }
+                    const double row_edge_abs = std::abs(
+                        static_cast<double>(matrix.getEntry(candidate, neighbor)));
+                    const double col_edge_abs = std::abs(
+                        static_cast<double>(matrix.getEntry(neighbor, candidate)));
+                    const double existing_edge_abs =
+                        std::max(row_edge_abs, col_edge_abs);
+                    if (existing_edge_abs > tolerance &&
+                        std::isfinite(existing_edge_abs)) {
+                        signature.pressure_neighbors.emplace_back(
+                            neighbor, existing_edge_abs);
+                    }
+                }
+                merge_pressure_signature(signature.pressure_neighbors);
+                if (!signature.pressure_neighbors.empty()) {
+                    signatures.emplace(candidate, std::move(signature));
+                }
+            }
+
+            for (const auto candidate : candidates) {
+                const auto candidate_it = signatures.find(candidate);
+                if (candidate_it == signatures.end()) {
+                    continue;
+                }
+                const auto& candidate_signature = candidate_it->second;
+                GlobalIndex best_partner = INVALID_GLOBAL_INDEX;
+                double best_shared_support = 0.0;
+                int best_shared_count = 0;
+                std::vector<GlobalIndex> best_shared_neighbors;
+                std::vector<GlobalIndex> shared_neighbors;
+                for (const auto partner : candidates) {
+                    if (partner == candidate) {
+                        continue;
+                    }
+                    const auto partner_it = signatures.find(partner);
+                    if (partner_it == signatures.end()) {
+                        continue;
+                    }
+                    const double row_edge_abs = std::abs(
+                        static_cast<double>(matrix.getEntry(candidate, partner)));
+                    const double col_edge_abs = std::abs(
+                        static_cast<double>(matrix.getEntry(partner, candidate)));
+                    const double existing_edge_abs =
+                        std::max(row_edge_abs, col_edge_abs);
+                    if (existing_edge_abs > tolerance &&
+                        std::isfinite(existing_edge_abs)) {
+                        continue;
+                    }
+                    const auto [shared_support, shared_count] =
+                        shared_pressure_neighbor_support(
+                            candidate_signature.pressure_neighbors,
+                            partner_it->second.pressure_neighbors,
+                            shared_neighbors);
+                    if (!(shared_support > tolerance) ||
+                        !std::isfinite(shared_support)) {
+                        continue;
+                    }
+                    const bool better =
+                        best_partner == INVALID_GLOBAL_INDEX ||
+                        shared_support > best_shared_support ||
+                        (shared_support == best_shared_support &&
+                         shared_count > best_shared_count) ||
+                        (shared_support == best_shared_support &&
+                         shared_count == best_shared_count &&
+                         partner < best_partner);
+                    if (better) {
+                        best_partner = partner;
+                        best_shared_support = shared_support;
+                        best_shared_count = shared_count;
+                        best_shared_neighbors = shared_neighbors;
+                    }
+                }
+                if (best_partner == INVALID_GLOBAL_INDEX) {
+                    continue;
+                }
+                edges.emplace_back(std::min(candidate, best_partner),
+                                   std::max(candidate, best_partner));
+                neighbor_dofs.insert(neighbor_dofs.end(),
+                                     best_shared_neighbors.begin(),
+                                     best_shared_neighbors.end());
+            }
+            std::sort(edges.begin(), edges.end());
+            edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+            std::sort(neighbor_dofs.begin(), neighbor_dofs.end());
+            neighbor_dofs.erase(std::unique(neighbor_dofs.begin(),
+                                            neighbor_dofs.end()),
+                                neighbor_dofs.end());
+        }
+    } else if (pressure_neighbor_mode || shared_velocity_neighbor_mode) {
+        edge_weight_rule =
+            pressure_neighbor_mode
+                ? "min_positive_candidate_diagonal_to_pressure_neighbor"
+                : "min_positive_candidate_diagonal_to_shared_velocity_neighbor";
+        neighbor_policy =
+            pressure_neighbor_mode
+                ? "max_neighbor_velocity_coupling_then_pressure_self"
+                : "max_shared_velocity_signature_then_row_support";
+        const auto pressure_range =
+            newtonMatrixSupportFieldRangeByName(sys, pressure_field);
+        const auto coupling_range =
+            newtonMatrixSupportFieldRangeByName(sys, coupling_field);
+        struct CompletionNeighborMetric {
+            GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
+            double row_coupling_abs_sum = 0.0;
+            double col_coupling_abs_sum = 0.0;
+            double row_self_abs_sum = 0.0;
+            double existing_edge_abs = 0.0;
+            double shared_velocity_abs = 0.0;
+            std::vector<std::pair<GlobalIndex, double>> velocity_signature;
+        };
+        const auto merge_velocity_signature =
+            [](std::vector<std::pair<GlobalIndex, double>>& signature) {
+                std::sort(signature.begin(), signature.end(),
+                          [](const auto& a, const auto& b) {
+                              return a.first < b.first;
+                          });
+                std::vector<std::pair<GlobalIndex, double>> merged;
+                merged.reserve(signature.size());
+                for (const auto& entry : signature) {
+                    if (!merged.empty() && merged.back().first == entry.first) {
+                        merged.back().second += entry.second;
+                    } else {
+                        merged.push_back(entry);
+                    }
+                }
+                signature = std::move(merged);
+            };
+        const auto shared_velocity_signature_abs =
+            [](const std::vector<std::pair<GlobalIndex, double>>& a,
+               const std::vector<std::pair<GlobalIndex, double>>& b) {
+                double shared = 0.0;
+                std::size_t i = 0;
+                std::size_t j = 0;
+                while (i < a.size() && j < b.size()) {
+                    if (a[i].first == b[j].first) {
+                        shared += std::min(a[i].second, b[j].second);
+                        ++i;
+                        ++j;
+                    } else if (a[i].first < b[j].first) {
+                        ++i;
+                    } else {
+                        ++j;
+                    }
+                }
+                return shared;
+            };
+        std::unordered_map<GlobalIndex, CompletionNeighborMetric> metrics;
+        if (pressure_range.has_value() && coupling_range.has_value()) {
+            metrics.reserve(static_cast<std::size_t>(
+                std::max<GlobalIndex>(0, pressure_range->end - pressure_range->begin)));
+            for (GlobalIndex local_dof = 0;
+                 local_dof < pressure_range->end - pressure_range->begin;
+                 ++local_dof) {
+                const auto global_dof = pressure_range->begin + local_dof;
+                if (global_dof < 0 ||
+                    global_dof >= matrix.numRows() ||
+                    global_dof >= matrix.numCols() ||
+                    std::binary_search(
+                        constrained_dofs.begin(), constrained_dofs.end(), global_dof)) {
+                    continue;
+                }
+                CompletionNeighborMetric metric;
+                metric.global_dof = global_dof;
+                for (GlobalIndex col = 0; col < matrix.numCols(); ++col) {
+                    const Real value = matrix.getEntry(global_dof, col);
+                    if (!std::isfinite(value)) {
+                        continue;
+                    }
+                    const double abs_value =
+                        std::abs(static_cast<double>(value));
+                    if (dofInFieldRange(col, *coupling_range)) {
+                        metric.row_coupling_abs_sum += abs_value;
+                        if (abs_value > tolerance) {
+                            metric.velocity_signature.emplace_back(col, abs_value);
+                        }
+                    }
+                    if (dofInFieldRange(col, *pressure_range)) {
+                        metric.row_self_abs_sum += abs_value;
+                    }
+                }
+                if (shared_velocity_neighbor_mode) {
+                    for (GlobalIndex row = coupling_range->begin;
+                         row < coupling_range->end;
+                         ++row) {
+                        const Real value = matrix.getEntry(row, global_dof);
+                        if (!std::isfinite(value)) {
+                            continue;
+                        }
+                        const double abs_value =
+                            std::abs(static_cast<double>(value));
+                        metric.col_coupling_abs_sum += abs_value;
+                        if (abs_value > tolerance) {
+                            metric.velocity_signature.emplace_back(row, abs_value);
+                        }
+                    }
+                    merge_velocity_signature(metric.velocity_signature);
+                }
+                metrics.emplace(global_dof, metric);
+            }
+
+            for (const auto candidate : candidates) {
+                if (candidate < pressure_range->begin ||
+                    candidate >= pressure_range->end ||
+                    candidate < 0 ||
+                    candidate >= matrix.numRows() ||
+                    candidate >= matrix.numCols()) {
+                    continue;
+                }
+
+                const auto candidate_metric_it = metrics.find(candidate);
+                if (candidate_metric_it == metrics.end()) {
+                    continue;
+                }
+                const auto& candidate_metric = candidate_metric_it->second;
+
+                std::optional<CompletionNeighborMetric> best_neighbor;
+                for (GlobalIndex neighbor = pressure_range->begin;
+                     neighbor < pressure_range->end;
+                     ++neighbor) {
+                    if (neighbor == candidate ||
+                        candidate_set.count(neighbor) != 0u ||
+                        std::binary_search(
+                            constrained_dofs.begin(), constrained_dofs.end(), neighbor)) {
+                        continue;
+                    }
+                    const double row_edge_abs = std::abs(
+                        static_cast<double>(matrix.getEntry(candidate, neighbor)));
+                    const double col_edge_abs = std::abs(
+                        static_cast<double>(matrix.getEntry(neighbor, candidate)));
+                    const double existing_edge_abs =
+                        std::max(row_edge_abs, col_edge_abs);
+                    if (pressure_neighbor_mode &&
+                        (!(existing_edge_abs > tolerance) ||
+                         !std::isfinite(existing_edge_abs))) {
+                        continue;
+                    }
+                    auto metric_it = metrics.find(neighbor);
+                    if (metric_it == metrics.end()) {
+                        continue;
+                    }
+                    CompletionNeighborMetric metric = metric_it->second;
+                    metric.existing_edge_abs = existing_edge_abs;
+                    if (shared_velocity_neighbor_mode) {
+                        metric.shared_velocity_abs =
+                            shared_velocity_signature_abs(
+                                candidate_metric.velocity_signature,
+                                metric.velocity_signature);
+                        if (!(metric.shared_velocity_abs > tolerance) ||
+                            !std::isfinite(metric.shared_velocity_abs)) {
+                            continue;
+                        }
+                    }
+                    if (!best_neighbor.has_value()) {
+                        best_neighbor = metric;
+                        continue;
+                    }
+                    const auto& best = *best_neighbor;
+                    const bool better_pressure_neighbor =
+                        pressure_neighbor_mode &&
+                        (metric.row_coupling_abs_sum > best.row_coupling_abs_sum ||
+                         (metric.row_coupling_abs_sum == best.row_coupling_abs_sum &&
+                          metric.row_self_abs_sum > best.row_self_abs_sum) ||
+                         (metric.row_coupling_abs_sum == best.row_coupling_abs_sum &&
+                          metric.row_self_abs_sum == best.row_self_abs_sum &&
+                          metric.existing_edge_abs > best.existing_edge_abs) ||
+                         (metric.row_coupling_abs_sum == best.row_coupling_abs_sum &&
+                          metric.row_self_abs_sum == best.row_self_abs_sum &&
+                          metric.existing_edge_abs == best.existing_edge_abs &&
+                          metric.global_dof < best.global_dof));
+                    const bool better_shared_velocity_neighbor =
+                        shared_velocity_neighbor_mode &&
+                        (metric.shared_velocity_abs > best.shared_velocity_abs ||
+                         (metric.shared_velocity_abs == best.shared_velocity_abs &&
+                          metric.row_coupling_abs_sum + metric.col_coupling_abs_sum >
+                              best.row_coupling_abs_sum + best.col_coupling_abs_sum) ||
+                         (metric.shared_velocity_abs == best.shared_velocity_abs &&
+                          metric.row_coupling_abs_sum + metric.col_coupling_abs_sum ==
+                              best.row_coupling_abs_sum + best.col_coupling_abs_sum &&
+                          metric.row_self_abs_sum > best.row_self_abs_sum) ||
+                         (metric.shared_velocity_abs == best.shared_velocity_abs &&
+                          metric.row_coupling_abs_sum + metric.col_coupling_abs_sum ==
+                              best.row_coupling_abs_sum + best.col_coupling_abs_sum &&
+                          metric.row_self_abs_sum == best.row_self_abs_sum &&
+                          metric.global_dof < best.global_dof));
+                    if (better_pressure_neighbor ||
+                        better_shared_velocity_neighbor) {
+                        best_neighbor = metric;
+                    }
+                }
+                if (!best_neighbor.has_value()) {
+                    continue;
+                }
+                const auto neighbor = best_neighbor->global_dof;
+                edges.emplace_back(std::min(candidate, neighbor),
+                                   std::max(candidate, neighbor));
+                neighbor_dofs.push_back(neighbor);
+            }
+            std::sort(edges.begin(), edges.end());
+            edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+            std::sort(neighbor_dofs.begin(), neighbor_dofs.end());
+            neighbor_dofs.erase(std::unique(neighbor_dofs.begin(),
+                                            neighbor_dofs.end()),
+                                neighbor_dofs.end());
+        }
+    } else {
+        const std::size_t edge_span =
+            candidates.size() == 2u ? 1u : candidates.size();
+        for (std::size_t i = 0; i < edge_span; ++i) {
+            const auto row_i = candidates[i];
+            const auto row_j = candidates[(i + 1u) % candidates.size()];
+            if (row_i == row_j) {
+                continue;
+            }
+            edges.emplace_back(std::min(row_i, row_j), std::max(row_i, row_j));
+        }
+    }
+
+    const bool can_apply_common_edges =
+        !direct_weighted_completion_mode &&
+        !edges.empty() &&
+        std::isfinite(min_positive_diag_abs);
+    const double edge_weight =
+        direct_weighted_completion_mode
+            ? max_completion_edge_weight
+            : (can_apply_common_edges
+                   ? min_positive_diag_abs *
+                         activePressureGraphCompletionWeightScale()
+                   : 0.0);
+    if (can_apply_common_edges && edge_weight > 0.0) {
+        weighted_edges.reserve(edges.size());
+        for (const auto& edge : edges) {
+            weighted_edges.push_back(
+                WeightedCompletionEdge{
+                    edge.first,
+                    edge.second,
+                    edge_weight,
+                    activePressureGraphCompletionWeightScale()});
+            min_completion_edge_weight =
+                std::min(min_completion_edge_weight, edge_weight);
+            max_completion_edge_weight =
+                std::max(max_completion_edge_weight, edge_weight);
+            min_completion_edge_scale =
+                std::min(
+                    min_completion_edge_scale,
+                    activePressureGraphCompletionWeightScale());
+            max_completion_edge_scale =
+                std::max(
+                    max_completion_edge_scale,
+                    activePressureGraphCompletionWeightScale());
+        }
+    }
+    GlobalIndex edge_count = 0;
+    if (!weighted_edges.empty()) {
+        auto matrix_view = matrix.createAssemblyView();
+        FE_CHECK_NOT_NULL(matrix_view.get(),
+                          "NewtonSolver: active pressure graph completion matrix view");
+        matrix_view->beginAssemblyPhase();
+        for (const auto& edge : weighted_edges) {
+            const auto row_i = edge.row_i;
+            const auto row_j = edge.row_j;
+            if (row_i == row_j) {
+                continue;
+            }
+            matrix_view->addMatrixEntry(
+                row_i, row_i, static_cast<Real>(edge.weight), assembly::AddMode::Add);
+            matrix_view->addMatrixEntry(
+                row_j, row_j, static_cast<Real>(edge.weight), assembly::AddMode::Add);
+            matrix_view->addMatrixEntry(
+                row_i, row_j, static_cast<Real>(-edge.weight), assembly::AddMode::Add);
+            matrix_view->addMatrixEntry(
+                row_j, row_i, static_cast<Real>(-edge.weight), assembly::AddMode::Add);
+            ++edge_count;
+        }
+        matrix_view->finalizeAssembly();
+    }
+
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    oss << "NewtonSolver: active pressure graph completion"
+        << " diagnostic=active_pressure_graph_completion"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " backend=" << backends::backendKindToString(matrix.backendKind())
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " pressure_field='" << summary.pressure_field << "'"
+        << " coupling_field='" << summary.coupling_field << "'"
+        << " mode='" << effective_mode << "'"
+        << " requested_mode='" << requested_mode << "'"
+        << " coupling_threshold=" << coupling_threshold
+        << " self_threshold=" << self_threshold
+        << " max_rows=" << max_rows
+        << " max_rows_applied=" << (all_pressure_schur_candidate_mode ? 0 : 1)
+        << " candidate_selector='" << candidate_selector << "'"
+        << " support_rank_candidate_row_count="
+        << summary.clamp_candidate_row_global_dofs.size()
+        << " max_active_neighbors="
+        << activePressureGraphCompletionMaxActiveNeighbors()
+        << " pressure_neighbor_depth="
+        << ((pressure_neighborhood_schur_candidate_mode ||
+             shared_row_schur_explicit_neighborhood_edge_balance_mode ||
+             shared_row_schur_support_gap_local_patch_candidate_mode)
+                ? activePressureGraphCompletionPressureNeighborDepth()
+                : 0)
+        << " candidate_row_count=" << candidates.size()
+        << " zero_coupling_candidate_count="
+        << zero_coupling_candidate_count
+        << " weak_coupling_candidate_count="
+        << weak_coupling_candidate_count
+        << " zero_self_candidate_count=" << zero_self_candidate_count
+        << " weak_self_candidate_count=" << weak_self_candidate_count
+        << " weak_coupling_and_self_candidate_count="
+        << weak_coupling_and_self_candidate_count
+        << " coupling_deficient_balance_candidate_count="
+        << coupling_deficient_balance_candidate_count
+        << " support_gap_candidate_count="
+        << support_gap_candidate_global_dofs.size()
+        << " support_gap_patch_candidate_count="
+        << support_gap_patch_candidate_global_dofs.size()
+        << " support_gap_self_threshold="
+        << support_gap_self_threshold
+        << " support_gap_self_threshold_source='"
+        << support_gap_self_threshold_source << "'"
+        << " support_gap_patch_truncated="
+        << support_gap_patch_truncated
+        << " low_degree_balance_candidate_count="
+        << low_degree_balance_candidate_count
+        << " explicit_balance_candidate_count="
+        << explicit_balance_candidate_count
+        << " balance_candidate_row_count="
+        << balance_candidate_row_count
+        << " coupling_deficient_balance_candidate_global_dofs="
+        << formatGlobalIndexListSample(
+               coupling_deficient_balance_candidate_global_dofs)
+        << " support_gap_candidate_global_dofs="
+        << formatGlobalIndexListSample(support_gap_candidate_global_dofs)
+        << " support_gap_patch_candidate_global_dofs="
+        << formatGlobalIndexListSample(support_gap_patch_candidate_global_dofs)
+        << " low_degree_balance_candidate_global_dofs="
+        << formatGlobalIndexListSample(low_degree_balance_candidate_global_dofs)
+        << " explicit_balance_requested_global_dofs="
+        << formatGlobalIndexListSample(explicit_balance_requested_global_dofs)
+        << " explicit_balance_candidate_global_dofs="
+        << formatGlobalIndexListSample(explicit_balance_candidate_global_dofs)
+        << " balance_candidate_global_dofs="
+        << formatGlobalIndexListSample(balance_candidate_global_dofs)
+        << " max_balance_pressure_edge_degree="
+        << max_balance_pressure_edge_degree
+        << " min_candidate_pressure_edge_degree="
+        << min_candidate_pressure_edge_degree
+        << " max_candidate_pressure_edge_degree="
+        << max_candidate_pressure_edge_degree
+        << " neighbor_row_count=" << neighbor_dofs.size()
+        << " edge_count=" << edge_count
+        << " edge_weight=" << edge_weight
+        << " edge_weight_rule='" << edge_weight_rule << "'"
+        << " neighbor_policy='" << neighbor_policy << "'"
+        << " weight_scale=" << activePressureGraphCompletionWeightScale()
+        << " max_edge_scale_cap=" << activePressureGraphCompletionMaxEdgeScale()
+        << " min_positive_candidate_diag_abs="
+        << (std::isfinite(min_positive_diag_abs) ? min_positive_diag_abs : 0.0)
+        << " target_self_row_abs_sum=" << target_self_row_abs_sum
+        << " min_completion_edge_weight="
+        << (std::isfinite(min_completion_edge_weight)
+                ? min_completion_edge_weight
+                : 0.0)
+        << " max_completion_edge_weight=" << max_completion_edge_weight
+        << " min_completion_edge_scale="
+        << (std::isfinite(min_completion_edge_scale)
+                ? min_completion_edge_scale
+                : 0.0)
+        << " max_completion_edge_scale=" << max_completion_edge_scale
+        << " non_laplacian_existing_edge_count="
+        << non_laplacian_existing_edge_count
+        << " candidate_with_existing_pressure_edge_count="
+        << candidate_with_existing_pressure_edge_count
+        << " candidate_with_laplacian_pressure_edge_count="
+        << candidate_with_laplacian_pressure_edge_count
+        << " candidate_with_non_laplacian_only_pressure_edge_count="
+        << candidate_with_non_laplacian_only_pressure_edge_count
+        << " shared_row_schur_hub_count="
+        << shared_row_schur_hub_count
+        << " shared_row_schur_candidate_edge_count="
+        << shared_row_schur_candidate_edge_count
+        << " shared_row_schur_contribution_count="
+        << shared_row_schur_contribution_count
+        << " shared_row_schur_edge_count="
+        << shared_row_schur_edge_count
+        << " existing_balance_edge_count="
+        << existing_balance_edge_count
+        << " applied=" << (edge_count > 0 ? 1 : 0)
+        << " candidate_global_dofs="
+        << formatGlobalIndexListSample(candidates)
+        << " neighbor_global_dofs="
+        << formatGlobalIndexListSample(neighbor_dofs);
+    FE_LOG_INFO(oss.str());
+}
+
+void logActivePressureUpdateSupportDiagnostic(
+    const systems::FESystem& sys,
+    const backends::GenericMatrix& matrix,
+    backends::GenericVector& update,
+    backends::GenericVector& rhs,
+    std::span<const GlobalIndex> constrained_dofs,
+    std::string_view phase,
+    int iteration,
+    double solve_time,
+    double dt)
+{
+    if (!activePressureUpdateSupportDiagnosticRequested()) {
+        return;
+    }
+
+    const auto& pressure_field = activePressureSupportRankPressureFieldName();
+    const auto& coupling_field = activePressureSupportRankCouplingFieldName();
+    const double tolerance = activePressureSupportRankTolerance();
+    const double weak_coupling_threshold =
+        activePressureUpdateSupportWeakVelocityThreshold();
+    const double weak_self_threshold =
+        activePressureUpdateSupportWeakSelfThreshold();
+    const int sample_limit = activePressureUpdateSupportSampleLimit();
+    const int action_sample_limit =
+        activePressureUpdateSupportActionSampleLimit();
+    const auto summary = scanActivePressureUpdateSupport(
+        sys,
+        matrix,
+        update,
+        rhs,
+        constrained_dofs,
+        pressure_field,
+        coupling_field,
+        tolerance,
+        weak_coupling_threshold,
+        weak_self_threshold,
+        sample_limit,
+        action_sample_limit);
+
+    std::ostringstream oss;
+    oss << std::setprecision(17);
+    oss << "NewtonSolver: active pressure update support diagnostic"
+        << " diagnostic=active_pressure_update_support"
+        << " rank=" << mpiRank()
+        << " iteration=" << iteration
+        << " phase='" << phase << "'"
+        << " backend=" << backends::backendKindToString(matrix.backendKind())
+        << " solve_time=" << solve_time
+        << " dt=" << dt
+        << " pressure_field='" << summary.pressure_field << "'"
+        << " coupling_field='" << summary.coupling_field << "'"
+        << " pressure_offset=" << summary.pressure_offset
+        << " pressure_dofs=" << summary.pressure_dofs
+        << " coupling_offset=" << summary.coupling_offset
+        << " coupling_dofs=" << summary.coupling_dofs
+        << " constrained_pressure_rows=" << summary.constrained_pressure_rows
+        << " unconstrained_pressure_rows=" << summary.unconstrained_pressure_rows
+        << " tolerance=" << tolerance
+        << " weak_coupling_threshold=" << weak_coupling_threshold
+        << " weak_self_threshold=" << weak_self_threshold
+        << " action_sample_limit=" << action_sample_limit
+        << " same_sign_pressure_action_top_edge_count="
+        << summary.same_sign_pressure_action_top_edge_count
+        << " same_sign_pressure_action_component_count="
+        << summary.same_sign_pressure_action_component_count
+        << " same_sign_pressure_action_largest_component_size="
+        << summary.same_sign_pressure_action_largest_component_size
+        << " same_sign_pressure_action_covered_top_update_count="
+        << summary.same_sign_pressure_action_covered_top_update_count
+        << " same_sign_pressure_action_isolated_top_update_count="
+        << summary.same_sign_pressure_action_isolated_top_update_count
+        << " same_sign_pressure_action_largest_component_has_max_update="
+        << summary.same_sign_pressure_action_largest_component_has_max_update
+        << " same_sign_pressure_action_covered_global_dofs="
+        << formatGlobalIndexListSample(
+               summary.same_sign_pressure_action_covered_global_dofs,
+               /*limit=*/24)
+        << " same_sign_pressure_action_isolated_global_dofs="
+        << formatGlobalIndexListSample(
+               summary.same_sign_pressure_action_isolated_global_dofs,
+               /*limit=*/24)
+        << " same_sign_pressure_action_largest_component_global_dofs="
+        << formatGlobalIndexListSample(
+               summary.same_sign_pressure_action_largest_component_global_dofs,
+               /*limit=*/24)
+        << " zero_coupling_row_block_count="
+        << summary.zero_coupling_row_block_count
+        << " weak_coupling_row_block_count="
+        << summary.weak_coupling_row_block_count
+        << " positive_coupling_row_block_count="
+        << summary.positive_coupling_row_block_count
+        << " zero_self_row_block_count=" << summary.zero_self_row_block_count
+        << " weak_self_row_block_count=" << summary.weak_self_row_block_count
+        << " positive_self_row_block_count="
+        << summary.positive_self_row_block_count
+        << " max_abs_update=" << summary.max_abs_update
+        << " max_update_local_dof=" << summary.max_update_local_dof
+        << " max_update_global_dof=" << summary.max_update_global_dof
+        << " max_update_rhs=" << summary.max_update_rhs
+        << " max_update_row_action=" << summary.max_update_row_action
+        << " max_update_row_coupling_action="
+        << summary.max_update_row_coupling_action
+        << " max_update_row_self_action="
+        << summary.max_update_row_self_action
+        << " max_update_row_self_constant_action="
+        << summary.max_update_row_self_constant_action
+        << " max_update_row_self_nonconstant_action="
+        << summary.max_update_row_self_nonconstant_action
+        << " max_update_row_other_action="
+        << summary.max_update_row_other_action
+        << " max_update_row_linear_residual="
+        << summary.max_update_row_linear_residual
+        << " zero_coupling_max_abs_update="
+        << summary.zero_coupling_max_abs_update
+        << " weak_coupling_max_abs_update="
+        << summary.weak_coupling_max_abs_update
+        << " positive_coupling_max_abs_update="
+        << summary.positive_coupling_max_abs_update
+        << " zero_self_max_abs_update=" << summary.zero_self_max_abs_update
+        << " weak_self_max_abs_update=" << summary.weak_self_max_abs_update
+        << " positive_self_max_abs_update="
+        << summary.positive_self_max_abs_update
+        << " top_update_details="
+        << formatActivePressureUpdateSupportRowDetails(
+               summary.top_update_samples);
     FE_LOG_INFO(oss.str());
 }
 
@@ -3843,6 +9871,15 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
         const auto& pattern = system.sparsity(options_.jacobian_op);
         workspace.jacobian = factory.createMatrix(pattern);
     }
+    workspace.diagnostic_jacobian_scratch.reset();
+    if (pressureRowContributionMatrixDiagnosticEnabled()) {
+        if (dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen) {
+            workspace.diagnostic_jacobian_scratch = factory.createMatrix(*dist);
+        } else {
+            const auto& pattern = system.sparsity(options_.jacobian_op);
+            workspace.diagnostic_jacobian_scratch = factory.createMatrix(pattern);
+        }
+    }
     workspace.residual = factory.createVector(n_dofs);
     workspace.delta = factory.createVector(n_dofs);
     workspace.u_backup = factory.createVector(n_dofs);
@@ -3859,6 +9896,10 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     FE_CHECK_NOT_NULL(workspace.residual_scratch.get(), "NewtonSolver workspace.residual_scratch");
     FE_CHECK_NOT_NULL(workspace.residual_base.get(), "NewtonSolver workspace.residual_base");
     FE_CHECK_NOT_NULL(workspace.residual_minus.get(), "NewtonSolver workspace.residual_minus");
+    if (pressureRowContributionMatrixDiagnosticEnabled()) {
+        FE_CHECK_NOT_NULL(workspace.diagnostic_jacobian_scratch.get(),
+                          "NewtonSolver workspace.diagnostic_jacobian_scratch");
+    }
 
     if (options_.pseudo_transient.enabled) {
         workspace.ptc_mass_lumped = factory.createVector(n_dofs);
@@ -3892,6 +9933,8 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
             << " ndofs=" << n_dofs << " jacobian_op='" << options_.jacobian_op << "'"
             << " residual_op='" << options_.residual_op << "'"
             << " dist_sparsity=" << ((dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen) ? "yes" : "no")
+            << " diagnostic_jacobian_scratch="
+            << (workspace.diagnostic_jacobian_scratch != nullptr ? "yes" : "no")
             << " dt_field_dofs=" << workspace.dt_field_dofs.size();
         traceLog(oss.str());
     }
@@ -3914,6 +9957,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
     auto& residual_scratch = *workspace.residual_scratch;
     auto& residual_base = *workspace.residual_base;
     auto& residual_minus = *workspace.residual_minus;
+    auto* diagnostic_jacobian_scratch =
+        workspace.diagnostic_jacobian_scratch.get();
 
     NewtonReport report;
 
@@ -4293,6 +10338,143 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             FE_LOG_INFO(oss.str());
         };
 
+    auto assemblePressureRowContributionDiagnostics =
+        [&](const systems::SystemStateView& state,
+            const char* phase,
+            StateSyncPoint sync_point) {
+            if (!pressureRowContributionDiagnosticEnabled()) {
+                return;
+            }
+            const char* ops[] = {
+                "equations_diagnostic_ns_galerkin_continuity",
+                "equations_diagnostic_ns_active_continuity",
+                "equations_diagnostic_ns_vms_pspg",
+                "equations_diagnostic_ns_vms_pspg_pressure_gradient",
+                "equations_diagnostic_ns_vms_pspg_nonpressure",
+                "equations_diagnostic_ns_vms_pspg_boundary_pressure_gradient",
+                "equations_diagnostic_ns_vms_pspg_boundary_pressure_flux",
+                "equations_diagnostic_ns_vms_pspg_boundary_tangential_pressure_gradient",
+                "equations_diagnostic_ns_vms_pspg_boundary_tangential_momentum_residual",
+                "equations_diagnostic_ns_pressure_ghost_penalty",
+                "equations_diagnostic_ns_free_surface_pressure_reference_probe",
+                "equations_diagnostic_ns_free_surface_tangential_pressure_gradient_probe",
+            };
+            for (const char* op : ops) {
+                if (!transient.system().hasOperator(op)) {
+                    if (mpiRank() == 0) {
+                        std::ostringstream skipped;
+                        skipped
+                            << "NewtonSolver: pressure row contribution diagnostic skipped"
+                            << " diagnostic=pressure_row_contribution_skipped"
+                            << " reason=operator_not_installed"
+                            << " op='" << op << "'"
+                            << " phase='" << (phase != nullptr ? phase : "unknown") << "'"
+                            << " sync_point=" << stateSyncPointName(sync_point);
+                        FE_LOG_INFO(skipped.str());
+                    }
+                    continue;
+                }
+
+                residual_scratch.zero();
+                auto scratch_view = residual_scratch.createAssemblyView();
+                FE_CHECK_NOT_NULL(
+                    scratch_view.get(),
+                    "NewtonSolver: pressure row contribution diagnostic view");
+                std::unique_ptr<assembly::GlobalSystemView> matrix_scratch_view;
+                const bool want_matrix_diagnostic =
+                    pressureRowContributionMatrixDiagnosticEnabled() &&
+                    diagnostic_jacobian_scratch != nullptr;
+                if (want_matrix_diagnostic) {
+                    matrix_scratch_view =
+                        diagnostic_jacobian_scratch->createAssemblyView();
+                    FE_CHECK_NOT_NULL(
+                        matrix_scratch_view.get(),
+                        "NewtonSolver: pressure row contribution matrix diagnostic view");
+                }
+                transient.system().beginTimeStep(
+                    /*reset_auxiliary_state=*/false,
+                    /*invalidate_auxiliary_inputs=*/false);
+                systems::AssemblyRequest req;
+                req.op = op;
+                req.want_matrix = want_matrix_diagnostic;
+                req.want_vector = true;
+                req.suppress_constraint_inhomogeneity = true;
+                req.is_nonlinear_iteration = true;
+                const auto ar =
+                    transient.assemble(req,
+                                       state,
+                                       matrix_scratch_view.get(),
+                                       scratch_view.get());
+                logNewtonAssemblyDiagnostic(
+                    "pressure_row_contribution",
+                    sync_point,
+                    req,
+                    ar);
+                FE_THROW_IF(
+                    !ar.success,
+                    FEException,
+                    "NewtonSolver: pressure row contribution diagnostic assembly failed for op '" +
+                        std::string(op) + "': " + ar.error_message);
+
+                if (want_matrix_diagnostic) {
+                    const std::string matrix_phase =
+                        std::string("pressure_row_contribution_matrix:") +
+                        (phase != nullptr ? phase : "unknown");
+                    logPressureRowOperatorMatrixSupportDiagnostic(
+                        transient.system(),
+                        *diagnostic_jacobian_scratch,
+                        matrix_phase,
+                        op,
+                        current_newton_iteration,
+                        solve_time,
+                        base_state.dt);
+                    logPressureRowOperatorMatrixSummaryDiagnostic(
+                        transient.system(),
+                        *diagnostic_jacobian_scratch,
+                        constrained_dofs,
+                        matrix_phase,
+                        op,
+                        current_newton_iteration,
+                        solve_time,
+                        base_state.dt);
+                    logDirectPspgFormulationCandidateDiagnostic(
+                        transient.system(),
+                        *diagnostic_jacobian_scratch,
+                        residual_scratch,
+                        constrained_dofs,
+                        matrix_phase,
+                        op,
+                        current_newton_iteration,
+                        solve_time,
+                        base_state.dt);
+                }
+
+                const std::string pre_phase =
+                    std::string("pressure_row_contribution_pre_constraints:") + op;
+                logNewtonFieldResidualDiagnostic(
+                    transient.system(),
+                    residual_scratch,
+                    pre_phase,
+                    sync_point,
+                    current_newton_iteration,
+                    solve_time,
+                    base_state.dt);
+
+                zeroVectorEntries(constrained_dofs, residual_scratch);
+
+                const std::string post_phase =
+                    std::string("pressure_row_contribution_post_constraints:") + op;
+                logNewtonFieldResidualDiagnostic(
+                    transient.system(),
+                    residual_scratch,
+                    post_phase,
+                    sync_point,
+                    current_newton_iteration,
+                    solve_time,
+                    base_state.dt);
+            }
+        };
+
     auto assembleResidualOnly = [&](const systems::SystemStateView& state,
                                     const char* phase,
                                     StateSyncPoint sync_point = StateSyncPoint::ResidualAssembly) -> double {
@@ -4343,6 +10525,16 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         traceResidualDebugState("residual_pre_constraints");
         applyResidualAdditionAndConstraints();
         traceResidualDebugState("residual_post_constraints");
+        logNewtonFieldResidualDiagnostic(
+            transient.system(),
+            r,
+            phase != nullptr ? std::string_view(phase)
+                             : std::string_view("residual"),
+            sync_point,
+            current_newton_iteration,
+            solve_time,
+            base_state.dt);
+        assemblePressureRowContributionDiagnostics(state, phase, sync_point);
         traceResidualComponents(phase);
         return refreshResidualComponents();
     };
@@ -4426,6 +10618,18 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         traceResidualDebugState("jacobian_and_residual_pre_constraints");
         applyResidualAdditionAndConstraints();
         traceResidualDebugState("jacobian_and_residual_post_constraints");
+        logNewtonFieldResidualDiagnostic(
+            transient.system(),
+            r,
+            std::string_view("jacobian_and_residual"),
+            StateSyncPoint::JacobianAndResidualAssembly,
+            current_newton_iteration,
+            solve_time,
+            base_state.dt);
+        assemblePressureRowContributionDiagnostics(
+            state,
+            "jacobian_and_residual",
+            StateSyncPoint::JacobianAndResidualAssembly);
         traceResidualComponents("jacobian_and_residual");
         return refreshResidualComponents();
     };
@@ -4481,6 +10685,18 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
 
         residual_op_used = options_.jacobian_op;
         applyResidualAdditionAndConstraints();
+        logNewtonFieldResidualDiagnostic(
+            transient.system(),
+            r,
+            std::string_view("jacobian_op_combined"),
+            StateSyncPoint::JacobianAndResidualAssembly,
+            current_newton_iteration,
+            solve_time,
+            base_state.dt);
+        assemblePressureRowContributionDiagnostics(
+            state,
+            "jacobian_op_combined",
+            StateSyncPoint::JacobianAndResidualAssembly);
         return refreshResidualComponents();
     };
 
@@ -5891,6 +12107,7 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         bool linear_probe_dumped = false;
         bool first_linear_vector_dumped = false;
         int primary_linear_solve_call_index = 0;
+        backends::GenericVector* accepted_linear_rhs = &r;
         while (true) {
             SolverOptionsGuard bordered_solver_options_guard{linear, base_linear_options};
             if (needs_strict_coupled_solve_options) {
@@ -6002,6 +12219,43 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
                              "full report logging deferred to keep collectives rank-symmetric.");
                 }
             }
+            logNewtonMatrixSupportDiagnostic(transient.system(),
+                                             J,
+                                             std::span<const GlobalIndex>(
+                                                 constrained_dofs.data(),
+                                                 constrained_dofs.size()),
+                                             std::string_view("pre_linear_solve"),
+                                             it,
+                                             solve_time,
+                                             base_state.dt);
+            logActivePressureSupportRankDiagnostic(
+                transient.system(),
+                J,
+                std::span<const GlobalIndex>(constrained_dofs.data(),
+                                             constrained_dofs.size()),
+                std::string_view("pre_linear_solve"),
+                it,
+                solve_time,
+                base_state.dt);
+            applyActivePressureSupportRankClamp(
+                transient.system(),
+                J,
+                *linear_rhs,
+                std::span<const GlobalIndex>(constrained_dofs.data(),
+                                             constrained_dofs.size()),
+                std::string_view("pre_linear_solve"),
+                it,
+                solve_time,
+                base_state.dt);
+            applyActivePressureGraphCompletion(
+                transient.system(),
+                J,
+                std::span<const GlobalIndex>(constrained_dofs.data(),
+                                             constrained_dofs.size()),
+                std::string_view("pre_linear_solve"),
+                it,
+                solve_time,
+                base_state.dt);
             if (oopTraceEnabled()) {
                 traceLog("NewtonSolver: calling linear.solve()");
             }
@@ -6152,6 +12406,8 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             ntp_linear += NTP() - ntp0;
             log_linear_solve_memory("after_linear_solve");
             ntp_linear_iters_total += report.linear.iterations;
+            copyVector(residual_minus, *linear_rhs);
+            accepted_linear_rhs = &residual_minus;
             std::optional<std::vector<Real>> first_linear_dense_rhs;
             std::optional<std::vector<Real>> first_linear_dense_du_raw;
             if (!first_linear_vector_dumped && it == 0 && ptc_retries == 0) {
@@ -6989,7 +13245,31 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
             }
         };
 
+        logActivePressureUpdateSupportDiagnostic(
+            transient.system(),
+            J,
+            du,
+            *accepted_linear_rhs,
+            std::span<const GlobalIndex>(constrained_dofs.data(),
+                                         constrained_dofs.size()),
+            std::string_view("post_linear_solve_raw_update"),
+            it,
+            solve_time,
+            base_state.dt);
+
         applyDtIncrementScaling();
+
+        logActivePressureUpdateSupportDiagnostic(
+            transient.system(),
+            J,
+            du,
+            *accepted_linear_rhs,
+            std::span<const GlobalIndex>(constrained_dofs.data(),
+                                         constrained_dofs.size()),
+            std::string_view("post_linear_solve_update"),
+            it,
+            solve_time,
+            base_state.dt);
 
         if (oopTraceEnabled()) {
             logVectorComponentNorms(transient.system(), du, "du");

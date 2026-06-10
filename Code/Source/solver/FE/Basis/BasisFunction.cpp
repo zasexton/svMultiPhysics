@@ -18,6 +18,33 @@ namespace basis {
 
 namespace {
 
+struct BasisFunctionScratch {
+    std::vector<Real> scalar_values;
+    std::vector<Gradient> scalar_gradients;
+    std::vector<Hessian> scalar_hessians;
+    std::vector<math::Vector<Real, 3>> vector_values;
+    std::vector<VectorJacobian> vector_jacobians;
+    std::vector<math::Vector<Real, 3>> vector_curls;
+    std::vector<Real> vector_divergences;
+
+    void prewarm(std::size_t max_size) {
+        scalar_values.reserve(max_size);
+        scalar_gradients.reserve(max_size);
+        scalar_hessians.reserve(max_size);
+        vector_values.reserve(max_size);
+        vector_jacobians.reserve(max_size);
+        vector_curls.reserve(max_size);
+        vector_divergences.reserve(max_size);
+    }
+};
+
+BasisFunctionScratch& basis_function_scratch() {
+    // Scratch is intentionally thread-local: production assembly uses a
+    // persistent worker-thread team, so buffers stay warm on each worker.
+    static thread_local BasisFunctionScratch scratch;
+    return scratch;
+}
+
 void mix_identity_hash_word(std::uint64_t word,
                             std::uint64_t& hash_a,
                             std::uint64_t& hash_b) noexcept {
@@ -63,6 +90,12 @@ bool BasisFunction::cache_identity_fingerprint(std::uint64_t& hash_a,
     return false;
 }
 
+void prewarm_basis_function_scratch(std::size_t max_size,
+                                    std::size_t max_qpts) {
+    (void)max_qpts;
+    basis_function_scratch().prewarm(max_size);
+}
+
 void BasisFunction::evaluate_gradients(const math::Vector<Real, 3>& xi,
                                        std::vector<Gradient>& gradients) const {
     (void)xi;
@@ -90,7 +123,7 @@ void BasisFunction::evaluate_all(const math::Vector<Real, 3>& xi,
 
 void BasisFunction::evaluate_values_to(const math::Vector<Real, 3>& xi,
                                        Real* SVMP_RESTRICT values_out) const {
-    static thread_local std::vector<Real> tmp;
+    auto& tmp = basis_function_scratch().scalar_values;
     tmp.resize(size());
     evaluate_values(xi, tmp);
     std::copy_n(tmp.data(), tmp.size(), values_out);
@@ -98,7 +131,7 @@ void BasisFunction::evaluate_values_to(const math::Vector<Real, 3>& xi,
 
 void BasisFunction::evaluate_gradients_to(const math::Vector<Real, 3>& xi,
                                           Real* SVMP_RESTRICT gradients_out) const {
-    static thread_local std::vector<Gradient> tmp;
+    auto& tmp = basis_function_scratch().scalar_gradients;
     tmp.resize(size());
     evaluate_gradients(xi, tmp);
     for (std::size_t i = 0; i < tmp.size(); ++i) {
@@ -110,7 +143,7 @@ void BasisFunction::evaluate_gradients_to(const math::Vector<Real, 3>& xi,
 
 void BasisFunction::evaluate_hessians_to(const math::Vector<Real, 3>& xi,
                                          Real* SVMP_RESTRICT hessians_out) const {
-    static thread_local std::vector<Hessian> tmp;
+    auto& tmp = basis_function_scratch().scalar_hessians;
     tmp.resize(size());
     evaluate_hessians(xi, tmp);
     for (std::size_t i = 0; i < tmp.size(); ++i) {
@@ -141,9 +174,10 @@ void BasisFunction::evaluate_at_quadrature_points_strided(
             __FILE__, __LINE__, __func__);
     }
 
-    static thread_local std::vector<Real> v_tmp;
-    static thread_local std::vector<Gradient> g_tmp;
-    static thread_local std::vector<Hessian> h_tmp;
+    auto& scratch = basis_function_scratch();
+    auto& v_tmp = scratch.scalar_values;
+    auto& g_tmp = scratch.scalar_gradients;
+    auto& h_tmp = scratch.scalar_hessians;
     if (values_out) v_tmp.resize(num_dofs);
     if (gradients_out) g_tmp.resize(num_dofs);
     if (hessians_out) h_tmp.resize(num_dofs);
@@ -211,10 +245,11 @@ void BasisFunction::evaluate_vector_at_quadrature_points_strided(
     detail::vector_common::validate_vector_strided_outputs(
         num_qpts, output_stride, "BasisFunction");
 
-    static thread_local std::vector<math::Vector<Real, 3>> v_tmp;
-    static thread_local std::vector<VectorJacobian> j_tmp;
-    static thread_local std::vector<math::Vector<Real, 3>> c_tmp;
-    static thread_local std::vector<Real> d_tmp;
+    auto& scratch = basis_function_scratch();
+    auto& v_tmp = scratch.vector_values;
+    auto& j_tmp = scratch.vector_jacobians;
+    auto& c_tmp = scratch.vector_curls;
+    auto& d_tmp = scratch.vector_divergences;
     if (values_out) v_tmp.resize(num_dofs);
     if (jacobians_out) j_tmp.resize(num_dofs);
     if (curls_out) c_tmp.resize(num_dofs);

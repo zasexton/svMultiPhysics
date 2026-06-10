@@ -44,6 +44,9 @@ struct BasisIdentityFingerprint {
 [[nodiscard]] BasisIdentityFingerprint
 compute_basis_identity_fingerprint(std::span<const std::uint64_t> words) noexcept;
 
+void prewarm_basis_function_scratch(std::size_t max_size,
+                                    std::size_t max_qpts = 0);
+
 [[nodiscard]] inline Hessian make_symmetric_hessian(Real xx,
                                                     Real yy,
                                                     Real zz,

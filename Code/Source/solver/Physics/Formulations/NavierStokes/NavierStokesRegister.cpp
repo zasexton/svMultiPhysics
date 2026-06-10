@@ -1318,11 +1318,28 @@ void apply_fluid_moving_domain_options(
 
 std::vector<int> parse_int_list(std::string_view raw)
 {
-  std::istringstream iss{std::string(raw)};
+  std::string normalized;
+  normalized.reserve(raw.size());
+  for (const char ch : raw) {
+    const auto uch = static_cast<unsigned char>(ch);
+    normalized.push_back(
+        (std::isdigit(uch) || ch == '-' || ch == '+') ? ch : ' ');
+  }
+
+  std::istringstream iss{normalized};
   std::vector<int> out;
   int v = 0;
   while (iss >> v) {
     out.push_back(v);
+  }
+  return out;
+}
+
+std::array<bool, 3> active_components_from_flags(const std::array<int, 3>& active, int dim)
+{
+  std::array<bool, 3> out{true, true, true};
+  for (int d = 0; d < 3; ++d) {
+    out[static_cast<std::size_t>(d)] = (d < dim) ? (active[static_cast<std::size_t>(d)] != 0) : false;
   }
   return out;
 }
@@ -2158,6 +2175,10 @@ parse_free_surface_pressure_stabilization_policy(std::string_view raw,
       token == "on" || token == "true") {
     return FreeSurfacePressureStabilizationPolicy::Enabled;
   }
+  if (token == "incremental" || token == "pressureincrement" ||
+      token == "incrementalpressure" || token == "incrementalenabled") {
+    return FreeSurfacePressureStabilizationPolicy::Incremental;
+  }
   if (token == "disabled" || token == "disable" ||
       token == "off" || token == "false") {
     return FreeSurfacePressureStabilizationPolicy::Disabled;
@@ -2171,7 +2192,7 @@ parse_free_surface_pressure_stabilization_policy(std::string_view raw,
   }
   throw std::runtime_error(
       "[svMultiPhysics::Physics] " + std::string(context) +
-      " must be one of Enabled, Disabled, or DisabledForRefreshedFrozenHighOrder.");
+      " must be one of Enabled, Incremental, Disabled, or DisabledForRefreshedFrozenHighOrder.");
 }
 
 std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
@@ -2241,6 +2262,93 @@ std::optional<int> first_defined_int(const svmp::Physics::ParameterMap& params,
     }
   }
   return std::nullopt;
+}
+
+void apply_fluid_rotating_frame_coriolis(
+    const svmp::Physics::EquationModuleInput& input,
+    const svmp::Physics::DomainInput& domain,
+    int dim,
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
+{
+  using Options = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
+
+  const auto enabled = first_defined_bool(
+      input.equation_params,
+      {"Rotating_frame_coriolis", "RotatingFrameCoriolis",
+       "Enable_rotating_frame_coriolis", "EnableRotatingFrameCoriolis"})
+      .value_or(first_defined_bool(
+          domain.params,
+          {"Rotating_frame_coriolis", "RotatingFrameCoriolis",
+           "Enable_rotating_frame_coriolis", "EnableRotatingFrameCoriolis"})
+          .value_or(false));
+
+  const auto equation_omega = first_defined_string(
+      input.equation_params,
+      {"Rotating_frame_angular_velocity", "RotatingFrameAngularVelocity",
+       "Angular_velocity", "AngularVelocity"});
+  const auto domain_omega = first_defined_string(
+      domain.params,
+      {"Rotating_frame_angular_velocity", "RotatingFrameAngularVelocity",
+       "Angular_velocity", "AngularVelocity"});
+  const auto equation_omega_file = first_defined_string(
+      input.equation_params,
+      {"Rotating_frame_angular_velocity_temporal_values_file_path",
+       "RotatingFrameAngularVelocityTemporalValuesFilePath",
+       "Angular_velocity_temporal_values_file_path",
+       "AngularVelocityTemporalValuesFilePath"});
+  const auto domain_omega_file = first_defined_string(
+      domain.params,
+      {"Rotating_frame_angular_velocity_temporal_values_file_path",
+       "RotatingFrameAngularVelocityTemporalValuesFilePath",
+       "Angular_velocity_temporal_values_file_path",
+       "AngularVelocityTemporalValuesFilePath"});
+
+  if (equation_omega && equation_omega_file) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Specify either Rotating_frame_angular_velocity or "
+        "Rotating_frame_angular_velocity_temporal_values_file_path, not both.");
+  }
+  if (domain_omega && domain_omega_file) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Specify either Rotating_frame_angular_velocity or "
+        "Rotating_frame_angular_velocity_temporal_values_file_path in a domain, not both.");
+  }
+
+  const bool equation_has_omega = equation_omega || equation_omega_file;
+  const auto omega = equation_omega ? equation_omega : (!equation_has_omega ? domain_omega : std::nullopt);
+  const auto omega_file =
+      equation_omega_file ? equation_omega_file : (!equation_has_omega ? domain_omega_file : std::nullopt);
+
+  if (!enabled && !omega && !omega_file) {
+    return;
+  }
+  if (dim != 3) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Physics] Rotating-frame Coriolis forcing requires a 3D Navier-Stokes mesh.");
+  }
+
+  options.rotating_frame_coriolis_enabled = true;
+  if (omega) {
+    const auto parsed = parse_real_vector3(*omega, "Rotating_frame_angular_velocity");
+    for (std::size_t d = 0; d < parsed.size(); ++d) {
+      options.rotating_frame_angular_velocity[d] = Options::ScalarValue{parsed[d]};
+    }
+  }
+  if (omega_file) {
+    auto temporal = svmp::Physics::readTemporalValuesFile(
+        *omega_file, /*num_components=*/3, svmp::Physics::TemporalEndBehavior::Clamp);
+    for (int d = 0; d < 3; ++d) {
+      const int comp = d;
+      options.rotating_frame_angular_velocity[static_cast<std::size_t>(d)] =
+          svmp::FE::forms::TimeScalarCoefficient(
+              [temporal, comp](svmp::FE::Real /*x*/,
+                               svmp::FE::Real /*y*/,
+                               svmp::FE::Real /*z*/,
+                               svmp::FE::Real t) -> svmp::FE::Real {
+                return temporal->interpolate(t, comp);
+              });
+    }
+  }
 }
 
 void apply_fluid_momentum_source_spacetime_file(
@@ -2963,6 +3071,9 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
 
         IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir_u{};
         dir_u.boundary_marker = bc.boundary_marker;
+        dir_u.active_components = use_normal_u
+                                      ? std::array<bool, 3>{true, true, true}
+                                      : active_components_from_flags(active_u, dim);
 
         for (int d = 0; d < dim; ++d) {
           const int comp = d;
@@ -3017,6 +3128,22 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
       // Common case: no-slip wall (Value=0) and other zero Dirichlet constraints.
       // Avoid expensive global geometry computations (MPI allgathers) when the imposed value is zero.
       if (magnitude == static_cast<svmp::FE::Real>(0.0)) {
+        if (!effective_dir.empty()) {
+          std::array<int, 3> active_zero{0, 0, 0};
+          int active_count_zero = 0;
+          for (int d = 0; d < dim; ++d) {
+            const int flag =
+                (static_cast<std::size_t>(d) < effective_dir.size() &&
+                 effective_dir[static_cast<std::size_t>(d)] != 0)
+                    ? 1
+                    : 0;
+            active_zero[static_cast<std::size_t>(d)] = flag;
+            active_count_zero += flag;
+          }
+          if (active_count_zero > 0 && active_count_zero < dim) {
+            dir.active_components = active_components_from_flags(active_zero, dim);
+          }
+        }
         if (weak) {
           options.velocity_dirichlet_weak.push_back(std::move(dir));
         } else {
@@ -3114,6 +3241,9 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
               return static_cast<svmp::FE::Real>(ctx->componentValue(comp, p));
             });
       }
+      dir.active_components = use_normal_direction
+                                  ? std::array<bool, 3>{true, true, true}
+                                  : active_components_from_flags(active, dim);
 
       if (weak) {
         options.velocity_dirichlet_weak.push_back(std::move(dir));
@@ -3321,6 +3451,7 @@ create_navier_stokes_from_input(const svmp::Physics::EquationModuleInput& input,
   apply_fluid_momentum_source_params(input.equation_params, options);
   apply_fluid_properties(domain, options);
   apply_fluid_momentum_source_spacetime_file(input, domain, dim, options);
+  apply_fluid_rotating_frame_coriolis(input, domain, dim, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, options);
 

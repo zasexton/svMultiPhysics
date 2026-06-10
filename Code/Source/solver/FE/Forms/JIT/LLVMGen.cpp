@@ -425,6 +425,10 @@ struct ABIV3 {
     static constexpr std::size_t field_entry_history_values_off = offsetof(assembly::jit::FieldSolutionEntryV1, history_values);
     static constexpr std::size_t field_entry_history_vector_values_xyz_off =
         offsetof(assembly::jit::FieldSolutionEntryV1, history_vector_values_xyz);
+    static constexpr std::size_t field_entry_history_gradients_xyz_off =
+        offsetof(assembly::jit::FieldSolutionEntryV1, history_gradients_xyz);
+    static constexpr std::size_t field_entry_history_jacobians_off =
+        offsetof(assembly::jit::FieldSolutionEntryV1, history_jacobians);
 
     // Batch V1
     static constexpr std::size_t batch_size_off = offsetof(assembly::jit::CellKernelBatchArgsV1, batch_size);
@@ -7324,17 +7328,83 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             }
                             throw std::runtime_error("LLVMGen: grad(DiscreteField) unsupported shape");
                         }
-                        if (kid.type == FormExprType::TimeDerivative) {
-                            const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+                        auto gradFromCoeffs = [&](llvm::Value* coeffs,
+                                                   const std::string& loop_base) -> CodeValue {
+                            if (shape.kind == Shape::Kind::Vector) {
+                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                const auto sums =
+                                    emitReduceSum(side.n_trial_dofs, loop_base, dim, [&](llvm::Value* j) {
+                                        auto* j64 = builder.CreateZExt(j, i64);
+                                        auto* cj = loadRealPtrAt(coeffs, j64);
+                                        const auto g =
+                                            loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                        std::vector<llvm::Value*> terms;
+                                        terms.reserve(dim);
+                                        for (std::size_t d = 0; d < dim; ++d) {
+                                            terms.push_back(builder.CreateFMul(cj, g[d]));
+                                        }
+                                        return terms;
+                                    });
+                                auto* x = sums[0];
+                                auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+                                auto* z = (dim > 2u) ? sums[2] : rc(0.0);
+                                return makeVector(static_cast<std::uint32_t>(dim), x, y, z);
+                            }
+                            if (shape.kind == Shape::Kind::Matrix) {
+                                return reduceCurrentGradientMatrix(side, coeffs, q_index, shape, loop_base);
+                            }
+                            throw std::runtime_error("LLVMGen: grad(u) unsupported shape");
+                        };
+
+                        auto gradPreviousSolution = [&](int k, const std::string& loop_base) -> CodeValue {
+                            auto* base_null =
+                                builder.CreateICmpEQ(side.previous_solution_coefficients_base,
+                                                     llvm::ConstantPointerNull::get(i8_ptr));
+                            auto* base_ok = llvm::BasicBlock::Create(*ctx, loop_base + ".base.ok", fn);
+                            auto* ok = llvm::BasicBlock::Create(*ctx, loop_base + ".ok", fn);
+                            auto* zero = llvm::BasicBlock::Create(*ctx, loop_base + ".zero", fn);
+                            auto* merge = llvm::BasicBlock::Create(*ctx, loop_base + ".merge", fn);
+                            builder.CreateCondBr(base_null, zero, base_ok);
+
+                            builder.SetInsertPoint(base_ok);
+                            auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+                            auto* coeffs_null =
+                                builder.CreateICmpEQ(coeffs, llvm::ConstantPointerNull::get(i8_ptr));
+                            builder.CreateCondBr(coeffs_null, zero, ok);
+
+                            builder.SetInsertPoint(ok);
+                            const auto loaded = gradFromCoeffs(coeffs, loop_base);
+                            builder.CreateBr(merge);
+                            auto* ok_block = builder.GetInsertBlock();
+
+                            builder.SetInsertPoint(zero);
+                            builder.CreateBr(merge);
+                            auto* zero_block = builder.GetInsertBlock();
+
+                            builder.SetInsertPoint(merge);
+                            CodeValue out = makeZero(shape);
+                            const auto n_e = elemCount(shape);
+                            for (std::uint32_t e = 0; e < n_e; ++e) {
+                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                              loop_base + "." + std::to_string(e));
+                                phi->addIncoming(rc(0.0), zero_block);
+                                phi->addIncoming(loaded.elems[e], ok_block);
+                                out.elems[e] = phi;
+                            }
+                            return out;
+                        };
+
+                        auto gradTimeDerivative = [&](const KernelIROp& dt_op) -> CodeValue {
+                            const int order = static_cast<int>(static_cast<std::int64_t>(dt_op.imm0));
                             auto* coeff0 = loadDtCoeff0(side, order);
                             const auto dt_child_idx =
-                                term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                                term.ir.children[static_cast<std::size_t>(dt_op.first_child)];
                             const auto& dt_child = term.ir.ops[dt_child_idx];
 
-	                            auto gradTrialBasis = [&]() -> CodeValue {
-	                                CodeValue g = makeZero(shape);
-	                                if (shape.kind == Shape::Kind::Vector) {
-	                                    const auto v = loadScalarPhysicalGradientMaybeBaked(side, false, j_index, q_index);
+                            auto gradTrialBasis = [&]() -> CodeValue {
+                                CodeValue g = makeZero(shape);
+                                if (shape.kind == Shape::Kind::Vector) {
+                                    const auto v = loadScalarPhysicalGradientMaybeBaked(side, false, j_index, q_index);
 	                                    g = makeVector(shape.dims[0], v[0], v[1], v[2]);
 	                                    return g;
 	                                }
@@ -7452,39 +7522,157 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        }
 	                                    }
 	                                    return out;
-	                                }
+                                }
 	                                throw std::runtime_error("LLVMGen: grad(dt(field)) unsupported shape");
-	                            };
+                            };
+
+                            auto gradDiscreteOrStateFieldHistoryK =
+                                [&](int fid, int k, const std::string& tag) -> CodeValue {
+                                auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+                                auto* entry_is_null =
+                                    builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* entry_ok = llvm::BasicBlock::Create(*ctx, tag + ".entry.ok", fn);
+                                auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+                                auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+                                builder.CreateCondBr(entry_is_null, zero, entry_ok);
+
+                                builder.SetInsertPoint(entry_ok);
+                                auto* history_count = loadU32(entry, ABIV3::field_entry_history_count_off);
+                                auto* has_k =
+                                    builder.CreateICmpUGE(history_count,
+                                                          builder.getInt32(static_cast<std::uint32_t>(k)));
+                                auto* k_ok = llvm::BasicBlock::Create(*ctx, tag + ".k.ok", fn);
+                                builder.CreateCondBr(has_k, k_ok, zero);
+
+                                if (shape.kind == Shape::Kind::Vector) {
+                                    const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                    std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+
+                                    builder.SetInsertPoint(k_ok);
+                                    auto* base = loadPtr(entry, ABIV3::field_entry_history_gradients_xyz_off);
+                                    auto* base_is_null =
+                                        builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                    auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                    builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                    builder.SetInsertPoint(base_ok);
+                                    auto* k_minus1 = builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                                    auto* hist_q = builder.CreateAdd(builder.CreateMul(k_minus1, side.n_qpts), q_index);
+                                    loaded = loadVec3FromQ(base, hist_q);
+                                    builder.CreateBr(merge);
+                                    auto* ok_block = builder.GetInsertBlock();
+
+                                    builder.SetInsertPoint(zero);
+                                    builder.CreateBr(merge);
+                                    auto* zero_block = builder.GetInsertBlock();
+
+                                    builder.SetInsertPoint(merge);
+                                    std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                    for (std::size_t d = 0; d < dim; ++d) {
+                                        auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".v");
+                                        phi->addIncoming(rc(0.0), zero_block);
+                                        phi->addIncoming(loaded[d], ok_block);
+                                        outv[d] = phi;
+                                    }
+                                    return makeVector(static_cast<std::uint32_t>(dim), outv[0], outv[1], outv[2]);
+                                }
+
+                                if (shape.kind == Shape::Kind::Matrix) {
+                                    const auto rows = static_cast<std::size_t>(shape.dims[0]);
+                                    const auto cols = static_cast<std::size_t>(shape.dims[1]);
+                                    CodeValue loaded = makeZero(matrixShape(3u, 3u));
+
+                                    builder.SetInsertPoint(k_ok);
+                                    auto* base = loadPtr(entry, ABIV3::field_entry_history_jacobians_off);
+                                    auto* base_is_null =
+                                        builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                    auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                    builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                    builder.SetInsertPoint(base_ok);
+                                    auto* k_minus1 = builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                                    auto* hist_q = builder.CreateAdd(builder.CreateMul(k_minus1, side.n_qpts), q_index);
+                                    loaded = loadMat3FromQ(base, hist_q);
+                                    builder.CreateBr(merge);
+                                    auto* ok_block = builder.GetInsertBlock();
+
+                                    builder.SetInsertPoint(zero);
+                                    builder.CreateBr(merge);
+                                    auto* zero_block = builder.GetInsertBlock();
+
+                                    builder.SetInsertPoint(merge);
+                                    CodeValue out = makeZero(shape);
+                                    for (std::size_t r = 0; r < rows; ++r) {
+                                        for (std::size_t c = 0; c < cols; ++c) {
+                                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".m");
+                                            phi->addIncoming(rc(0.0), zero_block);
+                                            phi->addIncoming(loaded.elems[r * 3u + c], ok_block);
+                                            out.elems[r * cols + c] = phi;
+                                        }
+                                    }
+                                    return out;
+                                }
+
+                                throw std::runtime_error("LLVMGen: grad(dt(field)) history unsupported shape");
+                            };
 
                             if (dt_child.type == FormExprType::TrialFunction) {
-                                const auto g = is_residual ? gradCurrentSolution() : gradTrialBasis();
-                                values[op_idx] = mul(makeScalar(coeff0), g);
-                                break;
+                                if (!is_residual) {
+                                    return mul(makeScalar(coeff0), gradTrialBasis());
+                                }
+                                CodeValue acc = mul(makeScalar(coeff0), gradCurrentSolution());
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  gradPreviousSolution(k, "grad_dt_prev" + std::to_string(k))));
+                                }
+                                return acc;
+                            }
+
+                            if (dt_child.type == FormExprType::StateField) {
+                                const int fid = unpackFieldIdImm1(dt_child.imm1);
+                                if (fid == kCurrentSolutionFid) {
+                                    CodeValue acc = mul(makeScalar(coeff0), gradCurrentSolution());
+                                    for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                        acc = add(acc,
+                                                  mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                      gradPreviousSolution(k, "grad_dt_prev" + std::to_string(k))));
+                                    }
+                                    return acc;
+                                }
                             }
 
                             if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(dt_child.imm1);
-                                const auto g = (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid)
-                                                   ? gradCurrentSolution()
-                                                   : gradDiscreteOrStateField(fid);
-                                values[op_idx] = mul(makeScalar(coeff0), g);
-                                break;
+                                CodeValue acc = mul(makeScalar(coeff0), gradDiscreteOrStateField(fid));
+                                for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                    acc = add(acc,
+                                              mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                  gradDiscreteOrStateFieldHistoryK(
+                                                      fid, k, "grad_dt_field_prev" + std::to_string(k))));
+                                }
+                                return acc;
                             }
-
                             if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
-                                values[op_idx] = makeZero(shape);
-                                break;
+                                return makeZero(shape);
                             }
 
-	                            throw std::runtime_error("LLVMGen: grad(dt(...)) operand not supported");
-	                        }
+                            throw std::runtime_error("LLVMGen: grad(dt(...)) operand not supported");
+                        };
 
-                        // Gradient is linear; handle the common simplified pattern grad(0 * X) -> 0.
+                        if (kid.type == FormExprType::TimeDerivative) {
+                            values[op_idx] = gradTimeDerivative(kid);
+                            break;
+                        }
+
+                        // Gradient is linear for spatially constant scalar factors.
                         if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
                             const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
                             const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
                             const auto& aop = term.ir.ops[a_idx];
                             const auto& bop = term.ir.ops[b_idx];
+                            const auto& ashape = term.shapes[a_idx];
+                            const auto& bshape = term.shapes[b_idx];
 
                             auto isZeroConstant = [](const KernelIROp& op2) -> bool {
                                 if (op2.type != FormExprType::Constant) {
@@ -7496,6 +7684,59 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             if (isZeroConstant(aop) || isZeroConstant(bop)) {
                                 values[op_idx] = makeZero(shape);
+                                break;
+                            }
+
+                            auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
+                                const auto& op2 = term.ir.ops[idx];
+                                if (term.shapes[idx].kind != Shape::Kind::Scalar) {
+                                    return false;
+                                }
+                                switch (op2.type) {
+                                    case FormExprType::TypedZero:
+                                    case FormExprType::Constant:
+                                    case FormExprType::ParameterRef:
+                                    case FormExprType::Time:
+                                    case FormExprType::TimeStep:
+                                    case FormExprType::EffectiveTimeStep:
+                                        return true;
+                                    case FormExprType::Negate:
+                                    case FormExprType::AbsoluteValue:
+                                    case FormExprType::Sign:
+                                    case FormExprType::Sqrt:
+                                    case FormExprType::Exp:
+                                    case FormExprType::Log:
+                                    case FormExprType::Add:
+                                    case FormExprType::Subtract:
+                                    case FormExprType::Multiply:
+                                    case FormExprType::Divide:
+                                    case FormExprType::Power:
+                                    case FormExprType::Minimum:
+                                    case FormExprType::Maximum:
+                                        break;
+                                    default:
+                                        return false;
+                                }
+                                for (std::size_t c = 0; c < static_cast<std::size_t>(op2.child_count); ++c) {
+                                    const auto child =
+                                        term.ir.children[static_cast<std::size_t>(op2.first_child) + c];
+                                    if (!self(self, child)) {
+                                        return false;
+                                    }
+                                }
+                                return true;
+                            };
+
+                            if (ashape.kind == Shape::Kind::Scalar &&
+                                isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx) &&
+                                bop.type == FormExprType::TimeDerivative) {
+                                values[op_idx] = mul(values[a_idx], gradTimeDerivative(bop));
+                                break;
+                            }
+                            if (bshape.kind == Shape::Kind::Scalar &&
+                                isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx) &&
+                                aop.type == FormExprType::TimeDerivative) {
+                                values[op_idx] = mul(values[b_idx], gradTimeDerivative(aop));
                                 break;
                             }
                         }
@@ -10177,16 +10418,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            break;
 	                        }
 
-	                        if (kid.type == FormExprType::TimeDerivative) {
-	                            const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
-	                            auto* coeff0 = loadDtCoeff0(side, order);
-	                            const auto dt_child_idx =
-	                                term.ir.children[static_cast<std::size_t>(kid.first_child)];
-	                            const auto& dt_child = term.ir.ops[dt_child_idx];
+                                auto gradTimeDerivative = [&](const KernelIROp& dt_op) -> CodeValue {
+		                            const int order = static_cast<int>(static_cast<std::int64_t>(dt_op.imm0));
+		                            auto* coeff0 = loadDtCoeff0(side, order);
+		                            const auto dt_child_idx =
+		                                term.ir.children[static_cast<std::size_t>(dt_op.first_child)];
+		                            const auto& dt_child = term.ir.ops[dt_child_idx];
 
-	                            auto gradCurrentSolution = [&]() -> CodeValue {
-	                                // Cache pattern 4: grad(dt(current solution)) - cache the
-	                                // underlying gradient (before dt coefficient multiplication)
+		                            auto gradCurrentSolution = [&]() -> CodeValue {
+		                                // Cache pattern 4: grad(dt(current solution)) - cache the
+		                                // underlying gradient (before dt coefficient multiplication)
 	                                if (qp_shared_cache_ptr && qp_cache_trial_group >= 0) {
 	                                    const auto n_e = elemCount(shape);
 	                                    const auto key = makeCacheKey(qp_cache_trial_group,
@@ -10201,27 +10442,276 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        return val;
 	                                    }
 	                                }
-	                                return gradFromCoeffs(side.solution_coefficients, "grad_dt_u");
-	                            };
+		                                return gradFromCoeffs(side.solution_coefficients, "grad_dt_u");
+		                            };
 
-	                            if (dt_child.type == FormExprType::TrialFunction) {
-	                                if (!is_residual) {
-	                                    throw std::runtime_error(
-	                                        "LLVMGen: cached grad(dt(TrialFunction)) only supports residual (current solution)");
-	                                }
-	                                values[op_idx] = mul(makeScalar(coeff0), gradCurrentSolution());
-	                                break;
-	                            }
-	                            if (dt_child.type == FormExprType::StateField) {
-	                                const int fid = unpackFieldIdImm1(dt_child.imm1);
-	                                if (fid == kCurrentSolutionFid) {
-	                                    values[op_idx] = mul(makeScalar(coeff0), gradCurrentSolution());
-	                                    break;
-	                                }
-	                            }
-	                            if (dt_child.type == FormExprType::PreviousSolutionRef) {
-	                                const int k = static_cast<int>(static_cast<std::int64_t>(dt_child.imm0));
-	                                auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
+                                    auto gradPreviousSolution = [&](int k,
+                                                                    const std::string& loop_base) -> CodeValue {
+                                        auto* base_null =
+                                            builder.CreateICmpEQ(side.previous_solution_coefficients_base,
+                                                                 llvm::ConstantPointerNull::get(i8_ptr));
+                                        auto* base_ok =
+                                            llvm::BasicBlock::Create(*ctx, loop_base + ".base.ok", fn);
+                                        auto* ok = llvm::BasicBlock::Create(*ctx, loop_base + ".ok", fn);
+                                        auto* zero = llvm::BasicBlock::Create(*ctx, loop_base + ".zero", fn);
+                                        auto* merge = llvm::BasicBlock::Create(*ctx, loop_base + ".merge", fn);
+                                        builder.CreateCondBr(base_null, zero, base_ok);
+
+                                        builder.SetInsertPoint(base_ok);
+                                        auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
+                                        auto* coeffs_null =
+                                            builder.CreateICmpEQ(coeffs_ptr,
+                                                                 llvm::ConstantPointerNull::get(i8_ptr));
+                                        builder.CreateCondBr(coeffs_null, zero, ok);
+
+                                        builder.SetInsertPoint(ok);
+                                        const auto loaded = gradFromCoeffs(coeffs_ptr, loop_base);
+                                        builder.CreateBr(merge);
+                                        auto* ok_block = builder.GetInsertBlock();
+
+                                        builder.SetInsertPoint(zero);
+                                        builder.CreateBr(merge);
+                                        auto* zero_block = builder.GetInsertBlock();
+
+                                        builder.SetInsertPoint(merge);
+                                        CodeValue out = makeZero(shape);
+                                        const auto n_e = elemCount(shape);
+                                        for (std::uint32_t e = 0; e < n_e; ++e) {
+                                            auto* phi =
+                                                builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                  loop_base + "." + std::to_string(e));
+                                            phi->addIncoming(rc(0.0), zero_block);
+                                            phi->addIncoming(loaded.elems[e], ok_block);
+                                            out.elems[e] = phi;
+                                        }
+                                        return out;
+                                    };
+
+                                    auto gradDiscreteOrStateField = [&](int fid,
+                                                                        const std::string& tag) -> CodeValue {
+                                        auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+                                        auto* entry_is_null =
+                                            builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                        auto* ok = llvm::BasicBlock::Create(*ctx, tag + ".ok", fn);
+                                        auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+                                        auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+                                        builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                        if (shape.kind == Shape::Kind::Vector) {
+                                            const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                            std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+
+                                            builder.SetInsertPoint(ok);
+                                            auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
+                                            auto* base_is_null =
+                                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                            auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                            builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                            builder.SetInsertPoint(base_ok);
+                                            loaded = loadVec3FromQ(base, q_index);
+                                            builder.CreateBr(merge);
+                                            auto* ok_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(zero);
+                                            builder.CreateBr(merge);
+                                            auto* zero_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(merge);
+                                            std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                            for (std::size_t d = 0; d < dim; ++d) {
+                                                auto* phi =
+                                                    builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".v");
+                                                phi->addIncoming(rc(0.0), zero_block);
+                                                phi->addIncoming(loaded[d], ok_block);
+                                                outv[d] = phi;
+                                            }
+                                            return makeVector(static_cast<std::uint32_t>(dim),
+                                                              outv[0], outv[1], outv[2]);
+                                        }
+
+                                        if (shape.kind == Shape::Kind::Matrix) {
+                                            const auto rows = static_cast<std::size_t>(shape.dims[0]);
+                                            const auto cols = static_cast<std::size_t>(shape.dims[1]);
+                                            CodeValue loaded = makeZero(matrixShape(3u, 3u));
+
+                                            builder.SetInsertPoint(ok);
+                                            auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                                            auto* base_is_null =
+                                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                            auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                            builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                            builder.SetInsertPoint(base_ok);
+                                            loaded = loadMat3FromQ(base, q_index);
+                                            builder.CreateBr(merge);
+                                            auto* ok_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(zero);
+                                            builder.CreateBr(merge);
+                                            auto* zero_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(merge);
+                                            CodeValue out = makeZero(shape);
+                                            for (std::size_t r = 0; r < rows; ++r) {
+                                                for (std::size_t c = 0; c < cols; ++c) {
+                                                    auto* phi =
+                                                        builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".m");
+                                                    phi->addIncoming(rc(0.0), zero_block);
+                                                    phi->addIncoming(loaded.elems[r * 3u + c], ok_block);
+                                                    out.elems[r * cols + c] = phi;
+                                                }
+                                            }
+                                            return out;
+                                        }
+
+                                        throw std::runtime_error("LLVMGen: cached grad(dt(field)) unsupported shape");
+                                    };
+
+                                    auto gradDiscreteOrStateFieldHistoryK =
+                                        [&](int fid, int k, const std::string& tag) -> CodeValue {
+                                        auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
+                                        auto* entry_is_null =
+                                            builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                        auto* entry_ok = llvm::BasicBlock::Create(*ctx, tag + ".entry.ok", fn);
+                                        auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+                                        auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+                                        builder.CreateCondBr(entry_is_null, zero, entry_ok);
+
+                                        builder.SetInsertPoint(entry_ok);
+                                        auto* history_count = loadU32(entry, ABIV3::field_entry_history_count_off);
+                                        auto* has_k =
+                                            builder.CreateICmpUGE(history_count,
+                                                                  builder.getInt32(static_cast<std::uint32_t>(k)));
+                                        auto* k_ok = llvm::BasicBlock::Create(*ctx, tag + ".k.ok", fn);
+                                        builder.CreateCondBr(has_k, k_ok, zero);
+
+                                        if (shape.kind == Shape::Kind::Vector) {
+                                            const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                            std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+
+                                            builder.SetInsertPoint(k_ok);
+                                            auto* base =
+                                                loadPtr(entry, ABIV3::field_entry_history_gradients_xyz_off);
+                                            auto* base_is_null =
+                                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                            auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                            builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                            builder.SetInsertPoint(base_ok);
+                                            auto* k_minus1 =
+                                                builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                                            auto* hist_q =
+                                                builder.CreateAdd(builder.CreateMul(k_minus1, side.n_qpts), q_index);
+                                            loaded = loadVec3FromQ(base, hist_q);
+                                            builder.CreateBr(merge);
+                                            auto* ok_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(zero);
+                                            builder.CreateBr(merge);
+                                            auto* zero_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(merge);
+                                            std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                            for (std::size_t d = 0; d < dim; ++d) {
+                                                auto* phi =
+                                                    builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".v");
+                                                phi->addIncoming(rc(0.0), zero_block);
+                                                phi->addIncoming(loaded[d], ok_block);
+                                                outv[d] = phi;
+                                            }
+                                            return makeVector(static_cast<std::uint32_t>(dim),
+                                                              outv[0], outv[1], outv[2]);
+                                        }
+
+                                        if (shape.kind == Shape::Kind::Matrix) {
+                                            const auto rows = static_cast<std::size_t>(shape.dims[0]);
+                                            const auto cols = static_cast<std::size_t>(shape.dims[1]);
+                                            CodeValue loaded = makeZero(matrixShape(3u, 3u));
+
+                                            builder.SetInsertPoint(k_ok);
+                                            auto* base = loadPtr(entry, ABIV3::field_entry_history_jacobians_off);
+                                            auto* base_is_null =
+                                                builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                            auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                            builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                            builder.SetInsertPoint(base_ok);
+                                            auto* k_minus1 =
+                                                builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                                            auto* hist_q =
+                                                builder.CreateAdd(builder.CreateMul(k_minus1, side.n_qpts), q_index);
+                                            loaded = loadMat3FromQ(base, hist_q);
+                                            builder.CreateBr(merge);
+                                            auto* ok_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(zero);
+                                            builder.CreateBr(merge);
+                                            auto* zero_block = builder.GetInsertBlock();
+
+                                            builder.SetInsertPoint(merge);
+                                            CodeValue out = makeZero(shape);
+                                            for (std::size_t r = 0; r < rows; ++r) {
+                                                for (std::size_t c = 0; c < cols; ++c) {
+                                                    auto* phi =
+                                                        builder.CreatePHI(simd_active ? vf64 : f64, 2, tag + ".m");
+                                                    phi->addIncoming(rc(0.0), zero_block);
+                                                    phi->addIncoming(loaded.elems[r * 3u + c], ok_block);
+                                                    out.elems[r * cols + c] = phi;
+                                                }
+                                            }
+                                            return out;
+                                        }
+
+                                        throw std::runtime_error(
+                                            "LLVMGen: cached grad(dt(field)) history unsupported shape");
+                                    };
+
+		                            if (dt_child.type == FormExprType::TrialFunction) {
+		                                if (!is_residual) {
+		                                    throw std::runtime_error(
+		                                        "LLVMGen: cached grad(dt(TrialFunction)) only supports residual (current solution)");
+		                                }
+                                        CodeValue acc = mul(makeScalar(coeff0), gradCurrentSolution());
+                                        for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                            acc = add(acc,
+                                                      mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                          gradPreviousSolution(
+                                                              k, "grad_dt_prev" + std::to_string(k))));
+                                        }
+		                                return acc;
+		                            }
+		                            if (dt_child.type == FormExprType::StateField) {
+		                                const int fid = unpackFieldIdImm1(dt_child.imm1);
+		                                if (fid == kCurrentSolutionFid) {
+                                            CodeValue acc = mul(makeScalar(coeff0), gradCurrentSolution());
+                                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                                acc = add(acc,
+                                                          mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                              gradPreviousSolution(
+                                                                  k, "grad_dt_prev" + std::to_string(k))));
+                                            }
+		                                    return acc;
+		                                }
+                                    }
+                                    if (dt_child.type == FormExprType::DiscreteField ||
+                                        dt_child.type == FormExprType::StateField) {
+                                        const int fid = unpackFieldIdImm1(dt_child.imm1);
+                                        CodeValue acc =
+                                            mul(makeScalar(coeff0),
+                                                gradDiscreteOrStateField(fid, "grad_dt_field"));
+                                        for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                            acc = add(acc,
+                                                      mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                          gradDiscreteOrStateFieldHistoryK(
+                                                              fid, k,
+                                                              "grad_dt_field_prev" + std::to_string(k))));
+                                        }
+                                        return acc;
+                                    }
+		                            if (dt_child.type == FormExprType::PreviousSolutionRef) {
+		                                const int k = static_cast<int>(static_cast<std::int64_t>(dt_child.imm0));
+		                                auto* coeffs_ptr = loadPrevSolutionCoeffsPtr(side, k);
 	                                // Cache pattern 3: grad(PreviousSolution(k)) via dt path
 	                                if (qp_shared_cache_ptr && qp_cache_trial_group >= 0) {
 	                                    const auto n_e = elemCount(shape);
@@ -10240,17 +10730,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    }
 	                                    values[op_idx] = mul(makeScalar(coeff0), grad_val);
 	                                } else {
-	                                    values[op_idx] =
-	                                        mul(makeScalar(coeff0), gradFromCoeffs(coeffs_ptr, "grad_dt_prev" + std::to_string(k)));
-	                                }
-	                                break;
-	                            }
-	                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
-	                                values[op_idx] = makeZero(shape);
-	                                break;
-	                            }
-	                            throw std::runtime_error("LLVMGen: cached grad(dt(...)) operand not supported");
-	                        }
+		                                    values[op_idx] =
+		                                        mul(makeScalar(coeff0), gradFromCoeffs(coeffs_ptr, "grad_dt_prev" + std::to_string(k)));
+		                                }
+		                                return values[op_idx];
+		                            }
+		                            if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
+		                                return makeZero(shape);
+		                            }
+		                            throw std::runtime_error("LLVMGen: cached grad(dt(...)) operand not supported");
+		                        };
+
+		                        if (kid.type == FormExprType::TimeDerivative) {
+		                            values[op_idx] = gradTimeDerivative(kid);
+		                            break;
+		                        }
 
 	                        if (kid.type == FormExprType::PreviousSolutionRef) {
 	                            const int k = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
@@ -10416,15 +10910,17 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                            break;
 	                        }
 
-                        // Gradient is linear; handle the common simplified pattern grad(0 * X) -> 0.
-                        if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
-                            const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
-                            const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
-                            const auto& aop = term.ir.ops[a_idx];
-                            const auto& bop = term.ir.ops[b_idx];
+	                        // Gradient is linear for spatially constant scalar factors.
+	                        if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+	                            const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+	                            const auto b_idx = term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+	                            const auto& aop = term.ir.ops[a_idx];
+	                            const auto& bop = term.ir.ops[b_idx];
+                                    const auto& ashape = term.shapes[a_idx];
+                                    const auto& bshape = term.shapes[b_idx];
 
-                            auto isZeroConstant = [](const KernelIROp& op2) -> bool {
-                                if (op2.type != FormExprType::Constant) {
+	                            auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+	                                if (op2.type != FormExprType::Constant) {
                                     return false;
                                 }
                                 const double v = std::bit_cast<double>(op2.imm0);
@@ -10432,10 +10928,63 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             };
 
                             if (isZeroConstant(aop) || isZeroConstant(bop)) {
-                                values[op_idx] = makeZero(shape);
-                                break;
-                            }
-                        }
+	                                values[op_idx] = makeZero(shape);
+	                                break;
+	                            }
+
+                                    auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
+                                        const auto& op2 = term.ir.ops[idx];
+                                        if (term.shapes[idx].kind != Shape::Kind::Scalar) {
+                                            return false;
+                                        }
+                                        switch (op2.type) {
+                                            case FormExprType::TypedZero:
+                                            case FormExprType::Constant:
+                                            case FormExprType::ParameterRef:
+                                            case FormExprType::Time:
+                                            case FormExprType::TimeStep:
+                                            case FormExprType::EffectiveTimeStep:
+                                                return true;
+                                            case FormExprType::Negate:
+                                            case FormExprType::AbsoluteValue:
+                                            case FormExprType::Sign:
+                                            case FormExprType::Sqrt:
+                                            case FormExprType::Exp:
+                                            case FormExprType::Log:
+                                            case FormExprType::Add:
+                                            case FormExprType::Subtract:
+                                            case FormExprType::Multiply:
+                                            case FormExprType::Divide:
+                                            case FormExprType::Power:
+                                            case FormExprType::Minimum:
+                                            case FormExprType::Maximum:
+                                                break;
+                                            default:
+                                                return false;
+                                        }
+                                        for (std::size_t c = 0; c < static_cast<std::size_t>(op2.child_count); ++c) {
+                                            const auto child =
+                                                term.ir.children[static_cast<std::size_t>(op2.first_child) + c];
+                                            if (!self(self, child)) {
+                                                return false;
+                                            }
+                                        }
+                                        return true;
+                                    };
+
+                                    if (ashape.kind == Shape::Kind::Scalar &&
+                                        isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx) &&
+                                        bop.type == FormExprType::TimeDerivative) {
+                                        values[op_idx] = mul(values[a_idx], gradTimeDerivative(bop));
+                                        break;
+                                    }
+                                    if (bshape.kind == Shape::Kind::Scalar &&
+                                        isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx) &&
+                                        aop.type == FormExprType::TimeDerivative) {
+                                        values[op_idx] = mul(values[b_idx], gradTimeDerivative(aop));
+                                        break;
+                                    }
+	                        }
 
 	                        throw std::runtime_error("LLVMGen: cached Gradient operand not supported");
 	                    }
@@ -12142,10 +12691,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto child_idx = term.ir.children[static_cast<std::size_t>(op.first_child)];
                         const auto& kid = term.ir.ops[child_idx];
 
-                        auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
-                            auto gradComponentFromCoeffs =
-                                [&](llvm::Value* coeffs,
-                                    std::size_t component,
+	                        auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
+                                    const auto& side_values = plus_side ? values_plus : values_minus;
+	                            auto gradComponentFromCoeffs =
+	                                [&](llvm::Value* coeffs,
+	                                    std::size_t component,
                                     std::size_t value_dim,
                                     const std::string& loop_base) -> CodeValue {
                                 if (shape.kind != Shape::Kind::Vector) {
@@ -12255,11 +12805,301 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     phi->addIncoming(loaded[d], ok2_block);
                                     outv[d] = phi;
                                 }
-                                return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
-                            };
+	                                return makeVector(shape.dims[0], outv[0], outv[1], outv[2]);
+	                            };
 
-                            if (kid.type == FormExprType::Component) {
-                                const auto component =
+                                    auto gradTimeDerivative = [&](const KernelIROp& dt_op) -> CodeValue {
+                                        const int order =
+                                            static_cast<int>(static_cast<std::int64_t>(dt_op.imm0));
+                                        auto* coeff0 = loadDtCoeff0(side, order);
+                                        const auto dt_child_idx =
+                                            term.ir.children[static_cast<std::size_t>(dt_op.first_child)];
+                                        const auto& dt_child = term.ir.ops[dt_child_idx];
+
+                                        auto gradCurrentSolutionWithHistory = [&]() -> CodeValue {
+                                            CodeValue acc =
+                                                mul(makeScalar(coeff0),
+                                                    gradFromCoeffs(side.solution_coefficients, "face_grad_dt_u"));
+                                            for (int k = 1;
+                                                 k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6);
+                                                 ++k) {
+                                                auto* base_null =
+                                                    builder.CreateICmpEQ(
+                                                        side.previous_solution_coefficients_base,
+                                                        llvm::ConstantPointerNull::get(i8_ptr));
+                                                auto* base_ok = llvm::BasicBlock::Create(
+                                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".base.ok", fn);
+                                                auto* ok = llvm::BasicBlock::Create(
+                                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".ok", fn);
+                                                auto* zero = llvm::BasicBlock::Create(
+                                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".zero", fn);
+                                                auto* merge = llvm::BasicBlock::Create(
+                                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".merge", fn);
+                                                builder.CreateCondBr(base_null, zero, base_ok);
+
+                                                builder.SetInsertPoint(base_ok);
+                                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+                                                auto* coeffs_null =
+                                                    builder.CreateICmpEQ(coeffs,
+                                                                         llvm::ConstantPointerNull::get(i8_ptr));
+                                                builder.CreateCondBr(coeffs_null, zero, ok);
+
+                                                builder.SetInsertPoint(ok);
+                                                const auto loaded =
+                                                    gradFromCoeffs(coeffs,
+                                                                   "face_grad_dt_prev" + std::to_string(k));
+                                                builder.CreateBr(merge);
+                                                auto* ok_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(zero);
+                                                builder.CreateBr(merge);
+                                                auto* zero_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(merge);
+                                                CodeValue prev_grad = makeZero(shape);
+                                                const auto n_e = elemCount(shape);
+                                                for (std::uint32_t e = 0; e < n_e; ++e) {
+                                                    auto* phi = builder.CreatePHI(
+                                                        simd_active ? vf64 : f64, 2,
+                                                        "face_grad_dt_prev" + std::to_string(k) + "." +
+                                                            std::to_string(e));
+                                                    phi->addIncoming(rc(0.0), zero_block);
+                                                    phi->addIncoming(loaded.elems[e], ok_block);
+                                                    prev_grad.elems[e] = phi;
+                                                }
+                                                acc = add(acc,
+                                                          mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                              prev_grad));
+                                            }
+                                            return acc;
+                                        };
+
+                                        auto gradDiscreteOrStateField =
+                                            [&](int fid, const std::string& tag) -> CodeValue {
+                                            auto* entry = fieldEntryPtrFor(plus_side, fid);
+                                            auto* entry_is_null =
+                                                builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                            auto* ok = llvm::BasicBlock::Create(*ctx, tag + ".ok", fn);
+                                            auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+                                            auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+                                            builder.CreateCondBr(entry_is_null, zero, ok);
+
+                                            if (shape.kind == Shape::Kind::Vector) {
+                                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+
+                                                builder.SetInsertPoint(ok);
+                                                auto* base = loadPtr(entry, ABIV3::field_entry_gradients_xyz_off);
+                                                auto* base_is_null =
+                                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                                auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                                builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                                builder.SetInsertPoint(base_ok);
+                                                loaded = loadVec3FromQ(base, q_index);
+                                                builder.CreateBr(merge);
+                                                auto* ok_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(zero);
+                                                builder.CreateBr(merge);
+                                                auto* zero_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(merge);
+                                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                                for (std::size_t d = 0; d < dim; ++d) {
+                                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                                  tag + ".v");
+                                                    phi->addIncoming(rc(0.0), zero_block);
+                                                    phi->addIncoming(loaded[d], ok_block);
+                                                    outv[d] = phi;
+                                                }
+                                                return makeVector(static_cast<std::uint32_t>(dim),
+                                                                  outv[0], outv[1], outv[2]);
+                                            }
+
+                                            if (shape.kind == Shape::Kind::Matrix) {
+                                                const auto rows = static_cast<std::size_t>(shape.dims[0]);
+                                                const auto cols = static_cast<std::size_t>(shape.dims[1]);
+                                                CodeValue loaded = makeZero(matrixShape(3u, 3u));
+
+                                                builder.SetInsertPoint(ok);
+                                                auto* base = loadPtr(entry, ABIV3::field_entry_jacobians_off);
+                                                auto* base_is_null =
+                                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                                auto* base_ok = llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                                builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                                builder.SetInsertPoint(base_ok);
+                                                loaded = loadMat3FromQ(base, q_index);
+                                                builder.CreateBr(merge);
+                                                auto* ok_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(zero);
+                                                builder.CreateBr(merge);
+                                                auto* zero_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(merge);
+                                                CodeValue out = makeZero(shape);
+                                                for (std::size_t r = 0; r < rows; ++r) {
+                                                    for (std::size_t c = 0; c < cols; ++c) {
+                                                        auto* phi =
+                                                            builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                              tag + ".m");
+                                                        phi->addIncoming(rc(0.0), zero_block);
+                                                        phi->addIncoming(loaded.elems[r * 3u + c], ok_block);
+                                                        out.elems[r * cols + c] = phi;
+                                                    }
+                                                }
+                                                return out;
+                                            }
+
+                                            throw std::runtime_error(
+                                                "LLVMGen: cached face grad(dt(field)) unsupported shape");
+                                        };
+
+                                        auto gradDiscreteOrStateFieldHistoryK =
+                                            [&](int fid, int k, const std::string& tag) -> CodeValue {
+                                            auto* entry = fieldEntryPtrFor(plus_side, fid);
+                                            auto* entry_is_null =
+                                                builder.CreateICmpEQ(entry, llvm::ConstantPointerNull::get(i8_ptr));
+                                            auto* entry_ok = llvm::BasicBlock::Create(*ctx, tag + ".entry.ok", fn);
+                                            auto* zero = llvm::BasicBlock::Create(*ctx, tag + ".zero", fn);
+                                            auto* merge = llvm::BasicBlock::Create(*ctx, tag + ".merge", fn);
+                                            builder.CreateCondBr(entry_is_null, zero, entry_ok);
+
+                                            builder.SetInsertPoint(entry_ok);
+                                            auto* history_count = loadU32(entry, ABIV3::field_entry_history_count_off);
+                                            auto* has_k =
+                                                builder.CreateICmpUGE(
+                                                    history_count,
+                                                    builder.getInt32(static_cast<std::uint32_t>(k)));
+                                            auto* k_ok = llvm::BasicBlock::Create(*ctx, tag + ".k.ok", fn);
+                                            builder.CreateCondBr(has_k, k_ok, zero);
+
+                                            if (shape.kind == Shape::Kind::Vector) {
+                                                const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                                                std::array<llvm::Value*, 3> loaded{rc(0.0), rc(0.0), rc(0.0)};
+
+                                                builder.SetInsertPoint(k_ok);
+                                                auto* base =
+                                                    loadPtr(entry, ABIV3::field_entry_history_gradients_xyz_off);
+                                                auto* base_is_null =
+                                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                                auto* base_ok =
+                                                    llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                                builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                                builder.SetInsertPoint(base_ok);
+                                                auto* k_minus1 =
+                                                    builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                                                auto* hist_q = builder.CreateAdd(
+                                                    builder.CreateMul(k_minus1, side.n_qpts), q_index);
+                                                loaded = loadVec3FromQ(base, hist_q);
+                                                builder.CreateBr(merge);
+                                                auto* ok_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(zero);
+                                                builder.CreateBr(merge);
+                                                auto* zero_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(merge);
+                                                std::array<llvm::Value*, 3> outv{rc(0.0), rc(0.0), rc(0.0)};
+                                                for (std::size_t d = 0; d < dim; ++d) {
+                                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                                  tag + ".v");
+                                                    phi->addIncoming(rc(0.0), zero_block);
+                                                    phi->addIncoming(loaded[d], ok_block);
+                                                    outv[d] = phi;
+                                                }
+                                                return makeVector(static_cast<std::uint32_t>(dim),
+                                                                  outv[0], outv[1], outv[2]);
+                                            }
+
+                                            if (shape.kind == Shape::Kind::Matrix) {
+                                                const auto rows = static_cast<std::size_t>(shape.dims[0]);
+                                                const auto cols = static_cast<std::size_t>(shape.dims[1]);
+                                                CodeValue loaded = makeZero(matrixShape(3u, 3u));
+
+                                                builder.SetInsertPoint(k_ok);
+                                                auto* base =
+                                                    loadPtr(entry, ABIV3::field_entry_history_jacobians_off);
+                                                auto* base_is_null =
+                                                    builder.CreateICmpEQ(base, llvm::ConstantPointerNull::get(i8_ptr));
+                                                auto* base_ok =
+                                                    llvm::BasicBlock::Create(*ctx, tag + ".base.ok", fn);
+                                                builder.CreateCondBr(base_is_null, zero, base_ok);
+
+                                                builder.SetInsertPoint(base_ok);
+                                                auto* k_minus1 =
+                                                    builder.getInt32(static_cast<std::uint32_t>(k - 1));
+                                                auto* hist_q = builder.CreateAdd(
+                                                    builder.CreateMul(k_minus1, side.n_qpts), q_index);
+                                                loaded = loadMat3FromQ(base, hist_q);
+                                                builder.CreateBr(merge);
+                                                auto* ok_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(zero);
+                                                builder.CreateBr(merge);
+                                                auto* zero_block = builder.GetInsertBlock();
+
+                                                builder.SetInsertPoint(merge);
+                                                CodeValue out = makeZero(shape);
+                                                for (std::size_t r = 0; r < rows; ++r) {
+                                                    for (std::size_t c = 0; c < cols; ++c) {
+                                                        auto* phi =
+                                                            builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                              tag + ".m");
+                                                        phi->addIncoming(rc(0.0), zero_block);
+                                                        phi->addIncoming(loaded.elems[r * 3u + c], ok_block);
+                                                        out.elems[r * cols + c] = phi;
+                                                    }
+                                                }
+                                                return out;
+                                            }
+
+                                            throw std::runtime_error(
+                                                "LLVMGen: cached face grad(dt(field)) history unsupported shape");
+                                        };
+
+                                        if (dt_child.type == FormExprType::TrialFunction) {
+                                            if (!is_residual) {
+                                                throw std::runtime_error(
+                                                    "LLVMGen: cached face grad(dt(TrialFunction)) only supports residual");
+                                            }
+                                            return gradCurrentSolutionWithHistory();
+                                        }
+                                        if (dt_child.type == FormExprType::StateField) {
+                                            const int fid = unpackFieldIdImm1(dt_child.imm1);
+                                            if (fid == kCurrentSolutionFid) {
+                                                return gradCurrentSolutionWithHistory();
+                                            }
+                                        }
+                                        if (dt_child.type == FormExprType::DiscreteField ||
+                                            dt_child.type == FormExprType::StateField) {
+                                            const int fid = unpackFieldIdImm1(dt_child.imm1);
+                                            CodeValue acc =
+                                                mul(makeScalar(coeff0),
+                                                    gradDiscreteOrStateField(fid, "face_grad_dt_field"));
+                                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                                acc = add(acc,
+                                                          mul(makeScalar(loadDtCoeff(side, order, k)),
+                                                              gradDiscreteOrStateFieldHistoryK(
+                                                                  fid, k,
+                                                                  "face_grad_dt_field_prev" +
+                                                                      std::to_string(k))));
+                                            }
+                                            return acc;
+                                        }
+                                        if (dt_child.type == FormExprType::Constant ||
+                                            dt_child.type == FormExprType::TypedZero) {
+                                            return makeZero(shape);
+                                        }
+                                        throw std::runtime_error(
+                                            "LLVMGen: cached face grad(dt(...)) operand not supported");
+                                    };
+
+	                            if (kid.type == FormExprType::Component) {
+	                                const auto component =
                                     static_cast<std::size_t>(static_cast<std::uint32_t>(unpackU32Lo(kid.imm0)));
                                 const auto base_idx =
                                     term.ir.children[static_cast<std::size_t>(kid.first_child)];
@@ -12453,15 +13293,94 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                    }
 	                                    return out;
 	                                }
-                                throw std::runtime_error("LLVMGen: cached grad(DiscreteField) unsupported shape");
-                            }
+	                                throw std::runtime_error("LLVMGen: cached grad(DiscreteField) unsupported shape");
+	                            }
 
-                            if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
-                                return makeZero(shape);
-                            }
+                                    if (kid.type == FormExprType::TimeDerivative) {
+                                        return gradTimeDerivative(kid);
+                                    }
 
-                            throw std::runtime_error("LLVMGen: cached Gradient operand not supported");
-                        };
+	                            if (kid.type == FormExprType::Constant || kid.type == FormExprType::TypedZero) {
+	                                return makeZero(shape);
+	                            }
+
+                                    if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+                                        const auto a_idx =
+                                            term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                                        const auto b_idx =
+                                            term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+                                        const auto& aop = term.ir.ops[a_idx];
+                                        const auto& bop = term.ir.ops[b_idx];
+
+                                        auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+                                            if (op2.type != FormExprType::Constant) {
+                                                return false;
+                                            }
+                                            const double v = std::bit_cast<double>(op2.imm0);
+                                            return v == 0.0;
+                                        };
+
+                                        if (isZeroConstant(aop) || isZeroConstant(bop)) {
+                                            return makeZero(shape);
+                                        }
+
+                                        auto isSpatiallyConstantScalar = [&](auto&& self,
+                                                                             std::size_t idx) -> bool {
+                                            const auto& op2 = term.ir.ops[idx];
+                                            if (term.shapes[idx].kind != Shape::Kind::Scalar) {
+                                                return false;
+                                            }
+                                            switch (op2.type) {
+                                                case FormExprType::TypedZero:
+                                                case FormExprType::Constant:
+                                                case FormExprType::ParameterRef:
+                                                case FormExprType::Time:
+                                                case FormExprType::TimeStep:
+                                                case FormExprType::EffectiveTimeStep:
+                                                    return true;
+                                                case FormExprType::Negate:
+                                                case FormExprType::AbsoluteValue:
+                                                case FormExprType::Sign:
+                                                case FormExprType::Sqrt:
+                                                case FormExprType::Exp:
+                                                case FormExprType::Log:
+                                                case FormExprType::Add:
+                                                case FormExprType::Subtract:
+                                                case FormExprType::Multiply:
+                                                case FormExprType::Divide:
+                                                case FormExprType::Power:
+                                                case FormExprType::Minimum:
+                                                case FormExprType::Maximum:
+                                                    break;
+                                                default:
+                                                    return false;
+                                            }
+                                            for (std::size_t c = 0;
+                                                 c < static_cast<std::size_t>(op2.child_count);
+                                                 ++c) {
+                                                const auto child =
+                                                    term.ir.children[static_cast<std::size_t>(op2.first_child) + c];
+                                                if (!self(self, child)) {
+                                                    return false;
+                                                }
+                                            }
+                                            return true;
+                                        };
+
+                                        if (term.shapes[a_idx].kind == Shape::Kind::Scalar &&
+                                            isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx) &&
+                                            bop.type == FormExprType::TimeDerivative) {
+                                            return mul(side_values[a_idx], gradTimeDerivative(bop));
+                                        }
+                                        if (term.shapes[b_idx].kind == Shape::Kind::Scalar &&
+                                            isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx) &&
+                                            aop.type == FormExprType::TimeDerivative) {
+                                            return mul(side_values[b_idx], gradTimeDerivative(aop));
+                                        }
+                                    }
+
+	                            throw std::runtime_error("LLVMGen: cached Gradient operand not supported");
+	                        };
 
                         values_minus[op_idx] = evalSide(side_minus, /*plus_side=*/false);
                         values_plus[op_idx] = evalSide(side_plus, /*plus_side=*/true);
@@ -14122,28 +15041,47 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 markPreviousSolutionValueAccess(req, shape);
                                 break;
 
-                            case FormExprType::Gradient: {
-                                const auto child_idx =
-                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
-                                const auto& child_op = term.ir.ops[child_idx];
-                                if (child_op.type == FormExprType::TestFunction) {
-                                    markTestGradientAccess(req);
-                                } else if (child_op.type == FormExprType::TrialFunction ||
-                                           child_op.type == FormExprType::PreviousSolutionRef ||
-                                           isCurrentSolutionState(child_op)) {
-                                    markTrialGradientAccess(req);
-                                } else if (child_op.type == FormExprType::TimeDerivative) {
-                                    const auto dt_child_idx = term.ir.children[
-                                        static_cast<std::size_t>(child_op.first_child)];
-                                    const auto& dt_child = term.ir.ops[dt_child_idx];
-                                    if (dt_child.type == FormExprType::TrialFunction ||
-                                        dt_child.type == FormExprType::PreviousSolutionRef ||
-                                        isCurrentSolutionState(dt_child)) {
-                                        markTrialGradientAccess(req);
-                                    }
-                                }
-                                break;
-                            }
+	                            case FormExprType::Gradient: {
+	                                const auto child_idx =
+	                                    term.ir.children[static_cast<std::size_t>(op.first_child)];
+	                                const auto& child_op = term.ir.ops[child_idx];
+                                    auto markGradientTimeDerivative = [&](const KernelIROp& dt_op) {
+                                        const auto dt_child_idx =
+                                            term.ir.children[static_cast<std::size_t>(dt_op.first_child)];
+                                        const auto& dt_child = term.ir.ops[dt_child_idx];
+                                        if (dt_child.type == FormExprType::TrialFunction ||
+                                            dt_child.type == FormExprType::PreviousSolutionRef ||
+                                            isCurrentSolutionState(dt_child)) {
+                                            markTrialGradientAccess(req);
+                                            markTimeDerivativeHistoryAccess(req, dt_child);
+                                            req.need_dt_stencil_coeffs_base = true;
+                                        }
+                                    };
+	                                if (child_op.type == FormExprType::TestFunction) {
+	                                    markTestGradientAccess(req);
+	                                } else if (child_op.type == FormExprType::TrialFunction ||
+	                                           child_op.type == FormExprType::PreviousSolutionRef ||
+	                                           isCurrentSolutionState(child_op)) {
+	                                    markTrialGradientAccess(req);
+	                                } else if (child_op.type == FormExprType::TimeDerivative) {
+                                        markGradientTimeDerivative(child_op);
+                                    } else if (child_op.type == FormExprType::Multiply &&
+                                               child_op.child_count == 2u) {
+                                        const auto a_idx =
+                                            term.ir.children[static_cast<std::size_t>(child_op.first_child)];
+                                        const auto b_idx =
+                                            term.ir.children[static_cast<std::size_t>(child_op.first_child) + 1u];
+                                        const auto& aop = term.ir.ops[a_idx];
+                                        const auto& bop = term.ir.ops[b_idx];
+                                        if (aop.type == FormExprType::TimeDerivative) {
+                                            markGradientTimeDerivative(aop);
+                                        }
+                                        if (bop.type == FormExprType::TimeDerivative) {
+                                            markGradientTimeDerivative(bop);
+                                        }
+	                                }
+	                                break;
+	                            }
 
                             case FormExprType::Divergence: {
                                 const auto child_idx =
@@ -16792,14 +17730,42 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         throw std::runtime_error("LLVMGen: grad(DiscreteField) unsupported shape");
                     }
 
-                    if (kid.type == FormExprType::TimeDerivative) {
-                        const int order = static_cast<int>(static_cast<std::int64_t>(kid.imm0));
+                    auto gradFromCoeffs = [&](llvm::Value* coeffs,
+                                               const std::string& loop_base) -> CodeValue {
+                        if (shape.kind == Shape::Kind::Vector) {
+                            const auto dim = static_cast<std::size_t>(shape.dims[0]);
+                            const auto sums =
+                                emitReduceSum(side.n_trial_dofs, loop_base, dim, [&](llvm::Value* j) {
+                                    auto* j64 = builder.CreateZExt(j, i64);
+                                    auto* cj = loadRealPtrAt(coeffs, j64);
+                                    const auto g =
+                                        loadScalarPhysicalGradientMaybeBaked(side, false, j, q_index);
+                                    std::vector<llvm::Value*> terms;
+                                    terms.reserve(dim);
+                                    for (std::size_t d = 0; d < dim; ++d) {
+                                        terms.push_back(builder.CreateFMul(cj, g[d]));
+                                    }
+                                    return terms;
+                                });
+                            auto* x = sums[0];
+                            auto* y = (dim > 1u) ? sums[1] : rc(0.0);
+                            auto* z = (dim > 2u) ? sums[2] : rc(0.0);
+                            return makeVector(shape.dims[0], x, y, z);
+                        }
+                        if (shape.kind == Shape::Kind::Matrix) {
+                            return reduceCurrentGradientMatrix(side, coeffs, q_index, shape, loop_base);
+                        }
+                        throw std::runtime_error("LLVMGen: face grad(u) unsupported shape");
+                    };
+
+                    auto gradTimeDerivative = [&](const KernelIROp& dt_op) -> CodeValue {
+                        const int order = static_cast<int>(static_cast<std::int64_t>(dt_op.imm0));
                         auto* coeff0 = loadDtCoeff0(side, order);
                         const auto dt_child_idx =
-                            term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                            term.ir.children[static_cast<std::size_t>(dt_op.first_child)];
                         const auto& dt_child = term.ir.ops[dt_child_idx];
 
-	                        auto gradTrialBasis = [&]() -> CodeValue {
+		                        auto gradTrialBasis = [&]() -> CodeValue {
 	                            if (is_plus != trial_active_plus) {
 	                                return makeZero(shape);
 	                            }
@@ -16841,7 +17807,58 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                return reduceCurrentGradientMatrix(
 		                                    side, coeffs, q_index, shape, "face_grad_dt_u");
 	                            }
-                            throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
+	                            throw std::runtime_error("LLVMGen: grad(dt(u)) unsupported shape");
+	                        };
+
+                        auto gradCurrentSolutionWithHistory = [&]() -> CodeValue {
+                            CodeValue acc = mul(makeScalar(coeff0), gradCurrentSolution());
+                            for (int k = 1; k <= static_cast<int>(assembly::jit::kMaxPreviousSolutionsV6); ++k) {
+                                auto* base_null =
+                                    builder.CreateICmpEQ(side.previous_solution_coefficients_base,
+                                                         llvm::ConstantPointerNull::get(i8_ptr));
+                                auto* base_ok = llvm::BasicBlock::Create(
+                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".base.ok", fn);
+                                auto* ok = llvm::BasicBlock::Create(
+                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".ok", fn);
+                                auto* zero = llvm::BasicBlock::Create(
+                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".zero", fn);
+                                auto* merge = llvm::BasicBlock::Create(
+                                    *ctx, "face_grad_dt_prev" + std::to_string(k) + ".merge", fn);
+                                builder.CreateCondBr(base_null, zero, base_ok);
+
+                                builder.SetInsertPoint(base_ok);
+                                auto* coeffs = loadPrevSolutionCoeffsPtr(side, k);
+                                auto* coeffs_null =
+                                    builder.CreateICmpEQ(coeffs, llvm::ConstantPointerNull::get(i8_ptr));
+                                builder.CreateCondBr(coeffs_null, zero, ok);
+
+                                builder.SetInsertPoint(ok);
+                                const auto loaded =
+                                    gradFromCoeffs(coeffs, "face_grad_dt_prev" + std::to_string(k));
+                                builder.CreateBr(merge);
+                                auto* ok_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(zero);
+                                builder.CreateBr(merge);
+                                auto* zero_block = builder.GetInsertBlock();
+
+                                builder.SetInsertPoint(merge);
+                                CodeValue prev_grad = makeZero(shape);
+                                const auto n_e = elemCount(shape);
+                                for (std::uint32_t e = 0; e < n_e; ++e) {
+                                    auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2,
+                                                                  "face_grad_dt_prev" +
+                                                                      std::to_string(k) + "." +
+                                                                      std::to_string(e));
+                                    phi->addIncoming(rc(0.0), zero_block);
+                                    phi->addIncoming(loaded.elems[e], ok_block);
+                                    prev_grad.elems[e] = phi;
+                                }
+                                acc = add(acc,
+                                          mul(makeScalar(loadDtCoeff(side, order, k)),
+                                              prev_grad));
+                            }
+                            return acc;
                         };
 
                         auto gradDiscreteOrStateField = [&](int fid) -> CodeValue {
@@ -16931,16 +17948,21 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         };
 
                         if (dt_child.type == FormExprType::TrialFunction) {
-                            const auto g = is_residual ? gradCurrentSolution() : gradTrialBasis();
-                            return mul(makeScalar(coeff0), g);
+                            return is_residual ? gradCurrentSolutionWithHistory()
+                                               : mul(makeScalar(coeff0), gradTrialBasis());
                         }
 
-                        if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
+                        if (dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
-                            const auto g = (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid)
-                                               ? gradCurrentSolution()
-                                               : gradDiscreteOrStateField(fid);
-                            return mul(makeScalar(coeff0), g);
+                            if (fid == kCurrentSolutionFid) {
+                                return gradCurrentSolutionWithHistory();
+                            }
+                        }
+
+                        if (dt_child.type == FormExprType::DiscreteField ||
+                            dt_child.type == FormExprType::StateField) {
+                            throw std::runtime_error(
+                                "LLVMGen: grad(dt(field)) history gradients require interpreter fallback");
                         }
 
                         if (dt_child.type == FormExprType::Constant || dt_child.type == FormExprType::TypedZero) {
@@ -16948,6 +17970,82 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         }
 
                         throw std::runtime_error("LLVMGen: grad(dt(...)) operand not supported");
+                    };
+
+                    if (kid.type == FormExprType::TimeDerivative) {
+                        return gradTimeDerivative(kid);
+                    }
+
+                    if (kid.type == FormExprType::Multiply && kid.child_count == 2u) {
+                        const auto a_idx = term.ir.children[static_cast<std::size_t>(kid.first_child)];
+                        const auto b_idx =
+                            term.ir.children[static_cast<std::size_t>(kid.first_child) + 1u];
+                        const auto& aop = term.ir.ops[a_idx];
+                        const auto& bop = term.ir.ops[b_idx];
+                        const auto& side_values = is_plus ? values_plus : values_minus;
+
+                        auto isZeroConstant = [](const KernelIROp& op2) -> bool {
+                            if (op2.type != FormExprType::Constant) {
+                                return false;
+                            }
+                            const double v = std::bit_cast<double>(op2.imm0);
+                            return v == 0.0;
+                        };
+
+                        if (isZeroConstant(aop) || isZeroConstant(bop)) {
+                            return makeZero(shape);
+                        }
+
+                        auto isSpatiallyConstantScalar = [&](auto&& self, std::size_t idx) -> bool {
+                            const auto& op2 = term.ir.ops[idx];
+                            if (term.shapes[idx].kind != Shape::Kind::Scalar) {
+                                return false;
+                            }
+                            switch (op2.type) {
+                                case FormExprType::TypedZero:
+                                case FormExprType::Constant:
+                                case FormExprType::ParameterRef:
+                                case FormExprType::Time:
+                                case FormExprType::TimeStep:
+                                case FormExprType::EffectiveTimeStep:
+                                    return true;
+                                case FormExprType::Negate:
+                                case FormExprType::AbsoluteValue:
+                                case FormExprType::Sign:
+                                case FormExprType::Sqrt:
+                                case FormExprType::Exp:
+                                case FormExprType::Log:
+                                case FormExprType::Add:
+                                case FormExprType::Subtract:
+                                case FormExprType::Multiply:
+                                case FormExprType::Divide:
+                                case FormExprType::Power:
+                                case FormExprType::Minimum:
+                                case FormExprType::Maximum:
+                                    break;
+                                default:
+                                    return false;
+                            }
+                            for (std::size_t c = 0; c < static_cast<std::size_t>(op2.child_count); ++c) {
+                                const auto child =
+                                    term.ir.children[static_cast<std::size_t>(op2.first_child) + c];
+                                if (!self(self, child)) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        };
+
+                        if (term.shapes[a_idx].kind == Shape::Kind::Scalar &&
+                            isSpatiallyConstantScalar(isSpatiallyConstantScalar, a_idx) &&
+                            bop.type == FormExprType::TimeDerivative) {
+                            return mul(side_values[a_idx], gradTimeDerivative(bop));
+                        }
+                        if (term.shapes[b_idx].kind == Shape::Kind::Scalar &&
+                            isSpatiallyConstantScalar(isSpatiallyConstantScalar, b_idx) &&
+                            aop.type == FormExprType::TimeDerivative) {
+                            return mul(side_values[b_idx], gradTimeDerivative(aop));
+                        }
                     }
 
                     throw std::runtime_error("LLVMGen: Gradient operand not supported");

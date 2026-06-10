@@ -25,6 +25,7 @@
 #include "Geometry/PushForward.h"
 #include "Basis/BasisFunction.h"
 #include "Basis/BasisCache.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Basis/VectorBasis.h"
 #include "Assembly/JIT/KernelArgs.h"
 #include "Core/KernelTrace.h"
@@ -45,6 +46,7 @@
 #include <array>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 #include <utility>
 #include <stdexcept>
 #include <cmath>
@@ -55,6 +57,8 @@
 #include <functional>
 #include <optional>
 #include <span>
+#include <sstream>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -94,6 +98,486 @@ namespace {
     return enabled;
 }
 
+[[nodiscard]] bool envFlagEnabled(const char* name) noexcept
+{
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+    return value != "0" && value != "false" && value != "off" &&
+           value != "no";
+}
+
+[[nodiscard]] bool cutVolumeLocalMatrixProvenanceDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        envFlagEnabled("SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_PROVENANCE_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeLocalMatrixColumnSupportDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_COLUMN_SUPPORT_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeLocalMatrixColumnGeometryDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_COLUMN_GEOMETRY_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeLocalMatrixQuadratureGeometryDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_QUADRATURE_GEOMETRY_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeLocalMatrixGradientBalanceDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_GRADIENT_BALANCE_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgLocalSchurDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_SCHUR_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgLocalEdgeBalanceDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_EDGE_BALANCE_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgSupportCouplingProvenanceDiagnosticEnabled() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_SUPPORT_COUPLING_PROVENANCE_DIAGNOSTIC");
+    return enabled;
+}
+
+enum class CutVolumeDirectPspgTopologyPolicy {
+    Off,
+    LocalSchurCompletion,
+    LocalEdgeBalance,
+    LocalSchurEdgeBalance
+};
+
+[[nodiscard]] std::size_t cutVolumeLocalMatrixColumnSupportMaxColumns() noexcept
+{
+    static const std::size_t value = []() noexcept {
+        constexpr std::size_t default_value = 16u;
+        constexpr std::size_t max_value = 256u;
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_COLUMN_SUPPORT_MAX_COLUMNS");
+        if (raw == nullptr || raw[0] == '\0') {
+            return default_value;
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtoul(raw, &end, 10);
+        if (end == raw || parsed == 0u) {
+            return default_value;
+        }
+        return std::min<std::size_t>(static_cast<std::size_t>(parsed), max_value);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string cutVolumeLocalMatrixProvenanceOperatorFilter()
+{
+    static const std::string value = []() {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_PROVENANCE_OPERATOR");
+        return raw == nullptr ? std::string{} : std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] bool diagnosticOperatorMatches(
+    std::string_view op,
+    std::string_view filter)
+{
+    if (filter.empty()) {
+        return true;
+    }
+    std::size_t begin = 0u;
+    while (begin <= filter.size()) {
+        const auto end = filter.find_first_of("|,", begin);
+        const auto count =
+            end == std::string_view::npos ? std::string_view::npos
+                                          : end - begin;
+        const auto token = filter.substr(begin, count);
+        if (token == op) {
+            return true;
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1u;
+    }
+    return false;
+}
+
+[[nodiscard]] Real cutVolumeLocalMatrixProvenanceTolerance() noexcept
+{
+    static const Real value = []() noexcept {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_LOCAL_MATRIX_PROVENANCE_TOLERANCE");
+        if (raw == nullptr || raw[0] == '\0') {
+            return Real{1.0e-30};
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtod(raw, &end);
+        if (end == raw || !std::isfinite(parsed) || parsed < 0.0) {
+            return Real{1.0e-30};
+        }
+        return static_cast<Real>(parsed);
+    }();
+    return value;
+}
+
+[[nodiscard]] Real cutVolumeDirectPspgLocalSchurScale() noexcept
+{
+    static const Real value = []() noexcept {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_SCHUR_SCALE");
+        if (raw == nullptr || raw[0] == '\0') {
+            return Real{1.0};
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtod(raw, &end);
+        if (end == raw || !std::isfinite(parsed) || parsed < 0.0) {
+            return Real{1.0};
+        }
+        return static_cast<Real>(parsed);
+    }();
+    return value;
+}
+
+[[nodiscard]] Real cutVolumeDirectPspgLocalEdgeBalanceTargetScale() noexcept
+{
+    static const Real value = []() noexcept {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_EDGE_BALANCE_TARGET_SCALE");
+        if (raw == nullptr || raw[0] == '\0') {
+            return Real{1.0};
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtod(raw, &end);
+        if (end == raw || !std::isfinite(parsed) || parsed < 0.0) {
+            return Real{1.0};
+        }
+        return static_cast<Real>(parsed);
+    }();
+    return value;
+}
+
+[[nodiscard]] Real cutVolumeDirectPspgLocalEdgeBalanceMaxEdgeScale() noexcept
+{
+    static const Real value = []() noexcept {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_EDGE_BALANCE_MAX_EDGE_SCALE");
+        if (raw == nullptr || raw[0] == '\0') {
+            return Real{16.0};
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtod(raw, &end);
+        if (end == raw || !std::isfinite(parsed) || parsed < 1.0) {
+            return Real{16.0};
+        }
+        return static_cast<Real>(parsed);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string cutVolumeDirectPspgLocalSchurOperatorFilter()
+{
+    static const std::string value = []() {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_SCHUR_OPERATOR");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string{
+                "equations_diagnostic_ns_vms_pspg_pressure_gradient"};
+        }
+        return std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string cutVolumeDirectPspgLocalEdgeBalanceOperatorFilter()
+{
+    static const std::string value = []() {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_LOCAL_EDGE_BALANCE_OPERATOR");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string{
+                "equations_diagnostic_ns_vms_pspg_pressure_gradient"};
+        }
+        return std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string cutVolumeDirectPspgSupportCouplingOperatorFilter()
+{
+    static const std::string value = []() {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_SUPPORT_COUPLING_OPERATOR");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string{"equations"};
+        }
+        return std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string cutVolumeDirectPspgSupportCouplingSourceComponentFilter()
+{
+    static const std::string value = []() {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_SUPPORT_COUPLING_SOURCE_COMPONENT");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string{"navier_stokes_vms_pspg_pressure_gradient"};
+        }
+        return std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] CutVolumeDirectPspgTopologyPolicy
+cutVolumeDirectPspgTopologyPolicy() noexcept
+{
+    static const CutVolumeDirectPspgTopologyPolicy value = []() noexcept {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_POLICY");
+        if (raw == nullptr || raw[0] == '\0') {
+            return CutVolumeDirectPspgTopologyPolicy::Off;
+        }
+        std::string policy(raw);
+        std::transform(policy.begin(), policy.end(), policy.begin(),
+                       [](unsigned char ch) {
+                           return static_cast<char>(std::tolower(ch));
+                       });
+        for (char& ch : policy) {
+            if (ch == '-' || ch == ' ') {
+                ch = '_';
+            }
+        }
+        if (policy == "0" || policy == "false" || policy == "off" ||
+            policy == "no" || policy == "none") {
+            return CutVolumeDirectPspgTopologyPolicy::Off;
+        }
+        if (policy == "local_schur_completion" ||
+            policy == "local_schur" ||
+            policy == "schur") {
+            return CutVolumeDirectPspgTopologyPolicy::LocalSchurCompletion;
+        }
+        if (policy == "local_edge_balance" ||
+            policy == "edge_balance" ||
+            policy == "balance") {
+            return CutVolumeDirectPspgTopologyPolicy::LocalEdgeBalance;
+        }
+        if (policy == "local_schur_edge_balance" ||
+            policy == "local_schur_completion_edge_balance" ||
+            policy == "schur_edge_balance" ||
+            policy == "both") {
+            return CutVolumeDirectPspgTopologyPolicy::LocalSchurEdgeBalance;
+        }
+        return CutVolumeDirectPspgTopologyPolicy::Off;
+    }();
+    return value;
+}
+
+[[nodiscard]] const char* cutVolumeDirectPspgTopologyPolicyName(
+    CutVolumeDirectPspgTopologyPolicy policy) noexcept
+{
+    switch (policy) {
+    case CutVolumeDirectPspgTopologyPolicy::Off:
+        return "off";
+    case CutVolumeDirectPspgTopologyPolicy::LocalSchurCompletion:
+        return "local_schur_completion";
+    case CutVolumeDirectPspgTopologyPolicy::LocalEdgeBalance:
+        return "local_edge_balance";
+    case CutVolumeDirectPspgTopologyPolicy::LocalSchurEdgeBalance:
+        return "local_schur_edge_balance";
+    }
+    return "off";
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgTopologyPolicyIncludesSchur(
+    CutVolumeDirectPspgTopologyPolicy policy) noexcept
+{
+    return policy == CutVolumeDirectPspgTopologyPolicy::LocalSchurCompletion ||
+           policy == CutVolumeDirectPspgTopologyPolicy::LocalSchurEdgeBalance;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgTopologyPolicyIncludesEdgeBalance(
+    CutVolumeDirectPspgTopologyPolicy policy) noexcept
+{
+    return policy == CutVolumeDirectPspgTopologyPolicy::LocalEdgeBalance ||
+           policy == CutVolumeDirectPspgTopologyPolicy::LocalSchurEdgeBalance;
+}
+
+[[nodiscard]] std::string cutVolumeDirectPspgTopologyOperatorFilter()
+{
+    static const std::string value = []() {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_OPERATOR");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string{"equations"};
+        }
+        return std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string cutVolumeDirectPspgTopologySourceComponentFilter()
+{
+    static const std::string value = []() {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_SOURCE_COMPONENT");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::string{"navier_stokes_vms_pspg_pressure_gradient"};
+        }
+        return std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgTopologyApplyFullCell() noexcept
+{
+    static const bool enabled = envFlagEnabled(
+        "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_APPLY_FULL_CELL");
+    return enabled;
+}
+
+[[nodiscard]] std::vector<GlobalIndex> parseCutVolumeDirectPspgTopologyDofList(
+    std::string_view text)
+{
+    std::vector<GlobalIndex> dofs;
+    std::string current;
+    const auto flush_current = [&]() {
+        if (current.empty()) {
+            return;
+        }
+        char* end = nullptr;
+        const long long parsed = std::strtoll(current.c_str(), &end, 10);
+        if (end != current.c_str() && end != nullptr && *end == '\0') {
+            dofs.push_back(static_cast<GlobalIndex>(parsed));
+        }
+        current.clear();
+    };
+    for (const char ch : text) {
+        if (std::isdigit(static_cast<unsigned char>(ch)) ||
+            (ch == '-' && current.empty())) {
+            current.push_back(ch);
+        } else {
+            flush_current();
+        }
+    }
+    flush_current();
+    std::sort(dofs.begin(), dofs.end());
+    dofs.erase(std::unique(dofs.begin(), dofs.end()), dofs.end());
+    return dofs;
+}
+
+[[nodiscard]] const std::vector<GlobalIndex>&
+cutVolumeDirectPspgTopologyGlobalDofFilter()
+{
+    static const std::vector<GlobalIndex> value = []() {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_GLOBAL_DOFS");
+        if (raw == nullptr || raw[0] == '\0') {
+            raw = std::getenv(
+                "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_ROW_DOFS");
+        }
+        if (raw == nullptr || raw[0] == '\0') {
+            raw = std::getenv("SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_DOFS");
+        }
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::vector<GlobalIndex>{};
+        }
+        return parseCutVolumeDirectPspgTopologyDofList(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] const std::vector<GlobalIndex>&
+cutVolumeDirectPspgTopologyParentCellFilter()
+{
+    static const std::vector<GlobalIndex> value = []() {
+        const char* raw = std::getenv(
+            "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_PARENT_CELLS");
+        if (raw == nullptr || raw[0] == '\0') {
+            raw = std::getenv(
+                "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_PARENT_CELL_IDS");
+        }
+        if (raw == nullptr || raw[0] == '\0') {
+            raw = std::getenv(
+                "SVMP_FE_CUT_VOLUME_DIRECT_PSPG_TOPOLOGY_PARENT_CELLS_FILTER");
+        }
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::vector<GlobalIndex>{};
+        }
+        return parseCutVolumeDirectPspgTopologyDofList(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgTopologyRowFilterContains(
+    const std::vector<GlobalIndex>& filter,
+    GlobalIndex dof) noexcept
+{
+    return filter.empty() ||
+           std::binary_search(filter.begin(), filter.end(), dof);
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgTopologyLocalRowSelected(
+    std::span<const char> selected_rows,
+    std::size_t row) noexcept
+{
+    return selected_rows.empty() || selected_rows[row] != 0;
+}
+
+[[nodiscard]] bool cutVolumeDirectPspgTopologyLocalEdgeSelected(
+    std::span<const char> selected_rows,
+    std::size_t i,
+    std::size_t j) noexcept
+{
+    return selected_rows.empty() ||
+           selected_rows[i] != 0 ||
+           selected_rows[j] != 0;
+}
+
+[[nodiscard]] bool fieldNameEquals(std::string_view lhs,
+                                   std::string_view rhs) noexcept
+{
+    if (lhs.size() != rhs.size()) {
+        return false;
+    }
+    for (std::size_t i = 0u; i < lhs.size(); ++i) {
+        const auto a = static_cast<unsigned char>(lhs[i]);
+        const auto b = static_cast<unsigned char>(rhs[i]);
+        if (std::tolower(a) != std::tolower(b)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] inline bool interiorFaceTimingEnabled() noexcept {
     static const bool enabled = [] {
         const char* face_env = std::getenv("SVMP_INTERIOR_FACE_TIMING");
@@ -117,6 +601,2112 @@ namespace {
         return "Interface";
     }
     return "Unknown";
+}
+
+struct ColumnSupportEntry {
+    std::size_t local_index{0u};
+    GlobalIndex dof{0};
+    Real value{0.0};
+    Real abs_value{0.0};
+};
+
+struct ReferenceNodeCoordinate {
+    bool available{false};
+    std::array<Real, 3> point{{Real{0.0}, Real{0.0}, Real{0.0}}};
+};
+
+struct CutRuleQuadratureGeometrySummary {
+    bool available{false};
+    std::size_t point_count{0u};
+    Real weight_sum{0.0};
+    Real abs_weight_sum{0.0};
+    Real max_abs_weight{0.0};
+    Real max_abs_weight_fraction{0.0};
+    std::array<Real, 3> centroid{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    std::array<Real, 3> min_point{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    std::array<Real, 3> max_point{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    std::array<Real, 3> parent_centroid{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    std::array<Real, 3> parent_min_point{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    std::array<Real, 3> parent_max_point{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    std::array<Real, 3> normal_mean{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    Real rms_radius{0.0};
+    Real max_radius{0.0};
+    Real min_level_set_residual{0.0};
+    Real max_level_set_residual{0.0};
+    Real mean_abs_level_set_residual{0.0};
+    Real max_abs_level_set_residual{0.0};
+    Real mean_gradient_norm{0.0};
+    Real max_gradient_norm{0.0};
+    Real reference_measure_factor_sum{0.0};
+};
+
+[[nodiscard]] Real gradientDot3(const AssemblyContext::Vector3D& a,
+                                const AssemblyContext::Vector3D& b) noexcept
+{
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+[[nodiscard]] Real gradientNorm3(const AssemblyContext::Vector3D& a) noexcept
+{
+    return std::sqrt(gradientDot3(a, a));
+}
+
+[[nodiscard]] Real gradientGramEntry(
+    std::span<const AssemblyContext::Vector3D> test_gradients,
+    std::span<const AssemblyContext::Vector3D> trial_gradients,
+    std::span<const Real> integration_weights,
+    std::size_t row,
+    std::size_t col,
+    std::size_t n_test,
+    std::size_t n_trial,
+    std::size_t n_qpts) noexcept
+{
+    Real value = Real{0.0};
+    for (std::size_t q = 0u; q < n_qpts; ++q) {
+        const auto& test_gradient = test_gradients[q * n_test + row];
+        const auto& trial_gradient = trial_gradients[q * n_trial + col];
+        value +=
+            integration_weights[q] * gradientDot3(test_gradient, trial_gradient);
+    }
+    return value;
+}
+
+[[nodiscard]] Real gradientEnergy(
+    std::span<const AssemblyContext::Vector3D> gradients,
+    std::span<const Real> integration_weights,
+    std::size_t local_index,
+    std::size_t n_dofs,
+    std::size_t n_qpts) noexcept
+{
+    Real value = Real{0.0};
+    for (std::size_t q = 0u; q < n_qpts; ++q) {
+        const auto& gradient = gradients[q * n_dofs + local_index];
+        value += std::abs(integration_weights[q]) *
+                 gradientDot3(gradient, gradient);
+    }
+    return value;
+}
+
+struct GradientMomentSummary {
+    AssemblyContext::Vector3D weighted_gradient{{Real{0.0}, Real{0.0}, Real{0.0}}};
+    Real weighted_gradient_norm{0.0};
+    Real abs_gradient_integral{0.0};
+    Real gradient_energy{0.0};
+    Real max_gradient_norm{0.0};
+    Real directional_ratio{0.0};
+    Real axis_dominance{0.0};
+    int dominant_axis{-1};
+};
+
+[[nodiscard]] GradientMomentSummary summarizeGradientMoment(
+    std::span<const AssemblyContext::Vector3D> gradients,
+    std::span<const Real> integration_weights,
+    std::size_t local_index,
+    std::size_t n_dofs,
+    std::size_t n_qpts) noexcept
+{
+    GradientMomentSummary summary;
+    for (std::size_t q = 0u; q < n_qpts; ++q) {
+        const auto& gradient = gradients[q * n_dofs + local_index];
+        const Real weight = integration_weights[q];
+        const Real abs_weight = std::abs(weight);
+        const Real gradient_norm = gradientNorm3(gradient);
+        for (std::size_t d = 0u; d < 3u; ++d) {
+            summary.weighted_gradient[d] += weight * gradient[d];
+        }
+        summary.abs_gradient_integral += abs_weight * gradient_norm;
+        summary.gradient_energy += abs_weight * gradient_norm * gradient_norm;
+        summary.max_gradient_norm =
+            std::max(summary.max_gradient_norm, gradient_norm);
+    }
+
+    summary.weighted_gradient_norm = gradientNorm3(summary.weighted_gradient);
+    summary.directional_ratio =
+        summary.abs_gradient_integral > Real{0.0}
+            ? summary.weighted_gradient_norm / summary.abs_gradient_integral
+            : Real{0.0};
+    if (summary.weighted_gradient_norm > Real{0.0}) {
+        Real max_component = Real{0.0};
+        for (std::size_t d = 0u; d < 3u; ++d) {
+            const Real abs_component = std::abs(summary.weighted_gradient[d]);
+            if (abs_component > max_component) {
+                max_component = abs_component;
+                summary.dominant_axis = static_cast<int>(d);
+            }
+        }
+        summary.axis_dominance = max_component / summary.weighted_gradient_norm;
+    }
+    return summary;
+}
+
+[[nodiscard]] ReferenceNodeCoordinate referenceNodeCoordinate(
+    ElementType element_type,
+    std::size_t local_index) noexcept
+{
+    try {
+        if (element_type == ElementType::Unknown ||
+            local_index >= basis::ReferenceNodeLayout::num_nodes(element_type)) {
+            return {};
+        }
+        const auto point =
+            basis::ReferenceNodeLayout::get_node_coords(element_type, local_index);
+        return ReferenceNodeCoordinate{
+            true,
+            {{point[0], point[1], point[2]}}};
+    } catch (...) {
+        return {};
+    }
+}
+
+[[nodiscard]] CutRuleQuadratureGeometrySummary summarizeCutRuleQuadratureGeometry(
+    const geometry::CutQuadratureRule& rule) noexcept
+{
+    CutRuleQuadratureGeometrySummary summary;
+    summary.point_count = rule.points.size();
+    if (rule.points.empty()) {
+        return summary;
+    }
+    summary.available = true;
+
+    const auto& first = rule.points.front();
+    summary.min_point = first.point;
+    summary.max_point = first.point;
+    summary.parent_min_point = first.parent_coordinate;
+    summary.parent_max_point = first.parent_coordinate;
+    summary.min_level_set_residual = first.level_set_residual;
+    summary.max_level_set_residual = first.level_set_residual;
+
+    for (const auto& qp : rule.points) {
+        const Real abs_weight = std::abs(qp.weight);
+        summary.weight_sum += qp.weight;
+        summary.abs_weight_sum += abs_weight;
+        summary.max_abs_weight = std::max(summary.max_abs_weight, abs_weight);
+        summary.reference_measure_factor_sum += qp.reference_measure_factor;
+        summary.min_level_set_residual =
+            std::min(summary.min_level_set_residual, qp.level_set_residual);
+        summary.max_level_set_residual =
+            std::max(summary.max_level_set_residual, qp.level_set_residual);
+        summary.mean_abs_level_set_residual += std::abs(qp.level_set_residual);
+        summary.max_abs_level_set_residual =
+            std::max(summary.max_abs_level_set_residual,
+                     std::abs(qp.level_set_residual));
+        summary.mean_gradient_norm += qp.gradient_norm;
+        summary.max_gradient_norm =
+            std::max(summary.max_gradient_norm, qp.gradient_norm);
+        for (std::size_t d = 0u; d < 3u; ++d) {
+            summary.centroid[d] += qp.point[d];
+            summary.min_point[d] = std::min(summary.min_point[d], qp.point[d]);
+            summary.max_point[d] = std::max(summary.max_point[d], qp.point[d]);
+            summary.parent_centroid[d] += qp.parent_coordinate[d];
+            summary.parent_min_point[d] =
+                std::min(summary.parent_min_point[d], qp.parent_coordinate[d]);
+            summary.parent_max_point[d] =
+                std::max(summary.parent_max_point[d], qp.parent_coordinate[d]);
+            summary.normal_mean[d] += qp.normal[d];
+        }
+    }
+
+    const Real inv_count = Real{1.0} / static_cast<Real>(rule.points.size());
+    summary.mean_abs_level_set_residual *= inv_count;
+    summary.mean_gradient_norm *= inv_count;
+    for (std::size_t d = 0u; d < 3u; ++d) {
+        summary.centroid[d] *= inv_count;
+        summary.parent_centroid[d] *= inv_count;
+        summary.normal_mean[d] *= inv_count;
+    }
+    summary.max_abs_weight_fraction =
+        summary.abs_weight_sum > Real{0.0}
+            ? summary.max_abs_weight / summary.abs_weight_sum
+            : Real{0.0};
+
+    for (const auto& qp : rule.points) {
+        Real squared_radius = Real{0.0};
+        for (std::size_t d = 0u; d < 3u; ++d) {
+            const Real delta = qp.point[d] - summary.centroid[d];
+            squared_radius += delta * delta;
+        }
+        summary.rms_radius += squared_radius;
+        summary.max_radius =
+            std::max(summary.max_radius, std::sqrt(squared_radius));
+    }
+    summary.rms_radius = std::sqrt(summary.rms_radius * inv_count);
+    return summary;
+}
+
+void appendCutRuleQuadratureGeometrySummary(
+    std::ostringstream& oss,
+    const geometry::CutQuadratureRule& rule)
+{
+    const auto summary = summarizeCutRuleQuadratureGeometry(rule);
+    const auto quiet_nan = std::numeric_limits<Real>::quiet_NaN();
+    auto value_or_nan = [&](Real value) {
+        return summary.available ? value : quiet_nan;
+    };
+    auto span = [&](const std::array<Real, 3>& max_point,
+                    const std::array<Real, 3>& min_point,
+                    std::size_t component) {
+        return summary.available ? max_point[component] - min_point[component]
+                                 : quiet_nan;
+    };
+
+    oss << " cut_rule_kind=" << static_cast<int>(rule.kind)
+        << " cut_rule_frame=" << static_cast<int>(rule.frame)
+        << " cut_rule_construction=" << static_cast<int>(rule.policy.kind)
+        << " cut_rule_exact_polynomial_order=" << rule.exact_polynomial_order
+        << " cut_rule_requested_quadrature_order="
+        << rule.provenance.requested_quadrature_order
+        << " cut_rule_achieved_quadrature_order="
+        << rule.provenance.achieved_quadrature_order
+        << " cut_qpoint_count=" << summary.point_count
+        << " cut_qpoint_weight_sum=" << value_or_nan(summary.weight_sum)
+        << " cut_qpoint_abs_weight_sum=" << value_or_nan(summary.abs_weight_sum)
+        << " cut_qpoint_max_abs_weight_fraction="
+        << value_or_nan(summary.max_abs_weight_fraction)
+        << " cut_qpoint_centroid_x=" << value_or_nan(summary.centroid[0])
+        << " cut_qpoint_centroid_y=" << value_or_nan(summary.centroid[1])
+        << " cut_qpoint_centroid_z=" << value_or_nan(summary.centroid[2])
+        << " cut_qpoint_span_x="
+        << span(summary.max_point, summary.min_point, 0u)
+        << " cut_qpoint_span_y="
+        << span(summary.max_point, summary.min_point, 1u)
+        << " cut_qpoint_span_z="
+        << span(summary.max_point, summary.min_point, 2u)
+        << " cut_qpoint_rms_radius=" << value_or_nan(summary.rms_radius)
+        << " cut_qpoint_max_radius=" << value_or_nan(summary.max_radius)
+        << " cut_qpoint_parent_centroid_x="
+        << value_or_nan(summary.parent_centroid[0])
+        << " cut_qpoint_parent_centroid_y="
+        << value_or_nan(summary.parent_centroid[1])
+        << " cut_qpoint_parent_centroid_z="
+        << value_or_nan(summary.parent_centroid[2])
+        << " cut_qpoint_parent_span_x="
+        << span(summary.parent_max_point, summary.parent_min_point, 0u)
+        << " cut_qpoint_parent_span_y="
+        << span(summary.parent_max_point, summary.parent_min_point, 1u)
+        << " cut_qpoint_parent_span_z="
+        << span(summary.parent_max_point, summary.parent_min_point, 2u)
+        << " cut_qpoint_normal_mean_x=" << value_or_nan(summary.normal_mean[0])
+        << " cut_qpoint_normal_mean_y=" << value_or_nan(summary.normal_mean[1])
+        << " cut_qpoint_normal_mean_z=" << value_or_nan(summary.normal_mean[2])
+        << " cut_qpoint_level_set_min="
+        << value_or_nan(summary.min_level_set_residual)
+        << " cut_qpoint_level_set_max="
+        << value_or_nan(summary.max_level_set_residual)
+        << " cut_qpoint_level_set_mean_abs="
+        << value_or_nan(summary.mean_abs_level_set_residual)
+        << " cut_qpoint_level_set_max_abs="
+        << value_or_nan(summary.max_abs_level_set_residual)
+        << " cut_qpoint_gradient_norm_mean="
+        << value_or_nan(summary.mean_gradient_norm)
+        << " cut_qpoint_gradient_norm_max="
+        << value_or_nan(summary.max_gradient_norm)
+        << " cut_qpoint_reference_measure_factor_sum="
+        << value_or_nan(summary.reference_measure_factor_sum);
+}
+
+void appendColumnSupportList(
+    std::ostringstream& oss,
+    std::string_view key,
+    std::span<const ColumnSupportEntry> entries,
+    std::string_view value_kind)
+{
+    oss << ' ' << key << '=';
+    if (entries.empty()) {
+        oss << "none";
+        return;
+    }
+    for (std::size_t i = 0u; i < entries.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        const auto& entry = entries[i];
+        if (value_kind == "local_index") {
+            oss << entry.local_index;
+        } else if (value_kind == "dof") {
+            oss << entry.dof;
+        } else if (value_kind == "value") {
+            oss << entry.value;
+        } else if (value_kind == "abs_value") {
+            oss << entry.abs_value;
+        } else if (value_kind == "sign") {
+            oss << (entry.value > Real{0.0} ? 1 : -1);
+        }
+    }
+}
+
+void appendColumnReferenceCoordinateList(
+    std::ostringstream& oss,
+    std::string_view key,
+    std::span<const ColumnSupportEntry> entries,
+    ElementType element_type,
+    std::size_t component)
+{
+    oss << ' ' << key << '=';
+    if (entries.empty()) {
+        oss << "none";
+        return;
+    }
+    for (std::size_t i = 0u; i < entries.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        const auto coord =
+            referenceNodeCoordinate(element_type, entries[i].local_index);
+        if (!coord.available || component >= coord.point.size()) {
+            oss << "nan";
+        } else {
+            oss << coord.point[component];
+        }
+    }
+}
+
+void appendColumnReferenceDistanceList(
+    std::ostringstream& oss,
+    std::string_view key,
+    const ReferenceNodeCoordinate& row_coordinate,
+    std::span<const ColumnSupportEntry> entries,
+    ElementType element_type)
+{
+    oss << ' ' << key << '=';
+    if (entries.empty()) {
+        oss << "none";
+        return;
+    }
+    for (std::size_t i = 0u; i < entries.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        const auto col_coordinate =
+            referenceNodeCoordinate(element_type, entries[i].local_index);
+        if (!row_coordinate.available || !col_coordinate.available) {
+            oss << "nan";
+            continue;
+        }
+        const Real dx = col_coordinate.point[0] - row_coordinate.point[0];
+        const Real dy = col_coordinate.point[1] - row_coordinate.point[1];
+        const Real dz = col_coordinate.point[2] - row_coordinate.point[2];
+        oss << std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+}
+
+void appendGradientGramSampleList(
+    std::ostringstream& oss,
+    std::string_view key,
+    std::span<const ColumnSupportEntry> entries,
+    std::span<const AssemblyContext::Vector3D> test_gradients,
+    std::span<const AssemblyContext::Vector3D> trial_gradients,
+    std::span<const Real> integration_weights,
+    std::size_t row,
+    std::size_t n_test,
+    std::size_t n_trial,
+    std::size_t n_qpts)
+{
+    oss << ' ' << key << '=';
+    if (entries.empty()) {
+        oss << "none";
+        return;
+    }
+    for (std::size_t i = 0u; i < entries.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        oss << gradientGramEntry(test_gradients, trial_gradients,
+                                 integration_weights, row,
+                                 entries[i].local_index, n_test, n_trial,
+                                 n_qpts);
+    }
+}
+
+void appendGradientGramCosineSampleList(
+    std::ostringstream& oss,
+    std::string_view key,
+    std::span<const ColumnSupportEntry> entries,
+    std::span<const AssemblyContext::Vector3D> test_gradients,
+    std::span<const AssemblyContext::Vector3D> trial_gradients,
+    std::span<const Real> integration_weights,
+    std::size_t row,
+    std::size_t n_test,
+    std::size_t n_trial,
+    std::size_t n_qpts,
+    Real row_energy)
+{
+    oss << ' ' << key << '=';
+    if (entries.empty()) {
+        oss << "none";
+        return;
+    }
+    for (std::size_t i = 0u; i < entries.size(); ++i) {
+        if (i > 0u) {
+            oss << '|';
+        }
+        const Real gram = gradientGramEntry(
+            test_gradients, trial_gradients, integration_weights, row,
+            entries[i].local_index, n_test, n_trial, n_qpts);
+        const Real col_energy =
+            gradientEnergy(trial_gradients, integration_weights,
+                           entries[i].local_index, n_trial, n_qpts);
+        const Real denom = std::sqrt(std::max(row_energy, Real{0.0}) *
+                                     std::max(col_energy, Real{0.0}));
+        oss << (denom > Real{0.0} ? gram / denom : Real{0.0});
+    }
+}
+
+void logCutVolumeLocalMatrixRowProvenance(
+    const AssemblyDiagnosticContext& diagnostic_context,
+    const AssemblyContext& assembly_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    const geometry::CutQuadratureRule& rule,
+    const CutCellAssemblyMetadata* metadata,
+    std::size_t rule_index,
+    GlobalIndex parent_cell,
+    std::size_t active_quadrature_points,
+    const KernelOutput& output,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs,
+    ElementType test_element_type,
+    ElementType trial_element_type)
+{
+    const bool row_provenance_enabled =
+        cutVolumeLocalMatrixProvenanceDiagnosticEnabled();
+    const bool column_support_enabled =
+        cutVolumeLocalMatrixColumnSupportDiagnosticEnabled();
+    const bool column_geometry_enabled =
+        cutVolumeLocalMatrixColumnGeometryDiagnosticEnabled();
+    const bool quadrature_geometry_enabled =
+        cutVolumeLocalMatrixQuadratureGeometryDiagnosticEnabled();
+    const bool gradient_balance_enabled =
+        cutVolumeLocalMatrixGradientBalanceDiagnosticEnabled();
+    const bool column_support_line_enabled =
+        column_support_enabled || column_geometry_enabled ||
+        quadrature_geometry_enabled;
+    const bool effective_column_support_enabled =
+        column_support_line_enabled || gradient_balance_enabled;
+    if ((!row_provenance_enabled && !effective_column_support_enabled) ||
+        !output.has_matrix ||
+        output.n_test_dofs <= 0 ||
+        output.n_trial_dofs <= 0) {
+        return;
+    }
+
+    const auto op_filter = cutVolumeLocalMatrixProvenanceOperatorFilter();
+    if (!diagnosticOperatorMatches(
+            diagnostic_context.operator_tag,
+            std::string_view(op_filter))) {
+        return;
+    }
+
+    const auto n_rows = static_cast<std::size_t>(output.n_test_dofs);
+    const auto n_cols = static_cast<std::size_t>(output.n_trial_dofs);
+    if (row_dofs.size() != n_rows || col_dofs.size() != n_cols ||
+        output.local_matrix.size() < n_rows * n_cols) {
+        return;
+    }
+
+    const auto test_gradients = assembly_context.testPhysicalGradientsRaw();
+    const auto trial_gradients = assembly_context.trialPhysicalGradientsRaw();
+    const auto integration_weights = assembly_context.integrationWeights();
+    const std::size_t n_qpts =
+        static_cast<std::size_t>(std::max<LocalIndex>(
+            assembly_context.numQuadraturePoints(), LocalIndex{0}));
+    const bool gradient_balance_available =
+        gradient_balance_enabled &&
+        test_gradients.size() >= n_rows * n_qpts &&
+        trial_gradients.size() >= n_cols * n_qpts &&
+        integration_weights.size() >= n_qpts &&
+        n_qpts > 0u;
+
+    const Real tolerance = cutVolumeLocalMatrixProvenanceTolerance();
+    const std::size_t max_column_samples =
+        cutVolumeLocalMatrixColumnSupportMaxColumns();
+    Real matrix_abs_sum = Real{0.0};
+    for (const auto value : output.local_matrix) {
+        matrix_abs_sum += std::abs(value);
+    }
+    Real gradient_gram_matrix_abs_sum = Real{0.0};
+    if (gradient_balance_available) {
+        for (std::size_t r = 0u; r < n_rows; ++r) {
+            for (std::size_t c = 0u; c < n_cols; ++c) {
+                gradient_gram_matrix_abs_sum += std::abs(
+                    gradientGramEntry(test_gradients, trial_gradients,
+                                      integration_weights, r, c, n_rows,
+                                      n_cols, n_qpts));
+            }
+        }
+    }
+
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        Real row_signed_sum = Real{0.0};
+        Real row_abs_sum = Real{0.0};
+        Real positive_sum = Real{0.0};
+        Real negative_abs_sum = Real{0.0};
+        Real diag_value = Real{0.0};
+        Real diag_abs = Real{0.0};
+        Real offdiag_abs_sum = Real{0.0};
+        Real max_abs_entry = Real{0.0};
+        GlobalIndex max_abs_col_dof = GlobalIndex{-1};
+        std::size_t max_abs_col_local_index = 0u;
+        std::size_t nonzero_count = 0u;
+        std::size_t positive_count = 0u;
+        std::size_t negative_count = 0u;
+        bool has_diag = false;
+        std::vector<ColumnSupportEntry> column_support_entries;
+        if (effective_column_support_enabled) {
+            column_support_entries.reserve(n_cols);
+        }
+
+        for (std::size_t c = 0u; c < n_cols; ++c) {
+            const Real value = output.local_matrix[r * n_cols + c];
+            const Real abs_value = std::abs(value);
+            row_signed_sum += value;
+            row_abs_sum += abs_value;
+            if (value > tolerance) {
+                positive_sum += value;
+                ++positive_count;
+            } else if (value < -tolerance) {
+                negative_abs_sum += -value;
+                ++negative_count;
+            }
+            if (abs_value > tolerance) {
+                ++nonzero_count;
+                if (effective_column_support_enabled) {
+                    column_support_entries.push_back(
+                        ColumnSupportEntry{c, col_dofs[c], value, abs_value});
+                }
+            }
+            if (abs_value > max_abs_entry) {
+                max_abs_entry = abs_value;
+                max_abs_col_dof = col_dofs[c];
+                max_abs_col_local_index = c;
+            }
+            if (row_dofs[r] == col_dofs[c]) {
+                has_diag = true;
+                diag_value += value;
+                diag_abs += abs_value;
+            } else {
+                offdiag_abs_sum += abs_value;
+            }
+        }
+
+        if (row_provenance_enabled) {
+            std::ostringstream oss;
+            oss << "StandardAssembler: diagnostic=cut_volume_local_matrix_row_provenance"
+                << " status=ok"
+                << " op='" << diagnostic_context.operator_tag << "'"
+                << " source_component='" << diagnostic_context.source_component_tag << "'"
+                << " marker=" << interface_marker
+                << " side=" << cutVolumeTimingSideName(side)
+                << " test='" << diagnostic_context.test_field_name << "'"
+                << " trial='" << diagnostic_context.trial_field_name << "'"
+                << " rule_index=" << rule_index
+                << " parent_cell=" << parent_cell
+                << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+                << " volume_fraction=" << rule.volume_fraction
+                << " measure=" << rule.measure
+                << " parent_measure=" << rule.parent_measure
+                << " rule_quadrature_points=" << rule.points.size()
+                << " active_quadrature_points=" << active_quadrature_points
+                << " source_revision="
+                << (metadata == nullptr ? 0u : metadata->source_value_revision)
+                << " cut_topology_revision="
+                << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+                << " quadrature_policy_key="
+                << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+                << " row_local_index=" << r
+                << " row_dof=" << row_dofs[r]
+                << " col_count=" << n_cols
+                << " row_abs_sum=" << row_abs_sum
+                << " row_abs_fraction="
+                << (matrix_abs_sum > Real{0.0} ? row_abs_sum / matrix_abs_sum
+                                               : Real{0.0})
+                << " row_signed_sum=" << row_signed_sum
+                << " positive_sum=" << positive_sum
+                << " negative_abs_sum=" << negative_abs_sum
+                << " nonzero_count=" << nonzero_count
+                << " positive_count=" << positive_count
+                << " negative_count=" << negative_count
+                << " has_diag=" << (has_diag ? 1 : 0)
+                << " diag_value=" << diag_value
+                << " diag_abs=" << diag_abs
+                << " offdiag_abs_sum=" << offdiag_abs_sum
+                << " max_abs_entry=" << max_abs_entry
+                << " max_abs_col_dof=" << max_abs_col_dof
+                << " max_abs_col_local_index=" << max_abs_col_local_index;
+            const auto line = oss.str();
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+
+        if (effective_column_support_enabled) {
+            std::sort(column_support_entries.begin(),
+                      column_support_entries.end(),
+                      [](const ColumnSupportEntry& lhs,
+                         const ColumnSupportEntry& rhs) {
+                          if (lhs.abs_value == rhs.abs_value) {
+                              return lhs.local_index < rhs.local_index;
+                          }
+                          return lhs.abs_value > rhs.abs_value;
+                      });
+            const std::size_t sampled_count =
+                std::min(column_support_entries.size(), max_column_samples);
+            const std::span<const ColumnSupportEntry> sampled_entries(
+                column_support_entries.data(), sampled_count);
+
+            bool diag_in_sample = false;
+            for (const auto& entry : sampled_entries) {
+                diag_in_sample = diag_in_sample || entry.dof == row_dofs[r];
+            }
+
+            if (gradient_balance_enabled) {
+                std::ostringstream oss;
+                oss << "StandardAssembler: diagnostic=cut_volume_local_matrix_gradient_balance"
+                    << " status=ok"
+                    << " op='" << diagnostic_context.operator_tag << "'"
+                    << " source_component='" << diagnostic_context.source_component_tag << "'"
+                    << " marker=" << interface_marker
+                    << " side=" << cutVolumeTimingSideName(side)
+                    << " test='" << diagnostic_context.test_field_name << "'"
+                    << " trial='" << diagnostic_context.trial_field_name << "'"
+                    << " rule_index=" << rule_index
+                    << " parent_cell=" << parent_cell
+                    << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+                    << " volume_fraction=" << rule.volume_fraction
+                    << " measure=" << rule.measure
+                    << " parent_measure=" << rule.parent_measure
+                    << " rule_quadrature_points=" << rule.points.size()
+                    << " active_quadrature_points=" << active_quadrature_points
+                    << " source_revision="
+                    << (metadata == nullptr ? 0u : metadata->source_value_revision)
+                    << " cut_topology_revision="
+                    << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+                    << " quadrature_policy_key="
+                    << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+                    << " row_local_index=" << r
+                    << " row_dof=" << row_dofs[r]
+                    << " col_count=" << n_cols
+                    << " nonzero_col_count=" << nonzero_count
+                    << " sampled_col_count=" << sampled_count
+                    << " sample_truncated="
+                    << (sampled_count < column_support_entries.size() ? 1 : 0)
+                    << " row_abs_sum=" << row_abs_sum
+                    << " row_signed_sum=" << row_signed_sum
+                    << " positive_sum=" << positive_sum
+                    << " negative_abs_sum=" << negative_abs_sum
+                    << " diag_abs=" << diag_abs
+                    << " offdiag_abs_sum=" << offdiag_abs_sum
+                    << " gradient_balance_available="
+                    << (gradient_balance_available ? 1 : 0)
+                    << " gradient_qpoint_count=" << n_qpts;
+                if (gradient_balance_available) {
+                    const auto row_gradient = summarizeGradientMoment(
+                        test_gradients, integration_weights, r, n_rows, n_qpts);
+                    Real gram_row_signed_sum = Real{0.0};
+                    Real gram_row_abs_sum = Real{0.0};
+                    Real gram_positive_sum = Real{0.0};
+                    Real gram_negative_abs_sum = Real{0.0};
+                    Real gram_diag_value = Real{0.0};
+                    Real gram_diag_abs = Real{0.0};
+                    Real gram_offdiag_abs_sum = Real{0.0};
+                    Real gram_max_abs_entry = Real{0.0};
+                    GlobalIndex gram_max_abs_col_dof = GlobalIndex{-1};
+                    std::size_t gram_max_abs_col_local_index = 0u;
+                    std::size_t gram_nonzero_count = 0u;
+                    std::size_t gram_positive_count = 0u;
+                    std::size_t gram_negative_count = 0u;
+                    for (std::size_t c = 0u; c < n_cols; ++c) {
+                        const Real gram = gradientGramEntry(
+                            test_gradients, trial_gradients,
+                            integration_weights, r, c, n_rows, n_cols,
+                            n_qpts);
+                        const Real abs_gram = std::abs(gram);
+                        gram_row_signed_sum += gram;
+                        gram_row_abs_sum += abs_gram;
+                        if (gram > tolerance) {
+                            gram_positive_sum += gram;
+                            ++gram_positive_count;
+                        } else if (gram < -tolerance) {
+                            gram_negative_abs_sum += -gram;
+                            ++gram_negative_count;
+                        }
+                        if (abs_gram > tolerance) {
+                            ++gram_nonzero_count;
+                        }
+                        if (abs_gram > gram_max_abs_entry) {
+                            gram_max_abs_entry = abs_gram;
+                            gram_max_abs_col_dof = col_dofs[c];
+                            gram_max_abs_col_local_index = c;
+                        }
+                        if (row_dofs[r] == col_dofs[c]) {
+                            gram_diag_value += gram;
+                            gram_diag_abs += abs_gram;
+                        } else {
+                            gram_offdiag_abs_sum += abs_gram;
+                        }
+                    }
+                    oss << " row_grad_x=" << row_gradient.weighted_gradient[0]
+                        << " row_grad_y=" << row_gradient.weighted_gradient[1]
+                        << " row_grad_z=" << row_gradient.weighted_gradient[2]
+                        << " row_grad_norm="
+                        << row_gradient.weighted_gradient_norm
+                        << " row_grad_abs_integral="
+                        << row_gradient.abs_gradient_integral
+                        << " row_grad_energy=" << row_gradient.gradient_energy
+                        << " row_grad_max_norm="
+                        << row_gradient.max_gradient_norm
+                        << " row_grad_directional_ratio="
+                        << row_gradient.directional_ratio
+                        << " row_grad_axis_dominance="
+                        << row_gradient.axis_dominance
+                        << " row_grad_dominant_axis="
+                        << row_gradient.dominant_axis
+                        << " gram_row_abs_sum=" << gram_row_abs_sum
+                        << " gram_row_abs_fraction="
+                        << (gradient_gram_matrix_abs_sum > Real{0.0}
+                                ? gram_row_abs_sum /
+                                      gradient_gram_matrix_abs_sum
+                                : Real{0.0})
+                        << " gram_row_signed_sum=" << gram_row_signed_sum
+                        << " gram_positive_sum=" << gram_positive_sum
+                        << " gram_negative_abs_sum="
+                        << gram_negative_abs_sum
+                        << " gram_nonzero_count=" << gram_nonzero_count
+                        << " gram_positive_count=" << gram_positive_count
+                        << " gram_negative_count=" << gram_negative_count
+                        << " gram_diag_value=" << gram_diag_value
+                        << " gram_diag_abs=" << gram_diag_abs
+                        << " gram_diag_abs_fraction="
+                        << (gram_row_abs_sum > Real{0.0}
+                                ? gram_diag_abs / gram_row_abs_sum
+                                : Real{0.0})
+                        << " gram_offdiag_abs_sum="
+                        << gram_offdiag_abs_sum
+                        << " gram_max_abs_entry=" << gram_max_abs_entry
+                        << " gram_max_abs_col_dof=" << gram_max_abs_col_dof
+                        << " gram_max_abs_col_local_index="
+                        << gram_max_abs_col_local_index
+                        << " matrix_to_gram_abs_ratio="
+                        << (gram_row_abs_sum > Real{0.0}
+                                ? row_abs_sum / gram_row_abs_sum
+                                : Real{0.0});
+                }
+                appendColumnSupportList(
+                    oss, "sampled_col_local_indices", sampled_entries,
+                    "local_index");
+                appendColumnSupportList(
+                    oss, "sampled_col_dofs", sampled_entries, "dof");
+                appendColumnSupportList(
+                    oss, "sampled_col_values", sampled_entries, "value");
+                if (gradient_balance_available) {
+                    const auto row_gradient = summarizeGradientMoment(
+                        test_gradients, integration_weights, r, n_rows,
+                        n_qpts);
+                    appendGradientGramSampleList(
+                        oss, "sampled_col_gradient_gram_values",
+                        sampled_entries, test_gradients, trial_gradients,
+                        integration_weights, r, n_rows, n_cols, n_qpts);
+                    appendGradientGramCosineSampleList(
+                        oss, "sampled_col_gradient_cosines", sampled_entries,
+                        test_gradients, trial_gradients, integration_weights,
+                        r, n_rows, n_cols, n_qpts,
+                        row_gradient.gradient_energy);
+                }
+                const auto line = oss.str();
+                std::fprintf(stderr, "%s\n", line.c_str());
+            }
+
+            if (!column_support_line_enabled) {
+                continue;
+            }
+
+            std::ostringstream oss;
+            oss << "StandardAssembler: diagnostic=cut_volume_local_matrix_column_support"
+                << " status=ok"
+                << " op='" << diagnostic_context.operator_tag << "'"
+                << " source_component='" << diagnostic_context.source_component_tag << "'"
+                << " marker=" << interface_marker
+                << " side=" << cutVolumeTimingSideName(side)
+                << " test='" << diagnostic_context.test_field_name << "'"
+                << " trial='" << diagnostic_context.trial_field_name << "'"
+                << " rule_index=" << rule_index
+                << " parent_cell=" << parent_cell
+                << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+                << " volume_fraction=" << rule.volume_fraction
+                << " measure=" << rule.measure
+                << " parent_measure=" << rule.parent_measure
+                << " rule_quadrature_points=" << rule.points.size()
+                << " active_quadrature_points=" << active_quadrature_points
+                << " source_revision="
+                << (metadata == nullptr ? 0u : metadata->source_value_revision)
+                << " cut_topology_revision="
+                << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+                << " quadrature_policy_key="
+                << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+                << " row_local_index=" << r
+                << " row_dof=" << row_dofs[r]
+                << " col_count=" << n_cols
+                << " nonzero_col_count=" << nonzero_count
+                << " positive_col_count=" << positive_count
+                << " negative_col_count=" << negative_count
+                << " sampled_col_count=" << sampled_count
+                << " sample_truncated="
+                << (sampled_count < column_support_entries.size() ? 1 : 0)
+                << " sample_sorted_by=abs_desc"
+                << " row_abs_sum=" << row_abs_sum
+                << " row_signed_sum=" << row_signed_sum
+                << " positive_sum=" << positive_sum
+                << " negative_abs_sum=" << negative_abs_sum
+                << " has_diag=" << (has_diag ? 1 : 0)
+                << " diag_in_sample=" << (diag_in_sample ? 1 : 0)
+                << " diag_value=" << diag_value
+                << " diag_abs=" << diag_abs
+                << " offdiag_abs_sum=" << offdiag_abs_sum;
+            appendColumnSupportList(
+                oss, "sampled_col_local_indices", sampled_entries, "local_index");
+            appendColumnSupportList(oss, "sampled_col_dofs", sampled_entries, "dof");
+            appendColumnSupportList(
+                oss, "sampled_col_values", sampled_entries, "value");
+            appendColumnSupportList(
+                oss, "sampled_col_abs_values", sampled_entries, "abs_value");
+            appendColumnSupportList(
+                oss, "sampled_col_signs", sampled_entries, "sign");
+            if (column_geometry_enabled) {
+                const auto row_coordinate =
+                    referenceNodeCoordinate(test_element_type, r);
+                oss << " test_element_type="
+                    << static_cast<int>(test_element_type)
+                    << " trial_element_type="
+                    << static_cast<int>(trial_element_type)
+                    << " row_ref_node_available="
+                    << (row_coordinate.available ? 1 : 0)
+                    << " row_ref_x="
+                    << (row_coordinate.available ? row_coordinate.point[0]
+                                                 : std::numeric_limits<Real>::quiet_NaN())
+                    << " row_ref_y="
+                    << (row_coordinate.available ? row_coordinate.point[1]
+                                                 : std::numeric_limits<Real>::quiet_NaN())
+                    << " row_ref_z="
+                    << (row_coordinate.available ? row_coordinate.point[2]
+                                                 : std::numeric_limits<Real>::quiet_NaN());
+                appendColumnReferenceCoordinateList(
+                    oss, "sampled_col_ref_x", sampled_entries,
+                    trial_element_type, 0u);
+                appendColumnReferenceCoordinateList(
+                    oss, "sampled_col_ref_y", sampled_entries,
+                    trial_element_type, 1u);
+                appendColumnReferenceCoordinateList(
+                    oss, "sampled_col_ref_z", sampled_entries,
+                    trial_element_type, 2u);
+                appendColumnReferenceDistanceList(
+                    oss, "sampled_ref_edge_lengths", row_coordinate,
+                    sampled_entries, trial_element_type);
+            }
+            if (quadrature_geometry_enabled) {
+                appendCutRuleQuadratureGeometrySummary(oss, rule);
+            }
+            const auto line = oss.str();
+            std::fprintf(stderr, "%s\n", line.c_str());
+        }
+    }
+}
+
+void logCutVolumeDirectPspgLocalSchurDiagnostic(
+    const AssemblyDiagnosticContext& diagnostic_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    const geometry::CutQuadratureRule& rule,
+    const CutCellAssemblyMetadata* metadata,
+    std::size_t rule_index,
+    GlobalIndex parent_cell,
+    std::size_t active_quadrature_points,
+    const KernelOutput& output,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs)
+{
+    if (!cutVolumeDirectPspgLocalSchurDiagnosticEnabled() ||
+        !output.has_matrix ||
+        output.n_test_dofs <= 0 ||
+        output.n_trial_dofs <= 0) {
+        return;
+    }
+
+    const auto op_filter = cutVolumeDirectPspgLocalSchurOperatorFilter();
+    if (!diagnosticOperatorMatches(
+            diagnostic_context.operator_tag,
+            std::string_view(op_filter)) ||
+        !fieldNameEquals(diagnostic_context.test_field_name, "pressure") ||
+        !fieldNameEquals(diagnostic_context.trial_field_name, "pressure")) {
+        return;
+    }
+
+    const auto n_rows = static_cast<std::size_t>(output.n_test_dofs);
+    const auto n_cols = static_cast<std::size_t>(output.n_trial_dofs);
+    if (n_rows != n_cols ||
+        row_dofs.size() != n_rows ||
+        col_dofs.size() != n_cols ||
+        output.local_matrix.size() < n_rows * n_cols) {
+        return;
+    }
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        if (row_dofs[i] != col_dofs[i]) {
+            return;
+        }
+    }
+
+    const Real tolerance = cutVolumeLocalMatrixProvenanceTolerance();
+    const Real schur_scale = cutVolumeDirectPspgLocalSchurScale();
+    const auto matrix_index = [n_cols](std::size_t row, std::size_t col) {
+        return row * n_cols + col;
+    };
+    std::vector<Real> edge_weights(n_rows * n_cols, Real{0.0});
+    std::vector<Real> completion_weights(n_rows * n_cols, Real{0.0});
+    std::vector<Real> row_abs_sum(n_rows, Real{0.0});
+    std::vector<Real> row_diag_abs(n_rows, Real{0.0});
+    std::vector<Real> row_offdiag_abs_sum(n_rows, Real{0.0});
+    std::vector<Real> row_source_edge_weight_sum(n_rows, Real{0.0});
+    std::vector<std::size_t> row_source_edge_count(n_rows, 0u);
+
+    Real source_edge_weight_sum = Real{0.0};
+    std::size_t source_edge_count = 0u;
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        for (std::size_t c = 0u; c < n_cols; ++c) {
+            const Real value = output.local_matrix[matrix_index(r, c)];
+            const Real abs_value = std::abs(value);
+            row_abs_sum[r] += abs_value;
+            if (r == c) {
+                row_diag_abs[r] += abs_value;
+            } else {
+                row_offdiag_abs_sum[r] += abs_value;
+            }
+        }
+    }
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            const Real a_ij = output.local_matrix[matrix_index(i, j)];
+            const Real a_ji = output.local_matrix[matrix_index(j, i)];
+            const Real weight =
+                std::max<Real>(Real{0.0}, -(a_ij + a_ji) * Real{0.5});
+            if (weight <= tolerance) {
+                continue;
+            }
+            edge_weights[matrix_index(i, j)] = weight;
+            edge_weights[matrix_index(j, i)] = weight;
+            ++source_edge_count;
+            source_edge_weight_sum += weight;
+            ++row_source_edge_count[i];
+            ++row_source_edge_count[j];
+            row_source_edge_weight_sum[i] += weight;
+            row_source_edge_weight_sum[j] += weight;
+        }
+    }
+
+    std::size_t schur_hub_count = 0u;
+    std::size_t schur_contribution_count = 0u;
+    for (std::size_t hub = 0u; hub < n_rows; ++hub) {
+        std::vector<std::pair<std::size_t, Real>> neighbors;
+        neighbors.reserve(n_rows);
+        Real hub_weight_sum = Real{0.0};
+        for (std::size_t node = 0u; node < n_rows; ++node) {
+            if (node == hub) {
+                continue;
+            }
+            const Real weight = edge_weights[matrix_index(hub, node)];
+            if (weight > tolerance) {
+                neighbors.push_back({node, weight});
+                hub_weight_sum += weight;
+            }
+        }
+        if (neighbors.size() < 2u || hub_weight_sum <= tolerance) {
+            continue;
+        }
+        ++schur_hub_count;
+        for (std::size_t a = 0u; a < neighbors.size(); ++a) {
+            for (std::size_t b = a + 1u; b < neighbors.size(); ++b) {
+                const std::size_t lhs = neighbors[a].first;
+                const std::size_t rhs = neighbors[b].first;
+                const Real completion =
+                    schur_scale * neighbors[a].second * neighbors[b].second /
+                    hub_weight_sum;
+                if (completion <= tolerance) {
+                    continue;
+                }
+                completion_weights[matrix_index(lhs, rhs)] += completion;
+                completion_weights[matrix_index(rhs, lhs)] += completion;
+                ++schur_contribution_count;
+            }
+        }
+    }
+
+    std::vector<Real> row_completion_weight_sum(n_rows, Real{0.0});
+    std::vector<Real> row_completion_abs_delta(n_rows, Real{0.0});
+    std::vector<std::size_t> row_completion_edge_count(n_rows, 0u);
+    Real schur_edge_weight_sum = Real{0.0};
+    std::size_t schur_edge_count = 0u;
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            const Real weight = completion_weights[matrix_index(i, j)];
+            if (weight <= tolerance) {
+                continue;
+            }
+            ++schur_edge_count;
+            schur_edge_weight_sum += weight;
+            ++row_completion_edge_count[i];
+            ++row_completion_edge_count[j];
+            row_completion_weight_sum[i] += weight;
+            row_completion_weight_sum[j] += weight;
+            row_completion_abs_delta[i] += Real{2.0} * weight;
+            row_completion_abs_delta[j] += Real{2.0} * weight;
+        }
+    }
+
+    std::size_t touched_row_count = 0u;
+    Real max_row_abs_delta = Real{0.0};
+    for (const Real value : row_completion_abs_delta) {
+        if (value > tolerance) {
+            ++touched_row_count;
+            max_row_abs_delta = std::max(max_row_abs_delta, value);
+        }
+    }
+
+    {
+        std::ostringstream oss;
+        oss << "StandardAssembler: diagnostic=cut_volume_direct_pspg_local_schur_completion"
+            << " status=ok"
+            << " record=summary"
+            << " op='" << diagnostic_context.operator_tag << "'"
+            << " source_component='" << diagnostic_context.source_component_tag << "'"
+            << " marker=" << interface_marker
+            << " side=" << cutVolumeTimingSideName(side)
+            << " test='" << diagnostic_context.test_field_name << "'"
+            << " trial='" << diagnostic_context.trial_field_name << "'"
+            << " rule_index=" << rule_index
+            << " parent_cell=" << parent_cell
+            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+            << " volume_fraction=" << rule.volume_fraction
+            << " measure=" << rule.measure
+            << " parent_measure=" << rule.parent_measure
+            << " rule_quadrature_points=" << rule.points.size()
+            << " active_quadrature_points=" << active_quadrature_points
+            << " source_revision="
+            << (metadata == nullptr ? 0u : metadata->source_value_revision)
+            << " cut_topology_revision="
+            << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+            << " quadrature_policy_key="
+            << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+            << " local_row_count=" << n_rows
+            << " source_edge_count=" << source_edge_count
+            << " source_edge_weight_sum=" << source_edge_weight_sum
+            << " schur_scale=" << schur_scale
+            << " schur_hub_count=" << schur_hub_count
+            << " schur_contribution_count=" << schur_contribution_count
+            << " schur_edge_count=" << schur_edge_count
+            << " schur_edge_weight_sum=" << schur_edge_weight_sum
+            << " touched_row_count=" << touched_row_count
+            << " max_row_abs_delta=" << max_row_abs_delta
+            << " constant_pressure_null_preserving=1"
+            << " diagnostic_only=1";
+        const auto line = oss.str();
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        if (row_completion_abs_delta[r] <= tolerance) {
+            continue;
+        }
+        std::ostringstream oss;
+        oss << "StandardAssembler: diagnostic=cut_volume_direct_pspg_local_schur_completion"
+            << " status=ok"
+            << " record=row"
+            << " op='" << diagnostic_context.operator_tag << "'"
+            << " source_component='" << diagnostic_context.source_component_tag << "'"
+            << " marker=" << interface_marker
+            << " side=" << cutVolumeTimingSideName(side)
+            << " test='" << diagnostic_context.test_field_name << "'"
+            << " trial='" << diagnostic_context.trial_field_name << "'"
+            << " rule_index=" << rule_index
+            << " parent_cell=" << parent_cell
+            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+            << " volume_fraction=" << rule.volume_fraction
+            << " measure=" << rule.measure
+            << " parent_measure=" << rule.parent_measure
+            << " rule_quadrature_points=" << rule.points.size()
+            << " active_quadrature_points=" << active_quadrature_points
+            << " source_revision="
+            << (metadata == nullptr ? 0u : metadata->source_value_revision)
+            << " cut_topology_revision="
+            << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+            << " quadrature_policy_key="
+            << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+            << " row_local_index=" << r
+            << " row_dof=" << row_dofs[r]
+            << " row_abs_sum=" << row_abs_sum[r]
+            << " row_diag_abs=" << row_diag_abs[r]
+            << " row_offdiag_abs_sum=" << row_offdiag_abs_sum[r]
+            << " source_edge_count=" << row_source_edge_count[r]
+            << " source_edge_weight_sum=" << row_source_edge_weight_sum[r]
+            << " schur_edge_count=" << row_completion_edge_count[r]
+            << " schur_edge_weight_sum=" << row_completion_weight_sum[r]
+            << " schur_diag_delta=" << row_completion_weight_sum[r]
+            << " schur_offdiag_abs_delta=" << row_completion_weight_sum[r]
+            << " schur_row_abs_delta=" << row_completion_abs_delta[r]
+            << " schur_row_abs_ratio="
+            << (row_abs_sum[r] > Real{0.0}
+                    ? row_completion_abs_delta[r] / row_abs_sum[r]
+                    : Real{0.0})
+            << " constant_pressure_row_sum_delta=0"
+            << " diagnostic_only=1";
+        const auto line = oss.str();
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+}
+
+void logCutVolumeDirectPspgLocalEdgeBalanceDiagnostic(
+    const AssemblyDiagnosticContext& diagnostic_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    const geometry::CutQuadratureRule& rule,
+    const CutCellAssemblyMetadata* metadata,
+    std::size_t rule_index,
+    GlobalIndex parent_cell,
+    std::size_t active_quadrature_points,
+    const KernelOutput& output,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs)
+{
+    if (!cutVolumeDirectPspgLocalEdgeBalanceDiagnosticEnabled() ||
+        !output.has_matrix ||
+        output.n_test_dofs <= 0 ||
+        output.n_trial_dofs <= 0) {
+        return;
+    }
+
+    const auto op_filter = cutVolumeDirectPspgLocalEdgeBalanceOperatorFilter();
+    if (!diagnosticOperatorMatches(
+            diagnostic_context.operator_tag,
+            std::string_view(op_filter)) ||
+        !fieldNameEquals(diagnostic_context.test_field_name, "pressure") ||
+        !fieldNameEquals(diagnostic_context.trial_field_name, "pressure")) {
+        return;
+    }
+
+    const auto n_rows = static_cast<std::size_t>(output.n_test_dofs);
+    const auto n_cols = static_cast<std::size_t>(output.n_trial_dofs);
+    if (n_rows != n_cols ||
+        row_dofs.size() != n_rows ||
+        col_dofs.size() != n_cols ||
+        output.local_matrix.size() < n_rows * n_cols) {
+        return;
+    }
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        if (row_dofs[i] != col_dofs[i]) {
+            return;
+        }
+    }
+
+    const Real tolerance = cutVolumeLocalMatrixProvenanceTolerance();
+    const Real target_scale =
+        cutVolumeDirectPspgLocalEdgeBalanceTargetScale();
+    const Real max_edge_scale =
+        cutVolumeDirectPspgLocalEdgeBalanceMaxEdgeScale();
+    const auto matrix_index = [n_cols](std::size_t row, std::size_t col) {
+        return row * n_cols + col;
+    };
+    std::vector<Real> row_abs_sum(n_rows, Real{0.0});
+    std::vector<Real> row_diag_abs(n_rows, Real{0.0});
+    std::vector<Real> row_offdiag_abs_sum(n_rows, Real{0.0});
+    std::vector<Real> edge_weights(n_rows * n_cols, Real{0.0});
+    std::vector<Real> row_source_edge_weight_sum(n_rows, Real{0.0});
+    std::vector<std::size_t> row_source_edge_count(n_rows, 0u);
+
+    Real max_local_row_abs_sum = Real{0.0};
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        for (std::size_t c = 0u; c < n_cols; ++c) {
+            const Real value = output.local_matrix[matrix_index(r, c)];
+            const Real abs_value = std::abs(value);
+            row_abs_sum[r] += abs_value;
+            if (r == c) {
+                row_diag_abs[r] += abs_value;
+            } else {
+                row_offdiag_abs_sum[r] += abs_value;
+            }
+        }
+        max_local_row_abs_sum =
+            std::max(max_local_row_abs_sum, row_abs_sum[r]);
+    }
+
+    Real source_edge_weight_sum = Real{0.0};
+    std::size_t source_edge_count = 0u;
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            const Real a_ij = output.local_matrix[matrix_index(i, j)];
+            const Real a_ji = output.local_matrix[matrix_index(j, i)];
+            const Real symmetric_offdiag = (a_ij + a_ji) * Real{0.5};
+            const Real weight =
+                symmetric_offdiag < -tolerance ? -symmetric_offdiag
+                                                : Real{0.0};
+            if (weight <= tolerance) {
+                continue;
+            }
+            edge_weights[matrix_index(i, j)] = weight;
+            edge_weights[matrix_index(j, i)] = weight;
+            ++source_edge_count;
+            source_edge_weight_sum += weight;
+            ++row_source_edge_count[i];
+            ++row_source_edge_count[j];
+            row_source_edge_weight_sum[i] += weight;
+            row_source_edge_weight_sum[j] += weight;
+        }
+    }
+
+    const Real target_self_row_abs_sum =
+        max_local_row_abs_sum * target_scale;
+    std::vector<Real> row_scale(n_rows, Real{1.0});
+    std::vector<Real> row_balance_weight_sum(n_rows, Real{0.0});
+    std::vector<Real> row_balance_abs_delta(n_rows, Real{0.0});
+    std::vector<std::size_t> row_balance_edge_count(n_rows, 0u);
+    std::size_t balance_candidate_row_count = 0u;
+    Real max_row_scale = Real{1.0};
+    if (target_self_row_abs_sum > tolerance &&
+        std::isfinite(target_self_row_abs_sum)) {
+        for (std::size_t r = 0u; r < n_rows; ++r) {
+            const Real self = row_abs_sum[r];
+            if (!(self > tolerance) || !std::isfinite(self)) {
+                continue;
+            }
+            const Real needed = target_self_row_abs_sum / self;
+            if (!(needed > Real{1.0}) || !std::isfinite(needed)) {
+                continue;
+            }
+            row_scale[r] = std::min(max_edge_scale, needed);
+            if (row_scale[r] > Real{1.0}) {
+                ++balance_candidate_row_count;
+                max_row_scale = std::max(max_row_scale, row_scale[r]);
+            }
+        }
+    }
+
+    Real balance_edge_weight_sum = Real{0.0};
+    std::size_t balance_edge_count = 0u;
+    Real max_balance_delta_weight = Real{0.0};
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            const Real source_weight = edge_weights[matrix_index(i, j)];
+            if (source_weight <= tolerance) {
+                continue;
+            }
+            const Real edge_scale = std::max(row_scale[i], row_scale[j]);
+            if (!(edge_scale > Real{1.0}) || !std::isfinite(edge_scale)) {
+                continue;
+            }
+            const Real delta_weight = source_weight * (edge_scale - Real{1.0});
+            if (!(delta_weight > tolerance) || !std::isfinite(delta_weight)) {
+                continue;
+            }
+            ++balance_edge_count;
+            balance_edge_weight_sum += delta_weight;
+            max_balance_delta_weight =
+                std::max(max_balance_delta_weight, delta_weight);
+            ++row_balance_edge_count[i];
+            ++row_balance_edge_count[j];
+            row_balance_weight_sum[i] += delta_weight;
+            row_balance_weight_sum[j] += delta_weight;
+            row_balance_abs_delta[i] += Real{2.0} * delta_weight;
+            row_balance_abs_delta[j] += Real{2.0} * delta_weight;
+        }
+    }
+
+    std::size_t touched_row_count = 0u;
+    Real max_row_abs_delta = Real{0.0};
+    for (const Real value : row_balance_abs_delta) {
+        if (value > tolerance) {
+            ++touched_row_count;
+            max_row_abs_delta = std::max(max_row_abs_delta, value);
+        }
+    }
+
+    {
+        std::ostringstream oss;
+        oss << "StandardAssembler: diagnostic=cut_volume_direct_pspg_local_edge_balance"
+            << " status=ok"
+            << " record=summary"
+            << " op='" << diagnostic_context.operator_tag << "'"
+            << " source_component='" << diagnostic_context.source_component_tag << "'"
+            << " marker=" << interface_marker
+            << " side=" << cutVolumeTimingSideName(side)
+            << " test='" << diagnostic_context.test_field_name << "'"
+            << " trial='" << diagnostic_context.trial_field_name << "'"
+            << " rule_index=" << rule_index
+            << " parent_cell=" << parent_cell
+            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+            << " volume_fraction=" << rule.volume_fraction
+            << " measure=" << rule.measure
+            << " parent_measure=" << rule.parent_measure
+            << " rule_quadrature_points=" << rule.points.size()
+            << " active_quadrature_points=" << active_quadrature_points
+            << " source_revision="
+            << (metadata == nullptr ? 0u : metadata->source_value_revision)
+            << " cut_topology_revision="
+            << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+            << " quadrature_policy_key="
+            << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+            << " local_row_count=" << n_rows
+            << " source_edge_count=" << source_edge_count
+            << " source_edge_weight_sum=" << source_edge_weight_sum
+            << " target_scale=" << target_scale
+            << " max_edge_scale=" << max_edge_scale
+            << " max_local_row_abs_sum=" << max_local_row_abs_sum
+            << " target_self_row_abs_sum=" << target_self_row_abs_sum
+            << " balance_candidate_row_count=" << balance_candidate_row_count
+            << " touched_row_count=" << touched_row_count
+            << " balance_edge_count=" << balance_edge_count
+            << " balance_edge_weight_sum=" << balance_edge_weight_sum
+            << " max_row_scale=" << max_row_scale
+            << " max_balance_delta_weight=" << max_balance_delta_weight
+            << " max_row_abs_delta=" << max_row_abs_delta
+            << " constant_pressure_null_preserving=1"
+            << " diagnostic_only=1";
+        const auto line = oss.str();
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        if (row_scale[r] <= Real{1.0} &&
+            row_balance_abs_delta[r] <= tolerance) {
+            continue;
+        }
+        std::ostringstream oss;
+        oss << "StandardAssembler: diagnostic=cut_volume_direct_pspg_local_edge_balance"
+            << " status=ok"
+            << " record=row"
+            << " op='" << diagnostic_context.operator_tag << "'"
+            << " source_component='" << diagnostic_context.source_component_tag << "'"
+            << " marker=" << interface_marker
+            << " side=" << cutVolumeTimingSideName(side)
+            << " test='" << diagnostic_context.test_field_name << "'"
+            << " trial='" << diagnostic_context.trial_field_name << "'"
+            << " rule_index=" << rule_index
+            << " parent_cell=" << parent_cell
+            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+            << " volume_fraction=" << rule.volume_fraction
+            << " measure=" << rule.measure
+            << " parent_measure=" << rule.parent_measure
+            << " rule_quadrature_points=" << rule.points.size()
+            << " active_quadrature_points=" << active_quadrature_points
+            << " source_revision="
+            << (metadata == nullptr ? 0u : metadata->source_value_revision)
+            << " cut_topology_revision="
+            << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+            << " quadrature_policy_key="
+            << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+            << " row_local_index=" << r
+            << " row_dof=" << row_dofs[r]
+            << " row_abs_sum=" << row_abs_sum[r]
+            << " row_diag_abs=" << row_diag_abs[r]
+            << " row_offdiag_abs_sum=" << row_offdiag_abs_sum[r]
+            << " source_edge_count=" << row_source_edge_count[r]
+            << " source_edge_weight_sum=" << row_source_edge_weight_sum[r]
+            << " target_self_row_abs_sum=" << target_self_row_abs_sum
+            << " row_scale=" << row_scale[r]
+            << " balance_candidate="
+            << (row_scale[r] > Real{1.0} ? 1 : 0)
+            << " balance_edge_count=" << row_balance_edge_count[r]
+            << " balance_edge_weight_sum=" << row_balance_weight_sum[r]
+            << " balance_diag_delta=" << row_balance_weight_sum[r]
+            << " balance_offdiag_abs_delta=" << row_balance_weight_sum[r]
+            << " balance_row_abs_delta=" << row_balance_abs_delta[r]
+            << " balance_row_abs_ratio="
+            << (row_abs_sum[r] > Real{0.0}
+                    ? row_balance_abs_delta[r] / row_abs_sum[r]
+                    : Real{0.0})
+            << " constant_pressure_row_sum_delta=0"
+            << " diagnostic_only=1";
+        const auto line = oss.str();
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+}
+
+struct DirectPspgTopologyPolicyStats {
+    std::size_t source_edge_count{0u};
+    std::size_t topology_edge_count{0u};
+    std::size_t schur_hub_count{0u};
+    std::size_t schur_contribution_count{0u};
+    std::size_t balance_candidate_row_count{0u};
+    Real source_edge_weight_sum{Real{0.0}};
+    Real topology_edge_weight_sum{Real{0.0}};
+    Real max_delta_weight{Real{0.0}};
+    Real max_row_abs_delta{Real{0.0}};
+    std::size_t touched_row_count{0u};
+};
+
+void logCutVolumeDirectPspgSupportCouplingProvenance(
+    const AssemblyDiagnosticContext& diagnostic_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    const geometry::CutQuadratureRule& rule,
+    const CutCellAssemblyMetadata* metadata,
+    std::size_t rule_index,
+    GlobalIndex parent_cell,
+    std::size_t active_quadrature_points,
+    const KernelOutput& output,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs)
+{
+    if (!cutVolumeDirectPspgSupportCouplingProvenanceDiagnosticEnabled() ||
+        !output.has_matrix ||
+        output.n_test_dofs <= 0 ||
+        output.n_trial_dofs <= 0) {
+        return;
+    }
+
+    const auto op_filter = cutVolumeDirectPspgSupportCouplingOperatorFilter();
+    const auto source_filter =
+        cutVolumeDirectPspgSupportCouplingSourceComponentFilter();
+    if (!diagnosticOperatorMatches(
+            diagnostic_context.operator_tag,
+            std::string_view(op_filter)) ||
+        !diagnosticOperatorMatches(
+            diagnostic_context.source_component_tag,
+            std::string_view(source_filter)) ||
+        !fieldNameEquals(diagnostic_context.test_field_name, "pressure")) {
+        return;
+    }
+
+    const auto n_rows = static_cast<std::size_t>(output.n_test_dofs);
+    const auto n_cols = static_cast<std::size_t>(output.n_trial_dofs);
+    if (row_dofs.size() != n_rows ||
+        col_dofs.size() != n_cols ||
+        output.local_matrix.size() < n_rows * n_cols) {
+        return;
+    }
+
+    const bool pressure_pressure_block =
+        fieldNameEquals(diagnostic_context.trial_field_name, "pressure");
+    const bool pressure_velocity_block =
+        fieldNameEquals(diagnostic_context.trial_field_name, "velocity");
+    if (!pressure_pressure_block && !pressure_velocity_block) {
+        return;
+    }
+
+    const bool square_pressure_graph =
+        pressure_pressure_block && n_rows == n_cols;
+    if (square_pressure_graph) {
+        for (std::size_t i = 0u; i < n_rows; ++i) {
+            if (row_dofs[i] != col_dofs[i]) {
+                return;
+            }
+        }
+    }
+
+    const char* block_name = pressure_pressure_block ? "pressure_pressure"
+                                                     : "pressure_velocity";
+    const Real tolerance = cutVolumeLocalMatrixProvenanceTolerance();
+    const auto matrix_index = [n_cols](std::size_t row, std::size_t col) {
+        return row * n_cols + col;
+    };
+
+    std::vector<Real> edge_weights;
+    if (square_pressure_graph) {
+        edge_weights.assign(n_rows * n_cols, Real{0.0});
+        for (std::size_t i = 0u; i < n_rows; ++i) {
+            for (std::size_t j = i + 1u; j < n_cols; ++j) {
+                const Real a_ij = output.local_matrix[matrix_index(i, j)];
+                const Real a_ji = output.local_matrix[matrix_index(j, i)];
+                if (!std::isfinite(a_ij) || !std::isfinite(a_ji)) {
+                    continue;
+                }
+                const Real symmetric_offdiag = (a_ij + a_ji) * Real{0.5};
+                const Real weight =
+                    symmetric_offdiag < -tolerance ? -symmetric_offdiag
+                                                    : Real{0.0};
+                if (weight <= tolerance) {
+                    continue;
+                }
+                edge_weights[matrix_index(i, j)] = weight;
+                edge_weights[matrix_index(j, i)] = weight;
+            }
+        }
+    }
+
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        Real row_signed_sum = Real{0.0};
+        Real row_abs_sum = Real{0.0};
+        Real positive_sum = Real{0.0};
+        Real negative_abs_sum = Real{0.0};
+        Real diag_abs = Real{0.0};
+        Real offdiag_abs_sum = Real{0.0};
+        std::size_t nonzero_count = 0u;
+        std::size_t positive_count = 0u;
+        std::size_t negative_count = 0u;
+        bool has_diag = false;
+        std::vector<ColumnSupportEntry> column_support_entries;
+        column_support_entries.reserve(n_cols);
+        for (std::size_t c = 0u; c < n_cols; ++c) {
+            const Real value = output.local_matrix[matrix_index(r, c)];
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const Real abs_value = std::abs(value);
+            row_signed_sum += value;
+            row_abs_sum += abs_value;
+            if (value > tolerance) {
+                positive_sum += value;
+                ++positive_count;
+            } else if (value < -tolerance) {
+                negative_abs_sum += -value;
+                ++negative_count;
+            }
+            if (abs_value > tolerance) {
+                ++nonzero_count;
+                column_support_entries.push_back(
+                    ColumnSupportEntry{c, col_dofs[c], value, abs_value});
+            }
+            if (square_pressure_graph && row_dofs[r] == col_dofs[c]) {
+                has_diag = true;
+                diag_abs += abs_value;
+            } else {
+                offdiag_abs_sum += abs_value;
+            }
+        }
+
+        std::vector<std::size_t> source_neighbors;
+        Real source_edge_weight_sum = Real{0.0};
+        if (square_pressure_graph) {
+            source_neighbors.reserve(n_cols);
+            for (std::size_t c = 0u; c < n_cols; ++c) {
+                if (c == r) {
+                    continue;
+                }
+                const Real weight = edge_weights[matrix_index(r, c)];
+                if (weight > tolerance) {
+                    source_neighbors.push_back(c);
+                    source_edge_weight_sum += weight;
+                }
+            }
+        }
+
+        const std::size_t degree = source_neighbors.size();
+        const std::size_t possible_neighbor_pairs =
+            degree > 1u ? degree * (degree - 1u) / 2u : 0u;
+        std::size_t neighbor_connected_pair_count = 0u;
+        if (square_pressure_graph && possible_neighbor_pairs > 0u) {
+            for (std::size_t a = 0u; a < source_neighbors.size(); ++a) {
+                for (std::size_t b = a + 1u; b < source_neighbors.size(); ++b) {
+                    if (edge_weights[matrix_index(
+                            source_neighbors[a], source_neighbors[b])] >
+                        tolerance) {
+                        ++neighbor_connected_pair_count;
+                    }
+                }
+            }
+        }
+        const std::size_t two_hop_completion_count =
+            possible_neighbor_pairs - neighbor_connected_pair_count;
+        const Real local_clustering =
+            possible_neighbor_pairs > 0u
+                ? static_cast<Real>(neighbor_connected_pair_count) /
+                      static_cast<Real>(possible_neighbor_pairs)
+                : Real{0.0};
+
+        std::sort(column_support_entries.begin(),
+                  column_support_entries.end(),
+                  [](const ColumnSupportEntry& lhs,
+                     const ColumnSupportEntry& rhs) {
+                      if (lhs.abs_value == rhs.abs_value) {
+                          return lhs.local_index < rhs.local_index;
+                      }
+                      return lhs.abs_value > rhs.abs_value;
+                  });
+        const std::size_t max_column_samples =
+            cutVolumeLocalMatrixColumnSupportMaxColumns();
+        const std::size_t sampled_count =
+            std::min(column_support_entries.size(), max_column_samples);
+        const std::span<const ColumnSupportEntry> sampled_entries(
+            column_support_entries.data(), sampled_count);
+
+        bool diag_in_sample = false;
+        for (const auto& entry : sampled_entries) {
+            diag_in_sample = diag_in_sample || entry.dof == row_dofs[r];
+        }
+
+        std::ostringstream oss;
+        oss << "StandardAssembler: diagnostic=cut_volume_direct_pspg_support_coupling_provenance"
+            << " status=ok"
+            << " record=row"
+            << " op='" << diagnostic_context.operator_tag << "'"
+            << " source_component='" << diagnostic_context.source_component_tag << "'"
+            << " block=" << block_name
+            << " marker=" << interface_marker
+            << " side=" << cutVolumeTimingSideName(side)
+            << " test='" << diagnostic_context.test_field_name << "'"
+            << " trial='" << diagnostic_context.trial_field_name << "'"
+            << " rule_index=" << rule_index
+            << " parent_cell=" << parent_cell
+            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+            << " volume_fraction=" << rule.volume_fraction
+            << " measure=" << rule.measure
+            << " parent_measure=" << rule.parent_measure
+            << " rule_quadrature_points=" << rule.points.size()
+            << " active_quadrature_points=" << active_quadrature_points
+            << " source_revision="
+            << (metadata == nullptr ? 0u : metadata->source_value_revision)
+            << " cut_topology_revision="
+            << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+            << " quadrature_policy_key="
+            << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+            << " row_local_index=" << r
+            << " row_dof=" << row_dofs[r]
+            << " col_count=" << n_cols
+            << " row_abs_sum=" << row_abs_sum
+            << " row_signed_sum=" << row_signed_sum
+            << " positive_sum=" << positive_sum
+            << " negative_abs_sum=" << negative_abs_sum
+            << " nonzero_count=" << nonzero_count
+            << " nonzero_col_count=" << nonzero_count
+            << " positive_count=" << positive_count
+            << " negative_count=" << negative_count
+            << " sampled_col_count=" << sampled_count
+            << " sample_truncated="
+            << (sampled_count < column_support_entries.size() ? 1 : 0)
+            << " sample_sorted_by=abs_desc"
+            << " has_diag=" << (has_diag ? 1 : 0)
+            << " diag_in_sample=" << (diag_in_sample ? 1 : 0)
+            << " diag_abs=" << diag_abs
+            << " offdiag_abs_sum=" << offdiag_abs_sum
+            << " square_pressure_graph=" << (square_pressure_graph ? 1 : 0)
+            << " source_edge_count=" << degree
+            << " source_edge_weight_sum=" << source_edge_weight_sum
+            << " neighbor_pair_count=" << possible_neighbor_pairs
+            << " neighbor_connected_pair_count=" << neighbor_connected_pair_count
+            << " two_hop_completion_count=" << two_hop_completion_count
+            << " local_clustering=" << local_clustering
+            << " pressure_update_sign_used=0"
+            << " diagnostic_only=1";
+        appendColumnSupportList(
+            oss, "sampled_col_local_indices", sampled_entries, "local_index");
+        appendColumnSupportList(
+            oss, "sampled_col_dofs", sampled_entries, "dof");
+        appendColumnSupportList(
+            oss, "sampled_col_values", sampled_entries, "value");
+        appendColumnSupportList(
+            oss, "sampled_col_abs_values", sampled_entries, "abs_value");
+        appendColumnSupportList(
+            oss, "sampled_col_signs", sampled_entries, "sign");
+        const auto line = oss.str();
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
+}
+
+void mergeDirectPspgTopologyStats(DirectPspgTopologyPolicyStats& total,
+                                  const DirectPspgTopologyPolicyStats& part)
+{
+    total.source_edge_count =
+        std::max(total.source_edge_count, part.source_edge_count);
+    total.source_edge_weight_sum =
+        std::max(total.source_edge_weight_sum, part.source_edge_weight_sum);
+    total.topology_edge_count += part.topology_edge_count;
+    total.schur_hub_count += part.schur_hub_count;
+    total.schur_contribution_count += part.schur_contribution_count;
+    total.balance_candidate_row_count += part.balance_candidate_row_count;
+    total.topology_edge_weight_sum += part.topology_edge_weight_sum;
+    total.max_delta_weight =
+        std::max(total.max_delta_weight, part.max_delta_weight);
+}
+
+void addNullPreservingPressureEdge(KernelOutput& output,
+                                   std::size_t n_cols,
+                                   std::size_t i,
+                                   std::size_t j,
+                                   Real weight,
+                                   std::vector<Real>& row_abs_delta)
+{
+    const auto matrix_index = [n_cols](std::size_t row, std::size_t col) {
+        return row * n_cols + col;
+    };
+    output.local_matrix[matrix_index(i, i)] += weight;
+    output.local_matrix[matrix_index(j, j)] += weight;
+    output.local_matrix[matrix_index(i, j)] -= weight;
+    output.local_matrix[matrix_index(j, i)] -= weight;
+    row_abs_delta[i] += Real{2.0} * weight;
+    row_abs_delta[j] += Real{2.0} * weight;
+}
+
+DirectPspgTopologyPolicyStats applyDirectPspgLocalSchurCompletion(
+    KernelOutput& output,
+    std::size_t n_rows,
+    std::size_t n_cols,
+    Real tolerance,
+    std::span<const char> selected_rows,
+    std::vector<Real>& row_abs_delta)
+{
+    DirectPspgTopologyPolicyStats stats;
+    const Real schur_scale = cutVolumeDirectPspgLocalSchurScale();
+    if (!(schur_scale > Real{0.0}) || !std::isfinite(schur_scale)) {
+        return stats;
+    }
+
+    const auto matrix_index = [n_cols](std::size_t row, std::size_t col) {
+        return row * n_cols + col;
+    };
+    std::vector<Real> edge_weights(n_rows * n_cols, Real{0.0});
+    std::vector<Real> completion_weights(n_rows * n_cols, Real{0.0});
+
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            if (!cutVolumeDirectPspgTopologyLocalEdgeSelected(
+                    selected_rows, i, j)) {
+                continue;
+            }
+            const Real a_ij = output.local_matrix[matrix_index(i, j)];
+            const Real a_ji = output.local_matrix[matrix_index(j, i)];
+            if (!std::isfinite(a_ij) || !std::isfinite(a_ji)) {
+                continue;
+            }
+            const Real weight =
+                std::max<Real>(Real{0.0}, -(a_ij + a_ji) * Real{0.5});
+            if (weight <= tolerance) {
+                continue;
+            }
+            edge_weights[matrix_index(i, j)] = weight;
+            edge_weights[matrix_index(j, i)] = weight;
+            ++stats.source_edge_count;
+            stats.source_edge_weight_sum += weight;
+        }
+    }
+
+    for (std::size_t hub = 0u; hub < n_rows; ++hub) {
+        if (!cutVolumeDirectPspgTopologyLocalRowSelected(
+                selected_rows, hub)) {
+            continue;
+        }
+        std::vector<std::pair<std::size_t, Real>> neighbors;
+        neighbors.reserve(n_rows);
+        Real hub_weight_sum = Real{0.0};
+        for (std::size_t node = 0u; node < n_rows; ++node) {
+            if (node == hub) {
+                continue;
+            }
+            const Real weight = edge_weights[matrix_index(hub, node)];
+            if (weight > tolerance) {
+                neighbors.push_back({node, weight});
+                hub_weight_sum += weight;
+            }
+        }
+        if (neighbors.size() < 2u || hub_weight_sum <= tolerance) {
+            continue;
+        }
+        ++stats.schur_hub_count;
+        for (std::size_t a = 0u; a < neighbors.size(); ++a) {
+            for (std::size_t b = a + 1u; b < neighbors.size(); ++b) {
+                const std::size_t lhs = neighbors[a].first;
+                const std::size_t rhs = neighbors[b].first;
+                const Real completion =
+                    schur_scale * neighbors[a].second * neighbors[b].second /
+                    hub_weight_sum;
+                if (completion <= tolerance || !std::isfinite(completion)) {
+                    continue;
+                }
+                completion_weights[matrix_index(lhs, rhs)] += completion;
+                completion_weights[matrix_index(rhs, lhs)] += completion;
+                ++stats.schur_contribution_count;
+            }
+        }
+    }
+
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            if (!cutVolumeDirectPspgTopologyLocalEdgeSelected(
+                    selected_rows, i, j)) {
+                continue;
+            }
+            const Real weight = completion_weights[matrix_index(i, j)];
+            if (weight <= tolerance || !std::isfinite(weight)) {
+                continue;
+            }
+            addNullPreservingPressureEdge(
+                output, n_cols, i, j, weight, row_abs_delta);
+            ++stats.topology_edge_count;
+            stats.topology_edge_weight_sum += weight;
+            stats.max_delta_weight =
+                std::max(stats.max_delta_weight, weight);
+        }
+    }
+    return stats;
+}
+
+DirectPspgTopologyPolicyStats applyDirectPspgLocalEdgeBalance(
+    KernelOutput& output,
+    std::size_t n_rows,
+    std::size_t n_cols,
+    Real tolerance,
+    std::span<const char> selected_rows,
+    std::vector<Real>& row_abs_delta)
+{
+    DirectPspgTopologyPolicyStats stats;
+    const Real target_scale =
+        cutVolumeDirectPspgLocalEdgeBalanceTargetScale();
+    const Real max_edge_scale =
+        cutVolumeDirectPspgLocalEdgeBalanceMaxEdgeScale();
+    if (!(target_scale > Real{0.0}) || !std::isfinite(target_scale) ||
+        !(max_edge_scale >= Real{1.0}) || !std::isfinite(max_edge_scale)) {
+        return stats;
+    }
+
+    const auto matrix_index = [n_cols](std::size_t row, std::size_t col) {
+        return row * n_cols + col;
+    };
+    std::vector<Real> row_abs_sum(n_rows, Real{0.0});
+    std::vector<Real> edge_weights(n_rows * n_cols, Real{0.0});
+
+    Real max_local_row_abs_sum = Real{0.0};
+    for (std::size_t r = 0u; r < n_rows; ++r) {
+        for (std::size_t c = 0u; c < n_cols; ++c) {
+            const Real value = output.local_matrix[matrix_index(r, c)];
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            row_abs_sum[r] += std::abs(value);
+        }
+        max_local_row_abs_sum =
+            std::max(max_local_row_abs_sum, row_abs_sum[r]);
+    }
+
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            if (!cutVolumeDirectPspgTopologyLocalEdgeSelected(
+                    selected_rows, i, j)) {
+                continue;
+            }
+            const Real a_ij = output.local_matrix[matrix_index(i, j)];
+            const Real a_ji = output.local_matrix[matrix_index(j, i)];
+            if (!std::isfinite(a_ij) || !std::isfinite(a_ji)) {
+                continue;
+            }
+            const Real symmetric_offdiag = (a_ij + a_ji) * Real{0.5};
+            const Real weight =
+                symmetric_offdiag < -tolerance ? -symmetric_offdiag
+                                                : Real{0.0};
+            if (weight <= tolerance) {
+                continue;
+            }
+            edge_weights[matrix_index(i, j)] = weight;
+            edge_weights[matrix_index(j, i)] = weight;
+            ++stats.source_edge_count;
+            stats.source_edge_weight_sum += weight;
+        }
+    }
+
+    const Real target_self_row_abs_sum =
+        max_local_row_abs_sum * target_scale;
+    std::vector<Real> row_scale(n_rows, Real{1.0});
+    if (target_self_row_abs_sum > tolerance &&
+        std::isfinite(target_self_row_abs_sum)) {
+        for (std::size_t r = 0u; r < n_rows; ++r) {
+            if (!cutVolumeDirectPspgTopologyLocalRowSelected(
+                    selected_rows, r)) {
+                continue;
+            }
+            const Real self = row_abs_sum[r];
+            if (!(self > tolerance) || !std::isfinite(self)) {
+                continue;
+            }
+            const Real needed = target_self_row_abs_sum / self;
+            if (!(needed > Real{1.0}) || !std::isfinite(needed)) {
+                continue;
+            }
+            row_scale[r] = std::min(max_edge_scale, needed);
+            if (row_scale[r] > Real{1.0}) {
+                ++stats.balance_candidate_row_count;
+            }
+        }
+    }
+
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        for (std::size_t j = i + 1u; j < n_cols; ++j) {
+            if (!cutVolumeDirectPspgTopologyLocalEdgeSelected(
+                    selected_rows, i, j)) {
+                continue;
+            }
+            const Real source_weight = edge_weights[matrix_index(i, j)];
+            if (source_weight <= tolerance) {
+                continue;
+            }
+            const Real edge_scale = std::max(row_scale[i], row_scale[j]);
+            if (!(edge_scale > Real{1.0}) || !std::isfinite(edge_scale)) {
+                continue;
+            }
+            const Real delta_weight = source_weight * (edge_scale - Real{1.0});
+            if (!(delta_weight > tolerance) || !std::isfinite(delta_weight)) {
+                continue;
+            }
+            addNullPreservingPressureEdge(
+                output, n_cols, i, j, delta_weight, row_abs_delta);
+            ++stats.topology_edge_count;
+            stats.topology_edge_weight_sum += delta_weight;
+            stats.max_delta_weight =
+                std::max(stats.max_delta_weight, delta_weight);
+        }
+    }
+    return stats;
+}
+
+void applyCutVolumeDirectPspgTopologyPolicy(
+    const AssemblyDiagnosticContext& diagnostic_context,
+    int interface_marker,
+    geometry::CutIntegrationSide side,
+    const geometry::CutQuadratureRule& rule,
+    const CutCellAssemblyMetadata* metadata,
+    std::size_t rule_index,
+    GlobalIndex parent_cell,
+    std::size_t active_quadrature_points,
+    KernelOutput& output,
+    std::span<const GlobalIndex> row_dofs,
+    std::span<const GlobalIndex> col_dofs)
+{
+    const auto policy = cutVolumeDirectPspgTopologyPolicy();
+    if (policy == CutVolumeDirectPspgTopologyPolicy::Off ||
+        !output.has_matrix ||
+        output.n_test_dofs <= 0 ||
+        output.n_trial_dofs <= 0) {
+        return;
+    }
+
+    const auto op_filter = cutVolumeDirectPspgTopologyOperatorFilter();
+    const auto source_filter = cutVolumeDirectPspgTopologySourceComponentFilter();
+    if (!diagnosticOperatorMatches(
+            diagnostic_context.operator_tag,
+            std::string_view(op_filter)) ||
+        !diagnosticOperatorMatches(
+            diagnostic_context.source_component_tag,
+            std::string_view(source_filter)) ||
+        !fieldNameEquals(diagnostic_context.test_field_name, "pressure") ||
+        !fieldNameEquals(diagnostic_context.trial_field_name, "pressure")) {
+        return;
+    }
+    if (rule.full_cell_equivalent &&
+        !cutVolumeDirectPspgTopologyApplyFullCell()) {
+        return;
+    }
+
+    const auto& parent_cell_filter =
+        cutVolumeDirectPspgTopologyParentCellFilter();
+    if (!cutVolumeDirectPspgTopologyRowFilterContains(
+            parent_cell_filter, parent_cell)) {
+        return;
+    }
+
+    const auto n_rows = static_cast<std::size_t>(output.n_test_dofs);
+    const auto n_cols = static_cast<std::size_t>(output.n_trial_dofs);
+    if (n_rows != n_cols ||
+        row_dofs.size() != n_rows ||
+        col_dofs.size() != n_cols ||
+        output.local_matrix.size() < n_rows * n_cols) {
+        return;
+    }
+    for (std::size_t i = 0u; i < n_rows; ++i) {
+        if (row_dofs[i] != col_dofs[i]) {
+            return;
+        }
+    }
+
+    const Real tolerance = cutVolumeLocalMatrixProvenanceTolerance();
+    const auto& global_dof_filter =
+        cutVolumeDirectPspgTopologyGlobalDofFilter();
+    std::vector<char> selected_rows;
+    std::size_t selected_local_row_count = n_rows;
+    if (!global_dof_filter.empty()) {
+        selected_rows.reserve(n_rows);
+        selected_local_row_count = 0u;
+        for (std::size_t i = 0u; i < n_rows; ++i) {
+            const bool selected =
+                cutVolumeDirectPspgTopologyRowFilterContains(
+                    global_dof_filter, row_dofs[i]);
+            selected_rows.push_back(selected ? 1 : 0);
+            if (selected) {
+                ++selected_local_row_count;
+            }
+        }
+        if (selected_local_row_count == 0u) {
+            return;
+        }
+    }
+    const std::span<const char> selected_row_span(
+        selected_rows.data(), selected_rows.size());
+    std::vector<Real> row_abs_delta(n_rows, Real{0.0});
+    DirectPspgTopologyPolicyStats stats;
+    if (cutVolumeDirectPspgTopologyPolicyIncludesSchur(policy)) {
+        mergeDirectPspgTopologyStats(
+            stats,
+            applyDirectPspgLocalSchurCompletion(
+                output, n_rows, n_cols, tolerance, selected_row_span,
+                row_abs_delta));
+    }
+    if (cutVolumeDirectPspgTopologyPolicyIncludesEdgeBalance(policy)) {
+        mergeDirectPspgTopologyStats(
+            stats,
+            applyDirectPspgLocalEdgeBalance(
+                output, n_rows, n_cols, tolerance, selected_row_span,
+                row_abs_delta));
+    }
+
+    for (const Real value : row_abs_delta) {
+        if (value > tolerance) {
+            ++stats.touched_row_count;
+            stats.max_row_abs_delta =
+                std::max(stats.max_row_abs_delta, value);
+        }
+    }
+
+    std::ostringstream oss;
+    oss << "StandardAssembler: diagnostic=cut_volume_direct_pspg_topology_policy"
+        << " status=applied"
+        << " policy=" << cutVolumeDirectPspgTopologyPolicyName(policy)
+        << " record=summary"
+        << " op='" << diagnostic_context.operator_tag << "'"
+        << " source_component='" << diagnostic_context.source_component_tag << "'"
+        << " marker=" << interface_marker
+        << " side=" << cutVolumeTimingSideName(side)
+        << " test='" << diagnostic_context.test_field_name << "'"
+        << " trial='" << diagnostic_context.trial_field_name << "'"
+        << " rule_index=" << rule_index
+        << " parent_cell=" << parent_cell
+        << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+        << " volume_fraction=" << rule.volume_fraction
+        << " measure=" << rule.measure
+        << " parent_measure=" << rule.parent_measure
+        << " rule_quadrature_points=" << rule.points.size()
+        << " active_quadrature_points=" << active_quadrature_points
+        << " source_revision="
+        << (metadata == nullptr ? 0u : metadata->source_value_revision)
+        << " cut_topology_revision="
+        << (metadata == nullptr ? 0u : metadata->cut_topology_revision)
+        << " quadrature_policy_key="
+        << (metadata == nullptr ? 0u : metadata->quadrature_policy_key)
+        << " local_row_count=" << n_rows
+        << " parent_filter_enabled="
+        << (parent_cell_filter.empty() ? 0 : 1)
+        << " parent_filter_parent_cell_count="
+        << parent_cell_filter.size()
+        << " parent_filter_selected=1"
+        << " row_filter_enabled=" << (global_dof_filter.empty() ? 0 : 1)
+        << " row_filter_global_dof_count=" << global_dof_filter.size()
+        << " row_filter_selected_local_row_count="
+        << selected_local_row_count
+        << " source_edge_count=" << stats.source_edge_count
+        << " source_edge_weight_sum=" << stats.source_edge_weight_sum
+        << " topology_edge_count=" << stats.topology_edge_count
+        << " topology_edge_weight_sum=" << stats.topology_edge_weight_sum
+        << " schur_hub_count=" << stats.schur_hub_count
+        << " schur_contribution_count=" << stats.schur_contribution_count
+        << " balance_candidate_row_count="
+        << stats.balance_candidate_row_count
+        << " touched_row_count=" << stats.touched_row_count
+        << " max_delta_weight=" << stats.max_delta_weight
+        << " max_row_abs_delta=" << stats.max_row_abs_delta
+        << " matrix_mutated="
+        << (stats.topology_edge_count > 0u ? 1 : 0)
+        << " solve_affecting=1"
+        << " constant_pressure_null_preserving=1"
+        << " diagnostic_only=0";
+    const auto line = oss.str();
+    std::fprintf(stderr, "%s\n", line.c_str());
 }
 
 void prepareKernelOutputRequest(KernelOutput& output,
@@ -1984,6 +4574,17 @@ void StandardAssembler::setCutIntegrationContext(const CutIntegrationContext* co
     }
 }
 
+void StandardAssembler::setAssemblyDiagnosticContext(
+    const AssemblyDiagnosticContext& context) noexcept
+{
+    diagnostic_context_ = context;
+}
+
+void StandardAssembler::clearAssemblyDiagnosticContext() noexcept
+{
+    diagnostic_context_.reset();
+}
+
 void StandardAssembler::setCoupledValues(std::span<const Real> integrals,
                                         std::span<const Real> aux_state) noexcept
 {
@@ -2182,6 +4783,7 @@ void StandardAssembler::reset()
     context_.clear();
     row_dofs_.clear();
     col_dofs_.clear();
+    diagnostic_context_.reset();
     current_solution_ = {};
     previous_solutions_.clear();
     local_solution_coeffs_.clear();
@@ -7994,6 +10596,76 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             cut_orientation_time += cut_now() - stage_start;
         }
 
+        if (diagnostic_context_) {
+            const auto& test_element =
+                test_space.getElement(cell_type, cell_id);
+            const auto& trial_element =
+                trial_space.getElement(cell_type, cell_id);
+            logCutVolumeLocalMatrixRowProvenance(
+                *diagnostic_context_,
+                context_,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                active_rule->num_points(),
+                kernel_output_,
+                row_dofs,
+                col_dofs,
+                test_element.element_type(),
+                trial_element.element_type());
+            logCutVolumeDirectPspgLocalSchurDiagnostic(
+                *diagnostic_context_,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                active_rule->num_points(),
+                kernel_output_,
+                row_dofs,
+                col_dofs);
+            logCutVolumeDirectPspgLocalEdgeBalanceDiagnostic(
+                *diagnostic_context_,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                active_rule->num_points(),
+                kernel_output_,
+                row_dofs,
+                col_dofs);
+            logCutVolumeDirectPspgSupportCouplingProvenance(
+                *diagnostic_context_,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                active_rule->num_points(),
+                kernel_output_,
+                row_dofs,
+                col_dofs);
+            applyCutVolumeDirectPspgTopologyPolicy(
+                *diagnostic_context_,
+                interface_marker,
+                side,
+                rule,
+                rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                rule_index,
+                cell_id,
+                active_rule->num_points(),
+                kernel_output_,
+                row_dofs,
+                col_dofs);
+        }
+
         stage_start = cut_now();
         insertLocalForCell(cell_id, row_dof_map_, row_dof_offset_,
                            col_dof_map_, col_dof_offset_,
@@ -8579,6 +11251,80 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                                                   cell_id, *t.trial_space,
                                                   kernel_output_);
                 cut_orientation_time += cut_now() - stage_start;
+            }
+
+            const AssemblyDiagnosticContext* active_diagnostic_context =
+                t.diagnostic_context ? &*t.diagnostic_context
+                                     : (diagnostic_context_ ? &*diagnostic_context_
+                                                            : nullptr);
+            if (active_diagnostic_context != nullptr) {
+                const auto& test_element =
+                    t.test_space->getElement(cell_type, cell_id);
+                const auto& trial_element =
+                    t.trial_space->getElement(cell_type, cell_id);
+                logCutVolumeLocalMatrixRowProvenance(
+                    *active_diagnostic_context,
+                    context_,
+                    interface_marker,
+                    side,
+                    rule,
+                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                    rule_index,
+                    cell_id,
+                    term_rule->num_points(),
+                    kernel_output_,
+                    ts.row_dofs,
+                    ts.col_dofs,
+                    test_element.element_type(),
+                    trial_element.element_type());
+                logCutVolumeDirectPspgLocalSchurDiagnostic(
+                    *active_diagnostic_context,
+                    interface_marker,
+                    side,
+                    rule,
+                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                    rule_index,
+                    cell_id,
+                    term_rule->num_points(),
+                    kernel_output_,
+                    ts.row_dofs,
+                    ts.col_dofs);
+                logCutVolumeDirectPspgLocalEdgeBalanceDiagnostic(
+                    *active_diagnostic_context,
+                    interface_marker,
+                    side,
+                    rule,
+                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                    rule_index,
+                    cell_id,
+                    term_rule->num_points(),
+                    kernel_output_,
+                    ts.row_dofs,
+                    ts.col_dofs);
+                logCutVolumeDirectPspgSupportCouplingProvenance(
+                    *active_diagnostic_context,
+                    interface_marker,
+                    side,
+                    rule,
+                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                    rule_index,
+                    cell_id,
+                    term_rule->num_points(),
+                    kernel_output_,
+                    ts.row_dofs,
+                    ts.col_dofs);
+                applyCutVolumeDirectPspgTopologyPolicy(
+                    *active_diagnostic_context,
+                    interface_marker,
+                    side,
+                    rule,
+                    rule_index < metadata.size() ? &metadata[rule_index] : nullptr,
+                    rule_index,
+                    cell_id,
+                    term_rule->num_points(),
+                    kernel_output_,
+                    ts.row_dofs,
+                    ts.col_dofs);
             }
 
             stage_start = cut_now();
@@ -15881,32 +18627,73 @@ void StandardAssembler::populateFieldSolutionData(
                                                      local_coeffs,
                                                      "StandardAssembler::populateFieldSolutionData", false);
 
-                    // Values only (dt() needs just value history).
-                    scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
-                    for (LocalIndex q = 0; q < n_qpts; ++q) {
-                        if (field_bcache) {
-                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+	                    scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
+	                    if (need_gradients) {
+	                        scalar_gradients.assign(
+	                            static_cast<std::size_t>(n_qpts),
+	                            AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+	                    } else {
+	                        scalar_gradients.clear();
+	                    }
+	                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+	                        if (field_bcache) {
+	                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+	                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
                                 values_at_pt[static_cast<std::size_t>(j)] =
                                     field_bcache->scalarValue(static_cast<std::size_t>(j),
-                                                             static_cast<std::size_t>(q));
-                            }
-                        } else {
-                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                                           qpts[static_cast<std::size_t>(q)][1],
-                                                           qpts[static_cast<std::size_t>(q)][2]};
-                            basis.evaluate_values(xi, values_at_pt);
-                        }
-                        Real val = 0.0;
-                        for (LocalIndex j = 0; j < n_dofs; ++j) {
-                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
-                        }
-                        scalar_values[static_cast<std::size_t>(q)] = val;
-                    }
-                    context.setFieldPreviousSolutionScalarK(req.field, k, std::span<const Real>(scalar_values));
-                }
-            }
+	                                                             static_cast<std::size_t>(q));
+	                            }
+	                        } else {
+	                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+	                                                           qpts[static_cast<std::size_t>(q)][1],
+	                                                           qpts[static_cast<std::size_t>(q)][2]};
+	                            basis.evaluate_values(xi, values_at_pt);
+	                            if (need_gradients) {
+	                                basis.evaluate_gradients(xi, gradients_at_pt);
+	                            }
+	                        }
+	                        Real val = 0.0;
+	                        AssemblyContext::Vector3D gref_sum = {0.0, 0.0, 0.0};
+	                        for (LocalIndex j = 0; j < n_dofs; ++j) {
+	                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+	                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
+	                            if (need_gradients) {
+	                                for (int d = 0; d < dim; ++d) {
+	                                    const auto sd = static_cast<std::size_t>(d);
+	                                    const Real gref = field_bcache
+	                                        ? field_bcache->gradientValue(
+	                                              static_cast<std::size_t>(j), sd,
+	                                              static_cast<std::size_t>(q))
+	                                        : gradients_at_pt[static_cast<std::size_t>(j)][sd];
+	                                    gref_sum[sd] += coef * gref;
+	                                }
+	                            }
+	                        }
+	                        scalar_values[static_cast<std::size_t>(q)] = val;
+	                        if (need_gradients) {
+	                            const auto& J_inv =
+	                                ctx_inv_jacs_span[cached_mapping_affine_
+	                                                      ? 0
+	                                                      : static_cast<std::size_t>(q)];
+	                            AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
+	                            for (int d1 = 0; d1 < dim; ++d1) {
+	                                for (int d2 = 0; d2 < dim; ++d2) {
+	                                    grad[d1] +=
+	                                        J_inv[static_cast<std::size_t>(d2)]
+	                                             [static_cast<std::size_t>(d1)] *
+	                                        gref_sum[d2];
+	                                }
+	                            }
+	                            scalar_gradients[static_cast<std::size_t>(q)] = grad;
+	                        }
+	                    }
+	                    context.setFieldPreviousSolutionScalarK(
+	                        req.field, k, std::span<const Real>(scalar_values),
+	                        need_gradients
+	                            ? std::span<const AssemblyContext::Vector3D>(scalar_gradients)
+	                            : std::span<const AssemblyContext::Vector3D>{});
+	                }
+	            }
             continue;
         }
 
@@ -16749,32 +19536,73 @@ void StandardAssembler::populateFieldSolutionData(
                                                      local_coeffs,
                                                      "StandardAssembler::populateFieldSolutionData", false);
 
-                    // Values only (dt() needs just value history).
-                    scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
-                    for (LocalIndex q = 0; q < n_qpts; ++q) {
-                        if (field_bcache) {
-                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
-                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
+	                    scalar_values.assign(static_cast<std::size_t>(n_qpts), 0.0);
+	                    if (need_gradients) {
+	                        scalar_gradients.assign(
+	                            static_cast<std::size_t>(n_qpts),
+	                            AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+	                    } else {
+	                        scalar_gradients.clear();
+	                    }
+	                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+	                        if (field_bcache) {
+	                            values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
+	                            for (LocalIndex j = 0; j < n_scalar_dofs; ++j) {
                                 values_at_pt[static_cast<std::size_t>(j)] =
                                     field_bcache->scalarValue(static_cast<std::size_t>(j),
-                                                             static_cast<std::size_t>(q));
-                            }
-                        } else {
-                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
-                                                           qpts[static_cast<std::size_t>(q)][1],
-                                                           qpts[static_cast<std::size_t>(q)][2]};
-                            basis.evaluate_values(xi, values_at_pt);
-                        }
-                        Real val = 0.0;
-                        for (LocalIndex j = 0; j < n_dofs; ++j) {
-                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
-                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
-                        }
-                        scalar_values[static_cast<std::size_t>(q)] = val;
-                    }
-                    context.setFieldPreviousSolutionScalarK(req.field, k, std::span<const Real>(scalar_values));
-                }
-            }
+	                                                             static_cast<std::size_t>(q));
+	                            }
+	                        } else {
+	                            const math::Vector<Real, 3> xi{qpts[static_cast<std::size_t>(q)][0],
+	                                                           qpts[static_cast<std::size_t>(q)][1],
+	                                                           qpts[static_cast<std::size_t>(q)][2]};
+	                            basis.evaluate_values(xi, values_at_pt);
+	                            if (need_gradients) {
+	                                basis.evaluate_gradients(xi, gradients_at_pt);
+	                            }
+	                        }
+	                        Real val = 0.0;
+	                        AssemblyContext::Vector3D gref_sum = {0.0, 0.0, 0.0};
+	                        for (LocalIndex j = 0; j < n_dofs; ++j) {
+	                            const Real coef = local_coeffs[static_cast<std::size_t>(j)];
+	                            val += coef * values_at_pt[static_cast<std::size_t>(j)];
+	                            if (need_gradients) {
+	                                for (int d = 0; d < dim; ++d) {
+	                                    const auto sd = static_cast<std::size_t>(d);
+	                                    const Real gref = field_bcache
+	                                        ? field_bcache->gradientValue(
+	                                              static_cast<std::size_t>(j), sd,
+	                                              static_cast<std::size_t>(q))
+	                                        : gradients_at_pt[static_cast<std::size_t>(j)][sd];
+	                                    gref_sum[sd] += coef * gref;
+	                                }
+	                            }
+	                        }
+	                        scalar_values[static_cast<std::size_t>(q)] = val;
+	                        if (need_gradients) {
+	                            const auto& J_inv =
+	                                ctx_inv_jacs_span[cached_mapping_affine_
+	                                                      ? 0
+	                                                      : static_cast<std::size_t>(q)];
+	                            AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
+	                            for (int d1 = 0; d1 < dim; ++d1) {
+	                                for (int d2 = 0; d2 < dim; ++d2) {
+	                                    grad[d1] +=
+	                                        J_inv[static_cast<std::size_t>(d2)]
+	                                             [static_cast<std::size_t>(d1)] *
+	                                        gref_sum[d2];
+	                                }
+	                            }
+	                            scalar_gradients[static_cast<std::size_t>(q)] = grad;
+	                        }
+	                    }
+	                    context.setFieldPreviousSolutionScalarK(
+	                        req.field, k, std::span<const Real>(scalar_values),
+	                        need_gradients
+	                            ? std::span<const AssemblyContext::Vector3D>(scalar_gradients)
+	                            : std::span<const AssemblyContext::Vector3D>{});
+	                }
+	            }
             continue;
         }
 
@@ -17846,13 +20674,21 @@ void StandardAssembler::populateFieldSolutionDataFast(
             int history_index) {
             if (entry.field_type == FieldType::Scalar) {
                 context.setFieldPreviousSolutionScalarK(
-                    req.field, history_index, std::span<const Real>(entry.scalar_values));
+                    req.field,
+                    history_index,
+                    std::span<const Real>(entry.scalar_values),
+                    entry.has_gradients
+                        ? std::span<const AssemblyContext::Vector3D>(entry.scalar_gradients)
+                        : std::span<const AssemblyContext::Vector3D>{});
             } else {
                 context.setFieldPreviousSolutionVectorK(
                     req.field,
                     history_index,
                     entry.value_dim,
-                    std::span<const AssemblyContext::Vector3D>(entry.vector_values));
+                    std::span<const AssemblyContext::Vector3D>(entry.vector_values),
+                    entry.has_gradients
+                        ? std::span<const AssemblyContext::Matrix3x3>(entry.vector_jacobians)
+                        : std::span<const AssemblyContext::Matrix3x3>{});
             }
         };
     const auto findCachedFieldEvaluation =
@@ -18169,7 +21005,9 @@ void StandardAssembler::populateFieldSolutionDataFast(
         if (required_history > 0) {
             auto& prev_coeffs = scratch_field_local_coeffs_;  // reuse scratch
             auto& prev_scalar_vals = scratch_fsd_scalar_values_;
+            auto& prev_scalar_grads = scratch_fsd_scalar_gradients_;
             auto& prev_vec_vals = scratch_fsd_vector_values_;
+            auto& prev_vec_jacs = scratch_fsd_vector_jacobians_;
 
             for (int k = 1; k <= required_history; ++k) {
                 const auto& prev_sol = previous_solutions_[static_cast<std::size_t>(k - 1)];
@@ -18180,6 +21018,9 @@ void StandardAssembler::populateFieldSolutionDataFast(
 
                 for (std::size_t ri = 0; ri < requirements.size(); ++ri) {
                     const auto& recipe = *matched_recipes[ri];
+                    const auto& req = requirements[ri];
+                    const bool want_gradients =
+                        hasFlag(req.required, RequiredData::SolutionGradients);
                     if (!recipe.access || !recipe.bcache) continue;
                     if (recipe.access->coefficient_source !=
                         FieldSolutionAccess::CoefficientSource::GlobalSolution) {
@@ -18191,9 +21032,10 @@ void StandardAssembler::populateFieldSolutionDataFast(
                         const bool compatible =
                             cached_eval->field_type == recipe.field_type &&
                             cached_eval->value_dim == recipe.value_dim &&
-                            cached_eval->has_values;
+                            cached_eval->has_values &&
+                            (!want_gradients || cached_eval->has_gradients);
                         if (compatible) {
-                            bindCachedPreviousField(*cached_eval, requirements[ri], k);
+                            bindCachedPreviousField(*cached_eval, req, k);
                             continue;
                         }
                     }
@@ -18224,7 +21066,7 @@ void StandardAssembler::populateFieldSolutionDataFast(
                                   return std::span<const Real>(prev_coeffs);
                               }();
 
-                    if (!recipe_matches_current_cell(recipe, prev_coeff_span, false)) {
+                    if (!recipe_matches_current_cell(recipe, prev_coeff_span, want_gradients)) {
                         fallback_to_original();
                         return;
                     }
@@ -18233,82 +21075,154 @@ void StandardAssembler::populateFieldSolutionDataFast(
 
                     if (recipe.field_type == FieldType::Scalar && !recipe.is_product) {
                         prev_scalar_vals.resize(static_cast<std::size_t>(n_qpts));
+                        if (want_gradients) {
+                            prev_scalar_grads.assign(
+                                static_cast<std::size_t>(n_qpts),
+                                AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                        } else {
+                            prev_scalar_grads.clear();
+                        }
                         for (LocalIndex q = 0; q < n_qpts; ++q) {
                             Real val = 0.0;
+                            Real gref0 = 0.0;
+                            Real gref1 = 0.0;
+                            Real gref2 = 0.0;
                             for (LocalIndex i = 0; i < n_scalar; ++i) {
-                                val += prev_coeff_span[static_cast<std::size_t>(i)] *
+                                const auto c =
+                                    prev_coeff_span[static_cast<std::size_t>(i)];
+                                const auto si = static_cast<std::size_t>(i);
+                                const auto sq = static_cast<std::size_t>(q);
+                                val += c *
                                        sv[static_cast<std::size_t>(i) *
                                           static_cast<std::size_t>(n_qpts) +
                                           static_cast<std::size_t>(q)];
+                                if (want_gradients) {
+                                    gref0 += c * recipe.bcache->gradientValue(si, 0u, sq);
+                                    gref1 += c * recipe.bcache->gradientValue(si, 1u, sq);
+                                    gref2 += c * recipe.bcache->gradientValue(si, 2u, sq);
+                                }
                             }
                             prev_scalar_vals[static_cast<std::size_t>(q)] = val;
+                            if (want_gradients) {
+                                const auto& Ji = ctx_inv_jacs[static_cast<std::size_t>(q)];
+                                auto& g = prev_scalar_grads[static_cast<std::size_t>(q)];
+                                g[0] = Ji[0][0] * gref0 + Ji[1][0] * gref1 + Ji[2][0] * gref2;
+                                g[1] = Ji[0][1] * gref0 + Ji[1][1] * gref1 + Ji[2][1] * gref2;
+                                g[2] = Ji[0][2] * gref0 + Ji[1][2] * gref1 + Ji[2][2] * gref2;
+                            }
                         }
                         if (field_eval_cache != nullptr) {
                             auto* cached_eval =
-                                findCachedFieldEvaluation(requirements[ri].field, k);
+                                findCachedFieldEvaluation(req.field, k);
                             if (cached_eval == nullptr) {
                                 field_eval_cache->emplace_back();
                                 cached_eval = &field_eval_cache->back();
                             }
-                            cached_eval->field_id = requirements[ri].field;
+                            cached_eval->field_id = req.field;
                             cached_eval->cell_id = cell_id;
                             cached_eval->history_index = k;
                             cached_eval->field_type = FieldType::Scalar;
                             cached_eval->value_dim = 1;
                             cached_eval->has_values = true;
-                            cached_eval->has_gradients = false;
+                            cached_eval->has_gradients = want_gradients;
                             cached_eval->scalar_values.assign(
                                 prev_scalar_vals.begin(), prev_scalar_vals.end());
-                            cached_eval->scalar_gradients.clear();
+                            cached_eval->scalar_gradients.assign(
+                                prev_scalar_grads.begin(), prev_scalar_grads.end());
                             cached_eval->vector_values.clear();
                             cached_eval->vector_jacobians.clear();
-                            bindCachedPreviousField(*cached_eval, requirements[ri], k);
+                            bindCachedPreviousField(*cached_eval, req, k);
                         } else {
                             context.setFieldPreviousSolutionScalarK(
-                                requirements[ri].field, k, prev_scalar_vals);
+                                req.field,
+                                k,
+                                prev_scalar_vals,
+                                want_gradients
+                                    ? std::span<const AssemblyContext::Vector3D>(prev_scalar_grads)
+                                    : std::span<const AssemblyContext::Vector3D>{});
                         }
                     } else if (recipe.is_product) {
                         prev_vec_vals.resize(static_cast<std::size_t>(n_qpts));
+                        if (want_gradients) {
+                            prev_vec_jacs.assign(static_cast<std::size_t>(n_qpts),
+                                                 AssemblyContext::Matrix3x3{});
+                        } else {
+                            prev_vec_jacs.clear();
+                        }
                         for (LocalIndex q = 0; q < n_qpts; ++q) {
                             AssemblyContext::Vector3D v{0.0, 0.0, 0.0};
+                            AssemblyContext::Matrix3x3 jac_ref{};
                             for (LocalIndex si = 0; si < n_scalar; ++si) {
                                 const auto phi =
                                     sv[static_cast<std::size_t>(si) *
                                        static_cast<std::size_t>(n_qpts) +
                                        static_cast<std::size_t>(q)];
+                                Real gref0 = 0.0;
+                                Real gref1 = 0.0;
+                                Real gref2 = 0.0;
+                                if (want_gradients) {
+                                    const auto ssi = static_cast<std::size_t>(si);
+                                    const auto sq = static_cast<std::size_t>(q);
+                                    gref0 = recipe.bcache->gradientValue(ssi, 0u, sq);
+                                    gref1 = recipe.bcache->gradientValue(ssi, 1u, sq);
+                                    gref2 = recipe.bcache->gradientValue(ssi, 2u, sq);
+                                }
                                 for (int c = 0; c < recipe.value_dim; ++c) {
-                                    v[c] += prev_coeff_span[
+                                    const auto coef = prev_coeff_span[
                                         static_cast<std::size_t>(c) *
                                         static_cast<std::size_t>(n_scalar) +
-                                        static_cast<std::size_t>(si)] * phi;
+                                        static_cast<std::size_t>(si)];
+                                    v[c] += coef * phi;
+                                    if (want_gradients) {
+                                        jac_ref[c][0] += coef * gref0;
+                                        jac_ref[c][1] += coef * gref1;
+                                        jac_ref[c][2] += coef * gref2;
+                                    }
                                 }
                             }
                             prev_vec_vals[static_cast<std::size_t>(q)] = v;
+                            if (want_gradients) {
+                                const auto& Ji = ctx_inv_jacs[static_cast<std::size_t>(q)];
+                                auto& jac = prev_vec_jacs[static_cast<std::size_t>(q)];
+                                for (int comp = 0; comp < recipe.value_dim; ++comp) {
+                                    for (int d = 0; d < 3; ++d) {
+                                        jac[comp][d] = jac_ref[comp][0] * Ji[0][d] +
+                                                       jac_ref[comp][1] * Ji[1][d] +
+                                                       jac_ref[comp][2] * Ji[2][d];
+                                    }
+                                }
+                            }
                         }
                         if (field_eval_cache != nullptr) {
                             auto* cached_eval =
-                                findCachedFieldEvaluation(requirements[ri].field, k);
+                                findCachedFieldEvaluation(req.field, k);
                             if (cached_eval == nullptr) {
                                 field_eval_cache->emplace_back();
                                 cached_eval = &field_eval_cache->back();
                             }
-                            cached_eval->field_id = requirements[ri].field;
+                            cached_eval->field_id = req.field;
                             cached_eval->cell_id = cell_id;
                             cached_eval->history_index = k;
                             cached_eval->field_type = recipe.field_type;
                             cached_eval->value_dim = recipe.value_dim;
                             cached_eval->has_values = true;
-                            cached_eval->has_gradients = false;
+                            cached_eval->has_gradients = want_gradients;
                             cached_eval->vector_values.assign(
                                 prev_vec_vals.begin(), prev_vec_vals.end());
-                            cached_eval->vector_jacobians.clear();
+                            cached_eval->vector_jacobians.assign(
+                                prev_vec_jacs.begin(), prev_vec_jacs.end());
                             cached_eval->scalar_values.clear();
                             cached_eval->scalar_gradients.clear();
-                            bindCachedPreviousField(*cached_eval, requirements[ri], k);
+                            bindCachedPreviousField(*cached_eval, req, k);
                         } else {
                             context.setFieldPreviousSolutionVectorK(
-                                requirements[ri].field, k, recipe.value_dim,
-                                prev_vec_vals);
+                                req.field,
+                                k,
+                                recipe.value_dim,
+                                prev_vec_vals,
+                                want_gradients
+                                    ? std::span<const AssemblyContext::Matrix3x3>(prev_vec_jacs)
+                                    : std::span<const AssemblyContext::Matrix3x3>{});
                         }
                     }
                 }

@@ -374,6 +374,31 @@ void eval_direct_table_curl(const DirectSeedTable& table,
 // - Interior functions: bubble functions with zero normal flux on all faces
 
 template <typename Scalar>
+inline std::array<Scalar, 3> shifted_quadratic_modes(const Scalar& s) {
+    return {Scalar(Real(1)),
+            Real(2) * s - Real(1),
+            Real(6) * s * s - Real(6) * s + Real(1)};
+}
+
+template <typename Scalar>
+inline std::array<Scalar, 3> centered_quadratic_modes(const Scalar& s) {
+    return {Scalar(Real(1)),
+            s,
+            (Real(3) * s * s - Real(1)) / Real(2)};
+}
+
+template <typename Scalar>
+inline std::array<Scalar, 3> monomial_quadratic_modes(const Scalar& s) {
+    return {Scalar(Real(1)), s, s * s};
+}
+
+template <typename Scalar>
+inline std::array<Scalar, 6> tensor_quadratic_modes(const Scalar& a,
+                                                    const Scalar& b) {
+    return {Scalar(Real(1)), a, b, a * b, a * a, b * b};
+}
+
+template <typename Scalar>
 inline void eval_wedge_rt1_direct_impl(const DirectVec3<Scalar>& xi,
                                        std::vector<DirectVec3<Scalar>>& values) {
     using ValueVec = DirectVec3<Scalar>;
@@ -1079,48 +1104,35 @@ inline void eval_wedge_nd2_direct_impl(const DirectVec3<Scalar>& xi,
     // Edge DOFs: 9 edges x 3 moments = 27 DOFs
     // ==========================================================================
     // Bottom triangle edges
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*x - Real(1)) : (Real(6)*x*x - Real(6)*x + Real(1)));
+    for (const auto& leg : shifted_quadratic_modes(x)) {
         values[idx++] = Vec3{zb * (Real(1) - y) * leg, Real(0), Real(0)};
     }
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto s = y; // parameter along edge
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+    for (const auto& leg : shifted_quadratic_modes(y)) {
         values[idx++] = Vec3{-zb * L0 * leg, zb * L0 * leg, Real(0)};
     }
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto s = Real(1) - y;
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+    for (const auto& leg : shifted_quadratic_modes(Real(1) - y)) {
         values[idx++] = Vec3{Real(0), -zb * (Real(1) - x) * leg, Real(0)};
     }
 
     // Top triangle edges
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*x - Real(1)) : (Real(6)*x*x - Real(6)*x + Real(1)));
+    for (const auto& leg : shifted_quadratic_modes(x)) {
         values[idx++] = Vec3{zt * (Real(1) - y) * leg, Real(0), Real(0)};
     }
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto s = y;
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+    for (const auto& leg : shifted_quadratic_modes(y)) {
         values[idx++] = Vec3{-zt * L0 * leg, zt * L0 * leg, Real(0)};
     }
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto s = Real(1) - y;
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? (Real(2)*s - Real(1)) : (Real(6)*s*s - Real(6)*s + Real(1)));
+    for (const auto& leg : shifted_quadratic_modes(Real(1) - y)) {
         values[idx++] = Vec3{Real(0), -zt * (Real(1) - x) * leg, Real(0)};
     }
 
     // Vertical edges
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
+    for (const auto& leg : centered_quadratic_modes(z)) {
         values[idx++] = Vec3{Real(0), Real(0), L0 * leg};
     }
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
+    for (const auto& leg : centered_quadratic_modes(z)) {
         values[idx++] = Vec3{Real(0), Real(0), L1 * leg};
     }
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : (Real(3)*z*z - Real(1)) / Real(2));
+    for (const auto& leg : centered_quadratic_modes(z)) {
         values[idx++] = Vec3{Real(0), Real(0), L2 * leg};
     }
 
@@ -1148,35 +1160,29 @@ inline void eval_wedge_nd2_direct_impl(const DirectVec3<Scalar>& xi,
     // Quad faces: 3 faces x 12 tangential = 36
     // Face y=0
     const auto qf2 = (Real(1) - y) * L0;
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(x, z)) {
         values[idx++] = Vec3{qf2 * poly * Real(12), Real(0), Real(0)};
     }
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(x, z)) {
         values[idx++] = Vec3{Real(0), Real(0), qf2 * poly * Real(12)};
     }
 
     // Face x=0
     const auto qf3 = (Real(1) - x) * L0;
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(y, z)) {
         values[idx++] = Vec3{Real(0), qf3 * poly * Real(12), Real(0)};
     }
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(y, z)) {
         values[idx++] = Vec3{Real(0), Real(0), qf3 * poly * Real(12)};
     }
 
     // Face x+y=1
     const auto loc4 = x + y;
     const auto qf4 = loc4 * L2;
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(x, z)) {
         values[idx++] = Vec3{-qf4 * poly * Real(12), qf4 * poly * Real(12), Real(0)};
     }
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(x, z)) {
         values[idx++] = Vec3{Real(0), Real(0), qf4 * poly * Real(12)};
     }
 
@@ -1219,45 +1225,37 @@ inline void eval_pyramid_nd2_direct_impl(const DirectVec3<Scalar>& xi,
     // ==========================================================================
     // Base edges
     const auto le0 = (Real(1) + y) * zc;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? x : x*x);
+    for (const auto& leg : monomial_quadratic_modes(x)) {
         values[idx++] = Vec3{le0 * leg, Real(0), Real(0)};
     }
     const auto le1 = (Real(1) - x) * zc;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? y : y*y);
+    for (const auto& leg : monomial_quadratic_modes(y)) {
         values[idx++] = Vec3{Real(0), le1 * leg, Real(0)};
     }
     const auto le2 = (Real(1) - y) * zc;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? x : x*x);
+    for (const auto& leg : monomial_quadratic_modes(x)) {
         values[idx++] = Vec3{-le2 * leg, Real(0), Real(0)};
     }
     const auto le3 = (Real(1) + x) * zc;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? y : y*y);
+    for (const auto& leg : monomial_quadratic_modes(y)) {
         values[idx++] = Vec3{Real(0), -le3 * leg, Real(0)};
     }
 
     // Apex edges
     const auto le4 = loc_f2 * loc_f3;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+    for (const auto& leg : monomial_quadratic_modes(z)) {
         values[idx++] = Vec3{le4 * leg, le4 * leg, le4 * leg * Real(2)};
     }
     const auto le5 = loc_f3 * loc_f4;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+    for (const auto& leg : monomial_quadratic_modes(z)) {
         values[idx++] = Vec3{-le5 * leg, le5 * leg, le5 * leg * Real(2)};
     }
     const auto le6 = loc_f4 * loc_f1;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+    for (const auto& leg : monomial_quadratic_modes(z)) {
         values[idx++] = Vec3{-le6 * leg, -le6 * leg, le6 * leg * Real(2)};
     }
     const auto le7 = loc_f1 * loc_f2;
-    for (int mode = 0; mode <= 2; ++mode) {
-        const auto leg = (mode == 0) ? Real(1) : ((mode == 1) ? z : z*z);
+    for (const auto& leg : monomial_quadratic_modes(z)) {
         values[idx++] = Vec3{le7 * leg, -le7 * leg, le7 * leg * Real(2)};
     }
 
@@ -1266,34 +1264,28 @@ inline void eval_pyramid_nd2_direct_impl(const DirectVec3<Scalar>& xi,
     // ==========================================================================
     // Quad base: 12 tangential
     const auto qbase = (Real(1) - x*x) * (Real(1) - y*y) * zc;
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? y : ((i == 3) ? x*y : ((i == 4) ? x*x : y*y))));
+    for (const auto& poly : tensor_quadratic_modes(x, y)) {
         values[idx++] = Vec3{qbase * poly * Real(4), Real(0), Real(0)};
     }
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? y : ((i == 3) ? x*y : ((i == 4) ? x*x : y*y))));
+    for (const auto& poly : tensor_quadratic_modes(x, y)) {
         values[idx++] = Vec3{Real(0), qbase * poly * Real(4), Real(0)};
     }
 
     // 4 tri faces: 6 tangential each = 24
     const auto tf1 = loc_f1 * (Real(1) - x*x);
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(x, z)) {
         values[idx++] = Vec3{tf1 * poly * Real(4), Real(0), tf1 * poly * z * Real(2)};
     }
     const auto tf2 = loc_f2 * (Real(1) - y*y);
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(y, z)) {
         values[idx++] = Vec3{-tf2 * poly * z * Real(2), tf2 * poly * Real(4), Real(0)};
     }
     const auto tf3 = loc_f3 * (Real(1) - x*x);
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? x : ((i == 2) ? z : ((i == 3) ? x*z : ((i == 4) ? x*x : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(x, z)) {
         values[idx++] = Vec3{tf3 * poly * Real(4), Real(0), -tf3 * poly * z * Real(2)};
     }
     const auto tf4 = loc_f4 * (Real(1) - y*y);
-    for (int i = 0; i < 6; ++i) {
-        const auto poly = (i == 0) ? Real(1) : ((i == 1) ? y : ((i == 2) ? z : ((i == 3) ? y*z : ((i == 4) ? y*y : z*z))));
+    for (const auto& poly : tensor_quadratic_modes(y, z)) {
         values[idx++] = Vec3{tf4 * poly * z * Real(2), tf4 * poly * Real(4), Real(0)};
     }
 
@@ -1306,154 +1298,61 @@ inline void eval_pyramid_nd2_direct_impl(const DirectVec3<Scalar>& xi,
     values[idx++] = Vec3{Real(0), Real(0), bubble * Real(120)};
 }
 
-const DirectSeedTable& wedge_rt1_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_wedge_rt1_direct_impl<Poly3>);
-    return table;
+#define SVMP_DEFINE_DIRECT_SEED_TABLE(name, impl) \
+const DirectSeedTable& name##_table() { \
+    static const DirectSeedTable table = build_direct_seed_table(impl); \
+    return table; \
 }
 
-const DirectSeedTable& wedge_rt2_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_wedge_rt2_direct_impl<Poly3>);
-    return table;
-}
+SVMP_DEFINE_DIRECT_SEED_TABLE(wedge_rt1, eval_wedge_rt1_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(wedge_rt2, eval_wedge_rt2_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(pyramid_rt1, eval_pyramid_rt1_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(pyramid_rt2, eval_pyramid_rt2_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(wedge_nd1, eval_wedge_nd1_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(wedge_nd2, eval_wedge_nd2_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(pyramid_nd1, eval_pyramid_nd1_direct_impl<Poly3>)
+SVMP_DEFINE_DIRECT_SEED_TABLE(pyramid_nd2, eval_pyramid_nd2_direct_impl<Poly3>)
 
-const DirectSeedTable& pyramid_rt1_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_pyramid_rt1_direct_impl<Poly3>);
-    return table;
-}
-
-const DirectSeedTable& pyramid_rt2_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_pyramid_rt2_direct_impl<Poly3>);
-    return table;
-}
-
-const DirectSeedTable& wedge_nd1_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_wedge_nd1_direct_impl<Poly3>);
-    return table;
-}
-
-const DirectSeedTable& wedge_nd2_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_wedge_nd2_direct_impl<Poly3>);
-    return table;
-}
-
-const DirectSeedTable& pyramid_nd1_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_pyramid_nd1_direct_impl<Poly3>);
-    return table;
-}
-
-const DirectSeedTable& pyramid_nd2_table() {
-    static const DirectSeedTable table =
-        build_direct_seed_table(eval_pyramid_nd2_direct_impl<Poly3>);
-    return table;
-}
+#undef SVMP_DEFINE_DIRECT_SEED_TABLE
 
 } // namespace
 
 namespace detail {
 namespace vector_direct {
 
-void eval_wedge_rt1_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(wedge_rt1_table(), xi, values);
+#define SVMP_DEFINE_RT_DIRECT_WRAPPERS(name) \
+void eval_##name##_values(const Vec3& xi, std::vector<Vec3>& values) { \
+    eval_direct_table_values(name##_table(), xi, values); \
+} \
+void eval_##name##_divergence(const Vec3& xi, std::vector<Real>& divergence) { \
+    eval_direct_table_divergence(name##_table(), xi, divergence); \
+} \
+void eval_##name##_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) { \
+    eval_direct_table_jacobians(name##_table(), xi, jacobians); \
 }
 
-void eval_wedge_rt1_divergence(const Vec3& xi, std::vector<Real>& divergence) {
-    eval_direct_table_divergence(wedge_rt1_table(), xi, divergence);
+#define SVMP_DEFINE_ND_DIRECT_WRAPPERS(name) \
+void eval_##name##_values(const Vec3& xi, std::vector<Vec3>& values) { \
+    eval_direct_table_values(name##_table(), xi, values); \
+} \
+void eval_##name##_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) { \
+    eval_direct_table_jacobians(name##_table(), xi, jacobians); \
+} \
+void eval_##name##_curl(const Vec3& xi, std::vector<Vec3>& curl) { \
+    eval_direct_table_curl(name##_table(), xi, curl); \
 }
 
-void eval_wedge_rt1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(wedge_rt1_table(), xi, jacobians);
-}
+SVMP_DEFINE_RT_DIRECT_WRAPPERS(wedge_rt1)
+SVMP_DEFINE_RT_DIRECT_WRAPPERS(wedge_rt2)
+SVMP_DEFINE_RT_DIRECT_WRAPPERS(pyramid_rt1)
+SVMP_DEFINE_RT_DIRECT_WRAPPERS(pyramid_rt2)
+SVMP_DEFINE_ND_DIRECT_WRAPPERS(wedge_nd1)
+SVMP_DEFINE_ND_DIRECT_WRAPPERS(wedge_nd2)
+SVMP_DEFINE_ND_DIRECT_WRAPPERS(pyramid_nd1)
+SVMP_DEFINE_ND_DIRECT_WRAPPERS(pyramid_nd2)
 
-void eval_wedge_rt2_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(wedge_rt2_table(), xi, values);
-}
-
-void eval_wedge_rt2_divergence(const Vec3& xi, std::vector<Real>& divergence) {
-    eval_direct_table_divergence(wedge_rt2_table(), xi, divergence);
-}
-
-void eval_wedge_rt2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(wedge_rt2_table(), xi, jacobians);
-}
-
-void eval_pyramid_rt1_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(pyramid_rt1_table(), xi, values);
-}
-
-void eval_pyramid_rt1_divergence(const Vec3& xi, std::vector<Real>& divergence) {
-    eval_direct_table_divergence(pyramid_rt1_table(), xi, divergence);
-}
-
-void eval_pyramid_rt1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(pyramid_rt1_table(), xi, jacobians);
-}
-
-void eval_pyramid_rt2_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(pyramid_rt2_table(), xi, values);
-}
-
-void eval_pyramid_rt2_divergence(const Vec3& xi, std::vector<Real>& divergence) {
-    eval_direct_table_divergence(pyramid_rt2_table(), xi, divergence);
-}
-
-void eval_pyramid_rt2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(pyramid_rt2_table(), xi, jacobians);
-}
-
-void eval_wedge_nd1_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(wedge_nd1_table(), xi, values);
-}
-
-void eval_wedge_nd1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(wedge_nd1_table(), xi, jacobians);
-}
-
-void eval_wedge_nd1_curl(const Vec3& xi, std::vector<Vec3>& curl) {
-    eval_direct_table_curl(wedge_nd1_table(), xi, curl);
-}
-
-void eval_wedge_nd2_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(wedge_nd2_table(), xi, values);
-}
-
-void eval_wedge_nd2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(wedge_nd2_table(), xi, jacobians);
-}
-
-void eval_wedge_nd2_curl(const Vec3& xi, std::vector<Vec3>& curl) {
-    eval_direct_table_curl(wedge_nd2_table(), xi, curl);
-}
-
-void eval_pyramid_nd1_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(pyramid_nd1_table(), xi, values);
-}
-
-void eval_pyramid_nd1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(pyramid_nd1_table(), xi, jacobians);
-}
-
-void eval_pyramid_nd1_curl(const Vec3& xi, std::vector<Vec3>& curl) {
-    eval_direct_table_curl(pyramid_nd1_table(), xi, curl);
-}
-
-void eval_pyramid_nd2_values(const Vec3& xi, std::vector<Vec3>& values) {
-    eval_direct_table_values(pyramid_nd2_table(), xi, values);
-}
-
-void eval_pyramid_nd2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians) {
-    eval_direct_table_jacobians(pyramid_nd2_table(), xi, jacobians);
-}
-
-void eval_pyramid_nd2_curl(const Vec3& xi, std::vector<Vec3>& curl) {
-    eval_direct_table_curl(pyramid_nd2_table(), xi, curl);
-}
+#undef SVMP_DEFINE_ND_DIRECT_WRAPPERS
+#undef SVMP_DEFINE_RT_DIRECT_WRAPPERS
 
 } // namespace vector_direct
 } // namespace detail

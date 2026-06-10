@@ -883,6 +883,46 @@ TEST(LevelSetVolume, GlobalShiftCorrectionMatchesTargetVolume)
     }
 }
 
+TEST(LevelSetVolume, CutCellVolumeHandlesTinyTetraFragmentWithoutActivePatch)
+{
+    const ScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    std::vector<FE::Real> coefficients(
+        static_cast<std::size_t>(field_dofs.getNumDofs()), FE::Real{0.0});
+    const std::array<FE::Real, 4> values{{
+        FE::Real{-1.0e-9},
+        FE::Real{1.0},
+        FE::Real{1.0},
+        FE::Real{1.0},
+    }};
+    for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 1u);
+        coefficients[static_cast<std::size_t>(dofs.front())] =
+            values[static_cast<std::size_t>(vertex)];
+    }
+
+    level_set::LevelSetVolumeOptions volume_opts{};
+    volume_opts.tolerance = 1.0e-12;
+    const auto result = level_set::computeLevelSetCutCellVolume(
+        *fixture.mesh,
+        field_dofs,
+        volume_opts,
+        coefficients);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    const FE::Real ratio = FE::Real{1.0e-9} / (FE::Real{1.0} + FE::Real{1.0e-9});
+    const FE::Real expected = (FE::Real{1.0} / FE::Real{6.0}) *
+                              ratio * ratio * ratio;
+    EXPECT_NEAR(result.negative_volume, expected, 1.0e-30);
+    EXPECT_NEAR(result.positive_volume,
+                FE::Real{1.0} / FE::Real{6.0} - expected,
+                1.0e-14);
+}
+
 TEST(LevelSetVolume, GlobalShiftCorrectionShiftsCompleteHighOrderFieldSlice)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

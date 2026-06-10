@@ -7,6 +7,7 @@
 
 #include "FE/Basis/BasisFactory.h"
 #include "FE/Basis/BasisExceptions.h"
+#include "FE/Basis/BasisFunction.h"
 #include "FE/Basis/BSplineBasis.h"
 #include "FE/Basis/BernsteinBasis.h"
 #include "FE/Basis/HermiteBasis.h"
@@ -270,6 +271,7 @@ TEST(BasisErrorPaths, BasisFunctionFallbackWritesFlatAndStridedLayouts) {
         {Real(0.25), Real(0.5), Real(-0.25)},
         {Real(-0.5), Real(0.75), Real(0.125)}
     };
+    prewarm_basis_function_scratch(basis.size(), points.size());
 
     std::vector<Real> flat_values(basis.size());
     std::vector<Real> flat_gradients(basis.size() * 3u);

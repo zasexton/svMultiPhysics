@@ -27,6 +27,18 @@ using interfaces::LevelSetInterfaceSource;
     return {{a[0] - b[0], a[1] - b[1], a[2] - b[2]}};
 }
 
+[[nodiscard]] std::array<Real, 3> add(const std::array<Real, 3>& a,
+                                      const std::array<Real, 3>& b) noexcept
+{
+    return {{a[0] + b[0], a[1] + b[1], a[2] + b[2]}};
+}
+
+[[nodiscard]] std::array<Real, 3> scale(const std::array<Real, 3>& a,
+                                        Real s) noexcept
+{
+    return {{a[0] * s, a[1] * s, a[2] * s}};
+}
+
 [[nodiscard]] std::array<Real, 3> cross(const std::array<Real, 3>& a,
                                         const std::array<Real, 3>& b) noexcept
 {
@@ -59,6 +71,25 @@ using interfaces::LevelSetInterfaceSource;
                                const std::array<Real, 3>& d) noexcept
 {
     return std::abs(dot(sub(b, a), cross(sub(c, a), sub(d, a)))) / Real{6.0};
+}
+
+[[nodiscard]] std::array<Real, 3> interpolatePoint(
+    const std::array<Real, 3>& a,
+    const std::array<Real, 3>& b,
+    Real t) noexcept
+{
+    return add(scale(a, Real{1.0} - t), scale(b, t));
+}
+
+[[nodiscard]] Real clampVolume(Real value, Real measure) noexcept
+{
+    if (value <= Real{0.0}) {
+        return Real{0.0};
+    }
+    if (value >= measure) {
+        return measure;
+    }
+    return value;
 }
 
 [[nodiscard]] std::size_t cornerCount(ElementType type)
@@ -264,6 +295,77 @@ tetrahedralCornerDecomposition(ElementType type)
         return simple_fraction * measure;
     }
 
+    auto clipped_volume = [&]() {
+        std::array<std::size_t, 4> inside{};
+        std::array<std::size_t, 4> outside{};
+        std::size_t inside_count = 0u;
+        std::size_t outside_count = 0u;
+        for (std::size_t i = 0; i < signed_values.size(); ++i) {
+            if (signed_values[i] <= tolerance) {
+                inside[inside_count++] = i;
+            } else {
+                outside[outside_count++] = i;
+            }
+        }
+        if (inside_count == 0u) {
+            return Real{0.0};
+        }
+        if (outside_count == 0u) {
+            return measure;
+        }
+
+        auto interface_point = [&](std::size_t inside_index,
+                                   std::size_t outside_index) {
+            const Real vi = signed_values[inside_index];
+            const Real vj = signed_values[outside_index];
+            if (std::abs(vi) <= tolerance) {
+                return coordinates[inside_index];
+            }
+            if (std::abs(vj) <= tolerance) {
+                return coordinates[outside_index];
+            }
+            const Real denom = vi - vj;
+            Real t = denom != Real{0.0} ? vi / denom : Real{0.0};
+            t = std::clamp(t, Real{0.0}, Real{1.0});
+            return interpolatePoint(coordinates[inside_index],
+                                    coordinates[outside_index],
+                                    t);
+        };
+
+        if (inside_count == 1u) {
+            const auto a = inside[0];
+            const auto p0 = interface_point(a, outside[0]);
+            const auto p1 = interface_point(a, outside[1]);
+            const auto p2 = interface_point(a, outside[2]);
+            return clampVolume(
+                tetraVolume(coordinates[a], p0, p1, p2),
+                measure);
+        }
+        if (inside_count == 3u) {
+            const auto p = outside[0];
+            const auto q0 = interface_point(inside[0], p);
+            const auto q1 = interface_point(inside[1], p);
+            const auto q2 = interface_point(inside[2], p);
+            return clampVolume(
+                measure - tetraVolume(coordinates[p], q0, q1, q2),
+                measure);
+        }
+
+        const auto a = inside[0];
+        const auto b = inside[1];
+        const auto c = outside[0];
+        const auto d = outside[1];
+        const auto p_ac = interface_point(a, c);
+        const auto p_ad = interface_point(a, d);
+        const auto p_bc = interface_point(b, c);
+        const auto p_bd = interface_point(b, d);
+        const Real volume =
+            tetraVolume(coordinates[a], coordinates[b], p_bd, p_bc) +
+            tetraVolume(coordinates[a], p_ac, p_bc, p_bd) +
+            tetraVolume(coordinates[a], p_ac, p_bd, p_ad);
+        return clampVolume(volume, measure);
+    };
+
     LevelSetCellCutInput input{};
     input.parent_cell = parent_cell;
     input.element_type = ElementType::Tetra4;
@@ -279,8 +381,7 @@ tetrahedralCornerDecomposition(ElementType type)
         cut_result.fragments.end(),
         [](const auto& fragment) { return fragment.active(); });
     if (active == cut_result.fragments.end()) {
-        throw std::runtime_error(
-            "level-set volume calculation found a tetrahedral subcell without an active interface fragment");
+        return clipped_volume();
     }
     return active->negative_volume_fraction * measure;
 }

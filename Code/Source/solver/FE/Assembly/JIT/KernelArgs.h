@@ -40,7 +40,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
 inline constexpr std::uint32_t kCellKernelBatchArgsABIV1 = 0xCB01'0001u;
 // Bump whenever any V6 argument/view struct layout changes. This is mixed into
 // JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
-inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 7u;
+inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 9u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -2280,6 +2280,8 @@ namespace detail {
 
                 assertAligned(e.history_values, "KernelArgsV6: field_solutions.history_values not aligned");
                 assertAligned(e.history_vector_values_xyz, "KernelArgsV6: field_solutions.history_vector_values_xyz not aligned");
+                assertAligned(e.history_gradients_xyz, "KernelArgsV6: field_solutions.history_gradients_xyz not aligned");
+                assertAligned(e.history_jacobians, "KernelArgsV6: field_solutions.history_jacobians not aligned");
             }
         }
 

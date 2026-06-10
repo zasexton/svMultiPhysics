@@ -408,7 +408,8 @@ public:
                             geometry::CutIntegrationSide side,
                             FieldId test_field,
                             FieldId trial_field,
-                            std::shared_ptr<assembly::AssemblyKernel> kernel);
+                            std::shared_ptr<assembly::AssemblyKernel> kernel,
+                            std::string source_component_tag = {});
 
     void addGlobalKernel(OperatorTag op,
                          std::shared_ptr<GlobalKernel> kernel);
@@ -1589,6 +1590,7 @@ private:
         geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
         FieldId test_field{INVALID_FIELD_ID};
         FieldId trial_field{INVALID_FIELD_ID};
+        std::string source_component_tag{};
         const spaces::FunctionSpace* test_space{nullptr};
         const spaces::FunctionSpace* trial_space{nullptr};
         assembly::AssemblyKernel* kernel{nullptr};

@@ -25,6 +25,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <span>
@@ -314,8 +315,24 @@ public:
         return Real{1.0e3};
     }
 
-    [[nodiscard]] static constexpr Real minGeneratedCutVolumeFraction() noexcept {
+    [[nodiscard]] static constexpr Real defaultMinGeneratedCutVolumeFraction() noexcept {
         return Real{1.0e-8};
+    }
+
+    [[nodiscard]] static Real minGeneratedCutVolumeFraction() noexcept {
+        static const Real value = []() noexcept {
+            const char* env = std::getenv("SVMP_MIN_GENERATED_CUT_VOLUME_FRACTION");
+            if (env != nullptr && env[0] != '\0') {
+                char* end = nullptr;
+                const double parsed = std::strtod(env, &end);
+                if (end != env && std::isfinite(parsed) &&
+                    parsed > 0.0 && parsed < 1.0) {
+                    return static_cast<Real>(parsed);
+                }
+            }
+            return defaultMinGeneratedCutVolumeFraction();
+        }();
+        return value;
     }
 
     [[nodiscard]] static bool shouldPruneGeneratedVolumeRule(

@@ -1601,6 +1601,68 @@ EvalValue<Scalar> addSubValue(const EvalValue<Scalar>& a, const EvalValue<Scalar
 }
 
 template<typename Scalar, typename Env>
+EvalValue<Scalar> scaleValue(const EvalValue<Scalar>& a, Real scale, const Env& env)
+{
+    const auto factor = makeScalarConstant<Scalar>(scale, env);
+    EvalValue<Scalar> out;
+    out.kind = a.kind;
+
+    if (isScalarKind<Scalar>(a.kind)) {
+        out.s = s_mul(a.s, factor, env);
+        return out;
+    }
+
+    if (isVectorKind<Scalar>(a.kind)) {
+        out.resizeVector(a.vectorSize());
+        for (std::size_t d = 0; d < out.vectorSize(); ++d) {
+            out.vectorAt(d) = s_mul(a.vectorAt(d), factor, env);
+        }
+        return out;
+    }
+
+    if (isMatrixKind<Scalar>(a.kind)) {
+        out.kind = EvalValue<Scalar>::Kind::Matrix;
+        out.resizeMatrix(a.matrixRows(), a.matrixCols());
+        for (std::size_t r = 0; r < out.matrixRows(); ++r) {
+            for (std::size_t c = 0; c < out.matrixCols(); ++c) {
+                out.matrixAt(r, c) = s_mul(a.matrixAt(r, c), factor, env);
+            }
+        }
+        return out;
+    }
+
+    if (isTensor3Kind<Scalar>(a.kind)) {
+        out.resizeTensor3(a.tensor3Dim0(), a.tensor3Dim1(), a.tensor3Dim2());
+        for (std::size_t i = 0; i < a.tensor3Dim0(); ++i) {
+            for (std::size_t j = 0; j < a.tensor3Dim1(); ++j) {
+                for (std::size_t k = 0; k < a.tensor3Dim2(); ++k) {
+                    out.tensor3At(i, j, k) =
+                        s_mul(a.tensor3At(i, j, k), factor, env);
+                }
+            }
+        }
+        return out;
+    }
+
+    throw FEException("Forms: spatial jet scale unsupported kind",
+                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+}
+
+template<typename Env>
+[[nodiscard]] bool includeTrialHistoryInDtSpatialJet(const Env& env, Side side)
+{
+    if constexpr (std::is_same_v<Env, EvalEnvReal>) {
+        return env.kind == FormKind::Residual;
+    } else if constexpr (std::is_same_v<Env, EvalEnvDual>) {
+        (void)env;
+        (void)side;
+        return true;
+    } else {
+        return false;
+    }
+}
+
+template<typename Scalar, typename Env>
 SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                                   const Env& env,
                                   Side side,
@@ -2003,9 +2065,192 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	                        }
 	                    }
 	                }
-	            }
-	            return out;
-	        }
+            }
+            return out;
+        }
+        case FormExprType::TimeDerivative: {
+            const int derivative_order = node.timeDerivativeOrder().value_or(1);
+            if (derivative_order <= 0) {
+                throw FEException("Forms: dt(.,k) requires k >= 1 (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+
+            const auto* time_ctx = ctx.timeIntegrationContext();
+            if (!time_ctx) {
+                throw FEException("dt(...) operator requires a transient time-integration context (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            const auto* stencil = time_ctx->stencil(derivative_order);
+            if (!stencil) {
+                throw FEException("Forms: dt(.," + std::to_string(derivative_order) +
+                                      ") is not supported by time integrator '" +
+                                      time_ctx->integrator_name + "' (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            const auto kids = node.childrenShared();
+            if (kids.size() != 1u || !kids[0]) {
+                throw FEException("Forms: dt(...) node missing operand (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            if (out.has_hess) {
+                throw FEException("Forms: Hessian of dt(...) is not supported in spatial jets",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+
+            const auto& child = *kids[0];
+            const bool trial_dt = child.type() == FormExprType::TrialFunction;
+            bool current_solution_dt = false;
+            std::optional<FieldId> discrete_fid{};
+            if (!trial_dt) {
+                if (child.type() != FormExprType::DiscreteField &&
+                    child.type() != FormExprType::StateField) {
+                    throw FEException(
+                        "Forms: dt() currently supports TrialFunction and DiscreteField operands only (jet)",
+                        __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                const auto fid = child.fieldId();
+                if (!fid) {
+                    throw FEException("Forms: dt(field) operand missing FieldId (jet)",
+                                      __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                }
+                if (child.type() == FormExprType::StateField &&
+                    *fid == CURRENT_SOLUTION_FIELD_ID) {
+                    current_solution_dt = true;
+                } else {
+                    if (*fid == CURRENT_SOLUTION_FIELD_ID) {
+                        throw FEException(
+                            "Forms: dt(DiscreteField/StateField) missing a valid FieldId (jet)",
+                            __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+                    }
+                    discrete_fid = *fid;
+                }
+            }
+
+            auto result = evalSpatialJet<Scalar>(child, env, side, q, order);
+            if (!isScalarKind<Scalar>(result.value.kind) &&
+                !isVectorKind<Scalar>(result.value.kind)) {
+                throw FEException("Forms: dt() operand did not evaluate to a scalar or vector (jet)",
+                                  __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+            }
+            result.value = scaleValue(result.value, stencil->coeff(0), env);
+            if (result.has_grad) {
+                result.grad = scaleValue(result.grad, stencil->coeff(0), env);
+            }
+
+            const int required = stencil->requiredHistoryStates();
+            const bool include_current_history =
+                current_solution_dt || (trial_dt && includeTrialHistoryInDtSpatialJet(env, side));
+            if (include_current_history) {
+                for (int k = 1; k <= required; ++k) {
+                    const Real ak = stencil->coeff(k);
+                    if (isScalarKind<Scalar>(result.value.kind)) {
+                        EvalValue<Scalar> hist_value;
+                        hist_value.kind = EvalValue<Scalar>::Kind::Scalar;
+                        hist_value.s = makeScalarConstant<Scalar>(
+                            ak * ctx.previousSolutionValue(q, k), env);
+                        result.value = addSubValue(result.value, hist_value, true, env);
+
+                        if (result.has_grad) {
+                            EvalValue<Scalar> hist_grad;
+                            hist_grad.kind = EvalValue<Scalar>::Kind::Vector;
+                            hist_grad.resizeVector(static_cast<std::size_t>(dim));
+                            const auto grad = ctx.previousSolutionGradient(q, k);
+                            for (int d = 0; d < dim; ++d) {
+                                hist_grad.vectorAt(static_cast<std::size_t>(d)) =
+                                    makeScalarConstant<Scalar>(
+                                        ak * grad[static_cast<std::size_t>(d)], env);
+                            }
+                            result.grad = addSubValue(result.grad, hist_grad, true, env);
+                        }
+                    } else {
+                        EvalValue<Scalar> hist_value;
+                        hist_value.kind = EvalValue<Scalar>::Kind::Vector;
+                        hist_value.resizeVector(result.value.vectorSize());
+                        const auto prev = ctx.previousSolutionVectorValue(q, k);
+                        for (std::size_t d = 0; d < hist_value.vectorSize(); ++d) {
+                            hist_value.vectorAt(d) =
+                                makeScalarConstant<Scalar>(ak * prev[d], env);
+                        }
+                        result.value = addSubValue(result.value, hist_value, true, env);
+
+                        if (result.has_grad) {
+                            EvalValue<Scalar> hist_grad;
+                            hist_grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                            hist_grad.resizeMatrix(result.value.vectorSize(),
+                                                   static_cast<std::size_t>(dim));
+                            const auto J = ctx.previousSolutionJacobian(q, k);
+                            for (std::size_t r = 0; r < hist_grad.matrixRows(); ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    hist_grad.matrixAt(r, static_cast<std::size_t>(c)) =
+                                        makeScalarConstant<Scalar>(
+                                            ak * J[r][static_cast<std::size_t>(c)], env);
+                                }
+                            }
+                            result.grad = addSubValue(result.grad, hist_grad, true, env);
+                        }
+                    }
+                }
+                return result;
+            }
+
+            if (discrete_fid && required > 0) {
+                for (int k = 1; k <= required; ++k) {
+                    const Real ak = stencil->coeff(k);
+                    if (isScalarKind<Scalar>(result.value.kind)) {
+                        EvalValue<Scalar> hist_value;
+                        hist_value.kind = EvalValue<Scalar>::Kind::Scalar;
+                        hist_value.s = makeScalarConstant<Scalar>(
+                            ak * ctx.fieldPreviousValue(*discrete_fid, q, k), env);
+                        result.value = addSubValue(result.value, hist_value, true, env);
+
+                        if (result.has_grad) {
+                            EvalValue<Scalar> hist_grad;
+                            hist_grad.kind = EvalValue<Scalar>::Kind::Vector;
+                            hist_grad.resizeVector(static_cast<std::size_t>(dim));
+                            const auto grad =
+                                ctx.fieldPreviousGradient(*discrete_fid, q, k);
+                            for (int d = 0; d < dim; ++d) {
+                                hist_grad.vectorAt(static_cast<std::size_t>(d)) =
+                                    makeScalarConstant<Scalar>(
+                                        ak * grad[static_cast<std::size_t>(d)], env);
+                            }
+                            result.grad = addSubValue(result.grad, hist_grad, true, env);
+                        }
+                    } else {
+                        EvalValue<Scalar> hist_value;
+                        hist_value.kind = EvalValue<Scalar>::Kind::Vector;
+                        hist_value.resizeVector(result.value.vectorSize());
+                        const auto prev =
+                            ctx.fieldPreviousVectorValue(*discrete_fid, q, k);
+                        for (std::size_t d = 0; d < hist_value.vectorSize(); ++d) {
+                            hist_value.vectorAt(d) =
+                                makeScalarConstant<Scalar>(ak * prev[d], env);
+                        }
+                        result.value = addSubValue(result.value, hist_value, true, env);
+
+                        if (result.has_grad) {
+                            EvalValue<Scalar> hist_grad;
+                            hist_grad.kind = EvalValue<Scalar>::Kind::Matrix;
+                            hist_grad.resizeMatrix(result.value.vectorSize(),
+                                                   static_cast<std::size_t>(dim));
+                            const auto J =
+                                ctx.fieldPreviousJacobian(*discrete_fid, q, k);
+                            for (std::size_t r = 0; r < hist_grad.matrixRows(); ++r) {
+                                for (int c = 0; c < dim; ++c) {
+                                    hist_grad.matrixAt(r, static_cast<std::size_t>(c)) =
+                                        makeScalarConstant<Scalar>(
+                                            ak * J[r][static_cast<std::size_t>(c)], env);
+                                }
+                            }
+                            result.grad = addSubValue(result.grad, hist_grad, true, env);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
         case FormExprType::GeometryTrialVectorVariation:
         case FormExprType::MeshVelocityVariation: {
             out.value.kind = EvalValue<Scalar>::Kind::Vector;

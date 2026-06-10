@@ -63,6 +63,10 @@ struct FormInstallOptions {
     /// law without duplicating physics-specific options.
     std::vector<analysis::ConstitutiveLawMetadata> constitutive_laws{};
 
+    /// Optional subterm/source label preserved through cut-volume assembly
+    /// diagnostics. Empty means the whole installed operator/component.
+    std::string source_component_tag{};
+
     FormInstallOptions& recordDynamicViscosity(
         FieldId velocity_field,
         Real constant_viscosity,

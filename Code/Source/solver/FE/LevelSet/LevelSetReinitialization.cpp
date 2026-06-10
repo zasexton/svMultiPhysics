@@ -517,13 +517,8 @@ void forEachNativeMeshScalarDofPoint(
     Callback&& callback)
 {
     std::vector<unsigned char> bound(coefficient_count, 0u);
-    const auto bind = [&](svmp::index_t geometry_node, GlobalIndex dof) {
-        if (geometry_node < 0 ||
-            static_cast<std::size_t>(geometry_node) >=
-                static_cast<std::size_t>(mesh.n_vertices())) {
-            throw std::invalid_argument(
-                "level-set signed-distance repair found a mesh geometry node outside the mesh");
-        }
+    const auto bind_point = [&](GlobalIndex dof,
+                                const std::array<Real, 3>& point) {
         if (dof < 0 || static_cast<std::size_t>(dof) >= coefficient_count) {
             throw std::invalid_argument(
                 "level-set signed-distance repair found an entity DOF outside the coefficient span");
@@ -532,8 +527,17 @@ void forEachNativeMeshScalarDofPoint(
         if (bound[sdof] != 0u) {
             return;
         }
-        callback(dof, coordinate_access.getNodeCoordinates(geometry_node));
+        callback(dof, point);
         bound[sdof] = 1u;
+    };
+    const auto bind = [&](svmp::index_t geometry_node, GlobalIndex dof) {
+        if (geometry_node < 0 ||
+            static_cast<std::size_t>(geometry_node) >=
+                static_cast<std::size_t>(mesh.n_vertices())) {
+            throw std::invalid_argument(
+                "level-set signed-distance repair found a mesh geometry node outside the mesh");
+        }
+        bind_point(dof, coordinate_access.getNodeCoordinates(geometry_node));
     };
 
     const auto n_vertices = static_cast<GlobalIndex>(mesh.n_vertices());
@@ -567,6 +571,28 @@ void forEachNativeMeshScalarDofPoint(
         const auto vertices = mesh.edge_vertices(edge);
         edge_by_vertices.emplace(make_edge_key(vertices[0], vertices[1]), edge);
     }
+    const auto vertex_gid = [&](svmp::index_t vertex) -> svmp::gid_t {
+        const auto sv = static_cast<std::size_t>(vertex);
+        if (vertex >= 0 && sv < mesh.vertex_gids().size()) {
+            return mesh.vertex_gids()[sv];
+        }
+        return static_cast<svmp::gid_t>(vertex);
+    };
+    const auto canonical_edge_dof_endpoints =
+        [&](std::array<svmp::index_t, 2> endpoints) {
+        if (vertex_gid(endpoints[1]) < vertex_gid(endpoints[0])) {
+            std::swap(endpoints[0], endpoints[1]);
+        }
+        return endpoints;
+    };
+    const auto interpolate_coordinates =
+        [&](svmp::index_t endpoint_a,
+            svmp::index_t endpoint_b,
+            Real t) -> std::array<Real, 3> {
+        const auto a = coordinate_access.getNodeCoordinates(endpoint_a);
+        const auto b = coordinate_access.getNodeCoordinates(endpoint_b);
+        return add(scale(a, Real{1} - t), scale(b, t));
+    };
 
     auto bind_edge_interior = [&](svmp::index_t cell,
                                   int local_edge,
@@ -579,7 +605,22 @@ void forEachNativeMeshScalarDofPoint(
         }
         const auto edge = edge_it->second;
         const auto edge_geometry = mesh.cell_edge_geometry_dofs(cell, local_edge);
+        const auto edge_dofs = entity_map.getEdgeDofs(edge);
+        if (edge_dofs.empty()) {
+            return;
+        }
         if (edge_geometry.size() <= 2u) {
+            const auto endpoints =
+                canonical_edge_dof_endpoints(mesh.edge_vertices(edge));
+            for (std::size_t j = 0; j < edge_dofs.size(); ++j) {
+                const Real t =
+                    static_cast<Real>(j + 1u) /
+                    static_cast<Real>(edge_dofs.size() + 1u);
+                bind_point(edge_dofs[j],
+                           interpolate_coordinates(endpoints[0],
+                                                   endpoints[1],
+                                                   t));
+            }
             return;
         }
         const auto canonical = mesh.edge_vertices(edge);
@@ -595,10 +636,6 @@ void forEachNativeMeshScalarDofPoint(
         }
 
         const auto interior_count = edge_geometry.size() - 2u;
-        const auto edge_dofs = entity_map.getEdgeDofs(edge);
-        if (edge_dofs.empty()) {
-            return;
-        }
         if (edge_dofs.size() != interior_count) {
             throw std::invalid_argument(
                 "level-set signed-distance repair edge DOF count does not match high-order mesh edge nodes");

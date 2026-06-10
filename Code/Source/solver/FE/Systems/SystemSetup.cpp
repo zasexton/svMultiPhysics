@@ -6069,6 +6069,7 @@ void FESystem::buildAssemblyPlans()
                 term.side,
                 term.test_field,
                 term.trial_field,
+                term.source_component_tag,
                 test_field.space.get(),
                 trial_field.space.get(),
                 term.kernel.get(),

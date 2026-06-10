@@ -33,6 +33,8 @@ namespace svmp {
 namespace FE {
 namespace basis {
 
+void prewarm_bspline_basis_scratch(std::size_t max_active_support);
+
 /**
  * @brief Univariate B-spline basis on a line element
  */

@@ -1238,6 +1238,60 @@ TEST(BSplineBasis, TensorProductStridedOutputsMatchVectorEvaluation) {
     }
 }
 
+TEST(BSplineBasis, StaticTensorDimensionSpecializationsMatchDynamicTensorBasis) {
+    const BSplineBasis bx(2, {Real(0), Real(0), Real(0), Real(0.35), Real(1), Real(1), Real(1)});
+    const BSplineBasis by(1, {Real(0), Real(0), Real(0.2), Real(0.8), Real(1), Real(1)});
+    const BSplineBasis bz(2, {Real(0), Real(0), Real(0), Real(0.4), Real(1), Real(1), Real(1)});
+
+    const TensorProductBasis<BSplineBasis> dynamic_quad(bx, by);
+    const TensorProductBasis<BSplineBasis, 2> static_quad(bx, by);
+    const TensorProductBasis<BSplineBasis> dynamic_hex(bx, by, bz);
+    const TensorProductBasis<BSplineBasis, 3> static_hex(bx, by, bz);
+
+    auto expect_same_strided_output = [](const auto& dynamic_basis,
+                                         const auto& static_basis,
+                                         const std::vector<math::Vector<Real, 3>>& points) {
+        ASSERT_EQ(dynamic_basis.size(), static_basis.size());
+        ASSERT_EQ(dynamic_basis.dimension(), static_basis.dimension());
+        const std::size_t stride = points.size() + 2u;
+        std::vector<Real> dynamic_values(dynamic_basis.size() * stride, Real(-7));
+        std::vector<Real> static_values(static_basis.size() * stride, Real(-7));
+        std::vector<Real> dynamic_gradients(dynamic_basis.size() * 3u * stride, Real(-7));
+        std::vector<Real> static_gradients(static_basis.size() * 3u * stride, Real(-7));
+        std::vector<Real> dynamic_hessians(dynamic_basis.size() * 9u * stride, Real(-7));
+        std::vector<Real> static_hessians(static_basis.size() * 9u * stride, Real(-7));
+
+        dynamic_basis.evaluate_at_quadrature_points_strided(
+            points, stride, dynamic_values.data(), dynamic_gradients.data(), dynamic_hessians.data());
+        static_basis.evaluate_at_quadrature_points_strided(
+            points, stride, static_values.data(), static_gradients.data(), static_hessians.data());
+
+        ASSERT_EQ(dynamic_values.size(), static_values.size());
+        ASSERT_EQ(dynamic_gradients.size(), static_gradients.size());
+        ASSERT_EQ(dynamic_hessians.size(), static_hessians.size());
+        for (std::size_t i = 0; i < dynamic_values.size(); ++i) {
+            EXPECT_NEAR(dynamic_values[i], static_values[i], Real(1e-14));
+        }
+        for (std::size_t i = 0; i < dynamic_gradients.size(); ++i) {
+            EXPECT_NEAR(dynamic_gradients[i], static_gradients[i], Real(1e-13));
+        }
+        for (std::size_t i = 0; i < dynamic_hessians.size(); ++i) {
+            EXPECT_NEAR(dynamic_hessians[i], static_hessians[i], Real(1e-12));
+        }
+    };
+
+    expect_same_strided_output(dynamic_quad,
+                               static_quad,
+                               {{Real(-0.82), Real(-0.65), Real(0)},
+                                {Real(-0.15), Real(0.2), Real(0)},
+                                {Real(0.7), Real(0.75), Real(0)}});
+    expect_same_strided_output(dynamic_hex,
+                               static_hex,
+                               {{Real(-0.8), Real(-0.55), Real(-0.35)},
+                                {Real(-0.1), Real(0.2), Real(0.15)},
+                                {Real(0.72), Real(0.68), Real(0.55)}});
+}
+
 TEST(BSplineBasis, AnisotropicTensorHexGradientsMatchFiniteDifference) {
     const BSplineBasis bx(1, {Real(0), Real(0), Real(0.25), Real(0.75), Real(1), Real(1)});
     const BSplineBasis by(2, {Real(0), Real(0), Real(0), Real(0.4), Real(1), Real(1), Real(1)});

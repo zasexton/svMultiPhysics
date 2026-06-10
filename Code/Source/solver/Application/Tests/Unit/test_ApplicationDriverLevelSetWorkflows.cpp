@@ -782,3 +782,111 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
 #endif
 }
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     NearestInterfaceVelocityExtensionPreservesActiveSourceVelocity)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  auto mesh = makeWorkflowBiquadraticQuadMesh();
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4,
+      /*order=*/2,
+      svmp::FE::BasisType::Hierarchical);
+  auto vector_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1});
+  const auto source_velocity = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "Velocity",
+      .space = vector_space,
+      .components = 2});
+  const auto target_velocity = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "LevelSetAdvectionVelocity",
+          .space = vector_space,
+          .components = 2,
+          .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData});
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
+  std::vector<svmp::FE::Real> source_vertex_values(mesh->n_vertices() * 2u, 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    phi_vertex_values[vertex] = workflowPhi(*mesh, vertex);
+    const auto velocity = workflowVelocity(*mesh, vertex);
+    source_vertex_values[2u * vertex] = velocity[0];
+    source_vertex_values[2u * vertex + 1u] = velocity[1];
+  }
+
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      std::span<const svmp::FE::Real>(phi_vertex_values.data(),
+                                      phi_vertex_values.size()),
+      1u,
+      "ApplicationDriver nearest-interface extension phi");
+  const auto source_coefficients = projectWorkflowVertexValues(
+      *system,
+      source_velocity,
+      std::span<const svmp::FE::Real>(source_vertex_values.data(),
+                                      source_vertex_values.size()),
+      2u,
+      "ApplicationDriver nearest-interface extension source velocity");
+
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, phi_coefficients, solution);
+  writeWorkflowFieldSlice(*system,
+                          source_velocity,
+                          source_coefficients,
+                          solution);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+
+  svmp::FE::systems::SystemStateView state{};
+  state.u = std::span<const svmp::FE::Real>(solution.data(), solution.size());
+
+  LevelSetAdvectionVelocityRequest request{};
+  request.level_set_field_name = "phi";
+  request.source_velocity_field_name = "Velocity";
+  request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+  request.extension_method = "nearest_interface_point";
+  request.active_side = application::core::LevelSetActiveSide::Negative;
+  request.isovalue = 0.0;
+
+  EXPECT_TRUE(updateLevelSetAdvectionVelocitiesFromState(
+      sim,
+      state,
+      std::vector<LevelSetAdvectionVelocityRequest>{request}));
+
+  const auto active_vertex = std::size_t{0};
+  ASSERT_LE(phi_vertex_values[active_vertex], 0.0);
+  const auto active_point = workflowVertexPoint(*mesh, active_vertex);
+  const auto active_value = sim.fe_system->evaluateFieldAtPoint(
+      target_velocity,
+      svmp::FE::systems::SystemStateView{},
+      active_point);
+  ASSERT_TRUE(active_value.has_value());
+  const auto active_expected = workflowVelocity(*mesh, active_vertex);
+  EXPECT_NEAR((*active_value)[0], active_expected[0], 1.0e-10);
+  EXPECT_NEAR((*active_value)[1], active_expected[1], 1.0e-10);
+
+  const auto dry_vertex = std::size_t{1};
+  ASSERT_GT(phi_vertex_values[dry_vertex], 0.0);
+  const auto dry_point = workflowVertexPoint(*mesh, dry_vertex);
+  const auto dry_value = sim.fe_system->evaluateFieldAtPoint(
+      target_velocity,
+      svmp::FE::systems::SystemStateView{},
+      dry_point);
+  ASSERT_TRUE(dry_value.has_value());
+  EXPECT_NEAR((*dry_value)[0], 2.75, 1.0e-10);
+  EXPECT_NEAR((*dry_value)[1], -0.875, 1.0e-10);
+#endif
+}

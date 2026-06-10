@@ -44,6 +44,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <sstream>
 #include <string>
@@ -66,6 +67,33 @@ namespace {
 struct ProcessMemorySnapshot {
     long vm_kb{-1};
     long rss_kb{-1};
+};
+
+class ScopedAssemblyDiagnosticContext final {
+public:
+    ScopedAssemblyDiagnosticContext(
+        assembly::Assembler& assembler,
+        const assembly::AssemblyDiagnosticContext* context) noexcept
+        : assembler_(assembler)
+    {
+        if (context == nullptr) {
+            assembler_.clearAssemblyDiagnosticContext();
+        } else {
+            assembler_.setAssemblyDiagnosticContext(*context);
+        }
+    }
+
+    ~ScopedAssemblyDiagnosticContext()
+    {
+        assembler_.clearAssemblyDiagnosticContext();
+    }
+
+    ScopedAssemblyDiagnosticContext(const ScopedAssemblyDiagnosticContext&) = delete;
+    ScopedAssemblyDiagnosticContext& operator=(
+        const ScopedAssemblyDiagnosticContext&) = delete;
+
+private:
+    assembly::Assembler& assembler_;
 };
 
 ProcessMemorySnapshot readProcessMemorySnapshot()
@@ -428,6 +456,225 @@ private:
         return "Interface";
     }
     return "Unknown";
+}
+
+[[nodiscard]] bool envFlagEnabled(const char* name) noexcept
+{
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || raw[0] == '\0') {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) {
+                       return static_cast<char>(std::tolower(ch));
+                   });
+    return value != "0" && value != "false" && value != "off" &&
+           value != "no";
+}
+
+[[nodiscard]] bool cutVolumeRowProvenanceDiagnosticEnabled() noexcept
+{
+    static const bool enabled =
+        envFlagEnabled("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_DIAGNOSTIC");
+    return enabled;
+}
+
+[[nodiscard]] std::string cutVolumeRowProvenanceOperatorFilter()
+{
+    static const std::string value = []() {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_OPERATOR");
+        return raw == nullptr ? std::string{} : std::string(raw);
+    }();
+    return value;
+}
+
+[[nodiscard]] bool cutVolumeRowProvenanceOperatorMatches(
+    const std::string& op,
+    const std::string& filter)
+{
+    if (filter.empty()) {
+        return true;
+    }
+    std::size_t begin = 0u;
+    while (begin <= filter.size()) {
+        const auto end = filter.find_first_of("|,", begin);
+        const auto count =
+            end == std::string::npos ? std::string::npos : end - begin;
+        const auto token = filter.substr(begin, count);
+        if (token == op) {
+            return true;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1u;
+    }
+    return false;
+}
+
+[[nodiscard]] std::size_t cutVolumeRowProvenanceMaxRules() noexcept
+{
+    static const std::size_t value = []() noexcept {
+        const char* raw =
+            std::getenv("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_MAX_RULES");
+        if (raw == nullptr || raw[0] == '\0') {
+            return std::size_t{0};
+        }
+        char* end = nullptr;
+        const auto parsed = std::strtoull(raw, &end, 10);
+        if (end == raw) {
+            return std::size_t{0};
+        }
+        return static_cast<std::size_t>(parsed);
+    }();
+    return value;
+}
+
+[[nodiscard]] std::string joinDofsWithOffset(
+    std::span<const GlobalIndex> dofs,
+    GlobalIndex offset)
+{
+    if (dofs.empty()) {
+        return "none";
+    }
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        if (i > 0u) {
+            oss << "|";
+        }
+        oss << (dofs[i] + offset);
+    }
+    return oss.str();
+}
+
+void logCutVolumeRowProvenanceDiagnostics(
+    const assembly::IMeshAccess& mesh,
+    const assembly::CutIntegrationContext& cut_context,
+    int marker,
+    geometry::CutIntegrationSide side,
+    const std::string& test_field_name,
+    const std::string& trial_field_name,
+    const std::string& source_component_tag,
+    const dofs::DofMap* row_dof_map,
+    const dofs::DofMap* col_dof_map,
+    GlobalIndex row_dof_offset,
+    GlobalIndex col_dof_offset,
+    const std::string& op,
+    bool want_matrix,
+    bool want_vector)
+{
+    if (!cutVolumeRowProvenanceDiagnosticEnabled()) {
+        return;
+    }
+    const auto op_filter = cutVolumeRowProvenanceOperatorFilter();
+    if (!cutVolumeRowProvenanceOperatorMatches(op, op_filter)) {
+        return;
+    }
+    if (row_dof_map == nullptr || col_dof_map == nullptr) {
+        return;
+    }
+
+    const auto& rules = cut_context.volumeRules();
+    const auto& metadata = cut_context.metadata();
+    const auto indexed_rule_indices =
+        cut_context.generatedVolumeRuleIndexSpanForMarkerAndSide(
+            marker,
+            side);
+    const bool use_indexed_rules = !indexed_rule_indices.empty();
+    const auto iteration_count =
+        use_indexed_rules ? indexed_rule_indices.size() : rules.size();
+    const auto max_rules = cutVolumeRowProvenanceMaxRules();
+    std::size_t emitted_rules = 0u;
+    std::size_t skipped_rules = 0u;
+
+    for (std::size_t ordinal = 0u; ordinal < iteration_count; ++ordinal) {
+        if (max_rules > 0u && emitted_rules >= max_rules) {
+            break;
+        }
+        const auto rule_index = use_indexed_rules ? indexed_rule_indices[ordinal]
+                                                  : ordinal;
+        if (rule_index >= rules.size()) {
+            ++skipped_rules;
+            continue;
+        }
+        const auto& rule = rules[rule_index];
+        if (!use_indexed_rules &&
+            (rule.kind != geometry::CutQuadratureKind::Volume ||
+             rule.provenance.marker != marker ||
+             rule.side != side)) {
+            continue;
+        }
+
+        GlobalIndex cell_id =
+            static_cast<GlobalIndex>(rule.provenance.parent_entity);
+        if (rule_index < metadata.size() &&
+            metadata[rule_index].parent_entity >= 0) {
+            cell_id =
+                static_cast<GlobalIndex>(metadata[rule_index].parent_entity);
+        }
+        if (cell_id < 0 || cell_id >= mesh.numCells() ||
+            cell_id >= row_dof_map->getNumCells() ||
+            cell_id >= col_dof_map->getNumCells()) {
+            ++skipped_rules;
+            continue;
+        }
+
+        const auto row_dofs = row_dof_map->getCellDofs(cell_id);
+        const auto col_dofs = col_dof_map->getCellDofs(cell_id);
+        const auto& rule_metadata =
+            rule_index < metadata.size() ? &metadata[rule_index] : nullptr;
+
+        std::ostringstream oss;
+        oss << "assembleOperator: diagnostic=cut_volume_row_provenance"
+            << " status=ok"
+            << " op='" << op << "'"
+            << " source_component='" << source_component_tag << "'"
+            << " marker=" << marker
+            << " side=" << cutIntegrationSideName(side)
+            << " test='" << test_field_name << "'"
+            << " trial='" << trial_field_name << "'"
+            << " want_matrix=" << (want_matrix ? 1 : 0)
+            << " want_vector=" << (want_vector ? 1 : 0)
+            << " rule_index=" << rule_index
+            << " parent_cell=" << cell_id
+            << " full_cell=" << (rule.full_cell_equivalent ? 1 : 0)
+            << " volume_fraction=" << rule.volume_fraction
+            << " measure=" << rule.measure
+            << " parent_measure=" << rule.parent_measure
+            << " quadrature_points=" << rule.points.size()
+            << " source_revision="
+            << (rule_metadata == nullptr ? 0u
+                                          : rule_metadata->source_value_revision)
+            << " cut_topology_revision="
+            << (rule_metadata == nullptr ? 0u
+                                          : rule_metadata->cut_topology_revision)
+            << " quadrature_policy_key="
+            << (rule_metadata == nullptr ? 0u
+                                          : rule_metadata->quadrature_policy_key)
+            << " row_dofs="
+            << joinDofsWithOffset(row_dofs, row_dof_offset)
+            << " col_dofs="
+            << joinDofsWithOffset(col_dofs, col_dof_offset);
+        FE_LOG_INFO(oss.str());
+        ++emitted_rules;
+    }
+
+    std::ostringstream summary;
+    summary << "assembleOperator: diagnostic=cut_volume_row_provenance_summary"
+            << " status=ok"
+            << " op='" << op << "'"
+            << " source_component='" << source_component_tag << "'"
+            << " marker=" << marker
+            << " side=" << cutIntegrationSideName(side)
+            << " test='" << test_field_name << "'"
+            << " trial='" << trial_field_name << "'"
+            << " emitted_rules=" << emitted_rules
+            << " skipped_rules=" << skipped_rules
+            << " total_rule_slots=" << iteration_count
+            << " max_rules=" << max_rules;
+    FE_LOG_INFO(summary.str());
 }
 
 void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_context,
@@ -1747,6 +1994,7 @@ assembly::AssemblyResult assembleOperator(
                 const auto& b = *rhs.term;
                 return a.test_field == b.test_field &&
                        a.trial_field == b.trial_field &&
+                       a.source_component_tag == b.source_component_tag &&
                        a.test_space == b.test_space &&
                        a.trial_space == b.trial_space &&
                        a.row_dof_map == b.row_dof_map &&
@@ -1777,6 +2025,19 @@ assembly::AssemblyResult assembleOperator(
         }
 
         std::unordered_set<std::string> logged_cut_volume_diagnostics;
+        auto make_cut_volume_diagnostic_context =
+            [&](const CutVolumeAssemblyEntry& entry) {
+                const auto& test_field =
+                    system.field_registry_.get(entry.term->test_field);
+                const auto& trial_field =
+                    system.field_registry_.get(entry.term->trial_field);
+                return assembly::AssemblyDiagnosticContext{
+                    request.op,
+                    entry.term->source_component_tag,
+                    test_field.name,
+                    trial_field.name};
+            };
+
         for (const auto& group : cut_volume_groups) {
             if (group.empty()) {
                 continue;
@@ -1797,6 +2058,29 @@ assembly::AssemblyResult assembleOperator(
                 logCutVolumeAssemblyDiagnostics(*cut_context, first.marker, first.side);
             }
 
+            for (const auto idx : group) {
+                const auto& entry = active_terms[idx];
+                const auto& provenance_test_field =
+                    system.field_registry_.get(entry.term->test_field);
+                const auto& provenance_trial_field =
+                    system.field_registry_.get(entry.term->trial_field);
+                logCutVolumeRowProvenanceDiagnostics(
+                    mesh,
+                    *cut_context,
+                    entry.term->marker,
+                    entry.term->side,
+                    provenance_test_field.name,
+                    provenance_trial_field.name,
+                    entry.term->source_component_tag,
+                    entry.term->row_dof_map,
+                    entry.term->col_dof_map,
+                    entry.term->row_dof_offset,
+                    entry.term->col_dof_offset,
+                    request.op,
+                    entry.want_matrix,
+                    entry.want_vector);
+            }
+
             if (oopTraceEnabled()) {
                 const auto& test_field = system.field_registry_.get(first.test_field);
                 const auto& trial_field = system.field_registry_.get(first.trial_field);
@@ -1805,6 +2089,7 @@ assembly::AssemblyResult assembleOperator(
                     << (group.size() > 1u ? "fused group" : "term")
                     << " marker=" << first.marker
                     << " side=" << cutIntegrationSideName(first.side)
+                    << " source_component='" << first.source_component_tag << "'"
                     << " test='" << test_field.name << "' trial='" << trial_field.name
                     << "' terms=" << group.size()
                     << "' want_matrix=" << (want_matrix ? 1 : 0)
@@ -1817,6 +2102,11 @@ assembly::AssemblyResult assembleOperator(
             if (group.size() == 1u) {
                 assembler.setRowDofMap(*first.row_dof_map, first.row_dof_offset);
                 assembler.setColDofMap(*first.col_dof_map, first.col_dof_offset);
+                const auto diagnostic_context =
+                    make_cut_volume_diagnostic_context(first_entry);
+                ScopedAssemblyDiagnosticContext scoped_diagnostic_context(
+                    assembler,
+                    &diagnostic_context);
                 r = assembler.assembleCutVolumes(
                     mesh,
                     *cut_context,
@@ -1857,8 +2147,11 @@ assembly::AssemblyResult assembleOperator(
                 }
 
                 std::vector<assembly::FusedCellTerm> terms;
+                std::vector<std::optional<assembly::AssemblyDiagnosticContext>>
+                    term_diagnostic_contexts;
                 std::vector<std::unique_ptr<CompositeCutVolumeCellKernel>> composite_storage;
                 terms.reserve(insertion_groups.size());
+                term_diagnostic_contexts.reserve(insertion_groups.size());
                 composite_storage.reserve(insertion_groups.size());
                 for (const auto& insertion_group : insertion_groups) {
                     const auto first_idx = insertion_group.front();
@@ -1900,13 +2193,37 @@ assembly::AssemblyResult assembleOperator(
                     fused_term.vector_view = group_want_vector ? vector_out : nullptr;
                     fused_term.assemble_matrix = group_want_matrix;
                     fused_term.assemble_vector = group_want_vector;
-                    terms.push_back(fused_term);
+                    fused_term.source_component_tag =
+                        first_insertion.source_component_tag;
+                    if (insertion_group.size() == 1u) {
+                        auto diagnostic_context =
+                            make_cut_volume_diagnostic_context(
+                                first_insertion_entry);
+                        fused_term.diagnostic_context = diagnostic_context;
+                        term_diagnostic_contexts.emplace_back(
+                            std::move(diagnostic_context));
+                    } else {
+                        auto diagnostic_context =
+                            make_cut_volume_diagnostic_context(
+                                first_insertion_entry);
+                        fused_term.diagnostic_context = diagnostic_context;
+                        term_diagnostic_contexts.emplace_back(
+                            std::move(diagnostic_context));
+                    }
+                    terms.push_back(std::move(fused_term));
                 }
 
                 if (terms.size() == 1u) {
                     const auto& term = terms.front();
                     assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
                     assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+                    const auto* diagnostic_context =
+                        term_diagnostic_contexts.front()
+                            ? &*term_diagnostic_contexts.front()
+                            : nullptr;
+                    ScopedAssemblyDiagnosticContext scoped_diagnostic_context(
+                        assembler,
+                        diagnostic_context);
                     r = assembler.assembleCutVolumes(
                         mesh,
                         *cut_context,
@@ -1920,9 +2237,19 @@ assembly::AssemblyResult assembleOperator(
                         term.assemble_matrix,
                         term.assemble_vector);
                 } else if (cutVolumeFusionDisabled()) {
-                    for (const auto& term : terms) {
+                    for (std::size_t term_index = 0u;
+                         term_index < terms.size();
+                         ++term_index) {
+                        const auto& term = terms[term_index];
                         assembler.setRowDofMap(*term.row_dof_map, term.row_dof_offset);
                         assembler.setColDofMap(*term.col_dof_map, term.col_dof_offset);
+                        const auto* diagnostic_context =
+                            term_diagnostic_contexts[term_index]
+                                ? &*term_diagnostic_contexts[term_index]
+                                : nullptr;
+                        ScopedAssemblyDiagnosticContext scoped_diagnostic_context(
+                            assembler,
+                            diagnostic_context);
                         auto part = assembler.assembleCutVolumes(
                             mesh,
                             *cut_context,
@@ -1938,6 +2265,9 @@ assembly::AssemblyResult assembleOperator(
                         mergeAssemblyResult(r, part);
                     }
                 } else {
+                    ScopedAssemblyDiagnosticContext scoped_diagnostic_context(
+                        assembler,
+                        nullptr);
                     r = assembler.assembleCutVolumesFused(
                         mesh,
                         *cut_context,

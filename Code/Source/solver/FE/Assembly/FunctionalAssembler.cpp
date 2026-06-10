@@ -1259,6 +1259,29 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
                 }
 
                 context.setFieldSolutionScalar(primary_field_, scalar_values, grads, hessians, laps);
+
+                const auto history_count = context.previousSolutionHistoryCount();
+                for (std::size_t kk = 0; kk < history_count; ++kk) {
+                    const int k = static_cast<int>(kk + 1u);
+                    scalar_values.resize(static_cast<std::size_t>(n_qpts));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        scalar_values[static_cast<std::size_t>(q)] = context.previousSolutionValue(q, k);
+                    }
+
+                    std::span<const AssemblyContext::Vector3D> prev_grads{};
+                    if (hasFlag(fr.required, RequiredData::SolutionGradients)) {
+                        scalar_gradients.resize(static_cast<std::size_t>(n_qpts));
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            scalar_gradients[static_cast<std::size_t>(q)] =
+                                context.previousSolutionGradient(q, k);
+                        }
+                        prev_grads = scalar_gradients;
+                    } else {
+                        scalar_gradients.clear();
+                    }
+
+                    context.setFieldPreviousSolutionScalarK(primary_field_, k, scalar_values, prev_grads);
+                }
             } else if (field_type == FieldType::Vector) {
                 const int vd = space_->value_dimension();
                 FE_THROW_IF(vd <= 0 || vd > 3, InvalidArgumentException,
@@ -1312,6 +1335,31 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
 
                 context.setFieldSolutionVector(primary_field_, vd, vector_values, jacobians,
                                                component_hessians, component_laps);
+
+                const auto history_count = context.previousSolutionHistoryCount();
+                for (std::size_t kk = 0; kk < history_count; ++kk) {
+                    const int k = static_cast<int>(kk + 1u);
+                    vector_values.resize(static_cast<std::size_t>(n_qpts));
+                    for (LocalIndex q = 0; q < n_qpts; ++q) {
+                        vector_values[static_cast<std::size_t>(q)] =
+                            context.previousSolutionVectorValue(q, k);
+                    }
+
+                    std::span<const AssemblyContext::Matrix3x3> prev_jacobians{};
+                    if (hasFlag(fr.required, RequiredData::SolutionGradients)) {
+                        vector_jacobians.resize(static_cast<std::size_t>(n_qpts));
+                        for (LocalIndex q = 0; q < n_qpts; ++q) {
+                            vector_jacobians[static_cast<std::size_t>(q)] =
+                                context.previousSolutionJacobian(q, k);
+                        }
+                        prev_jacobians = vector_jacobians;
+                    } else {
+                        vector_jacobians.clear();
+                    }
+
+                    context.setFieldPreviousSolutionVectorK(primary_field_, k, vd, vector_values,
+                                                            prev_jacobians);
+                }
             } else {
                 FE_THROW(NotImplementedException,
                          "FunctionalAssembler: primary field type not supported");

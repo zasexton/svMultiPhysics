@@ -8,6 +8,7 @@
 #include "HierarchicalBasis.h"
 #include "BasisTraits.h"
 #include "BasisTolerance.h"
+#include <algorithm>
 #include <cmath>
 #include <span>
 
@@ -32,10 +33,21 @@ struct LegendreScratch {
     std::array<std::vector<Real>, 3> values;
     std::array<std::vector<Real>, 3> derivatives;
     std::array<std::vector<Real>, 3> second_derivatives;
+
+    void prewarm(int max_order) {
+        const auto count = static_cast<std::size_t>(std::max(0, max_order) + 1);
+        for (std::size_t slot = 0; slot < values.size(); ++slot) {
+            values[slot].reserve(count);
+            derivatives[slot].reserve(count);
+            second_derivatives[slot].reserve(count);
+        }
+    }
 };
 
 LegendreScratch& legendre_scratch() {
-    thread_local LegendreScratch scratch;
+    // Scratch is intentionally thread-local: production assembly uses a
+    // persistent worker-thread team, so buffers stay warm on each worker.
+    static thread_local LegendreScratch scratch;
     return scratch;
 }
 
@@ -77,6 +89,12 @@ LegendreSecondSequence fill_legendre_second(LegendreScratch& scratch,
 }
 
 } // namespace
+
+void prewarm_hierarchical_basis_scratch(int max_order,
+                                        std::size_t max_qpts) {
+    (void)max_qpts;
+    legendre_scratch().prewarm(max_order);
+}
 
 HierarchicalBasis::HierarchicalBasis(ElementType type, int order)
     : element_type_(type), dimension_(0), order_(order), size_(0) {

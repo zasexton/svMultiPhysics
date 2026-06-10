@@ -1,28 +1,62 @@
 {
   "benchmark": "SPHERIC Test 02 three-dimensional dam break with obstacle",
   "dimensions_m": {
+    "height_probe_x_positions": {
+      "H1": 0.496,
+      "H2": 0.992,
+      "H3": 1.488,
+      "H4": 2.632
+    },
     "initial_column_height": 0.55,
-    "initial_column_length": 0.58,
+    "initial_column_length": 1.228,
     "initial_column_x_max": 3.22,
-    "initial_column_x_min": 2.64,
-    "obstacle_center_x": 0.8200000000000003,
+    "initial_column_x_min": 1.9920000000000002,
+    "interface_centering_gap": 0.08,
+    "obstacle_center_x": 0.744,
     "obstacle_center_z": 0.5,
-    "obstacle_height": 0.16,
-    "obstacle_length": 0.4,
-    "obstacle_width": 0.16,
+    "obstacle_flow_direction_length": 0.161,
+    "obstacle_height": 0.161,
+    "obstacle_lateral_width": 0.403,
+    "obstacle_x_max": 0.8245,
+    "obstacle_x_min": 0.6635,
+    "obstacle_z_max": 0.7015,
+    "obstacle_z_min": 0.2985,
+    "previous_incorrect_initial_column_length": 0.58,
+    "previous_incorrect_obstacle_flow_direction_length": 0.4,
+    "previous_incorrect_obstacle_lateral_width": 0.16,
+    "structured_max_spacing": 0.1,
     "tank_height": 1.0,
     "tank_length": 3.22,
     "tank_width": 1.0
   },
   "mesh_tools": [
     "PyVista",
-    "TetGen",
-    "MMG"
+    "structured_tet_grid"
   ],
   "notes": [
+    "The geometry follows the official SPHERIC Test02/Kleefsman setup: water initially occupies x >= 1.992 m and height <= 0.55 m.",
+    "The structured mesh aligns tank and obstacle geometry while centering the top and gate free-surface cuts between mesh planes.",
     "The obstacle is represented as an internal no-slip boundary in the background mesh.",
-    "The initial level-set field is negative inside the retained water column."
+    "The initial level-set field is negative inside the retained water column and remains negative on contacted tank walls.",
+    "The zero level set is limited to the top and gate-facing air-water interfaces; a closed-box signed distance incorrectly creates free-surface cuts on wet walls.",
+    "Earlier repository metadata used a 0.58 m retained column and swapped obstacle footprint; those settings are not the SPHERIC Test02 benchmark geometry.",
+    "The promoted OOP unfitted case uses nearest-interface-point wet-extension level-set advection; coupled-field level-set advection changes the cut topology during Newton startup on this sharp 3D dam-break initial condition."
   ],
+  "pressure_gauge": {
+    "coordinates": [
+      2.632,
+      0.0805,
+      0.5
+    ],
+    "expected_initial_hydrostatic_pressure": 4597.504569000001,
+    "initial_phi": -0.46950000000000003,
+    "node_id": 2867
+  },
+  "pressure_gauge_verification": {
+    "anchor_purpose": "pressure_nullspace_anchor_not_literature_sensor",
+    "current_prescribed_pressure_matches_initial_hydrostatic": true,
+    "initial_pressure_error_after_constraint": 0.0
+  },
   "representation": "unfitted_level_set",
   "source_urls": [
     "https://www.spheric-sph.org/tests/test-02",

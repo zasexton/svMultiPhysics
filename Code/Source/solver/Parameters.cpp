@@ -427,6 +427,18 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "AutoRegisterMomentumSourceField",
     "Auto_register_body_force_field",
     "AutoRegisterBodyForceField",
+    "Rotating_frame_coriolis",
+    "RotatingFrameCoriolis",
+    "Enable_rotating_frame_coriolis",
+    "EnableRotatingFrameCoriolis",
+    "Rotating_frame_angular_velocity",
+    "RotatingFrameAngularVelocity",
+    "Angular_velocity",
+    "AngularVelocity",
+    "Rotating_frame_angular_velocity_temporal_values_file_path",
+    "RotatingFrameAngularVelocityTemporalValuesFilePath",
+    "Angular_velocity_temporal_values_file_path",
+    "AngularVelocityTemporalValuesFilePath",
   };
   return names.count(name) != 0;
 }
@@ -2932,6 +2944,8 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Adaptive_time_loop_increase_factor", 1.0, !required, adaptive_time_loop_increase_factor);
   set_parameter("Adaptive_time_loop_target_newton_iterations", 6, !required, adaptive_time_loop_target_newton_iterations, {1,int_inf});
   set_parameter("Adaptive_time_loop_max_steps_multiplier", 8, !required, adaptive_time_loop_max_steps_multiplier, {1,int_inf});
+  set_parameter("Newton_line_search_fail_on_no_reduction", false, !required, newton_line_search_fail_on_no_reduction);
+  set_parameter("Newton_line_search_max_iterations", 10, !required, newton_line_search_max_iterations, {1,int_inf});
 
   set_parameter("Increment_in_saving_restart_files", 0, !required, increment_in_saving_restart_files);
   set_parameter("Increment_in_saving_VTK_files", 0, !required, increment_in_saving_vtk_files);
@@ -2955,6 +2969,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
   set_parameter("Spectral_radius_of_infinite_time_step", 0.5, required, spectral_radius_of_infinite_time_step);
   set_parameter("Start_averaging_from_zero", false, !required, start_averaging_from_zero);
   set_parameter("Start_saving_after_time_step", 0, required, start_saving_after_time_step);
+  set_parameter("Start_time", 0.0, !required, start_time);
   set_parameter("Starting time step", 0, !required, starting_time_step);
 
   set_parameter("Time_step_size", 0.0, required, time_step_size);

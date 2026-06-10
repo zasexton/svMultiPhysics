@@ -595,6 +595,21 @@ public:
         std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> callback) const = 0;
 };
 
+/**
+ * @brief Optional assembly-call metadata used by env-gated diagnostics/policies.
+ *
+ * Higher-level system assembly labels low-level diagnostics with the operator,
+ * source component, and field names that produced the current local
+ * contribution. Disabled-by-default assembly policies may also use this
+ * provenance to target one contribution before global insertion.
+ */
+struct AssemblyDiagnosticContext {
+    std::string operator_tag{};
+    std::string source_component_tag{};
+    std::string test_field_name{};
+    std::string trial_field_name{};
+};
+
 // ============================================================================
 // Fused Multi-Term Assembly
 // ============================================================================
@@ -618,6 +633,8 @@ struct FusedCellTerm {
     GlobalSystemView* vector_view{nullptr};   ///< nullptr if no vector
     bool assemble_matrix{false};
     bool assemble_vector{false};
+    std::optional<AssemblyDiagnosticContext> diagnostic_context{};
+    std::string source_component_tag{};
 };
 
 // ============================================================================
@@ -926,6 +943,22 @@ public:
      * per-face constants such as cut-cell stabilization scales.
      */
     virtual void setCutIntegrationContext(const CutIntegrationContext* /*context*/) noexcept {}
+
+    /**
+     * @brief Bind optional diagnostic metadata for the next assembly operation.
+     *
+     * Default implementation is a no-op. Callers must clear this after the
+     * scoped assembly call to avoid stale labels in diagnostic-only code paths.
+     */
+    virtual void setAssemblyDiagnosticContext(
+        const AssemblyDiagnosticContext& /*context*/) noexcept
+    {
+    }
+
+    /**
+     * @brief Clear optional diagnostic metadata.
+     */
+    virtual void clearAssemblyDiagnosticContext() noexcept {}
 
     /**
      * @brief Bind coupled boundary-condition scalar arrays (integrals + auxiliary state).

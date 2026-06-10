@@ -384,7 +384,8 @@ void registerKernel(
     FieldId test_field,
     FieldId trial_field,
     const DomainDispatch& dispatch,
-    const KernelPtr& kernel)
+    const KernelPtr& kernel,
+    std::string source_component_tag = {})
 {
     if (dispatch.has_cell) {
         system.addCellKernel(op, test_field, trial_field, kernel);
@@ -403,7 +404,13 @@ void registerKernel(
     }
     for (const auto& region : dispatch.cut_volume_regions) {
         system.addCutVolumeKernel(
-            op, region.marker, toGeometrySide(region.side), test_field, trial_field, kernel);
+            op,
+            region.marker,
+            toGeometrySide(region.side),
+            test_field,
+            trial_field,
+            kernel,
+            source_component_tag);
     }
 }
 
@@ -414,7 +421,8 @@ void registerKernelDomains(
     FieldId trial_field,
     const DomainDispatch& dispatch,
     const KernelPtr& kernel,
-    bool include_cell)
+    bool include_cell,
+    std::string source_component_tag = {})
 {
     if (include_cell && dispatch.has_cell) {
         system.addCellKernel(op, test_field, trial_field, kernel);
@@ -433,7 +441,13 @@ void registerKernelDomains(
     }
     for (const auto& region : dispatch.cut_volume_regions) {
         system.addCutVolumeKernel(
-            op, region.marker, toGeometrySide(region.side), test_field, trial_field, kernel);
+            op,
+            region.marker,
+            toGeometrySide(region.side),
+            test_field,
+            trial_field,
+            kernel,
+            source_component_tag);
     }
 }
 
@@ -1602,7 +1616,14 @@ KernelPtr installResidualForm(
     if (split.has_value()) {
         kernel = maybeWrapForJIT(std::move(kernel), block_options);
     }
-    registerKernel(system, op, test_field, trial_field, dispatch, kernel);
+    registerKernel(
+        system,
+        op,
+        test_field,
+        trial_field,
+        dispatch,
+        kernel,
+        block_options.source_component_tag);
     return kernel;
 }
 
@@ -1755,7 +1776,14 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                                                       block_options,
                                                       "installResidualBlocks");
             }
-            registerKernel(system, op, test_fields[i], trial_fields[j], dispatch, kernel);
+            registerKernel(
+                system,
+                op,
+                test_fields[i],
+                trial_fields[j],
+                dispatch,
+                kernel,
+                block_options.source_component_tag);
             kernels[i][j] = kernel;
         }
     }
@@ -2107,7 +2135,8 @@ CoupledResidualKernels installCoupledResidual(
             pending.dispatch,
             pending.kernel,
             (!plan->monolithic_cell_enabled && !use_mixed_block_cell_kernel) ||
-                !pending.cell_semantics_owned_by_monolithic);
+                !pending.cell_semantics_owned_by_monolithic,
+            install_options.source_component_tag);
     }
 
     if (plan->monolithic_cell_enabled) {
@@ -2724,7 +2753,8 @@ CoupledResidualKernels installCoupledResidualMixed(
             pending.dispatch,
             pending.kernel,
             (!plan->monolithic_cell_enabled && !use_mixed_block_cell_kernel) ||
-                !pending.cell_semantics_owned_by_monolithic);
+                !pending.cell_semantics_owned_by_monolithic,
+            install_options.source_component_tag);
     }
 
     if (plan->monolithic_cell_enabled) {
@@ -2918,7 +2948,8 @@ installMixedFormIR(
             pending.dispatch,
             pending.kernel,
             (!plan->monolithic_cell_enabled && !use_mixed_block_cell_kernel) ||
-                !pending.cell_semantics_owned_by_monolithic);
+                !pending.cell_semantics_owned_by_monolithic,
+            options.source_component_tag);
     }
 
     if (plan->monolithic_cell_enabled) {
@@ -3625,7 +3656,14 @@ CoupledResidualKernels installFormulation(
             const auto dispatch = analyzeDispatch(ir);
             kernel = std::make_shared<forms::FormKernel>(std::move(ir));
             kernel = maybeWrapForJIT(std::move(kernel), install_options);
-            registerKernel(system, op, fields[0], fields[0], dispatch, kernel);
+            registerKernel(
+                system,
+                op,
+                fields[0],
+                fields[0],
+                dispatch,
+                kernel,
+                install_options.source_component_tag);
         }
 
         commitRecord();

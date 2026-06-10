@@ -1738,30 +1738,42 @@ AssemblyContext::Matrix3x3 AssemblyContext::solutionJacobian(LocalIndex q) const
 
 AssemblyContext::Vector3D AssemblyContext::previousSolutionGradient(LocalIndex q) const
 {
+    return previousSolutionGradient(q, 1);
+}
+
+AssemblyContext::Vector3D AssemblyContext::previousSolutionGradient(LocalIndex q, int k) const
+{
     if (trial_field_type_ != FieldType::Scalar) {
         throw std::logic_error("AssemblyContext::previousSolutionGradient: trial field is not scalar-valued");
     }
-    if (history_solution_data_.size() < 1 || history_solution_data_[0].gradients.empty()) {
+    if (k <= 0 || history_solution_data_.size() < static_cast<std::size_t>(k) ||
+        history_solution_data_[static_cast<std::size_t>(k - 1)].gradients.empty()) {
         throw std::logic_error("AssemblyContext::previousSolutionGradient: previous solution gradient data not set");
     }
     if (q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::previousSolutionGradient: index out of range");
     }
-    return history_solution_data_[0].gradients[static_cast<std::size_t>(q)];
+    return history_solution_data_[static_cast<std::size_t>(k - 1)].gradients[static_cast<std::size_t>(q)];
 }
 
 AssemblyContext::Matrix3x3 AssemblyContext::previousSolutionJacobian(LocalIndex q) const
 {
+    return previousSolutionJacobian(q, 1);
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::previousSolutionJacobian(LocalIndex q, int k) const
+{
     if (trial_field_type_ != FieldType::Vector) {
         throw std::logic_error("AssemblyContext::previousSolutionJacobian: trial field is not vector-valued");
     }
-    if (history_solution_data_.size() < 1 || history_solution_data_[0].jacobians.empty()) {
+    if (k <= 0 || history_solution_data_.size() < static_cast<std::size_t>(k) ||
+        history_solution_data_[static_cast<std::size_t>(k - 1)].jacobians.empty()) {
         throw std::logic_error("AssemblyContext::previousSolutionJacobian: previous solution Jacobian data not set");
     }
     if (q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::previousSolutionJacobian: index out of range");
     }
-    return history_solution_data_[0].jacobians[static_cast<std::size_t>(q)];
+    return history_solution_data_[static_cast<std::size_t>(k - 1)].jacobians[static_cast<std::size_t>(q)];
 }
 
 AssemblyContext::Vector3D AssemblyContext::previousSolution2Gradient(LocalIndex q) const
@@ -1888,6 +1900,8 @@ void AssemblyContext::copyFieldSolutionDataFrom(const AssemblyContext& other)
         dst.vector_values = src.vector_values;
         dst.history_values = src.history_values;
         dst.history_vector_values = src.history_vector_values;
+        dst.history_gradients = src.history_gradients;
+        dst.history_jacobians = src.history_jacobians;
         dst.gradients = src.gradients;
         dst.jacobians = src.jacobians;
         dst.hessians = src.hessians;
@@ -1950,6 +1964,8 @@ bool AssemblyContext::copyFieldSolutionDataSubsetFrom(const AssemblyContext& oth
         dst.vector_values = src.vector_values;
         dst.history_values = src.history_values;
         dst.history_vector_values = src.history_vector_values;
+        dst.history_gradients = src.history_gradients;
+        dst.history_jacobians = src.history_jacobians;
         dst.gradients = src.gradients;
         dst.jacobians = src.jacobians;
         dst.hessians = src.hessians;
@@ -2005,6 +2021,8 @@ void AssemblyContext::preAllocateFieldSolutionData(std::size_t max_fields, std::
         f.vector_values.reserve(cap_vec);
         f.history_values.reserve(cap_scalar);
         f.history_vector_values.reserve(cap_vec);
+        f.history_gradients.reserve(cap_vec);
+        f.history_jacobians.reserve(cap_vec);
         f.gradients.reserve(cap_vec);
         f.jacobians.reserve(cap_vec);
         f.hessians.reserve(cap_vec);
@@ -2056,10 +2074,20 @@ void AssemblyContext::rebuildJITFieldSolutionTable()
                 e.history_values = f.history_values.data();
                 e.history_count = static_cast<std::uint32_t>(f.history_values.size() / nq);
             }
+            if (!f.history_gradients.empty()) {
+                e.history_gradients_xyz = flattenXYZ(f.history_gradients);
+                e.history_count =
+                    std::max(e.history_count, static_cast<std::uint32_t>(f.history_gradients.size() / nq));
+            }
         } else if (f.field_type == FieldType::Vector) {
             if (!f.history_vector_values.empty()) {
                 e.history_vector_values_xyz = flattenXYZ(f.history_vector_values);
                 e.history_count = static_cast<std::uint32_t>(f.history_vector_values.size() / nq);
+            }
+            if (!f.history_jacobians.empty()) {
+                e.history_jacobians = flattenMat3(f.history_jacobians);
+                e.history_count =
+                    std::max(e.history_count, static_cast<std::uint32_t>(f.history_jacobians.size() / nq));
             }
         }
 
@@ -2113,6 +2141,8 @@ void AssemblyContext::setFieldSolutionScalar(FieldId field,
     it->vector_values.clear();
     it->history_values.clear();
     it->history_vector_values.clear();
+    it->history_gradients.clear();
+    it->history_jacobians.clear();
     it->jacobians.clear();
     it->component_hessians.clear();
     it->component_laplacians.clear();
@@ -2177,6 +2207,8 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
     it->values.clear();
     it->history_values.clear();
     it->history_vector_values.clear();
+    it->history_gradients.clear();
+    it->history_jacobians.clear();
     it->gradients.clear();
     it->hessians.clear();
     it->laplacians.clear();
@@ -2184,7 +2216,10 @@ void AssemblyContext::setFieldSolutionVector(FieldId field,
     if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
 }
 
-void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std::span<const Real> values)
+void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field,
+                                                      int k,
+                                                      std::span<const Real> values,
+                                                      std::span<const Vector3D> gradients)
 {
     FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
                 "AssemblyContext::setFieldPreviousSolutionScalarK: invalid FieldId");
@@ -2193,6 +2228,10 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
     if (!values.empty() && values.size() != static_cast<std::size_t>(n_qpts_)) {
         throw std::invalid_argument(
             "AssemblyContext::setFieldPreviousSolutionScalarK: values size does not match quadrature points");
+    }
+    if (!gradients.empty() && gradients.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument(
+            "AssemblyContext::setFieldPreviousSolutionScalarK: gradients size does not match quadrature points");
     }
 
     const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
@@ -2219,6 +2258,7 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
     it->value_dim = 1;
 
     it->history_vector_values.clear();
+    it->history_jacobians.clear();
 
     const auto nq = static_cast<std::size_t>(n_qpts_);
     const auto needed = static_cast<std::size_t>(k) * nq;
@@ -2228,6 +2268,16 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
     if (!values.empty()) {
         std::copy(values.begin(), values.end(), it->history_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
     }
+    if (!gradients.empty()) {
+        if (it->history_gradients.size() < needed) {
+            it->history_gradients.resize(needed, Vector3D{0.0, 0.0, 0.0});
+        }
+        std::copy(gradients.begin(), gradients.end(),
+                  it->history_gradients.begin() +
+                      (static_cast<std::size_t>(k - 1) * nq));
+    } else {
+        it->history_gradients.clear();
+    }
 
     if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
 }
@@ -2235,7 +2285,8 @@ void AssemblyContext::setFieldPreviousSolutionScalarK(FieldId field, int k, std:
 void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
                                                       int k,
                                                       int value_dimension,
-                                                      std::span<const Vector3D> values)
+                                                      std::span<const Vector3D> values,
+                                                      std::span<const Matrix3x3> jacobians)
 {
     FE_THROW_IF(field == INVALID_FIELD_ID, InvalidArgumentException,
                 "AssemblyContext::setFieldPreviousSolutionVectorK: invalid FieldId");
@@ -2246,6 +2297,10 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
     if (!values.empty() && values.size() != static_cast<std::size_t>(n_qpts_)) {
         throw std::invalid_argument(
             "AssemblyContext::setFieldPreviousSolutionVectorK: values size does not match quadrature points");
+    }
+    if (!jacobians.empty() && jacobians.size() != static_cast<std::size_t>(n_qpts_)) {
+        throw std::invalid_argument(
+            "AssemblyContext::setFieldPreviousSolutionVectorK: jacobians size does not match quadrature points");
     }
 
     const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
@@ -2272,6 +2327,7 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
     it->value_dim = value_dimension;
 
     it->history_values.clear();
+    it->history_gradients.clear();
 
     const auto nq = static_cast<std::size_t>(n_qpts_);
     const auto needed = static_cast<std::size_t>(k) * nq;
@@ -2281,6 +2337,16 @@ void AssemblyContext::setFieldPreviousSolutionVectorK(FieldId field,
     if (!values.empty()) {
         std::copy(values.begin(), values.end(),
                   it->history_vector_values.begin() + (static_cast<std::size_t>(k - 1) * nq));
+    }
+    if (!jacobians.empty()) {
+        if (it->history_jacobians.size() < needed) {
+            it->history_jacobians.resize(needed, Matrix3x3{});
+        }
+        std::copy(jacobians.begin(), jacobians.end(),
+                  it->history_jacobians.begin() +
+                      (static_cast<std::size_t>(k - 1) * nq));
+    } else {
+        it->history_jacobians.clear();
     }
 
     if (jit_field_table_suspended_) { jit_field_table_dirty_ = true; } else { rebuildJITFieldSolutionTable(); }
@@ -2518,6 +2584,58 @@ AssemblyContext::Vector3D AssemblyContext::fieldPreviousVectorValue(FieldId fiel
         throw std::out_of_range("AssemblyContext::fieldPreviousVectorValue: history index out of range");
     }
     return it->history_vector_values[idx];
+}
+
+AssemblyContext::Vector3D AssemblyContext::fieldPreviousGradient(FieldId field, LocalIndex q, int k) const
+{
+    if (k <= 0) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousGradient: history index k must be >= 1");
+    }
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == active_end || it->history_gradients.empty()) {
+        throw std::logic_error("AssemblyContext::fieldPreviousGradient: field previous gradient data not set");
+    }
+    if (it->field_type != FieldType::Scalar) {
+        throw std::logic_error("AssemblyContext::fieldPreviousGradient: field is not scalar-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousGradient: index out of range");
+    }
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    const auto idx = static_cast<std::size_t>(k - 1) * nq + static_cast<std::size_t>(q);
+    if (idx >= it->history_gradients.size()) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousGradient: history index out of range");
+    }
+    return it->history_gradients[idx];
+}
+
+AssemblyContext::Matrix3x3 AssemblyContext::fieldPreviousJacobian(FieldId field, LocalIndex q, int k) const
+{
+    if (k <= 0) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousJacobian: history index k must be >= 1");
+    }
+    const auto active_end = field_solution_data_.begin() + static_cast<std::ptrdiff_t>(field_solution_data_used_);
+    const auto it = std::find_if(field_solution_data_.begin(), active_end,
+                                 [&](const FieldSolutionData& d) { return d.id == field; });
+    if (it == active_end || it->history_jacobians.empty()) {
+        throw std::logic_error("AssemblyContext::fieldPreviousJacobian: field previous Jacobian data not set");
+    }
+    if (it->field_type != FieldType::Vector) {
+        throw std::logic_error("AssemblyContext::fieldPreviousJacobian: field is not vector-valued");
+    }
+    if (q >= n_qpts_) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousJacobian: index out of range");
+    }
+
+    const auto nq = static_cast<std::size_t>(n_qpts_);
+    const auto idx = static_cast<std::size_t>(k - 1) * nq + static_cast<std::size_t>(q);
+    if (idx >= it->history_jacobians.size()) {
+        throw std::out_of_range("AssemblyContext::fieldPreviousJacobian: history index out of range");
+    }
+    return it->history_jacobians[idx];
 }
 
 // ============================================================================

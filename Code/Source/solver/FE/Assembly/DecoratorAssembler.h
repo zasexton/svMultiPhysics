@@ -168,6 +168,17 @@ public:
         base_->setCutIntegrationContext(context);
     }
 
+    void setAssemblyDiagnosticContext(
+        const AssemblyDiagnosticContext& context) noexcept override
+    {
+        base_->setAssemblyDiagnosticContext(context);
+    }
+
+    void clearAssemblyDiagnosticContext() noexcept override
+    {
+        base_->clearAssemblyDiagnosticContext();
+    }
+
     void setCoupledValues(std::span<const Real> integrals,
                           std::span<const Real> aux_state) noexcept override
     {

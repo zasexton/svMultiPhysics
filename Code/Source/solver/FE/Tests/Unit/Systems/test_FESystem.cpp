@@ -99,6 +99,29 @@ std::shared_ptr<Mesh> build_single_quad_mesh()
     return svmp::create_mesh(std::move(base));
 }
 
+std::shared_ptr<Mesh> build_single_tetra_mesh()
+{
+    auto base = std::make_shared<MeshBase>();
+
+    const std::vector<svmp::real_t> X_ref = {
+        0.0, 0.0, 0.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0
+    };
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
+
+    CellShape shape{};
+    shape.family = CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/3, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+
+    return svmp::create_mesh(std::move(base));
+}
+
 std::shared_ptr<Mesh> build_single_biquadratic_quad_mesh()
 {
     auto base = std::make_shared<MeshBase>();
@@ -1208,6 +1231,82 @@ TEST(FESystem, MeshVertexProjectionUsesFaceBacked2DEdgeDofs)
                 << "cell=" << cell << " local_node=" << local_node
                 << " vertex=" << vertex << " dof=" << dof;
         }
+    }
+}
+
+TEST(FESystem, MeshVertexProjectionInterpolatesP2EdgeDofsOnLinearTetraMesh)
+{
+    auto mesh = build_single_tetra_mesh();
+    ASSERT_EQ(mesh->local_mesh().n_vertices(), 4u);
+    ASSERT_EQ(mesh->local_mesh().n_edges(), 6u);
+
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/2);
+
+    FESystem sys(mesh);
+    const auto source = sys.addField(FieldSpec{
+        .name = "ProjectedLevelSet",
+        .space = scalar_space,
+        .components = 1,
+        .source_kind = FieldSourceKind::Unknown});
+    ASSERT_NO_THROW(sys.setup());
+
+    std::vector<Real> mesh_values(mesh->n_vertices(), Real{0});
+    const auto& coords = mesh->X_ref();
+    const int dim = mesh->dim();
+    for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+        const Real x =
+            static_cast<Real>(coords[vertex * static_cast<std::size_t>(dim)]);
+        const Real y =
+            static_cast<Real>(coords[vertex * static_cast<std::size_t>(dim) + 1u]);
+        const Real z =
+            static_cast<Real>(coords[vertex * static_cast<std::size_t>(dim) + 2u]);
+        mesh_values[vertex] = Real{2} + Real{3} * x - y + Real{0.5} * z;
+    }
+
+    std::vector<Real> coefficients(
+        static_cast<std::size_t>(sys.fieldDofHandler(source).getNumDofs()),
+        Real{0});
+    std::vector<std::uint8_t> assigned(coefficients.size(), 0u);
+
+    const auto projection = sys.projectMeshVertexValuesToFieldCoefficients(
+        source,
+        std::span<const Real>(mesh_values.data(), mesh_values.size()),
+        /*mesh_components=*/1,
+        std::span<Real>(coefficients.data(), coefficients.size()),
+        std::span<std::uint8_t>(assigned.data(), assigned.size()),
+        "FESystem linear-tetra P2 edge projection test");
+
+    EXPECT_EQ(projection.unassigned_dofs, 0u);
+    EXPECT_EQ(projection.values_written, coefficients.size());
+    EXPECT_EQ(std::count(assigned.begin(), assigned.end(), std::uint8_t{1}),
+              static_cast<std::ptrdiff_t>(coefficients.size()));
+
+    const auto* entity_map = sys.fieldDofHandler(source).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+
+    for (GlobalIndex vertex = 0;
+         vertex < static_cast<GlobalIndex>(mesh->n_vertices());
+         ++vertex) {
+        const auto vertex_dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(vertex_dofs.size(), 1u);
+        const auto dof = static_cast<std::size_t>(vertex_dofs[0]);
+        EXPECT_DOUBLE_EQ(coefficients[dof],
+                         mesh_values[static_cast<std::size_t>(vertex)]);
+    }
+
+    for (GlobalIndex edge = 0;
+         edge < static_cast<GlobalIndex>(mesh->local_mesh().n_edges());
+         ++edge) {
+        const auto edge_dofs = entity_map->getEdgeDofs(edge);
+        ASSERT_EQ(edge_dofs.size(), 1u);
+        const auto endpoints = mesh->local_mesh().edge_vertices(edge);
+        const auto expected =
+            Real{0.5} *
+            (mesh_values[static_cast<std::size_t>(endpoints[0])] +
+             mesh_values[static_cast<std::size_t>(endpoints[1])]);
+        const auto dof = static_cast<std::size_t>(edge_dofs[0]);
+        EXPECT_DOUBLE_EQ(coefficients[dof], expected)
+            << "edge=" << edge << " dof=" << dof;
     }
 }
 

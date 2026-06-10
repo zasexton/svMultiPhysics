@@ -21,6 +21,9 @@ namespace svmp {
 namespace FE {
 namespace basis {
 
+void prewarm_hierarchical_basis_scratch(int max_order,
+                                        std::size_t max_qpts = 0);
+
 /**
  * @brief Hierarchical/modal basis using orthogonal polynomials
  */

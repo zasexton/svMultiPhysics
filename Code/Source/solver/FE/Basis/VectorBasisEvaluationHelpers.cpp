@@ -19,8 +19,14 @@ namespace detail {
 namespace vector_common {
 
 VectorBasisScratch& vector_basis_scratch() {
+    // Scratch is intentionally thread-local: production assembly uses a
+    // persistent worker-thread team, so buffers stay warm on each worker.
     static thread_local VectorBasisScratch scratch;
     return scratch;
+}
+
+void prewarm_vector_basis_scratch(std::size_t max_size, std::size_t max_qpts) {
+    vector_basis_scratch().prewarm(max_size, max_qpts);
 }
 
 void fill_powers(Real x, int max_p, std::vector<Real>& out) {

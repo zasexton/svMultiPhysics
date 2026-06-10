@@ -158,7 +158,23 @@ namespace detail {
     auto uD_comp = FE::forms::bc::toVectorExpr(
         bc.value, dim, "ns_u_dirichlet", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
-    return std::make_unique<FE::forms::bc::EssentialBC>(marker, std::move(uD_comp), std::string(symbol));
+    bool all_active = true;
+    for (int d = 0; d < dim; ++d) {
+        all_active = all_active && bc.active_components[static_cast<std::size_t>(d)];
+    }
+    if (all_active) {
+        return std::make_unique<FE::forms::bc::EssentialBC>(marker, std::move(uD_comp), std::string(symbol));
+    }
+
+    return FE::forms::bc::vectorComponentEssentialBC(
+        bc.value,
+        bc.active_components,
+        dim,
+        marker,
+        "ns_u_dirichlet",
+        symbol,
+        "Navier-Stokes velocity Dirichlet",
+        FE::forms::bc::ComponentValueNameStyle::Component);
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toPressureEssentialBC(
@@ -374,6 +390,12 @@ inline void applyVelocityNitscheBCs(
     for (const auto& bc : options.velocity_dirichlet_weak) {
         const int marker =
             FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::applyVelocityNitscheBCs");
+        for (int d = 0; d < dim; ++d) {
+            if (!bc.active_components[static_cast<std::size_t>(d)]) {
+                throw std::invalid_argument(
+                    "applyVelocityNitscheBCs: partial-component weak velocity Dirichlet is not supported");
+            }
+        }
 
         auto uD_comp = FE::forms::bc::toVectorExpr(
             bc.value, dim, "ns_uD", marker, FE::forms::bc::ComponentValueNameStyle::Component);

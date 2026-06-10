@@ -432,6 +432,38 @@ void applyNewtonLineSearchEnvOptions(svmp::FE::timestepping::NewtonOptions& opts
                    opts.line_search_fail_on_no_reduction);
 }
 
+void applyNewtonToleranceEnvOptions(svmp::FE::timestepping::NewtonOptions& opts)
+{
+  if (std::getenv("SVMP_NEWTON_ABS_TOLERANCE")) {
+    const double value =
+        parseDoubleEnv("SVMP_NEWTON_ABS_TOLERANCE", opts.abs_tolerance);
+    if (value >= 0.0) {
+      opts.abs_tolerance = value;
+    }
+  }
+  if (std::getenv("SVMP_NEWTON_REL_TOLERANCE")) {
+    const double value =
+        parseDoubleEnv("SVMP_NEWTON_REL_TOLERANCE", opts.rel_tolerance);
+    if (value >= 0.0) {
+      opts.rel_tolerance = value;
+    }
+  }
+}
+
+void applyNewtonLineSearchXmlOptions(
+    const GeneralSimulationParameters& general_params,
+    svmp::FE::timestepping::NewtonOptions& opts)
+{
+  if (general_params.newton_line_search_max_iterations.defined()) {
+    opts.line_search_max_iterations =
+        std::max(1, general_params.newton_line_search_max_iterations.value());
+  }
+  if (general_params.newton_line_search_fail_on_no_reduction.defined()) {
+    opts.line_search_fail_on_no_reduction =
+        general_params.newton_line_search_fail_on_no_reduction.value();
+  }
+}
+
 void applyNewtonPseudoTransientEnvOptions(svmp::FE::timestepping::NewtonOptions& opts)
 {
   auto& ptc = opts.pseudo_transient;
@@ -2444,6 +2476,271 @@ std::vector<svmp::FE::Real> gatherFeOrderedSolution(
   }
   throw std::runtime_error(
       "[svMultiPhysics::Application] Could not gather FE-ordered state values.");
+}
+
+double globalMaxDouble(double local, const svmp::MeshComm& comm);
+std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm);
+
+bool acceptedPressureUpdateDiagnosticEnabled()
+{
+  return parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_DIAGNOSTIC", false) ||
+         parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_GUARD", false) ||
+         parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_REJECT_ON_TRIGGER", false) ||
+         parseDoubleEnv("SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA", -1.0) >
+             0.0;
+}
+
+bool activePressureUpdateRejectOnTriggerEnabled()
+{
+  return parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_REJECT_ON_TRIGGER", false);
+}
+
+const char* activePressureUpdateSupportClass(double max_wet_fraction,
+                                             double min_positive_wet_fraction)
+{
+  constexpr double tiny_fraction = 1.0e-4;
+  constexpr double full_wet_tolerance = 1.0e-12;
+  if (!std::isfinite(max_wet_fraction) || max_wet_fraction <= 0.0) {
+    return "active_support_no_wet_fraction";
+  }
+  if (max_wet_fraction <= tiny_fraction) {
+    return "tiny_cut_supported";
+  }
+  if (std::isfinite(min_positive_wet_fraction) &&
+      min_positive_wet_fraction >= 1.0 - full_wet_tolerance) {
+    return "full_wet_supported";
+  }
+  return "cut_supported";
+}
+
+bool logAcceptedPressureUpdateDiagnostic(
+    const svmp::FE::systems::FESystem& system,
+    const Parameters& params,
+    std::span<const svmp::FE::Real> previous_solution,
+    std::span<const svmp::FE::Real> current_solution,
+    int step,
+    double time,
+    double dt,
+    std::string_view phase,
+    bool honor_fail_on_trigger)
+{
+  if (!acceptedPressureUpdateDiagnosticEnabled()) {
+    return false;
+  }
+  if (previous_solution.size() != current_solution.size()) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING accepted pressure update "
+        << "diagnostic skipped: solution size mismatch"
+        << " diagnostic=accepted_pressure_update_guard_skipped"
+        << " phase='" << phase << "'"
+        << " previous_size=" << previous_solution.size()
+        << " current_size=" << current_solution.size() << std::endl;
+    return false;
+  }
+
+  const char* pressure_field_env =
+      std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_FIELD");
+  const std::string pressure_field_name =
+      pressure_field_env != nullptr && *pressure_field_env != '\0'
+          ? std::string(pressure_field_env)
+          : std::string("Pressure");
+  const auto pressure_field = system.findFieldByName(pressure_field_name);
+  if (pressure_field == svmp::FE::INVALID_FIELD_ID) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING accepted pressure update "
+        << "diagnostic skipped: pressure field not found"
+        << " diagnostic=accepted_pressure_update_guard_skipped"
+        << " phase='" << phase << "'"
+        << " field='" << pressure_field_name << "'" << std::endl;
+    return false;
+  }
+
+  const auto& pressure_dofs = system.fieldDofHandler(pressure_field);
+  const auto* pressure_entity_map = pressure_dofs.getEntityDofMap();
+  if (pressure_entity_map == nullptr) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING accepted pressure update "
+        << "diagnostic skipped: pressure field has no entity DOF map"
+        << " diagnostic=accepted_pressure_update_guard_skipped"
+        << " phase='" << phase << "'"
+        << " field='" << pressure_field_name << "'" << std::endl;
+    return false;
+  }
+
+  const auto requests = activeCutVolumeRequests(params);
+  const auto* cut_context = system.cutIntegrationContext();
+  if (requests.empty() || cut_context == nullptr) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING accepted pressure update "
+        << "diagnostic skipped: active cut context unavailable"
+        << " diagnostic=accepted_pressure_update_guard_skipped"
+        << " phase='" << phase << "'"
+        << " active_requests=" << requests.size()
+        << " has_cut_context=" << (cut_context != nullptr ? 1 : 0)
+        << std::endl;
+    return false;
+  }
+
+  const auto& mesh = system.meshAccess();
+  const auto n_vertices = static_cast<std::size_t>(
+      std::max<svmp::FE::GlobalIndex>(0, mesh.numVertices()));
+  std::vector<unsigned char> active_support(n_vertices, 0u);
+  std::vector<double> max_wet_fraction(
+      n_vertices, -std::numeric_limits<double>::infinity());
+  std::vector<double> min_positive_wet_fraction(
+      n_vertices, std::numeric_limits<double>::infinity());
+  std::vector<svmp::FE::GlobalIndex> cell_nodes;
+  std::size_t retained_rule_count = 0u;
+
+  for (std::size_t i = 0; i < requests.size(); ++i) {
+    const auto& request = requests[i];
+    const auto marker = generatedVolumeMarkerForRequest(*cut_context, request, i);
+    if (!marker.has_value()) {
+      continue;
+    }
+    const auto side = cutIntegrationSide(request.active_side);
+    const auto rules =
+        cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
+    for (const auto* rule : rules) {
+      if (rule == nullptr || !std::isfinite(rule->volume_fraction) ||
+          rule->volume_fraction <= svmp::FE::Real{0.0}) {
+        continue;
+      }
+      const auto parent = rule->provenance.parent_entity;
+      if (parent < 0 || parent >= mesh.numCells()) {
+        continue;
+      }
+      ++retained_rule_count;
+      cell_nodes.clear();
+      mesh.getCellNodes(parent, cell_nodes);
+      for (const auto vertex : cell_nodes) {
+        if (vertex < 0 ||
+            static_cast<std::size_t>(vertex) >= active_support.size()) {
+          continue;
+        }
+        const auto v = static_cast<std::size_t>(vertex);
+        active_support[v] = 1u;
+        const auto fraction = static_cast<double>(rule->volume_fraction);
+        max_wet_fraction[v] = std::max(max_wet_fraction[v], fraction);
+        min_positive_wet_fraction[v] =
+            std::min(min_positive_wet_fraction[v], fraction);
+      }
+    }
+  }
+
+  const auto pressure_offset = system.fieldDofOffset(pressure_field);
+  const auto pressure_field_dofs = pressure_dofs.getNumDofs();
+  const auto solution_size =
+      static_cast<svmp::FE::GlobalIndex>(current_solution.size());
+  if (pressure_offset < 0 ||
+      pressure_offset + pressure_field_dofs > solution_size) {
+    application::core::oopCout()
+        << "[svMultiPhysics::Application] WARNING accepted pressure update "
+        << "diagnostic skipped: pressure field DOFs outside solution vector"
+        << " diagnostic=accepted_pressure_update_guard_skipped"
+        << " phase='" << phase << "'"
+        << " field='" << pressure_field_name << "'"
+        << " pressure_offset=" << pressure_offset
+        << " pressure_dofs=" << pressure_field_dofs
+        << " solution_size=" << current_solution.size() << std::endl;
+    return false;
+  }
+
+  std::size_t supported_vertices = 0u;
+  std::size_t compared_vertices = 0u;
+  std::size_t skipped_nonvertex_pressure_dofs = 0u;
+  double local_max_abs_delta = 0.0;
+  double local_signed_delta = 0.0;
+  svmp::FE::GlobalIndex local_vertex = -1;
+  svmp::FE::GlobalIndex local_dof = -1;
+  double local_from_pressure = 0.0;
+  double local_to_pressure = 0.0;
+  double local_max_wet = std::numeric_limits<double>::quiet_NaN();
+  double local_min_positive_wet = std::numeric_limits<double>::quiet_NaN();
+
+  for (std::size_t vertex = 0; vertex < active_support.size(); ++vertex) {
+    if (active_support[vertex] == 0u) {
+      continue;
+    }
+    ++supported_vertices;
+    const auto vertex_dofs = pressure_entity_map->getVertexDofs(
+        static_cast<svmp::FE::GlobalIndex>(vertex));
+    if (vertex_dofs.size() != 1u) {
+      ++skipped_nonvertex_pressure_dofs;
+      continue;
+    }
+    const auto global_dof = pressure_offset + vertex_dofs.front();
+    if (global_dof < 0 ||
+        static_cast<std::size_t>(global_dof) >= current_solution.size()) {
+      ++skipped_nonvertex_pressure_dofs;
+      continue;
+    }
+    ++compared_vertices;
+    const auto previous = static_cast<double>(
+        previous_solution[static_cast<std::size_t>(global_dof)]);
+    const auto current = static_cast<double>(
+        current_solution[static_cast<std::size_t>(global_dof)]);
+    const auto delta = current - previous;
+    const auto abs_delta = std::abs(delta);
+    if (abs_delta > local_max_abs_delta) {
+      local_max_abs_delta = abs_delta;
+      local_signed_delta = delta;
+      local_vertex = static_cast<svmp::FE::GlobalIndex>(vertex);
+      local_dof = global_dof;
+      local_from_pressure = previous;
+      local_to_pressure = current;
+      local_max_wet = max_wet_fraction[vertex];
+      local_min_positive_wet = min_positive_wet_fraction[vertex];
+    }
+  }
+
+  const auto comm = svmp::MeshComm::world();
+  const auto global_supported_vertices = globalSumSize(supported_vertices, comm);
+  const auto global_compared_vertices = globalSumSize(compared_vertices, comm);
+  const auto global_skipped_vertices =
+      globalSumSize(skipped_nonvertex_pressure_dofs, comm);
+  const auto global_retained_rules = globalSumSize(retained_rule_count, comm);
+  const auto global_max_abs_delta = globalMaxDouble(local_max_abs_delta, comm);
+  const auto threshold =
+      parseDoubleEnv("SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA", -1.0);
+  const bool triggered = threshold > 0.0 && global_max_abs_delta > threshold;
+
+  application::core::oopCout()
+      << "[svMultiPhysics::Application] Accepted pressure update diagnostic"
+      << " diagnostic=accepted_pressure_update_guard"
+      << " phase='" << phase << "'"
+      << " step=" << step
+      << " time=" << time
+      << " dt=" << dt
+      << " field='" << pressure_field_name << "'"
+      << " retained_active_volume_rules=" << global_retained_rules
+      << " active_supported_vertices=" << global_supported_vertices
+      << " compared_vertex_pressure_dofs=" << global_compared_vertices
+      << " skipped_nonvertex_pressure_vertices=" << global_skipped_vertices
+      << " local_worst_vertex=" << local_vertex
+      << " local_worst_dof=" << local_dof
+      << " local_abs_pressure_delta_pa=" << local_max_abs_delta
+      << " global_abs_pressure_delta_pa=" << global_max_abs_delta
+      << " local_pressure_delta_pa=" << local_signed_delta
+      << " local_from_pressure_pa=" << local_from_pressure
+      << " local_to_pressure_pa=" << local_to_pressure
+      << " support_class="
+      << activePressureUpdateSupportClass(local_max_wet,
+                                          local_min_positive_wet)
+      << " incident_wet_fraction_max=" << local_max_wet
+      << " incident_wet_fraction_min_positive=" << local_min_positive_wet
+      << " threshold_pa=" << threshold
+      << " triggered=" << (triggered ? 1 : 0)
+      << std::endl;
+
+  if (triggered &&
+      honor_fail_on_trigger &&
+      parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_FAIL_ON_TRIGGER", false)) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Accepted active pressure update "
+        "exceeded SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA.");
+  }
+  return triggered;
 }
 
 void scatterFeOrderedSolution(
@@ -4852,6 +5149,17 @@ bool updateLevelSetAdvectionVelocitiesFromState(
       const NearestPointIndex sample_index(mesh_dim, std::move(sample_records));
 
       for (std::size_t v = 0; v < n_vertices; ++v) {
+        if (active[v]) {
+          for (std::size_t c = 0; c < copy_components; ++c) {
+            const auto value =
+                source_values[v * source_components + c];
+            extended[v * target_components + c] =
+                std::isfinite(value) ? value : 0.0;
+          }
+          record_speed(v);
+          continue;
+        }
+
         const auto nearest =
             sample_index.nearest(meshVertexPoint(coords, mesh_dim, v));
         if (!nearest.found || nearest.payload >= samples.size()) {
@@ -5601,6 +5909,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         << " active_pruned_volume_regions="
         << global_pruned_volume_regions
         << " active_pruned_volume=" << global_pruned_volume
+        << " generated_volume_prune_min_fraction="
+        << svmp::FE::assembly::CutIntegrationContext::
+               minGeneratedCutVolumeFraction()
         << " generated_pruned_volume_rules="
         << global_generated_pruned_volume_rules
         << " generated_pruned_volume=" << global_generated_pruned_volume
@@ -6480,7 +6791,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   newton_opts.use_line_search =
       parseBoolEnv("SVMP_NEWTON_LINE_SEARCH",
                    !steady_active_cut_requests.empty());
+  applyNewtonLineSearchXmlOptions(params.general_simulation_parameters,
+                                  newton_opts);
   applyNewtonLineSearchEnvOptions(newton_opts);
+  applyNewtonToleranceEnvOptions(newton_opts);
   newton_opts.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
   applyNewtonPseudoTransientEnvOptions(newton_opts);
@@ -6632,9 +6946,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
 
   svmp::FE::timestepping::TimeLoopOptions opts{};
-  opts.t0 = 0.0;
+  opts.t0 = params.general_simulation_parameters.start_time.defined()
+                ? params.general_simulation_parameters.start_time.value()
+                : 0.0;
   opts.dt = dt;
-  opts.t_end = static_cast<double>(num_steps) * dt;
+  opts.t_end = opts.t0 + static_cast<double>(num_steps) * dt;
   opts.max_steps = num_steps;
   opts.scheme = svmp::FE::timestepping::SchemeKind::GeneralizedAlpha;
   if (params.general_simulation_parameters.spectral_radius_of_infinite_time_step.defined()) {
@@ -6684,7 +7000,10 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       parseBoolEnv("SVMP_NEWTON_LINE_SEARCH",
                    !transient_active_cut_requests.empty() ||
                        !level_set_advection_velocity.empty());
+  applyNewtonLineSearchXmlOptions(params.general_simulation_parameters,
+                                  opts.newton);
   applyNewtonLineSearchEnvOptions(opts.newton);
+  applyNewtonToleranceEnvOptions(opts.newton);
   opts.newton.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 
@@ -6755,11 +7074,15 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " target_newton_iterations=" << controller_opts.target_newton_iterations
               << " max_steps=" << opts.max_steps << std::endl;
   }
+  opts.last_step_absorb_fraction =
+      parseDoubleEnv("SVMP_TIMELOOP_LAST_STEP_ABSORB_FRACTION",
+                     opts.step_controller ? 1.0e-2 : 0.0);
 
   oopCout() << "[svMultiPhysics::Application] Transient solve: t0=" << opts.t0 << " dt=" << opts.dt
             << " t_end=" << opts.t_end << " max_steps=" << opts.max_steps
             << " scheme=GeneralizedAlpha rho_inf=" << opts.generalized_alpha_rho_inf
             << " pde_udot_init=" << (opts.initialize_first_order_rate_from_pde ? 1 : 0)
+            << " last_step_absorb_fraction=" << opts.last_step_absorb_fraction
             << " newton(max_it=" << opts.newton.max_iterations << ", min_it=" << opts.newton.min_iterations
             << ", abs_tol=" << opts.newton.abs_tolerance
             << ", rel_tol=" << opts.newton.rel_tolerance << ")" << std::endl;
@@ -6798,6 +7121,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       level_set_maintenance);
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
+  std::vector<svmp::FE::Real> accepted_pressure_update_previous_solution;
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_start step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
@@ -6859,6 +7183,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             /*reuse_cached_on_projection_failure=*/false);
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
+        if (acceptedPressureUpdateDiagnosticEnabled()) {
+          accepted_pressure_update_previous_solution =
+              gatherFeOrderedSolution(h.u());
+        } else {
+          accepted_pressure_update_previous_solution.clear();
+        }
         return true;
       };
   callbacks.on_nonlinear_done = [&](const svmp::FE::timestepping::TimeHistory& h,
@@ -6872,10 +7202,55 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               << " iters=" << nr.linear.iterations
               << " rel=" << nr.linear.relative_residual << ")" << std::endl;
   };
+  if (activePressureUpdateRejectOnTriggerEnabled()) {
+    callbacks.on_before_step_accept =
+        [&](svmp::FE::timestepping::TimeHistory& h,
+            const svmp::FE::timestepping::NewtonReport& nr) {
+          (void)nr;
+          if (!acceptedPressureUpdateDiagnosticEnabled() ||
+              accepted_pressure_update_previous_solution.empty()) {
+            return true;
+          }
+          const auto current_solution = gatherFeOrderedSolution(h.u());
+          const bool triggered = logAcceptedPressureUpdateDiagnostic(
+              *sim.fe_system,
+              params,
+              std::span<const svmp::FE::Real>(
+                  accepted_pressure_update_previous_solution.data(),
+                  accepted_pressure_update_previous_solution.size()),
+              std::span<const svmp::FE::Real>(
+                  current_solution.data(),
+                  current_solution.size()),
+              h.stepIndex() + 1,
+              h.time() + h.dt(),
+              h.dt(),
+              "pre_commit",
+              /*honor_fail_on_trigger=*/false);
+          return !triggered;
+        };
+  }
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
     oopCout() << "[svMultiPhysics::Application] TimeLoop: step_accepted step=" << h.stepIndex()
               << " time=" << h.time() << " dt=" << h.dt() << std::endl;
+    if (acceptedPressureUpdateDiagnosticEnabled() &&
+        !accepted_pressure_update_previous_solution.empty()) {
+      const auto current_solution = gatherFeOrderedSolution(h.u());
+      logAcceptedPressureUpdateDiagnostic(
+          *sim.fe_system,
+          params,
+          std::span<const svmp::FE::Real>(
+              accepted_pressure_update_previous_solution.data(),
+              accepted_pressure_update_previous_solution.size()),
+          std::span<const svmp::FE::Real>(
+              current_solution.data(),
+              current_solution.size()),
+          h.stepIndex(),
+          h.time(),
+          h.dt(),
+          "post_accept",
+          /*honor_fail_on_trigger=*/true);
+    }
     const bool level_set_maintenance_changed =
         applyLevelSetMaintenance(sim, h, level_set_maintenance);
     const auto cut_report = refreshActiveCutIntegrationContextCached(

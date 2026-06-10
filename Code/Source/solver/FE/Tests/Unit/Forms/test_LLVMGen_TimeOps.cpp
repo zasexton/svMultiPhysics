@@ -114,6 +114,64 @@ TEST(LLVMGenTimeOps, TimeDerivativeOrder2_UsesCorrectStencil)
     EXPECT_NEAR(jit / env.volume, Real(140.0), 1e-12); // 10*1 + 20*2 + 30*3
 }
 
+TEST(LLVMGenTimeOps, GradientEffectiveDtTimeDerivativeUsesHistoryStencil)
+{
+    requireLLVMJITOrSkip();
+    TimeEnv env;
+    ASSERT_GT(env.volume, Real(0.0));
+
+    // P1 tetra nodal data with gradients du/dx = 1, du_prev/dx = 2,
+    // du_prev2/dx = -1.
+    env.u = {Real(0.0), Real(1.0), Real(0.0), Real(0.0)};
+    env.u_prev = {Real(0.0), Real(2.0), Real(0.0), Real(0.0)};
+    env.u_prev2 = {Real(0.0), Real(-1.0), Real(0.0), Real(0.0)};
+    env.assembler.setSolution(env.u);
+    env.assembler.setPreviousSolution(env.u_prev);
+    env.assembler.setPreviousSolution2(env.u_prev2);
+
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {Real(150.0), Real(-200.0), Real(50.0)};
+    env.ti.dt1 = dt1;
+
+    const auto u = FormExpr::stateField(CURRENT_SOLUTION_FIELD_ID, env.space, "u");
+    const auto integrand = (FormExpr::effectiveTimeStep() * u.dt()).grad().component(0);
+
+    const Real ref = assembleInterp(integrand, env);
+    const Real jit = assembleJIT(integrand, env);
+
+    EXPECT_NEAR(jit, ref, 1e-12);
+    EXPECT_NEAR(jit / env.volume, Real(-2.0), 1e-12);
+}
+
+TEST(LLVMGenTimeOps, GradientEffectiveDtDiscreteFieldUsesFieldHistoryGradients)
+{
+    requireLLVMJITOrSkip();
+    TimeEnv env;
+    ASSERT_GT(env.volume, Real(0.0));
+
+    env.u = {Real(0.0), Real(1.0), Real(0.0), Real(0.0)};
+    env.u_prev = {Real(0.0), Real(2.0), Real(0.0), Real(0.0)};
+    env.u_prev2 = {Real(0.0), Real(-1.0), Real(0.0), Real(0.0)};
+    env.assembler.setSolution(env.u);
+    env.assembler.setPreviousSolution(env.u_prev);
+    env.assembler.setPreviousSolution2(env.u_prev2);
+
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {Real(150.0), Real(-200.0), Real(50.0)};
+    env.ti.dt1 = dt1;
+
+    const auto p = FormExpr::discreteField(/*field_id=*/0, env.space, "p");
+    const auto integrand = (FormExpr::effectiveTimeStep() * p.dt()).grad().component(0);
+
+    const Real ref = assembleInterp(integrand, env);
+    const Real jit = assembleJIT(integrand, env);
+
+    EXPECT_NEAR(jit, ref, 1e-12);
+    EXPECT_NEAR(jit / env.volume, Real(-2.0), 1e-12);
+}
+
 TEST(LLVMGenTimeOps, HistoryWeightedSum_AppliesWeightsCorrectly)
 {
     requireLLVMJITOrSkip();
@@ -136,4 +194,3 @@ TEST(LLVMGenTimeOps, HistoryWeightedSum_AppliesWeightsCorrectly)
 } // namespace forms
 } // namespace FE
 } // namespace svmp
-

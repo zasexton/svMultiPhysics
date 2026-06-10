@@ -52,16 +52,68 @@ inline bool coords_close(const math::Vector<Real, 3>& a,
  *
  * Basis1D must satisfy the BasisFunction interface on a line element.
  */
-template<typename Basis1D>
+template<typename Basis1D, int StaticDimension = 0>
 class TensorProductBasis : public BasisFunction {
-public:
-    /// Construct isotropic tensor-product basis from a single 1D prototype
-    explicit TensorProductBasis(const Basis1D& basis_1d, int dimension = 2)
-        : bases_{basis_1d, basis_1d, basis_1d}, dimension_(dimension) {
-        if (dimension_ != 1 && dimension_ != 2 && dimension_ != 3) {
+    static_assert(StaticDimension >= 0 && StaticDimension <= 3,
+                  "TensorProductBasis static dimension must be 0, 1, 2, or 3");
+
+    static constexpr int default_dimension() noexcept {
+        return StaticDimension == 0 ? 2 : StaticDimension;
+    }
+
+    static int validated_dimension(int dimension) {
+        if (dimension != 1 && dimension != 2 && dimension != 3) {
             throw BasisConfigurationException("TensorProductBasis dimension must be 1, 2, or 3",
                                               __FILE__, __LINE__, __func__);
         }
+        if constexpr (StaticDimension != 0) {
+            if (dimension != StaticDimension) {
+                throw BasisConfigurationException("TensorProductBasis static dimension does not match constructor dimension",
+                                                  __FILE__, __LINE__, __func__);
+            }
+        }
+        return dimension;
+    }
+
+    [[nodiscard]] int dimension_value() const noexcept {
+        if constexpr (StaticDimension != 0) {
+            return StaticDimension;
+        } else {
+            return dimension_;
+        }
+    }
+
+    template <typename Func>
+    void dispatch_dimension(Func&& func) const {
+        if constexpr (StaticDimension == 1) {
+            func(std::integral_constant<int, 1>{});
+        } else if constexpr (StaticDimension == 2) {
+            func(std::integral_constant<int, 2>{});
+        } else if constexpr (StaticDimension == 3) {
+            func(std::integral_constant<int, 3>{});
+        } else {
+            switch (dimension_) {
+                case 1:
+                    func(std::integral_constant<int, 1>{});
+                    return;
+                case 2:
+                    func(std::integral_constant<int, 2>{});
+                    return;
+                case 3:
+                    func(std::integral_constant<int, 3>{});
+                    return;
+                default:
+                    throw BasisConfigurationException("TensorProductBasis dimension must be 1, 2, or 3",
+                                                      __FILE__, __LINE__, __func__);
+            }
+        }
+    }
+
+public:
+    /// Construct isotropic tensor-product basis from a single 1D prototype
+    explicit TensorProductBasis(const Basis1D& basis_1d, int dimension = default_dimension())
+        : bases_{basis_1d, basis_1d, basis_1d},
+          dimension_(validated_dimension(dimension)) {
         normalize_orders();
         build_indices();
         finalize_node_ordering();
@@ -70,7 +122,7 @@ public:
 
     /// Anisotropic 2D tensor product
     TensorProductBasis(const Basis1D& bx, const Basis1D& by)
-        : bases_{bx, by, bx}, dimension_(2) {
+        : bases_{bx, by, bx}, dimension_(validated_dimension(2)) {
         normalize_orders();
         build_indices();
         finalize_node_ordering();
@@ -79,7 +131,7 @@ public:
 
     /// Anisotropic 3D tensor product
     TensorProductBasis(const Basis1D& bx, const Basis1D& by, const Basis1D& bz)
-        : bases_{bx, by, bz}, dimension_(3) {
+        : bases_{bx, by, bz}, dimension_(validated_dimension(3)) {
         normalize_orders();
         build_indices();
         finalize_node_ordering();
@@ -88,19 +140,20 @@ public:
 
     [[nodiscard]] BasisType basis_type() const noexcept override { return bases_[0].basis_type(); }
     [[nodiscard]] ElementType element_type() const noexcept override {
-        if (dimension_ == 1) return ElementType::Line2;
-        if (dimension_ == 2) return ElementType::Quad4;
+        if (dimension_value() == 1) return ElementType::Line2;
+        if (dimension_value() == 2) return ElementType::Quad4;
         return ElementType::Hex8;
     }
-    [[nodiscard]] int dimension() const noexcept override { return dimension_; }
+    [[nodiscard]] int dimension() const noexcept override { return dimension_value(); }
     [[nodiscard]] int order() const noexcept override { return order_; }
     [[nodiscard]] std::size_t size() const noexcept override { return indices_.size(); }
     [[nodiscard]] const Basis1D& axis_basis(int axis) const noexcept {
         return bases_[static_cast<std::size_t>(axis)];
     }
     [[nodiscard]] std::vector<int> tensor_extents() const {
-        std::vector<int> extents(static_cast<std::size_t>(dimension_));
-        for (int axis = 0; axis < dimension_; ++axis) {
+        const int dim = dimension_value();
+        std::vector<int> extents(static_cast<std::size_t>(dim));
+        for (int axis = 0; axis < dim; ++axis) {
             extents[static_cast<std::size_t>(axis)] =
                 static_cast<int>(bases_[static_cast<std::size_t>(axis)].size());
         }
@@ -136,84 +189,16 @@ public:
 
     void evaluate_gradients(const math::Vector<Real, 3>& xi,
                             std::vector<Gradient>& gradients) const override {
-        gradients.resize(size());
-        auto& scratch = axis_scratch();
-        fill_axis_scratch(xi, true, false, scratch);
-        const auto& vx = scratch.values[0];
-        const auto& vy = scratch.values[1];
-        const auto& vz = scratch.values[2];
-        const auto& gx = scratch.gradients[0];
-        const auto& gy = scratch.gradients[1];
-        const auto& gz = scratch.gradients[2];
-
-        for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
-            const auto& id = indices_[idx];
-            const auto ix = static_cast<std::size_t>(id[0]);
-            Gradient g{};
-            if (dimension_ == 1) {
-                g[0] = gx[ix * 3u];
-            } else if (dimension_ == 2) {
-                const auto iy = static_cast<std::size_t>(id[1]);
-                g[0] = gx[ix * 3u] * vy[iy];
-                g[1] = vx[ix] * gy[iy * 3u];
-            } else {
-                const auto iy = static_cast<std::size_t>(id[1]);
-                const auto iz = static_cast<std::size_t>(id[2]);
-                g[0] = gx[ix * 3u] * vy[iy] * vz[iz];
-                g[1] = vx[ix] * gy[iy * 3u] * vz[iz];
-                g[2] = vx[ix] * vy[iy] * gz[iz * 3u];
-            }
-            gradients[idx] = g;
-        }
+        dispatch_dimension([&](auto dim) {
+            evaluate_gradients_impl<decltype(dim)::value>(xi, gradients);
+        });
     }
 
     void evaluate_hessians(const math::Vector<Real, 3>& xi,
                            std::vector<Hessian>& hessians) const override {
-        hessians.resize(size());
-        auto& scratch = axis_scratch();
-        fill_axis_scratch(xi, true, true, scratch);
-        const auto& vx = scratch.values[0];
-        const auto& vy = scratch.values[1];
-        const auto& vz = scratch.values[2];
-        const auto& gx = scratch.gradients[0];
-        const auto& gy = scratch.gradients[1];
-        const auto& gz = scratch.gradients[2];
-        const auto& hx = scratch.hessians[0];
-        const auto& hy = scratch.hessians[1];
-        const auto& hz = scratch.hessians[2];
-
-        for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
-            const auto& id = indices_[idx];
-            const auto ix = static_cast<std::size_t>(id[0]);
-            Hessian H{};
-            if (dimension_ == 1) {
-                H(0, 0) = hx[ix * 9u];
-            } else if (dimension_ == 2) {
-                const auto iy = static_cast<std::size_t>(id[1]);
-                const Real dx = gx[ix * 3u];
-                const Real dy = gy[iy * 3u];
-                H(0, 0) = hx[ix * 9u] * vy[iy];
-                H(1, 1) = vx[ix] * hy[iy * 9u];
-                H(0, 1) = dx * dy;
-                H(1, 0) = H(0, 1);
-            } else {
-                const auto iy = static_cast<std::size_t>(id[1]);
-                const auto iz = static_cast<std::size_t>(id[2]);
-                const Real dx = gx[ix * 3u];
-                const Real dy = gy[iy * 3u];
-                const Real dz = gz[iz * 3u];
-                H(0, 0) = hx[ix * 9u] * vy[iy] * vz[iz];
-                H(1, 1) = vx[ix] * hy[iy * 9u] * vz[iz];
-                H(2, 2) = vx[ix] * vy[iy] * hz[iz * 9u];
-                H(0, 1) = dx * dy * vz[iz];
-                H(1, 0) = H(0, 1);
-                H(0, 2) = dx * vy[iy] * dz;
-                H(2, 0) = H(0, 2);
-                H(1, 2) = vx[ix] * dy * dz;
-                H(2, 1) = H(1, 2);
-            }
-            hessians[idx] = H;
-        }
+        dispatch_dimension([&](auto dim) {
+            evaluate_hessians_impl<decltype(dim)::value>(xi, hessians);
+        });
     }
 
     void evaluate_values_to(const math::Vector<Real, 3>& xi,
@@ -260,10 +245,171 @@ public:
             return;
         }
 
+        dispatch_dimension([&](auto dim) {
+            evaluate_at_quadrature_points_strided_impl<decltype(dim)::value>(
+                points, output_stride, values_out, gradients_out, hessians_out);
+        });
+    }
+
+private:
+    struct AxisScratch {
+        std::array<std::vector<Real>, 3> values;
+        std::array<std::vector<Real>, 3> gradients;
+        std::array<std::vector<Real>, 3> hessians;
+
+        void prewarm(std::size_t max_axis_size) {
+            for (std::size_t axis = 0; axis < values.size(); ++axis) {
+                values[axis].reserve(max_axis_size);
+                gradients[axis].reserve(max_axis_size);
+                hessians[axis].reserve(max_axis_size);
+            }
+        }
+    };
+
+    struct AxisBatchScratch {
+        std::array<std::vector<math::Vector<Real, 3>>, 3> points;
+        std::array<std::vector<Real>, 3> values;
+        std::array<std::vector<Real>, 3> gradients;
+        std::array<std::vector<Real>, 3> hessians;
+
+        void prewarm(std::size_t max_axis_size, std::size_t max_qpts) {
+            const std::size_t cells = max_axis_size * std::max<std::size_t>(max_qpts, 1u);
+            for (std::size_t axis = 0; axis < values.size(); ++axis) {
+                points[axis].reserve(max_qpts);
+                values[axis].reserve(cells);
+                gradients[axis].reserve(cells);
+                hessians[axis].reserve(cells);
+            }
+        }
+    };
+
+    std::array<Basis1D, 3> bases_;
+    int dimension_;
+    int order_{0};
+    std::vector<std::array<int, 3>> indices_;
+    std::string cache_identity_;
+    std::vector<std::uint64_t> cache_identity_words_;
+    std::uint64_t cache_identity_hash_a_{0};
+    std::uint64_t cache_identity_hash_b_{0};
+
+    static AxisScratch& axis_scratch() {
+        // Scratch is intentionally thread-local: production assembly uses a
+        // persistent worker-thread team, so buffers stay warm on each worker.
+        static thread_local AxisScratch scratch;
+        return scratch;
+    }
+
+    static AxisBatchScratch& axis_batch_scratch() {
+        // Scratch is intentionally thread-local: production assembly uses a
+        // persistent worker-thread team, so buffers stay warm on each worker.
+        static thread_local AxisBatchScratch scratch;
+        return scratch;
+    }
+
+public:
+    static void prewarm_scratch(std::size_t max_axis_size,
+                                std::size_t max_qpts = 0) {
+        axis_scratch().prewarm(max_axis_size);
+        axis_batch_scratch().prewarm(max_axis_size, max_qpts);
+    }
+
+private:
+    template <int D>
+    void evaluate_gradients_impl(const math::Vector<Real, 3>& xi,
+                                 std::vector<Gradient>& gradients) const {
+        gradients.resize(size());
+        auto& scratch = axis_scratch();
+        fill_axis_scratch<D>(xi, true, false, scratch);
+        const auto& vx = scratch.values[0];
+        const auto& gx = scratch.gradients[0];
+        [[maybe_unused]] const auto& vy = scratch.values[1];
+        [[maybe_unused]] const auto& vz = scratch.values[2];
+        [[maybe_unused]] const auto& gy = scratch.gradients[1];
+        [[maybe_unused]] const auto& gz = scratch.gradients[2];
+
+        for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
+            const auto& id = indices_[idx];
+            const auto ix = static_cast<std::size_t>(id[0]);
+            Gradient g{};
+            if constexpr (D == 1) {
+                g[0] = gx[ix * 3u];
+            } else if constexpr (D == 2) {
+                const auto iy = static_cast<std::size_t>(id[1]);
+                g[0] = gx[ix * 3u] * vy[iy];
+                g[1] = vx[ix] * gy[iy * 3u];
+            } else {
+                const auto iy = static_cast<std::size_t>(id[1]);
+                const auto iz = static_cast<std::size_t>(id[2]);
+                g[0] = gx[ix * 3u] * vy[iy] * vz[iz];
+                g[1] = vx[ix] * gy[iy * 3u] * vz[iz];
+                g[2] = vx[ix] * vy[iy] * gz[iz * 3u];
+            }
+            gradients[idx] = g;
+        }
+    }
+
+    template <int D>
+    void evaluate_hessians_impl(const math::Vector<Real, 3>& xi,
+                                std::vector<Hessian>& hessians) const {
+        hessians.resize(size());
+        auto& scratch = axis_scratch();
+        fill_axis_scratch<D>(xi, true, true, scratch);
+        const auto& vx = scratch.values[0];
+        const auto& gx = scratch.gradients[0];
+        const auto& hx = scratch.hessians[0];
+        [[maybe_unused]] const auto& vy = scratch.values[1];
+        [[maybe_unused]] const auto& vz = scratch.values[2];
+        [[maybe_unused]] const auto& gy = scratch.gradients[1];
+        [[maybe_unused]] const auto& gz = scratch.gradients[2];
+        [[maybe_unused]] const auto& hy = scratch.hessians[1];
+        [[maybe_unused]] const auto& hz = scratch.hessians[2];
+
+        for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
+            const auto& id = indices_[idx];
+            const auto ix = static_cast<std::size_t>(id[0]);
+            Hessian H{};
+            if constexpr (D == 1) {
+                H(0, 0) = hx[ix * 9u];
+            } else if constexpr (D == 2) {
+                const auto iy = static_cast<std::size_t>(id[1]);
+                const Real dx = gx[ix * 3u];
+                const Real dy = gy[iy * 3u];
+                H(0, 0) = hx[ix * 9u] * vy[iy];
+                H(1, 1) = vx[ix] * hy[iy * 9u];
+                H(0, 1) = dx * dy;
+                H(1, 0) = H(0, 1);
+            } else {
+                const auto iy = static_cast<std::size_t>(id[1]);
+                const auto iz = static_cast<std::size_t>(id[2]);
+                const Real dx = gx[ix * 3u];
+                const Real dy = gy[iy * 3u];
+                const Real dz = gz[iz * 3u];
+                H(0, 0) = hx[ix * 9u] * vy[iy] * vz[iz];
+                H(1, 1) = vx[ix] * hy[iy * 9u] * vz[iz];
+                H(2, 2) = vx[ix] * vy[iy] * hz[iz * 9u];
+                H(0, 1) = dx * dy * vz[iz];
+                H(1, 0) = H(0, 1);
+                H(0, 2) = dx * vy[iy] * dz;
+                H(2, 0) = H(0, 2);
+                H(1, 2) = vx[ix] * dy * dz;
+                H(2, 1) = H(1, 2);
+            }
+            hessians[idx] = H;
+        }
+    }
+
+    template <int D>
+    void evaluate_at_quadrature_points_strided_impl(
+        const std::vector<math::Vector<Real, 3>>& points,
+        std::size_t output_stride,
+        Real* SVMP_RESTRICT values_out,
+        Real* SVMP_RESTRICT gradients_out,
+        Real* SVMP_RESTRICT hessians_out) const {
+        const std::size_t num_qpts = points.size();
         const bool need_gradients = gradients_out != nullptr || hessians_out != nullptr;
         const bool need_hessians = hessians_out != nullptr;
         auto& scratch = axis_batch_scratch();
-        fill_axis_batch_scratch(points, need_gradients, need_hessians, scratch);
+        fill_axis_batch_scratch<D>(points, need_gradients, need_hessians, scratch);
 
         for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
             const auto& id = indices_[idx];
@@ -277,10 +423,10 @@ public:
 
             for (std::size_t q = 0; q < num_qpts; ++q) {
                 const Real vx = axis_value(scratch, 0u, ix, q, num_qpts);
-                const Real vy = (dimension_ >= 2)
+                const Real vy = (D >= 2)
                     ? axis_value(scratch, 1u, iy, q, num_qpts)
                     : Real(1);
-                const Real vz = (dimension_ == 3)
+                const Real vz = (D == 3)
                     ? axis_value(scratch, 2u, iz, q, num_qpts)
                     : Real(1);
 
@@ -291,27 +437,27 @@ public:
                 if (gradient_row != nullptr) {
                     gradient_row[0u * output_stride + q] =
                         axis_gradient(scratch, 0u, ix, q, num_qpts) * vy * vz;
-                    gradient_row[1u * output_stride + q] = (dimension_ >= 2)
+                    gradient_row[1u * output_stride + q] = (D >= 2)
                         ? vx * axis_gradient(scratch, 1u, iy, q, num_qpts) * vz
                         : Real(0);
-                    gradient_row[2u * output_stride + q] = (dimension_ == 3)
+                    gradient_row[2u * output_stride + q] = (D == 3)
                         ? vx * vy * axis_gradient(scratch, 2u, iz, q, num_qpts)
                         : Real(0);
                 }
 
                 if (hessian_row != nullptr) {
                     const Real dx = axis_gradient(scratch, 0u, ix, q, num_qpts);
-                    const Real dy = (dimension_ >= 2)
+                    const Real dy = (D >= 2)
                         ? axis_gradient(scratch, 1u, iy, q, num_qpts)
                         : Real(0);
-                    const Real dz = (dimension_ == 3)
+                    const Real dz = (D == 3)
                         ? axis_gradient(scratch, 2u, iz, q, num_qpts)
                         : Real(0);
                     const Real d2x = axis_hessian(scratch, 0u, ix, q, num_qpts);
-                    const Real d2y = (dimension_ >= 2)
+                    const Real d2y = (D >= 2)
                         ? axis_hessian(scratch, 1u, iy, q, num_qpts)
                         : Real(0);
-                    const Real d2z = (dimension_ == 3)
+                    const Real d2z = (D == 3)
                         ? axis_hessian(scratch, 2u, iz, q, num_qpts)
                         : Real(0);
 
@@ -330,39 +476,6 @@ public:
                 }
             }
         }
-    }
-
-private:
-    struct AxisScratch {
-        std::array<std::vector<Real>, 3> values;
-        std::array<std::vector<Real>, 3> gradients;
-        std::array<std::vector<Real>, 3> hessians;
-    };
-
-    struct AxisBatchScratch {
-        std::array<std::vector<math::Vector<Real, 3>>, 3> points;
-        std::array<std::vector<Real>, 3> values;
-        std::array<std::vector<Real>, 3> gradients;
-        std::array<std::vector<Real>, 3> hessians;
-    };
-
-    std::array<Basis1D, 3> bases_;
-    int dimension_;
-    int order_{0};
-    std::vector<std::array<int, 3>> indices_;
-    std::string cache_identity_;
-    std::vector<std::uint64_t> cache_identity_words_;
-    std::uint64_t cache_identity_hash_a_{0};
-    std::uint64_t cache_identity_hash_b_{0};
-
-    static AxisScratch& axis_scratch() {
-        static thread_local AxisScratch scratch;
-        return scratch;
-    }
-
-    static AxisBatchScratch& axis_batch_scratch() {
-        static thread_local AxisBatchScratch scratch;
-        return scratch;
     }
 
     static Real axis_value(const AxisBatchScratch& scratch,
@@ -389,11 +502,12 @@ private:
         return scratch.hessians[axis][basis_index * 9u * stride + q];
     }
 
+    template <int D>
     void fill_axis_scratch(const math::Vector<Real, 3>& xi,
                            bool need_gradients,
                            bool need_hessians,
                            AxisScratch& scratch) const {
-        for (int axis = 0; axis < dimension_; ++axis) {
+        for (int axis = 0; axis < D; ++axis) {
             const auto a = static_cast<std::size_t>(axis);
             const std::size_t axis_size = bases_[a].size();
             const math::Vector<Real, 3> coord{
@@ -421,12 +535,13 @@ private:
         }
     }
 
+    template <int D>
     void fill_axis_batch_scratch(const std::vector<math::Vector<Real, 3>>& points,
                                  bool need_gradients,
                                  bool need_hessians,
                                  AxisBatchScratch& scratch) const {
         const std::size_t num_qpts = points.size();
-        for (int axis = 0; axis < dimension_; ++axis) {
+        for (int axis = 0; axis < D; ++axis) {
             const auto a = static_cast<std::size_t>(axis);
             const std::size_t axis_size = bases_[a].size();
             auto& axis_points = scratch.points[a];
@@ -466,20 +581,33 @@ private:
                           Real* SVMP_RESTRICT values_out,
                           Real* SVMP_RESTRICT gradients_out,
                           Real* SVMP_RESTRICT hessians_out) const {
+        dispatch_dimension([&](auto dim) {
+            write_evaluation_impl<decltype(dim)::value>(
+                xi, q, stride, values_out, gradients_out, hessians_out);
+        });
+    }
+
+    template <int D>
+    void write_evaluation_impl(const math::Vector<Real, 3>& xi,
+                               std::size_t q,
+                               std::size_t stride,
+                               Real* SVMP_RESTRICT values_out,
+                               Real* SVMP_RESTRICT gradients_out,
+                               Real* SVMP_RESTRICT hessians_out) const {
         const bool need_gradients = gradients_out != nullptr || hessians_out != nullptr;
         const bool need_hessians = hessians_out != nullptr;
         auto& scratch = axis_scratch();
-        fill_axis_scratch(xi, need_gradients, need_hessians, scratch);
+        fill_axis_scratch<D>(xi, need_gradients, need_hessians, scratch);
 
         const auto& vx = scratch.values[0];
-        const auto& vy = scratch.values[1];
-        const auto& vz = scratch.values[2];
+        [[maybe_unused]] const auto& vy = scratch.values[1];
+        [[maybe_unused]] const auto& vz = scratch.values[2];
         const auto& gx = scratch.gradients[0];
-        const auto& gy = scratch.gradients[1];
-        const auto& gz = scratch.gradients[2];
+        [[maybe_unused]] const auto& gy = scratch.gradients[1];
+        [[maybe_unused]] const auto& gz = scratch.gradients[2];
         const auto& hx = scratch.hessians[0];
-        const auto& hy = scratch.hessians[1];
-        const auto& hz = scratch.hessians[2];
+        [[maybe_unused]] const auto& hy = scratch.hessians[1];
+        [[maybe_unused]] const auto& hz = scratch.hessians[2];
 
         for (std::size_t idx = 0; idx < indices_.size(); ++idx) {
             const auto& id = indices_[idx];
@@ -489,10 +617,10 @@ private:
 
             if (values_out) {
                 Real value = vx[ix];
-                if (dimension_ >= 2) {
+                if constexpr (D >= 2) {
                     value *= vy[iy];
                 }
-                if (dimension_ == 3) {
+                if constexpr (D == 3) {
                     value *= vz[iz];
                 }
                 values_out[idx * stride + q] = value;
@@ -502,9 +630,9 @@ private:
                 for (std::size_t component = 0; component < 3u; ++component) {
                     gradients_out[(idx * 3u + component) * stride + q] = Real(0);
                 }
-                if (dimension_ == 1) {
+                if constexpr (D == 1) {
                     gradients_out[(idx * 3u + 0u) * stride + q] = gx[ix * 3u];
-                } else if (dimension_ == 2) {
+                } else if constexpr (D == 2) {
                     gradients_out[(idx * 3u + 0u) * stride + q] = gx[ix * 3u] * vy[iy];
                     gradients_out[(idx * 3u + 1u) * stride + q] = vx[ix] * gy[iy * 3u];
                 } else {
@@ -519,9 +647,9 @@ private:
                     hessians_out[(idx * 9u + component) * stride + q] = Real(0);
                 }
 
-                if (dimension_ == 1) {
+                if constexpr (D == 1) {
                     hessians_out[(idx * 9u + 0u) * stride + q] = hx[ix * 9u];
-                } else if (dimension_ == 2) {
+                } else if constexpr (D == 2) {
                     const Real dx = gx[ix * 3u];
                     const Real dy = gy[iy * 3u];
                     hessians_out[(idx * 9u + 0u) * stride + q] = hx[ix * 9u] * vy[iy];
@@ -547,27 +675,29 @@ private:
     }
 
     void normalize_orders() {
+        const int dim = dimension_value();
         order_ = bases_[0].order();
-        if (dimension_ >= 2) {
+        if (dim >= 2) {
             order_ = std::max(order_, bases_[1].order());
         }
-        if (dimension_ == 3) {
+        if (dim == 3) {
             order_ = std::max(order_, bases_[2].order());
         }
     }
 
     void build_indices() {
+        const int dim = dimension_value();
         indices_.clear();
         const int nx = static_cast<int>(bases_[0].size());
-        const int ny = (dimension_ >= 2) ? static_cast<int>(bases_[1].size()) : 1;
-        const int nz = (dimension_ == 3) ? static_cast<int>(bases_[2].size()) : 1;
-        if (dimension_ == 1) {
+        const int ny = (dim >= 2) ? static_cast<int>(bases_[1].size()) : 1;
+        const int nz = (dim == 3) ? static_cast<int>(bases_[2].size()) : 1;
+        if (dim == 1) {
             for (int i = 0; i < nx; ++i) {
                 indices_.push_back({i, 0, 0});
             }
             return;
         }
-        if (dimension_ == 2) {
+        if (dim == 2) {
             for (int j = 0; j < ny; ++j) {
                 for (int i = 0; i < nx; ++i) {
                     indices_.push_back({i, j, 0});
@@ -585,7 +715,8 @@ private:
     }
 
     void finalize_node_ordering() {
-        if (dimension_ == 1) {
+        const int dim = dimension_value();
+        if (dim == 1) {
             return;
         }
         if (bases_[0].basis_type() != BasisType::Lagrange) {
@@ -595,17 +726,17 @@ private:
             return;
         } else {
             const int ox = bases_[0].order();
-            const int oy = (dimension_ >= 2) ? bases_[1].order() : ox;
-            const int oz = (dimension_ == 3) ? bases_[2].order() : ox;
-            if ((dimension_ == 2 && ox != oy) || (dimension_ == 3 && (ox != oy || ox != oz))) {
+            const int oy = (dim >= 2) ? bases_[1].order() : ox;
+            const int oz = (dim == 3) ? bases_[2].order() : ox;
+            if ((dim == 2 && ox != oy) || (dim == 3 && (ox != oy || ox != oz))) {
                 return;
             }
 
             ElementType ordering_type = ElementType::Unknown;
-            if (dimension_ == 2) {
+            if (dim == 2) {
                 if (ox == 1) ordering_type = ElementType::Quad4;
                 if (ox == 2) ordering_type = ElementType::Quad9;
-            } else if (dimension_ == 3) {
+            } else if (dim == 3) {
                 if (ox == 1) ordering_type = ElementType::Hex8;
                 if (ox == 2) ordering_type = ElementType::Hex27;
             }
@@ -622,10 +753,10 @@ private:
             if (nx.size() != bases_[0].size()) {
                 return;
             }
-            if (dimension_ >= 2 && ny.size() != bases_[1].size()) {
+            if (dim >= 2 && ny.size() != bases_[1].size()) {
                 return;
             }
-            if (dimension_ == 3 && nz.size() != bases_[2].size()) {
+            if (dim == 3 && nz.size() != bases_[2].size()) {
                 return;
             }
 
@@ -634,10 +765,10 @@ private:
             for (const auto& id : indices_) {
                 math::Vector<Real, 3> p{Real(0), Real(0), Real(0)};
                 p[0] = nx[static_cast<std::size_t>(id[0])][0];
-                if (dimension_ >= 2) {
+                if (dim >= 2) {
                     p[1] = ny[static_cast<std::size_t>(id[1])][0];
                 }
-                if (dimension_ == 3) {
+                if (dim == 3) {
                     p[2] = nz[static_cast<std::size_t>(id[2])][0];
                 }
                 internal_nodes.push_back(p);
@@ -670,18 +801,19 @@ private:
     }
 
     void rebuild_cache_identity() {
+        const int dim = dimension_value();
         std::ostringstream oss;
-        oss << BasisFunction::cache_identity() << "|axes=" << dimension_;
+        oss << BasisFunction::cache_identity() << "|axes=" << dim;
 
         std::vector<std::uint64_t> words;
-        words.reserve(12u + static_cast<std::size_t>(dimension_) * 12u);
+        words.reserve(12u + static_cast<std::size_t>(dim) * 12u);
         words.push_back(0x74656e736f727031ULL); // "tensorp1"
-        words.push_back(static_cast<std::uint64_t>(dimension_));
+        words.push_back(static_cast<std::uint64_t>(dim));
         words.push_back(static_cast<std::uint64_t>(order_));
         words.push_back(static_cast<std::uint64_t>(indices_.size()));
 
         bool has_structured_identity = true;
-        for (int axis = 0; axis < dimension_; ++axis) {
+        for (int axis = 0; axis < dim; ++axis) {
             const auto& basis = bases_[static_cast<std::size_t>(axis)];
             oss << "|axis" << axis
                 << ":type=" << static_cast<int>(basis.basis_type())

@@ -80,6 +80,399 @@ constexpr Hessian p2_edge_hessian(const Gradient& left_gradient,
     return hessian;
 }
 
+constexpr std::size_t public_axis_index(int lattice, int order) noexcept {
+    return lattice == 0 ? 0u :
+           lattice == order ? 1u :
+           static_cast<std::size_t>(lattice + 1);
+}
+
+template<int Order>
+constexpr Real public_axis_coord(std::size_t public_index) noexcept {
+    const int lattice = public_index == 0u ? 0 :
+                        public_index == 1u ? Order :
+                        static_cast<int>(public_index) - 1;
+    return Real(-1) + Real(2) * static_cast<Real>(lattice) / static_cast<Real>(Order);
+}
+
+template<int Order>
+constexpr std::array<Real, Order + 1> make_public_axis_nodes() {
+    std::array<Real, Order + 1> nodes{};
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        nodes[i] = public_axis_coord<Order>(i);
+    }
+    return nodes;
+}
+
+template<int Order>
+constexpr std::array<Real, Order + 1> make_public_axis_inverse_denominators() {
+    constexpr auto nodes = make_public_axis_nodes<Order>();
+    std::array<Real, Order + 1> inv_denominators{};
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        Real denominator = Real(1);
+        for (std::size_t j = 0; j < nodes.size(); ++j) {
+            if (j != i) {
+                denominator *= nodes[i] - nodes[j];
+            }
+        }
+        inv_denominators[i] = Real(1) / denominator;
+    }
+    return inv_denominators;
+}
+
+template<int Order, bool NeedFirst, bool NeedSecond>
+void fill_axis_lagrange(Real x,
+                        std::array<Real, Order + 1>& values,
+                        std::array<Real, Order + 1>* first,
+                        std::array<Real, Order + 1>* second) {
+    constexpr auto nodes = make_public_axis_nodes<Order>();
+    constexpr auto inv_denominators = make_public_axis_inverse_denominators<Order>();
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        Real product = Real(1);
+        for (std::size_t j = 0; j < nodes.size(); ++j) {
+            if (j != i) {
+                product *= x - nodes[j];
+            }
+        }
+        values[i] = product * inv_denominators[i];
+
+        if constexpr (NeedFirst) {
+            Real derivative = Real(0);
+            for (std::size_t m = 0; m < nodes.size(); ++m) {
+                if (m == i) {
+                    continue;
+                }
+                Real term = Real(1);
+                for (std::size_t j = 0; j < nodes.size(); ++j) {
+                    if (j != i && j != m) {
+                        term *= x - nodes[j];
+                    }
+                }
+                derivative += term;
+            }
+            (*first)[i] = derivative * inv_denominators[i];
+        }
+
+        if constexpr (NeedSecond) {
+            Real curvature = Real(0);
+            for (std::size_t m = 0; m < nodes.size(); ++m) {
+                if (m == i) {
+                    continue;
+                }
+                for (std::size_t l = 0; l < nodes.size(); ++l) {
+                    if (l == i || l == m) {
+                        continue;
+                    }
+                    Real term = Real(1);
+                    for (std::size_t j = 0; j < nodes.size(); ++j) {
+                        if (j != i && j != m && j != l) {
+                            term *= x - nodes[j];
+                        }
+                    }
+                    curvature += term;
+                }
+            }
+            (*second)[i] = curvature * inv_denominators[i];
+        }
+    }
+}
+
+template<int Order>
+void fill_axis_values(Real x, std::array<Real, Order + 1>& values) {
+    fill_axis_lagrange<Order, false, false>(x, values, nullptr, nullptr);
+}
+
+template<int Order>
+void fill_axis_values_first(Real x,
+                            std::array<Real, Order + 1>& values,
+                            std::array<Real, Order + 1>& first) {
+    fill_axis_lagrange<Order, true, false>(x, values, &first, nullptr);
+}
+
+template<int Order>
+void fill_axis_values_first_second(Real x,
+                                   std::array<Real, Order + 1>& values,
+                                   std::array<Real, Order + 1>& first,
+                                   std::array<Real, Order + 1>& second) {
+    fill_axis_lagrange<Order, true, true>(x, values, &first, &second);
+}
+
+template<int Order>
+constexpr std::array<std::array<std::size_t, 2>, (Order + 1) * (Order + 1)>
+make_quad_tensor_node_axes() {
+    std::array<std::array<std::size_t, 2>, (Order + 1) * (Order + 1)> axes{};
+    std::size_t n = 0;
+
+    axes[n++] = {{0u, 0u}};
+    axes[n++] = {{1u, 0u}};
+    axes[n++] = {{1u, 1u}};
+    axes[n++] = {{0u, 1u}};
+
+    for (int i = 1; i < Order; ++i) {
+        axes[n++] = {{public_axis_index(i, Order), 0u}};
+    }
+    for (int j = 1; j < Order; ++j) {
+        axes[n++] = {{1u, public_axis_index(j, Order)}};
+    }
+    for (int i = Order - 1; i >= 1; --i) {
+        axes[n++] = {{public_axis_index(i, Order), 1u}};
+    }
+    for (int j = Order - 1; j >= 1; --j) {
+        axes[n++] = {{0u, public_axis_index(j, Order)}};
+    }
+
+    for (int j = 1; j < Order; ++j) {
+        for (int i = 1; i < Order; ++i) {
+            axes[n++] = {{public_axis_index(i, Order), public_axis_index(j, Order)}};
+        }
+    }
+
+    return axes;
+}
+
+template<int Order>
+constexpr std::array<std::array<std::size_t, 3>, (Order + 1) * (Order + 1) * (Order + 1)>
+make_hex_tensor_node_axes() {
+    std::array<std::array<std::size_t, 3>, (Order + 1) * (Order + 1) * (Order + 1)> axes{};
+    std::size_t n = 0;
+
+    axes[n++] = {{0u, 0u, 0u}};
+    axes[n++] = {{1u, 0u, 0u}};
+    axes[n++] = {{1u, 1u, 0u}};
+    axes[n++] = {{0u, 1u, 0u}};
+    axes[n++] = {{0u, 0u, 1u}};
+    axes[n++] = {{1u, 0u, 1u}};
+    axes[n++] = {{1u, 1u, 1u}};
+    axes[n++] = {{0u, 1u, 1u}};
+
+    for (int i = 1; i < Order; ++i) {
+        axes[n++] = {{public_axis_index(i, Order), 0u, 0u}};
+    }
+    for (int j = 1; j < Order; ++j) {
+        axes[n++] = {{1u, public_axis_index(j, Order), 0u}};
+    }
+    for (int i = Order - 1; i >= 1; --i) {
+        axes[n++] = {{public_axis_index(i, Order), 1u, 0u}};
+    }
+    for (int j = Order - 1; j >= 1; --j) {
+        axes[n++] = {{0u, public_axis_index(j, Order), 0u}};
+    }
+    for (int i = 1; i < Order; ++i) {
+        axes[n++] = {{public_axis_index(i, Order), 0u, 1u}};
+    }
+    for (int j = 1; j < Order; ++j) {
+        axes[n++] = {{1u, public_axis_index(j, Order), 1u}};
+    }
+    for (int i = Order - 1; i >= 1; --i) {
+        axes[n++] = {{public_axis_index(i, Order), 1u, 1u}};
+    }
+    for (int j = Order - 1; j >= 1; --j) {
+        axes[n++] = {{0u, public_axis_index(j, Order), 1u}};
+    }
+    for (int k = 1; k < Order; ++k) {
+        axes[n++] = {{0u, 0u, public_axis_index(k, Order)}};
+    }
+    for (int k = 1; k < Order; ++k) {
+        axes[n++] = {{1u, 0u, public_axis_index(k, Order)}};
+    }
+    for (int k = 1; k < Order; ++k) {
+        axes[n++] = {{1u, 1u, public_axis_index(k, Order)}};
+    }
+    for (int k = 1; k < Order; ++k) {
+        axes[n++] = {{0u, 1u, public_axis_index(k, Order)}};
+    }
+
+    for (int j = 1; j < Order; ++j) {
+        for (int i = 1; i < Order; ++i) {
+            axes[n++] = {{public_axis_index(i, Order), public_axis_index(j, Order), 0u}};
+        }
+    }
+    for (int j = 1; j < Order; ++j) {
+        for (int i = 1; i < Order; ++i) {
+            axes[n++] = {{public_axis_index(i, Order), public_axis_index(j, Order), 1u}};
+        }
+    }
+    for (int k = 1; k < Order; ++k) {
+        for (int i = 1; i < Order; ++i) {
+            axes[n++] = {{public_axis_index(i, Order), 0u, public_axis_index(k, Order)}};
+        }
+    }
+    for (int k = 1; k < Order; ++k) {
+        for (int j = 1; j < Order; ++j) {
+            axes[n++] = {{1u, public_axis_index(j, Order), public_axis_index(k, Order)}};
+        }
+    }
+    for (int k = 1; k < Order; ++k) {
+        for (int i = Order - 1; i >= 1; --i) {
+            axes[n++] = {{public_axis_index(i, Order), 1u, public_axis_index(k, Order)}};
+        }
+    }
+    for (int k = 1; k < Order; ++k) {
+        for (int j = Order - 1; j >= 1; --j) {
+            axes[n++] = {{0u, public_axis_index(j, Order), public_axis_index(k, Order)}};
+        }
+    }
+
+    for (int k = 1; k < Order; ++k) {
+        for (int j = 1; j < Order; ++j) {
+            for (int i = 1; i < Order; ++i) {
+                axes[n++] = {{public_axis_index(i, Order),
+                              public_axis_index(j, Order),
+                              public_axis_index(k, Order)}};
+            }
+        }
+    }
+
+    return axes;
+}
+
+template<int Order>
+constexpr std::array<std::array<std::size_t, 3>, (Order + 1) * (Order + 2) / 2>
+make_triangle_simplex_exponents() {
+    std::array<std::array<std::size_t, 3>, (Order + 1) * (Order + 2) / 2> exponents{};
+    std::size_t n = 0;
+
+    exponents[n++] = {{static_cast<std::size_t>(Order), 0u, 0u}};
+    exponents[n++] = {{0u, static_cast<std::size_t>(Order), 0u}};
+    exponents[n++] = {{0u, 0u, static_cast<std::size_t>(Order)}};
+
+    for (int m = 1; m < Order; ++m) {
+        exponents[n++] = {{static_cast<std::size_t>(Order - m), static_cast<std::size_t>(m), 0u}};
+    }
+    for (int m = 1; m < Order; ++m) {
+        exponents[n++] = {{0u, static_cast<std::size_t>(Order - m), static_cast<std::size_t>(m)}};
+    }
+    for (int m = 1; m < Order; ++m) {
+        exponents[n++] = {{static_cast<std::size_t>(m), 0u, static_cast<std::size_t>(Order - m)}};
+    }
+
+    for (int c = 1; c <= Order - 2; ++c) {
+        for (int b = 1; b <= Order - c - 1; ++b) {
+            const int a = Order - b - c;
+            exponents[n++] = {{static_cast<std::size_t>(a),
+                               static_cast<std::size_t>(b),
+                               static_cast<std::size_t>(c)}};
+        }
+    }
+
+    return exponents;
+}
+
+template<int Order>
+constexpr std::array<std::array<std::size_t, 4>, (Order + 1) * (Order + 2) * (Order + 3) / 6>
+make_tetrahedron_simplex_exponents() {
+    std::array<std::array<std::size_t, 4>, (Order + 1) * (Order + 2) * (Order + 3) / 6> exponents{};
+    std::size_t n = 0;
+
+    exponents[n++] = {{static_cast<std::size_t>(Order), 0u, 0u, 0u}};
+    exponents[n++] = {{0u, static_cast<std::size_t>(Order), 0u, 0u}};
+    exponents[n++] = {{0u, 0u, static_cast<std::size_t>(Order), 0u}};
+    exponents[n++] = {{0u, 0u, 0u, static_cast<std::size_t>(Order)}};
+
+    constexpr int edges[6][2] = {
+        {0, 1}, {1, 2}, {2, 0}, {0, 3}, {1, 3}, {2, 3}
+    };
+    for (const auto& edge : edges) {
+        for (int m = 1; m < Order; ++m) {
+            std::array<std::size_t, 4> e{};
+            e[static_cast<std::size_t>(edge[0])] = static_cast<std::size_t>(Order - m);
+            e[static_cast<std::size_t>(edge[1])] = static_cast<std::size_t>(m);
+            exponents[n++] = e;
+        }
+    }
+
+    constexpr int faces[4][3] = {
+        {0, 1, 2},
+        {0, 1, 3},
+        {1, 2, 3},
+        {0, 2, 3},
+    };
+    for (const auto& face : faces) {
+        for (int c = 1; c <= Order - 2; ++c) {
+            for (int b = 1; b <= Order - c - 1; ++b) {
+                const int a = Order - b - c;
+                std::array<std::size_t, 4> e{};
+                e[static_cast<std::size_t>(face[0])] = static_cast<std::size_t>(a);
+                e[static_cast<std::size_t>(face[1])] = static_cast<std::size_t>(b);
+                e[static_cast<std::size_t>(face[2])] = static_cast<std::size_t>(c);
+                exponents[n++] = e;
+            }
+        }
+    }
+
+    for (int l = 1; l <= Order - 3; ++l) {
+        for (int k = 1; k <= Order - l - 2; ++k) {
+            for (int j = 1; j <= Order - l - k - 1; ++j) {
+                const int i = Order - j - k - l;
+                exponents[n++] = {{static_cast<std::size_t>(i),
+                                   static_cast<std::size_t>(j),
+                                   static_cast<std::size_t>(k),
+                                   static_cast<std::size_t>(l)}};
+            }
+        }
+    }
+
+    return exponents;
+}
+
+template<int Order, bool NeedFirst, bool NeedSecond>
+void fill_simplex_factor_sequence(Real lambda,
+                                  std::array<Real, Order + 1>& phi,
+                                  std::array<Real, Order + 1>* dphi,
+                                  std::array<Real, Order + 1>* d2phi) {
+    phi[0] = Real(1);
+    if constexpr (NeedFirst) {
+        (*dphi)[0] = Real(0);
+    }
+    if constexpr (NeedSecond) {
+        (*d2phi)[0] = Real(0);
+    }
+
+    const Real t = static_cast<Real>(Order) * lambda;
+    constexpr Real dt_dlambda = static_cast<Real>(Order);
+    Real dphi_dt_prev = Real(0);
+    Real d2phi_dt2_prev = Real(0);
+
+    for (int a = 1; a <= Order; ++a) {
+        const std::size_t au = static_cast<std::size_t>(a);
+        const Real inv_a = Real(1) / static_cast<Real>(a);
+        const Real s = (t - static_cast<Real>(a - 1)) * inv_a;
+        phi[au] = s * phi[au - 1];
+
+        if constexpr (NeedFirst) {
+            const Real dphi_dt = inv_a * phi[au - 1] + s * dphi_dt_prev;
+            (*dphi)[au] = dt_dlambda * dphi_dt;
+
+            if constexpr (NeedSecond) {
+                const Real d2phi_dt2 = Real(2) * inv_a * dphi_dt_prev + s * d2phi_dt2_prev;
+                (*d2phi)[au] = dt_dlambda * dt_dlambda * d2phi_dt2;
+                d2phi_dt2_prev = d2phi_dt2;
+            }
+
+            dphi_dt_prev = dphi_dt;
+        }
+    }
+}
+
+template<int Order>
+void fill_simplex_factor_values(Real lambda, std::array<Real, Order + 1>& phi) {
+    fill_simplex_factor_sequence<Order, false, false>(lambda, phi, nullptr, nullptr);
+}
+
+template<int Order>
+void fill_simplex_factor_values_first(Real lambda,
+                                      std::array<Real, Order + 1>& phi,
+                                      std::array<Real, Order + 1>& dphi) {
+    fill_simplex_factor_sequence<Order, true, false>(lambda, phi, &dphi, nullptr);
+}
+
+template<int Order>
+void fill_simplex_factor_values_first_second(Real lambda,
+                                             std::array<Real, Order + 1>& phi,
+                                             std::array<Real, Order + 1>& dphi,
+                                             std::array<Real, Order + 1>& d2phi) {
+    fill_simplex_factor_sequence<Order, true, true>(lambda, phi, &dphi, &d2phi);
+}
+
 } // namespace detail
 
 // ---------------------------------------------------------------------------
@@ -137,6 +530,38 @@ struct LagrangeLineFast<2> {
         out[0](0, 0) = Real(1);
         out[1](0, 0) = Real(1);
         out[2](0, 0) = Real(-2);
+    }
+};
+
+template<>
+struct LagrangeLineFast<3> {
+    static constexpr int n_dofs = 4;
+
+    static void evaluate(const math::Vector<Real, 3>& xi, std::array<Real, n_dofs>& out) {
+        detail::fill_axis_values<3>(xi[0], out);
+    }
+
+    static void evaluate_gradients(const math::Vector<Real, 3>& xi,
+                                   std::array<Gradient, n_dofs>& out) {
+        std::array<Real, n_dofs> values{};
+        std::array<Real, n_dofs> first{};
+        detail::fill_axis_values_first<3>(xi[0], values, first);
+        for (std::size_t i = 0; i < first.size(); ++i) {
+            out[i] = Gradient{first[i], Real(0), Real(0)};
+        }
+    }
+
+    static void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                  std::array<Hessian, n_dofs>& out) {
+        std::array<Real, n_dofs> values{};
+        std::array<Real, n_dofs> first{};
+        std::array<Real, n_dofs> second{};
+        detail::fill_axis_values_first_second<3>(xi[0], values, first, second);
+        for (std::size_t i = 0; i < second.size(); ++i) {
+            Hessian H{};
+            H(0, 0) = second[i];
+            out[i] = H;
+        }
     }
 };
 
@@ -246,6 +671,61 @@ struct LagrangeQuadFast<2> {
             H(0, 0) = hx[i](0, 0) * ly[j];
             H(1, 1) = lx[i] * hy[j](0, 0);
             H(0, 1) = gx[i][0] * gy[j][0];
+            H(1, 0) = H(0, 1);
+            out[n] = H;
+        }
+    }
+};
+
+template<>
+struct LagrangeQuadFast<3> {
+    static constexpr int n_dofs = 16;
+
+    static constexpr std::array<std::array<std::size_t, 2>, n_dofs> node_axes =
+        detail::make_quad_tensor_node_axes<3>();
+
+    static void evaluate(const math::Vector<Real, 3>& xi, std::array<Real, n_dofs>& out) {
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> ly{};
+        detail::fill_axis_values<3>(xi[0], lx);
+        detail::fill_axis_values<3>(xi[1], ly);
+        for (std::size_t n = 0; n < node_axes.size(); ++n) {
+            out[n] = lx[node_axes[n][0]] * ly[node_axes[n][1]];
+        }
+    }
+
+    static void evaluate_gradients(const math::Vector<Real, 3>& xi,
+                                   std::array<Gradient, n_dofs>& out) {
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> ly{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gy{};
+        detail::fill_axis_values_first<3>(xi[0], lx, gx);
+        detail::fill_axis_values_first<3>(xi[1], ly, gy);
+        for (std::size_t n = 0; n < node_axes.size(); ++n) {
+            const auto i = node_axes[n][0];
+            const auto j = node_axes[n][1];
+            out[n] = Gradient{gx[i] * ly[j], lx[i] * gy[j], Real(0)};
+        }
+    }
+
+    static void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                  std::array<Hessian, n_dofs>& out) {
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> ly{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gy{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> hx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> hy{};
+        detail::fill_axis_values_first_second<3>(xi[0], lx, gx, hx);
+        detail::fill_axis_values_first_second<3>(xi[1], ly, gy, hy);
+        for (std::size_t n = 0; n < node_axes.size(); ++n) {
+            const auto i = node_axes[n][0];
+            const auto j = node_axes[n][1];
+            Hessian H{};
+            H(0, 0) = hx[i] * ly[j];
+            H(1, 1) = lx[i] * hy[j];
+            H(0, 1) = gx[i] * gy[j];
             H(1, 0) = H(0, 1);
             out[n] = H;
         }
@@ -423,6 +903,81 @@ struct LagrangeHexFast<2> {
     }
 };
 
+template<>
+struct LagrangeHexFast<3> {
+    static constexpr int n_dofs = 64;
+
+    static constexpr std::array<std::array<std::size_t, 3>, n_dofs> node_axes =
+        detail::make_hex_tensor_node_axes<3>();
+
+    static void evaluate(const math::Vector<Real, 3>& xi, std::array<Real, n_dofs>& out) {
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> ly{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lz{};
+        detail::fill_axis_values<3>(xi[0], lx);
+        detail::fill_axis_values<3>(xi[1], ly);
+        detail::fill_axis_values<3>(xi[2], lz);
+        for (std::size_t n = 0; n < node_axes.size(); ++n) {
+            out[n] = lx[node_axes[n][0]] * ly[node_axes[n][1]] * lz[node_axes[n][2]];
+        }
+    }
+
+    static void evaluate_gradients(const math::Vector<Real, 3>& xi,
+                                   std::array<Gradient, n_dofs>& out) {
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> ly{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lz{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gy{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gz{};
+        detail::fill_axis_values_first<3>(xi[0], lx, gx);
+        detail::fill_axis_values_first<3>(xi[1], ly, gy);
+        detail::fill_axis_values_first<3>(xi[2], lz, gz);
+        for (std::size_t n = 0; n < node_axes.size(); ++n) {
+            const auto i = node_axes[n][0];
+            const auto j = node_axes[n][1];
+            const auto k = node_axes[n][2];
+            out[n] = Gradient{
+                gx[i] * ly[j] * lz[k],
+                lx[i] * gy[j] * lz[k],
+                lx[i] * ly[j] * gz[k],
+            };
+        }
+    }
+
+    static void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                  std::array<Hessian, n_dofs>& out) {
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> ly{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> lz{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gy{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> gz{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> hx{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> hy{};
+        std::array<Real, LagrangeLineFast<3>::n_dofs> hz{};
+        detail::fill_axis_values_first_second<3>(xi[0], lx, gx, hx);
+        detail::fill_axis_values_first_second<3>(xi[1], ly, gy, hy);
+        detail::fill_axis_values_first_second<3>(xi[2], lz, gz, hz);
+        for (std::size_t n = 0; n < node_axes.size(); ++n) {
+            const auto i = node_axes[n][0];
+            const auto j = node_axes[n][1];
+            const auto k = node_axes[n][2];
+            Hessian H{};
+            H(0, 0) = hx[i] * ly[j] * lz[k];
+            H(1, 1) = lx[i] * hy[j] * lz[k];
+            H(2, 2) = lx[i] * ly[j] * hz[k];
+            H(0, 1) = gx[i] * gy[j] * lz[k];
+            H(1, 0) = H(0, 1);
+            H(0, 2) = gx[i] * ly[j] * gz[k];
+            H(2, 0) = H(0, 2);
+            H(1, 2) = lx[i] * gy[j] * gz[k];
+            H(2, 1) = H(1, 2);
+            out[n] = H;
+        }
+    }
+};
+
 // ---------------------------------------------------------------------------
 // LagrangeTriFast<Order>
 // ---------------------------------------------------------------------------
@@ -500,6 +1055,100 @@ struct LagrangeTriFast<2> {
         out[3] = detail::p2_edge_hessian(g0, g1);
         out[4] = detail::p2_edge_hessian(g1, g2);
         out[5] = detail::p2_edge_hessian(g0, g2);
+    }
+};
+
+template<>
+struct LagrangeTriFast<3> {
+    static constexpr int n_dofs = 10;
+
+    static constexpr std::array<std::array<std::size_t, 3>, n_dofs> exponents =
+        detail::make_triangle_simplex_exponents<3>();
+
+    static void evaluate(const math::Vector<Real, 3>& xi, std::array<Real, n_dofs>& out) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l0 = Real(1) - l1 - l2;
+        std::array<Real, 4> phi0{};
+        std::array<Real, 4> phi1{};
+        std::array<Real, 4> phi2{};
+        detail::fill_simplex_factor_values<3>(l0, phi0);
+        detail::fill_simplex_factor_values<3>(l1, phi1);
+        detail::fill_simplex_factor_values<3>(l2, phi2);
+
+        for (std::size_t n = 0; n < exponents.size(); ++n) {
+            const auto& e = exponents[n];
+            out[n] = phi0[e[0]] * phi1[e[1]] * phi2[e[2]];
+        }
+    }
+
+    static void evaluate_gradients(const math::Vector<Real, 3>& xi,
+                                   std::array<Gradient, n_dofs>& out) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l0 = Real(1) - l1 - l2;
+        std::array<Real, 4> phi0{};
+        std::array<Real, 4> phi1{};
+        std::array<Real, 4> phi2{};
+        std::array<Real, 4> dphi0{};
+        std::array<Real, 4> dphi1{};
+        std::array<Real, 4> dphi2{};
+        detail::fill_simplex_factor_values_first<3>(l0, phi0, dphi0);
+        detail::fill_simplex_factor_values_first<3>(l1, phi1, dphi1);
+        detail::fill_simplex_factor_values_first<3>(l2, phi2, dphi2);
+
+        for (std::size_t n = 0; n < exponents.size(); ++n) {
+            const auto& e = exponents[n];
+            const Real v0 = phi0[e[0]];
+            const Real v1 = phi1[e[1]];
+            const Real v2 = phi2[e[2]];
+            const Real dl0 = dphi0[e[0]] * v1 * v2;
+            const Real dl1 = v0 * dphi1[e[1]] * v2;
+            const Real dl2 = v0 * v1 * dphi2[e[2]];
+            out[n] = Gradient{dl1 - dl0, dl2 - dl0, Real(0)};
+        }
+    }
+
+    static void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                  std::array<Hessian, n_dofs>& out) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l0 = Real(1) - l1 - l2;
+        std::array<Real, 4> phi0{};
+        std::array<Real, 4> phi1{};
+        std::array<Real, 4> phi2{};
+        std::array<Real, 4> dphi0{};
+        std::array<Real, 4> dphi1{};
+        std::array<Real, 4> dphi2{};
+        std::array<Real, 4> d2phi0{};
+        std::array<Real, 4> d2phi1{};
+        std::array<Real, 4> d2phi2{};
+        detail::fill_simplex_factor_values_first_second<3>(l0, phi0, dphi0, d2phi0);
+        detail::fill_simplex_factor_values_first_second<3>(l1, phi1, dphi1, d2phi1);
+        detail::fill_simplex_factor_values_first_second<3>(l2, phi2, dphi2, d2phi2);
+
+        for (std::size_t n = 0; n < exponents.size(); ++n) {
+            const auto& e = exponents[n];
+            const Real v0 = phi0[e[0]];
+            const Real v1 = phi1[e[1]];
+            const Real v2 = phi2[e[2]];
+            const Real D0 = dphi0[e[0]];
+            const Real D1 = dphi1[e[1]];
+            const Real D2 = dphi2[e[2]];
+            const Real H00 = d2phi0[e[0]] * v1 * v2;
+            const Real H11 = v0 * d2phi1[e[1]] * v2;
+            const Real H22 = v0 * v1 * d2phi2[e[2]];
+            const Real H01 = D0 * D1 * v2;
+            const Real H02 = D0 * v1 * D2;
+            const Real H12 = v0 * D1 * D2;
+
+            Hessian H{};
+            H(0, 0) = H00 - Real(2) * H01 + H11;
+            H(1, 1) = H00 - Real(2) * H02 + H22;
+            H(0, 1) = H00 - H01 - H02 + H12;
+            H(1, 0) = H(0, 1);
+            out[n] = H;
+        }
     }
 };
 
@@ -599,6 +1248,126 @@ struct LagrangeTetFast<2> {
         out[7] = detail::p2_edge_hessian(g0, g3);
         out[8] = detail::p2_edge_hessian(g1, g3);
         out[9] = detail::p2_edge_hessian(g2, g3);
+    }
+};
+
+template<>
+struct LagrangeTetFast<3> {
+    static constexpr int n_dofs = 20;
+
+    static constexpr std::array<std::array<std::size_t, 4>, n_dofs> exponents =
+        detail::make_tetrahedron_simplex_exponents<3>();
+
+    static void evaluate(const math::Vector<Real, 3>& xi, std::array<Real, n_dofs>& out) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l3 = xi[2];
+        const Real l0 = Real(1) - l1 - l2 - l3;
+        std::array<Real, 4> phi0{};
+        std::array<Real, 4> phi1{};
+        std::array<Real, 4> phi2{};
+        std::array<Real, 4> phi3{};
+        detail::fill_simplex_factor_values<3>(l0, phi0);
+        detail::fill_simplex_factor_values<3>(l1, phi1);
+        detail::fill_simplex_factor_values<3>(l2, phi2);
+        detail::fill_simplex_factor_values<3>(l3, phi3);
+
+        for (std::size_t n = 0; n < exponents.size(); ++n) {
+            const auto& e = exponents[n];
+            out[n] = phi0[e[0]] * phi1[e[1]] * phi2[e[2]] * phi3[e[3]];
+        }
+    }
+
+    static void evaluate_gradients(const math::Vector<Real, 3>& xi,
+                                   std::array<Gradient, n_dofs>& out) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l3 = xi[2];
+        const Real l0 = Real(1) - l1 - l2 - l3;
+        std::array<Real, 4> phi0{};
+        std::array<Real, 4> phi1{};
+        std::array<Real, 4> phi2{};
+        std::array<Real, 4> phi3{};
+        std::array<Real, 4> dphi0{};
+        std::array<Real, 4> dphi1{};
+        std::array<Real, 4> dphi2{};
+        std::array<Real, 4> dphi3{};
+        detail::fill_simplex_factor_values_first<3>(l0, phi0, dphi0);
+        detail::fill_simplex_factor_values_first<3>(l1, phi1, dphi1);
+        detail::fill_simplex_factor_values_first<3>(l2, phi2, dphi2);
+        detail::fill_simplex_factor_values_first<3>(l3, phi3, dphi3);
+
+        for (std::size_t n = 0; n < exponents.size(); ++n) {
+            const auto& e = exponents[n];
+            const Real v0 = phi0[e[0]];
+            const Real v1 = phi1[e[1]];
+            const Real v2 = phi2[e[2]];
+            const Real v3 = phi3[e[3]];
+            const Real dl0 = dphi0[e[0]] * v1 * v2 * v3;
+            const Real dl1 = v0 * dphi1[e[1]] * v2 * v3;
+            const Real dl2 = v0 * v1 * dphi2[e[2]] * v3;
+            const Real dl3 = v0 * v1 * v2 * dphi3[e[3]];
+            out[n] = Gradient{dl1 - dl0, dl2 - dl0, dl3 - dl0};
+        }
+    }
+
+    static void evaluate_hessians(const math::Vector<Real, 3>& xi,
+                                  std::array<Hessian, n_dofs>& out) {
+        const Real l1 = xi[0];
+        const Real l2 = xi[1];
+        const Real l3 = xi[2];
+        const Real l0 = Real(1) - l1 - l2 - l3;
+        std::array<Real, 4> phi0{};
+        std::array<Real, 4> phi1{};
+        std::array<Real, 4> phi2{};
+        std::array<Real, 4> phi3{};
+        std::array<Real, 4> dphi0{};
+        std::array<Real, 4> dphi1{};
+        std::array<Real, 4> dphi2{};
+        std::array<Real, 4> dphi3{};
+        std::array<Real, 4> d2phi0{};
+        std::array<Real, 4> d2phi1{};
+        std::array<Real, 4> d2phi2{};
+        std::array<Real, 4> d2phi3{};
+        detail::fill_simplex_factor_values_first_second<3>(l0, phi0, dphi0, d2phi0);
+        detail::fill_simplex_factor_values_first_second<3>(l1, phi1, dphi1, d2phi1);
+        detail::fill_simplex_factor_values_first_second<3>(l2, phi2, dphi2, d2phi2);
+        detail::fill_simplex_factor_values_first_second<3>(l3, phi3, dphi3, d2phi3);
+
+        for (std::size_t n = 0; n < exponents.size(); ++n) {
+            const auto& e = exponents[n];
+            const Real v0 = phi0[e[0]];
+            const Real v1 = phi1[e[1]];
+            const Real v2 = phi2[e[2]];
+            const Real v3 = phi3[e[3]];
+            const Real D0 = dphi0[e[0]];
+            const Real D1 = dphi1[e[1]];
+            const Real D2 = dphi2[e[2]];
+            const Real D3 = dphi3[e[3]];
+
+            const Real H00 = d2phi0[e[0]] * v1 * v2 * v3;
+            const Real H11 = v0 * d2phi1[e[1]] * v2 * v3;
+            const Real H22 = v0 * v1 * d2phi2[e[2]] * v3;
+            const Real H33 = v0 * v1 * v2 * d2phi3[e[3]];
+            const Real H01 = D0 * D1 * v2 * v3;
+            const Real H02 = D0 * v1 * D2 * v3;
+            const Real H03 = D0 * v1 * v2 * D3;
+            const Real H12 = v0 * D1 * D2 * v3;
+            const Real H13 = v0 * D1 * v2 * D3;
+            const Real H23 = v0 * v1 * D2 * D3;
+
+            Hessian H{};
+            H(0, 0) = H00 - Real(2) * H01 + H11;
+            H(1, 1) = H00 - Real(2) * H02 + H22;
+            H(2, 2) = H00 - Real(2) * H03 + H33;
+            H(0, 1) = H00 - H01 - H02 + H12;
+            H(1, 0) = H(0, 1);
+            H(0, 2) = H00 - H01 - H03 + H13;
+            H(2, 0) = H(0, 2);
+            H(1, 2) = H00 - H02 - H03 + H23;
+            H(2, 1) = H(1, 2);
+            out[n] = H;
+        }
     }
 };
 

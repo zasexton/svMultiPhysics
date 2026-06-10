@@ -47,9 +47,35 @@ struct VectorBasisScratch {
     std::vector<VectorJacobian> api_jacobians;
     std::vector<Vec3> api_curl;
     std::vector<Real> api_divergence;
+
+    void prewarm(std::size_t max_size, std::size_t max_qpts) {
+        const std::size_t batched_size = max_size * std::max<std::size_t>(max_qpts, 1u);
+        px.reserve(max_size);
+        py.reserve(max_size);
+        pz.reserve(max_size);
+        batched_px.reserve(batched_size);
+        batched_py.reserve(batched_size);
+        batched_pz.reserve(batched_size);
+        candidate_values.reserve(max_size);
+        candidate_dx.reserve(max_size);
+        candidate_dy.reserve(max_size);
+        candidate_dz.reserve(max_size);
+        modal_values_batched.reserve(batched_size * 3u);
+        modal_jacobians_batched.reserve(batched_size * 9u);
+        modal_curls_batched.reserve(batched_size * 3u);
+        modal_divergence_batched.reserve(batched_size);
+        vector_values.reserve(max_size);
+        vector_jacobians.reserve(max_size);
+        scalars.reserve(max_size);
+        api_values.reserve(max_size);
+        api_jacobians.reserve(max_size);
+        api_curl.reserve(max_size);
+        api_divergence.reserve(max_size);
+    }
 };
 
 VectorBasisScratch& vector_basis_scratch();
+void prewarm_vector_basis_scratch(std::size_t max_size, std::size_t max_qpts = 0);
 
 void fill_powers(Real x, int max_p, std::vector<Real>& out);
 void fill_power_tables(const Vec3& xi,
