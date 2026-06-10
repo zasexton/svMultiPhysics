@@ -1503,28 +1503,51 @@ private:
     [[nodiscard]] static std::unordered_map<MeshIndex, Real>
     buildCutCellStabilizationScales(
         const std::vector<CutCellAssemblyMetadata>& metadata) {
-        std::unordered_map<MeshIndex, Real> scales;
+        // Generated cut backends emit many subdivision-leaf rules per cut
+        // cell, so a single entry's volume fraction says nothing about the
+        // cell's cut support. Aggregate fractions per (parent, side) first;
+        // the stabilization scale reflects the smallest per-side aggregate
+        // support of the cell, never an individual subdivision leaf.
         constexpr Real fraction_floor = Real{1.0e-12};
         constexpr Real full_fraction_tol = Real{1.0e-12};
+        std::unordered_map<MeshIndex, std::array<Real, 2>> side_fractions;
         for (const auto& entry : metadata) {
             const MeshIndex parent =
                 entry.parent_entity >= static_cast<MeshIndex>(0)
                     ? entry.parent_entity
                     : entry.cell;
             if (parent < static_cast<MeshIndex>(0) ||
+                entry.side == geometry::CutIntegrationSide::Interface ||
                 !std::isfinite(entry.volume_fraction) ||
-                entry.volume_fraction <= fraction_floor ||
-                entry.volume_fraction >= Real{1.0} - full_fraction_tol) {
+                entry.volume_fraction <= Real{0.0}) {
                 continue;
             }
+            const std::size_t side_index =
+                entry.side == geometry::CutIntegrationSide::Negative ? 0u : 1u;
+            auto [it, inserted] = side_fractions.emplace(
+                parent, std::array<Real, 2>{Real{0.0}, Real{0.0}});
+            it->second[side_index] += entry.volume_fraction;
+        }
 
-            const Real scale = std::min(
-                maxCutCellStabilizationScale(),
-                Real{1.0} / std::max(entry.volume_fraction, fraction_floor));
-            auto [it, inserted] = scales.emplace(parent, scale);
-            if (!inserted) {
-                it->second = std::max(it->second, scale);
+        std::unordered_map<MeshIndex, Real> scales;
+        scales.reserve(side_fractions.size());
+        for (const auto& [parent, fractions] : side_fractions) {
+            Real min_side_fraction = std::numeric_limits<Real>::infinity();
+            for (const Real fraction : fractions) {
+                if (fraction > Real{0.0}) {
+                    min_side_fraction = std::min(
+                        min_side_fraction, std::min(fraction, Real{1.0}));
+                }
             }
+            if (!std::isfinite(min_side_fraction) ||
+                min_side_fraction >= Real{1.0} - full_fraction_tol) {
+                continue;
+            }
+            scales.emplace(
+                parent,
+                std::min(maxCutCellStabilizationScale(),
+                         Real{1.0} /
+                             std::max(min_side_fraction, fraction_floor)));
         }
         return scales;
     }

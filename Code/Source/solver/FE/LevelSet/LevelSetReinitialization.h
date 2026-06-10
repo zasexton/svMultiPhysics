@@ -23,6 +23,7 @@ struct LevelSetSignedDistanceRepairResult {
     bool success{false};
     LevelSetReinitializationMethod method{LevelSetReinitializationMethod::Projection};
     std::size_t repaired_dofs{0};
+    std::size_t preserved_dofs{0};
     std::size_t interface_fragments{0};
     std::size_t cut_cells{0};
     std::size_t interface_displacement_samples{0};
@@ -30,6 +31,9 @@ struct LevelSetSignedDistanceRepairResult {
     Real max_distance{0.0};
     Real max_interface_displacement{0.0};
     Real l2_interface_displacement{0.0};
+    // Resolved near-interface preservation band actually applied (0 when
+    // preservation was disabled).
+    Real preserve_band_width{0.0};
     std::string diagnostic{};
 };
 

@@ -720,6 +720,7 @@ TEST(LevelSetReinitialization, ProjectionRepairsNodalField)
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
     options.interface_band_width = 1.0;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> repaired;
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
@@ -755,6 +756,7 @@ TEST(LevelSetReinitialization, GenericProjectionFailsClosedForHighOrderCellNodeD
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
     options.interface_band_width = 1.0;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> repaired;
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
@@ -786,6 +788,7 @@ TEST(LevelSetReinitialization, FESystemOverloadRepairsP2EdgeDofsOnLinearTetraMes
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
     options.interface_band_width = 1.0;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> solution(
         static_cast<std::size_t>(fixture.system.dofHandler().getNumDofs()), 2.0);
@@ -848,6 +851,7 @@ TEST(LevelSetReinitialization, FESystemOverloadRepairsNativeHighOrderCellNodeDof
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
     options.interface_band_width = 1.0;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> solution(
         static_cast<std::size_t>(fixture.system.dofHandler().getNumDofs()), 2.0);
@@ -888,6 +892,7 @@ TEST(LevelSetReinitialization, ProjectionReportsInterfaceMovementBeyondTolerance
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
     options.interface_band_width = 1.0;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> repaired;
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
@@ -923,6 +928,7 @@ TEST(LevelSetReinitialization, ProjectionPreservesZeroContourWithinTolerance)
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
     options.interface_band_width = 1.0;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> repaired;
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
@@ -961,6 +967,7 @@ TEST(LevelSetReinitialization, FESystemOverloadRepairsFieldSlice)
 
     level_set::LevelSetReinitializationOptions options{};
     options.signed_distance_tolerance = 1.0e-12;
+    options.preserve_band_width = 0.0;
 
     std::vector<FE::Real> repaired_solution;
     const auto result = level_set::repairLevelSetSignedDistanceByProjection(
@@ -973,6 +980,70 @@ TEST(LevelSetReinitialization, FESystemOverloadRepairsFieldSlice)
     ASSERT_TRUE(result.success) << result.diagnostic;
     ASSERT_EQ(repaired_solution.size(), solution.size());
     EXPECT_NE(repaired_solution, solution);
+}
+
+TEST(LevelSetReinitialization, ProjectionPreservesNearInterfaceBandByDefault)
+{
+    const ScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto distorted = distortedPlaneCoefficients(fixture);
+
+    // Default options request an automatic preservation band of ~1.5 local
+    // interface primitive diameters. Every DOF of this single-cell fixture
+    // lies within that band, so the repair must leave the field untouched
+    // instead of replacing the interface with its corner linearization.
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 1.0;
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        distorted,
+        repaired);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(result.preserve_band_width, 0.0);
+    EXPECT_EQ(result.preserved_dofs, 4u);
+    EXPECT_EQ(result.repaired_dofs, 0u);
+    EXPECT_DOUBLE_EQ(result.max_abs_update, 0.0);
+    ASSERT_EQ(repaired.size(), distorted.size());
+    for (std::size_t i = 0; i < repaired.size(); ++i) {
+        EXPECT_DOUBLE_EQ(repaired[i], distorted[i]) << "dof " << i;
+    }
+}
+
+TEST(LevelSetReinitialization, ProjectionExplicitPreserveBandRepairsFarField)
+{
+    const ScalarFieldFixture fixture;
+    const auto& field_dofs = fixture.system.fieldDofHandler(fixture.phi);
+    const auto* entity_map = field_dofs.getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    const auto distorted = distortedPlaneCoefficients(fixture);
+
+    // An explicit band tighter than the nearest DOF distance must behave like
+    // the legacy whole-field repair.
+    level_set::LevelSetReinitializationOptions options{};
+    options.signed_distance_tolerance = 1.0e-12;
+    options.interface_band_width = 1.0;
+    options.preserve_band_width = 1.0e-9;
+
+    std::vector<FE::Real> repaired;
+    const auto result = level_set::repairLevelSetSignedDistanceByProjection(
+        *fixture.mesh,
+        field_dofs,
+        options,
+        distorted,
+        repaired);
+
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_DOUBLE_EQ(result.preserve_band_width, 1.0e-9);
+    EXPECT_EQ(result.preserved_dofs, 0u);
+    EXPECT_EQ(result.repaired_dofs, 4u);
+    EXPECT_NEAR(vertexValue(*entity_map, repaired, 0), -0.25, 1.0e-12);
+    EXPECT_NEAR(vertexValue(*entity_map, repaired, 1), 0.75, 1.0e-12);
 }
 
 TEST(LevelSetReinitialization, ProjectionReportsMissingInterface)

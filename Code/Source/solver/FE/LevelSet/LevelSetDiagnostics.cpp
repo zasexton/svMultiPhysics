@@ -75,11 +75,17 @@ void computeSignedDistanceError(LevelSetOutputDiagnostics& result,
             "level-set output diagnostics require a positive signed-distance interface band width");
     }
 
+    // The repair acts as a measurement reference here: build the full
+    // projected signed-distance field so the band error compares the input
+    // against it. Near-interface preservation would make the reference equal
+    // to the input and report zero error.
+    auto repair_options = options.signed_distance;
+    repair_options.preserve_band_width = Real{0.0};
     std::vector<Real> repaired;
     result.signed_distance = repairLevelSetSignedDistanceByProjection(
         mesh,
         level_set_dofs,
-        options.signed_distance,
+        repair_options,
         coefficients,
         repaired);
     if (!result.signed_distance.success) {

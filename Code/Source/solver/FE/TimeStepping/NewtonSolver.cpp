@@ -96,6 +96,16 @@ namespace {
     return enabled;
 }
 
+/// Legacy comparison switch: stamp the current-time constraint values into
+/// every TimeHistory state before the nonlinear solve (rewrites the committed
+/// trajectory of time-dependent Dirichlet data and the injected rate slot).
+[[nodiscard]] bool distributeConstraintsIntoHistoryRequested() noexcept
+{
+    static const bool enabled =
+        envBoolEnabled("SVMP_DISTRIBUTE_CONSTRAINTS_INTO_HISTORY");
+    return enabled;
+}
+
 [[nodiscard]] bool pressureRowContributionDiagnosticEnabled() noexcept
 {
     static const bool enabled =
@@ -9975,9 +9985,27 @@ NewtonReport NewtonSolver::solveStep(systems::TransientSystem& transient,
         }
         constraints.distribute(history.u());
         syncOwnedRowHaloIfNeeded(history.u());
-        for (int k = 1; k <= history.historyDepth(); ++k) {
-            constraints.distribute(history.uPrevK(k));
-            syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+        // Do NOT distribute the (current-time) constraint values into the
+        // history states. Committed history already satisfies the constraints
+        // at its own time levels; stamping the stage inhomogeneity g(t_stage)
+        // over u^n (and over the injected-rate slot used by the first-order
+        // generalized-alpha stencil) rewrites the trajectory of time-dependent
+        // Dirichlet data. The stencil then sees zero wall velocity increments
+        // and a value written into a rate slot, i.e. a wall acceleration of
+        // c0*g(t) instead of g_dot(t); the consistent-mass coupling turns the
+        // missing g_dot into a secular, h- and dt-independent velocity error
+        // in wall-adjacent cells (observed as the bottom-wall sawtooth in the
+        // open-vessel MMS). Set SVMP_DISTRIBUTE_CONSTRAINTS_INTO_HISTORY=1 to
+        // restore the legacy stamping for comparison.
+        if (distributeConstraintsIntoHistoryRequested()) {
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                constraints.distribute(history.uPrevK(k));
+                syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+            }
+        } else {
+            for (int k = 1; k <= history.historyDepth(); ++k) {
+                syncOwnedRowHaloIfNeeded(history.uPrevK(k));
+            }
         }
     };
 

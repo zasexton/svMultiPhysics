@@ -92,7 +92,10 @@ TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutMetadataScale)
     expectText(free_surface, "Active_domain", "LevelSetNegative");
     expectText(free_surface, "Active_domain_method", "CutVolume");
     expectText(free_surface, "Enable_cut_cell_stabilization", "true");
-    expectText(free_surface, "Use_cut_metadata_scale", "true");
+    // The cut metadata scale is intentionally off: the ghost-penalty
+    // coefficients carry the transient scaling (mu + rho*h^2/dt) directly,
+    // and the metadata multiplier is unnecessary on top of it.
+    expectText(free_surface, "Use_cut_metadata_scale", "false");
     expectText(free_surface, "Cut_cell_velocity_gradient_penalty", "1.0");
     expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
   }

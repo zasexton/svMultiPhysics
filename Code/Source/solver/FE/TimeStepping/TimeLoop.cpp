@@ -91,6 +91,25 @@ std::size_t setLinearDirichletDofs(backends::LinearSolver& linear,
     return enabled;
 }
 
+/// Legacy comparison switch: zero the rate history at constrained DOFs after
+/// each generalized-alpha rate update instead of keeping the
+/// constraint-consistent finite-difference rates (which carry the
+/// inhomogeneity rate g_dot of time-dependent Dirichlet data).
+[[nodiscard]] bool zeroConstrainedRatesRequested() noexcept
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("SVMP_ZERO_CONSTRAINED_RATES");
+        if (env == nullptr || env[0] == '\0') {
+            return false;
+        }
+        const std::string value(env);
+        return !(value == "0" || value == "false" || value == "False" ||
+                 value == "off" || value == "OFF" || value == "no" ||
+                 value == "NO");
+    }();
+    return enabled;
+}
+
 void logInitializationSolveDiagnostics(const char* phase,
                                        const constraints::AffineConstraints& constraints,
                                        std::size_t dirichlet_dofs,
@@ -2139,7 +2158,19 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                            if (!nondt_dofs.empty()) {
 	                                zeroVectorEntries(nondt_dofs, history.uDot());
 	                            }
-                            if (!constraints.empty()) {
+                            // Do NOT distribute the homogeneous constraints into uDot here.
+                            // The update above already produces constraint-consistent rates:
+                            // constrained VALUES satisfy the (possibly time-dependent) affine
+                            // relations at both time levels, so the finite-difference rate
+                            // carries the inhomogeneity rate g_dot(t) automatically.
+                            // distributeHomogeneous would zero g_dot at Dirichlet DOFs, so the
+                            // injected-rate stencil sees a wall acceleration of (alpha_m/gamma)
+                            // times the true value; the consistent-mass coupling then pumps a
+                            // secular, h- and dt-independent velocity error into wall-adjacent
+                            // cells for moving-wall data (observed as the bottom-wall sawtooth
+                            // in the open-vessel MMS). Set SVMP_ZERO_CONSTRAINED_RATES=1 to
+                            // restore the legacy zeroing for comparison.
+                            if (!constraints.empty() && zeroConstrainedRatesRequested()) {
                                 constraints.distributeHomogeneous(history.uDot());
                             }
                             monolithic_aux_stage_alpha_f = ga1_params->alpha_f;

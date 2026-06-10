@@ -909,6 +909,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     bool top_wall_bc;
     bool obstacle_bc;
     bool pressure_constraints;
+    std::string level_set_velocity_source;
     std::vector<std::string> faces;
   };
 
@@ -919,6 +920,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        false,
        true,
+       "",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "free_surface"}},
       {"unfitted_level_set",
@@ -927,6 +929,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        true,
        false,
        true,
+       "coupled_field",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
@@ -934,7 +937,8 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        true,
        false,
-       false,
+       true,
+       "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
@@ -942,7 +946,8 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        true,
        false,
-       false,
+       true,
+       "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top"}},
       {"unfitted_level_set",
@@ -951,6 +956,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
        false,
        true,
        true,
+       "prescribed_data",
        {"wall_left", "wall_right", "wall_bottom", "wall_front", "wall_back",
         "wall_top", "obstacle"}},
   };
@@ -1017,13 +1023,13 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
           childWithAttribute(*root, "Add_equation", "type", "level_set");
       expectText(level_set, "Module_options", expected_jit_options);
       expectText(level_set, "Enable_reinitialization", "false");
-      expectText(level_set, "Enable_volume_correction", "false");
+      expectText(level_set, "Enable_volume_correction", "true");
       expectText(fluid, "Module_options", expected_jit_options);
       expectText(free_surface, "Active_domain", "LevelSetNegative");
       expectText(free_surface, "Active_domain_method", "CutVolume");
       expectText(free_surface, "Enable_velocity_extension", "true");
       expectText(free_surface, "Velocity_extension_diffusivity", "1.0");
-      expectGmresSolver(fluid);
+      expectEigenDirectSolver(fluid);
       EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"),
                 nullptr);
       expectText(fluid, "Hydrostatic_pressure_field_name", "Pressure");
@@ -1044,7 +1050,8 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
       const auto& level_set =
           childWithAttribute(*root, "Add_equation", "type", "level_set");
       expectText(level_set, "Level_set_field_name", "phi");
-      expectText(level_set, "Velocity_source", "coupled_field");
+      expectText(level_set, "Velocity_source",
+                 expected.level_set_velocity_source);
       expectText(free_surface, "Generated_interface_domain_id",
                  "open_vessel_surface");
     }

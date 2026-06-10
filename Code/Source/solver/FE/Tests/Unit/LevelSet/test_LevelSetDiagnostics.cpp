@@ -326,6 +326,9 @@ TEST(LevelSetDiagnostics, SignedDistanceMaintenanceReducesInterfaceBandError)
     level_set::LevelSetOutputDiagnosticsOptions options{};
     options.signed_distance.signed_distance_tolerance = 1.0e-12;
     options.signed_distance.interface_band_width = 2.0;
+    // This test exercises the legacy whole-field repair; the single-cell
+    // fixture lies entirely inside the automatic preservation band.
+    options.signed_distance.preserve_band_width = 0.0;
 
     const auto before = level_set::computeLevelSetOutputDiagnostics(
         *fixture.mesh,

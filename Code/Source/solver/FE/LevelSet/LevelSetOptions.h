@@ -75,6 +75,13 @@ struct LevelSetReinitializationOptions {
     Real pseudo_time_step_scale{0.3};
     Real interface_band_width{3.0};
     Real signed_distance_tolerance{1.0e-6};
+    // Projection repair preserves (does not overwrite) DOFs whose distance to
+    // the interface primitives is within this band, so the interface geometry
+    // carried by near-interface DOFs — including high-order edge/cell DOFs —
+    // is never replaced by its corner linearization. Negative requests an
+    // automatic band of ~1.5 local interface primitive diameters; zero
+    // disables preservation and repairs the whole field.
+    Real preserve_band_width{-1.0};
 };
 
 struct LevelSetVolumeCorrectionOptions {

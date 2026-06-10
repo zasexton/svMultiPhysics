@@ -3219,6 +3219,8 @@ bool applyLevelSetMaintenance(
           << "[svMultiPhysics::Application] Level-set reinitialized field='"
           << request.level_set_field_name << "' step=" << completed_step
           << " repaired_dofs=" << result.repaired_dofs
+          << " preserved_dofs=" << result.preserved_dofs
+          << " preserve_band_width=" << result.preserve_band_width
           << " interface_fragments=" << result.interface_fragments
           << " interface_displacement_samples="
           << result.interface_displacement_samples
@@ -7145,6 +7147,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
        curvature_projection_cache](
           const svmp::FE::systems::SystemStateView& state,
           TransientStateSyncPoint point) {
+        // Keep the cut geometry, constraints, curvature, and advection
+        // velocity frozen during line-search trial evaluations so trial
+        // residuals are measured against the same state the Jacobian was
+        // built from. The refreshed-frozen quadrature policy omits geometry
+        // sensitivities from the Jacobian; refreshing per trial turns the
+        // backtracking objective into a moving target, which can livelock
+        // Newton after large level-set updates (e.g. reinitialization).
+        // Accepted/residual/Jacobian sync points still refresh, so geometry
+        // follows the iterates Picard-style between iterations.
+        if (point == TransientStateSyncPoint::LineSearchTrialResidual &&
+            !parseBoolEnv("SVMP_SYNC_LINE_SEARCH_TRIALS", false)) {
+          return;
+        }
         const auto report = refreshActiveCutIntegrationContextCached(
             sim, params, state, *cut_lifecycle, *cut_refresh_cache,
             stateSyncPointName(point));

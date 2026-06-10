@@ -1801,6 +1801,7 @@ void applyFreeSurfaceCutCellStabilization(
     const FE::forms::FormExpr& v,
     const FE::forms::FormExpr& q,
     const FE::forms::FormExpr& mu,
+    FE::Real density,
     FE::Real stabilization_epsilon,
     int velocity_components,
     int velocity_polynomial_order,
@@ -1863,6 +1864,15 @@ void applyFreeSurfaceCutCellStabilization(
     const auto h_f = FE::forms::avg(FE::forms::hNormal());
     const auto h3 = h_f * h_f * h_f;
     const auto h5 = h3 * h_f * h_f;
+    // Transient ghost-penalty coefficient. The viscous scale mu alone
+    // under-stabilizes inertia-dominated cut supports (rho*h^2/dt >> mu for
+    // water-like parameters), so the penalty carries the generalized
+    // diffusivity mu_gp = mu + rho*h^2/dt used by transient CutFEM analyses
+    // (Schott & Wall; Burman, Fernandez & Massing). Velocity jump penalties
+    // scale with mu_gp, pressure jump penalties with 1/mu_gp.
+    const auto rho_gp = FE::forms::FormExpr::constant(density);
+    const auto mu_gp =
+        mu + rho_gp * h_f * h_f / FE::forms::FormExpr::effectiveTimeStep();
     const auto interface_side =
         bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
             ? "Plus"
@@ -1918,13 +1928,15 @@ void applyFreeSurfaceCutCellStabilization(
         << " pressure_derivative_orders="
         << derivative_order_label(pressure_derivative_order)
         << " velocity_scaling="
-        << (velocity_derivative_order > 1 ? "h,h^3" : "h")
+        << (velocity_derivative_order > 1
+                ? "(mu+rho*h^2/dt)*h,(mu+rho*h^2/dt)*h^3"
+                : "(mu+rho*h^2/dt)*h")
         << " pressure_scaling="
         << (pressure_derivative_order <= 0
                 ? "disabled"
                 : (pressure_derivative_order > 1
-                       ? "h^3/mu,h^5/mu"
-                       : "h^3/mu"));
+                       ? "h^3/(mu+rho*h^2/dt),h^5/(mu+rho*h^2/dt)"
+                       : "h^3/(mu+rho*h^2/dt)"));
     FE_LOG_INFO(oss.str());
 
     if (has_unsupported_derivative_order) {
@@ -1959,7 +1971,7 @@ void applyFreeSurfaceCutCellStabilization(
         momentum_form =
             momentum_form +
             FE::forms::cutAdjacentFacetIntegral(
-                cut_scale * velocity_penalty * mu * h_f *
+                cut_scale * velocity_penalty * mu_gp * h_f *
                     velocity_jump_term,
                 bc.interface_marker);
 
@@ -1979,7 +1991,7 @@ void applyFreeSurfaceCutCellStabilization(
             momentum_form =
                 momentum_form +
                 FE::forms::cutAdjacentFacetIntegral(
-                    cut_scale * velocity_penalty * mu * h3 *
+                    cut_scale * velocity_penalty * mu_gp * h3 *
                         velocity_second_normal_jump_term,
                     bc.interface_marker);
         }
@@ -2000,7 +2012,7 @@ void applyFreeSurfaceCutCellStabilization(
         auto pressure_form =
             FE::forms::cutAdjacentFacetIntegral(
                 cut_scale * pressure_penalty * h3 /
-                    (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                    (mu_gp + FE::forms::FormExpr::constant(stabilization_epsilon)) *
                     FE::forms::inner(pressure_jump_p, pressure_jump_q),
                 bc.interface_marker);
 
@@ -2014,7 +2026,7 @@ void applyFreeSurfaceCutCellStabilization(
                 pressure_form +
                 FE::forms::cutAdjacentFacetIntegral(
                     cut_scale * pressure_penalty * h5 /
-                        (mu + FE::forms::FormExpr::constant(stabilization_epsilon)) *
+                        (mu_gp + FE::forms::FormExpr::constant(stabilization_epsilon)) *
                         pressure_second_jump_p * pressure_second_jump_q,
                     bc.interface_marker);
         }
@@ -2357,9 +2369,33 @@ void applyFreeSurfaceVelocityExtension(
         bc.velocity_extension.diffusivity,
         freeSurfaceValueName("ns_free_surface_velocity_extension_diffusivity", bc));
     const auto inactive_domain = inactiveVolumeDomainFor(bc, system);
-    const auto extension_integrand =
+    auto extension_integrand =
         diffusivity * FE::forms::inner(FE::forms::grad(u),
                                        FE::forms::grad(v));
+    if (inactive_domain.method == FreeSurfaceActiveDomainMethod::CutVolume) {
+        // Down-weight the extension Laplacian on the dry parts of cut cells.
+        // At full strength there it adds an O(diffusivity) artificial
+        // diffusion to the momentum rows of every DOF with wet support; those
+        // rows must remain physics plus ghost penalty. A small floor (rather
+        // than zero) keeps every dry-side DOF of a cut cell attached to an
+        // equation even when its wet rules are pruned and no stabilized facet
+        // reaches it, which would otherwise produce singular zero rows.
+        // cutVolumeFraction() is exactly 1 on full-cell-equivalent rules and
+        // < 1 on generated cut-cell rules, so a sharp ramp at 1 selects the
+        // full cells.
+        const auto fraction = FE::forms::cutVolumeFraction();
+        const auto one = FE::forms::FormExpr::constant(1.0);
+        const auto ramp_width = FE::forms::FormExpr::constant(1.0e-6);
+        const auto full_cell_indicator = FE::forms::min(
+            one,
+            FE::forms::max(FE::forms::FormExpr::constant(0.0),
+                           (fraction - one + ramp_width) / ramp_width));
+        const auto cut_cell_extension_floor =
+            FE::forms::FormExpr::constant(1.0e-3);
+        extension_integrand =
+            FE::forms::max(full_cell_indicator, cut_cell_extension_floor) *
+            extension_integrand;
+    }
     momentum_form =
         momentum_form +
         integrateOnActiveVolume(extension_integrand, inactive_domain);
@@ -4274,6 +4310,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(FE::systems::FESystem& syst
             v,
             q,
             mu,
+            options_.density,
             options_.stabilization_epsilon,
             dim,
             velocity_space_->polynomial_order(),

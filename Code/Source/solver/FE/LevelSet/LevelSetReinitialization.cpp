@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -305,6 +306,48 @@ struct LinearInterfacePrimitiveSet {
     return output;
 }
 
+[[nodiscard]] Real medianPrimitiveDiameter(
+    const LinearInterfacePrimitiveSet& primitive_set)
+{
+    std::vector<Real> diameters;
+    diameters.reserve(primitive_set.primitives.size());
+    for (const auto& primitive : primitive_set.primitives) {
+        const auto& points = primitive.points;
+        Real diameter = 0.0;
+        for (std::size_t i = 0; i + 1u < points.size(); ++i) {
+            for (std::size_t j = i + 1u; j < points.size(); ++j) {
+                diameter = std::max(diameter, distance(points[i], points[j]));
+            }
+        }
+        if (std::isfinite(diameter) && diameter > Real{0.0}) {
+            diameters.push_back(diameter);
+        }
+    }
+    if (diameters.empty()) {
+        return Real{0.0};
+    }
+    const auto mid =
+        diameters.begin() + static_cast<std::ptrdiff_t>(diameters.size() / 2u);
+    std::nth_element(diameters.begin(), mid, diameters.end());
+    return *mid;
+}
+
+[[nodiscard]] Real resolvePreserveBandWidth(
+    const LevelSetReinitializationOptions& options,
+    const LinearInterfacePrimitiveSet& primitive_set)
+{
+    if (options.preserve_band_width == Real{0.0}) {
+        return Real{0.0};
+    }
+    if (options.preserve_band_width > Real{0.0}) {
+        return options.preserve_band_width;
+    }
+    // Automatic band: preserve DOFs within ~1.5 local interface primitive
+    // diameters. The corner-linear primitives span roughly one cell each, so
+    // this keeps every DOF that shapes the discrete interface untouched.
+    return Real{1.5} * medianPrimitiveDiameter(primitive_set);
+}
+
 template <typename ForEachDofPoint>
 [[nodiscard]] LevelSetSignedDistanceRepairResult repairSignedDistanceCoefficientsFromPrimitives(
     const LevelSetReinitializationOptions& options,
@@ -326,6 +369,8 @@ template <typename ForEachDofPoint>
     const auto expected = input_coefficients.size();
     Real interface_displacement_squared_sum = 0.0;
     std::vector<unsigned char> repaired_once(expected, 0u);
+    const Real preserve_band = resolvePreserveBandWidth(options, primitive_set);
+    result.preserve_band_width = preserve_band;
 
     const auto repair_dof_at_point = [&](GlobalIndex dof,
                                          const std::array<Real, 3>& x) {
@@ -343,6 +388,15 @@ template <typename ForEachDofPoint>
         if (!std::isfinite(d)) {
             throw std::runtime_error(
                 "level-set signed-distance repair produced a non-finite distance");
+        }
+        if (preserve_band > Real{0.0} && d <= preserve_band) {
+            // Preserve near-interface DOFs: the original coefficients define
+            // the discrete interface (including its high-order shape), and
+            // replacing them with distances to the linearized primitives
+            // would move the zero contour onto that linearization.
+            repaired_once[dof_index] = 1u;
+            ++result.preserved_dofs;
+            return;
         }
         Real repaired = 0.0;
         if (original > options.signed_distance_tolerance) {
@@ -733,6 +787,57 @@ void forEachNativeMeshScalarDofPoint(
 }
 #endif
 
+/// Bind every field DOF to a coordinate through the isoparametric nodal
+/// pairing getCellDofs(cell)[i] <-> i-th cell node. Returns false without
+/// invoking the callback when any cell breaks the pairing (non-nodal or
+/// sub/super-parametric fields), so callers can fall back to entity-aware
+/// binding.
+template <typename Callback>
+[[nodiscard]] bool tryForEachCellNodalDofPoint(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& field_dofs,
+    std::size_t coefficient_count,
+    const Callback& repair_dof_at_point)
+{
+    bool pairable = true;
+    std::vector<GlobalIndex> cell_nodes;
+    std::vector<std::array<Real, 3>> cell_coordinates;
+    mesh.forEachCell([&](GlobalIndex cell) {
+        if (!pairable) {
+            return;
+        }
+        mesh.getCellNodes(cell, cell_nodes);
+        mesh.getCellCoordinates(cell, cell_coordinates);
+        const auto cell_dofs = field_dofs.getCellDofs(cell);
+        if (cell_nodes.empty() ||
+            cell_dofs.size() != cell_nodes.size() ||
+            cell_coordinates.size() < cell_nodes.size()) {
+            pairable = false;
+            return;
+        }
+        for (const auto dof : cell_dofs) {
+            if (dof < 0 ||
+                static_cast<std::size_t>(dof) >= coefficient_count) {
+                pairable = false;
+                return;
+            }
+        }
+    });
+    if (!pairable) {
+        return false;
+    }
+
+    mesh.forEachCell([&](GlobalIndex cell) {
+        mesh.getCellNodes(cell, cell_nodes);
+        mesh.getCellCoordinates(cell, cell_coordinates);
+        const auto cell_dofs = field_dofs.getCellDofs(cell);
+        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+            repair_dof_at_point(cell_dofs[i], cell_coordinates[i]);
+        }
+    });
+    return true;
+}
+
 } // namespace
 
 LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
@@ -855,6 +960,20 @@ LevelSetSignedDistanceRepairResult repairLevelSetSignedDistanceByProjection(
         repaired_field,
         primitive_set,
         [&](const auto& repair_dof_at_point) {
+            // Isoparametric nodal Lagrange fields pair getCellDofs(cell)[i]
+            // with the cell's i-th mesh node — the same convention used to
+            // build level-set fields and consumed by the cut backends. Prefer
+            // it over the entity-id walk below: entity-aware binding assumes
+            // the FE edge/face numbering matches the mesh tables, which does
+            // not hold on all native meshes and then pairs DOFs with the
+            // wrong coordinates. The walk remains the fallback for
+            // sub/super-parametric fields where DOF and node counts differ.
+            if (tryForEachCellNodalDofPoint(mesh_access,
+                                            field_dofs,
+                                            field_coefficients.size(),
+                                            repair_dof_at_point)) {
+                return;
+            }
             forEachNativeMeshScalarDofPoint(
                 native_mesh->local_mesh(),
                 mesh_access,
