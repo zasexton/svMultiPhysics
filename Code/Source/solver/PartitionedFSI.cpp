@@ -17,6 +17,7 @@
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <unordered_map>
 
 /// Check if any value in the solution arrays is NaN
 static bool has_nan(const SolutionStates& sol) {
@@ -451,6 +452,108 @@ void PartitionedFSI::build_node_maps()
   gather_global_map(local_s2f, solid_face_global_nNo_, cm, cm_mod, solid_to_fluid_map_);
   gather_global_map(local_f2s, fluid_face_global_nNo_, cm, cm_mod, fluid_to_solid_map_);
   gather_global_map(local_s2m, solid_face_global_nNo_, cm, cm_mod, solid_to_mesh_map_);
+
+  solid_face_canonical_ = build_face_dedup_map(*solid_face_, solid_sim_->com_mod,
+                                               solid_face_global_nNo_, cm, cm_mod);
+  fluid_face_canonical_ = build_face_dedup_map(*fluid_face_, fluid_sim_->com_mod,
+                                               fluid_face_global_nNo_, cm, cm_mod);
+  mesh_face_canonical_  = build_face_dedup_map(*mesh_face_,  mesh_sim_->com_mod,
+                                               mesh_face_global_nNo_,  cm, cm_mod);
+
+  // Owner flags for the solid interface face: the interface traction is a
+  // precomputed nodal force that must be injected exactly once per physical
+  // node, since all_fun::commu sums it across ranks after the callback.
+  solid_face_owner_ = build_face_owner_flags(*solid_face_, solid_sim_->com_mod, cm);
+
+  if (cm.mas(cm_mod)) {
+    auto count_dups = [](const std::vector<int>& c) {
+      int n = 0; for (int i = 0; i < (int)c.size(); i++) if (c[i] != i) n++; return n;
+    };
+    std::cout << "[PartitionedFSI] face dedup: solid "
+              << count_dups(solid_face_canonical_) << "/" << solid_face_global_nNo_
+              << " dups, fluid " << count_dups(fluid_face_canonical_) << "/" << fluid_face_global_nNo_
+              << " dups, mesh " << count_dups(mesh_face_canonical_) << "/" << mesh_face_global_nNo_
+              << " dups" << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------
+// build_face_dedup_map — canonical[i] = first global slot index that
+// shares the same physical node (global node ID) as slot i.
+// Slots with no duplicate have canonical[i] == i.
+//----------------------------------------------------------------------
+std::vector<int> PartitionedFSI::build_face_dedup_map(
+    const faceType& face, const ComMod& com,
+    int global_nNo, cmType& cm, const CmMod& cm_mod)
+{
+  std::vector<int> local_ids(face.nNo);
+  for (int a = 0; a < face.nNo; a++)
+    local_ids[a] = com.ltg[face.gN(a)];
+
+  int np = cm.np();
+  std::vector<int> counts(np), displs(np);
+  MPI_Allgather(&face.nNo, 1, MPI_INT, counts.data(), 1, MPI_INT, cm.com());
+  int total = 0;
+  for (int p = 0; p < np; p++) { displs[p] = total; total += counts[p]; }
+
+  std::vector<int> all_ids(total);
+  MPI_Allgatherv(local_ids.data(), face.nNo, MPI_INT,
+                 all_ids.data(), counts.data(), displs.data(), MPI_INT, cm.com());
+
+  std::unordered_map<int,int> first;
+  std::vector<int> canonical(total);
+  for (int i = 0; i < total; i++) {
+    auto [it, inserted] = first.emplace(all_ids[i], i);
+    canonical[i] = it->second;
+  }
+  return canonical;
+}
+
+//----------------------------------------------------------------------
+// apply_dedup — copy canonical slot value to every duplicate slot.
+//----------------------------------------------------------------------
+void PartitionedFSI::apply_dedup(Array<double>& arr, const std::vector<int>& canonical)
+{
+  for (int i = 0; i < (int)canonical.size(); i++)
+    if (canonical[i] != i)
+      for (int row = 0; row < arr.nrows(); row++)
+        arr(row, i) = arr(row, canonical[i]);
+}
+
+//----------------------------------------------------------------------
+// build_face_owner_flags — flags[a] = 1 if THIS rank is the lowest-ID rank
+// that contains local face node a, else 0.  A node shared across ranks
+// (a partition-ring node) is owned by exactly one rank under this rule.
+//----------------------------------------------------------------------
+std::vector<int> PartitionedFSI::build_face_owner_flags(
+    const faceType& face, const ComMod& com, cmType& cm)
+{
+  const int np = cm.np();
+  const int myrank = cm.id();
+
+  std::vector<int> local_ids(face.nNo);
+  for (int a = 0; a < face.nNo; a++)
+    local_ids[a] = com.ltg[face.gN(a)];
+
+  std::vector<int> counts(np), displs(np);
+  MPI_Allgather(&face.nNo, 1, MPI_INT, counts.data(), 1, MPI_INT, cm.com());
+  int total = 0;
+  for (int p = 0; p < np; p++) { displs[p] = total; total += counts[p]; }
+
+  std::vector<int> all_ids(total);
+  MPI_Allgatherv(local_ids.data(), face.nNo, MPI_INT,
+                 all_ids.data(), counts.data(), displs.data(), MPI_INT, cm.com());
+
+  // owner[globalID] = lowest rank containing it (ranks scanned in ascending order)
+  std::unordered_map<int,int> owner;
+  for (int p = 0; p < np; p++)
+    for (int k = 0; k < counts[p]; k++)
+      owner.emplace(all_ids[displs[p] + k], p);
+
+  std::vector<int> flags(face.nNo);
+  for (int a = 0; a < face.nNo; a++)
+    flags[a] = (owner[local_ids[a]] == myrank) ? 1 : 0;
+  return flags;
 }
 
 //----------------------------------------------------------------------
@@ -520,6 +623,9 @@ void PartitionedFSI::relax_aitken(int cp, int nsd,
   if (cp > 0 && !r_prev_.empty()) {
     double num = 0, den = 0;
     for (int j = 0; j < u; j++) {
+      // Count each physical node once so omega is independent of partition
+      // count (duplicate ring slots hold identical residual entries).
+      if (solid_face_canonical_[j / nsd] != j / nsd) continue;
       double dr = r[j] - r_prev_[j];
       num += r_prev_[j] * dr;
       den += dr * dr;
@@ -658,6 +764,7 @@ void PartitionedFSI::compute_interface_velocity()
   // All-gather to global
   vel_prev_ = gather_face_data(local_vel, solid_face_global_nNo_,
                                solid_face_local_offset_, cm, cm_mod);
+  apply_dedup(vel_prev_, solid_face_canonical_);
 }
 
 //----------------------------------------------------------------------
@@ -675,6 +782,7 @@ bool PartitionedFSI::solve_fluid(
   // Transfer global solid velocity → global fluid velocity, then extract local
   auto global_fluid_vel = transfer_data(solid_to_fluid_map_, vel_prev_,
                                         fluid_face_global_nNo_);
+  apply_dedup(global_fluid_vel, fluid_face_canonical_);
   Array<double> local_fluid_vel(nsd, fluid_face_->nNo);
   for (int a = 0; a < fluid_face_->nNo; a++)
     for (int i = 0; i < nsd; i++)
@@ -722,17 +830,25 @@ bool PartitionedFSI::solve_solid()
                                                 fluid_face_global_nNo_,
                                                 fluid_face_local_offset_,
                                                 cm, cm_mod);
+  apply_dedup(global_fluid_traction, fluid_face_canonical_);
 
   // Transfer global fluid → global solid, then extract local solid portion
   auto global_solid_traction = transfer_data(fluid_to_solid_map_,
                                              global_fluid_traction,
                                              solid_face_global_nNo_);
+  apply_dedup(global_solid_traction, solid_face_canonical_);
   const int nrows = global_solid_traction.nrows();
   Array<double> local_solid_traction(nrows, solid_face_->nNo);
-  for (int a = 0; a < solid_face_->nNo; a++)
+  for (int a = 0; a < solid_face_->nNo; a++) {
+    // Apply the nodal force on the owning rank only; partition-ring nodes are
+    // shared by several ranks and all_fun::commu (called after the traction
+    // callback in step_equation) SUMS R across them.  Subtracting the full
+    // force on every sharing rank would multiply it by the node's multiplicity.
+    double w = solid_face_owner_[a] ? 1.0 : 0.0;
     for (int i = 0; i < nrows; i++)
       local_solid_traction(i, a) =
-          global_solid_traction(i, solid_face_local_offset_ + a);
+          w * global_solid_traction(i, solid_face_local_offset_ + a);
+  }
 
   set_bc::set_bc_dir(solid_com, solid_sol);
   solid_int.step_equation(0, [&]() {
@@ -757,6 +873,7 @@ bool PartitionedFSI::solve_mesh(const Array<double>& x_ref, int mesh_s)
   // Transfer global solid displacement → global mesh, extract local portion
   auto global_mesh_disp = transfer_data(solid_to_mesh_map_, disp_prev_,
                                         mesh_face_global_nNo_);
+  apply_dedup(global_mesh_disp, mesh_face_canonical_);
   Array<double> local_mesh_disp(nsd, mesh_face_->nNo);
   for (int a = 0; a < mesh_face_->nNo; a++)
     for (int i = 0; i < nsd; i++)
@@ -839,6 +956,7 @@ bool PartitionedFSI::step()
         solid_com, solid_com.eq[0], *solid_face_, solid_sol);
     disp_prev_ = gather_face_data(local_disp, solid_face_global_nNo_,
                                   solid_face_local_offset_, cm, cm_mod);
+    apply_dedup(disp_prev_, solid_face_canonical_);
   }
   compute_interface_velocity();
 
@@ -887,15 +1005,21 @@ bool PartitionedFSI::step()
           solid_com, solid_com.eq[0], *solid_face_, solid_sol);
       disp_current = gather_face_data(local_disp, solid_face_global_nNo_,
                                       solid_face_local_offset_, cm, cm_mod);
+      apply_dedup(disp_current, solid_face_canonical_);
     }
 
     double res_norm = 0.0, disp_norm = 0.0;
-    for (int a = 0; a < solid_face_global_nNo_; a++)
+    for (int a = 0; a < solid_face_global_nNo_; a++) {
+      // Count each physical node once: duplicate ring slots (canonical != a)
+      // hold identical values and would otherwise be weighted by multiplicity,
+      // making the convergence metric depend on the partition count.
+      if (solid_face_canonical_[a] != a) continue;
       for (int i = 0; i < nsd; i++) {
         double res = disp_current(i, a) - disp_prev_(i, a);
         res_norm  += res * res;
         disp_norm += disp_current(i, a) * disp_current(i, a);
       }
+    }
     res_norm  = sqrt(res_norm);
     disp_norm = sqrt(disp_norm);
     double rel = (disp_norm > 1e-30) ? res_norm / disp_norm : res_norm;

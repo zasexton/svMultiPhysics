@@ -87,6 +87,16 @@ private:
   std::vector<int> fluid_to_solid_map_;
   std::vector<int> solid_to_mesh_map_;
 
+  // Canonical slot maps: canonical_[i] = first global slot with same physical node as i
+  std::vector<int> solid_face_canonical_;
+  std::vector<int> fluid_face_canonical_;
+  std::vector<int> mesh_face_canonical_;
+
+  // Per-local-node owner flag for the solid interface face: 1 if THIS rank is
+  // the min-rank owner of the node, else 0.  Used to apply the interface
+  // traction exactly once per physical node (it is summed by all_fun::commu).
+  std::vector<int> solid_face_owner_;
+
   // Coupling state — indexed by GLOBAL solid face nodes (replicated on all ranks)
   Array<double> disp_prev_;
   Array<double> vel_prev_;
@@ -151,6 +161,18 @@ private:
   /// Transfer data from global src face to global tgt face using global map
   static Array<double> transfer_data(const std::vector<int>& src_to_tgt_map,
                                      const Array<double>& src_data, int tgt_nNo);
+
+  /// Build canonical[i] = index of first occurrence of global node ID i across ranks
+  std::vector<int> build_face_dedup_map(const faceType& face, const ComMod& com,
+                                        int global_nNo, cmType& cm, const CmMod& cm_mod);
+
+  /// Propagate canonical slot values to duplicate slots (canonical[i] != i)
+  static void apply_dedup(Array<double>& arr, const std::vector<int>& canonical);
+
+  /// Build per-local-node flags marking whether THIS rank is the min-rank
+  /// owner of each face node (1 = owner, 0 = shared but owned by a lower rank).
+  static std::vector<int> build_face_owner_flags(const faceType& face,
+                                                 const ComMod& com, cmType& cm);
 
   void save_results();
 };
