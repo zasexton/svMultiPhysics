@@ -761,10 +761,11 @@ void PartitionedFSI::compute_interface_velocity()
     }
   }
 
-  // All-gather to global
+  // All-gather to global.  Duplicate ring slots are filled identically by
+  // their owning ranks (velocity is computed from the replicated disp_prev_),
+  // so no dedup is needed.
   vel_prev_ = gather_face_data(local_vel, solid_face_global_nNo_,
                                solid_face_local_offset_, cm, cm_mod);
-  apply_dedup(vel_prev_, solid_face_canonical_);
 }
 
 //----------------------------------------------------------------------
@@ -779,7 +780,10 @@ bool PartitionedFSI::solve_fluid(
   auto& fluid_sol = fluid_int.get_solutions();
   const int nsd = main_sim_->com_mod.nsd;
 
-  // Transfer global solid velocity → global fluid velocity, then extract local
+  // Transfer global solid velocity → global fluid velocity, then extract local.
+  // transfer_data only writes the canonical target slot of each node; dedup
+  // fills the duplicate ring slots so every rank reads a correct Dirichlet
+  // value below (the velocity is applied on all face nodes, not just owners).
   auto global_fluid_vel = transfer_data(solid_to_fluid_map_, vel_prev_,
                                         fluid_face_global_nNo_);
   apply_dedup(global_fluid_vel, fluid_face_canonical_);
@@ -826,17 +830,19 @@ bool PartitionedFSI::solve_solid()
       fluid_com, fluid_sim_->cm_mod,
       *fluid_mesh_, *fluid_face_, fluid_com.eq[0],
       fluid_int.get_solutions());
+  // gather_face_data fills duplicate ring slots identically (compute_face_traction
+  // already summed across ranks via commu), so no dedup is needed here.
   auto global_fluid_traction = gather_face_data(local_fluid_traction,
                                                 fluid_face_global_nNo_,
                                                 fluid_face_local_offset_,
                                                 cm, cm_mod);
-  apply_dedup(global_fluid_traction, fluid_face_canonical_);
 
-  // Transfer global fluid → global solid, then extract local solid portion
+  // Transfer global fluid → global solid, then extract local solid portion.
+  // Only the owning (min-rank) slot of each node is read below, and that slot
+  // is the canonical one that transfer_data writes, so no dedup is needed.
   auto global_solid_traction = transfer_data(fluid_to_solid_map_,
                                              global_fluid_traction,
                                              solid_face_global_nNo_);
-  apply_dedup(global_solid_traction, solid_face_canonical_);
   const int nrows = global_solid_traction.nrows();
   Array<double> local_solid_traction(nrows, solid_face_->nNo);
   for (int a = 0; a < solid_face_->nNo; a++) {
@@ -870,7 +876,10 @@ bool PartitionedFSI::solve_mesh(const Array<double>& x_ref, int mesh_s)
   auto& mesh_sol  = mesh_int.get_solutions();
   const int nsd = main_sim_->com_mod.nsd;
 
-  // Transfer global solid displacement → global mesh, extract local portion
+  // Transfer global solid displacement → global mesh, extract local portion.
+  // transfer_data only writes the canonical target slot of each node; dedup
+  // fills the duplicate ring slots so every rank reads a correct Dirichlet
+  // value below (the displacement is applied on all face nodes, not just owners).
   auto global_mesh_disp = transfer_data(solid_to_mesh_map_, disp_prev_,
                                         mesh_face_global_nNo_);
   apply_dedup(global_mesh_disp, mesh_face_canonical_);
@@ -956,7 +965,6 @@ bool PartitionedFSI::step()
         solid_com, solid_com.eq[0], *solid_face_, solid_sol);
     disp_prev_ = gather_face_data(local_disp, solid_face_global_nNo_,
                                   solid_face_local_offset_, cm, cm_mod);
-    apply_dedup(disp_prev_, solid_face_canonical_);
   }
   compute_interface_velocity();
 
@@ -1005,7 +1013,6 @@ bool PartitionedFSI::step()
           solid_com, solid_com.eq[0], *solid_face_, solid_sol);
       disp_current = gather_face_data(local_disp, solid_face_global_nNo_,
                                       solid_face_local_offset_, cm, cm_mod);
-      apply_dedup(disp_current, solid_face_canonical_);
     }
 
     double res_norm = 0.0, disp_norm = 0.0;
