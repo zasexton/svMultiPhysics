@@ -90,7 +90,7 @@ void b_assem_neu_bc(ComMod& com_mod, const faceType& lFa, const Vector<double>& 
       Vector<double> nV(nsd);
       auto Nx = lFa.Nx.rslice(g);
       nn::gnnb(com_mod, lFa, e, g, nsd, nsd-1, eNoN, Nx, nV, solutions, consts::MechanicalConfigurationType::reference);
-      double Jac = sqrt(utils::norm(nV));
+      double Jac = utils::norm(nV);
       nV = nV / Jac;
       double w = lFa.w(g)*Jac;
       N  = lFa.N.col(g);
@@ -231,6 +231,9 @@ void b_neu_folw_p(ComMod& com_mod, const bcType& lBc, const faceType& lFa, const
 
       for (int i = 0; i < nsd; i++) {
         xl(i,a) = com_mod.x(i,Ac);
+      }
+
+      for (int i = 0; i < tDof; i++) {
         dl(i,a) = Dg(i,Ac);
       }
     }
@@ -263,7 +266,7 @@ void b_neu_folw_p(ComMod& com_mod, const bcType& lBc, const faceType& lFa, const
       Vector<double> nV(nsd);
       auto Nx_g = lFa.Nx.rslice(g);
       nn::gnnb(com_mod, lFa, e, g, nsd, nsd-1, eNoNb, Nx_g, nV, solutions, consts::MechanicalConfigurationType::reference);
-      Jac = sqrt(utils::norm(nV));
+      Jac = utils::norm(nV);
       nV = nV / Jac;
       double w = lFa.w(g)*Jac;
 
