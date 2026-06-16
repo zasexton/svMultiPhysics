@@ -37,20 +37,18 @@ def test_pipe_RCR_3d(n_proc):
 def test_pipe_3d_partitioned(n_proc):
     test_folder = "pipe_3d_partitioned"
     t_max = 1
-    # Single 1-proc reference compared at the global RTOL. The coupling tolerance
-    # in solver_ramp.xml is tightened to 1e-10 so the independently partitioned
-    # multi-proc runs converge to the same FSI fixed point as the 1-proc run to
-    # within the original tolerances.
-    #
-    # 4-proc is skipped for now: its Dirichlet-Neumann coupling stagnates at a
-    # ~1e-8 floor (the Aitken relaxation factor collapses), an irreducible
-    # 4-partition floating-point floor in the solve chain that leaves the
-    # incompressible pressure ~4.5e-4 off the 1-proc reference — above the 1e-6
-    # pressure tolerance. Handling of the 4-proc case is still to be decided.
-    if n_proc == 4:
-        pytest.skip("4-proc coupling FP floor exceeds pressure RTOL; decision pending")
+    # A single 1-proc result is the reference for all processor counts, compared
+    # at the global RTOL. Each sub-mesh (fluid/solid/mesh) is partitioned
+    # independently, so multi-proc runs only match the 1-proc run once the
+    # Dirichlet-Neumann coupling has converged tightly. Two settings in
+    # solver.xml make that possible at the original tolerances:
+    #   - Coupling_tolerance = 1e-10 (drives all proc counts to the same fixed point)
+    #   - Time_step_size = 1e-2: a larger step weakens the added-mass coupling
+    #     stiffness (which grows ~1/dt for partitioned FSI), so the Aitken
+    #     iteration converges in ~15 steps at 1, 3 and 4 procs instead of
+    #     stagnating at 4 procs. At convergence the partition-count round-off is
+    #     5-7 orders below the global RTOL for every field.
     run_with_reference(base_folder, test_folder, fields=[], n_proc=n_proc, t_max=t_max,
-                       name_inp="solver_ramp.xml",
                        comparisons=[
                            {"fields": ["Velocity", "Pressure"],
                             "name_ref": "result_fluid_001.vtu",
